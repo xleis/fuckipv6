@@ -1754,7 +1754,7 @@ JS heap 为 9.21MB。快照 JSON 解析与 patch diff、拓扑布局均移到 Wo
 
 - [x] 加载、部分数据、陈旧、空、错误、无权限状态完整；
 - [x] 单网络、多网络、公共节点、离线、降级、能力混合场景有基线；
-- [ ] GPUI 与 WebUI 使用同一对象详情、菜单和状态；
+- [x] GPUI 与 WebUI 使用同一对象详情、菜单和状态；
 - [ ] 同尺寸/DPR/字体下视觉回归；
 - [ ] 选择、悬停和菜单状态可对比；
 - [ ] 布局重置和持久化行为一致；
@@ -1773,6 +1773,19 @@ JS heap 为 9.21MB。快照 JSON 解析与 patch diff、拓扑布局均移到 Wo
 **验证通过**：WebUI `npm test -- --run`（18 files，194 passed）、`npm run typecheck`、
 `npm run lint`、`node scripts/test_i18n_runtime.mjs`、
 `cargo test -p fuckipv6-common --all-features i18n`（9 passed）和 `git diff --check`。
+
+**证据（2026-11-06，GPUI 共享投影）**：GPUI 新增与 WebUI 一致的拓扑状态优先级
+`error → permission_denied → initial_loading → offline → stale → refreshing → partial → unavailable → empty → ready`，
+陈旧、离线、错误和刷新时只要仍有权威边界就继续展示最后快照；节点详情按“成员网络关系 → 权威成员目录 → 未知”
+取值，角色、状态、presence 与能力均走同一 DTO/本地化键。对象菜单只消费服务端目录的
+`available_actions`，同时要求目录网络匹配当前边界、`can_manage_members=true` 且 viewer 不是普通成员；
+生命周期动作使用稳定 wire value，不依赖本地化文案。真实点击测试
+`topology_detail_and_menu_are_independent_actions` 验证点击节点只打开详情、独立菜单按钮才打开菜单；
+`topology_presentation_matches_webui_priority_including_stale`、`topology_detail_uses_membership_then_directory_then_unknown`、
+`topology_member_actions_require_a_matching_manageable_directory` 和
+`topology_lifecycle_wire_values_do_not_depend_on_localized_copy` 验证状态、详情和菜单权限语义。
+验证通过：`cargo test -p fuckipv6-client --all-features --lib`（857 passed，3 ignored）、
+`cargo fmt --all -- --check` 和 `git diff --check`。
 
 **证据（2026-11-06，场景基线）**：`contracts/typescript/fixtures/topology-presentation-scenarios.json`
 提供单网络、多网络、跨网络公共节点、离线、降级和能力混合六个独立权威拓扑快照，fixture SHA-256 为

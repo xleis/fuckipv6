@@ -7,8 +7,9 @@ use fuckipv6_common::domain::{
     CapabilityKind, CapabilityState, ContentHash, ExitContributionObligation,
     ExitContributionScope, InvitationCode, InvitationId, InvitationRedeemRequest,
     MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode, NetworkMember,
-    NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileUpdate,
-    NetworkVisibility, NodeId,
+    NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberStatus,
+    NetworkProfileUpdate, NetworkVisibility, NodeId, TopologyNode, TopologyNodeHealth,
+    TopologySnapshot,
 };
 use fuckipv6_common::i18n::{t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
@@ -434,6 +435,336 @@ pub struct ActionModel {
     pub backend_status: NodeUiBackendStatus,
     pub permission: NodeUiPermission,
     pub availability: NodeUiAvailability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TopologyPresentationCondition {
+    Error,
+    PermissionDenied,
+    InitialLoading,
+    Offline,
+    Stale,
+    Refreshing,
+    Partial,
+    Unavailable,
+    Empty,
+    Ready,
+}
+
+impl TopologyPresentationCondition {
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::PermissionDenied => "permission_denied",
+            Self::InitialLoading => "initial_loading",
+            Self::Offline => "offline",
+            Self::Stale => "stale",
+            Self::Refreshing => "refreshing",
+            Self::Partial => "partial",
+            Self::Unavailable => "unavailable",
+            Self::Empty => "empty",
+            Self::Ready => "ready",
+        }
+    }
+
+    pub const fn title_key(self) -> &'static str {
+        match self {
+            Self::Error => "state.error.title",
+            Self::PermissionDenied => "state.permission_denied.title",
+            Self::InitialLoading => "state.initial_loading.title",
+            Self::Offline => "state.offline.title",
+            Self::Stale => "state.stale.title",
+            Self::Refreshing => "state.refreshing.title",
+            Self::Partial => "topology.state.partial.title",
+            Self::Unavailable => "topology.state.unavailable.title",
+            Self::Empty => "topology.state.empty.title",
+            Self::Ready => "state.ready.title",
+        }
+    }
+
+    pub const fn detail_key(self) -> &'static str {
+        match self {
+            Self::Error => "state.error.detail",
+            Self::PermissionDenied => "state.permission_denied.detail",
+            Self::InitialLoading => "state.initial_loading.detail",
+            Self::Offline => "state.offline.detail",
+            Self::Stale => "state.stale.detail",
+            Self::Refreshing => "state.refreshing.detail",
+            Self::Partial => "topology.state.partial.detail",
+            Self::Unavailable => "topology.empty.unavailable",
+            Self::Empty => "topology.empty.no_networks",
+            Self::Ready => "state.ready.detail",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TopologyPresentationSignals {
+    pub initial_loading: bool,
+    pub refreshing: bool,
+    pub offline: bool,
+    pub stale: bool,
+    pub error: bool,
+    pub permission_denied: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopologyPresentation {
+    pub kind: TopologyPresentationCondition,
+    pub conditions: Vec<TopologyPresentationCondition>,
+    pub has_content: bool,
+    pub can_render: bool,
+}
+
+fn topology_presentation_condition(
+    topology: Option<&TopologySnapshot>,
+    signals: TopologyPresentationSignals,
+) -> Vec<TopologyPresentationCondition> {
+    let mut conditions = Vec::new();
+    if signals.error {
+        conditions.push(TopologyPresentationCondition::Error);
+    }
+    if signals.permission_denied {
+        conditions.push(TopologyPresentationCondition::PermissionDenied);
+    }
+    if signals.initial_loading {
+        conditions.push(TopologyPresentationCondition::InitialLoading);
+    }
+    if signals.offline {
+        conditions.push(TopologyPresentationCondition::Offline);
+    }
+    if signals.stale {
+        conditions.push(TopologyPresentationCondition::Stale);
+    }
+    if signals.refreshing {
+        conditions.push(TopologyPresentationCondition::Refreshing);
+    }
+    if topology.is_some_and(|topology| topology.truncated) {
+        conditions.push(TopologyPresentationCondition::Partial);
+    }
+    match topology {
+        None => conditions.push(TopologyPresentationCondition::Unavailable),
+        Some(topology) if topology.boundaries.is_empty() => {
+            conditions.push(TopologyPresentationCondition::Empty);
+        }
+        Some(_) => {}
+    }
+    if conditions.is_empty() {
+        conditions.push(TopologyPresentationCondition::Ready);
+    }
+    conditions.sort();
+    conditions
+}
+
+pub fn topology_presentation(
+    topology: Option<&TopologySnapshot>,
+    signals: TopologyPresentationSignals,
+) -> TopologyPresentation {
+    let conditions = topology_presentation_condition(topology, signals);
+    let kind = conditions[0];
+    let has_content = topology.is_some_and(|topology| !topology.boundaries.is_empty());
+    TopologyPresentation {
+        kind,
+        conditions,
+        has_content,
+        can_render: has_content
+            && !matches!(
+                kind,
+                TopologyPresentationCondition::PermissionDenied
+                    | TopologyPresentationCondition::InitialLoading
+            ),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopologyNodeDetailModel {
+    pub node_id: String,
+    pub display_name: String,
+    pub health: String,
+    pub role: String,
+    pub capabilities: String,
+    pub status: String,
+    pub presence: String,
+    pub networks: String,
+}
+
+pub fn topology_member_actions(
+    directory: Option<&NetworkMemberDirectory>,
+    network_id: Option<&str>,
+    node_id: &str,
+) -> Vec<MemberLifecycleAction> {
+    const BATCH_MEMBER_ACTIONS: [MemberLifecycleAction; 6] = [
+        MemberLifecycleAction::Approve,
+        MemberLifecycleAction::Reject,
+        MemberLifecycleAction::Suspend,
+        MemberLifecycleAction::Resume,
+        MemberLifecycleAction::Remove,
+        MemberLifecycleAction::UndoRemove,
+    ];
+    let (Some(directory), Some(network_id)) = (directory, network_id) else {
+        return Vec::new();
+    };
+    if directory.network_id.as_str() != network_id
+        || !directory.can_manage_members
+        || directory.viewer_role == MembershipRole::Member
+    {
+        return Vec::new();
+    }
+    let Some(member) = directory
+        .members
+        .iter()
+        .find(|member| member.node_id.as_str() == node_id)
+    else {
+        return Vec::new();
+    };
+    member
+        .available_actions
+        .iter()
+        .copied()
+        .filter(|action| BATCH_MEMBER_ACTIONS.contains(action))
+        .collect()
+}
+
+pub fn topology_node_detail(
+    node: &TopologyNode,
+    network_id: Option<&str>,
+    directory_member: Option<&NetworkMember>,
+    locale: Locale,
+) -> TopologyNodeDetailModel {
+    let membership = network_id.and_then(|network_id| {
+        node.networks
+            .iter()
+            .find(|network| network.network_id.as_str() == network_id)
+    });
+    let role = membership
+        .map(|membership| t(locale, topology_role_key(membership.role)))
+        .unwrap_or_else(|| t(locale, "common.not_available"));
+    let capabilities = if node.capabilities.is_empty() {
+        t(locale, "status.capability.unknown").to_string()
+    } else {
+        node.capabilities
+            .iter()
+            .map(|capability| t(locale, capability_key(*capability)))
+            .collect::<Vec<_>>()
+            .join(t(locale, "common.list_separator"))
+    };
+    let status = membership
+        .map(|membership| t(locale, topology_member_status_key(membership.status)))
+        .or_else(|| {
+            directory_member.map(|member| t(locale, topology_member_status_key(member.status)))
+        })
+        .unwrap_or_else(|| t(locale, "common.unknown"));
+    let presence = membership
+        .map(|membership| t(locale, topology_presence_key(membership.presence.state)))
+        .or_else(|| {
+            directory_member.map(|member| t(locale, topology_presence_key(member.presence.state)))
+        })
+        .unwrap_or_else(|| t(locale, "common.unknown"));
+    let networks = node
+        .networks
+        .iter()
+        .map(|network| {
+            format!(
+                "{} · {}",
+                network.network_id,
+                t(locale, topology_role_key(network.role))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(t(locale, "common.list_separator"));
+    TopologyNodeDetailModel {
+        node_id: node.node_id.to_string(),
+        display_name: node
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(node.node_id.as_str())
+            .to_string(),
+        health: t(locale, topology_health_key(node.health)).to_string(),
+        role: role.to_string(),
+        capabilities,
+        status: status.to_string(),
+        presence: presence.to_string(),
+        networks,
+    }
+}
+
+fn topology_health_key(health: TopologyNodeHealth) -> &'static str {
+    match health {
+        TopologyNodeHealth::Healthy => "topology.health.healthy",
+        TopologyNodeHealth::Unknown => "topology.health.unknown",
+        TopologyNodeHealth::Degraded => "topology.health.degraded",
+        TopologyNodeHealth::Unreachable => "topology.health.unreachable",
+    }
+}
+
+fn topology_role_key(role: MembershipRole) -> &'static str {
+    match role {
+        MembershipRole::Owner => "join_request.role.owner",
+        MembershipRole::Administrator => "join_request.role.administrator",
+        MembershipRole::Member => "join_request.role.member",
+    }
+}
+
+fn topology_member_status_key(status: NetworkMemberStatus) -> &'static str {
+    match status {
+        NetworkMemberStatus::Pending => "member_directory.status.pending",
+        NetworkMemberStatus::Approved => "member_directory.status.approved",
+        NetworkMemberStatus::Active => "member_directory.status.active",
+        NetworkMemberStatus::Degraded => "member_directory.status.degraded",
+        NetworkMemberStatus::Suspended => "member_directory.status.suspended",
+        NetworkMemberStatus::Exited => "member_directory.status.exited",
+        NetworkMemberStatus::Removed => "member_directory.status.removed",
+        NetworkMemberStatus::Expired => "member_directory.status.expired",
+    }
+}
+
+fn topology_presence_key(presence: NetworkMemberOnlineState) -> &'static str {
+    match presence {
+        NetworkMemberOnlineState::Online => "member_directory.presence.online",
+        NetworkMemberOnlineState::Offline => "member_directory.presence.offline",
+        NetworkMemberOnlineState::Unknown => "member_directory.presence.unknown",
+    }
+}
+
+pub fn member_lifecycle_action_key(action: MemberLifecycleAction) -> &'static str {
+    match action {
+        MemberLifecycleAction::Invite => "choice.member_lifecycle.invite",
+        MemberLifecycleAction::Approve => "choice.member_lifecycle.approve",
+        MemberLifecycleAction::Reject => "choice.member_lifecycle.reject",
+        MemberLifecycleAction::Suspend => "choice.member_lifecycle.suspend",
+        MemberLifecycleAction::Resume => "choice.member_lifecycle.resume",
+        MemberLifecycleAction::Exit => "choice.member_lifecycle.exit",
+        MemberLifecycleAction::Remove => "choice.member_lifecycle.remove",
+        MemberLifecycleAction::UndoRemove => "choice.member_lifecycle.undo_remove",
+    }
+}
+
+/// Wire value accepted by `change_member_lifecycle`. This is deliberately
+/// separate from the localized label key so presentation copy can never leak
+/// into command serialization.
+pub const fn member_lifecycle_action_value(action: MemberLifecycleAction) -> &'static str {
+    match action {
+        MemberLifecycleAction::Invite => "invite",
+        MemberLifecycleAction::Approve => "approve",
+        MemberLifecycleAction::Reject => "reject",
+        MemberLifecycleAction::Suspend => "suspend",
+        MemberLifecycleAction::Resume => "resume",
+        MemberLifecycleAction::Exit => "exit",
+        MemberLifecycleAction::Remove => "remove",
+        MemberLifecycleAction::UndoRemove => "undo_remove",
+    }
+}
+
+/// Wire value accepted by `change_member_lifecycle` for the target member's
+/// authoritative role.
+pub const fn membership_role_value(role: MembershipRole) -> &'static str {
+    match role {
+        MembershipRole::Owner => "owner",
+        MembershipRole::Administrator => "administrator",
+        MembershipRole::Member => "member",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1531,7 +1862,7 @@ pub fn build_command(
                 )?
                 .to_string(),
                 action: parse_member_lifecycle_action(action, &required("action")?)?,
-                role: parse_invitation_role(action, &required("role")?)?,
+                role: parse_invitation_role(&action.id, &required("role")?)?,
                 expected_revision: parse_number(
                     action,
                     "expected_revision",
@@ -1613,7 +1944,7 @@ pub fn build_command(
         Ok(ActionBinding::CreateInvitation) => {
             Ok(NodeCommand::CreateInvitation(NodeCreateInvitationCommand {
                 network_id: parse_network_id(action, "network_id", &field("network_id"))?,
-                role: parse_invitation_role(action, &required("role")?)?,
+                role: parse_invitation_role(&action.id, &required("role")?)?,
                 capabilities: parse_capability_declarations(
                     action,
                     "capabilities",
@@ -2345,14 +2676,15 @@ fn parse_node_id(
 }
 
 fn parse_invitation_role(
-    action: &NodeUiAction,
+    action_id: &str,
     value: &str,
 ) -> Result<MembershipRole, CommandBuildError> {
     match value.trim() {
+        "owner" => Ok(MembershipRole::Owner),
         "member" => Ok(MembershipRole::Member),
         "administrator" | "admin" => Ok(MembershipRole::Administrator),
         _ => Err(CommandBuildError::InvalidField {
-            action_id: action.id.clone(),
+            action_id: action_id.into(),
             field_id: "role".into(),
             value: value.into(),
         }),
@@ -3206,43 +3538,63 @@ fn project_topology(
     snapshot: &NodeSnapshot,
     locale: Locale,
 ) -> (Vec<MetricModel>, Vec<SectionModel>) {
-    let sections = snapshot
-        .networks
+    // Topology is a server-owned projection. Adapters must never reconstruct
+    // graph objects from the legacy network and peer lists, otherwise a stale
+    // peer session can become a fake topology node or connection.
+    let Some(topology) = snapshot.topology.as_ref() else {
+        return (
+            vec![metric(
+                t(locale, "gpui.metric.topology_edges"),
+                0,
+                "TopologySnapshot",
+            )],
+            vec![section(
+                t(locale, "gpui.section.topology"),
+                t(locale, "topology.empty.unavailable"),
+                Vec::new(),
+            )],
+        );
+    };
+
+    let sections = topology
+        .boundaries
         .iter()
-        .map(|network| {
-            let rows = snapshot
-                .peers
+        .map(|boundary| {
+            let rows = topology
+                .nodes
                 .iter()
-                .filter(|peer| peer.network_name == network.name)
-                .map(|peer| {
-                    let transport = if peer.p2p_active {
-                        t(locale, "peer.transport.p2p")
-                    } else {
-                        t(locale, "gpui.value.p2p_unknown")
-                    };
-                    row(
-                        peer.peer_id.clone(),
-                        tr(
-                            locale,
-                            "gpui.topology_peer_detail",
-                            &[
-                                ("address", &peer.virtual_ipv6.to_string()),
-                                ("transport", transport),
-                            ],
-                        ),
-                    )
+                .filter(|node| node.belongs_to(&boundary.network_id))
+                .map(|node| {
+                    let name = node
+                        .display_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(node.node_id.as_str());
+                    let membership = node
+                        .networks
+                        .iter()
+                        .find(|network| network.network_id == boundary.network_id);
+                    let relationship = membership
+                        .map(|membership| {
+                            format!(
+                                "{} · {} · {}",
+                                t(locale, topology_health_key(node.health)),
+                                t(locale, topology_role_key(membership.role)),
+                                t(locale, topology_member_status_key(membership.status)),
+                            )
+                        })
+                        .unwrap_or_else(|| t(locale, "common.not_available").to_string());
+                    row(name, format!("{} · {relationship}", node.node_id))
                 })
                 .collect::<Vec<_>>();
             section(
                 tr(
                     locale,
-                    "gpui.network_status_title",
-                    &[
-                        ("network", &network.name),
-                        ("status", t(locale, network_status_key(network.status))),
-                    ],
+                    "topology.boundary.members",
+                    &[("count", &boundary.member_count.to_string())],
                 ),
-                t(locale, "gpui.empty.network_peers"),
+                t(locale, "topology.state.empty.title"),
                 rows,
             )
         })
@@ -3250,13 +3602,13 @@ fn project_topology(
     (
         vec![metric(
             t(locale, "gpui.metric.topology_edges"),
-            snapshot.peers.len(),
-            "network-scoped peers",
+            topology.active_connections().len(),
+            "TopologySnapshot",
         )],
         if sections.is_empty() {
             vec![section(
                 t(locale, "gpui.section.topology"),
-                t(locale, "gpui.empty.topology"),
+                t(locale, "topology.empty.no_networks"),
                 Vec::new(),
             )]
         } else {
@@ -4444,6 +4796,8 @@ mod tests {
     };
     use fuckipv6_common::domain::{
         ActivityEntry, AuditId, AuditOutcome, MembershipState, NetworkMemberPresence, NodeId,
+        TopologyBoundary, TopologyConnection, TopologyConnectionState, TopologyNode,
+        TopologyNodeNetwork,
     };
     use serde::Deserialize;
     use std::collections::BTreeMap;
@@ -6298,5 +6652,432 @@ mod tests {
             validation: NodeUiValidation::None,
         });
         assert!(validate_form_contract(&action).is_err());
+    }
+
+    fn topology_node_network(
+        network_id: &NetworkId,
+        role: MembershipRole,
+        status: NetworkMemberStatus,
+        presence: NetworkMemberPresence,
+    ) -> TopologyNodeNetwork {
+        TopologyNodeNetwork {
+            network_id: network_id.clone(),
+            role,
+            status,
+            presence,
+            health: TopologyNodeHealth::Healthy,
+            capabilities: vec![CapabilityKind::File],
+        }
+    }
+
+    fn topology_snapshot_fixture() -> (TopologySnapshot, NetworkId, NetworkId, NodeId) {
+        let alpha = NetworkId::from_public_key(b"topology-alpha");
+        let beta = NetworkId::from_public_key(b"topology-beta");
+        let relay = NodeId::from_public_key(b"topology-relay");
+        let viewer = NodeId::from_public_key(b"topology-viewer");
+        let snapshot = TopologySnapshot {
+            revision: 9,
+            generated_at_unix_ms: 1_700_000_010_000,
+            viewer: viewer.clone(),
+            truncated: false,
+            boundaries: vec![
+                TopologyBoundary {
+                    network_id: alpha.clone(),
+                    name: "alpha".into(),
+                    member_count: 2,
+                    visible_member_count: 2,
+                    viewer_role: Some(MembershipRole::Member),
+                    capabilities: vec![CapabilityKind::File],
+                },
+                TopologyBoundary {
+                    network_id: beta.clone(),
+                    name: "beta".into(),
+                    member_count: 2,
+                    visible_member_count: 2,
+                    viewer_role: Some(MembershipRole::Owner),
+                    capabilities: vec![CapabilityKind::Coordinator],
+                },
+            ],
+            nodes: vec![
+                TopologyNode {
+                    node_id: relay.clone(),
+                    display_name: Some("  Trusted relay  ".into()),
+                    is_self: false,
+                    health: TopologyNodeHealth::Degraded,
+                    capabilities: vec![CapabilityKind::Exit],
+                    networks: vec![
+                        topology_node_network(
+                            &alpha,
+                            MembershipRole::Member,
+                            NetworkMemberStatus::Active,
+                            NetworkMemberPresence::live(1_700_000_009_000),
+                        ),
+                        topology_node_network(
+                            &beta,
+                            MembershipRole::Administrator,
+                            NetworkMemberStatus::Approved,
+                            NetworkMemberPresence::disconnected(1_700_000_009_100),
+                        ),
+                    ],
+                },
+                TopologyNode {
+                    node_id: viewer.clone(),
+                    display_name: None,
+                    is_self: true,
+                    health: TopologyNodeHealth::Healthy,
+                    capabilities: Vec::new(),
+                    networks: vec![topology_node_network(
+                        &alpha,
+                        MembershipRole::Member,
+                        NetworkMemberStatus::Active,
+                        NetworkMemberPresence::live(1_700_000_009_200),
+                    )],
+                },
+            ],
+            connections: vec![
+                TopologyConnection {
+                    connection_id: ContentHash::from_bytes(b"active"),
+                    from: relay.clone(),
+                    to: viewer.clone(),
+                    networks: vec![alpha.clone()],
+                    state: TopologyConnectionState::Active,
+                    observed_at_unix_ms: Some(1_700_000_009_000),
+                },
+                TopologyConnection {
+                    connection_id: ContentHash::from_bytes(b"idle"),
+                    from: relay.clone(),
+                    to: viewer.clone(),
+                    networks: vec![alpha.clone()],
+                    state: TopologyConnectionState::Idle,
+                    observed_at_unix_ms: Some(1_700_000_009_000),
+                },
+                TopologyConnection {
+                    connection_id: ContentHash::from_bytes(b"stale"),
+                    from: relay.clone(),
+                    to: viewer.clone(),
+                    networks: vec![beta.clone()],
+                    state: TopologyConnectionState::Stale,
+                    observed_at_unix_ms: None,
+                },
+            ],
+            clusters: Vec::new(),
+        };
+        (snapshot, alpha, beta, relay)
+    }
+
+    fn topology_directory_member(
+        network_id: &NetworkId,
+        node_id: &NodeId,
+        status: NetworkMemberStatus,
+        presence: NetworkMemberPresence,
+        available_actions: Vec<MemberLifecycleAction>,
+    ) -> NetworkMemberDirectory {
+        NetworkMemberDirectory {
+            network_id: network_id.clone(),
+            generated_at_unix_ms: 1_700_000_010_000,
+            viewer_role: MembershipRole::Administrator,
+            can_manage_members: true,
+            members: vec![NetworkMember {
+                node_id: node_id.clone(),
+                display_name: Some("Directory relay".into()),
+                identity_fingerprint: None,
+                role: MembershipRole::Administrator,
+                groups: vec![NetworkMemberGroup::Administrator],
+                capabilities: None,
+                status,
+                lifecycle_state: lifecycle_state_for_status(status),
+                revision: 17,
+                access_epoch: 3,
+                available_actions,
+                presence,
+                joined_at_unix_ms: Some(1_700_000_000_000),
+            }],
+        }
+    }
+
+    #[test]
+    fn topology_projection_uses_only_the_authoritative_snapshot() {
+        let (topology, _, _, relay) = topology_snapshot_fixture();
+        let mut snapshot = populated_snapshot();
+        snapshot.networks[0].name = "legacy-network".into();
+        snapshot.peers[0].peer_id = "legacy-peer".into();
+        snapshot.peers[0].network_name = "legacy-network".into();
+        snapshot.topology = Some(topology);
+
+        let (metrics, sections) = project_topology(&snapshot, Locale::En);
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].source, "TopologySnapshot");
+        assert_eq!(metrics[0].value, "1");
+        assert_eq!(sections.len(), 2);
+        let rendered = sections
+            .iter()
+            .flat_map(|section| {
+                section
+                    .rows
+                    .iter()
+                    .flat_map(|row| [row.title.as_str(), row.detail.as_str()])
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("Trusted relay"));
+        assert!(rendered.contains(relay.as_str()));
+        assert!(!rendered.contains("legacy-peer"));
+        assert!(!rendered.contains("legacy-network"));
+        assert!(!rendered.contains("fd00::3"));
+    }
+
+    #[test]
+    fn topology_presentation_matches_webui_priority_including_stale() {
+        let (topology, _, _, _) = topology_snapshot_fixture();
+        let all = topology_presentation(
+            Some(&topology),
+            TopologyPresentationSignals {
+                initial_loading: true,
+                refreshing: true,
+                offline: true,
+                stale: true,
+                error: true,
+                permission_denied: true,
+            },
+        );
+        assert_eq!(all.kind, TopologyPresentationCondition::Error);
+        assert_eq!(
+            all.conditions,
+            vec![
+                TopologyPresentationCondition::Error,
+                TopologyPresentationCondition::PermissionDenied,
+                TopologyPresentationCondition::InitialLoading,
+                TopologyPresentationCondition::Offline,
+                TopologyPresentationCondition::Stale,
+                TopologyPresentationCondition::Refreshing,
+            ]
+        );
+        assert!(all.has_content);
+        assert!(all.can_render);
+
+        let denied = topology_presentation(
+            Some(&topology),
+            TopologyPresentationSignals {
+                permission_denied: true,
+                ..TopologyPresentationSignals::default()
+            },
+        );
+        assert_eq!(denied.kind, TopologyPresentationCondition::PermissionDenied);
+        assert!(!denied.can_render);
+
+        let unavailable = topology_presentation(None, TopologyPresentationSignals::default());
+        assert_eq!(unavailable.kind, TopologyPresentationCondition::Unavailable);
+        assert!(!unavailable.has_content);
+        assert!(!unavailable.can_render);
+
+        let empty = topology_presentation(
+            Some(&TopologySnapshot {
+                boundaries: Vec::new(),
+                ..topology.clone()
+            }),
+            TopologyPresentationSignals::default(),
+        );
+        assert_eq!(empty.kind, TopologyPresentationCondition::Empty);
+
+        let partial = topology_presentation(
+            Some(&TopologySnapshot {
+                truncated: true,
+                ..topology.clone()
+            }),
+            TopologyPresentationSignals::default(),
+        );
+        assert_eq!(partial.kind, TopologyPresentationCondition::Partial);
+        assert!(partial.can_render);
+
+        for (signals, expected) in [
+            (
+                TopologyPresentationSignals {
+                    refreshing: true,
+                    ..TopologyPresentationSignals::default()
+                },
+                TopologyPresentationCondition::Refreshing,
+            ),
+            (
+                TopologyPresentationSignals {
+                    offline: true,
+                    ..TopologyPresentationSignals::default()
+                },
+                TopologyPresentationCondition::Offline,
+            ),
+            (
+                TopologyPresentationSignals {
+                    stale: true,
+                    ..TopologyPresentationSignals::default()
+                },
+                TopologyPresentationCondition::Stale,
+            ),
+        ] {
+            assert_eq!(
+                topology_presentation(Some(&topology), signals).kind,
+                expected
+            );
+        }
+        assert_eq!(
+            topology_presentation(Some(&topology), TopologyPresentationSignals::default()).kind,
+            TopologyPresentationCondition::Ready
+        );
+    }
+
+    #[test]
+    fn topology_detail_uses_membership_then_directory_then_unknown() {
+        let (topology, alpha, beta, relay) = topology_snapshot_fixture();
+        let node = topology.node(&relay).expect("relay node");
+        let directory = topology_directory_member(
+            &beta,
+            &relay,
+            NetworkMemberStatus::Suspended,
+            NetworkMemberPresence::disconnected(1_700_000_009_900),
+            vec![MemberLifecycleAction::Resume],
+        );
+        let detail = topology_node_detail(
+            node,
+            Some(beta.as_str()),
+            Some(&directory.members[0]),
+            Locale::En,
+        );
+        assert_eq!(detail.display_name, "Trusted relay");
+        assert_eq!(
+            detail.role,
+            t(Locale::En, "join_request.role.administrator")
+        );
+        assert_eq!(
+            detail.status,
+            t(Locale::En, "member_directory.status.approved")
+        );
+        assert_eq!(
+            detail.presence,
+            t(Locale::En, "member_directory.presence.offline")
+        );
+        assert!(detail.networks.contains(alpha.as_str()));
+        assert!(detail.networks.contains(beta.as_str()));
+        assert!(detail
+            .capabilities
+            .contains(t(Locale::En, "capability.exit")));
+
+        let fallback = topology_node_detail(
+            node,
+            Some(NetworkId::from_public_key(b"foreign-network").as_str()),
+            Some(&directory.members[0]),
+            Locale::En,
+        );
+        assert_eq!(fallback.role, t(Locale::En, "common.not_available"));
+        assert_eq!(
+            fallback.status,
+            t(Locale::En, "member_directory.status.suspended")
+        );
+        assert_eq!(
+            fallback.presence,
+            t(Locale::En, "member_directory.presence.offline")
+        );
+
+        let unknown = topology_node_detail(node, None, None, Locale::En);
+        assert_eq!(unknown.status, t(Locale::En, "common.unknown"));
+        assert_eq!(unknown.presence, t(Locale::En, "common.unknown"));
+
+        let viewer = topology
+            .node_ids()
+            .into_iter()
+            .find(|node_id| node_id != &relay)
+            .expect("viewer node");
+        let viewer = topology.node(&viewer).expect("viewer node");
+        let viewer_detail = topology_node_detail(viewer, Some(alpha.as_str()), None, Locale::En);
+        assert_eq!(viewer_detail.display_name, viewer.node_id.as_str());
+        assert_eq!(
+            viewer_detail.capabilities,
+            t(Locale::En, "status.capability.unknown")
+        );
+    }
+
+    #[test]
+    fn topology_member_actions_require_a_matching_manageable_directory() {
+        let (_, alpha, beta, relay) = topology_snapshot_fixture();
+        let actions = vec![
+            MemberLifecycleAction::Invite,
+            MemberLifecycleAction::Approve,
+            MemberLifecycleAction::Exit,
+            MemberLifecycleAction::Suspend,
+            MemberLifecycleAction::Remove,
+        ];
+        let directory = topology_directory_member(
+            &alpha,
+            &relay,
+            NetworkMemberStatus::Active,
+            NetworkMemberPresence::live(1_700_000_009_000),
+            actions,
+        );
+        assert_eq!(
+            topology_member_actions(Some(&directory), Some(alpha.as_str()), relay.as_str()),
+            vec![
+                MemberLifecycleAction::Approve,
+                MemberLifecycleAction::Suspend,
+                MemberLifecycleAction::Remove,
+            ]
+        );
+        assert!(
+            topology_member_actions(Some(&directory), Some(beta.as_str()), relay.as_str())
+                .is_empty()
+        );
+        assert!(topology_member_actions(
+            Some(&directory),
+            Some(alpha.as_str()),
+            NetworkId::from_public_key(b"missing-node").as_str()
+        )
+        .is_empty());
+
+        let mut non_manager = directory.clone();
+        non_manager.can_manage_members = false;
+        assert!(
+            topology_member_actions(Some(&non_manager), Some(alpha.as_str()), relay.as_str())
+                .is_empty()
+        );
+
+        let mut member_view = directory.clone();
+        member_view.viewer_role = MembershipRole::Member;
+        assert!(
+            topology_member_actions(Some(&member_view), Some(alpha.as_str()), relay.as_str())
+                .is_empty()
+        );
+        assert!(topology_member_actions(None, Some(alpha.as_str()), relay.as_str()).is_empty());
+    }
+
+    #[test]
+    fn topology_lifecycle_wire_values_do_not_depend_on_localized_copy() {
+        assert_eq!(
+            member_lifecycle_action_value(MemberLifecycleAction::UndoRemove),
+            "undo_remove"
+        );
+        assert_eq!(
+            membership_role_value(MembershipRole::Administrator),
+            "administrator"
+        );
+        assert_ne!(
+            member_lifecycle_action_value(MemberLifecycleAction::Remove),
+            t(
+                Locale::En,
+                member_lifecycle_action_key(MemberLifecycleAction::Remove)
+            )
+        );
+    }
+
+    #[test]
+    fn invitation_role_parser_accepts_owner_and_keeps_existing_aliases() {
+        assert_eq!(
+            parse_invitation_role("create_invitation", "owner").expect("owner invitation role"),
+            MembershipRole::Owner
+        );
+        assert_eq!(
+            parse_invitation_role("create_invitation", "admin").expect("admin alias"),
+            MembershipRole::Administrator
+        );
+        assert_eq!(
+            parse_invitation_role("create_invitation", "member").expect("member role"),
+            MembershipRole::Member
+        );
+        assert!(parse_invitation_role("create_invitation", "superuser").is_err());
     }
 }

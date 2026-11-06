@@ -6,11 +6,12 @@ use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
 use fuckipv6_common::domain::{
     CapabilityKind, ExitContributionObligation, IdempotencyKey, InvitationPreview, InvitationState,
     InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
-    MembershipRole, NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
-    NetworkMemberObservationSource, NetworkMemberOnlineState, NetworkMemberStatus,
-    NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileProjections,
-    NetworkProfileWarningCode, NetworkPublicProfileDocument, NetworkVisibility, OperationError,
-    OperationState, JOIN_REQUEST_MAX_REASON_CHARS,
+    MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode, NetworkMember,
+    NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberObservationSource,
+    NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileApplyResult,
+    NetworkProfilePreview, NetworkProfileProjections, NetworkProfileWarningCode,
+    NetworkPublicProfileDocument, NetworkVisibility, OperationError, OperationState,
+    TopologyConnectionState, TopologySnapshot, JOIN_REQUEST_MAX_REASON_CHARS,
 };
 use fuckipv6_common::i18n::{
     detect_system_locale, format_decimal, format_integer, format_timestamp, resolve_language, t,
@@ -40,10 +41,12 @@ use super::path_picker::{pick_paths, PathPickerMode};
 use super::text_input::{NativeTextInput, TextInputEvent};
 use super::view_model::{
     action_block_reason, build_command, build_page_model, default_form_values,
-    filter_network_members, network_membership_id, network_status_key, retain_member_selection,
-    search_node_snapshot, sort_network_members, validate_manifest_bindings, ActionBinding,
-    MemberCapabilityFilter, MemberDirectoryFilters, MemberHealthFilter, OverviewModel, PageKind,
-    RowModel, RowNavigation, SearchResult, SectionModel,
+    filter_network_members, member_lifecycle_action_key, member_lifecycle_action_value,
+    membership_role_value, network_membership_id, network_status_key, retain_member_selection,
+    search_node_snapshot, sort_network_members, topology_member_actions, topology_node_detail,
+    topology_presentation, validate_manifest_bindings, ActionBinding, MemberCapabilityFilter,
+    MemberDirectoryFilters, MemberHealthFilter, OverviewModel, PageKind, RowModel, RowNavigation,
+    SearchResult, SectionModel, TopologyPresentationCondition, TopologyPresentationSignals,
 };
 use crate::config_manager::ConfigManager;
 use crate::config_transaction::{
@@ -57,12 +60,12 @@ use crate::network_discovery::{
 use crate::node::{
     NodeApplyConfigurationCommand, NodeCommand, NodeCommandBus, NodeCommandBusError,
     NodeCommandContext, NodeCommandOutcome, NodeCommandRequest, NodeCommandResult,
-    NodeDiagnosticCheck, NodeDiagnosticLayer, NodeDiagnosticState, NodeDiagnosticsSnapshot,
-    NodeJoinRequestListResult, NodeJoinRequestReviewAck, NodeJoinRequestReviewItem,
-    NodeNetworkCreationNextStep, NodeNetworkJoinPreview, NodeNetworkStatus, NodeOperationSnapshot,
-    NodePreviewConfigurationCommand, NodePrimaryStatus, NodeProblem,
-    NodeRollbackConfigurationCommand, NodeSnapshot, NodeStateStore, NodeUiAction,
-    NodeUiBackendStatus, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage,
+    NodeControlHealth, NodeDiagnosticCheck, NodeDiagnosticLayer, NodeDiagnosticState,
+    NodeDiagnosticsSnapshot, NodeJoinRequestListResult, NodeJoinRequestReviewAck,
+    NodeJoinRequestReviewItem, NodeNetworkCreationNextStep, NodeNetworkJoinPreview,
+    NodeNetworkStatus, NodeOperationSnapshot, NodePermission, NodePreviewConfigurationCommand,
+    NodePrimaryStatus, NodeProblem, NodeRollbackConfigurationCommand, NodeSnapshot, NodeStateStore,
+    NodeUiAction, NodeUiBackendStatus, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage,
     OperationClientError,
 };
 use crate::remote_node::RemoteOperationClient;
@@ -203,6 +206,40 @@ struct NetworkProfileResultSections<'a> {
     warnings: &'a [fuckipv6_common::domain::NetworkProfileWarning],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TopologyDirectoryRequest {
+    request_id: u64,
+    network_id: NetworkId,
+    boundary: fuckipv6_common::domain::TopologyBoundary,
+    topology_revision: u64,
+    generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TopologyDirectoryReady {
+    directory: NetworkMemberDirectory,
+    network_id: NetworkId,
+    boundary: fuckipv6_common::domain::TopologyBoundary,
+    topology_revision: u64,
+    generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TopologyDirectoryError {
+    message: String,
+    network_id: NetworkId,
+    boundary: fuckipv6_common::domain::TopologyBoundary,
+    topology_revision: u64,
+    generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingTopologyLifecycle {
+    network_id: NetworkId,
+    node_id: String,
+    action: MemberLifecycleAction,
+}
+
 fn visible_overview_primary_page<'a>(
     overview: &'a OverviewModel,
     manifest: Option<&NodeUiManifest>,
@@ -276,6 +313,15 @@ struct GpuiShell {
     language_menu_open: bool,
     network_menu_open: bool,
     network_actions_open: Option<String>,
+    selected_topology_network_id: Option<NetworkId>,
+    selected_topology_node_id: Option<String>,
+    topology_menu_node_id: Option<String>,
+    topology_selection: BTreeSet<String>,
+    topology_directory_request: Option<TopologyDirectoryRequest>,
+    topology_directory_ready: Option<TopologyDirectoryReady>,
+    topology_directory_error: Option<TopologyDirectoryError>,
+    topology_directory_generation: u64,
+    pending_topology_lifecycle: Option<PendingTopologyLifecycle>,
 }
 
 impl GpuiShell {
@@ -355,6 +401,15 @@ impl GpuiShell {
             language_menu_open: false,
             network_menu_open: false,
             network_actions_open: None,
+            selected_topology_network_id: None,
+            selected_topology_node_id: None,
+            topology_menu_node_id: None,
+            topology_selection: BTreeSet::new(),
+            topology_directory_request: None,
+            topology_directory_ready: None,
+            topology_directory_error: None,
+            topology_directory_generation: 0,
+            pending_topology_lifecycle: None,
         };
 
         let search_input = cx.new(|cx| {
@@ -457,7 +512,448 @@ impl GpuiShell {
         cx.notify();
     }
 
+    fn topology_identity_changed(
+        previous: Option<&TopologySnapshot>,
+        next: Option<&TopologySnapshot>,
+    ) -> bool {
+        let identity = |topology: Option<&TopologySnapshot>| {
+            topology.map(|topology| {
+                (
+                    topology.revision,
+                    topology.viewer.as_str().to_string(),
+                    topology
+                        .boundaries
+                        .iter()
+                        .map(|boundary| boundary.network_id.as_str().to_string())
+                        .collect::<Vec<_>>(),
+                    topology
+                        .nodes
+                        .iter()
+                        .map(|node| node.node_id.as_str().to_string())
+                        .collect::<Vec<_>>(),
+                )
+            })
+        };
+        identity(previous) != identity(next)
+    }
+
+    fn topology_network_id(&self) -> Option<NetworkId> {
+        let topology = self.snapshot.topology.as_ref()?;
+        self.selected_topology_network_id
+            .as_ref()
+            .filter(|network_id| topology.boundary(network_id).is_some())
+            .cloned()
+            .or_else(|| {
+                topology
+                    .boundaries
+                    .iter()
+                    .find(|boundary| {
+                        self.selected_network
+                            .as_deref()
+                            .is_some_and(|selected| boundary.name == selected)
+                    })
+                    .or_else(|| topology.boundaries.first())
+                    .map(|boundary| boundary.network_id.clone())
+            })
+    }
+
+    fn invalidate_topology_directory(&mut self) {
+        // Keep the last authoritative directory so the UI can explain that it
+        // is stale. Matching helpers reject it for reads and writes until the
+        // topology revision is observed again.
+        self.topology_directory_request = None;
+        self.topology_directory_error = None;
+    }
+
+    fn topology_directory_for_network(
+        &self,
+        network_id: &NetworkId,
+    ) -> Option<&NetworkMemberDirectory> {
+        let topology = self.snapshot.topology.as_ref()?;
+        let boundary = topology.boundary(network_id)?;
+        let ready = self.topology_directory_ready.as_ref()?;
+        (ready.generation == self.topology_directory_generation
+            && &ready.network_id == network_id
+            && ready.topology_revision == topology.revision
+            && &ready.boundary == boundary)
+            .then_some(&ready.directory)
+    }
+
+    fn topology_directory_error_for_network(&self, network_id: &NetworkId) -> Option<&str> {
+        let topology = self.snapshot.topology.as_ref()?;
+        let error = self.topology_directory_error.as_ref()?;
+        (error.generation == self.topology_directory_generation
+            && &error.network_id == network_id
+            && error.topology_revision == topology.revision)
+            .then_some(error.message.as_str())
+    }
+
+    fn topology_directory_is_stale_for_network(&self, network_id: &NetworkId) -> bool {
+        let Some(topology) = self.snapshot.topology.as_ref() else {
+            return false;
+        };
+        let Some(boundary) = topology.boundary(network_id) else {
+            return false;
+        };
+        self.topology_directory_ready.as_ref().is_some_and(|ready| {
+            ready.generation == self.topology_directory_generation
+                && &ready.network_id == network_id
+                && (ready.topology_revision != topology.revision || &ready.boundary != boundary)
+        })
+    }
+
+    fn request_topology_directory(
+        &mut self,
+        network_id: NetworkId,
+        topology_revision: u64,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .snapshot
+            .permissions
+            .permissions
+            .contains(&NodePermission::ViewState)
+        {
+            return;
+        }
+        let Some(topology) = self.snapshot.topology.as_ref() else {
+            return;
+        };
+        if topology.revision != topology_revision || topology.boundary(&network_id).is_none() {
+            return;
+        }
+        if self
+            .topology_directory_request
+            .as_ref()
+            .is_some_and(|request| {
+                request.generation == self.topology_directory_generation
+                    && request.network_id == network_id
+                    && request.topology_revision == topology_revision
+            })
+            || self.topology_directory_for_network(&network_id).is_some()
+            || self
+                .topology_directory_error_for_network(&network_id)
+                .is_some()
+        {
+            return;
+        }
+
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1).max(1);
+        let boundary = topology
+            .boundary(&network_id)
+            .expect("validated topology boundary")
+            .clone();
+        let request = TopologyDirectoryRequest {
+            request_id,
+            network_id: network_id.clone(),
+            boundary,
+            topology_revision,
+            generation: self.topology_directory_generation,
+        };
+        let command = NodeCommand::ListNetworkMembers(crate::node::NodeNetworkMembersCommand {
+            network_id: network_id.to_string(),
+        });
+        let command_request = NodeCommandRequest::new(request_id, command);
+        let context = NodeCommandContext::local_owner_for_snapshot(&self.snapshot, "gpui");
+        let commands = self.commands.clone();
+        self.topology_directory_request = Some(request.clone());
+        self.pending_commands = self.pending_commands.saturating_add(1);
+        cx.notify();
+
+        cx.spawn(async move |weak, cx| {
+            let result = commands.execute(context, command_request).await;
+            let _ = weak.update(cx, |shell, cx| {
+                shell.pending_commands = shell.pending_commands.saturating_sub(1);
+                shell.apply_topology_directory_result(&request, result);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn apply_topology_directory_result(
+        &mut self,
+        request: &TopologyDirectoryRequest,
+        result: Result<NodeCommandResult, NodeCommandBusError>,
+    ) {
+        let current = self
+            .topology_directory_request
+            .as_ref()
+            .is_some_and(|current| current == request);
+        if !current {
+            return;
+        }
+        self.topology_directory_request = None;
+
+        let topology_revision_matches = self.snapshot.topology.as_ref().is_some_and(|topology| {
+            topology.revision == request.topology_revision
+                && topology.boundary(&request.network_id) == Some(&request.boundary)
+        });
+        if !topology_revision_matches || request.generation != self.topology_directory_generation {
+            return;
+        }
+
+        let message = match result {
+            Ok(result) if result.request_id == request.request_id => match result.outcome {
+                NodeCommandOutcome::NetworkMembers(directory)
+                    if directory.network_id == request.network_id =>
+                {
+                    self.topology_directory_ready = Some(TopologyDirectoryReady {
+                        directory: *directory,
+                        network_id: request.network_id.clone(),
+                        boundary: request.boundary.clone(),
+                        topology_revision: request.topology_revision,
+                        generation: request.generation,
+                    });
+                    self.topology_directory_error = None;
+                    return;
+                }
+                NodeCommandOutcome::NetworkMembers(directory) => tr(
+                    self.locale,
+                    "gpui.command_channel_error",
+                    &[(
+                        "error",
+                        &format!(
+                            "member directory network {} does not match requested {}",
+                            directory.network_id, request.network_id
+                        ),
+                    )],
+                ),
+                NodeCommandOutcome::Rejected(problem) => {
+                    format_operation_problem(self.locale, &problem)
+                }
+                _ => t(self.locale, "topology.batch.directory_failed").to_string(),
+            },
+            Ok(_) => return,
+            Err(error) => tr(
+                self.locale,
+                "gpui.command_channel_error",
+                &[("error", &error.to_string())],
+            ),
+        };
+        self.topology_directory_error = Some(TopologyDirectoryError {
+            message,
+            network_id: request.network_id.clone(),
+            boundary: request.boundary.clone(),
+            topology_revision: request.topology_revision,
+            generation: request.generation,
+        });
+    }
+
+    fn select_topology_network(&mut self, network_id: NetworkId, cx: &mut Context<Self>) {
+        if self
+            .snapshot
+            .topology
+            .as_ref()
+            .and_then(|topology| topology.boundary(&network_id))
+            .is_none()
+        {
+            return;
+        }
+        if self.selected_topology_network_id.as_ref() == Some(&network_id) {
+            return;
+        }
+        self.selected_topology_network_id = Some(network_id.clone());
+        self.selected_network = self
+            .snapshot
+            .topology
+            .as_ref()
+            .and_then(|topology| topology.boundary(&network_id))
+            .map(|boundary| boundary.name.clone());
+        self.selected_topology_node_id = None;
+        self.topology_menu_node_id = None;
+        self.topology_selection.clear();
+        self.pending_topology_lifecycle = None;
+        self.invalidate_topology_directory();
+        cx.notify();
+    }
+
+    fn open_topology_node(&mut self, node_id: String, cx: &mut Context<Self>) {
+        let network_id = self.topology_network_id();
+        let exists = network_id.as_ref().is_some_and(|network_id| {
+            self.snapshot
+                .topology
+                .as_ref()
+                .and_then(|topology| {
+                    topology
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_id.as_str() == node_id)
+                })
+                .is_some_and(|node| node.belongs_to(network_id))
+        });
+        if !exists {
+            return;
+        }
+        self.selected_topology_node_id = Some(node_id);
+        self.topology_menu_node_id = None;
+        cx.notify();
+    }
+
+    fn toggle_topology_selection(&mut self, node_id: String, cx: &mut Context<Self>) {
+        let Some(network_id) = self.topology_network_id() else {
+            return;
+        };
+        let exists = self
+            .snapshot
+            .topology
+            .as_ref()
+            .and_then(|topology| {
+                topology
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_id.as_str() == node_id)
+            })
+            .is_some_and(|node| node.belongs_to(&network_id));
+        if !exists {
+            return;
+        }
+        if !self.topology_selection.remove(&node_id) {
+            self.topology_selection.insert(node_id.clone());
+        }
+        self.selected_topology_node_id = Some(node_id);
+        self.pending_topology_lifecycle = None;
+        cx.notify();
+    }
+
+    fn toggle_topology_menu(&mut self, node_id: String, cx: &mut Context<Self>) {
+        let Some(network_id) = self.topology_network_id() else {
+            return;
+        };
+        let exists = self
+            .snapshot
+            .topology
+            .as_ref()
+            .and_then(|topology| {
+                topology
+                    .nodes
+                    .iter()
+                    .find(|node| node.node_id.as_str() == node_id)
+            })
+            .is_some_and(|node| node.belongs_to(&network_id));
+        if !exists {
+            return;
+        }
+        self.selected_topology_node_id = Some(node_id.clone());
+        if self.topology_menu_node_id.as_deref() == Some(node_id.as_str()) {
+            self.topology_menu_node_id = None;
+        } else {
+            self.topology_menu_node_id = Some(node_id);
+        }
+        cx.notify();
+    }
+
+    fn prepare_topology_lifecycle(&mut self, node_id: &str, action: MemberLifecycleAction) -> bool {
+        let Some(network_id) = self.topology_network_id() else {
+            return false;
+        };
+        let Some(topology) = self.snapshot.topology.as_ref() else {
+            return false;
+        };
+        if topology.boundary(&network_id).is_none() {
+            return false;
+        }
+        let Some(node) = topology
+            .nodes
+            .iter()
+            .find(|node| node.node_id.as_str() == node_id)
+        else {
+            return false;
+        };
+        if !node.belongs_to(&network_id) {
+            return false;
+        }
+        let Some((role, expected_revision)) = ({
+            let Some(directory) = self.topology_directory_for_network(&network_id) else {
+                return false;
+            };
+            if !topology_member_actions(Some(directory), Some(network_id.as_str()), node_id)
+                .contains(&action)
+            {
+                return false;
+            }
+            directory
+                .members
+                .iter()
+                .find(|member| member.node_id.as_str() == node_id)
+                .map(|member| (member.role, member.revision))
+        }) else {
+            return false;
+        };
+
+        self.set_field_value(
+            "change_member_lifecycle",
+            "network_id",
+            network_id.to_string(),
+        );
+        self.set_field_value("change_member_lifecycle", "target_node_id", node_id);
+        self.set_field_value(
+            "change_member_lifecycle",
+            "action",
+            member_lifecycle_action_value(action),
+        );
+        self.set_field_value(
+            "change_member_lifecycle",
+            "role",
+            membership_role_value(role),
+        );
+        self.set_field_value(
+            "change_member_lifecycle",
+            "expected_revision",
+            expected_revision.to_string(),
+        );
+        self.set_field_value("change_member_lifecycle", "reason", "");
+        true
+    }
+
+    fn request_topology_lifecycle(
+        &mut self,
+        node_id: String,
+        action: MemberLifecycleAction,
+        cx: &mut Context<Self>,
+    ) {
+        let network_id = self.topology_network_id();
+        if network_id.is_none() || !self.prepare_topology_lifecycle(&node_id, action) {
+            self.pending_topology_lifecycle = None;
+            self.error = Some(t(self.locale, "topology.batch.directory_stale").to_string());
+            cx.notify();
+            return;
+        }
+        let confirmed = self.pending_confirmation.as_deref() == Some("change_member_lifecycle");
+        self.pending_topology_lifecycle = Some(PendingTopologyLifecycle {
+            network_id: network_id.expect("checked topology network"),
+            node_id,
+            action,
+        });
+        if confirmed {
+            self.pending_topology_lifecycle = None;
+        }
+        self.submit_manifest_action("change_member_lifecycle", cx);
+    }
+
+    fn confirm_topology_lifecycle(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_topology_lifecycle.clone() else {
+            return;
+        };
+        if self.pending_confirmation.as_deref() != Some("change_member_lifecycle") {
+            return;
+        }
+        if self.topology_network_id().as_ref() != Some(&pending.network_id) {
+            self.pending_topology_lifecycle = None;
+            self.pending_confirmation = None;
+            self.error = Some(t(self.locale, "topology.batch.directory_stale").to_string());
+            cx.notify();
+            return;
+        }
+        self.request_topology_lifecycle(pending.node_id, pending.action, cx);
+    }
+
     fn apply_snapshot(&mut self, snapshot: NodeSnapshot, cx: &mut Context<Self>) {
+        let topology_changed = Self::topology_identity_changed(
+            self.snapshot.topology.as_ref(),
+            snapshot.topology.as_ref(),
+        );
         self.snapshot = snapshot;
         let selection_still_exists = self.selected_network.as_deref().is_some_and(|selected| {
             self.snapshot
@@ -473,6 +969,80 @@ impl GpuiShell {
                 .find(|network| network.status == NodeNetworkStatus::Online)
                 .or_else(|| self.snapshot.networks.first())
                 .map(|network| network.name.clone());
+        }
+
+        let previous_topology_network = self.selected_topology_network_id.clone();
+        self.selected_topology_network_id = self.topology_network_id();
+        let topology_network_changed =
+            previous_topology_network != self.selected_topology_network_id;
+        if topology_changed {
+            self.invalidate_topology_directory();
+        }
+        if topology_network_changed {
+            self.selected_topology_node_id = None;
+            self.topology_menu_node_id = None;
+            self.topology_selection.clear();
+            self.pending_topology_lifecycle = None;
+            if self.pending_confirmation.as_deref() == Some("change_member_lifecycle") {
+                self.pending_confirmation = None;
+            }
+        }
+        if let Some(network_id) = self.selected_topology_network_id.clone() {
+            if let Some(boundary) = self
+                .snapshot
+                .topology
+                .as_ref()
+                .and_then(|topology| topology.boundary(&network_id))
+            {
+                self.selected_network = Some(boundary.name.clone());
+            }
+            let valid_nodes = self
+                .snapshot
+                .topology
+                .as_ref()
+                .map(|topology| {
+                    topology
+                        .nodes
+                        .iter()
+                        .filter(|node| node.belongs_to(&network_id))
+                        .map(|node| node.node_id.as_str().to_string())
+                        .collect::<BTreeSet<_>>()
+                })
+                .unwrap_or_default();
+            if self
+                .selected_topology_node_id
+                .as_ref()
+                .is_some_and(|node_id| !valid_nodes.contains(node_id))
+            {
+                self.selected_topology_node_id = None;
+            }
+            if self
+                .topology_menu_node_id
+                .as_ref()
+                .is_some_and(|node_id| !valid_nodes.contains(node_id))
+            {
+                self.topology_menu_node_id = None;
+            }
+            if self
+                .pending_topology_lifecycle
+                .as_ref()
+                .is_some_and(|pending| !valid_nodes.contains(&pending.node_id))
+            {
+                self.pending_topology_lifecycle = None;
+                if self.pending_confirmation.as_deref() == Some("change_member_lifecycle") {
+                    self.pending_confirmation = None;
+                }
+            }
+            self.topology_selection
+                .retain(|node_id| valid_nodes.contains(node_id));
+        } else {
+            self.selected_topology_node_id = None;
+            self.topology_menu_node_id = None;
+            self.topology_selection.clear();
+            self.pending_topology_lifecycle = None;
+            if self.pending_confirmation.as_deref() == Some("change_member_lifecycle") {
+                self.pending_confirmation = None;
+            }
         }
         self.fill_empty_network_fields();
         self.sync_text_inputs(cx);
@@ -1305,7 +1875,7 @@ impl GpuiShell {
                 ));
             }
             NodeCommandOutcome::MemberLifecycleChanged(change) => {
-                self.notice = Some(tr(
+                let notice = tr(
                     self.locale,
                     "gpui.member_lifecycle_changed",
                     &[
@@ -1314,13 +1884,35 @@ impl GpuiShell {
                         ("revision", &change.revision.to_string()),
                         ("idempotent", &change.idempotent.to_string()),
                     ],
-                ));
-                self.submit_raw(
-                    NodeCommand::ListNetworkMembers(crate::node::NodeNetworkMembersCommand {
-                        network_id: change.network_id.to_string(),
-                    }),
-                    cx,
                 );
+                let topology_context = self.selected_page == "topology"
+                    && self.topology_network_id().as_ref() == Some(&change.network_id);
+                if topology_context {
+                    self.notice = Some(notice.clone());
+                    self.pending_notice_after_snapshot = Some(notice);
+                    let topology_revision = self
+                        .snapshot
+                        .topology
+                        .as_ref()
+                        .map(|topology| topology.revision);
+                    self.invalidate_topology_directory();
+                    if let Some(topology_revision) = topology_revision {
+                        self.request_topology_directory(
+                            change.network_id.clone(),
+                            topology_revision,
+                            cx,
+                        );
+                    }
+                    self.submit_raw(NodeCommand::GetSnapshot, cx);
+                } else {
+                    self.notice = Some(notice);
+                    self.submit_raw(
+                        NodeCommand::ListNetworkMembers(crate::node::NodeNetworkMembersCommand {
+                            network_id: change.network_id.to_string(),
+                        }),
+                        cx,
+                    );
+                }
             }
             NodeCommandOutcome::JoinRequestsReviewed(result) => {
                 self.apply_join_request_review_ack(&result);
@@ -6373,6 +6965,827 @@ impl GpuiShell {
         .into_any_element()
     }
 
+    fn topology_presentation_for_current_network(&self) -> TopologyPresentationSignals {
+        let network_id = self.topology_network_id();
+        let directory_stale = network_id
+            .as_ref()
+            .is_some_and(|network_id| self.topology_directory_is_stale_for_network(network_id));
+        TopologyPresentationSignals {
+            initial_loading: self.snapshot.topology.is_none() && self.pending_commands > 0,
+            refreshing: self.pending_commands > 0
+                && self.snapshot.topology.is_some()
+                && self.topology_directory_request.is_none(),
+            offline: false,
+            stale: self.snapshot.control_health == NodeControlHealth::Unavailable
+                || directory_stale,
+            error: self.error.is_some(),
+            permission_denied: !self
+                .snapshot
+                .permissions
+                .permissions
+                .contains(&NodePermission::ViewState),
+        }
+    }
+
+    fn ensure_topology_directory(&mut self, cx: &mut Context<Self>) {
+        if self.selected_page != "topology" {
+            return;
+        }
+        let Some(network_id) = self.topology_network_id() else {
+            return;
+        };
+        let Some(topology_revision) = self
+            .snapshot
+            .topology
+            .as_ref()
+            .map(|topology| topology.revision)
+        else {
+            return;
+        };
+        self.request_topology_directory(network_id, topology_revision, cx);
+    }
+
+    fn refresh_topology_directory(&mut self, cx: &mut Context<Self>) {
+        let Some(network_id) = self.topology_network_id() else {
+            return;
+        };
+        let Some(topology_revision) = self
+            .snapshot
+            .topology
+            .as_ref()
+            .map(|topology| topology.revision)
+        else {
+            return;
+        };
+        if self
+            .topology_directory_request
+            .as_ref()
+            .is_some_and(|request| {
+                request.generation == self.topology_directory_generation
+                    && request.network_id == network_id
+                    && request.topology_revision == topology_revision
+            })
+        {
+            return;
+        }
+        if self
+            .topology_directory_error_for_network(&network_id)
+            .is_some()
+        {
+            self.topology_directory_error = None;
+        }
+        self.request_topology_directory(network_id, topology_revision, cx);
+    }
+
+    fn topology_state_card(
+        &self,
+        presentation: &super::view_model::TopologyPresentation,
+    ) -> gpui::AnyElement {
+        let palette = semantic_palette(match presentation.kind {
+            TopologyPresentationCondition::Ready => SemanticState::Success,
+            TopologyPresentationCondition::Error => SemanticState::Danger,
+            TopologyPresentationCondition::PermissionDenied => SemanticState::PermissionDenied,
+            TopologyPresentationCondition::Offline => SemanticState::Danger,
+            TopologyPresentationCondition::Stale
+            | TopologyPresentationCondition::Partial
+            | TopologyPresentationCondition::Refreshing => SemanticState::Warning,
+            TopologyPresentationCondition::InitialLoading => SemanticState::Info,
+            TopologyPresentationCondition::Unavailable | TopologyPresentationCondition::Empty => {
+                SemanticState::Neutral
+            }
+        });
+        let kind = presentation.kind;
+        let title = t(self.locale, kind.title_key()).to_string();
+        let detail = t(self.locale, kind.detail_key()).to_string();
+        let conditions = presentation
+            .conditions
+            .iter()
+            .map(|condition| condition.key())
+            .collect::<Vec<_>>()
+            .join(", ");
+        div()
+            .id("visual-topology-state")
+            .debug_selector(|| "visual-topology-state".into())
+            .role(Role::Status)
+            .aria_label(format!("{title}: {detail}"))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgba(palette.border.rgba_hex()))
+            .bg(rgba(palette.background.rgba_hex()))
+            .px_4()
+            .py_3()
+            .child(
+                div()
+                    .id(format!("topology-state-{}", kind.key()))
+                    .debug_selector(move || format!("visual-topology-state-{}", kind.key()))
+                    .text_sm()
+                    .font_weight(gpui::FontWeight(600.0))
+                    .text_color(rgba(palette.foreground.rgba_hex()))
+                    .child(title),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .line_height(px(18.0))
+                    .text_color(rgba(palette.foreground.rgba_hex()))
+                    .child(detail),
+            )
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(conditions),
+            )
+            .into_any_element()
+    }
+
+    fn topology_detail_card(
+        &self,
+        topology: &TopologySnapshot,
+        network_id: &NetworkId,
+        directory: Option<&NetworkMemberDirectory>,
+    ) -> gpui::AnyElement {
+        let Some(node_id) = self.selected_topology_node_id.as_deref() else {
+            return div()
+                .id("visual-topology-detail")
+                .debug_selector(|| "visual-topology-detail".into())
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_4()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgba(COLOR_BORDER))
+                .bg(rgba(COLOR_PANEL))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight(600.0))
+                        .text_color(rgba(COLOR_TEXT))
+                        .child(t(self.locale, "topology.detail.empty_title").to_string()),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "visual-topology-detail-empty".into())
+                        .text_xs()
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(t(self.locale, "topology.detail.empty_hint").to_string()),
+                )
+                .into_any_element();
+        };
+        let Some(node) = topology
+            .nodes
+            .iter()
+            .find(|node| node.node_id.as_str() == node_id && node.belongs_to(network_id))
+        else {
+            return div()
+                .id("visual-topology-detail")
+                .debug_selector(|| "visual-topology-detail".into())
+                .p_4()
+                .text_sm()
+                .text_color(rgba(COLOR_MUTED))
+                .child(t(self.locale, "topology.detail.empty_title").to_string())
+                .into_any_element();
+        };
+        let member = directory.and_then(|directory| {
+            directory
+                .members
+                .iter()
+                .find(|member| member.node_id.as_str() == node.node_id.as_str())
+        });
+        let detail = topology_node_detail(node, Some(network_id.as_str()), member, self.locale);
+        let field = |label_key: &'static str, value: String| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .min_w(px(160.0))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(t(self.locale, label_key).to_string()),
+                )
+                .child(div().text_sm().text_color(rgba(COLOR_TEXT)).child(value))
+        };
+        div()
+            .id("visual-topology-detail")
+            .debug_selector(|| "visual-topology-detail".into())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgba(COLOR_BORDER))
+            .bg(rgba(COLOR_PANEL))
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(t(self.locale, "topology.detail.title").to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_base()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(detail.display_name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .font_family("monospace")
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                    .child(detail.node_id.clone()),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .rounded_full()
+                            .border_1()
+                            .border_color(rgba(COLOR_BORDER))
+                            .px_2()
+                            .py_1()
+                            .text_xs()
+                            .text_color(rgba(COLOR_TEXT_SECONDARY))
+                            .child(detail.health.clone()),
+                    ),
+            )
+            .child(div().flex().flex_wrap().gap_4().children([
+                field("topology.detail.role", detail.role),
+                field("topology.detail.capabilities", detail.capabilities),
+                field("topology.detail.health", detail.health),
+                field("topology.detail.status", detail.status),
+                field("topology.detail.presence", detail.presence),
+                field("topology.detail.networks", detail.networks),
+            ]))
+            .into_any_element()
+    }
+
+    fn topology_action_panel_body(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(network_id) = self.topology_network_id() else {
+            return div()
+                .id("topology-action-panel-body")
+                .p_4()
+                .text_sm()
+                .text_color(rgba(COLOR_MUTED))
+                .child(t(self.locale, "topology.state.unavailable.title").to_string())
+                .into_any_element();
+        };
+        let topology_revision = self
+            .snapshot
+            .topology
+            .as_ref()
+            .map(|topology| topology.revision);
+        let network_label = self
+            .snapshot
+            .topology
+            .as_ref()
+            .and_then(|topology| topology.boundary(&network_id))
+            .map(|boundary| format!("{} · {}", boundary.name, boundary.network_id))
+            .unwrap_or_else(|| network_id.to_string());
+        let visible_count = self
+            .snapshot
+            .topology
+            .as_ref()
+            .map(|topology| {
+                topology
+                    .nodes
+                    .iter()
+                    .filter(|node| node.belongs_to(&network_id))
+                    .count()
+            })
+            .unwrap_or_default();
+        let directory_loading = topology_revision.is_some_and(|revision| {
+            self.topology_directory_request
+                .as_ref()
+                .is_some_and(|request| {
+                    request.generation == self.topology_directory_generation
+                        && request.network_id == network_id
+                        && request.topology_revision == revision
+                })
+        });
+        let directory_error = self.topology_directory_error_for_network(&network_id);
+        let directory_stale = self.topology_directory_is_stale_for_network(&network_id);
+        let directory_ready = self.topology_directory_for_network(&network_id);
+        let pending = self.pending_topology_lifecycle.as_ref();
+        let mut body = div()
+            .id("topology-action-panel-body")
+            .flex()
+            .flex_col()
+            .gap_4()
+            .p_4()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "topology.batch.title").to_string()),
+                    )
+                    .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(format!(
+                        "{}: {network_label}",
+                        t(self.locale, "topology.batch.network")
+                    )))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(COLOR_TEXT_SECONDARY))
+                            .child(tr(
+                                self.locale,
+                                "topology.batch.selection_count",
+                                &[
+                                    ("selected", &self.topology_selection.len().to_string()),
+                                    ("visible", &visible_count.to_string()),
+                                ],
+                            )),
+                    ),
+            );
+
+        if directory_loading {
+            body = body.child(
+                div()
+                    .debug_selector(|| "visual-topology-directory-loading".into())
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "topology.batch.directory_loading").to_string()),
+            );
+        } else if let Some(error) = directory_error {
+            body = body.child(
+                div()
+                    .debug_selector(|| "visual-topology-directory-failed".into())
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .text_xs()
+                    .text_color(rgba(COLOR_WARNING))
+                    .child(t(self.locale, "topology.batch.directory_failed").to_string())
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(error.to_string()),
+                    ),
+            );
+        } else if directory_stale {
+            body = body.child(
+                div()
+                    .debug_selector(|| "visual-topology-directory-stale".into())
+                    .text_xs()
+                    .text_color(rgba(COLOR_WARNING))
+                    .child(t(self.locale, "topology.batch.directory_stale").to_string()),
+            );
+        } else if let Some(directory) = directory_ready {
+            let actions = self
+                .topology_selection
+                .iter()
+                .flat_map(|node_id| {
+                    topology_member_actions(
+                        Some(directory),
+                        Some(network_id.as_str()),
+                        node_id.as_str(),
+                    )
+                })
+                .collect::<BTreeSet<_>>();
+            body = body.child(
+                div()
+                    .debug_selector(|| "visual-topology-directory-ready".into())
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(if actions.is_empty() {
+                        t(self.locale, "topology.batch.no_actions").to_string()
+                    } else {
+                        actions
+                            .iter()
+                            .map(|action| t(self.locale, member_lifecycle_action_key(*action)))
+                            .collect::<Vec<_>>()
+                            .join(t(self.locale, "common.list_separator"))
+                    }),
+            );
+        }
+
+        if let Some(pending) = pending {
+            let action = t(self.locale, member_lifecycle_action_key(pending.action)).to_string();
+            body = body
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgba(COLOR_WARNING))
+                        .bg(rgba(DARK_THEME.colors.warning_soft.rgba_hex()))
+                        .p_3()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight(600.0))
+                                .text_color(rgba(COLOR_WARNING))
+                                .child(t(self.locale, "topology.batch.confirm_title").to_string()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                .child(format!("{action} · {}", pending.node_id)),
+                        )
+                        .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(tr(
+                            self.locale,
+                            "topology.batch.confirm_counts",
+                            &[("selected", "1"), ("eligible", "1"), ("skipped", "0")],
+                        ))),
+                )
+                .child(
+                    button(
+                        SharedString::from("topology-confirm-lifecycle"),
+                        tr(self.locale, "topology.batch.execute", &[("count", "1")]),
+                        ButtonVariant::Danger,
+                        self.pending_commands > 0,
+                    )
+                    .debug_selector(|| "visual-topology-confirm".into())
+                    .w_full()
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.confirm_topology_lifecycle(cx);
+                    })),
+                );
+        }
+
+        body.child(
+            button(
+                SharedString::from("topology-refresh-directory"),
+                t(self.locale, "topology.batch.refresh_directory"),
+                ButtonVariant::Secondary,
+                self.pending_commands > 0,
+            )
+            .debug_selector(|| "visual-topology-refresh-directory".into())
+            .w_full()
+            .on_click(cx.listener(|shell, _, _, cx| {
+                shell.refresh_topology_directory(cx);
+            })),
+        )
+        .into_any_element()
+    }
+
+    fn topology_content(
+        &mut self,
+        layout: LayoutClass,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let signals = self.topology_presentation_for_current_network();
+        let presentation = topology_presentation(self.snapshot.topology.as_ref(), signals);
+        let state_card = self.topology_state_card(&presentation);
+        let Some(topology) = self.snapshot.topology.clone() else {
+            return div()
+                .id("topology-unavailable")
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(state_card)
+                .into_any_element();
+        };
+        if !presentation.can_render {
+            return div()
+                .id("topology-presentation-blocked")
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(state_card)
+                .into_any_element();
+        }
+        let Some(network_id) = self.topology_network_id() else {
+            return div()
+                .id("topology-no-network")
+                .flex()
+                .flex_col()
+                .gap_4()
+                .child(state_card)
+                .into_any_element();
+        };
+        let directory = self.topology_directory_for_network(&network_id).cloned();
+        let boundary_buttons = topology
+            .boundaries
+            .iter()
+            .enumerate()
+            .map(|(index, boundary)| {
+                let selected = boundary.network_id == network_id;
+                let boundary_id = boundary.network_id.clone();
+                let label = format!("{} · {}", boundary.name, boundary.member_count);
+                button(
+                    SharedString::from(format!("topology-network-{index}")),
+                    label,
+                    if selected {
+                        ButtonVariant::Secondary
+                    } else {
+                        ButtonVariant::Ghost
+                    },
+                    false,
+                )
+                .debug_selector(move || format!("visual-topology-boundary-{index}"))
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.select_topology_network(boundary_id.clone(), cx);
+                }))
+            })
+            .collect::<Vec<_>>();
+
+        let connections = topology
+            .connections
+            .iter()
+            .filter(|connection| connection.networks.contains(&network_id))
+            .enumerate()
+            .map(|(index, connection)| {
+                let state_key = match connection.state {
+                    TopologyConnectionState::Active => "topology.connection.active",
+                    TopologyConnectionState::Idle => "topology.connection.idle",
+                    TopologyConnectionState::Stale => "topology.connection.stale",
+                };
+                div()
+                    .id(format!("topology-connection-{index}"))
+                    .debug_selector(move || format!("visual-topology-connection-{index}"))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                    .child(format!("{} ↔ {}", connection.from, connection.to))
+                    .child(
+                        div()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(t(self.locale, state_key).to_string()),
+                    )
+            })
+            .collect::<Vec<_>>();
+
+        let visible_nodes = topology
+            .nodes
+            .iter()
+            .filter(|node| node.belongs_to(&network_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut node_cards = Vec::new();
+        for (index, node) in visible_nodes.iter().enumerate() {
+            let member = directory.as_ref().and_then(|directory| {
+                directory
+                    .members
+                    .iter()
+                    .find(|member| member.node_id.as_str() == node.node_id.as_str())
+            });
+            let detail = topology_node_detail(node, Some(network_id.as_str()), member, self.locale);
+            let selected = self.selected_topology_node_id.as_deref() == Some(node.node_id.as_str());
+            let menu_open = self.topology_menu_node_id.as_deref() == Some(node.node_id.as_str());
+            let node_id = node.node_id.as_str().to_string();
+            let open_node_id = node_id.clone();
+            let menu_node_id = node_id.clone();
+            let menu_actions = topology_member_actions(
+                directory.as_ref(),
+                Some(network_id.as_str()),
+                node.node_id.as_str(),
+            );
+            let selected_for_menu = self.topology_selection.contains(node.node_id.as_str());
+
+            let mut card = div()
+                .id(format!("topology-node-card-{index}"))
+                .debug_selector(move || format!("visual-topology-node-{index}"))
+                .flex()
+                .flex_col()
+                .gap_2()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgba(if selected { COLOR_ACCENT } else { COLOR_BORDER }))
+                .bg(rgba(if selected {
+                    DARK_THEME.colors.panel_raised.rgba_hex()
+                } else {
+                    COLOR_PANEL
+                }))
+                .p_3()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            button(
+                                SharedString::from(format!("topology-open-{index}")),
+                                format!("{} · {}", detail.display_name, detail.role),
+                                ButtonVariant::Ghost,
+                                false,
+                            )
+                            .debug_selector(move || format!("visual-topology-open-{index}"))
+                            .flex_1()
+                            .justify_start()
+                            .border_0()
+                            .on_click(cx.listener(
+                                move |shell, _, _, cx| {
+                                    shell.open_topology_node(open_node_id.clone(), cx);
+                                },
+                            )),
+                        )
+                        .child(
+                            button(
+                                SharedString::from(format!("topology-menu-{index}")),
+                                "•••",
+                                ButtonVariant::Ghost,
+                                false,
+                            )
+                            .debug_selector(move || format!("visual-topology-menu-trigger-{index}"))
+                            .aria_label(tr(
+                                self.locale,
+                                "topology.menu.label",
+                                &[("name", &detail.display_name)],
+                            ))
+                            .on_click(cx.listener(
+                                move |shell, _, _, cx| {
+                                    shell.toggle_topology_menu(menu_node_id.clone(), cx);
+                                },
+                            )),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(format!("{} · {}", detail.node_id, detail.health)),
+                );
+
+            if menu_open {
+                let mut menu = div()
+                    .id(format!("topology-menu-{index}"))
+                    .debug_selector(|| "visual-topology-menu".into())
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .bg(rgba(COLOR_PANEL_RAISED))
+                    .p_2();
+                let open_detail_node = node_id.clone();
+                menu = menu.child(
+                    button(
+                        SharedString::from(format!("topology-menu-open-{index}")),
+                        t(self.locale, "topology.menu.open"),
+                        ButtonVariant::Ghost,
+                        false,
+                    )
+                    .debug_selector(|| "visual-topology-menu-open".into())
+                    .w_full()
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.open_topology_node(open_detail_node.clone(), cx);
+                        shell.topology_menu_node_id = None;
+                        cx.notify();
+                    })),
+                );
+                let select_node = node_id.clone();
+                menu = menu.child(
+                    button(
+                        SharedString::from(format!("topology-menu-select-{index}")),
+                        t(
+                            self.locale,
+                            if selected_for_menu {
+                                "topology.menu.unselect"
+                            } else {
+                                "topology.menu.select"
+                            },
+                        ),
+                        ButtonVariant::Ghost,
+                        false,
+                    )
+                    .debug_selector(move || {
+                        if selected_for_menu {
+                            "visual-topology-menu-unselect".into()
+                        } else {
+                            "visual-topology-menu-select".into()
+                        }
+                    })
+                    .w_full()
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.toggle_topology_selection(select_node.clone(), cx);
+                        shell.topology_menu_node_id = None;
+                        cx.notify();
+                    })),
+                );
+                if menu_actions.is_empty() {
+                    menu = menu.child(
+                        div()
+                            .debug_selector(|| "visual-topology-menu-no-actions".into())
+                            .px_2()
+                            .py_1()
+                            .text_xs()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(t(self.locale, "topology.menu.no_actions").to_string()),
+                    );
+                } else {
+                    for action in menu_actions {
+                        let action_node = node_id.clone();
+                        menu = menu.child(
+                            button(
+                                SharedString::from(format!(
+                                    "topology-menu-action-{}-{index}",
+                                    member_lifecycle_action_value(action)
+                                )),
+                                t(self.locale, member_lifecycle_action_key(action)),
+                                ButtonVariant::Ghost,
+                                false,
+                            )
+                            .debug_selector(move || {
+                                format!(
+                                    "visual-topology-menu-action-{}",
+                                    member_lifecycle_action_value(action)
+                                )
+                            })
+                            .w_full()
+                            .on_click(cx.listener(
+                                move |shell, _, _, cx| {
+                                    shell.request_topology_lifecycle(
+                                        action_node.clone(),
+                                        action,
+                                        cx,
+                                    );
+                                    shell.topology_menu_node_id = None;
+                                    cx.notify();
+                                },
+                            )),
+                        );
+                    }
+                }
+                card = card.child(menu);
+            }
+            node_cards.push(card);
+        }
+
+        let detail_card = self.topology_detail_card(&topology, &network_id, directory.as_ref());
+        let compact = matches!(layout, LayoutClass::Mobile | LayoutClass::Compact);
+        let mut content = div()
+            .id("topology-content")
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(state_card)
+            .child(div().flex().flex_wrap().gap_2().children(boundary_buttons))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "topology.legend.connections").to_string()),
+                    )
+                    .children(connections),
+            );
+        if compact {
+            content = content
+                .child(div().flex().flex_col().gap_2().children(node_cards))
+                .child(detail_card);
+        } else {
+            content = content.child(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .children(node_cards),
+                    )
+                    .child(div().w(px(360.0)).flex_shrink_0().child(detail_card)),
+            );
+        }
+        content.into_any_element()
+    }
+
     fn page_content(&mut self, layout: LayoutClass, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(manifest) = self.manifest.as_ref() else {
             return div()
@@ -6482,6 +7895,12 @@ impl GpuiShell {
         if let Some(overview) = model.overview.as_ref() {
             return content
                 .child(self.overview_content(overview, cx))
+                .into_any_element();
+        }
+
+        if self.selected_page == "topology" {
+            return content
+                .child(self.topology_content(layout, cx))
                 .into_any_element();
         }
 
@@ -9805,25 +11224,32 @@ impl GpuiShell {
             .into_iter()
             .map(|action| self.action_card(action, cx))
             .collect::<Vec<_>>();
-        let body = div()
-            .id("action-panel-body")
-            .flex()
-            .flex_col()
-            .overflow_y_scroll()
-            .when(action_cards.is_empty(), |body| {
-                body.child(
-                    div()
-                        .id("no-shared-actions")
-                        .p_4()
-                        .text_sm()
-                        .text_color(rgba(COLOR_MUTED))
-                        .child(t(self.locale, "common.page_actions_empty").to_string()),
-                )
-            })
-            .children(action_cards)
-            .when_some(self.network_profile_result_card(), |body, result| {
-                body.child(div().px_3().pb_3().child(result))
-            });
+        let body = if self.selected_page == "topology" {
+            div()
+                .id("topology-action-panel-scroll")
+                .overflow_y_scroll()
+                .child(self.topology_action_panel_body(cx))
+        } else {
+            div()
+                .id("action-panel-body")
+                .flex()
+                .flex_col()
+                .overflow_y_scroll()
+                .when(action_cards.is_empty(), |body| {
+                    body.child(
+                        div()
+                            .id("no-shared-actions")
+                            .p_4()
+                            .text_sm()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(t(self.locale, "common.page_actions_empty").to_string()),
+                    )
+                })
+                .children(action_cards)
+                .when_some(self.network_profile_result_card(), |body, result| {
+                    body.child(div().px_3().pb_3().child(result))
+                })
+        };
 
         let mut panel = div()
             .id(app_region_id(AppRegion::ActionPanel))
@@ -9881,6 +11307,9 @@ impl Render for GpuiShell {
         let layout = layout_for_window_width(f32::from(window.viewport_size().width));
         let presentation = ActionPanelPresentation::for_layout(layout);
         self.sync_configuration_editor(window, cx);
+        if self.selected_page == "topology" {
+            cx.on_next_frame(window, |shell, _, cx| shell.ensure_topology_directory(cx));
+        }
         let content = self.page_content(layout, cx);
         let action_panel = self.action_panel(layout, cx);
         let workspace = if presentation == ActionPanelPresentation::Stacked {
@@ -11111,7 +12540,7 @@ mod tests {
     use crate::network_discovery::DISCOVERY_RESULT_STALE_AFTER_MS;
     use crate::node::{
         NodeCommandFuture, NodeCommandHandler, NodeCommandRequest, NodeCommandResult, NodeEventBus,
-        NodeNetworkMembershipSnapshot, NodeUiValidation,
+        NodeNetworkMembershipSnapshot, NodePermissionSnapshot, NodeUiValidation,
     };
     use crate::tun::TunCapabilityReason;
     use fuckipv6_common::crypto::Identity;
@@ -11119,7 +12548,8 @@ mod tests {
         DiscoveryTransport, JoinApplicantProfile, JoinRequest, JoinRequestGrantPreview,
         JoinRequestId, MembershipState, MembershipTerms, NetworkDiscoveryDocument,
         NetworkDiscoveryRecord, NetworkEndpoint, NetworkId, NetworkMemberPresence, NodeId,
-        Signature,
+        Signature, TopologyBoundary, TopologyConnection, TopologyNode, TopologyNodeHealth,
+        TopologyNodeNetwork,
     };
     use gpui::{Modifiers, OwnedMenuItem, TestAppContext, VisualTestContext};
     use serde_json::{json, Map, Value};
@@ -11429,6 +12859,232 @@ mod tests {
             can_manage_members: true,
             members,
         }
+    }
+
+    struct TopologyWidgetFixture {
+        snapshot: NodeSnapshot,
+        network_id: NetworkId,
+        relay_id: NodeId,
+        viewer_id: NodeId,
+        directory: NetworkMemberDirectory,
+    }
+
+    fn topology_widget_fixture() -> TopologyWidgetFixture {
+        let network_id = NetworkId::from_public_key(b"gpui-topology-network");
+        let relay_id = NodeId::from_public_key(b"gpui-topology-relay");
+        let viewer_id = NodeId::from_public_key(b"gpui-topology-viewer");
+        let relay_presence = NetworkMemberPresence::live(1_700_000_010_000);
+        let viewer_presence = NetworkMemberPresence::live(1_700_000_010_100);
+        let topology = TopologySnapshot {
+            revision: 9,
+            generated_at_unix_ms: 1_700_000_010_200,
+            viewer: viewer_id.clone(),
+            truncated: false,
+            boundaries: vec![TopologyBoundary {
+                network_id: network_id.clone(),
+                name: "gpui-topology".into(),
+                member_count: 2,
+                visible_member_count: 2,
+                viewer_role: Some(MembershipRole::Owner),
+                capabilities: vec![CapabilityKind::File],
+            }],
+            nodes: vec![
+                TopologyNode {
+                    node_id: relay_id.clone(),
+                    display_name: Some("  Relay node  ".into()),
+                    is_self: false,
+                    health: TopologyNodeHealth::Degraded,
+                    capabilities: vec![CapabilityKind::Exit, CapabilityKind::File],
+                    networks: vec![TopologyNodeNetwork {
+                        network_id: network_id.clone(),
+                        role: MembershipRole::Administrator,
+                        status: NetworkMemberStatus::Active,
+                        presence: relay_presence.clone(),
+                        health: TopologyNodeHealth::Degraded,
+                        capabilities: vec![CapabilityKind::Exit, CapabilityKind::File],
+                    }],
+                },
+                TopologyNode {
+                    node_id: viewer_id.clone(),
+                    display_name: Some("Viewer node".into()),
+                    is_self: true,
+                    health: TopologyNodeHealth::Healthy,
+                    capabilities: vec![CapabilityKind::Coordinator],
+                    networks: vec![TopologyNodeNetwork {
+                        network_id: network_id.clone(),
+                        role: MembershipRole::Owner,
+                        status: NetworkMemberStatus::Active,
+                        presence: viewer_presence.clone(),
+                        health: TopologyNodeHealth::Healthy,
+                        capabilities: vec![CapabilityKind::Coordinator],
+                    }],
+                },
+            ],
+            connections: vec![TopologyConnection {
+                connection_id: fuckipv6_common::domain::ContentHash::from_bytes(
+                    b"gpui-topology-connection",
+                ),
+                from: relay_id.clone(),
+                to: viewer_id.clone(),
+                networks: vec![network_id.clone()],
+                state: TopologyConnectionState::Active,
+                observed_at_unix_ms: Some(1_700_000_010_000),
+            }],
+            clusters: Vec::new(),
+        };
+        let directory = NetworkMemberDirectory {
+            network_id: network_id.clone(),
+            generated_at_unix_ms: 1_700_000_010_200,
+            viewer_role: MembershipRole::Owner,
+            can_manage_members: true,
+            members: vec![
+                NetworkMember {
+                    node_id: relay_id.clone(),
+                    display_name: Some("Relay directory member".into()),
+                    identity_fingerprint: Some("SHA256:relay".into()),
+                    role: MembershipRole::Administrator,
+                    groups: vec![NetworkMemberGroup::Administrator],
+                    capabilities: Some(vec![CapabilityKind::Exit, CapabilityKind::File]),
+                    status: NetworkMemberStatus::Active,
+                    lifecycle_state: lifecycle_state_for_status(NetworkMemberStatus::Active),
+                    revision: 17,
+                    access_epoch: 3,
+                    available_actions: vec![
+                        MemberLifecycleAction::Invite,
+                        MemberLifecycleAction::Approve,
+                        MemberLifecycleAction::Exit,
+                        MemberLifecycleAction::Suspend,
+                        MemberLifecycleAction::Resume,
+                        MemberLifecycleAction::Remove,
+                        MemberLifecycleAction::UndoRemove,
+                    ],
+                    presence: relay_presence,
+                    joined_at_unix_ms: Some(1_700_000_000_000),
+                },
+                NetworkMember {
+                    node_id: viewer_id.clone(),
+                    display_name: Some("Viewer directory member".into()),
+                    identity_fingerprint: Some("SHA256:viewer".into()),
+                    role: MembershipRole::Owner,
+                    groups: vec![NetworkMemberGroup::Owner],
+                    capabilities: Some(vec![CapabilityKind::Coordinator]),
+                    status: NetworkMemberStatus::Active,
+                    lifecycle_state: lifecycle_state_for_status(NetworkMemberStatus::Active),
+                    revision: 4,
+                    access_epoch: 1,
+                    available_actions: Vec::new(),
+                    presence: viewer_presence,
+                    joined_at_unix_ms: Some(1_700_000_000_000),
+                },
+            ],
+        };
+        TopologyWidgetFixture {
+            snapshot: NodeSnapshot {
+                revision: 9,
+                permissions: NodePermissionSnapshot {
+                    permissions: NodePermission::ALL.to_vec(),
+                    ..Default::default()
+                },
+                topology: Some(topology),
+                ..Default::default()
+            },
+            network_id,
+            relay_id,
+            viewer_id,
+            directory,
+        }
+    }
+
+    fn install_topology_widget_fixture(
+        shell: &mut GpuiShell,
+        fixture: &TopologyWidgetFixture,
+        cx: &mut Context<GpuiShell>,
+    ) {
+        shell.manifest = Some(crate::node::node_ui_manifest());
+        shell.locale = Locale::En;
+        shell.selected_page = "topology".into();
+        shell.error = None;
+        shell.notice = None;
+        shell.apply_snapshot(fixture.snapshot.clone(), cx);
+        let topology = shell
+            .snapshot
+            .topology
+            .as_ref()
+            .expect("topology fixture snapshot");
+        let boundary = topology
+            .boundary(&fixture.network_id)
+            .expect("topology fixture boundary")
+            .clone();
+        shell.topology_directory_ready = Some(TopologyDirectoryReady {
+            directory: fixture.directory.clone(),
+            network_id: fixture.network_id.clone(),
+            boundary,
+            topology_revision: topology.revision,
+            generation: shell.topology_directory_generation,
+        });
+        shell.topology_directory_error = None;
+        shell.topology_directory_request = None;
+        cx.notify();
+    }
+
+    #[gpui::test]
+    fn topology_detail_and_menu_are_independent_actions(cx: &mut TestAppContext) {
+        let fixture = topology_widget_fixture();
+        let first_node_id = fixture.relay_id.as_str().to_string();
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                install_topology_widget_fixture(shell, &fixture, cx);
+            })
+            .expect("install topology fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        assert!(visible
+            .debug_bounds("visual-topology-detail-empty")
+            .is_some());
+        assert!(visible.debug_bounds("visual-topology-menu").is_none());
+
+        let open = visible
+            .debug_bounds("visual-topology-open-0")
+            .expect("first topology node detail action");
+        visible.simulate_click(open.center(), Modifiers::default());
+        visible.run_until_parked();
+        assert!(visible
+            .debug_bounds("visual-topology-detail-empty")
+            .is_none());
+        assert!(
+            visible.debug_bounds("visual-topology-menu").is_none(),
+            "opening node details must not also open the object menu"
+        );
+        window
+            .update(cx, |shell, _, _| {
+                assert_eq!(
+                    shell.selected_topology_node_id.as_deref(),
+                    Some(first_node_id.as_str())
+                );
+                assert_eq!(shell.topology_menu_node_id, None);
+            })
+            .expect("verify detail-only state");
+
+        let menu = visible
+            .debug_bounds("visual-topology-menu-trigger-0")
+            .expect("first topology node menu trigger");
+        visible.simulate_click(menu.center(), Modifiers::default());
+        visible.run_until_parked();
+        assert!(visible.debug_bounds("visual-topology-menu").is_some());
+        window
+            .update(cx, |shell, _, _| {
+                assert_eq!(
+                    shell.selected_topology_node_id.as_deref(),
+                    Some(first_node_id.as_str())
+                );
+                assert_eq!(
+                    shell.topology_menu_node_id.as_deref(),
+                    Some(first_node_id.as_str())
+                );
+            })
+            .expect("verify menu state");
     }
 
     fn join_preview_fixture() -> NodeNetworkJoinPreview {
@@ -13105,12 +14761,16 @@ mod tests {
     struct SnapshotCommandHandler {
         state: NodeStateStore,
         configs: ConfigManager,
+        directory: Option<NetworkMemberDirectory>,
+        executed_commands: Arc<Mutex<Vec<NodeCommand>>>,
     }
 
     impl NodeCommandHandler for SnapshotCommandHandler {
         fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
             let state = self.state.clone();
             let configs = self.configs.clone();
+            let directory = self.directory.clone();
+            let executed_commands = self.executed_commands.clone();
             Box::pin(async move {
                 let request_id = request.request_id;
                 match request.command {
@@ -13146,10 +14806,52 @@ mod tests {
                             ),
                         ),
                     },
+                    NodeCommand::ListNetworkMembers(command) => {
+                        if let Ok(mut executed) = executed_commands.lock() {
+                            executed.push(NodeCommand::ListNetworkMembers(command.clone()));
+                        }
+                        match directory
+                            .filter(|directory| directory.network_id.as_str() == command.network_id)
+                        {
+                            Some(directory) => NodeCommandResult::completed(
+                                request_id,
+                                NodeCommandOutcome::NetworkMembers(Box::new(directory)),
+                            ),
+                            None => NodeCommandResult::rejected(
+                                request_id,
+                                crate::node::NodeProblem::new(
+                                    crate::node::NodeProblemCode::NotFound,
+                                    format!("测试成员目录不存在: {}", command.network_id),
+                                ),
+                            ),
+                        }
+                    }
+                    NodeCommand::ChangeMemberLifecycle(command) => {
+                        if let Ok(mut executed) = executed_commands.lock() {
+                            executed.push(NodeCommand::ChangeMemberLifecycle(command));
+                        }
+                        NodeCommandResult::rejected(
+                            request_id,
+                            crate::node::NodeProblem::new(
+                                crate::node::NodeProblemCode::Internal,
+                                "测试 operation 必须通过 operation client 提交",
+                            ),
+                        )
+                    }
                     command => panic!("unexpected GPUI test command: {command:?}"),
                 }
             })
         }
+    }
+
+    fn test_config_manager() -> ConfigManager {
+        static NEXT_CONFIG_DIR: AtomicU64 = AtomicU64::new(1);
+        let config_dir = std::env::temp_dir().join(format!(
+            "fuckipv6-gpui-test-{}-{}",
+            std::process::id(),
+            NEXT_CONFIG_DIR.fetch_add(1, Ordering::Relaxed)
+        ));
+        ConfigManager::new_for_dir(config_dir).expect("temporary config directory")
     }
 
     fn open_shell_window(
@@ -13157,28 +14859,23 @@ mod tests {
         width: f32,
         height: f32,
     ) -> gpui::WindowHandle<GpuiShell> {
-        static NEXT_CONFIG_DIR: AtomicU64 = AtomicU64::new(1);
-
         let state = NodeStateStore::new();
         // GPUI tests do not install a Tokio runtime, while the production
         // command bus dispatches through Tokio. Rendering the initial shell
         // only needs the bus to exist; async command behavior is covered by
-        // the node command tests.
+        // the node command tests and the dedicated topology directory test.
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("temporary Tokio runtime");
         let runtime_guard = runtime.enter();
-        let config_dir = std::env::temp_dir().join(format!(
-            "fuckipv6-gpui-test-{}-{}",
-            std::process::id(),
-            NEXT_CONFIG_DIR.fetch_add(1, Ordering::Relaxed)
-        ));
-        let configs = ConfigManager::new_for_dir(config_dir).expect("temporary config directory");
+        let configs = test_config_manager();
         let bus = NodeCommandBus::spawn(
             Arc::new(SnapshotCommandHandler {
                 state: state.clone(),
                 configs: configs.clone(),
+                directory: None,
+                executed_commands: Arc::new(Mutex::new(Vec::new())),
             }),
             NodeEventBus::default(),
             4,
@@ -13190,6 +14887,29 @@ mod tests {
         });
         cx.run_until_parked();
         window
+    }
+
+    fn open_shell_window_with_handler(
+        cx: &mut TestAppContext,
+        width: f32,
+        height: f32,
+        handler: Arc<SnapshotCommandHandler>,
+    ) -> (gpui::WindowHandle<GpuiShell>, tokio::runtime::Runtime) {
+        let state = handler.state.clone();
+        let configs = handler.configs.clone();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("test Tokio runtime");
+        let runtime_guard = runtime.enter();
+        let bus = NodeCommandBus::spawn(handler, NodeEventBus::default(), 4);
+        drop(runtime_guard);
+        let window = cx.open_window(size(px(width), px(height)), move |_, cx| {
+            GpuiShell::new(state, bus, None, configs, cx)
+        });
+        cx.run_until_parked();
+        (window, runtime)
     }
 
     fn bound_keystrokes(
@@ -13568,6 +15288,8 @@ mod tests {
             Arc::new(SnapshotCommandHandler {
                 state: state.clone(),
                 configs: configs.clone(),
+                directory: None,
+                executed_commands: Arc::new(Mutex::new(Vec::new())),
             }),
             NodeEventBus::default(),
             4,

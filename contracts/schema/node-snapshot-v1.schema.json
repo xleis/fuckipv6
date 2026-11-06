@@ -114,6 +114,10 @@
         }
       ]
     },
+    "ContentHash": {
+      "description": "SHA-256/Blake3-style content digest represented without exposing secret input.",
+      "type": "string"
+    },
     "DiscoveryTransport": {
       "enum": [
         "quic",
@@ -508,6 +512,61 @@
           "type": "string"
         }
       ]
+    },
+    "NetworkMemberObservationSource": {
+      "description": "Why presence has its current value. The timestamp lets both UIs display the\nobservation's freshness without inventing a client-side observation.",
+      "enum": [
+        "live_session",
+        "disconnect_observed",
+        "not_observed"
+      ],
+      "type": "string"
+    },
+    "NetworkMemberOnlineState": {
+      "description": "Three-state presence. Unknown means the Coordinator has never observed the\nmember's data-plane session and must never be presented as offline.",
+      "enum": [
+        "online",
+        "offline",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "NetworkMemberPresence": {
+      "properties": {
+        "observed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/NetworkMemberObservationSource"
+        },
+        "state": {
+          "$ref": "#/$defs/NetworkMemberOnlineState"
+        }
+      },
+      "required": [
+        "state",
+        "source"
+      ],
+      "type": "object"
+    },
+    "NetworkMemberStatus": {
+      "description": "Authoritative, sanitized member status shown by governance surfaces.\n\nThis is deliberately distinct from [`MembershipState`], which tracks the\nlocal node's connection workflow. In particular, an approved roster member\nis not reported as active until a live data-plane session observes it.",
+      "enum": [
+        "pending",
+        "approved",
+        "active",
+        "degraded",
+        "suspended",
+        "exited",
+        "removed",
+        "expired"
+      ],
+      "type": "string"
     },
     "NetworkMode": {
       "description": "虚拟网络工作模式",
@@ -2053,6 +2112,270 @@
       "description": "Signature bytes encoded as URL-safe base64 without padding.",
       "type": "string"
     },
+    "TopologyBoundary": {
+      "description": "One network boundary. `member_count` is the authoritative count, while\n`visible_member_count` reflects aggregation so a surface can explain it.",
+      "properties": {
+        "capabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
+        "member_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "viewer_role": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MembershipRole"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "visible_member_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "network_id",
+        "name",
+        "member_count",
+        "visible_member_count"
+      ],
+      "type": "object"
+    },
+    "TopologyCluster": {
+      "description": "Aggregated remainder of an oversized network.",
+      "properties": {
+        "expandable": {
+          "type": "boolean"
+        },
+        "hidden_member_count": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "sample": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "network_id",
+        "hidden_member_count",
+        "expandable"
+      ],
+      "type": "object"
+    },
+    "TopologyConnection": {
+      "description": "One unordered node pair, with every network that observed it.",
+      "properties": {
+        "connection_id": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "from": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "networks": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NetworkId"
+          },
+          "type": "array"
+        },
+        "observed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/TopologyConnectionState"
+        },
+        "to": {
+          "$ref": "#/$defs/NodeId"
+        }
+      },
+      "required": [
+        "connection_id",
+        "from",
+        "to",
+        "state"
+      ],
+      "type": "object"
+    },
+    "TopologyConnectionState": {
+      "description": "Link state as observed, not as assumed. `Stale` is terminal for rendering\npurposes: it never counts as an active link.",
+      "enum": [
+        "active",
+        "idle",
+        "stale"
+      ],
+      "type": "string"
+    },
+    "TopologyNode": {
+      "description": "Exactly one entry per `NodeId`, regardless of how many networks it joins.",
+      "properties": {
+        "capabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "health": {
+          "$ref": "#/$defs/TopologyNodeHealth"
+        },
+        "is_self": {
+          "type": "boolean"
+        },
+        "networks": {
+          "description": "Sorted by network id so both UIs render the same order.",
+          "items": {
+            "$ref": "#/$defs/TopologyNodeNetwork"
+          },
+          "type": "array"
+        },
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        }
+      },
+      "required": [
+        "node_id",
+        "is_self",
+        "health",
+        "networks"
+      ],
+      "type": "object"
+    },
+    "TopologyNodeHealth": {
+      "description": "Aggregated node health. `Unknown` is deliberately distinct from `Healthy`\nso a surface can never claim a healthy node it has not observed.",
+      "enum": [
+        "healthy",
+        "unknown",
+        "degraded",
+        "unreachable"
+      ],
+      "type": "string"
+    },
+    "TopologyNodeNetwork": {
+      "description": "The node's relationship with one visible network.",
+      "properties": {
+        "capabilities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
+        "health": {
+          "$ref": "#/$defs/TopologyNodeHealth"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "presence": {
+          "$ref": "#/$defs/NetworkMemberPresence"
+        },
+        "role": {
+          "$ref": "#/$defs/MembershipRole"
+        },
+        "status": {
+          "$ref": "#/$defs/NetworkMemberStatus"
+        }
+      },
+      "required": [
+        "network_id",
+        "role",
+        "status",
+        "presence",
+        "health"
+      ],
+      "type": "object"
+    },
+    "TopologySnapshot": {
+      "description": "Server-owned, privacy-filtered topology projection.",
+      "properties": {
+        "boundaries": {
+          "items": {
+            "$ref": "#/$defs/TopologyBoundary"
+          },
+          "type": "array"
+        },
+        "clusters": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TopologyCluster"
+          },
+          "type": "array"
+        },
+        "connections": {
+          "items": {
+            "$ref": "#/$defs/TopologyConnection"
+          },
+          "type": "array"
+        },
+        "generated_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/TopologyNode"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "viewer": {
+          "$ref": "#/$defs/NodeId"
+        }
+      },
+      "required": [
+        "revision",
+        "generated_at_unix_ms",
+        "viewer",
+        "truncated",
+        "boundaries",
+        "nodes",
+        "connections"
+      ],
+      "type": "object"
+    },
     "TunCapabilities": {
       "description": "Redacted TUN readiness for the current node process. This is deliberately\nderived from capability metadata rather than a real TUN creation probe.",
       "properties": {
@@ -2331,6 +2654,17 @@
         "$ref": "#/$defs/NodeRoutingSummarySnapshot"
       },
       "type": "array"
+    },
+    "topology": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TopologySnapshot"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Privacy-filtered topology derived from the cached roster plus live peer\nsessions. `None` means the node has no identity yet, so no graph can be\ndrawn at all; a present but empty snapshot means nothing is joined.\nAdapters never project membership themselves."
     },
     "tun_capabilities": {
       "$ref": "#/$defs/TunCapabilities",

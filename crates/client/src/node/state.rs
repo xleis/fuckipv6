@@ -7,8 +7,10 @@ use tokio::sync::{watch, RwLock};
 
 use fuckipv6_common::domain::{
     ActivityEntry, CapabilityKind, CapabilityState, ExitContributionObligation,
-    ExitContributionScope, MembershipRole, MembershipState, MembershipTerms, NetworkJoinMode,
-    NetworkVisibility, OperationRecovery,
+    ExitContributionScope, MembershipRole, MembershipState, MembershipTerms, NetworkId,
+    NetworkJoinMode, NetworkMemberDirectory, NetworkMemberPresence, NetworkMemberStatus,
+    NetworkVisibility, NodeId, OperationRecovery, TopologyBuilder, TopologyLinkObservation,
+    TopologyMemberInput, TopologyNetworkInput, TopologySnapshot, TopologyViewer,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -86,6 +88,12 @@ pub struct NodeSnapshot {
     pub recent_activity: Vec<ActivityEntry>,
     pub logs: Vec<NodeLogEntry>,
     pub last_error: Option<NodeProblem>,
+    /// Privacy-filtered topology derived from the cached roster plus live peer
+    /// sessions. `None` means the node has no identity yet, so no graph can be
+    /// drawn at all; a present but empty snapshot means nothing is joined.
+    /// Adapters never project membership themselves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topology: Option<TopologySnapshot>,
 }
 
 impl NodeSnapshot {
@@ -93,6 +101,18 @@ impl NodeSnapshot {
     /// Derived state is never stored independently by adapters.
     pub fn refresh_capability_states(&mut self) {
         self.capabilities = NodeCapabilityRegistrySnapshot::from_snapshot(self);
+    }
+
+    /// Recompute the derived topology from roster data already present in the
+    /// snapshot. The projection is never authored by an adapter: an unavailable
+    /// roster simply yields a boundary without members instead of invented
+    /// peers, and live links come only from observed peer sessions.
+    pub fn refresh_topology(
+        &mut self,
+        directories: &BTreeMap<NetworkId, NetworkMemberDirectory>,
+        now_ms: u64,
+    ) {
+        self.topology = project_topology(self, directories, now_ms);
     }
 
     /// Return the single user-facing status for this snapshot. Transitions win
@@ -369,6 +389,132 @@ impl NodeSnapshot {
     }
 }
 
+/// Project the single topology model from authoritative roster data.
+///
+/// Inputs are already redacted projections: membership records (which networks
+/// this node joined, with its role), cached member directories (the roster the
+/// Coordinator returned last time) and live peer sessions (the only source of
+/// link state). Nothing here invents a member or a connection: a missing roster
+/// yields a boundary with just this node, and a link is emitted only where a
+/// peer session actually exists.
+fn project_topology(
+    snapshot: &NodeSnapshot,
+    directories: &BTreeMap<NetworkId, NetworkMemberDirectory>,
+    now_ms: u64,
+) -> Option<TopologySnapshot> {
+    let viewer = NodeId::parse(snapshot.identity.as_ref()?.node_id.clone()).ok()?;
+    let mut networks: Vec<TopologyNetworkInput> = Vec::new();
+    let mut network_ids_by_name: BTreeMap<String, NetworkId> = BTreeMap::new();
+    for membership in &snapshot.memberships {
+        if !membership.state.can_access_network_resources() {
+            continue;
+        }
+        let Ok(network_id) = NetworkId::parse(membership.network_id.clone()) else {
+            continue;
+        };
+        network_ids_by_name.insert(membership.network_name.clone(), network_id.clone());
+        let mut input =
+            TopologyNetworkInput::new(network_id.clone(), membership.network_name.clone());
+        match directories.get(&network_id) {
+            Some(directory) => {
+                for member in &directory.members {
+                    let mut entry = TopologyMemberInput::new(member.node_id.clone(), member.role)
+                        .with_status(member.status)
+                        .with_presence(member.presence.clone())
+                        .with_capabilities(member.capabilities.clone().unwrap_or_default());
+                    if let Some(display_name) = &member.display_name {
+                        entry = entry.with_display_name(display_name.clone());
+                    }
+                    input = input.with_member(entry);
+                }
+            }
+            None => {
+                // The roster is not cached yet. Only this node's own membership
+                // is projected so the boundary stays explainable while the UI
+                // shows the roster as unavailable.
+                let network = snapshot
+                    .networks
+                    .iter()
+                    .find(|network| network.name == membership.network_name);
+                let (status, presence) =
+                    local_membership_projection(network.map(|n| n.status), now_ms);
+                let member =
+                    NodeId::parse(membership.node_id.clone()).unwrap_or_else(|_| viewer.clone());
+                input = input.with_member(
+                    TopologyMemberInput::new(member, membership.role)
+                        .with_status(status)
+                        .with_presence(presence),
+                );
+            }
+        }
+        networks.push(input);
+    }
+
+    let mut links = Vec::new();
+    for peer in &snapshot.peers {
+        let Some(network_id) = network_ids_by_name.get(peer.network_name.as_str()) else {
+            continue;
+        };
+        let Ok(peer_id) = NodeId::parse(peer.peer_id.clone()) else {
+            continue;
+        };
+        links.push(TopologyLinkObservation::new(
+            viewer.clone(),
+            peer_id,
+            network_id.clone(),
+            now_ms,
+            peer.online && peer.p2p_active,
+        ));
+    }
+
+    let visible = networks
+        .iter()
+        .map(|network| network.network_id.clone())
+        .collect::<Vec<_>>();
+    let mut builder = TopologyBuilder::new(
+        TopologyViewer::new(viewer, visible),
+        snapshot.revision,
+        now_ms,
+    );
+    for network in networks {
+        builder = builder.add_network(network);
+    }
+    for link in links {
+        builder = builder.observe_link(link);
+    }
+    builder.build().ok()
+}
+
+/// Local fallback when no roster is cached: translate this node's own data-plane
+/// status into the shared member vocabulary instead of guessing about peers.
+fn local_membership_projection(
+    status: Option<NodeNetworkStatus>,
+    now_ms: u64,
+) -> (NetworkMemberStatus, NetworkMemberPresence) {
+    match status {
+        Some(NodeNetworkStatus::Online) => (
+            NetworkMemberStatus::Active,
+            NetworkMemberPresence::live(now_ms),
+        ),
+        Some(NodeNetworkStatus::Degraded) => (
+            NetworkMemberStatus::Degraded,
+            NetworkMemberPresence::live(now_ms),
+        ),
+        Some(NodeNetworkStatus::Offline) => (
+            NetworkMemberStatus::Approved,
+            NetworkMemberPresence::disconnected(now_ms),
+        ),
+        Some(NodeNetworkStatus::Failed) => (
+            NetworkMemberStatus::Degraded,
+            NetworkMemberPresence::disconnected(now_ms),
+        ),
+        Some(NodeNetworkStatus::Connecting) | Some(NodeNetworkStatus::Stopping) | None => (
+            NetworkMemberStatus::Approved,
+            NetworkMemberPresence::unknown(),
+        ),
+    }
+}
+
 fn collect_duplicate_values<T>(
     values: impl IntoIterator<Item = T>,
     prefix: &str,
@@ -595,6 +741,13 @@ fn exit_node_capability_state(snapshot: &NodeSnapshot) -> CapabilityState {
     } else {
         CapabilityState::Starting
     }
+}
+
+fn unix_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 fn collect_duplicate_names<'a>(
@@ -1156,6 +1309,10 @@ pub struct NodeStateStore {
     snapshot: Arc<RwLock<NodeSnapshot>>,
     updates: watch::Sender<NodeSnapshot>,
     events: Option<NodeEventBus>,
+    /// Authoritative member rosters, keyed by network. They are cached only so
+    /// the derived topology can be rebuilt without a second Coordinator round
+    /// trip; `list_network_members` remains the single writer.
+    directories: Arc<RwLock<BTreeMap<NetworkId, NetworkMemberDirectory>>>,
 }
 
 impl NodeStateStore {
@@ -1167,6 +1324,7 @@ impl NodeStateStore {
             snapshot: Arc::new(RwLock::new(snapshot)),
             updates,
             events: None,
+            directories: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -1195,11 +1353,24 @@ impl NodeStateStore {
             snapshot: Arc::new(RwLock::new(snapshot)),
             updates,
             events: Some(events),
+            directories: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
     pub async fn snapshot(&self) -> NodeSnapshot {
         self.snapshot.read().await.clone()
+    }
+
+    /// Cache one authoritative member directory and republish the derived
+    /// topology. Cached rosters are never treated as live link state: presence
+    /// and connections still come from the entries the Coordinator returned or
+    /// from observed peer sessions.
+    pub async fn set_member_directory(&self, directory: NetworkMemberDirectory) {
+        {
+            let mut directories = self.directories.write().await;
+            directories.insert(directory.network_id.clone(), directory);
+        }
+        self.update(|_| {}).await;
     }
 
     pub fn subscribe(&self) -> watch::Receiver<NodeSnapshot> {
@@ -1215,6 +1386,7 @@ impl NodeStateStore {
         update(&mut snapshot);
         snapshot.refresh_capability_states();
         snapshot.revision = snapshot.revision.saturating_add(1);
+        snapshot.refresh_topology(&*self.directories.read().await, unix_time_ms());
         let published = snapshot.clone();
         self.updates.send_replace(published.clone());
         if let Some(events) = &self.events {
@@ -1288,6 +1460,7 @@ impl NodeStateStore {
         snapshot.interface_problems = capture.problems;
         snapshot.refresh_capability_states();
         snapshot.revision = snapshot.revision.saturating_add(1);
+        snapshot.refresh_topology(&*self.directories.read().await, unix_time_ms());
         let published = snapshot.clone();
         self.updates.send_replace(published.clone());
         if let Some(events) = &self.events {
@@ -2149,6 +2322,261 @@ mod tests {
         assert_eq!(restored.revision, before.revision);
         assert_eq!(restored.control_health, NodeControlHealth::Available);
         assert!(event_receiver.try_recv().is_err());
+    }
+
+    fn topology_node(seed: &str) -> NodeId {
+        NodeId::from_public_key(seed.as_bytes())
+    }
+
+    fn topology_network(seed: &str) -> NetworkId {
+        NetworkId::from_public_key(seed.as_bytes())
+    }
+
+    fn membership_snapshot(
+        network_name: &str,
+        network_id: &NetworkId,
+        node_id: &NodeId,
+    ) -> NodeNetworkMembershipSnapshot {
+        NodeNetworkMembershipSnapshot {
+            network_name: network_name.into(),
+            network_id: network_id.to_string(),
+            node_id: node_id.to_string(),
+            state: MembershipState::Active,
+            role: MembershipRole::Member,
+            local_policy_revision: 1,
+            network_policy_revision: None,
+            privacy_policy_revision: None,
+            member_limit: None,
+            exit_contribution: None,
+            exit_contribution_scope: None,
+            terms_hash: None,
+            current_terms: None,
+            current_terms_hash: None,
+            policy_confirmation_required: false,
+            acknowledged_at_unix_ms: None,
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+            suspension_reason: None,
+        }
+    }
+
+    fn directory_member(
+        node_id: &NodeId,
+        display_name: &str,
+        role: MembershipRole,
+        capabilities: Vec<CapabilityKind>,
+    ) -> fuckipv6_common::domain::NetworkMember {
+        fuckipv6_common::domain::NetworkMember {
+            node_id: node_id.clone(),
+            display_name: Some(display_name.into()),
+            identity_fingerprint: None,
+            role,
+            groups: vec![fuckipv6_common::domain::NetworkMemberGroup::Member],
+            capabilities: Some(capabilities),
+            status: NetworkMemberStatus::Active,
+            lifecycle_state: fuckipv6_common::domain::MemberLifecycleStatus::Active,
+            revision: 1,
+            access_epoch: 1,
+            available_actions: Vec::new(),
+            presence: NetworkMemberPresence::live(1_000),
+            joined_at_unix_ms: Some(1),
+        }
+    }
+
+    fn peer_snapshot(network_name: &str, node_id: &NodeId, p2p_active: bool) -> NodePeerSnapshot {
+        NodePeerSnapshot {
+            peer_id: node_id.to_string(),
+            network_name: network_name.into(),
+            virtual_ipv6: Ipv6Addr::LOCALHOST,
+            virtual_ipv4: None,
+            endpoints: Vec::new(),
+            online: true,
+            p2p_active,
+            p2p_healthy: p2p_active,
+            rtt_us: Some(1_000),
+            loss_rate: 0.0,
+            traffic: NodeTrafficSnapshot::default(),
+        }
+    }
+
+    #[test]
+    fn topology_requires_identity_and_projects_only_joined_networks() {
+        let viewer = topology_node("viewer");
+        let network_id = topology_network("alpha");
+        let mut snapshot = NodeSnapshot::default();
+        let directories = BTreeMap::new();
+        snapshot.refresh_topology(&directories, 5_000);
+        assert!(
+            snapshot.topology.is_none(),
+            "a node without identity cannot draw a graph"
+        );
+
+        snapshot.identity = Some(NodeIdentitySnapshot {
+            node_id: viewer.to_string(),
+            display_name: None,
+            public_key_fingerprint: "fingerprint".into(),
+            created_at_unix_ms: None,
+        });
+        snapshot.memberships = vec![membership_snapshot("alpha", &network_id, &viewer)];
+        let mut pending = membership_snapshot("beta", &topology_network("beta"), &viewer);
+        pending.state = MembershipState::PendingApproval;
+        snapshot.memberships.push(pending);
+        snapshot.refresh_topology(&directories, 5_000);
+
+        let topology = snapshot.topology.expect("topology is projected");
+        assert_eq!(topology.boundaries.len(), 1);
+        assert_eq!(topology.boundaries[0].network_id, network_id);
+        assert_eq!(topology.viewer, viewer);
+        assert_eq!(
+            topology.boundaries[0].visible_member_count, 1,
+            "without a cached roster only this node is projected"
+        );
+        assert!(topology.nodes.iter().all(|node| node.is_self));
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn topology_uses_the_cached_roster_and_marks_capabilities() {
+        let viewer = topology_node("viewer");
+        let relay = topology_node("relay");
+        let network_id = topology_network("alpha");
+        let mut snapshot = NodeSnapshot::default();
+        snapshot.identity = Some(NodeIdentitySnapshot {
+            node_id: viewer.to_string(),
+            display_name: None,
+            public_key_fingerprint: "fingerprint".into(),
+            created_at_unix_ms: None,
+        });
+        snapshot.memberships = vec![membership_snapshot("alpha", &network_id, &viewer)];
+        let directory = NetworkMemberDirectory {
+            network_id: network_id.clone(),
+            generated_at_unix_ms: 4_000,
+            viewer_role: MembershipRole::Member,
+            can_manage_members: false,
+            members: vec![
+                directory_member(&viewer, "me", MembershipRole::Member, Vec::new()),
+                directory_member(
+                    &relay,
+                    "relay",
+                    MembershipRole::Administrator,
+                    vec![CapabilityKind::Coordinator, CapabilityKind::Relay],
+                ),
+            ],
+        };
+        let mut directories = BTreeMap::new();
+        directories.insert(network_id.clone(), directory);
+        snapshot.refresh_topology(&directories, 5_000);
+
+        let topology = snapshot.topology.expect("topology is projected");
+        assert_eq!(topology.nodes.len(), 2);
+        let relay_node = topology.node(&relay).expect("relay is projected once");
+        assert_eq!(
+            relay_node.health,
+            fuckipv6_common::domain::TopologyNodeHealth::Healthy
+        );
+        assert_eq!(
+            relay_node.capabilities,
+            vec![CapabilityKind::Coordinator, CapabilityKind::Relay]
+        );
+        assert_eq!(relay_node.networks[0].role, MembershipRole::Administrator);
+        assert_eq!(
+            topology.boundaries[0].member_count, 2,
+            "the boundary reports the authoritative roster size"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::field_reassign_with_default)]
+    fn topology_links_only_observed_peer_sessions() {
+        let viewer = topology_node("viewer");
+        let relay = topology_node("relay");
+        let stranger = topology_node("stranger-net");
+        let network_id = topology_network("alpha");
+        let mut snapshot = NodeSnapshot::default();
+        snapshot.identity = Some(NodeIdentitySnapshot {
+            node_id: viewer.to_string(),
+            display_name: None,
+            public_key_fingerprint: "fingerprint".into(),
+            created_at_unix_ms: None,
+        });
+        snapshot.memberships = vec![membership_snapshot("alpha", &network_id, &viewer)];
+        snapshot.peers = vec![
+            peer_snapshot("alpha", &relay, true),
+            peer_snapshot("alpha", &stranger, true),
+        ];
+        let directory = NetworkMemberDirectory {
+            network_id: network_id.clone(),
+            generated_at_unix_ms: 4_000,
+            viewer_role: MembershipRole::Member,
+            can_manage_members: false,
+            members: vec![
+                directory_member(&viewer, "me", MembershipRole::Member, Vec::new()),
+                directory_member(&relay, "relay", MembershipRole::Member, Vec::new()),
+            ],
+        };
+        let mut directories = BTreeMap::new();
+        directories.insert(network_id.clone(), directory);
+        snapshot.refresh_topology(&directories, 5_000);
+
+        let topology = snapshot.topology.clone().expect("topology is projected");
+        let connections = topology.active_connections();
+        assert_eq!(
+            connections.len(),
+            1,
+            "a live peer that the roster never returned is not drawn"
+        );
+        assert_eq!(connections[0].from, viewer);
+        assert_eq!(connections[0].to, relay);
+        assert_eq!(connections[0].networks, vec![network_id.clone()]);
+
+        snapshot.peers = vec![peer_snapshot("alpha", &relay, false)];
+        snapshot.refresh_topology(&directories, 5_000);
+        let topology = snapshot.topology.expect("topology is projected");
+        assert!(
+            topology.active_connections().is_empty(),
+            "a relayed peer is not an active link"
+        );
+    }
+
+    #[tokio::test]
+    async fn member_directory_updates_republish_the_derived_topology() {
+        let state = NodeStateStore::new();
+        let viewer = topology_node("viewer");
+        let relay = topology_node("relay");
+        let network_id = topology_network("alpha");
+        state
+            .update(|snapshot| {
+                snapshot.identity = Some(NodeIdentitySnapshot {
+                    node_id: viewer.to_string(),
+                    display_name: None,
+                    public_key_fingerprint: "fingerprint".into(),
+                    created_at_unix_ms: None,
+                });
+                snapshot.memberships = vec![membership_snapshot("alpha", &network_id, &viewer)];
+            })
+            .await;
+        let before = state.snapshot().await;
+        let before_topology = before.topology.clone().expect("topology is projected");
+        assert_eq!(before_topology.nodes.len(), 1);
+
+        state
+            .set_member_directory(NetworkMemberDirectory {
+                network_id: network_id.clone(),
+                generated_at_unix_ms: 4_000,
+                viewer_role: MembershipRole::Member,
+                can_manage_members: false,
+                members: vec![
+                    directory_member(&viewer, "me", MembershipRole::Member, Vec::new()),
+                    directory_member(&relay, "relay", MembershipRole::Member, Vec::new()),
+                ],
+            })
+            .await;
+
+        let after = state.snapshot().await;
+        assert_eq!(after.revision, before.revision + 1);
+        let topology = after.topology.expect("topology is projected");
+        assert!(topology.node(&relay).is_some());
+        assert_eq!(topology.boundaries[0].member_count, 2);
     }
 
     #[tokio::test]

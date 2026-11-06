@@ -1706,6 +1706,7 @@ export type NodeSnapshot = {
   "recent_activity"?: Array<ActivityEntry>;
   "revision": number;
   "routing_summaries"?: Array<NodeRoutingSummarySnapshot>;
+  "topology"?: TopologySnapshot | null;
   "tun_capabilities"?: TunCapabilities;
   "ui_mode"?: UiModeResolution | null;
 };
@@ -1869,6 +1870,64 @@ export type OperationState = "queued" | "running" | "waiting_for_reauth" | "succ
 export type PublicKey = string;
 
 export type Signature = string;
+
+export type TopologyBoundary = {
+  "capabilities"?: Array<CapabilityKind>;
+  "member_count": number;
+  "name": string;
+  "network_id": NetworkId;
+  "viewer_role"?: MembershipRole | null;
+  "visible_member_count": number;
+};
+
+export type TopologyCluster = {
+  "expandable": boolean;
+  "hidden_member_count": number;
+  "network_id": NetworkId;
+  "sample"?: Array<NodeId>;
+};
+
+export type TopologyConnection = {
+  "connection_id": ContentHash;
+  "from": NodeId;
+  "networks"?: Array<NetworkId>;
+  "observed_at_unix_ms"?: number | null;
+  "state": TopologyConnectionState;
+  "to": NodeId;
+};
+
+export type TopologyConnectionState = "active" | "idle" | "stale";
+
+export type TopologyNode = {
+  "capabilities"?: Array<CapabilityKind>;
+  "display_name"?: string | null;
+  "health": TopologyNodeHealth;
+  "is_self": boolean;
+  "networks": Array<TopologyNodeNetwork>;
+  "node_id": NodeId;
+};
+
+export type TopologyNodeHealth = "healthy" | "unknown" | "degraded" | "unreachable";
+
+export type TopologyNodeNetwork = {
+  "capabilities"?: Array<CapabilityKind>;
+  "health": TopologyNodeHealth;
+  "network_id": NetworkId;
+  "presence": NetworkMemberPresence;
+  "role": MembershipRole;
+  "status": NetworkMemberStatus;
+};
+
+export type TopologySnapshot = {
+  "boundaries": Array<TopologyBoundary>;
+  "clusters"?: Array<TopologyCluster>;
+  "connections": Array<TopologyConnection>;
+  "generated_at_unix_ms": number;
+  "nodes": Array<TopologyNode>;
+  "revision": number;
+  "truncated": boolean;
+  "viewer": NodeId;
+};
 
 export type TunCapabilities = {
   "can_rebuild": boolean;

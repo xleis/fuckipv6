@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage"
     };
 
     public enum AclAction {
@@ -1946,6 +1946,57 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown OperationState wire value: " + value);
+        }
+    }
+
+    public enum TopologyConnectionState {
+        ACTIVE("active"),
+        IDLE("idle"),
+        STALE("stale");
+
+        private final String wireName;
+
+        TopologyConnectionState(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static TopologyConnectionState fromWireName(String value) {
+            for (TopologyConnectionState candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown TopologyConnectionState wire value: " + value);
+        }
+    }
+
+    public enum TopologyNodeHealth {
+        HEALTHY("healthy"),
+        UNKNOWN("unknown"),
+        DEGRADED("degraded"),
+        UNREACHABLE("unreachable");
+
+        private final String wireName;
+
+        TopologyNodeHealth(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static TopologyNodeHealth fromWireName(String value) {
+            for (TopologyNodeHealth candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown TopologyNodeHealth wire value: " + value);
         }
     }
 
@@ -4496,10 +4547,11 @@ public final class NodeContractV1 {
         public final List<ActivityEntry> recent_activity;
         public final Long revision;
         public final List<NodeRoutingSummarySnapshot> routing_summaries;
+        public final TopologySnapshot topology;
         public final TunCapabilities tun_capabilities;
         public final UiModeResolution ui_mode;
 
-        public NodeSnapshot(NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, NodeDiscoveryIndexSnapshot discovery_index, List<NodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, NodeIdentitySnapshot identity, List<NodeProblem> interface_problems, List<NodeInterfaceSnapshot> interfaces, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, List<NodeLogEntry> logs, List<NodeNetworkMembershipSnapshot> memberships, List<NodeNetworkProfileSnapshot> network_profiles, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, NodePermissionSnapshot permissions, List<ActivityEntry> recent_activity, Long revision, List<NodeRoutingSummarySnapshot> routing_summaries, TunCapabilities tun_capabilities, UiModeResolution ui_mode) {
+        public NodeSnapshot(NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, NodeDiscoveryIndexSnapshot discovery_index, List<NodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, NodeIdentitySnapshot identity, List<NodeProblem> interface_problems, List<NodeInterfaceSnapshot> interfaces, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, List<NodeLogEntry> logs, List<NodeNetworkMembershipSnapshot> memberships, List<NodeNetworkProfileSnapshot> network_profiles, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, NodePermissionSnapshot permissions, List<ActivityEntry> recent_activity, Long revision, List<NodeRoutingSummarySnapshot> routing_summaries, TopologySnapshot topology, TunCapabilities tun_capabilities, UiModeResolution ui_mode) {
             this.capabilities = capabilities;
             this.configuration = configuration;
             this.control_health = control_health;
@@ -4520,6 +4572,7 @@ public final class NodeContractV1 {
             this.recent_activity = recent_activity;
             this.revision = revision;
             this.routing_summaries = routing_summaries;
+            this.topology = topology;
             this.tun_capabilities = tun_capabilities;
             this.ui_mode = ui_mode;
         }
@@ -4749,6 +4802,120 @@ public final class NodeContractV1 {
         public OperationRecovery(String hint_key, String kind) {
             this.hint_key = hint_key;
             this.kind = kind;
+        }
+    }
+
+    /** DTO for TopologyBoundary. */
+    public static final class TopologyBoundary {
+        public final List<CapabilityKind> capabilities;
+        public final Long member_count;
+        public final String name;
+        public final String network_id;
+        public final MembershipRole viewer_role;
+        public final Long visible_member_count;
+
+        public TopologyBoundary(List<CapabilityKind> capabilities, Long member_count, String name, String network_id, MembershipRole viewer_role, Long visible_member_count) {
+            this.capabilities = capabilities;
+            this.member_count = member_count;
+            this.name = name;
+            this.network_id = network_id;
+            this.viewer_role = viewer_role;
+            this.visible_member_count = visible_member_count;
+        }
+    }
+
+    /** DTO for TopologyCluster. */
+    public static final class TopologyCluster {
+        public final Boolean expandable;
+        public final Long hidden_member_count;
+        public final String network_id;
+        public final List<String> sample;
+
+        public TopologyCluster(Boolean expandable, Long hidden_member_count, String network_id, List<String> sample) {
+            this.expandable = expandable;
+            this.hidden_member_count = hidden_member_count;
+            this.network_id = network_id;
+            this.sample = sample;
+        }
+    }
+
+    /** DTO for TopologyConnection. */
+    public static final class TopologyConnection {
+        public final String connection_id;
+        public final String from;
+        public final List<String> networks;
+        public final Long observed_at_unix_ms;
+        public final TopologyConnectionState state;
+        public final String to;
+
+        public TopologyConnection(String connection_id, String from, List<String> networks, Long observed_at_unix_ms, TopologyConnectionState state, String to) {
+            this.connection_id = connection_id;
+            this.from = from;
+            this.networks = networks;
+            this.observed_at_unix_ms = observed_at_unix_ms;
+            this.state = state;
+            this.to = to;
+        }
+    }
+
+    /** DTO for TopologyNode. */
+    public static final class TopologyNode {
+        public final List<CapabilityKind> capabilities;
+        public final String display_name;
+        public final TopologyNodeHealth health;
+        public final Boolean is_self;
+        public final List<TopologyNodeNetwork> networks;
+        public final String node_id;
+
+        public TopologyNode(List<CapabilityKind> capabilities, String display_name, TopologyNodeHealth health, Boolean is_self, List<TopologyNodeNetwork> networks, String node_id) {
+            this.capabilities = capabilities;
+            this.display_name = display_name;
+            this.health = health;
+            this.is_self = is_self;
+            this.networks = networks;
+            this.node_id = node_id;
+        }
+    }
+
+    /** DTO for TopologyNodeNetwork. */
+    public static final class TopologyNodeNetwork {
+        public final List<CapabilityKind> capabilities;
+        public final TopologyNodeHealth health;
+        public final String network_id;
+        public final NetworkMemberPresence presence;
+        public final MembershipRole role;
+        public final NetworkMemberStatus status;
+
+        public TopologyNodeNetwork(List<CapabilityKind> capabilities, TopologyNodeHealth health, String network_id, NetworkMemberPresence presence, MembershipRole role, NetworkMemberStatus status) {
+            this.capabilities = capabilities;
+            this.health = health;
+            this.network_id = network_id;
+            this.presence = presence;
+            this.role = role;
+            this.status = status;
+        }
+    }
+
+    /** DTO for TopologySnapshot. */
+    public static final class TopologySnapshot {
+        public final List<TopologyBoundary> boundaries;
+        public final List<TopologyCluster> clusters;
+        public final List<TopologyConnection> connections;
+        public final Long generated_at_unix_ms;
+        public final List<TopologyNode> nodes;
+        public final Long revision;
+        public final Boolean truncated;
+        public final String viewer;
+
+        public TopologySnapshot(List<TopologyBoundary> boundaries, List<TopologyCluster> clusters, List<TopologyConnection> connections, Long generated_at_unix_ms, List<TopologyNode> nodes, Long revision, Boolean truncated, String viewer) {
+            this.boundaries = boundaries;
+            this.clusters = clusters;
+            this.connections = connections;
+            this.generated_at_unix_ms = generated_at_unix_ms;
+            this.nodes = nodes;
+            this.revision = revision;
+            this.truncated = truncated;
+            this.viewer = viewer;
         }
     }
 

@@ -468,6 +468,7 @@ impl NodeRuntimeHandler {
                         list_network_members(
                             &runtime,
                             discovery.as_ref(),
+                            &state,
                             request_id,
                             command.network_id,
                         )
@@ -2426,6 +2427,7 @@ async fn list_join_requests(
 async fn list_network_members(
     runtime: &NetworkRuntimeManager,
     discovery: Option<&DiscoveryIndexManager>,
+    state: &NodeStateStore,
     request_id: u64,
     network_id: String,
 ) -> NodeCommandResult {
@@ -2444,10 +2446,15 @@ async fn list_network_members(
         .list_network_members(network_id, coordinator_url)
         .await
     {
-        Ok(directory) => NodeCommandResult::completed(
-            request_id,
-            NodeCommandOutcome::NetworkMembers(Box::new(directory)),
-        ),
+        Ok(directory) => {
+            // Cache the authoritative roster so the derived topology reflects
+            // the same members without issuing a second Coordinator request.
+            state.set_member_directory(directory.clone()).await;
+            NodeCommandResult::completed(
+                request_id,
+                NodeCommandOutcome::NetworkMembers(Box::new(directory)),
+            )
+        }
         Err(error) => runtime_rejection(request_id, error),
     }
 }

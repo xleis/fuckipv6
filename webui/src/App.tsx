@@ -203,6 +203,9 @@ function useNodeEvents(
     const invalidateSnapshot = createCoalescedTask(() => {
       void queryClient.invalidateQueries({ queryKey: SNAPSHOT_QUERY_KEY });
     }, 150);
+    const invalidateManifest = createCoalescedTask(() => {
+      void queryClient.invalidateQueries({ queryKey: MANIFEST_QUERY_KEY });
+    }, 150);
 
     const processPendingMessage = () => {
       messageTimer = null;
@@ -221,6 +224,9 @@ function useNodeEvents(
         if (message.type === "snapshot" || message.type === "resync") {
           const snapshot = validateSnapshot(message.snapshot as NodeSnapshot);
           queryClient.setQueryData(SNAPSHOT_QUERY_KEY, snapshot);
+          // Capabilities can change without changing the snapshot revision
+          // (for example, when an administrator revokes one operation).
+          invalidateManifest.schedule();
           setState({
             status: "live",
             stale: false,
@@ -230,6 +236,7 @@ function useNodeEvents(
         }
         if (message.type === "event") {
           invalidateSnapshot.schedule();
+          invalidateManifest.schedule();
           return;
         }
         if (message.type === "error") queueResync();
@@ -245,6 +252,7 @@ function useNodeEvents(
           : { ...current, status: "resyncing", stale: true },
       );
       invalidateSnapshot.schedule();
+      invalidateManifest.schedule();
     };
 
     const connect = () => {
@@ -289,6 +297,7 @@ function useNodeEvents(
     return () => {
       stopped = true;
       invalidateSnapshot.dispose();
+      invalidateManifest.dispose();
       if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
       if (messageTimer !== null) window.clearTimeout(messageTimer);
       pendingMessage = null;

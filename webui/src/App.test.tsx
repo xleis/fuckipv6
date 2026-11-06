@@ -1156,6 +1156,7 @@ describe("React WebUI shell", () => {
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
     expect(loadSnapshot).toHaveBeenCalledTimes(1);
+    expect(loadManifest).toHaveBeenCalledTimes(1);
     const firstSocket = SilentWebSocket.instances.at(-1);
     if (!firstSocket) throw new Error("WebSocket was not created");
     const refreshedSnapshot = {
@@ -1174,7 +1175,10 @@ describe("React WebUI shell", () => {
     if (!reconnectSocket) throw new Error("Reconnect WebSocket was not created");
 
     act(() => reconnectSocket.emit("open"));
-    await waitFor(() => expect(loadSnapshot).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      expect(loadSnapshot).toHaveBeenCalledTimes(2);
+      expect(loadManifest).toHaveBeenCalledTimes(2);
+    });
     expect(await screen.findByText("command-77")).toBeInTheDocument();
 
     act(() =>
@@ -1193,6 +1197,39 @@ describe("React WebUI shell", () => {
       expect(container.querySelector(".stale-indicator")).not.toHaveClass(
         "active",
       );
+    });
+  });
+
+  it("refreshes snapshot and capability manifest on authoritative events", async () => {
+    authenticate(populatedSnapshot);
+    renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+    expect(loadManifest).toHaveBeenCalledTimes(1);
+    const socket = SilentWebSocket.instances.at(-1);
+    if (!socket) throw new Error("WebSocket was not created");
+
+    act(() =>
+      socket.emit(
+        "message",
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            schema_version: 1,
+            type: "event",
+            event: {
+              kind: { type: "state_changed", data: { revision: 2 } },
+              sequence: 2,
+              snapshot_revision: 2,
+            },
+          }),
+        }),
+      ),
+    );
+
+    await waitFor(() => {
+      expect(loadSnapshot).toHaveBeenCalledTimes(2);
+      expect(loadManifest).toHaveBeenCalledTimes(2);
     });
   });
 

@@ -43,6 +43,7 @@ export type DirectoryLoad =
       networkId: string;
       directory: NetworkMemberDirectory;
       topologyRevision: number;
+      topologyGeneratedAtUnixMs: number;
     }
   | { state: "error"; networkId: string; message: string };
 

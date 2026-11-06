@@ -413,6 +413,97 @@ describe("TopologyPage interactions and governance", () => {
     expect(lifecycleCalls).toBe(0);
   });
 
+  it("removes lifecycle actions immediately when the manifest revokes the command", async () => {
+    const onSubmit = vi.fn(directorySubmit(directory()));
+    const view = render(
+      <TopologyPage
+        topology={snapshot()}
+        locale="zh-CN"
+        actions={governanceActions}
+        onSubmitAction={onSubmit}
+      />,
+    );
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const bob = screen.getByRole("option", { name: /Bob/ });
+
+    fireEvent.contextMenu(bob);
+    expect(
+      await within(await screen.findByRole("menu")).findByRole("menuitem", {
+        name: translated("choice.member_lifecycle.suspend"),
+      }),
+    ).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+
+    view.rerender(
+      <TopologyPage
+        topology={snapshot()}
+        locale="zh-CN"
+        actions={governanceActions.filter(
+          (action) => action.id !== "change_member_lifecycle",
+        )}
+        onSubmitAction={onSubmit}
+      />,
+    );
+    fireEvent.contextMenu(screen.getByRole("option", { name: /Bob/ }));
+    const menu = await screen.findByRole("menu");
+    expect(
+      await within(menu).findByRole("menuitem", {
+        name: translated("topology.menu.no_actions"),
+      }),
+    ).toHaveAttribute("aria-disabled", "true");
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops stale directory actions and reloads them when topology authority changes", async () => {
+    const initialDirectory = directory();
+    const firstSubmit = vi.fn(directorySubmit(initialDirectory));
+    const restrictedDirectory = {
+      ...initialDirectory,
+      members: initialDirectory.members.map((entry) => ({
+        ...entry,
+        available_actions: [],
+      })),
+    };
+    const secondSubmit = vi.fn(directorySubmit(restrictedDirectory));
+    const view = render(
+      <TopologyPage
+        topology={snapshot(3)}
+        locale="zh-CN"
+        actions={governanceActions}
+        onSubmitAction={firstSubmit}
+      />,
+    );
+    await waitFor(() => expect(firstSubmit).toHaveBeenCalledTimes(1));
+
+    view.rerender(
+      <TopologyPage
+        topology={snapshot(4)}
+        locale="zh-CN"
+        actions={governanceActions}
+        onSubmitAction={secondSubmit}
+      />,
+    );
+    fireEvent.contextMenu(screen.getByRole("option", { name: /Bob/ }));
+    let menu = await screen.findByRole("menu");
+    expect(
+      await within(menu).findByRole("menuitem", {
+        name: translated("topology.menu.no_actions"),
+      }),
+    ).toHaveAttribute("aria-disabled", "true");
+
+    await waitFor(() => expect(secondSubmit).toHaveBeenCalledTimes(1));
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    fireEvent.contextMenu(screen.getByRole("option", { name: /Bob/ }));
+    menu = await screen.findByRole("menu");
+    expect(
+      await within(menu).findByRole("menuitem", {
+        name: translated("topology.menu.no_actions"),
+      }),
+    ).toHaveAttribute("aria-disabled", "true");
+  });
+
   it("treats a server removal denial as a per-item skip and never submits lifecycle", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn(

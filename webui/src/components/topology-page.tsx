@@ -54,12 +54,20 @@ function memberLifecycleActions(
   member: NetworkMember | undefined,
   directoryLoad: DirectoryLoad,
   networkId: string | null,
+  topologyRevision: number,
+  topologyGeneratedAtUnixMs: number,
+  canListMembers: boolean,
+  canChangeLifecycle: boolean,
 ): MemberLifecycleAction[] {
   if (
     !member ||
     !networkId ||
+    !canListMembers ||
+    !canChangeLifecycle ||
     directoryLoad.state !== "ready" ||
     directoryLoad.networkId !== networkId ||
+    directoryLoad.topologyRevision !== topologyRevision ||
+    directoryLoad.topologyGeneratedAtUnixMs !== topologyGeneratedAtUnixMs ||
     !directoryLoad.directory.can_manage_members ||
     directoryLoad.directory.viewer_role === "member"
   ) {
@@ -213,13 +221,16 @@ export function TopologyPage({
   const listActionRef = useRef<NodeUiAction | undefined>(undefined);
   const localeRef = useRef(locale);
   const topologyRevision = topology?.revision ?? 0;
+  const topologyGeneratedAtUnixMs = topology?.generated_at_unix_ms ?? 0;
   const topologyRevisionRef = useRef(topologyRevision);
+  const topologyGeneratedAtRef = useRef(topologyGeneratedAtUnixMs);
   useEffect(() => {
     submitActionRef.current = onSubmitAction;
   }, [onSubmitAction]);
   useEffect(() => {
     topologyRevisionRef.current = topologyRevision;
-  }, [topologyRevision]);
+    topologyGeneratedAtRef.current = topologyGeneratedAtUnixMs;
+  }, [topologyGeneratedAtUnixMs, topologyRevision]);
 
   const listAction = useMemo(
     () => actions.find((action) => action.id === "list_network_members"),
@@ -271,6 +282,7 @@ export function TopologyPage({
           networkId: activeNetworkId,
           directory: submission.outcome.data,
           topologyRevision: topologyRevisionRef.current,
+          topologyGeneratedAtUnixMs: topologyGeneratedAtRef.current,
         });
         return;
       }
@@ -301,23 +313,34 @@ export function TopologyPage({
       directoryNetworkRef.current = null;
       return;
     }
-    if (
-      !listActionAvailable ||
-      directoryNetworkRef.current === networkId
-    ) {
-      return;
-    }
+    if (!listActionAvailable) return;
+    const needsInitialLoad = directoryNetworkRef.current !== networkId;
+    const needsRefresh =
+      directoryLoad.state === "ready" &&
+      directoryLoad.networkId === networkId &&
+      (directoryLoad.topologyRevision !== topologyRevision ||
+        directoryLoad.topologyGeneratedAtUnixMs !== topologyGeneratedAtUnixMs);
+    if (!needsInitialLoad && !needsRefresh) return;
     // Manifest refreshes may briefly replace the action objects after a
     // command. Latch the network so equivalent manifest generations cannot
-    // recursively trigger another directory command.
+    // recursively trigger another directory command. A newer topology token
+    // still forces a directory refresh so revoked member actions disappear.
     directoryNetworkRef.current = networkId;
     const timer = window.setTimeout(() => {
       void refreshDirectory();
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [listActionAvailable, networkId, refreshDirectory]);
+  }, [
+    directoryLoad,
+    listActionAvailable,
+    networkId,
+    refreshDirectory,
+    topologyGeneratedAtUnixMs,
+    topologyRevision,
+  ]);
 
   const directory =
+    listActionAvailable &&
     directoryLoad.state === "ready" &&
     directoryLoad.networkId === networkId
       ? directoryLoad.directory
@@ -419,6 +442,10 @@ export function TopologyPage({
       membersByNodeId.get(nodeId),
       directoryLoad,
       networkId,
+      topologyRevision,
+      topologyGeneratedAtUnixMs,
+      listActionAvailable,
+      Boolean(lifecycleAction),
     );
   }
 

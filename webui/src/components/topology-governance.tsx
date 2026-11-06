@@ -220,7 +220,8 @@ export function TopologyGovernancePanel({
   const stale =
     directoryLoad.state === "ready" &&
     directoryLoad.networkId === networkId &&
-    directoryLoad.topologyRevision !== topology.revision;
+    (directoryLoad.topologyRevision !== topology.revision ||
+      directoryLoad.topologyGeneratedAtUnixMs !== topology.generated_at_unix_ms);
 
   function finishResults(): void {
     setResults([]);

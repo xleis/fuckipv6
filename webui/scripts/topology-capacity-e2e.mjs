@@ -292,6 +292,8 @@ async function startFixtureServer(manifest, fixture, sharedAssets) {
   const clients = new Set();
   const sockets = new Set();
   let snapshotRequests = 0;
+  let manifestRequests = 0;
+  let websocketConnections = 0;
   const snapshotRequestTimes = [];
   const server = createServer(async (request, response) => {
     try {
@@ -349,6 +351,7 @@ async function startFixtureServer(manifest, fixture, sharedAssets) {
           jsonResponse(response, { preference: fixture.language_preference });
           return;
         case "/api/v1/manifest":
+          manifestRequests += 1;
           jsonResponse(response, {
             schema_version: 1,
             request_id: 1,
@@ -412,9 +415,28 @@ async function startFixtureServer(manifest, fixture, sharedAssets) {
         "Connection: Upgrade\r\n" +
         `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
     );
+    websocketConnections += 1;
+    const connectionNumber = websocketConnections;
     clients.add(socket);
     socket.on("error", () => {});
     socket.once("close", () => clients.delete(socket));
+    if (connectionNumber > 1) {
+      // A production server republishes authority after reconnect. The client
+      // must still issue snapshot/manifest reads because it may have missed
+      // events while disconnected.
+      setImmediate(() => {
+        if (socket.destroyed) return;
+        socket.write(
+          websocketTextFrame(
+            JSON.stringify({
+              schema_version: 1,
+              type: "snapshot",
+              snapshot: fixture.snapshot,
+            }),
+          ),
+        );
+      });
+    }
   });
 
   await new Promise((resolvePromise, reject) => {
@@ -435,6 +457,46 @@ async function startFixtureServer(manifest, fixture, sharedAssets) {
     },
     snapshotRequestTimestamps() {
       return snapshotRequestTimes;
+    },
+    manifestRequestCount() {
+      return manifestRequests;
+    },
+    websocketConnectionCount() {
+      return websocketConnections;
+    },
+    disconnectClients() {
+      const count = clients.size;
+      for (const client of clients) client.destroy();
+      return count;
+    },
+    advanceAuthoritativeSnapshotDuringDisconnect() {
+      const removedNodeId = "node-0000";
+      const before = fixture.snapshot.topology.nodes.length;
+      fixture.snapshot.topology.nodes = fixture.snapshot.topology.nodes.filter(
+        (node) => node.node_id !== removedNodeId,
+      );
+      fixture.snapshot.topology.connections = fixture.snapshot.topology.connections.filter(
+        (connection) =>
+          connection.from !== removedNodeId && connection.to !== removedNodeId,
+      );
+      for (const boundary of fixture.snapshot.topology.boundaries) {
+        boundary.member_count = Math.max(0, boundary.member_count - 1);
+        boundary.visible_member_count = Math.max(0, boundary.visible_member_count - 1);
+      }
+      const survivor = fixture.snapshot.topology.nodes.find(
+        (node) => node.node_id === "node-0001",
+      );
+      if (!survivor) throw new Error("capacity reconnect survivor is missing");
+      survivor.display_name = "Capacity Node 0001 after reconnect";
+      fixture.snapshot.revision += 10;
+      fixture.snapshot.topology.revision += 10;
+      fixture.snapshot.topology.generated_at_unix_ms += 10_000;
+      return {
+        removed_node_id: removedNodeId,
+        nodes_before: before,
+        nodes_after: fixture.snapshot.topology.nodes.length,
+        revision: fixture.snapshot.revision,
+      };
     },
     emitEventBurst(count = EVENT_BURST_COUNT) {
       fixture.snapshot.revision += 1;
@@ -1022,6 +1084,78 @@ async function main() {
     await mark(cdp, "list-end-end");
     checks.push("End key reaches node 1,000 without expanding the virtual list");
 
+    const snapshotRequestsBeforeReconnect = fixtureServer.snapshotRequestCount();
+    const manifestRequestsBeforeReconnect = fixtureServer.manifestRequestCount();
+    const websocketConnectionsBeforeReconnect =
+      fixtureServer.websocketConnectionCount();
+    assert.ok(
+      fixtureServer.disconnectClients() >= 1,
+      "capacity fixture has no connected WebSocket client to disconnect",
+    );
+    const reconnectAuthority =
+      fixtureServer.advanceAuthoritativeSnapshotDuringDisconnect();
+    const reconnectStartedAt = Date.now();
+    await waitFor(
+      cdp,
+      `document.querySelector(".topology-view[data-view='list']") &&
+       document.querySelector(".topology-list-table table")?.getAttribute("aria-rowcount") === "1000"`,
+      "authoritative resync after reconnect removes a stale node",
+      10_000,
+    );
+    const reconnectDeadline = Date.now() + 5_000;
+    while (
+      (fixtureServer.snapshotRequestCount() <= snapshotRequestsBeforeReconnect ||
+        fixtureServer.manifestRequestCount() <= manifestRequestsBeforeReconnect) &&
+      Date.now() < reconnectDeadline
+    ) {
+      await sleep(50);
+    }
+    const reconnectResyncMs = Date.now() - reconnectStartedAt;
+    const snapshotRequestsAfterReconnect = fixtureServer.snapshotRequestCount();
+    const manifestRequestsAfterReconnect = fixtureServer.manifestRequestCount();
+    const websocketConnectionsAfterReconnect =
+      fixtureServer.websocketConnectionCount();
+    assert.ok(
+      snapshotRequestsAfterReconnect > snapshotRequestsBeforeReconnect,
+      "reconnect did not refetch the authoritative snapshot",
+    );
+    assert.ok(
+      manifestRequestsAfterReconnect > manifestRequestsBeforeReconnect,
+      "reconnect did not refetch the authoritative manifest",
+    );
+    assert.ok(
+      websocketConnectionsAfterReconnect > websocketConnectionsBeforeReconnect,
+      "WebSocket did not reconnect automatically",
+    );
+    await evaluate(
+      cdp,
+      `(() => {
+        const button = [...document.querySelectorAll(".topology-view-switch button")].find(
+          (element) => element.textContent?.trim() === "Graph",
+        );
+        button?.click();
+        return Boolean(button);
+      })()`,
+    );
+    await waitFor(
+      cdp,
+      `document.querySelector(".topology-canvas[data-layout-pending='false']") &&
+       document.querySelector('g.topology-node[data-node-id="node-0001"]')?.getAttribute("aria-label")?.includes("Capacity Node 0001 after reconnect")`,
+      "post-reconnect graph authority",
+      5_000,
+    );
+    assert.equal(
+      await evaluate(
+        cdp,
+        `Boolean(document.querySelector('g.topology-node[data-node-id="${reconnectAuthority.removed_node_id}"]'))`,
+      ),
+      false,
+      "stale node reappeared after reconnect",
+    );
+    checks.push(
+      "disconnect resync refetches snapshot and manifest and does not revive stale objects",
+    );
+
     await sleep(250);
     if (profileRefresh) {
       const { profile } = await cdp.send("Profiler.stop");
@@ -1108,6 +1242,14 @@ async function main() {
         selection_ms: selectionMs,
         incremental_refresh_ms: incrementalRefreshMs,
         list_keyboard_navigation_ms: listKeyboardNavigationMs,
+        reconnect_resync_ms: reconnectResyncMs,
+        reconnect_snapshot_requests:
+          snapshotRequestsAfterReconnect - snapshotRequestsBeforeReconnect,
+        reconnect_manifest_requests:
+          manifestRequestsAfterReconnect - manifestRequestsBeforeReconnect,
+        reconnect_websocket_connections:
+          websocketConnectionsAfterReconnect - websocketConnectionsBeforeReconnect,
+        authoritative_nodes_after_disconnect: reconnectAuthority.nodes_after,
         event_frames: EVENT_BURST_COUNT,
         snapshot_requests_after_event_burst: snapshotRequestCount,
         rendered_graph_nodes: graphCounts.nodes,

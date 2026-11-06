@@ -10,7 +10,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::ids::{NetworkId, NodeId};
+use super::audit::{ActivityEntry, AuditOutcome};
+use super::file_share::{
+    ConcurrentNamePolicy, FileAcl, FileDeletePolicy, FileQuota, FileShare, FileShareMode,
+    SymlinkPolicy,
+};
+use super::ids::{AuditId, FileShareId, NetworkId, NodeId, OperationId};
 use super::membership::{
     MembershipRole, MembershipState, NetworkMember, NetworkMemberDirectory, NetworkMemberStatus,
 };
@@ -1302,6 +1307,185 @@ pub fn filter_topology_connections(
         .collect()
 }
 
+/// Activity projection. Required identity/timeline fields remove the whole
+/// entry when hidden; optional prose fields are omitted from JSON entirely.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct ProjectedActivityEntry {
+    pub audit_id: AuditId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<OperationId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_id: Option<NetworkId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<NodeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<AuditOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<BTreeMap<String, String>>,
+}
+
+pub fn project_activity_entry(
+    activity: &ActivityEntry,
+    viewer: &PrivacyViewer,
+    policy: Option<&FieldPrivacyPolicy>,
+    now_unix_ms: u64,
+) -> Option<ProjectedActivityEntry> {
+    if policy.is_some_and(|policy| policy.validate_at(now_unix_ms).is_err()) {
+        return None;
+    }
+    let network_visible = match activity.network_id.as_ref() {
+        Some(network_id) => viewer.can_view_network(network_id),
+        None => viewer.local_owner && activity.actor == viewer.node_id,
+    };
+    if !network_visible {
+        return None;
+    }
+    let state = PrivacyObjectState::Active;
+    let visible = |field| {
+        field_visible(
+            policy,
+            field,
+            viewer,
+            state,
+            Some(&activity.actor),
+            field.default_visibility(),
+            now_unix_ms,
+        )
+    };
+    let required = [
+        PrivacyField::ActivityActor,
+        PrivacyField::ActivityAction,
+        PrivacyField::ActivityResource,
+        PrivacyField::ActivityOutcome,
+        PrivacyField::ActivityOccurredAt,
+    ];
+    if required.iter().any(|field| !visible(*field)) {
+        return None;
+    }
+    Some(ProjectedActivityEntry {
+        audit_id: activity.audit_id.clone(),
+        operation_id: activity.operation_id.clone(),
+        network_id: activity.network_id.clone(),
+        actor: Some(activity.actor.clone()),
+        action: Some(activity.action.clone()),
+        resource: Some(activity.resource.clone()),
+        outcome: Some(activity.outcome),
+        occurred_at_unix_ms: Some(activity.occurred_at_unix_ms),
+        summary: visible(PrivacyField::ActivitySummary).then(|| activity.summary.clone()),
+        details: visible(PrivacyField::ActivityDetails).then(|| activity.details.clone()),
+    })
+}
+
+/// File metadata is deliberately a separate DTO. The canonical `FileShare`
+/// remains available to authorization code but is never serialized directly to
+/// a viewer without this field projection.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct ProjectedFileShareMetadata {
+    pub schema_version: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<FileShareId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_id: Option<NetworkId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<NodeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<FileShareMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_acl: Option<FileAcl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_acl: Option<FileAcl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota: Option<FileQuota>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symlink_policy: Option<SymlinkPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrent_name_policy: Option<ConcurrentNamePolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_policy: Option<FileDeletePolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at_unix_ms: Option<u64>,
+}
+
+pub fn project_file_share_metadata(
+    share: &FileShare,
+    viewer: &PrivacyViewer,
+    policy: Option<&FieldPrivacyPolicy>,
+    now_unix_ms: u64,
+) -> ProjectedFileShareMetadata {
+    let empty = ProjectedFileShareMetadata {
+        schema_version: share.schema_version,
+        id: None,
+        network_id: None,
+        owner: None,
+        display_name: None,
+        mode: None,
+        revision: None,
+        network_acl: None,
+        local_acl: None,
+        quota: None,
+        symlink_policy: None,
+        concurrent_name_policy: None,
+        delete_policy: None,
+        audit_enabled: None,
+        created_at_unix_ms: None,
+        updated_at_unix_ms: None,
+    };
+    if policy.is_some_and(|policy| policy.validate_at(now_unix_ms).is_err())
+        || !viewer.can_view_network(&share.network_id)
+        || !viewer.can_view_object(PrivacyObjectState::Active, Some(&share.owner))
+    {
+        return empty;
+    }
+    let visible = |field| {
+        field_visible(
+            policy,
+            field,
+            viewer,
+            PrivacyObjectState::Active,
+            Some(&share.owner),
+            field.default_visibility(),
+            now_unix_ms,
+        )
+    };
+    ProjectedFileShareMetadata {
+        schema_version: share.schema_version,
+        id: visible(PrivacyField::FileId).then(|| share.id.clone()),
+        network_id: visible(PrivacyField::FileNetworkId).then(|| share.network_id.clone()),
+        owner: visible(PrivacyField::FileOwner).then(|| share.owner.clone()),
+        display_name: visible(PrivacyField::FileDisplayName).then(|| share.display_name.clone()),
+        mode: visible(PrivacyField::FileMode).then_some(share.mode),
+        revision: visible(PrivacyField::FileRevision).then_some(share.revision),
+        network_acl: visible(PrivacyField::FileNetworkAcl).then(|| share.network_acl.clone()),
+        local_acl: visible(PrivacyField::FileLocalAcl).then(|| share.local_acl.clone()),
+        quota: visible(PrivacyField::FileQuota).then(|| share.quota.clone()),
+        symlink_policy: visible(PrivacyField::FilePathPolicy).then_some(share.symlink_policy),
+        concurrent_name_policy: visible(PrivacyField::FilePathPolicy)
+            .then_some(share.concurrent_name_policy),
+        delete_policy: visible(PrivacyField::FilePathPolicy).then_some(share.delete_policy),
+        audit_enabled: visible(PrivacyField::FileAuditSettings).then_some(share.audit_enabled),
+        created_at_unix_ms: visible(PrivacyField::FileTimestamps)
+            .then_some(share.created_at_unix_ms),
+        updated_at_unix_ms: visible(PrivacyField::FileTimestamps)
+            .then_some(share.updated_at_unix_ms),
+    }
+}
+
 /// Determine whether a member status can be listed for a viewer. Used by
 /// search/export adapters before they construct any query result.
 pub fn member_status_visible(status: NetworkMemberStatus, viewer: &PrivacyViewer) -> bool {
@@ -1323,7 +1507,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         CapabilityKind, MemberLifecycleAction, NetworkMemberGroup, NetworkMemberOnlineState,
-        NetworkMemberPresence,
+        NetworkMemberPresence, TopologyNode,
     };
 
     fn network_id() -> NetworkId {
@@ -1379,6 +1563,42 @@ mod tests {
             viewer_role: MembershipRole::Member,
             can_manage_members: false,
             members,
+        }
+    }
+
+    fn activity() -> ActivityEntry {
+        ActivityEntry {
+            audit_id: AuditId::from_public_key(b"activity"),
+            operation_id: Some(OperationId::from_public_key(b"operation")),
+            actor: node_id(b"actor"),
+            network_id: Some(network_id()),
+            action: "file.share_update".into(),
+            resource: "file/share".into(),
+            outcome: AuditOutcome::Succeeded,
+            occurred_at_unix_ms: 1_100,
+            summary: "private activity summary".into(),
+            details: BTreeMap::from([("secret_detail".into(), "private details".into())]),
+        }
+    }
+
+    fn file_share() -> FileShare {
+        FileShare {
+            schema_version: super::super::file_share::FILE_SHARE_SCHEMA_VERSION,
+            id: FileShareId::from_public_key(b"share"),
+            network_id: network_id(),
+            owner: node_id(b"owner"),
+            display_name: "private file share".into(),
+            mode: FileShareMode::ReadWrite,
+            revision: 7,
+            network_acl: FileAcl::default(),
+            local_acl: FileAcl::default(),
+            quota: FileQuota::default(),
+            symlink_policy: SymlinkPolicy::Reject,
+            concurrent_name_policy: ConcurrentNamePolicy::IfUnchanged,
+            delete_policy: FileDeletePolicy::default(),
+            audit_enabled: true,
+            created_at_unix_ms: 1_000,
+            updated_at_unix_ms: 1_100,
         }
     }
 
@@ -1641,6 +1861,86 @@ mod tests {
         assert!(preview
             .hidden_fields
             .contains(&PrivacyField::MemberIdentityFingerprint));
+    }
+
+    #[test]
+    fn activity_projection_omits_hidden_text_and_drops_hidden_required_rows() {
+        let activity_policy = policy([
+            (
+                PrivacyField::ActivitySummary,
+                FieldVisibility::Administrators,
+            ),
+            (PrivacyField::ActivityDetails, FieldVisibility::OwnerOnly),
+        ]);
+        let projected = project_activity_entry(
+            &activity(),
+            &viewer(MembershipRole::Member),
+            Some(&activity_policy),
+            1_500,
+        )
+        .unwrap();
+        let json = serde_json::to_value(projected).unwrap();
+        assert!(json.get("summary").is_none());
+        assert!(json.get("details").is_none());
+        assert!(!json.to_string().contains("private activity summary"));
+        assert!(!json.to_string().contains("private details"));
+
+        let hidden_actor = policy([(PrivacyField::ActivityActor, FieldVisibility::OwnerOnly)]);
+        assert!(project_activity_entry(
+            &activity(),
+            &viewer(MembershipRole::Administrator),
+            Some(&hidden_actor),
+            1_500,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn file_metadata_projection_omits_hidden_acl_quota_paths_and_timestamps() {
+        let file_policy = policy([
+            (PrivacyField::FileOwner, FieldVisibility::Administrators),
+            (
+                PrivacyField::FileNetworkAcl,
+                FieldVisibility::Administrators,
+            ),
+            (PrivacyField::FileLocalAcl, FieldVisibility::Administrators),
+            (PrivacyField::FileQuota, FieldVisibility::Administrators),
+            (
+                PrivacyField::FilePathPolicy,
+                FieldVisibility::Administrators,
+            ),
+            (
+                PrivacyField::FileTimestamps,
+                FieldVisibility::Administrators,
+            ),
+            (
+                PrivacyField::FileAuditSettings,
+                FieldVisibility::Administrators,
+            ),
+        ]);
+        let projected = project_file_share_metadata(
+            &file_share(),
+            &viewer(MembershipRole::Member),
+            Some(&file_policy),
+            1_500,
+        );
+        let json = serde_json::to_value(projected).unwrap();
+        for key in [
+            "owner",
+            "network_acl",
+            "local_acl",
+            "quota",
+            "symlink_policy",
+            "concurrent_name_policy",
+            "delete_policy",
+            "audit_enabled",
+            "created_at_unix_ms",
+            "updated_at_unix_ms",
+        ] {
+            assert!(json.get(key).is_none(), "hidden key leaked: {key}");
+        }
+        assert_eq!(json["display_name"], "private file share");
+        assert_eq!(json["revision"], 7);
     }
 
     #[test]

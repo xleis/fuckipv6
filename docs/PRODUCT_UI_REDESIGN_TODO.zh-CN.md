@@ -1725,21 +1725,23 @@ Enter 打开详情、Space 选择、Shift+F10/ContextMenu 打开菜单；菜单�
 **证据（2026-11-06）**：`webui/scripts/topology-capacity-e2e.mjs` 生成固定 1,000 节点、
 5,000 连接的基准拓扑，数据集 SHA-256 为
 `2d36eef16c8451f17c15c2a76469d0ecc66f34158d4a1179272d059d4dc81e4c`。报告记录
-Chrome `157.0.8103.38`、Linux x64、960×640、DPR 1、减少动效，并绑定生成时的 commit、
-分支和工作树状态。冻结预算为首次可交互 2,000ms、筛选/选择/增量刷新/列表键盘导航各 500ms、
-Long Task 50ms、图工作集 80 节点/200 连接、列表 DOM 40 行、500 个事件最多 2 次快照请求、
-JS heap 256MB；测试没有放宽这些预算。
+Chrome `157.0.8103.38`、Linux x64、960×640、DPR 1、减少动效；提交后 clean-tree 报告绑定
+commit `839569f4f9f4610bc67847a55880fcc2074e0eb8`、分支 `main`、`working_tree_clean: true`，
+报告 SHA-256 为 `408686ffc4ff3c7078dc8ce68a602b29476379f0c69bba57408823ebd74bf8f5`。
+冻结预算为首次可交互 2,000ms、筛选/选择/增量刷新/列表键盘导航各 500ms、Long Task 50ms、
+图工作集 80 节点/200 连接、列表 DOM 40 行、500 个事件最多 2 次快照请求、JS heap 256MB；
+测试没有放宽这些预算。
 
-一轮桌面实测：首次可交互 72ms、筛选 8ms、选择 15ms、500 事件刷新 192ms、列表键盘导航
+最终桌面实测：首次可交互 77ms、筛选 11ms、选择 14ms、500 事件刷新 194ms、列表键盘导航
 24ms；500 帧事件突发只产生 1 次 snapshot 请求。图工作集渲染 80 节点/50 连接，列表 DOM
 13/14 行但通过 `aria-rowcount=1001` 暴露完整 1,000 节点；无超过 50ms 的 Long Task，
-JS heap 为 9.30MB。快照 JSON 解析与 patch diff、拓扑布局均移到 Worker；拓扑索引按快照使用
+JS heap 为 9.21MB。快照 JSON 解析与 patch diff、拓扑布局均移到 Worker；拓扑索引按快照使用
 `WeakMap` 缓存，500 帧事件只保留最新帧并合并一次 trailing snapshot 失效，避免无界队列。
 `TopologyPage` 不再因每次 topology revision 变化自动拉取成员目录，空选择刷新也不会扫描全部
 节点生成批量计划。
 
-容量脚本连续 4 次通过 10 项检查，键盘 E2E 同时通过 10 项检查。Android 方面 `adb devices -l`
-可用，但没有连接设备；报告明确写入 `android_real_device.tested: false`，因此不宣称 Android
+容量脚本此前连续 4 次、提交后再次在 clean worktree 通过 10 项检查；键盘 E2E 同时通过
+10 项检查。Android 方面 `adb devices -l` 可用，但没有连接设备；报告明确写入 `android_real_device.tested: false`，因此不宣称 Android
 真机通过，第 7 项保持未完成。报告路径为 `target/topology-capacity-e2e/report.json`。
 
 **验证通过**：WebUI `npm test -- --run`（17 files，187 passed）、`npm run typecheck`、

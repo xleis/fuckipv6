@@ -12,13 +12,23 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use fuckipv6_common::domain::{
-    field_is_visible, project_activity_entry, project_topology_snapshot, ActivityEntry,
-    FieldPrivacyPolicy, MembershipState, NetworkId, NodeId, PrivacyField, PrivacyObjectState,
+    field_is_visible, project_activity_entry, project_member_directory, project_topology_snapshot,
+    ActivityEntry, FieldPrivacyPolicy, InvitationPreview, InvitationRedemption,
+    InvitationStatusView, IssuedInvitation, JoinRequest, MemberLifecycleChange,
+    MemberRemovalPreview, MembershipState, NetworkId, NetworkMemberDirectory,
+    NetworkProfileApplyResult, NetworkProfilePreview, NodeId, PrivacyField, PrivacyObjectState,
     PrivacyViewer, ProjectedActivityEntry, TopologyConnection, TopologyNode, TopologySnapshot,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
 use super::authorization::NodeCommandContext;
+use super::command::{
+    NodeBlacklistSnapshot, NodeCommandOutcome, NodeCommandResult, NodeCreatedNetwork,
+    NodeDiagnosticsSnapshot, NodeIdentityRotationSnapshot, NodeJoinRequestListResult,
+    NodeJoinRequestReviewAck, NodeNetworkAllocationSnapshot, NodeNetworkJoinPreview,
+    NodePeerProbeSnapshot, NodeResidualCleanupResult,
+};
+use super::event::{NodeEvent, NodeEventKind};
 use super::state::{
     NodeAccessControlSnapshot, NodeCapabilityRegistrySnapshot, NodeConfigurationSnapshot,
     NodeControlHealth, NodeEmbeddedServiceSnapshot, NodeEmbeddedServiceStatus,
@@ -27,7 +37,11 @@ use super::state::{
     NodeNetworkStatus, NodePeerSnapshot, NodePermissionSnapshot, NodeProblem,
     NodeRoutingSummarySnapshot, NodeSnapshot, NodeTrafficSnapshot,
 };
-use super::NodeLifecycleSnapshot;
+use super::{NodeLifecycleSnapshot, NodeLogLevel, NodeRoutingMode, NodeUiManifest};
+use crate::config_transaction::{
+    ConfigurationApplyResult, ConfigurationDocument, ConfigurationHistoryEntry,
+    ConfigurationPreview,
+};
 use crate::discovery_index::NodeDiscoveryIndexSnapshot;
 use crate::tun::TunCapabilities;
 use crate::ui::UiModeResolution;
@@ -170,6 +184,368 @@ pub struct ProjectedNodeEmbeddedServiceSnapshot {
     pub signaling_addr: Option<SocketAddr>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_addr: Option<SocketAddr>,
+}
+
+/// A member directory that has already passed field projection. The inner
+/// canonical value is intentionally private so adapters cannot accidentally
+/// serialize an unprojected directory through this DTO.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProjectedNetworkMemberDirectory(NetworkMemberDirectory);
+
+impl ProjectedNetworkMemberDirectory {
+    pub fn as_directory(&self) -> &NetworkMemberDirectory {
+        &self.0
+    }
+}
+
+/// Wire-safe command result. Sensitive variants carry projected DTOs rather
+/// than canonical snapshots or member directories.
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
+pub struct ProjectedNodeCommandResult {
+    pub request_id: u64,
+    pub outcome: ProjectedNodeCommandOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
+#[serde(tag = "status", content = "data", rename_all = "snake_case")]
+pub enum ProjectedNodeCommandOutcome {
+    Snapshot(Box<ProjectedNodeSnapshot>),
+    UiManifest(Box<NodeUiManifest>),
+    Diagnostics(NodeDiagnosticsSnapshot),
+    Cleanup(NodeResidualCleanupResult),
+    Blacklist(NodeBlacklistSnapshot),
+    NetworkAllocation(NodeNetworkAllocationSnapshot),
+    Probe(NodePeerProbeSnapshot),
+    NetworkCreated(NodeCreatedNetwork),
+    NetworkProfilePreview(Box<NetworkProfilePreview>),
+    NetworkProfileUpdated(Box<NetworkProfileApplyResult>),
+    NetworkJoinPreview(Box<NodeNetworkJoinPreview>),
+    NetworkJoined(Box<ProjectedNodeNetworkJoinResult>),
+    JoinRequestSubmitted(Box<JoinRequest>),
+    JoinRequests(Box<NodeJoinRequestListResult>),
+    NetworkMembers(Box<ProjectedNetworkMemberDirectory>),
+    MemberRemovalPreview(Box<MemberRemovalPreview>),
+    MemberLifecycleChanged(Box<MemberLifecycleChange>),
+    JoinRequestsReviewed(Box<NodeJoinRequestReviewAck>),
+    JoinRequestUpdated(Box<JoinRequest>),
+    InvitationCreated(Box<IssuedInvitation>),
+    Invitations(Vec<InvitationStatusView>),
+    InvitationStatus(Box<InvitationStatusView>),
+    InvitationRevoked(Box<InvitationStatusView>),
+    InvitationPreview(Box<InvitationPreview>),
+    InvitationRedeemed(Box<InvitationRedemption>),
+    NetworkLeft(Box<ProjectedNodeNetworkLeaveResult>),
+    MembershipPolicyAcknowledged(Box<NodeNetworkMembershipSnapshot>),
+    IdentityRotated(NodeIdentityRotationSnapshot),
+    Configuration(ConfigurationDocument),
+    ConfigurationPreview(Box<ConfigurationPreview>),
+    ConfigurationApplied(Box<ConfigurationApplyResult>),
+    ConfigurationHistory(Vec<ConfigurationHistoryEntry>),
+    Accepted { operation_id: String },
+    Completed { message: String },
+    Rejected(NodeProblem),
+}
+
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
+pub struct ProjectedNodeNetworkJoinResult {
+    pub membership: NodeNetworkMembershipSnapshot,
+    pub snapshot: ProjectedNodeSnapshot,
+    pub idempotent: bool,
+    pub config_saved: bool,
+    pub started: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
+pub struct ProjectedNodeNetworkLeaveResult {
+    pub network_name: String,
+    pub left: bool,
+    pub snapshot: ProjectedNodeSnapshot,
+}
+
+/// Event with field-level projection applied. Log contents are omitted for
+/// non-owner viewers while the sequence and snapshot revision remain intact so
+/// cursors still advance without silently skipping an event.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct ProjectedNodeEvent {
+    pub sequence: u64,
+    pub snapshot_revision: u64,
+    pub kind: ProjectedNodeEventKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "snake_case")]
+pub enum ProjectedNodeEventKind {
+    StateChanged {
+        revision: u64,
+    },
+    NetworkChanged {
+        network_name: String,
+        status: NodeNetworkStatus,
+    },
+    EmbeddedServiceChanged {
+        network_name: String,
+        status: NodeEmbeddedServiceStatus,
+    },
+    LogAppended {
+        level: NodeLogLevel,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+    RoutingChanged {
+        network_name: String,
+        mode: NodeRoutingMode,
+        exit_node: Option<String>,
+        is_exit_node: bool,
+    },
+    RoleChanged {
+        network_name: String,
+        role: NodeNetworkRole,
+        enabled: bool,
+        roles: Vec<NodeNetworkRole>,
+    },
+    CommandCompleted {
+        request_id: u64,
+        success: bool,
+    },
+    OperationChanged {
+        operation_id: String,
+        state: fuckipv6_common::domain::OperationState,
+        stage: String,
+    },
+}
+
+/// Project a command result immediately before it crosses a transport
+/// boundary. The canonical result remains unchanged for local execution and
+/// audit code.
+pub fn project_node_command_result(
+    result: &NodeCommandResult,
+    context: &NodeCommandContext,
+    now_unix_ms: u64,
+) -> Result<ProjectedNodeCommandResult, NodeSnapshotProjectionError> {
+    let outcome = match &result.outcome {
+        NodeCommandOutcome::Snapshot(snapshot) => ProjectedNodeCommandOutcome::Snapshot(Box::new(
+            project_node_snapshot(snapshot, context, now_unix_ms)?,
+        )),
+        NodeCommandOutcome::UiManifest(manifest) => {
+            ProjectedNodeCommandOutcome::UiManifest(manifest.clone())
+        }
+        NodeCommandOutcome::Diagnostics(diagnostics) => {
+            ProjectedNodeCommandOutcome::Diagnostics(diagnostics.clone())
+        }
+        NodeCommandOutcome::Cleanup(cleanup) => {
+            ProjectedNodeCommandOutcome::Cleanup(cleanup.clone())
+        }
+        NodeCommandOutcome::Blacklist(blacklist) => {
+            ProjectedNodeCommandOutcome::Blacklist(blacklist.clone())
+        }
+        NodeCommandOutcome::NetworkAllocation(allocation) => {
+            ProjectedNodeCommandOutcome::NetworkAllocation(allocation.clone())
+        }
+        NodeCommandOutcome::Probe(probe) => ProjectedNodeCommandOutcome::Probe(probe.clone()),
+        NodeCommandOutcome::NetworkCreated(created) => {
+            ProjectedNodeCommandOutcome::NetworkCreated(created.clone())
+        }
+        NodeCommandOutcome::NetworkProfilePreview(preview) => {
+            ProjectedNodeCommandOutcome::NetworkProfilePreview(preview.clone())
+        }
+        NodeCommandOutcome::NetworkProfileUpdated(updated) => {
+            ProjectedNodeCommandOutcome::NetworkProfileUpdated(updated.clone())
+        }
+        NodeCommandOutcome::NetworkJoinPreview(preview) => {
+            ProjectedNodeCommandOutcome::NetworkJoinPreview(preview.clone())
+        }
+        NodeCommandOutcome::NetworkJoined(joined) => {
+            ProjectedNodeCommandOutcome::NetworkJoined(Box::new(ProjectedNodeNetworkJoinResult {
+                membership: joined.membership.clone(),
+                snapshot: project_node_snapshot(&joined.snapshot, context, now_unix_ms)?,
+                idempotent: joined.idempotent,
+                config_saved: joined.config_saved,
+                started: joined.started,
+            }))
+        }
+        NodeCommandOutcome::JoinRequestSubmitted(request) => {
+            ProjectedNodeCommandOutcome::JoinRequestSubmitted(request.clone())
+        }
+        NodeCommandOutcome::JoinRequests(requests) => {
+            ProjectedNodeCommandOutcome::JoinRequests(requests.clone())
+        }
+        NodeCommandOutcome::NetworkMembers(directory) => {
+            if context.privacy_viewer_for(None).local_owner {
+                return Ok(ProjectedNodeCommandResult {
+                    request_id: result.request_id,
+                    outcome: ProjectedNodeCommandOutcome::NetworkMembers(Box::new(
+                        ProjectedNetworkMemberDirectory(directory.as_ref().clone()),
+                    )),
+                });
+            }
+            let viewer = context.privacy_viewer_for(Some(&directory.network_id));
+            let policy = context
+                .field_privacy_policy_for(Some(&directory.network_id))
+                .map_err(|()| NodeSnapshotProjectionError::InvalidFieldPolicy)?;
+            ProjectedNodeCommandOutcome::NetworkMembers(Box::new(ProjectedNetworkMemberDirectory(
+                project_member_directory(directory, &viewer, policy, now_unix_ms),
+            )))
+        }
+        NodeCommandOutcome::MemberRemovalPreview(preview) => {
+            ProjectedNodeCommandOutcome::MemberRemovalPreview(preview.clone())
+        }
+        NodeCommandOutcome::MemberLifecycleChanged(change) => {
+            ProjectedNodeCommandOutcome::MemberLifecycleChanged(change.clone())
+        }
+        NodeCommandOutcome::JoinRequestsReviewed(reviewed) => {
+            ProjectedNodeCommandOutcome::JoinRequestsReviewed(reviewed.clone())
+        }
+        NodeCommandOutcome::JoinRequestUpdated(request) => {
+            ProjectedNodeCommandOutcome::JoinRequestUpdated(request.clone())
+        }
+        NodeCommandOutcome::InvitationCreated(invitation) => {
+            ProjectedNodeCommandOutcome::InvitationCreated(invitation.clone())
+        }
+        NodeCommandOutcome::Invitations(invitations) => {
+            ProjectedNodeCommandOutcome::Invitations(invitations.clone())
+        }
+        NodeCommandOutcome::InvitationStatus(status) => {
+            ProjectedNodeCommandOutcome::InvitationStatus(status.clone())
+        }
+        NodeCommandOutcome::InvitationRevoked(status) => {
+            ProjectedNodeCommandOutcome::InvitationRevoked(status.clone())
+        }
+        NodeCommandOutcome::InvitationPreview(preview) => {
+            ProjectedNodeCommandOutcome::InvitationPreview(preview.clone())
+        }
+        NodeCommandOutcome::InvitationRedeemed(redemption) => {
+            ProjectedNodeCommandOutcome::InvitationRedeemed(redemption.clone())
+        }
+        NodeCommandOutcome::NetworkLeft(left) => {
+            ProjectedNodeCommandOutcome::NetworkLeft(Box::new(ProjectedNodeNetworkLeaveResult {
+                network_name: left.network_name.clone(),
+                left: left.left,
+                snapshot: project_node_snapshot(&left.snapshot, context, now_unix_ms)?,
+            }))
+        }
+        NodeCommandOutcome::MembershipPolicyAcknowledged(membership) => {
+            ProjectedNodeCommandOutcome::MembershipPolicyAcknowledged(membership.clone())
+        }
+        NodeCommandOutcome::IdentityRotated(rotation) => {
+            ProjectedNodeCommandOutcome::IdentityRotated(rotation.clone())
+        }
+        NodeCommandOutcome::Configuration(configuration) => {
+            ProjectedNodeCommandOutcome::Configuration(configuration.clone())
+        }
+        NodeCommandOutcome::ConfigurationPreview(preview) => {
+            ProjectedNodeCommandOutcome::ConfigurationPreview(preview.clone())
+        }
+        NodeCommandOutcome::ConfigurationApplied(applied) => {
+            ProjectedNodeCommandOutcome::ConfigurationApplied(applied.clone())
+        }
+        NodeCommandOutcome::ConfigurationHistory(history) => {
+            ProjectedNodeCommandOutcome::ConfigurationHistory(history.clone())
+        }
+        NodeCommandOutcome::Accepted { operation_id } => ProjectedNodeCommandOutcome::Accepted {
+            operation_id: operation_id.clone(),
+        },
+        NodeCommandOutcome::Completed { message } => ProjectedNodeCommandOutcome::Completed {
+            message: message.clone(),
+        },
+        NodeCommandOutcome::Rejected(problem) => {
+            ProjectedNodeCommandOutcome::Rejected(problem.clone())
+        }
+    };
+    Ok(ProjectedNodeCommandResult {
+        request_id: result.request_id,
+        outcome,
+    })
+}
+
+/// Project an event before fan-out or transport serialization. The event keeps
+/// its original cursor identity even when its content is redacted.
+pub fn project_node_event(
+    event: &NodeEvent,
+    context: &NodeCommandContext,
+    now_unix_ms: u64,
+) -> Result<ProjectedNodeEvent, NodeSnapshotProjectionError> {
+    let kind = match &event.kind {
+        NodeEventKind::StateChanged { revision } => ProjectedNodeEventKind::StateChanged {
+            revision: *revision,
+        },
+        NodeEventKind::NetworkChanged {
+            network_name,
+            status,
+        } => ProjectedNodeEventKind::NetworkChanged {
+            network_name: network_name.clone(),
+            status: *status,
+        },
+        NodeEventKind::EmbeddedServiceChanged {
+            network_name,
+            status,
+        } => ProjectedNodeEventKind::EmbeddedServiceChanged {
+            network_name: network_name.clone(),
+            status: *status,
+        },
+        NodeEventKind::LogAppended { level, message } => {
+            let viewer = context.privacy_viewer_for(None);
+            let policy = context
+                .field_privacy_policy_for(None)
+                .map_err(|()| NodeSnapshotProjectionError::InvalidFieldPolicy)?;
+            let message_visible = viewer.local_owner
+                || field_is_visible(
+                    policy,
+                    PrivacyField::NodeDetailedLogs,
+                    &viewer,
+                    PrivacyObjectState::Active,
+                    None,
+                    now_unix_ms,
+                );
+            ProjectedNodeEventKind::LogAppended {
+                level: *level,
+                message: message_visible.then(|| message.clone()),
+            }
+        }
+        NodeEventKind::RoutingChanged {
+            network_name,
+            mode,
+            exit_node,
+            is_exit_node,
+        } => ProjectedNodeEventKind::RoutingChanged {
+            network_name: network_name.clone(),
+            mode: *mode,
+            exit_node: exit_node.clone(),
+            is_exit_node: *is_exit_node,
+        },
+        NodeEventKind::RoleChanged {
+            network_name,
+            role,
+            enabled,
+            roles,
+        } => ProjectedNodeEventKind::RoleChanged {
+            network_name: network_name.clone(),
+            role: *role,
+            enabled: *enabled,
+            roles: roles.clone(),
+        },
+        NodeEventKind::CommandCompleted {
+            request_id,
+            success,
+        } => ProjectedNodeEventKind::CommandCompleted {
+            request_id: *request_id,
+            success: *success,
+        },
+        NodeEventKind::OperationChanged {
+            operation_id,
+            state,
+            stage,
+        } => ProjectedNodeEventKind::OperationChanged {
+            operation_id: operation_id.clone(),
+            state: *state,
+            stage: stage.clone(),
+        },
+    };
+    Ok(ProjectedNodeEvent {
+        sequence: event.sequence,
+        snapshot_revision: event.snapshot_revision,
+        kind,
+    })
 }
 
 struct SnapshotProjector<'a> {
@@ -725,8 +1101,10 @@ mod tests {
     use std::net::IpAddr;
 
     use fuckipv6_common::domain::{
-        ActivityEntry, AuditId, AuditOutcome, ContentHash, FieldPrivacyPolicy, FieldVisibility,
-        FieldVisibilityRule, MembershipRole, MembershipState, NetworkMemberPresence,
+        ActivityEntry, AuditId, AuditOutcome, CapabilityKind, ContentHash, FieldPrivacyPolicy,
+        FieldVisibility, FieldVisibilityRule, MemberLifecycleStatus, MembershipRole,
+        MembershipState, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
+        NetworkMemberObservationSource, NetworkMemberOnlineState, NetworkMemberPresence,
         NetworkMemberStatus, NetworkRole, TopologyBoundary, TopologyConnection,
         TopologyConnectionState, TopologyNode, TopologyNodeHealth, TopologyNodeNetwork,
     };
@@ -734,7 +1112,7 @@ mod tests {
     use super::*;
     use crate::node::{
         NetworkCommandScope, NodeIdentitySnapshot, NodeInterfaceSnapshot, NodeLogLevel,
-        NodePermission,
+        NodeNetworkJoinResult, NodeNetworkLeaveResult, NodePermission,
     };
 
     fn actor() -> NodeId {
@@ -1239,6 +1617,350 @@ mod tests {
         assert_eq!(
             project_node_snapshot(&snapshot, &context, 1_500),
             Err(NodeSnapshotProjectionError::InvalidFieldPolicy)
+        );
+    }
+
+    fn directory_member(node_name: &str, display_name: &str, fingerprint: &str) -> NetworkMember {
+        NetworkMember {
+            node_id: NodeId::from_public_key(node_name.as_bytes()),
+            display_name: Some(display_name.into()),
+            identity_fingerprint: Some(fingerprint.into()),
+            role: MembershipRole::Member,
+            groups: vec![NetworkMemberGroup::Member],
+            capabilities: Some(vec![CapabilityKind::Relay]),
+            status: NetworkMemberStatus::Active,
+            lifecycle_state: MemberLifecycleStatus::Active,
+            revision: 3,
+            access_epoch: 4,
+            available_actions: Vec::new(),
+            presence: NetworkMemberPresence {
+                state: NetworkMemberOnlineState::Online,
+                source: NetworkMemberObservationSource::LiveSession,
+                observed_at_unix_ms: Some(1_400),
+            },
+            joined_at_unix_ms: Some(1_300),
+        }
+    }
+
+    fn member_directory(network_id: NetworkId) -> NetworkMemberDirectory {
+        NetworkMemberDirectory {
+            network_id,
+            generated_at_unix_ms: 1_500,
+            viewer_role: MembershipRole::Member,
+            can_manage_members: false,
+            members: vec![
+                directory_member("member-a", "hidden-member-a", "hidden-fingerprint-a"),
+                directory_member("member-b", "hidden-member-b", "hidden-fingerprint-b"),
+            ],
+        }
+    }
+
+    #[test]
+    fn snapshot_command_result_serialization_omits_hidden_fields_and_values() {
+        let snapshot = full_snapshot();
+        let home = network("home");
+        let context = network_context(
+            home,
+            NetworkRole::Administrator,
+            MembershipState::Active,
+            snapshot.access_control.field_privacy_policies.clone(),
+        );
+        let result = NodeCommandResult::snapshot(17, snapshot);
+
+        let projected = project_node_command_result(&result, &context, 1_500).unwrap();
+        let json = serde_json::to_value(&projected).unwrap();
+        let data = &json["outcome"]["data"];
+
+        for key in [
+            "identity",
+            "configuration",
+            "access_control",
+            "ui_mode",
+            "tun_capabilities",
+            "memberships",
+            "logs",
+        ] {
+            assert!(data.get(key).is_none(), "hidden key leaked: {key}");
+        }
+        let serialized = json.to_string();
+        for secret in [
+            "hidden-display-name",
+            "hidden-fingerprint",
+            "hidden-tun-home",
+            "203.0.113.7:443",
+            "hidden-log-message",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "hidden value leaked: {secret}"
+            );
+        }
+    }
+
+    #[test]
+    fn join_and_leave_command_results_project_nested_snapshots() {
+        let snapshot = full_snapshot();
+        let home = network("home");
+        let context = network_context(
+            home.clone(),
+            NetworkRole::Member,
+            MembershipState::Active,
+            snapshot.access_control.field_privacy_policies.clone(),
+        );
+        let membership = membership(
+            "home",
+            &home,
+            MembershipRole::Member,
+            MembershipState::Active,
+        );
+        let join_result = NodeCommandResult::completed(
+            18,
+            NodeCommandOutcome::NetworkJoined(Box::new(NodeNetworkJoinResult {
+                membership,
+                snapshot: snapshot.clone(),
+                idempotent: false,
+                config_saved: true,
+                started: true,
+            })),
+        );
+        let leave_result = NodeCommandResult::completed(
+            19,
+            NodeCommandOutcome::NetworkLeft(Box::new(NodeNetworkLeaveResult {
+                network_name: "home".into(),
+                left: true,
+                snapshot,
+            })),
+        );
+
+        let projected_join = project_node_command_result(&join_result, &context, 1_500).unwrap();
+        let ProjectedNodeCommandOutcome::NetworkJoined(joined) = projected_join.outcome else {
+            panic!("expected projected join result");
+        };
+        assert!(joined.snapshot.configuration.is_none());
+        assert!(joined.snapshot.access_control.is_empty());
+        assert!(joined.snapshot.memberships.is_empty());
+        assert!(joined.snapshot.logs.is_empty());
+
+        let projected_leave = project_node_command_result(&leave_result, &context, 1_500).unwrap();
+        let ProjectedNodeCommandOutcome::NetworkLeft(left) = projected_leave.outcome else {
+            panic!("expected projected leave result");
+        };
+        assert!(left.snapshot.configuration.is_none());
+        assert!(left.snapshot.access_control.is_empty());
+        assert!(left.snapshot.memberships.is_empty());
+        assert!(left.snapshot.logs.is_empty());
+    }
+
+    #[test]
+    fn non_owner_member_directory_hides_fields_and_counts_only_projected_rows() {
+        let home = network("home");
+        let directory = member_directory(home.clone());
+        let optional_hidden = policy(
+            home.clone(),
+            [
+                (PrivacyField::MemberDisplayName, FieldVisibility::OwnerOnly),
+                (
+                    PrivacyField::MemberIdentityFingerprint,
+                    FieldVisibility::OwnerOnly,
+                ),
+                (PrivacyField::MemberCapabilities, FieldVisibility::OwnerOnly),
+            ],
+        );
+        let context = network_context(
+            home.clone(),
+            NetworkRole::Member,
+            MembershipState::Active,
+            vec![optional_hidden],
+        );
+        let result = NodeCommandResult::completed(
+            20,
+            NodeCommandOutcome::NetworkMembers(Box::new(directory.clone())),
+        );
+        let projected = project_node_command_result(&result, &context, 1_500).unwrap();
+        let ProjectedNodeCommandOutcome::NetworkMembers(ref projected_directory) =
+            projected.outcome
+        else {
+            panic!("expected projected member directory");
+        };
+        let projected_directory = projected_directory.as_directory();
+        assert_eq!(projected_directory.members.len(), 2);
+        for member in &projected_directory.members {
+            assert!(member.display_name.is_none());
+            assert!(member.identity_fingerprint.is_none());
+            assert!(member.capabilities.is_none());
+        }
+        let json = serde_json::to_value(&projected).unwrap().to_string();
+        for secret in ["hidden-member-a", "hidden-member-b", "hidden-fingerprint-a"] {
+            assert!(
+                !json.contains(secret),
+                "hidden member value leaked: {secret}"
+            );
+        }
+
+        let required_hidden = policy(
+            home.clone(),
+            [(PrivacyField::MemberNodeId, FieldVisibility::OwnerOnly)],
+        );
+        let context = network_context(
+            home,
+            NetworkRole::Member,
+            MembershipState::Active,
+            vec![required_hidden],
+        );
+        let projected = project_node_command_result(&result, &context, 1_500).unwrap();
+        let ProjectedNodeCommandOutcome::NetworkMembers(projected_directory) = projected.outcome
+        else {
+            panic!("expected projected member directory");
+        };
+        assert_eq!(directory.members.len(), 2);
+        assert!(projected_directory.as_directory().members.is_empty());
+    }
+
+    #[test]
+    fn local_owner_member_directory_remains_complete() {
+        let home = network("home");
+        let directory = member_directory(home.clone());
+        let snapshot = full_snapshot();
+        let context = NodeCommandContext::local_owner_for_snapshot(&snapshot, "owner-test");
+        let result = NodeCommandResult::completed(
+            21,
+            NodeCommandOutcome::NetworkMembers(Box::new(directory.clone())),
+        );
+
+        let projected = project_node_command_result(&result, &context, 1_500).unwrap();
+        let ProjectedNodeCommandOutcome::NetworkMembers(projected_directory) = projected.outcome
+        else {
+            panic!("expected projected member directory");
+        };
+        assert_eq!(projected_directory.as_directory(), &directory);
+    }
+
+    #[test]
+    fn non_owner_log_event_omits_message_but_preserves_cursor_identity() {
+        let home = network("home");
+        let context = network_context(
+            home.clone(),
+            NetworkRole::Member,
+            MembershipState::Active,
+            vec![policy(
+                home,
+                [(PrivacyField::NodeDetailedLogs, FieldVisibility::OwnerOnly)],
+            )],
+        );
+        let event = NodeEvent {
+            sequence: 91,
+            snapshot_revision: 12,
+            kind: NodeEventKind::LogAppended {
+                level: NodeLogLevel::Warn,
+                message: "hidden-event-message".into(),
+            },
+        };
+
+        let projected = project_node_event(&event, &context, 1_500).unwrap();
+        assert_eq!(projected.sequence, 91);
+        assert_eq!(projected.snapshot_revision, 12);
+        let ProjectedNodeEventKind::LogAppended { level, message } = &projected.kind else {
+            panic!("expected projected log event");
+        };
+        assert_eq!(*level, NodeLogLevel::Warn);
+        assert!(message.is_none());
+        let json = serde_json::to_value(&projected).unwrap();
+        assert!(json["kind"]["data"].get("message").is_none());
+        assert!(!json.to_string().contains("hidden-event-message"));
+    }
+
+    #[test]
+    fn local_owner_log_event_keeps_message() {
+        let snapshot = full_snapshot();
+        let context = NodeCommandContext::local_owner_for_snapshot(&snapshot, "owner-test");
+        let event = NodeEvent {
+            sequence: 92,
+            snapshot_revision: 12,
+            kind: NodeEventKind::LogAppended {
+                level: NodeLogLevel::Info,
+                message: "owner-visible-message".into(),
+            },
+        };
+
+        let projected = project_node_event(&event, &context, 1_500).unwrap();
+        let ProjectedNodeEventKind::LogAppended { message, .. } = projected.kind else {
+            panic!("expected projected log event");
+        };
+        assert_eq!(message.as_deref(), Some("owner-visible-message"));
+    }
+
+    #[test]
+    fn malformed_duplicate_policies_fail_closed_for_results_and_events() {
+        let home = network("home");
+        let duplicate = policy(
+            home.clone(),
+            [(PrivacyField::NodeDetailedLogs, FieldVisibility::OwnerOnly)],
+        );
+        let context = network_context(
+            home,
+            NetworkRole::Member,
+            MembershipState::Active,
+            vec![duplicate.clone(), duplicate],
+        );
+        let result = NodeCommandResult::snapshot(22, full_snapshot());
+        let event = NodeEvent {
+            sequence: 93,
+            snapshot_revision: 12,
+            kind: NodeEventKind::LogAppended {
+                level: NodeLogLevel::Info,
+                message: "must-not-leak".into(),
+            },
+        };
+
+        assert_eq!(
+            project_node_command_result(&result, &context, 1_500),
+            Err(NodeSnapshotProjectionError::InvalidFieldPolicy)
+        );
+        assert_eq!(
+            project_node_event(&event, &context, 1_500),
+            Err(NodeSnapshotProjectionError::InvalidFieldPolicy)
+        );
+    }
+
+    #[test]
+    fn command_projection_does_not_mutate_canonical_snapshot_or_directory() {
+        let home = network("home");
+        let snapshot = full_snapshot();
+        let original_snapshot = snapshot.clone();
+        let directory = member_directory(home.clone());
+        let original_directory = directory.clone();
+        let context = network_context(
+            home,
+            NetworkRole::Member,
+            MembershipState::Active,
+            snapshot.access_control.field_privacy_policies.clone(),
+        );
+        let result = NodeCommandResult::completed(
+            23,
+            NodeCommandOutcome::NetworkJoined(Box::new(NodeNetworkJoinResult {
+                membership: membership(
+                    "home",
+                    &network("home"),
+                    MembershipRole::Member,
+                    MembershipState::Active,
+                ),
+                snapshot: snapshot.clone(),
+                idempotent: false,
+                config_saved: false,
+                started: false,
+            })),
+        );
+        let member_result = NodeCommandResult::completed(
+            24,
+            NodeCommandOutcome::NetworkMembers(Box::new(directory)),
+        );
+
+        project_node_command_result(&result, &context, 1_500).unwrap();
+        project_node_command_result(&member_result, &context, 1_500).unwrap();
+        assert_eq!(snapshot, original_snapshot);
+        assert_eq!(
+            member_result.outcome,
+            NodeCommandOutcome::NetworkMembers(Box::new(original_directory))
         );
     }
 

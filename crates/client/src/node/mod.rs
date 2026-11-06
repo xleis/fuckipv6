@@ -64,8 +64,11 @@ pub use operation_service::{
 };
 pub use plan::{NodeNetworkSelection, NodeNetworkSpec, NodeRuntimePlan};
 pub use privacy_projection::{
-    project_node_snapshot, NodeSnapshotProjectionError, ProjectedNodeEmbeddedServiceSnapshot,
-    ProjectedNodeIdentitySnapshot, ProjectedNodeInterfaceSnapshot, ProjectedNodeNetworkSnapshot,
+    project_node_command_result, project_node_event, project_node_snapshot,
+    NodeSnapshotProjectionError, ProjectedNetworkMemberDirectory, ProjectedNodeCommandOutcome,
+    ProjectedNodeCommandResult, ProjectedNodeEmbeddedServiceSnapshot, ProjectedNodeEvent,
+    ProjectedNodeEventKind, ProjectedNodeIdentitySnapshot, ProjectedNodeInterfaceSnapshot,
+    ProjectedNodeNetworkJoinResult, ProjectedNodeNetworkLeaveResult, ProjectedNodeNetworkSnapshot,
     ProjectedNodePeerSnapshot, ProjectedNodeSnapshot,
 };
 pub(crate) use runtime_control::{

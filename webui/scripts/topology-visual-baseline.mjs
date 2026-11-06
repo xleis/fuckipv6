@@ -29,6 +29,7 @@ const HEALTH_VALUES = ["healthy", "unknown", "degraded", "unreachable"];
 const CAPABILITY_ORDER = ["coordinator", "relay", "exit", "file"];
 const INTERACTION_SCENARIO_ID = "multi-network";
 const INTERACTION_NODE_ID = "node-multi-studio";
+const TOPOLOGY_LAYOUT_STORAGE_KEY = "fuckipv6.topology.layout.v1";
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
@@ -589,6 +590,135 @@ async function rightClick(session, point) {
   });
 }
 
+function transformTranslation(transform) {
+  const match = /^translate\(([^ ]+) ([^)]+)\)$/.exec(transform ?? "");
+  assert.ok(match, `invalid topology node transform: ${transform}`);
+  return { x: Number(match[1]), y: Number(match[2]) };
+}
+
+async function layoutPersistenceEvidence(session, nodeId) {
+  return evaluate(
+    session,
+    `(() => {
+      const view = document.querySelector(".topology-view");
+      const node = document.querySelector('g.topology-node[data-node-id=${JSON.stringify(nodeId)}]');
+      const raw = localStorage.getItem(${JSON.stringify(TOPOLOGY_LAYOUT_STORAGE_KEY)});
+      let stored = null;
+      let parseError = false;
+      if (raw !== null) {
+        try {
+          stored = JSON.parse(raw);
+        } catch {
+          parseError = true;
+        }
+      }
+      return {
+        fixed_count: Number(view?.getAttribute("data-layout-fixed-count")),
+        pinned: view?.getAttribute("data-layout-pinned"),
+        storage_status: view?.getAttribute("data-layout-storage-status"),
+        transform: node?.getAttribute("transform") ?? null,
+        data_layout_pinned: node?.getAttribute("data-layout-pinned") ?? null,
+        dragging: node?.getAttribute("data-dragging") ?? null,
+        storage_raw: raw,
+        storage: stored,
+        storage_parse_error: parseError,
+      };
+    })()`,
+  );
+}
+
+async function dragNodeBy(session, nodeId, dx, dy) {
+  const start = await nodeCenter(session, nodeId);
+  const target = { x: start.x + dx, y: start.y + dy };
+  await dispatchMouse(session, "mouseMoved", start.x, start.y, {
+    button: "none",
+    buttons: 0,
+  });
+  await dispatchMouse(session, "mousePressed", start.x, start.y, {
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  for (let step = 1; step <= 6; step += 1) {
+    await dispatchMouse(
+      session,
+      "mouseMoved",
+      start.x + ((target.x - start.x) * step) / 6,
+      start.y + ((target.y - start.y) * step) / 6,
+      { button: "left", buttons: 1 },
+    );
+    await sleep(16);
+  }
+  await dispatchMouse(session, "mouseReleased", target.x, target.y, {
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+  await waitFor(
+    session,
+    `(() => {
+      const view = document.querySelector(".topology-view");
+      const node = document.querySelector('g.topology-node[data-node-id=${JSON.stringify(nodeId)}]');
+      return view?.getAttribute("data-layout-fixed-count") === "1" &&
+        view?.getAttribute("data-layout-storage-status") === "loaded" &&
+        node?.getAttribute("data-layout-pinned") === "true" &&
+        node?.getAttribute("data-dragging") === "false";
+    })()`,
+    "committed pinned topology layout",
+    5_000,
+  );
+}
+
+async function clickTopologyControl(session, ariaLabel) {
+  const point = await evaluate(
+    session,
+    `(() => {
+      const control = [...document.querySelectorAll("button")].find(
+        (element) => element.getAttribute("aria-label") === ${JSON.stringify(ariaLabel)},
+      );
+      if (!control) throw new Error("topology control is missing");
+      const rect = control.getBoundingClientRect();
+      const point = { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      const hit = document.elementFromPoint(point.x, point.y)?.closest("button");
+      if (hit !== control) throw new Error("topology control is occluded");
+      return point;
+    })()`,
+  );
+  await dispatchMouse(session, "mouseMoved", point.x, point.y, {
+    button: "none",
+    buttons: 0,
+  });
+  await dispatchMouse(session, "mousePressed", point.x, point.y, {
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+  await dispatchMouse(session, "mouseReleased", point.x, point.y, {
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+}
+
+async function reloadTopology(session, nodeCount) {
+  await session.send("Page.reload", { ignoreCache: true });
+  await waitForReady(session);
+  await navigateToTopology(session, nodeCount);
+}
+
+async function captureViewport(session) {
+  const screenshot = await session.send("Page.captureScreenshot", {
+    format: "png",
+    fromSurface: true,
+    captureBeyondViewport: false,
+  });
+  const image = Buffer.from(screenshot.data, "base64");
+  const dimensions = pngDimensions(image);
+  assert.equal(dimensions.width, VIEWPORT.width * VIEWPORT.deviceScaleFactor);
+  assert.equal(dimensions.height, VIEWPORT.height * VIEWPORT.deviceScaleFactor);
+  return { image, dimensions, sha256: sha256(image) };
+}
+
 async function navigateToTopology(session, nodeCount) {
   await waitFor(
     session,
@@ -835,6 +965,7 @@ function assertInteractionSemantics(state, semantics) {
     assert.deepEqual(semantics.menu.items, [
       { text: "Open node details", disabled: false },
       { text: "Add to batch selection", disabled: false },
+      { text: "Pin current layout", disabled: false },
       { text: "The server exposes no actions for this object", disabled: true },
     ]);
     assert.deepEqual(semantics.selection.selected_ids, []);
@@ -958,6 +1089,7 @@ async function main() {
     },
     scenarios: [],
     interactions: [],
+    layout_persistence: null,
   };
 
   const workspace = await mkdtemp(join(tmpdir(), "fuckipv6-topology-baseline-"));
@@ -1190,13 +1322,151 @@ async function main() {
       );
     }
 
+    await evaluate(
+      cdp,
+      `localStorage.removeItem(${JSON.stringify(TOPOLOGY_LAYOUT_STORAGE_KEY)}); true`,
+    );
+    await loadScenario(interactionScenario);
+    const initialLayout = await layoutPersistenceEvidence(cdp, INTERACTION_NODE_ID);
+    assert.equal(initialLayout.fixed_count, 0, "initial fixed position count");
+    assert.equal(initialLayout.pinned, "false", "initial pin state");
+    assert.equal(initialLayout.storage_status, "empty", "initial storage status");
+    assert.equal(initialLayout.storage_raw, null, "initial layout storage");
+    const automaticPosition = transformTranslation(initialLayout.transform);
+
+    await dragNodeBy(cdp, INTERACTION_NODE_ID, 86, 58);
+    await movePointerAway(cdp);
+    const draggedLayout = await layoutPersistenceEvidence(cdp, INTERACTION_NODE_ID);
+    const draggedPosition = transformTranslation(draggedLayout.transform);
+    assert.notDeepEqual(draggedPosition, automaticPosition, "drag must move the node");
+    assert.equal(draggedLayout.fixed_count, 1, "dragged fixed position count");
+    assert.equal(draggedLayout.pinned, "true", "dragged pin state");
+    assert.equal(draggedLayout.storage_status, "loaded", "dragged storage status");
+    assert.equal(draggedLayout.storage_parse_error, false, "layout storage must parse");
+    assert.deepEqual(Object.keys(draggedLayout.storage ?? {}).sort(), [
+      "positions",
+      "version",
+    ]);
+    assert.equal(draggedLayout.storage.version, 1);
+    assert.deepEqual(Object.keys(draggedLayout.storage.positions), [
+      INTERACTION_NODE_ID,
+    ]);
+    assert.deepEqual(
+      Object.keys(draggedLayout.storage.positions[INTERACTION_NODE_ID]).sort(),
+      ["x", "y"],
+    );
+    for (const sensitiveValue of [
+      "Studio Peer",
+      "Alpha",
+      "Beta",
+      "Healthy",
+      "Coordinator",
+      "Member",
+    ]) {
+      assert.equal(
+        draggedLayout.storage_raw.includes(sensitiveValue),
+        false,
+        `layout storage must not contain ${sensitiveValue}`,
+      );
+    }
+    await sleep(150);
+    const pinnedCapture = await captureViewport(cdp);
+
+    await reloadTopology(cdp, interactionScenario.topology.nodes.length);
+    const restoredLayout = await layoutPersistenceEvidence(cdp, INTERACTION_NODE_ID);
+    assert.deepEqual(
+      transformTranslation(restoredLayout.transform),
+      draggedPosition,
+      "reload must restore the pinned node position",
+    );
+    assert.equal(restoredLayout.fixed_count, 1, "restored fixed position count");
+    assert.equal(restoredLayout.pinned, "true", "restored pin state");
+    assert.equal(restoredLayout.storage_status, "loaded", "restored storage status");
+
+    await clickTopologyControl(cdp, "Reset pinned layout");
+    await waitFor(
+      cdp,
+      `(() => {
+        const view = document.querySelector(".topology-view");
+        const node = document.querySelector('g.topology-node[data-node-id=${JSON.stringify(INTERACTION_NODE_ID)}]');
+        return view?.getAttribute("data-layout-fixed-count") === "0" &&
+          view?.getAttribute("data-layout-storage-status") === "empty" &&
+          node?.getAttribute("data-layout-pinned") === "false";
+      })()`,
+      "reset topology layout",
+      5_000,
+    );
+    await movePointerAway(cdp);
+    const resetLayout = await layoutPersistenceEvidence(cdp, INTERACTION_NODE_ID);
+    assert.deepEqual(
+      transformTranslation(resetLayout.transform),
+      automaticPosition,
+      "reset must restore the automatic position",
+    );
+    assert.equal(resetLayout.storage_raw, null, "reset must clear layout storage");
+
+    await reloadTopology(cdp, interactionScenario.topology.nodes.length);
+    const resetReloadLayout = await layoutPersistenceEvidence(cdp, INTERACTION_NODE_ID);
+    assert.deepEqual(
+      transformTranslation(resetReloadLayout.transform),
+      automaticPosition,
+      "reload after reset must keep the automatic position",
+    );
+    assert.equal(resetReloadLayout.fixed_count, 0, "reset reload fixed position count");
+    assert.equal(resetReloadLayout.storage_raw, null, "reset reload layout storage");
+    await movePointerAway(cdp);
+    await sleep(150);
+    const resetCapture = await captureViewport(cdp);
+
+    const pinnedImageName = `${INTERACTION_SCENARIO_ID}-layout-pinned.png`;
+    const resetImageName = `${INTERACTION_SCENARIO_ID}-layout-reset.png`;
+    await writeFile(join(OUTPUT_ROOT, pinnedImageName), pinnedCapture.image);
+    await writeFile(join(OUTPUT_ROOT, resetImageName), resetCapture.image);
+    report.layout_persistence = {
+      scenario_id: INTERACTION_SCENARIO_ID,
+      node_id: INTERACTION_NODE_ID,
+      storage_key: TOPOLOGY_LAYOUT_STORAGE_KEY,
+      storage_schema: {
+        version: 1,
+        persisted_fields: ["positions.<stable-node-id>.x", "positions.<stable-node-id>.y"],
+        excluded: ["display_name", "network", "role", "address", "health", "connections"],
+      },
+      initial: initialLayout,
+      dragged: draggedLayout,
+      restored: restoredLayout,
+      reset: resetLayout,
+      reset_reloaded: resetReloadLayout,
+      screenshots: [
+        {
+          state: "pinned",
+          path: pinnedImageName,
+          dimensions: pinnedCapture.dimensions,
+          sha256: pinnedCapture.sha256,
+        },
+        {
+          state: "reset",
+          path: resetImageName,
+          dimensions: resetCapture.dimensions,
+          sha256: resetCapture.sha256,
+        },
+      ],
+    };
+    await writeFile(
+      join(OUTPUT_ROOT, `${INTERACTION_SCENARIO_ID}-layout.json`),
+      `${JSON.stringify(report.layout_persistence, null, 2)}\n`,
+    );
+    process.stdout.write(
+      `${INTERACTION_SCENARIO_ID}-layout: drag, reload restore, reset, reload automatic ` +
+        `${pinnedCapture.sha256} ${resetCapture.sha256}\n`,
+    );
+
     await writeFile(
       join(OUTPUT_ROOT, "manifest.json"),
       `${JSON.stringify(report, null, 2)}\n`,
     );
     process.stdout.write(
       `topology visual baseline passed (${report.scenarios.length} scenarios, ` +
-        `${report.interactions.length} interaction states)\n` +
+        `${report.interactions.length} interaction states, 1 layout persistence check)\n` +
         `${join(OUTPUT_ROOT, "manifest.json")}\n`,
     );
   } catch (error) {

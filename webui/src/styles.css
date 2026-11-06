@@ -1880,6 +1880,20 @@ button:disabled {
   text-align: center;
   font-size: var(--font-size-xs);
 }
+.topology-layout-status {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+.topology-layout-status.warning {
+  border-left-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--text-secondary);
+}
 .topology-view[data-frozen="true"] .topology-canvas {
   border-color: color-mix(in srgb, var(--warning) 60%, var(--border));
 }
@@ -2271,7 +2285,10 @@ button:disabled {
   margin: calc(var(--space-2) * -1) 0 0;
 }
 .topology-node {
-  cursor: pointer;
+  cursor: grab;
+}
+.topology-node.dragging {
+  cursor: grabbing;
 }
 .topology-node:hover .topology-node-halo,
 .topology-node.selected .topology-node-halo {

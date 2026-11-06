@@ -1757,7 +1757,7 @@ JS heap 为 9.21MB。快照 JSON 解析与 patch diff、拓扑布局均移到 Wo
 - [x] GPUI 与 WebUI 使用同一对象详情、菜单和状态；
 - [x] 同尺寸/DPR/字体下视觉回归；
 - [x] 选择、悬停和菜单状态可对比；
-- [ ] 布局重置和持久化行为一致；
+- [x] 布局重置和持久化行为一致；
 - [ ] 禁止拓扑展示假节点或静态连接；
 - [ ] 证据包含筛选、选择和动作结果。
 
@@ -1816,9 +1816,42 @@ JS heap 为 9.21MB。快照 JSON 解析与 patch diff、拓扑布局均移到 Wo
 `1046faafcdda8b6749b10fb54e0950642aee23d74dbe9641eca3ac1f57808ba4`。人工审查截图确认
 悬停卡未遮挡关键节点、选择栏完整可见、右键菜单无截断且禁用动作有明确说明。
 
-**验证通过**：WebUI `npm test -- --run`（18 files，194 passed）、`npm run typecheck`、
-`npm run lint`、`npm run visual:topology-baseline`（6 scenarios）、
-`node scripts/test_i18n_runtime.mjs`、`cargo test -p fuckipv6-common --all-features i18n`
+**证据（2026-11-06，布局重置与持久化）**：WebUI 图形拓扑支持鼠标拖动节点、右键
+“固定当前布局/更新固定布局”，以及工具栏“重置固定布局”。布局存储键为
+`fuckipv6.topology.layout.v1`，文档版本为 `1`，最多保存 2,000 个位置，结构仅为
+`{version, positions: {<stable-node-id>: {x, y}}}`；名称、网络、角色、地址、健康与连接
+均不写入存储。加载时安全忽略损坏 JSON、未知版本、非法/非有限坐标和超限集合，并按当前权威
+布局尺寸钳制坐标；存储不可用或写入失败时保留本次会话位置并显示警告。重置只清除固定坐标，
+不改变缩放、冻结、筛选或选择状态；固定坐标只覆盖位置，节点网络归属、槽位与连接仍来自当前
+`TopologySnapshot`。
+
+真实 Chrome/CDP 验证使用鼠标事件拖动 `node-multi-studio`：自动坐标为
+`(482.4, 24.233873484032657)`，拖动后固定为
+`(547.0810913085937, 67.85599338759711)`；刷新后坐标与固定状态恢复，点击真实重置按钮后
+回到自动坐标，再次刷新仍保持自动布局且存储为空。浏览器存储实测仅包含上述版本、稳定 NodeId
+和 x/y。固定态截图 SHA-256 为
+`9fd9dba5973c2f9b7c11d6f56219f255fe21c70dac1e8aea62fec4f8fd701c73`，重置后截图
+`d5f6ea5968807021a2bfc2afb0c43d5715558acecd60c7d93e54acea86e066d5`，均为
+2880×1800；最终脚本连续两次 `--skip-build` 运行哈希一致。新增控件后当前场景/交互基线哈希为：
+single-network `20868c8baa22f663a98acaf464ecf8591a2877e6a5863a8e96d7f0eea234b7e6`、
+multi-network `6ddb3c5d0bbe0e6c112103b0c0528d76835272b73a5843834647a0c81cbd8ab0`、
+public-node `a7bc80e6b719500555b970d2e7f4c8fc5251fc6df169ca0c2459ad382b5f62f2`、
+offline `76352da42226c7764856be75ddd9a80a537c3272976fb466a174a868c31afddc`、
+degraded `00560e084c67df9cda6b62fd115fa0c17194e2894549e3e1da7728d2a2bdd6a5`、
+capability-mixed `32ac8d8f9b8d6ba0fa14784f5c4abba6898457c3429c01dadd3a99e54a44ed5d`；
+悬停 `0b08d93116650553b88ea0003095f0d344b6518848e0bc89623582d3b8ed723d`、选择
+`6b38897db9c5e5e0cf11df1079da821eac5a01ce71e4e74080f2f47e1f09ffef`、菜单
+`89402af3ca89e885246f679eea24b24edbb7a378ba2b46089c15c4e7fd964bc2`。
+
+能力边界：GPUI 当前拓扑使用权威卡片/连接列表，没有可拖动的坐标系或用户可编辑节点位置，
+因此不存在可等价的坐标持久化/重置操作，本项未在 GPUI 添加伪控件；两端的节点归属、连接和
+动作数据仍共用同一权威快照与状态契约。人工审查固定态与重置态截图，确认拖动后的标签和连接
+随节点移动、固定状态提示可见，重置后节点、边界和连接恢复自动布局，无残留固定状态。
+
+**验证通过**：WebUI `npm test -- --run`（19 files，207 passed）、`npm run typecheck`、
+`npm run lint`、`npm run visual:topology-baseline`（含构建，6 scenarios、3 interaction states、
+1 layout persistence check）、最终脚本 `--skip-build` 连续 2 次、`node scripts/test_i18n_runtime.mjs`、
+`node scripts/test_webui_accessibility.mjs`、`cargo test -p fuckipv6-common --all-features i18n`
 （9 passed）和 `git diff --check`。
 
 ### W9-10 拓扑与成员 E2E `[ ]`

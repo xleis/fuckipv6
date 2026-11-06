@@ -20,10 +20,25 @@ import type {
   TopologySnapshot,
 } from "../../../contracts/typescript/node-contract-v1";
 import { installTestI18nRuntime } from "../test/runtime";
+import { TOPOLOGY_LAYOUT_STORAGE_KEY } from "../topology-layout-persistence";
 import { PageContent } from "./page-content";
 import { TopologyView } from "./topology-view";
 
 const translated = (key: string) => `translated:${key}`;
+
+function memoryStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    get length() {
+      return values.size;
+    },
+    clear: vi.fn(() => values.clear()),
+    getItem: vi.fn((key: string) => values.get(key) ?? null),
+    key: vi.fn((index: number) => [...values.keys()][index] ?? null),
+    removeItem: vi.fn((key: string) => values.delete(key)),
+    setItem: vi.fn((key: string, value: string) => values.set(key, value)),
+  };
+}
 
 function membership(
   networkId: string,
@@ -191,6 +206,10 @@ function largeTopologySnapshot(nodeCount = 1_000): TopologySnapshot {
 
 beforeEach(() => {
   installTestI18nRuntime();
+  Object.defineProperty(window, "localStorage", {
+    configurable: true,
+    value: memoryStorage(),
+  });
   Object.defineProperty(Element.prototype, "scrollIntoView", {
     configurable: true,
     value: vi.fn(),
@@ -500,14 +519,17 @@ describe("Topology keyboard, touch and accessibility behavior", () => {
     const selectAction = within(menu).getByRole("menuitem", {
       name: translated("topology.menu.select"),
     });
+    const pinAction = within(menu).getByRole("menuitem", {
+      name: translated("topology.menu.pin_layout"),
+    });
     await user.keyboard("{ArrowDown}");
     expect(selectAction).toHaveFocus();
     await user.keyboard("{ArrowUp}");
     expect(openAction).toHaveFocus();
     await user.keyboard("{ArrowUp}");
-    expect(selectAction).toHaveFocus();
+    expect(pinAction).toHaveFocus();
     await user.keyboard("{End}");
-    expect(selectAction).toHaveFocus();
+    expect(pinAction).toHaveFocus();
     await user.keyboard("{Home}");
     expect(openAction).toHaveFocus();
 
@@ -761,6 +783,186 @@ describe("Topology keyboard, touch and accessibility behavior", () => {
     await waitFor(() =>
       expect(container.querySelector('[data-node-id="node-self"]')).toHaveFocus(),
     );
+  });
+
+});
+
+describe("Topology layout persistence", () => {
+  it("restores pinned coordinates across live refreshes and resets to automatic layout", async () => {
+    const user = userEvent.setup();
+    const first = topologySnapshot();
+    const firstRender = render(
+      <TopologyView topology={first} locale="zh-CN" />,
+    );
+    const automaticTransform = firstRender.container
+      .querySelector('[data-node-id="node-shared"]')
+      ?.getAttribute("transform");
+    expect(automaticTransform).toMatch(/^translate\(/);
+    firstRender.unmount();
+
+    window.localStorage.setItem(
+      TOPOLOGY_LAYOUT_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        positions: { "node-shared": { x: 52, y: 64 } },
+      }),
+    );
+    const { container, rerender } = render(
+      <TopologyView topology={first} locale="zh-CN" />,
+    );
+    const shared = () =>
+      container.querySelector('[data-node-id="node-shared"]');
+    expect(shared()).toHaveAttribute("transform", "translate(52 64)");
+    expect(shared()).toHaveAttribute("data-layout-pinned", "true");
+    expect(container.querySelector(".topology-view")).toHaveAttribute(
+      "data-layout-storage-status",
+      "loaded",
+    );
+
+    rerender(
+      <TopologyView
+        topology={{
+          ...first,
+          revision: first.revision + 1,
+          nodes: [
+            ...first.nodes,
+            node("node-new", "New Node", "healthy", [
+              { networkId: "net_alpha", role: "member" },
+            ]),
+          ],
+        }}
+        locale="zh-CN"
+      />,
+    );
+    expect(shared()).toHaveAttribute("transform", "translate(52 64)");
+
+    await user.click(
+      screen.getByRole("button", {
+        name: translated("topology.layout.reset"),
+      }),
+    );
+    expect(container.querySelector(".topology-view")).toHaveAttribute(
+      "data-layout-fixed-count",
+      "0",
+    );
+    expect(container.querySelector(".topology-view")).toHaveAttribute(
+      "data-layout-storage-status",
+      "empty",
+    );
+    expect(window.localStorage.getItem(TOPOLOGY_LAYOUT_STORAGE_KEY)).toBeNull();
+    expect(shared()?.getAttribute("transform")).not.toBe("translate(52 64)");
+  });
+
+  it("pins the current graph position from the object menu without storing snapshot metadata", async () => {
+    const { container } = render(
+      <TopologyView topology={topologySnapshot()} locale="zh-CN" />,
+    );
+    const shared = container.querySelector(
+      '[data-node-id="node-shared"]',
+    ) as SVGGElement;
+    fireEvent.contextMenu(shared, { clientX: 160, clientY: 160 });
+    const menu = await screen.findByRole("menu");
+    fireEvent.click(
+      within(menu).getByRole("menuitem", {
+        name: translated("topology.menu.pin_layout"),
+      }),
+    );
+
+    expect(shared).toHaveAttribute("data-layout-pinned", "true");
+    expect(container.querySelector(".topology-view")).toHaveAttribute(
+      "data-layout-fixed-count",
+      "1",
+    );
+    const raw = window.localStorage.getItem(TOPOLOGY_LAYOUT_STORAGE_KEY);
+    expect(raw).not.toBeNull();
+    const persisted = JSON.parse(raw as string);
+    expect(persisted).toEqual({
+      version: 1,
+      positions: {
+        "node-shared": expect.objectContaining({
+          x: expect.any(Number),
+          y: expect.any(Number),
+        }),
+      },
+    });
+    expect(Object.keys(persisted.positions["node-shared"]).sort()).toEqual([
+      "x",
+      "y",
+    ]);
+    for (const sensitiveValue of [
+      "Shared Node",
+      "Alpha",
+      "Beta",
+      "degraded",
+      "administrator",
+      "coordinator",
+    ]) {
+      expect(raw).not.toContain(sensitiveValue);
+    }
+  });
+
+  it("ignores damaged stored coordinates and explains the automatic-layout fallback", () => {
+    window.localStorage.setItem(TOPOLOGY_LAYOUT_STORAGE_KEY, "{");
+    const { container } = render(
+      <TopologyView topology={topologySnapshot()} locale="zh-CN" />,
+    );
+
+    expect(container.querySelector(".topology-view")).toHaveAttribute(
+      "data-layout-storage-status",
+      "invalid",
+    );
+    expect(container.querySelector(".topology-view")).toHaveAttribute(
+      "data-layout-fixed-count",
+      "0",
+    );
+    expect(
+      screen.getByText(translated("topology.layout.storage_invalid")),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps pinning and resetting usable when browser storage throws", () => {
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: () => {
+          throw new Error("storage blocked");
+        },
+        setItem: () => {
+          throw new Error("storage blocked");
+        },
+        removeItem: () => {
+          throw new Error("storage blocked");
+        },
+      },
+    });
+    const { container } = render(
+      <TopologyView topology={topologySnapshot()} locale="zh-CN" />,
+    );
+    const view = container.querySelector(".topology-view");
+    expect(view).toHaveAttribute("data-layout-storage-status", "unavailable");
+    expect(
+      screen.getByText(translated("topology.layout.storage_unavailable")),
+    ).toBeInTheDocument();
+
+    const shared = container.querySelector(
+      '[data-node-id="node-shared"]',
+    ) as SVGGElement;
+    fireEvent.contextMenu(shared, { clientX: 160, clientY: 160 });
+    fireEvent.click(
+      within(screen.getByRole("menu")).getByRole("menuitem", {
+        name: translated("topology.menu.pin_layout"),
+      }),
+    );
+    expect(view).toHaveAttribute("data-layout-fixed-count", "1");
+    expect(view).toHaveAttribute("data-layout-storage-status", "unavailable");
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: translated("topology.layout.reset"),
+      }),
+    );
+    expect(view).toHaveAttribute("data-layout-fixed-count", "0");
+    expect(view).toHaveAttribute("data-layout-storage-status", "unavailable");
   });
 });
 

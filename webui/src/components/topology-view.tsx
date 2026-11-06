@@ -23,6 +23,8 @@ import {
   Pause,
   Play,
   Plus,
+  Pin,
+  PinOff,
   RefreshCw,
   RotateCcw,
   Search,
@@ -64,6 +66,15 @@ import {
   type TopologyLayout,
   type TopologyPlacement,
 } from "../topology";
+import {
+  applyFixedTopologyPositions,
+  clampTopologyNodePosition,
+  clearPersistedTopologyPositions,
+  loadPersistedTopologyPositions,
+  savePersistedTopologyPositions,
+  type TopologyFixedPositions,
+  type TopologyNodePosition,
+} from "../topology-layout-persistence";
 import {
   EMPTY_TOPOLOGY_FILTERS,
   filteredTopologySnapshot,
@@ -155,6 +166,7 @@ type NodeMenuState = {
   nodeId: string;
   x: number;
   y: number;
+  layoutPosition?: TopologyNodePosition;
 };
 
 const NODE_RING_RADIUS = 17;
@@ -486,24 +498,30 @@ function NodeActionMenu({
   locale,
   selected,
   lifecycleActions,
+  layoutPinned,
+  layoutPosition,
   x,
   y,
   menuRef,
   onOpen,
   onToggle,
   onPrepareLifecycle,
+  onPinLayout,
   onClose,
 }: {
   node: TopologyNode;
   locale: Locale;
   selected: boolean;
   lifecycleActions: MemberLifecycleAction[];
+  layoutPinned: boolean;
+  layoutPosition?: TopologyNodePosition;
   x: number;
   y: number;
   menuRef: React.RefObject<HTMLDivElement | null>;
   onOpen(nodeId: string): void;
   onToggle(nodeId: string): void;
   onPrepareLifecycle(nodeId: string, action: BatchMemberAction): void;
+  onPinLayout(nodeId: string, position: TopologyNodePosition): void;
   onClose(restoreFocus?: boolean): void;
 }) {
   function menuItems(menu: HTMLDivElement): HTMLButtonElement[] {
@@ -572,6 +590,24 @@ function NodeActionMenu({
           selected ? "topology.menu.unselect" : "topology.menu.select",
         )}
       </button>
+      {layoutPosition ? (
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            onClose(false);
+            onPinLayout(node.node_id, layoutPosition);
+          }}
+        >
+          <Pin size={13} aria-hidden="true" />
+          {label(
+            locale,
+            layoutPinned
+              ? "topology.menu.update_layout"
+              : "topology.menu.pin_layout",
+          )}
+        </button>
+      ) : null}
       <div className="topology-node-menu-separator" role="separator" />
       <div className="topology-node-menu-label">
         <ShieldCheck size={13} />
@@ -811,11 +847,13 @@ const GraphView = memo(function GraphView({
   locale,
   mode,
   zoom,
+  fixedPositions,
   focusRequest,
   focusTargetNodeId,
   selectedNodeIds,
   onOpenNode,
   onToggleNode,
+  onPinNode,
   onShowHover,
   onHideHover,
   onShowMenu,
@@ -825,14 +863,21 @@ const GraphView = memo(function GraphView({
   locale: Locale;
   mode: TopologyColorMode;
   zoom: number;
+  fixedPositions: TopologyFixedPositions;
   focusRequest: number;
   focusTargetNodeId: string | null;
   selectedNodeIds: ReadonlySet<string>;
   onOpenNode?: (nodeId: string) => void;
   onToggleNode?: (nodeId: string) => void;
+  onPinNode(nodeId: string, position: TopologyNodePosition): void;
   onShowHover(nodeId: string, rect: DOMRect): void;
   onHideHover(): void;
-  onShowMenu(nodeId: string, x: number, y: number): void;
+  onShowMenu(
+    nodeId: string,
+    x: number,
+    y: number,
+    layoutPosition?: TopologyNodePosition,
+  ): void;
 }): JSX.Element {
   const budget = useMemo(
     () => topologyGraphBudget(topology, selectedNodeIds),
@@ -846,7 +891,44 @@ const GraphView = memo(function GraphView({
     }),
     [budget.connections, budget.nodes, topology],
   );
-  const { layout, pending: layoutPending } = useTopologyLayout(graphTopology);
+  const { layout: automaticLayout, pending: layoutPending } =
+    useTopologyLayout(graphTopology);
+  const [dragPreview, setDragPreview] = useState<{
+    nodeId: string;
+    position: TopologyNodePosition;
+  } | null>(null);
+  const effectiveFixedPositions = useMemo(() => {
+    if (!dragPreview) return fixedPositions;
+    const positions = new Map(fixedPositions);
+    positions.set(dragPreview.nodeId, dragPreview.position);
+    return positions;
+  }, [dragPreview, fixedPositions]);
+  const layout = useMemo(
+    () =>
+      automaticLayout
+        ? applyFixedTopologyPositions(automaticLayout, effectiveFixedPositions)
+        : null,
+    [automaticLayout, effectiveFixedPositions],
+  );
+  const previewNodeDrag = useCallback(
+    (nodeId: string, position: TopologyNodePosition): void => {
+      if (!layout) return;
+      setDragPreview({
+        nodeId,
+        position: clampTopologyNodePosition(position, layout),
+      });
+    },
+    [layout],
+  );
+  const commitNodeDrag = useCallback(
+    (nodeId: string, position: TopologyNodePosition): void => {
+      setDragPreview(null);
+      if (!layout) return;
+      onPinNode(nodeId, clampTopologyNodePosition(position, layout));
+    },
+    [layout, onPinNode],
+  );
+  const cancelNodeDrag = useCallback((): void => setDragPreview(null), []);
   const visuals = useMemo(
     () => networkVisuals(topology, mode),
     [mode, topology],
@@ -909,7 +991,19 @@ const GraphView = memo(function GraphView({
   )
     ? activeNodeId
     : fallbackNodeId;
-  const longPress = useTouchLongPress(onShowMenu);
+  const showNodeMenu = useCallback(
+    (nodeId: string, x: number, y: number): void => {
+      const placement = placements.get(nodeId);
+      onShowMenu(
+        nodeId,
+        x,
+        y,
+        placement ? { x: placement.x, y: placement.y } : undefined,
+      );
+    },
+    [onShowMenu, placements],
+  );
+  const longPress = useTouchLongPress(showNodeMenu);
   const focusTargetNodeRef = useRef(focusTargetNodeId);
   const focusNode = useCallback((nodeId: string): void => {
     setActiveNodeId(nodeId);
@@ -929,9 +1023,15 @@ const GraphView = memo(function GraphView({
       }
       event.preventDefault();
       const position = rectPosition(event.currentTarget.getBoundingClientRect());
-      onShowMenu(nodeId, position.x, position.y);
+      const placement = placements.get(nodeId);
+      onShowMenu(
+        nodeId,
+        position.x,
+        position.y,
+        placement ? { x: placement.x, y: placement.y } : undefined,
+      );
     },
-    [onShowMenu],
+    [onShowMenu, placements],
   );
   const navigateNode = useCallback(
     (event: ReactKeyboardEvent<SVGGElement>, nodeId: string): void => {
@@ -1127,12 +1227,16 @@ const GraphView = memo(function GraphView({
                 locale={locale}
                 networkColor={visual?.color ?? "#6b7280"}
                 selected={selectedNodeIds.has(node.node_id)}
+                layoutPinned={fixedPositions.has(node.node_id)}
                 tabIndex={resolvedActiveNodeId === node.node_id ? 0 : -1}
                 onOpenNode={onOpenNode}
                 onToggleNode={onToggleNode}
                 onShowHover={onShowHover}
                 onHideHover={onHideHover}
                 onShowMenu={onShowMenu}
+                onDragPreview={previewNodeDrag}
+                onCommitDrag={commitNodeDrag}
+                onCancelDrag={cancelNodeDrag}
                 onMenuKey={menuFromFocus}
                 onNavigate={navigateNode}
                 onFocusNode={focusNode}
@@ -1311,12 +1415,21 @@ type TopologyNodeGlyphProps = {
   locale: Locale;
   networkColor: string;
   selected: boolean;
+  layoutPinned: boolean;
   tabIndex: number;
   onOpenNode?: (nodeId: string) => void;
   onToggleNode?: (nodeId: string) => void;
   onShowHover(nodeId: string, rect: DOMRect): void;
   onHideHover(): void;
-  onShowMenu(nodeId: string, x: number, y: number): void;
+  onShowMenu(
+    nodeId: string,
+    x: number,
+    y: number,
+    layoutPosition?: TopologyNodePosition,
+  ): void;
+  onDragPreview(nodeId: string, position: TopologyNodePosition): void;
+  onCommitDrag(nodeId: string, position: TopologyNodePosition): void;
+  onCancelDrag(): void;
   onMenuKey(event: ReactKeyboardEvent<SVGGElement>, nodeId: string): void;
   onNavigate(event: ReactKeyboardEvent<SVGGElement>, nodeId: string): void;
   onFocusNode(nodeId: string): void;
@@ -1341,12 +1454,16 @@ const TopologyNodeGlyph = memo(function TopologyNodeGlyph({
   locale,
   networkColor,
   selected,
+  layoutPinned,
   tabIndex,
   onOpenNode,
   onToggleNode,
   onShowHover,
   onHideHover,
   onShowMenu,
+  onDragPreview,
+  onCommitDrag,
+  onCancelDrag,
   onMenuKey,
   onNavigate,
   onFocusNode,
@@ -1359,8 +1476,130 @@ const TopologyNodeGlyph = memo(function TopologyNodeGlyph({
   const segments = capabilitySegments(node, mode);
   const health = healthEncoding(node.health);
   const shared = node.networks.length > 1;
+  const dragRef = useRef<{
+    pointerId: number;
+    startClientX: number;
+    startClientY: number;
+    startX: number;
+    startY: number;
+    active: boolean;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
+  const [dragging, setDragging] = useState(false);
+
+  function pointerDeltaInSvg(
+    event: ReactPointerEvent<SVGGElement>,
+    startClientX: number,
+    startClientY: number,
+  ): TopologyNodePosition {
+    const svg = event.currentTarget.ownerSVGElement;
+    const matrix = svg?.getScreenCTM?.();
+    if (!svg || !matrix || typeof svg.createSVGPoint !== "function") {
+      return {
+        x: event.clientX - startClientX,
+        y: event.clientY - startClientY,
+      };
+    }
+    try {
+      const start = svg.createSVGPoint();
+      start.x = startClientX;
+      start.y = startClientY;
+      const current = svg.createSVGPoint();
+      current.x = event.clientX;
+      current.y = event.clientY;
+      const inverse = matrix.inverse();
+      const localStart = start.matrixTransform(inverse);
+      const localCurrent = current.matrixTransform(inverse);
+      return {
+        x: localCurrent.x - localStart.x,
+        y: localCurrent.y - localStart.y,
+      };
+    } catch {
+      return {
+        x: event.clientX - startClientX,
+        y: event.clientY - startClientY,
+      };
+    }
+  }
+
+  function draggedPosition(
+    event: ReactPointerEvent<SVGGElement>,
+    drag: NonNullable<typeof dragRef.current>,
+  ): TopologyNodePosition {
+    const delta = pointerDeltaInSvg(
+      event,
+      drag.startClientX,
+      drag.startClientY,
+    );
+    return { x: drag.startX + delta.x, y: drag.startY + delta.y };
+  }
+
+  function startDrag(event: ReactPointerEvent<SVGGElement>): void {
+    onLongPressStart(event, node.node_id);
+    if (event.pointerType !== "mouse" || event.button !== 0) return;
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startX: x,
+      startY: y,
+      active: false,
+    };
+    try {
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    } catch {
+      // Pointer capture is an enhancement; pointerup still commits the drag.
+    }
+  }
+
+  function moveDrag(event: ReactPointerEvent<SVGGElement>): void {
+    onLongPressMove(event);
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (!drag.active) {
+      if (
+        Math.hypot(
+          event.clientX - drag.startClientX,
+          event.clientY - drag.startClientY,
+        ) < 4
+      ) {
+        return;
+      }
+      drag.active = true;
+      setDragging(true);
+    }
+    event.preventDefault();
+    onDragPreview(node.node_id, draggedPosition(event, drag));
+  }
+
+  function finishDrag(
+    event: ReactPointerEvent<SVGGElement>,
+    commit: boolean,
+  ): void {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    setDragging(false);
+    if (drag.active) {
+      suppressClickRef.current = true;
+      if (commit) onCommitDrag(node.node_id, draggedPosition(event, drag));
+      else onCancelDrag();
+    }
+    try {
+      if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // The browser may already have released capture during pointer cancel.
+    }
+  }
 
   function openOrToggle(event: ReactMouseEvent<SVGGElement>): void {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      event.preventDefault();
+      return;
+    }
     if (consumeLongPress(node.node_id)) return;
     if (event.ctrlKey || event.metaKey || event.shiftKey) {
       event.preventDefault();
@@ -1396,9 +1635,11 @@ const TopologyNodeGlyph = memo(function TopologyNodeGlyph({
     <g
       ref={(element) => setNodeRef(node.node_id, element)}
       transform={`translate(${x} ${y})`}
-      className={`topology-node ${node.is_self ? "self" : ""} ${node.health} ${selected ? "selected" : ""}`}
+      className={`topology-node ${node.is_self ? "self" : ""} ${node.health} ${selected ? "selected" : ""} ${dragging ? "dragging" : ""}`}
       data-node-id={node.node_id}
       data-selected={selected ? "true" : "false"}
+      data-layout-pinned={layoutPinned ? "true" : "false"}
+      data-dragging={dragging ? "true" : "false"}
       tabIndex={tabIndex}
       role="option"
       aria-selected={selected}
@@ -1417,14 +1658,20 @@ const TopologyNodeGlyph = memo(function TopologyNodeGlyph({
         onShowHover(node.node_id, event.currentTarget.getBoundingClientRect());
       }}
       onBlur={onHideHover}
-      onPointerDown={(event) => onLongPressStart(event, node.node_id)}
-      onPointerMove={onLongPressMove}
-      onPointerUp={onLongPressEnd}
-      onPointerCancel={onLongPressEnd}
+      onPointerDown={startDrag}
+      onPointerMove={moveDrag}
+      onPointerUp={(event) => {
+        onLongPressEnd();
+        finishDrag(event, true);
+      }}
+      onPointerCancel={(event) => {
+        onLongPressEnd();
+        finishDrag(event, false);
+      }}
       onPointerLeave={onLongPressEnd}
       onContextMenu={(event) => {
         event.preventDefault();
-        onShowMenu(node.node_id, event.clientX, event.clientY);
+        onShowMenu(node.node_id, event.clientX, event.clientY, { x, y });
       }}
     >
       <title>{ariaLabel}</title>
@@ -1491,12 +1738,16 @@ function areTopologyNodeGlyphPropsEqual(
     previous.locale === next.locale &&
     previous.networkColor === next.networkColor &&
     previous.selected === next.selected &&
+    previous.layoutPinned === next.layoutPinned &&
     previous.tabIndex === next.tabIndex &&
     previous.onOpenNode === next.onOpenNode &&
     previous.onToggleNode === next.onToggleNode &&
     previous.onShowHover === next.onShowHover &&
     previous.onHideHover === next.onHideHover &&
     previous.onShowMenu === next.onShowMenu &&
+    previous.onDragPreview === next.onDragPreview &&
+    previous.onCommitDrag === next.onCommitDrag &&
+    previous.onCancelDrag === next.onCancelDrag &&
     previous.onMenuKey === next.onMenuKey &&
     previous.onNavigate === next.onNavigate &&
     previous.onFocusNode === next.onFocusNode &&
@@ -2034,6 +2285,9 @@ export function TopologyView({
     null,
   );
   const [focusRequest, setFocusRequest] = useState(0);
+  const [layoutPersistence, setLayoutPersistence] = useState(() =>
+    loadPersistedTopologyPositions(),
+  );
   const [internalFilters, setInternalFilters] = useState<TopologyFilters>({
     ...EMPTY_TOPOLOGY_FILTERS,
   });
@@ -2043,6 +2297,8 @@ export function TopologyView({
   const menuRef = useRef<HTMLDivElement>(null);
   const menuNodeIdRef = useRef<string | null>(null);
   const activeFilters = filters ?? internalFilters;
+  const fixedPositions = layoutPersistence.positions;
+  const layoutStorageStatus = layoutPersistence.status;
   const deferredFilters = useDeferredValue(activeFilters);
   const sourceTopology = frozenTopology ?? topology;
   const sourceIndex = useMemo(
@@ -2171,14 +2427,40 @@ export function TopologyView({
   const hideHover = useCallback((): void => setHover(null), []);
 
   const showMenu = useCallback(
-    (nodeId: string, x: number, y: number): void => {
+    (
+      nodeId: string,
+      x: number,
+      y: number,
+      layoutPosition?: TopologyNodePosition,
+    ): void => {
       setHover(null);
       const clamped = clampOverlayPosition(x, y, 270, 360);
       menuNodeIdRef.current = nodeId;
-      setMenu({ nodeId, x: clamped.x, y: clamped.y });
+      setMenu({ nodeId, x: clamped.x, y: clamped.y, layoutPosition });
     },
     [],
   );
+
+  const pinNodePosition = useCallback(
+    (nodeId: string, position: TopologyNodePosition): void => {
+      const next = new Map(fixedPositions);
+      next.set(nodeId, position);
+      const persisted = savePersistedTopologyPositions(next);
+      setLayoutPersistence({
+        positions: next,
+        status: persisted ? "loaded" : "unavailable",
+      });
+    },
+    [fixedPositions],
+  );
+
+  function resetLayout(): void {
+    const cleared = clearPersistedTopologyPositions();
+    setLayoutPersistence({
+      positions: new Map<string, TopologyNodePosition>(),
+      status: cleared ? "empty" : "unavailable",
+    });
+  }
 
   function zoomBy(direction: -1 | 1): void {
     setZoom((current) => {
@@ -2248,6 +2530,9 @@ export function TopologyView({
       className={`topology-view ${highContrast ? "topology-high-contrast" : ""}`}
       data-color-mode={mode}
       data-frozen={frozenTopology ? "true" : "false"}
+      data-layout-fixed-count={fixedPositions.size}
+      data-layout-pinned={fixedPositions.size > 0 ? "true" : "false"}
+      data-layout-storage-status={layoutStorageStatus}
       data-topology-state={presentation.kind}
       data-view={view}
     >
@@ -2358,6 +2643,17 @@ export function TopologyView({
           <button
             type="button"
             className="topology-control-button topology-control-wide"
+            aria-label={label(locale, "topology.layout.reset")}
+            title={label(locale, "topology.layout.reset")}
+            disabled={view !== "graph" || fixedPositions.size === 0}
+            onClick={resetLayout}
+          >
+            <PinOff size={15} aria-hidden="true" />
+            <span>{label(locale, "topology.layout.reset")}</span>
+          </button>
+          <button
+            type="button"
+            className="topology-control-button topology-control-wide"
             aria-label={label(
               locale,
               frozenTopology
@@ -2393,6 +2689,22 @@ export function TopologyView({
           </button>
         </div>
       </div>
+      {layoutStorageStatus === "unavailable" ? (
+        <p className="topology-layout-status warning" role="status">
+          {label(locale, "topology.layout.storage_unavailable")}
+        </p>
+      ) : layoutStorageStatus === "invalid" ||
+        layoutStorageStatus === "unsupported_version" ? (
+        <p className="topology-layout-status warning" role="status">
+          {label(locale, "topology.layout.storage_invalid")}
+        </p>
+      ) : fixedPositions.size > 0 ? (
+        <p className="topology-layout-status" role="status">
+          {tr(locale, "topology.layout.pinned", {
+            count: String(fixedPositions.size),
+          })}
+        </p>
+      ) : null}
       <FilterToolbar
         topology={sourceTopology}
         locale={locale}
@@ -2440,11 +2752,13 @@ export function TopologyView({
           locale={locale}
           mode={mode}
           zoom={zoom}
+          fixedPositions={fixedPositions}
           focusRequest={focusRequest}
           focusTargetNodeId={focusTargetNodeId}
           selectedNodeIds={selectedNodeIds}
           onOpenNode={onOpenNode}
           onToggleNode={onToggleNode}
+          onPinNode={pinNodePosition}
           onShowHover={showHover}
           onHideHover={hideHover}
           onShowMenu={showMenu}
@@ -2482,11 +2796,14 @@ export function TopologyView({
           locale={locale}
           selected={selectedNodeIds.has(menuNode.node_id)}
           lifecycleActions={lifecycleActions?.(menuNode.node_id) ?? []}
+          layoutPinned={fixedPositions.has(menuNode.node_id)}
+          layoutPosition={menu.layoutPosition}
           x={menu.x}
           y={menu.y}
           menuRef={menuRef}
           onOpen={(nodeId) => onOpenNode?.(nodeId)}
           onToggle={(nodeId) => onToggleNode?.(nodeId)}
+          onPinLayout={pinNodePosition}
           onPrepareLifecycle={(nodeId, action) =>
             onPrepareLifecycle?.(nodeId, action)
           }

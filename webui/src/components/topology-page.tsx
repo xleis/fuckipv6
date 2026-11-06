@@ -256,6 +256,8 @@ export function TopologyPage({
     const submitAction = submitActionRef.current;
     const activeListAction = listActionRef.current;
     const activeLocale = localeRef.current;
+    const requestedTopologyRevision = topologyRevisionRef.current;
+    const requestedTopologyGeneratedAt = topologyGeneratedAtRef.current;
     if (!activeNetworkId || !submitAction || !activeListAction) {
       setDirectoryLoad({ state: "idle" });
       return;
@@ -281,8 +283,8 @@ export function TopologyPage({
           state: "ready",
           networkId: activeNetworkId,
           directory: submission.outcome.data,
-          topologyRevision: topologyRevisionRef.current,
-          topologyGeneratedAtUnixMs: topologyGeneratedAtRef.current,
+          topologyRevision: requestedTopologyRevision,
+          topologyGeneratedAtUnixMs: requestedTopologyGeneratedAt,
         });
         return;
       }

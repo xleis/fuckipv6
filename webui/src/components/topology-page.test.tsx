@@ -506,6 +506,69 @@ describe("TopologyPage interactions and governance", () => {
     ).toHaveAttribute("aria-disabled", "true");
   });
 
+  it("reloads the directory when authority changes while a response is in flight", async () => {
+    const initialDirectory = directory();
+    const restrictedDirectory = {
+      ...initialDirectory,
+      members: initialDirectory.members.map((entry) => ({
+        ...entry,
+        available_actions: [],
+      })),
+    };
+    let resolveInitial:
+      | ((value: Awaited<ReturnType<TopologyActionSubmit>>) => void)
+      | undefined;
+    const initialResponse = new Promise<
+      Awaited<ReturnType<TopologyActionSubmit>>
+    >((resolve) => {
+      resolveInitial = resolve;
+    });
+    let directoryCalls = 0;
+    const onSubmit = vi.fn(async (action: NodeUiAction) => {
+      if (action.id === "list_network_members") {
+        directoryCalls += 1;
+        if (directoryCalls === 1) return initialResponse;
+        return {
+          outcome: {
+            status: "network_members" as const,
+            data: restrictedDirectory,
+          },
+        };
+      }
+      return {};
+    });
+    const view = render(
+      <TopologyPage
+        topology={snapshot(3)}
+        locale="zh-CN"
+        actions={governanceActions}
+        onSubmitAction={onSubmit}
+      />,
+    );
+    await waitFor(() => expect(directoryCalls).toBe(1));
+
+    view.rerender(
+      <TopologyPage
+        topology={snapshot(4)}
+        locale="zh-CN"
+        actions={governanceActions}
+        onSubmitAction={onSubmit}
+      />,
+    );
+    resolveInitial?.({
+      outcome: { status: "network_members", data: initialDirectory },
+    });
+
+    await waitFor(() => expect(directoryCalls).toBe(2));
+    fireEvent.contextMenu(screen.getByRole("option", { name: /Bob/ }));
+    const menu = await screen.findByRole("menu");
+    expect(
+      await within(menu).findByRole("menuitem", {
+        name: translated("topology.menu.no_actions"),
+      }),
+    ).toHaveAttribute("aria-disabled", "true");
+  });
+
   it("treats a server removal denial as a per-item skip and never submits lifecycle", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn(

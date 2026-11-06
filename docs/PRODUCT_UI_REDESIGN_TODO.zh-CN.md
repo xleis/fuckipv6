@@ -1893,18 +1893,39 @@ SHA-256 为 `e0b7288b5e609a6767117622aed323c2fa3c0bda3de8c40da2c34fbed93ab306`�
 `node ../scripts/test_webui_accessibility.mjs`、`node ../scripts/test_i18n_runtime.mjs` 和
 `git diff --check`。
 
-### W9-10 拓扑与成员 E2E `[ ]`
+### W9-10 拓扑与成员 E2E `[x]`
 
-- [ ] 覆盖邀请→批准→在线→降级→移除完整旅程；
-- [ ] 覆盖多网络公共节点和跨网络筛选；
-- [ ] 覆盖组策略变化后拓扑能力变化；
-- [ ] 覆盖权限撤销后对象和操作即时消失；
-- [ ] 覆盖右键、菜单键、长按和键盘操作；
-- [ ] 覆盖大图增量更新和断线重连；
-- [ ] 验证所有批量操作有逐项结果；
-- [ ] 测试证据与活动记录可相互追溯。
+- [x] 覆盖邀请→批准→在线→降级→移除完整旅程；
+- [x] 覆盖多网络公共节点和跨网络筛选；
+- [x] 覆盖组策略变化后拓扑能力变化；
+- [x] 覆盖权限撤销后对象和操作即时消失；
+- [x] 覆盖右键、菜单键、长按和键盘操作；
+- [x] 覆盖大图增量更新和断线重连；
+- [x] 验证所有批量操作有逐项结果；
+- [x] 测试证据与活动记录可相互追溯。
 
 **验收**：拓扑与治理不是两张皮；用户从图或列表均可完成同一真实操作。
+
+**证据（2026-11-06）**：`webui/scripts/topology-member-e2e.mjs` 在真实无头 Chrome/CDP 中完成 17 项断言，
+使用服务端权威拓扑和成员目录走通邀请创建、Bob 的 pending/online 多网络身份、批准、降级和移除；批准与
+移除响应中的 audit ID 均与后续 Overview 活动和权威快照一致，邀请码只做格式校验且不写入报告。组策略
+场景先完成批准结果面板并重新以 `Space` 选中真实节点，再把 Bob 从 `file-readers`/File 收紧为
+`relay-operators`/Relay，同时撤销 `can_manage_members`；拓扑角色、能力和右键/键盘菜单动作立即消失，
+随后恢复策略并等待两次权威目录刷新，File/Exit 能力和 Suspend/Remove 动作随授权恢复。移除后 Bob 的
+Home membership 与操作消失，但 Studio 公共节点及其动作保留。旅程还覆盖真实右键、`Shift+F10`、
+方向键/`End`/`Enter`、窄屏触控长按和跨网络筛选；122 节点大图仅渲染 80 个 DOM 节点，断线重连不刷新
+文档、重新获取权威快照、移除陈旧节点并应用重命名。批准在 E2E 中展示逐项结果与真实 audit ID；单元测试
+另行覆盖 approve/reject/suspend/resume/remove/undo_remove 六种批量动作、混合失败逐项披露和
+operation-only 伪成功拒绝。组策略目录响应与快照 revision 竞争时不会把旧授权写回 UI，新增回归覆盖
+in-flight 响应后立即刷新权威目录。
+
+**验证通过**：`node webui/scripts/topology-member-e2e.mjs --skip-build`（17 checks）、WebUI
+`npm test -- --run`（19 files，221 passed）、`npm run typecheck`、`npm run lint`、`npm run build`、
+`node scripts/test_webui_accessibility.mjs`、`node scripts/test_i18n_runtime.mjs`、
+`cargo test -p fuckipv6-client --all-features --lib topology_shared_scenarios_render_only_authoritative_objects`
+（1 passed）、`cargo test -p fuckipv6-common --all-features i18n`（9 passed）和 `git diff --check`。
+报告位于 `target/topology-member-e2e/report.json`，脚本 SHA-256 为
+`728e60b31f6f761b1269a0a328f37c1aa95219336a8c9967dca7b4f1c4f2e5a3`。
 
 ## 13. W10：安全、隐私与活动
 

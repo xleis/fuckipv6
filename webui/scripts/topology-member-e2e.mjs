@@ -255,6 +255,15 @@ function createJourneyState(productSnapshot, topology) {
     homeBobStatus: "pending",
     homeBobLifecycle: "pending_approval",
     homeBobPresence: presence("online"),
+    groupPolicy: {
+      network_id: "home",
+      policy_id: "policy_group_media_share",
+      revision: 1,
+      bob_group: "file-readers",
+      bob_capabilities: ["file"],
+      viewer_role: "owner",
+      can_manage_members: true,
+    },
     commands: [],
     outcomes: [],
     reconnects: 0,
@@ -297,6 +306,29 @@ function setHomeBobState(state, { status, lifecycle, health }) {
   state.homeBobPresence = home.presence;
 }
 
+function updateHomeGroupPolicy(
+  state,
+  { bobGroup, bobCapabilities, viewerRole, canManageMembers },
+) {
+  const bob = state.topology.nodes.find((node) => node.node_id === BOB_ID);
+  if (!bob) throw new Error("fixture Bob node is missing");
+  const home = membershipForNode(bob, "home");
+  if (!home) throw new Error("fixture Bob home membership is missing");
+  state.groupPolicy = {
+    ...state.groupPolicy,
+    revision: state.groupPolicy.revision + 1,
+    bob_group: bobGroup,
+    bob_capabilities: [...bobCapabilities],
+    viewer_role: viewerRole,
+    can_manage_members: canManageMembers,
+  };
+  home.capabilities = [...bobCapabilities];
+  bob.capabilities = [
+    ...new Set(bob.networks.flatMap((network) => network.capabilities ?? [])),
+  ].sort();
+  bumpAuthority(state);
+}
+
 function removeBobFromHome(state) {
   const bob = state.topology.nodes.find((node) => node.node_id === BOB_ID);
   if (!bob) throw new Error("fixture Bob node is missing");
@@ -324,6 +356,13 @@ function memberFromNode(state, node, networkId) {
   const status = isHomeBob ? state.homeBobStatus : network.status;
   const lifecycle = isHomeBob ? state.homeBobLifecycle : network.status;
   const revision = isHomeBob ? state.homeMemberRevision : 7;
+  const capabilities = isHomeBob
+    ? state.groupPolicy.bob_capabilities
+    : network.capabilities;
+  const canManageHome =
+    state.groupPolicy.can_manage_members &&
+    state.groupPolicy.viewer_role !== "member";
+  const canManage = networkId === "studio" ? true : canManageHome;
   const availableActions =
     isHomeBob && status === "pending"
       ? ["approve", "reject"]
@@ -336,12 +375,12 @@ function memberFromNode(state, node, networkId) {
     identity_fingerprint: `fingerprint-${node.node_id.slice(-8)}`,
     role: network.role,
     groups: [network.role],
-    capabilities: network.capabilities,
+    capabilities,
     status,
     lifecycle_state: lifecycle,
     revision,
     access_epoch: 4,
-    available_actions: availableActions,
+    ...(canManage ? { available_actions: availableActions } : {}),
     presence: isHomeBob ? state.homeBobPresence : network.presence,
   };
 }
@@ -353,8 +392,12 @@ function memberDirectory(state, networkId) {
   return {
     network_id: networkId,
     generated_at_unix_ms: state.topology.generated_at_unix_ms,
-    viewer_role: networkId === "studio" ? "administrator" : "owner",
-    can_manage_members: true,
+    viewer_role:
+      networkId === "studio"
+        ? "administrator"
+        : state.groupPolicy.viewer_role,
+    can_manage_members:
+      networkId === "studio" ? true : state.groupPolicy.can_manage_members,
     members,
   };
 }
@@ -1676,6 +1719,168 @@ async function main() {
     checks.push("Shift+F10, End, ArrowUp and Enter prepare and execute one audited Approve action");
     checks.push("Approval per-item result and authoritative topology both expose the same audit ID");
 
+    const postApprovalDirectoryStart = fixtureServer.state.commands.length;
+    await clickElement(
+      cdp,
+      `[...document.querySelectorAll('[data-testid="topology-batch-results"] button')].find(
+        (button) => button.textContent?.trim() === "Finish and clear selection"
+      )`,
+      "finish approved batch results",
+    );
+    await waitForCommandAfter(
+      fixtureServer,
+      postApprovalDirectoryStart,
+      "list_network_members",
+      (entry) => entry.payload.network_id === "home",
+      "home directory refresh after finishing approval",
+    );
+    await evaluate(
+      cdp,
+      `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.focus()`,
+    );
+    await waitForActive(
+      cdp,
+      `el?.matches('g.topology-node[data-node-id="${BOB_ID}"]')`,
+      "Bob node before group policy check",
+    );
+    await pressKey(cdp, " ");
+    try {
+      await waitFor(
+        cdp,
+        `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("data-selected") === "true" &&
+         Boolean(document.querySelector('[data-testid="topology-governance"]'))`,
+        "Bob selection before group policy check",
+      );
+    } catch (error) {
+      const diagnostic = await evaluate(
+        cdp,
+        `(() => ({
+          selected: document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("data-selected"),
+          governance: document.querySelector('#topology-governance')?.innerText ?? null,
+          batchResults: document.querySelector('[data-testid="topology-batch-results"]')?.innerText ?? null,
+          active: document.activeElement?.getAttribute("data-node-id") ?? document.activeElement?.textContent?.trim().slice(0, 100) ?? null,
+        }))()`,
+      );
+      throw new Error(`${error.message}; diagnostic=${JSON.stringify(diagnostic)}`);
+    }
+
+    assert.match(
+      await evaluate(
+        cdp,
+        `document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("aria-label") ?? ""`,
+      ),
+      /Exit.*File|File.*Exit/,
+      "Bob topology does not expose the initial group-granted File capability",
+    );
+    const groupPolicyDirectoryRequestsBefore = fixtureServer.commandCount(
+      "list_network_members",
+    );
+    updateHomeGroupPolicy(state, {
+      bobGroup: "relay-operators",
+      bobCapabilities: ["relay"],
+      viewerRole: "member",
+      canManageMembers: false,
+    });
+    const restrictedDirectoryStart = fixtureServer.state.commands.length;
+    fixtureServer.broadcastSnapshot();
+    await waitFor(
+      cdp,
+      `(() => {
+        const label = document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("aria-label") ?? "";
+        const detail = document.querySelector('[data-testid="topology-node-detail"]')?.textContent ?? "";
+        return label.includes("Relay") && !label.includes("File") &&
+          detail.includes("Relay") && !detail.includes("File");
+      })()`,
+      "topology capabilities after restricted group policy",
+      12_000,
+    );
+    await waitForCommandAfter(
+      fixtureServer,
+      restrictedDirectoryStart,
+      "list_network_members",
+      (entry) => entry.payload.network_id === "home",
+      "home directory refresh after restricted group policy",
+    );
+    try {
+      await waitFor(
+        cdp,
+        `(() => {
+          const governance = document.querySelector('[data-testid="topology-governance"]');
+          const text = governance?.textContent ?? "";
+          const selectedBob = document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("data-selected") === "true";
+          return selectedBob && governance?.getAttribute("data-testid") === "topology-governance" &&
+            text.includes("No server-authorized actions") &&
+            !text.includes("member directory is stale") &&
+            !text.includes("Loading the member directory");
+        })()`,
+        "restricted directory capabilities settled",
+        12_000,
+      );
+    } catch (error) {
+      const diagnostic = await evaluate(
+        cdp,
+        `(() => ({
+          selectedBob: document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("data-selected"),
+          governanceText: document.querySelector('#topology-governance')?.innerText ?? null,
+          governanceHtml: document.querySelector('#topology-governance')?.innerHTML?.slice(0, 2_000) ?? null,
+          actionOptions: [...document.querySelectorAll('#topology-governance select option')].map((option) => option.textContent?.trim()),
+        }))()`,
+      );
+      throw new Error(`${error.message}; diagnostic=${JSON.stringify(diagnostic)}`);
+    }
+    await openNodeMenuByKeyboard(cdp, BOB_ID);
+    await waitFor(
+      cdp,
+      `document.querySelector('[data-testid="topology-node-menu"] [role="menuitem"][aria-disabled="true"]')?.textContent?.trim() === "The server exposes no actions for this object"`,
+      "lifecycle capabilities after restricted group policy",
+    );
+    await pressKey(cdp, "Escape");
+
+    const restoredDirectoryStart = fixtureServer.state.commands.length;
+    updateHomeGroupPolicy(state, {
+      bobGroup: "file-readers",
+      bobCapabilities: ["file"],
+      viewerRole: "owner",
+      canManageMembers: true,
+    });
+    fixtureServer.broadcastSnapshot();
+    await waitFor(
+      cdp,
+      `(() => {
+        const label = document.querySelector('g.topology-node[data-node-id="${BOB_ID}"]')?.getAttribute("aria-label") ?? "";
+        return label.includes("File") && label.includes("Exit");
+      })()`,
+      "topology capabilities after restored group policy",
+      12_000,
+    );
+    await waitForCommandAfter(
+      fixtureServer,
+      restoredDirectoryStart,
+      "list_network_members",
+      (entry) => entry.payload.network_id === "home",
+      "home directory refresh after restored group policy",
+    );
+    await openNodeMenuByKeyboard(cdp, BOB_ID);
+    await waitFor(
+      cdp,
+      `["Suspend", "Remove"].every((action) =>
+        [...document.querySelectorAll('[data-testid="topology-node-menu"] [role="menuitem"]')].some(
+          (item) => item.textContent?.trim() === action
+        )
+      )`,
+      "lifecycle capabilities after restored group policy",
+    );
+    await pressKey(cdp, "Escape");
+    const groupPolicyDirectoryRequests = fixtureServer.commandCount(
+      "list_network_members",
+    ) - groupPolicyDirectoryRequestsBefore;
+    assert.equal(
+      groupPolicyDirectoryRequests,
+      2,
+      `group policy changes caused ${groupPolicyDirectoryRequests} directory refreshes instead of 2`,
+    );
+    checks.push("group policy changes refresh topology capabilities and lifecycle controls from authority");
+
     state.homeMemberRevision = 14;
     setHomeBobState(state, {
       status: "degraded",
@@ -2165,6 +2370,31 @@ async function main() {
         preview_payload: previewCommand.payload,
         impact_items: 6,
         bob_removed_from_home: true,
+      },
+      group_policy: {
+        source: "authoritative_snapshot_and_member_directory",
+        policy_id: state.groupPolicy.policy_id,
+        final_revision: state.groupPolicy.revision,
+        before: {
+          bob_group: "file-readers",
+          bob_capabilities: ["file"],
+          viewer_role: "owner",
+          can_manage_members: true,
+        },
+        restricted: {
+          bob_group: "relay-operators",
+          bob_capabilities: ["relay"],
+          viewer_role: "member",
+          can_manage_members: false,
+        },
+        restored: {
+          bob_group: "file-readers",
+          bob_capabilities: ["file"],
+          viewer_role: "owner",
+          can_manage_members: true,
+        },
+        directory_refreshes: groupPolicyDirectoryRequests,
+        lifecycle_actions_restored: true,
       },
       audit_trace: {
         remove_response_audit_id: removeOutcome.data.audit_id,

@@ -126,9 +126,9 @@ class SilentWebSocket {
 
   close(): void {}
 
-  emit(type: string): void {
+  emit(type: string, event: Event = new Event(type)): void {
     for (const listener of this.listeners.get(type) ?? []) {
-      listener(new Event(type));
+      listener(event);
     }
   }
 }
@@ -1148,6 +1148,52 @@ describe("React WebUI shell", () => {
       );
     });
     expect(container.querySelectorAll("[data-page-state]")).toHaveLength(1);
+  });
+
+  it("fetches an authoritative snapshot after the event stream reconnects", async () => {
+    authenticate(populatedSnapshot);
+    const { container } = renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+    const firstSocket = SilentWebSocket.instances.at(-1);
+    if (!firstSocket) throw new Error("WebSocket was not created");
+    const refreshedSnapshot = {
+      ...populatedSnapshot,
+      recent_activity: [activityAt(77)],
+    };
+    vi.mocked(loadSnapshot).mockResolvedValue(refreshedSnapshot);
+
+    act(() => firstSocket.emit("open"));
+    act(() => firstSocket.emit("close"));
+    await waitFor(
+      () => expect(SilentWebSocket.instances).toHaveLength(2),
+      { timeout: 3_000, interval: 100 },
+    );
+    const reconnectSocket = SilentWebSocket.instances.at(-1);
+    if (!reconnectSocket) throw new Error("Reconnect WebSocket was not created");
+
+    act(() => reconnectSocket.emit("open"));
+    await waitFor(() => expect(loadSnapshot).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("command-77")).toBeInTheDocument();
+
+    act(() =>
+      reconnectSocket.emit(
+        "message",
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            schema_version: 1,
+            type: "snapshot",
+            snapshot: refreshedSnapshot,
+          }),
+        }),
+      ),
+    );
+    await waitFor(() => {
+      expect(container.querySelector(".stale-indicator")).not.toHaveClass(
+        "active",
+      );
+    });
   });
 
   it("maps a temporary control rejection to maintenance while keeping the snapshot", async () => {

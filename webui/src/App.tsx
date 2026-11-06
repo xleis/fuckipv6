@@ -199,6 +199,7 @@ function useNodeEvents(
     let messageTimer: number | null = null;
     let pendingMessage: string | null = null;
     let stopped = false;
+    let openedOnce = false;
     const invalidateSnapshot = createCoalescedTask(() => {
       void queryClient.invalidateQueries({ queryKey: SNAPSHOT_QUERY_KEY });
     }, 150);
@@ -253,9 +254,16 @@ function useNodeEvents(
       socket = new WebSocket(
         `${protocol}//${window.location.host}/api/node/events?schema_version=1`,
       );
-      socket.addEventListener("open", () =>
-        setState((current) => ({ ...current, status: "live" })),
-      );
+      socket.addEventListener("open", () => {
+        if (openedOnce) {
+          // Events missed while disconnected cannot be replayed. Force an
+          // authoritative snapshot fetch before considering the graph live.
+          queueResync();
+        } else {
+          setState((current) => ({ ...current, status: "live" }));
+          openedOnce = true;
+        }
+      });
       socket.addEventListener("message", (event) => {
         // Snapshot invalidation events are level-triggered: only the newest
         // queued frame matters. Deferring the parse keeps a 500-frame burst

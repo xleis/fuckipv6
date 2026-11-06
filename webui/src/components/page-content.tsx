@@ -742,6 +742,7 @@ function recentOverviewActivity(
   title: string;
   detail: string;
   command?: string;
+  auditId: string;
 }> {
   return [...(snapshot.recent_activity ?? [])]
     .sort(
@@ -758,6 +759,7 @@ function recentOverviewActivity(
         resource: entry.resource,
       }),
       command: entry.details.command,
+      auditId: entry.audit_id,
     }));
 }
 
@@ -891,11 +893,17 @@ function Overview({
                 className="overview-activity-row"
                 key={entry.id}
                 data-activity-action={entry.title}
+                data-audit-id={entry.auditId}
               >
                 <CircleDot size={14} />
                 <span>
                   <strong>{entry.title}</strong>
                   <small>{entry.detail}</small>
+                  <code className="activity-audit-id">
+                    {tr(locale, "overview.activity.audit_id", {
+                      audit: entry.auditId,
+                    })}
+                  </code>
                   {entry.command ? <code>{entry.command}</code> : null}
                 </span>
               </div>

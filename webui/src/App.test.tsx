@@ -1915,6 +1915,8 @@ describe("React WebUI shell", () => {
     expect(rows).toHaveLength(5);
     expect(rows[0]).toHaveTextContent("command-6");
     expect(rows[4]).toHaveTextContent("command-2");
+    expect(rows[0]).toHaveAttribute("data-audit-id", "audit-6");
+    expect(rows[0]).toHaveTextContent("translated:overview.activity.audit_id");
     expect(activity).not.toHaveTextContent("raw-summary");
     expect(activity).not.toHaveTextContent("secret-");
   });

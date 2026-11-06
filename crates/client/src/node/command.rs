@@ -13,8 +13,8 @@ use fuckipv6_common::domain::{
     MemberLifecycleAction, MemberLifecycleChange, MemberRemovalPreview, MembershipRole,
     NetworkCreateProfile, NetworkDiscoveryRecord, NetworkEndpoint, NetworkId, NetworkJoinMode,
     NetworkMemberDirectory, NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate,
-    NetworkVisibility, JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS, JOIN_REQUEST_MAX_REASON_CHARS,
-    NETWORK_PROFILE_MAX_TAG_CHARS,
+    NetworkVisibility, PermissionDenialCode, JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS,
+    JOIN_REQUEST_MAX_REASON_CHARS, NETWORK_PROFILE_MAX_TAG_CHARS,
 };
 #[cfg(test)]
 use fuckipv6_common::domain::{DEFAULT_NETWORK_ICON, DEFAULT_NETWORK_LANGUAGE};
@@ -2939,12 +2939,13 @@ impl NodeCommandBus {
         &self,
         request: NodeCommandRequest,
     ) -> Result<NodeCommandResult, NodeCommandBusError> {
-        self.execute(test_owner_context(), request).await
+        let context = test_owner_context().with_test_network_authority_for(&request.command);
+        self.execute(context, request).await
     }
 }
 
 pub(crate) fn denied(request_id: u64, denial: &CommandDenial) -> NodeCommandResult {
-    let code = if denial.code == "permission.recent_authentication_required" {
+    let code = if denial.code == PermissionDenialCode::RecentAuthenticationRequired.as_str() {
         NodeProblemCode::AuthenticationRequired
     } else {
         NodeProblemCode::PermissionDenied
@@ -2983,6 +2984,10 @@ pub enum NodeCommandBusError {
 mod tests {
     use super::*;
     use crate::node::NodePermission;
+    use fuckipv6_common::domain::{
+        PermissionCondition, PermissionEffect, PermissionRule, PolicyAction, ResourceKind,
+        SecurityRuleId, SubjectSelector,
+    };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn invitation_code() -> InvitationCode {
@@ -4257,6 +4262,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn command_bus_preserves_stable_policy_denial_code_and_reason() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let network_id = fuckipv6_common::domain::NetworkId::from_public_key(b"stable-denial-home");
+        let deny_rule = PermissionRule {
+            rule_id: SecurityRuleId::from_public_key(b"stable-denial-rule"),
+            effect: PermissionEffect::Deny,
+            subjects: vec![SubjectSelector::AnyMember],
+            resources: vec![ResourceKind::SecurityPolicy],
+            actions: vec![PolicyAction::Update],
+            conditions: vec![PermissionCondition::MembershipActive],
+        };
+        let deny_rule_id = deny_rule.rule_id.to_string();
+        let context = NodeCommandContext::local_owner(actor(), "control-api:owner-session")
+            .with_local_policy(vec![deny_rule])
+            .with_network_scopes([(
+                "home".into(),
+                crate::node::NetworkCommandScope::new(
+                    network_id,
+                    fuckipv6_common::domain::NetworkRole::Owner,
+                    fuckipv6_common::domain::MembershipState::Active,
+                    Vec::new(),
+                ),
+            )]);
+        let bus = NodeCommandBus::spawn(
+            Arc::new(CountingHandler {
+                calls: calls.clone(),
+            }),
+            NodeEventBus::default(),
+            4,
+        );
+        let command = NodeCommand::BanClient(NodeClientBlacklistCommand {
+            network_name: "home".into(),
+            client_id: "bad-client".into(),
+        });
+
+        let result = bus
+            .execute(context, NodeCommandRequest::new(54, command))
+            .await
+            .expect("authorization denial is a command result");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let NodeCommandOutcome::Rejected(problem) = result.outcome else {
+            panic!("expected authorization rejection");
+        };
+        assert_eq!(problem.code, NodeProblemCode::PermissionDenied);
+        assert_eq!(
+            problem.params.get("authorization_code").map(String::as_str),
+            Some(PermissionDenialCode::Denied.as_str())
+        );
+        let audit = bus.audit_entries();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].outcome, AuditOutcome::Denied);
+        let reason = &audit[0].details["authorization_reason"];
+        assert!(reason.contains(&deny_rule_id), "reason: {reason}");
+        assert!(reason.contains("local layer"), "reason: {reason}");
+    }
+
+    #[tokio::test]
     async fn create_network_permission_denial_precedes_handler_and_is_audited() {
         let calls = Arc::new(AtomicUsize::new(0));
         let network_id = fuckipv6_common::domain::NetworkId::from_public_key(b"create-denied-home");
@@ -4436,6 +4499,7 @@ mod tests {
             let result = bus
                 .execute(
                     NodeCommandContext::local_owner(actor.clone(), "control-api:owner-session")
+                        .with_test_network_authority_for(&command)
                         .with_audit_operation_id(operation_id.clone()),
                     NodeCommandRequest::new(80 + offset as u64, command),
                 )
@@ -4478,7 +4542,10 @@ mod tests {
         );
         let network_id = join_request_network_id();
         let request_id = join_request_id("audit-request");
-        let context = || NodeCommandContext::local_owner(actor(), "local-ipc:owner");
+        let context = |command: &NodeCommand| {
+            NodeCommandContext::local_owner(actor(), "local-ipc:owner")
+                .with_test_network_authority_for(command)
+        };
         let commands = vec![
             NodeCommand::SubmitJoinRequest(NodeSubmitJoinRequestCommand {
                 network_id: network_id.clone(),
@@ -4530,7 +4597,7 @@ mod tests {
         for (offset, command) in commands.into_iter().enumerate() {
             let result = bus
                 .execute(
-                    context(),
+                    context(&command),
                     NodeCommandRequest::new(60 + offset as u64, command),
                 )
                 .await

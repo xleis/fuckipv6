@@ -55,7 +55,8 @@
             "viewer_role": "owner",
             "capabilities": [
               "relay"
-            ]
+            ],
+            "can_manage_members": true
           }
         ],
         "clusters": [],
@@ -189,7 +190,8 @@
             "capabilities": [
               "relay",
               "exit"
-            ]
+            ],
+            "can_manage_members": true
           },
           {
             "network_id": "studio",
@@ -199,7 +201,8 @@
             "viewer_role": "administrator",
             "capabilities": [
               "coordinator"
-            ]
+            ],
+            "can_manage_members": true
           }
         ],
         "clusters": [],
@@ -389,7 +392,8 @@
             "viewer_role": "owner",
             "capabilities": [
               "relay"
-            ]
+            ],
+            "can_manage_members": true
           },
           {
             "network_id": "studio",
@@ -401,7 +405,8 @@
               "coordinator",
               "relay",
               "exit"
-            ]
+            ],
+            "can_manage_members": false
           }
         ],
         "clusters": [],
@@ -610,7 +615,8 @@
             "viewer_role": "owner",
             "capabilities": [
               "relay"
-            ]
+            ],
+            "can_manage_members": true
           }
         ],
         "clusters": [],
@@ -730,7 +736,8 @@
             "viewer_role": "owner",
             "capabilities": [
               "relay"
-            ]
+            ],
+            "can_manage_members": true
           }
         ],
         "clusters": [],
@@ -871,7 +878,8 @@
               "relay",
               "exit",
               "file"
-            ]
+            ],
+            "can_manage_members": true
           }
         ],
         "clusters": [],

@@ -188,6 +188,21 @@ describe("topology action planning", () => {
     ]);
   });
 
+  it("trusts server management capability instead of the viewer role label", () => {
+    const plan = buildBatchMemberPlan(
+      snapshot(),
+      new Set(["bob"]),
+      "net-alpha",
+      { ...directory(), viewer_role: "member", can_manage_members: true },
+    );
+    expect(plan.actionOptions).toContainEqual({
+      action: "suspend",
+      eligibleCount: 1,
+      totalCount: 1,
+    });
+    expect(plan.eligible.map((candidate) => candidate.nodeId)).toEqual(["bob"]);
+  });
+
   it("blocks every member when the server did not grant management", () => {
     const plan = buildBatchMemberPlan(
       snapshot(),

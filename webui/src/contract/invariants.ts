@@ -2418,8 +2418,6 @@ function memberDirectory(value: unknown): NetworkMemberDirectory {
     value.can_manage_members,
     "member directory manage flag invalid",
   );
-  if (canManage && viewerRole === "member")
-    fail("member directory manage flag contradicts viewer role");
   const members = arrayValue(value.members, "member directory rows invalid");
   const seenNodeIds: string[] = [];
   for (const [index, entry] of members.entries()) {

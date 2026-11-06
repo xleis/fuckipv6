@@ -227,11 +227,12 @@ function memberDirectory(topology, networkId) {
     (candidate) => candidate.network_id === networkId,
   );
   const viewerRole = boundary?.viewer_role ?? "member";
+  const canManageMembers = boundary?.can_manage_members === true;
   return {
     network_id: networkId,
     generated_at_unix_ms: topology.generated_at_unix_ms + 1000,
     viewer_role: viewerRole,
-    can_manage_members: viewerRole !== "member",
+    can_manage_members: canManageMembers,
     members: topology.nodes.flatMap((node) => {
       const membership = node.networks.find(
         (candidate) => candidate.network_id === networkId,
@@ -250,7 +251,7 @@ function memberDirectory(topology, networkId) {
           revision: topology.revision,
           access_epoch: 1,
           available_actions:
-            viewerRole !== "member" && node.node_id !== topology.viewer
+            canManageMembers && node.node_id !== topology.viewer
               ? ["suspend"]
               : [],
           presence: membership.presence,

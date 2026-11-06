@@ -884,6 +884,25 @@ describe("node UI contract invariants", () => {
       "translated:outcome.network_members_loaded",
     );
 
+    const memberViewer = structuredClone(outcome) as unknown as {
+      data: NetworkMemberDirectory;
+    };
+    memberViewer.data.viewer_role = "member";
+    expect(
+      validateCommandResponse(
+        {
+          schema_version: 1,
+          request_id: 471,
+          server_time: "2026-11-01T00:00:00Z",
+          result: {
+            request_id: 471,
+            outcome: memberViewer as unknown as NodeCommandOutcome,
+          },
+        },
+        471,
+      ),
+    ).toEqual(memberViewer);
+
     const duplicate = structuredClone(outcome) as unknown as {
       data: NetworkMemberDirectory;
     };

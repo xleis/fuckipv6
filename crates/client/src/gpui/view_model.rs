@@ -604,10 +604,7 @@ pub fn topology_member_actions(
     let (Some(directory), Some(network_id)) = (directory, network_id) else {
         return Vec::new();
     };
-    if directory.network_id.as_str() != network_id
-        || !directory.can_manage_members
-        || directory.viewer_role == MembershipRole::Member
-    {
+    if directory.network_id.as_str() != network_id || !directory.can_manage_members {
         return Vec::new();
     }
     let Some(member) = directory
@@ -7038,9 +7035,13 @@ mod tests {
 
         let mut member_view = directory.clone();
         member_view.viewer_role = MembershipRole::Member;
-        assert!(
-            topology_member_actions(Some(&member_view), Some(alpha.as_str()), relay.as_str())
-                .is_empty()
+        assert_eq!(
+            topology_member_actions(Some(&member_view), Some(alpha.as_str()), relay.as_str()),
+            vec![
+                MemberLifecycleAction::Approve,
+                MemberLifecycleAction::Suspend,
+                MemberLifecycleAction::Remove,
+            ]
         );
         assert!(topology_member_actions(None, Some(alpha.as_str()), relay.as_str()).is_empty());
     }

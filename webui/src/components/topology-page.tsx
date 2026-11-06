@@ -68,8 +68,7 @@ function memberLifecycleActions(
     directoryLoad.networkId !== networkId ||
     directoryLoad.topologyRevision !== topologyRevision ||
     directoryLoad.topologyGeneratedAtUnixMs !== topologyGeneratedAtUnixMs ||
-    !directoryLoad.directory.can_manage_members ||
-    directoryLoad.directory.viewer_role === "member"
+    !directoryLoad.directory.can_manage_members
   ) {
     return [];
   }

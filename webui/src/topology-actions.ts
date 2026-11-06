@@ -196,7 +196,7 @@ export function buildBatchMemberPlan(
   const baseCandidates = selectedNodes.map((node) => {
     const member = directoryMembers.get(node.node_id) ?? null;
     let skipReason: BatchSkipReason | undefined;
-    if (!directory?.can_manage_members || directory.viewer_role === "member") {
+    if (!directory?.can_manage_members) {
       skipReason = "not_manageable";
     } else if (!member) {
       skipReason = "member_missing";
@@ -209,7 +209,7 @@ export function buildBatchMemberPlan(
     };
   });
   const actionOptions =
-    directory?.can_manage_members && directory.viewer_role !== "member"
+    directory?.can_manage_members
       ? BATCH_MEMBER_ACTIONS.map((action) => {
           let eligibleCount = 0;
           for (const candidate of baseCandidates) {

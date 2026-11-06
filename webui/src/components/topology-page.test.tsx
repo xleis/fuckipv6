@@ -415,6 +415,30 @@ describe("TopologyPage interactions and governance", () => {
     expect(lifecycleCalls).toBe(0);
   });
 
+  it("uses server capability even when the viewer role label is member", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn(
+      directorySubmit(directory(true, "member", ["suspend"])),
+    );
+    render(
+      <TopologyPage
+        topology={snapshot()}
+        locale="zh-CN"
+        actions={governanceActions}
+        onSubmitAction={onSubmit}
+      />,
+    );
+
+    fireEvent.contextMenu(screen.getByRole("option", { name: /Bob/ }));
+    const menu = await screen.findByRole("menu");
+    const suspend = await within(menu).findByRole("menuitem", {
+      name: translated("choice.member_lifecycle.suspend"),
+    });
+    expect(suspend).toBeEnabled();
+    await user.click(suspend);
+    expect(screen.getByText(translated("topology.selection.count"))).toBeInTheDocument();
+  });
+
   it("removes lifecycle actions immediately when the manifest revokes the command", async () => {
     const onSubmit = vi.fn(directorySubmit(directory()));
     const view = render(

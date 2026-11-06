@@ -56,7 +56,7 @@
 | W7 节点页 | `[~]` | P1 | W2,W4,W5 | W7-01 启停、W7-03 权威路由摘要、W7-04 身份和密钥、W7-05 诊断恢复与 W7-06 状态权限矩阵已完成；W7-02 接口/TUN 的实机平台验收进行中 |
 | W8 网络创建与发现 | `[~]` | P1 | W3,W4,W5 | 创建、发现、开放/审批/私有邀请和强制 Exit 知情已完成；索引故障隔离与发现全链路测试待完成 |
 | W9 成员、组与拓扑 | `[~]` | P1 | W8 | 成员列表、邀请审批、组目录和拓扑聚合已完成；多网络视觉、交互、性能与 E2E 进行中 |
-| W10 安全与隐私 | `[ ]` | P1 | W9 | ACL、字段权限、测试器、审计 |
+| W10 安全与隐私 | `[~]` | P1 | W9 | W10-01 权限模型与矩阵已冻结；ACL、字段权限、测试器、审计进行中 |
 | W11 流量路由 | `[ ]` | P1 | W7,W10 | 规则、测试、原子应用、失败关闭 |
 | W12 Exit | `[ ]` | P1 | W10,W11 | 治理、Google、DNS、网速报告 |
 | W13 Relay | `[ ]` | P1 | W10 | 授权、配额、健康、回退 |
@@ -1931,16 +1931,33 @@ in-flight 响应后立即刷新权威目录。
 
 目标：权限、字段隐私、策略应用和审计使用同一权威契约。默认拒绝，节点本地否决不可被远程管理员覆盖。
 
-### W10-01 权限模型与矩阵冻结 `[ ]`
+### W10-01 权限模型与矩阵冻结 `[x]`
 
-- [ ] 定义 Node Owner、Network Owner、Administrator、Member、Guest 和临时 Coordinator 身份；
-- [ ] 定义资源、动作、作用域和前置状态；
-- [ ] 实现权限合成算法：显式拒绝优先、本地否决其次、允许需全部满足；
-- [ ] 区分网络授权与节点本地授权；
-- [ ] 临时 Coordinator 的写权限冻结规则进入领域层；
-- [ ] 建立权限矩阵契约测试；
-- [ ] 前端只根据服务端 capability 结果启用控件；
-- [ ] 所有拒绝返回稳定错误码和可解释原因。
+- [x] 定义 Node Owner、Network Owner、Administrator、Member、Guest 和临时 Coordinator 身份；
+- [x] 定义资源、动作、作用域和前置状态；
+- [x] 实现权限合成算法：显式拒绝优先、本地否决其次、允许需全部满足；
+- [x] 区分网络授权与节点本地授权；
+- [x] 临时 Coordinator 的写权限冻结规则进入领域层；
+- [x] 建立权限矩阵契约测试；
+- [x] 前端只根据服务端 capability 结果启用控件；
+- [x] 所有拒绝返回稳定错误码和可解释原因。
+
+身份层使用 `NodeOwner`、`Network(role)`、`DiscoveryGuest` 和 `UnauthenticatedPublic` 明确分离节点所有权、网络角色与公开发现身份；
+网络持久角色为 Owner/Administrator/Member，临时 Coordinator 仅作为运行时角色。权限契约冻结 13 个动作、12 类资源、只读/变更意图
+和 14 个稳定拒绝码。本地与网络策略必须同时存在匹配允许，任一层显式拒绝优先；临时 Coordinator 的所有变更意图在领域层冻结。
+命令总线从认证后的持久 membership 构造网络作用域，Node Owner 不再隐式获得网络治理权限，畸形网络 ID 失败关闭；拒绝结果保留
+策略层、规则 ID 和可解释原因。GPUI/WebUI 删除角色标签授权推断，只依据服务端 `can_manage_members` 与逐成员
+`available_actions`。
+
+**验证通过（2026-11-07）**：`cargo test -p fuckipv6-common --all-features`（231 passed）、
+`cargo test -p fuckipv6-client --all-features --lib`（863 passed，3 ignored）、
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`、WebUI `npm test -- --run`
+（19 files，223 passed）、`npm run typecheck`、`npm run lint`、`npm run build`、`./scripts/check-contracts.sh`
+（契约 Rust 7 passed，生成物 verified 2，TypeScript/Java 绑定测试通过）、
+`node webui/scripts/topology-visual-baseline.mjs --skip-build`（6 scenarios、5 interaction states、1 layout persistence check）、
+`node webui/scripts/topology-member-e2e.mjs --skip-build`（17 checks）和 `git diff --check`。角色矩阵测试覆盖
+4 角色 × 13 动作 × 12 资源共 624 个组合；报告位于 `target/topology-member-e2e/report.json` 与
+`target/topology-visual-baseline/manifest.json`。
 
 **验收**：任何授权判断不依赖 UI 隐藏；角色、组、本地限制和临时任期组合均能确定结果。
 

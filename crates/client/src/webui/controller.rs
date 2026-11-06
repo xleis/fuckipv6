@@ -3,6 +3,8 @@ use fuckipv6_common::domain::{
     default_network_icon, default_network_language, default_network_purpose,
     default_network_region, CapabilityKind, NetworkJoinMode, NetworkVisibility,
 };
+#[cfg(test)]
+use fuckipv6_common::domain::{MembershipRole, MembershipState, NetworkId};
 use fuckipv6_common::NetworkTicket;
 use fuckipv6_coordinator::signaling::session::{PeerSnapshot, TrafficSnapshot};
 use fuckipv6_coordinator::webui::{NetworkConfigDto, UpdateNetworkConfigRequest};
@@ -433,6 +435,29 @@ impl AppController {
         let state = NodeStateStore::with_events(events.clone());
         state
             .update(|snapshot| {
+                snapshot
+                    .memberships
+                    .push(crate::node::NodeNetworkMembershipSnapshot {
+                        network_name: "managed".to_string(),
+                        network_id: NetworkId::from_public_key(b"managed").to_string(),
+                        node_id: "managed-owner".to_string(),
+                        state: MembershipState::Active,
+                        role: MembershipRole::Owner,
+                        local_policy_revision: 1,
+                        network_policy_revision: Some(1),
+                        privacy_policy_revision: Some(1),
+                        member_limit: None,
+                        exit_contribution: None,
+                        exit_contribution_scope: None,
+                        terms_hash: None,
+                        current_terms: None,
+                        current_terms_hash: None,
+                        policy_confirmation_required: false,
+                        acknowledged_at_unix_ms: None,
+                        created_at_unix_ms: 1,
+                        updated_at_unix_ms: 1,
+                        suspension_reason: None,
+                    });
                 snapshot
                     .embedded_services
                     .push(crate::node::NodeEmbeddedServiceSnapshot {

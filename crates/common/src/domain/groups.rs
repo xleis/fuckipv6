@@ -807,7 +807,8 @@ impl GroupCatalog {
 #[cfg(test)]
 mod tests {
     use super::super::permissions::{
-        PermissionCondition, PermissionEffect, PolicyAction, ResourceKind, ResourceRef,
+        PermissionCondition, PermissionEffect, PermissionIntent, PolicyAction, ResourceKind,
+        ResourceRef,
     };
     use super::*;
 
@@ -871,6 +872,7 @@ mod tests {
                 network_id: network(),
                 object_id: None,
             },
+            intent: PermissionIntent::ReadOnly,
         }
     }
 
@@ -1570,6 +1572,7 @@ mod tests {
                 network_id: network(),
                 object_id: None,
             },
+            intent: PermissionIntent::Mutating,
         };
         let decision = evaluate_network_permissions(&[escalation], &request, &context);
         assert!(matches!(

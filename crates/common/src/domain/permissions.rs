@@ -18,6 +18,45 @@ pub enum NetworkRole {
     TemporaryCoordinator,
 }
 
+impl NetworkRole {
+    pub const ALL: [Self; 4] = [
+        Self::Owner,
+        Self::Administrator,
+        Self::Member,
+        Self::TemporaryCoordinator,
+    ];
+}
+
+/// One identity from one authorization layer. Node ownership and network
+/// governance are deliberately separate variants: holding either never grants
+/// the other, and a command may require both. Discovery guests are public-index
+/// principals, not network members.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessPrincipal {
+    NodeOwner,
+    Network(NetworkRole),
+    DiscoveryGuest,
+    UnauthenticatedPublic,
+}
+
+impl AccessPrincipal {
+    /// The network-governance role carried by this principal, if any. Node
+    /// owners and discovery guests intentionally return `None`.
+    pub const fn network_role(self) -> Option<NetworkRole> {
+        match self {
+            Self::Network(role) => Some(role),
+            Self::NodeOwner | Self::DiscoveryGuest | Self::UnauthenticatedPublic => None,
+        }
+    }
+
+    /// Discovery guests are not durable members and therefore cannot enter the
+    /// member/network role matrix.
+    pub const fn is_network_member(self) -> bool {
+        matches!(self, Self::Network(_))
+    }
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema, Serialize, Deserialize,
 )]
@@ -36,6 +75,24 @@ pub enum PolicyAction {
     Recover,
     Export,
     Test,
+}
+
+impl PolicyAction {
+    pub const ALL: [Self; 13] = [
+        Self::Read,
+        Self::Create,
+        Self::Update,
+        Self::Delete,
+        Self::Approve,
+        Self::Reject,
+        Self::Remove,
+        Self::Enable,
+        Self::Disable,
+        Self::Use,
+        Self::Recover,
+        Self::Export,
+        Self::Test,
+    ];
 }
 
 #[derive(
@@ -57,10 +114,29 @@ pub enum ResourceKind {
     Keys,
 }
 
+impl ResourceKind {
+    pub const ALL: [Self; 12] = [
+        Self::Network,
+        Self::Ownership,
+        Self::Membership,
+        Self::Group,
+        Self::SecurityPolicy,
+        Self::TrafficPolicy,
+        Self::Capability,
+        Self::ExitGrant,
+        Self::FileShare,
+        Self::Audit,
+        Self::CoordinatorTerm,
+        Self::Keys,
+    ];
+}
+
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema, Serialize, Deserialize,
 )]
 pub struct ResourceRef {
+    /// The network authorization scope. Cross-network requests are rejected
+    /// before any rule is evaluated.
     pub kind: ResourceKind,
     pub network_id: NetworkId,
     /// Opaque object identifier. It is not interpreted by the policy engine.
@@ -311,10 +387,99 @@ pub struct AccessContext {
     pub emergency_coordinator: bool,
 }
 
+/// Whether a request can mutate durable state. Temporary Coordinators may read
+/// the last valid policy and coordinate existing connections, but every
+/// mutating request is frozen in the domain evaluator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionIntent {
+    ReadOnly,
+    Mutating,
+}
+
+impl PermissionIntent {
+    pub const fn is_mutating(self) -> bool {
+        matches!(self, Self::Mutating)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionRequest {
     pub action: PolicyAction,
     pub resource: ResourceRef,
+    pub intent: PermissionIntent,
+}
+
+/// Stable authorization denial codes. Every authorization surface must return
+/// one of these values rather than constructing ad-hoc strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
+pub enum PermissionDenialCode {
+    #[serde(rename = "permission.authentication_required")]
+    AuthenticationRequired,
+    #[serde(rename = "permission.capability_denied")]
+    CapabilityDenied,
+    #[serde(rename = "permission.local_owner_required")]
+    LocalOwnerRequired,
+    #[serde(rename = "permission.recent_authentication_required")]
+    RecentAuthenticationRequired,
+    #[serde(rename = "permission.network_scope_denied")]
+    NetworkScopeDenied,
+    #[serde(rename = "permission.membership_inactive")]
+    MembershipInactive,
+    #[serde(rename = "permission.temporary_coordinator_read_only")]
+    TemporaryCoordinatorReadOnly,
+    #[serde(rename = "permission.role_ceiling_exceeded")]
+    RoleCeilingExceeded,
+    #[serde(rename = "permission.policy_denied")]
+    PolicyDenied,
+    #[serde(rename = "permission.cross_network_denied")]
+    CrossNetworkDenied,
+    #[serde(rename = "permission.denied")]
+    Denied,
+    #[serde(rename = "permission.default_denied")]
+    DefaultDenied,
+    #[serde(rename = "permission.field_denied")]
+    FieldDenied,
+    #[serde(rename = "permission.field_default_denied")]
+    FieldDefaultDenied,
+}
+
+impl PermissionDenialCode {
+    pub const ALL: [Self; 14] = [
+        Self::AuthenticationRequired,
+        Self::CapabilityDenied,
+        Self::LocalOwnerRequired,
+        Self::RecentAuthenticationRequired,
+        Self::NetworkScopeDenied,
+        Self::MembershipInactive,
+        Self::TemporaryCoordinatorReadOnly,
+        Self::RoleCeilingExceeded,
+        Self::PolicyDenied,
+        Self::CrossNetworkDenied,
+        Self::Denied,
+        Self::DefaultDenied,
+        Self::FieldDenied,
+        Self::FieldDefaultDenied,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthenticationRequired => "permission.authentication_required",
+            Self::CapabilityDenied => "permission.capability_denied",
+            Self::LocalOwnerRequired => "permission.local_owner_required",
+            Self::RecentAuthenticationRequired => "permission.recent_authentication_required",
+            Self::NetworkScopeDenied => "permission.network_scope_denied",
+            Self::MembershipInactive => "permission.membership_inactive",
+            Self::TemporaryCoordinatorReadOnly => "permission.temporary_coordinator_read_only",
+            Self::RoleCeilingExceeded => "permission.role_ceiling_exceeded",
+            Self::PolicyDenied => "permission.policy_denied",
+            Self::CrossNetworkDenied => "permission.cross_network_denied",
+            Self::Denied => "permission.denied",
+            Self::DefaultDenied => "permission.default_denied",
+            Self::FieldDenied => "permission.field_denied",
+            Self::FieldDefaultDenied => "permission.field_default_denied",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -333,9 +498,13 @@ impl PermissionDecision {
         matches!(self, Self::Allow)
     }
 
-    fn deny(code: &str, layer: &'static str, rule_id: Option<SecurityRuleId>) -> Self {
+    pub(crate) fn deny(
+        code: PermissionDenialCode,
+        layer: &'static str,
+        rule_id: Option<SecurityRuleId>,
+    ) -> Self {
         Self::Deny {
-            code: code.to_owned(),
+            code: code.as_str().to_owned(),
             layer,
             rule_id,
         }
@@ -351,14 +520,7 @@ pub fn evaluate_permissions(
     request: &PermissionRequest,
     context: &AccessContext,
 ) -> PermissionDecision {
-    if request.resource.network_id != context.network_id {
-        return PermissionDecision::deny("permission.cross_network_denied", "request", None);
-    }
-    let local = evaluate_permission_layer(local_rules, request, context, "local");
-    if !local.is_allowed() {
-        return local;
-    }
-    evaluate_permission_layer(network_rules, request, context, "network")
+    compose_permission_layers(local_rules, network_rules, request, context)
 }
 
 /// Evaluate one policy layer. Network-only policy documents use this helper;
@@ -369,40 +531,125 @@ pub fn evaluate_network_permissions(
     context: &AccessContext,
 ) -> PermissionDecision {
     if request.resource.network_id != context.network_id {
-        return PermissionDecision::deny("permission.cross_network_denied", "request", None);
+        return PermissionDecision::deny(PermissionDenialCode::CrossNetworkDenied, "request", None);
     }
-    evaluate_permission_layer(network_rules, request, context, "network")
+    evaluate_permission_layer(network_rules, request, context, "network").into_decision()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LayerDecision {
+    Allow,
+    ExplicitDeny(SecurityRuleId),
+    TemporaryCoordinatorReadOnly,
+    RoleCeilingExceeded(SecurityRuleId),
+    DefaultDenied,
+}
+
+impl LayerDecision {
+    fn into_decision(self) -> PermissionDecision {
+        match self {
+            Self::Allow => PermissionDecision::Allow,
+            Self::ExplicitDeny(rule_id) => {
+                PermissionDecision::deny(PermissionDenialCode::Denied, "network", Some(rule_id))
+            }
+            Self::TemporaryCoordinatorReadOnly => PermissionDecision::deny(
+                PermissionDenialCode::TemporaryCoordinatorReadOnly,
+                "network",
+                None,
+            ),
+            Self::RoleCeilingExceeded(rule_id) => PermissionDecision::deny(
+                PermissionDenialCode::RoleCeilingExceeded,
+                "network",
+                Some(rule_id),
+            ),
+            Self::DefaultDenied => {
+                PermissionDecision::deny(PermissionDenialCode::DefaultDenied, "network", None)
+            }
+        }
+    }
+}
+
+fn compose_permission_layers(
+    local_rules: &[PermissionRule],
+    network_rules: &[PermissionRule],
+    request: &PermissionRequest,
+    context: &AccessContext,
+) -> PermissionDecision {
+    if request.resource.network_id != context.network_id {
+        return PermissionDecision::deny(PermissionDenialCode::CrossNetworkDenied, "request", None);
+    }
+
+    // Evaluate both layers before choosing a result. Returning a local default
+    // denial early would hide a more specific network explicit denial or
+    // temporary-Coordinator freeze from callers and audits.
+    let local = evaluate_permission_layer(local_rules, request, context, "local");
+    let network = evaluate_permission_layer(network_rules, request, context, "network");
+
+    for (layer, decision) in [("local", &local), ("network", &network)] {
+        if let LayerDecision::ExplicitDeny(rule_id) = decision {
+            return PermissionDecision::deny(
+                PermissionDenialCode::Denied,
+                layer,
+                Some(rule_id.clone()),
+            );
+        }
+    }
+    for (layer, decision) in [("local", &local), ("network", &network)] {
+        if matches!(decision, LayerDecision::TemporaryCoordinatorReadOnly) {
+            return PermissionDecision::deny(
+                PermissionDenialCode::TemporaryCoordinatorReadOnly,
+                layer,
+                None,
+            );
+        }
+    }
+    for (layer, decision) in [("local", &local), ("network", &network)] {
+        if let LayerDecision::RoleCeilingExceeded(rule_id) = decision {
+            return PermissionDecision::deny(
+                PermissionDenialCode::RoleCeilingExceeded,
+                layer,
+                Some(rule_id.clone()),
+            );
+        }
+    }
+    for (layer, decision) in [("local", &local), ("network", &network)] {
+        if matches!(decision, LayerDecision::DefaultDenied) {
+            return PermissionDecision::deny(PermissionDenialCode::DefaultDenied, layer, None);
+        }
+    }
+    PermissionDecision::Allow
 }
 
 fn evaluate_permission_layer(
     rules: &[PermissionRule],
     request: &PermissionRequest,
     context: &AccessContext,
-    layer: &'static str,
-) -> PermissionDecision {
+    _layer: &'static str,
+) -> LayerDecision {
+    // Explicit denial is evaluated before every other gate. Rule ordering must
+    // never turn a denied request into a role-ceiling or temporary-term error.
     for rule in rules.iter().filter(|rule| rule.matches(request, context)) {
         if rule.effect == PermissionEffect::Deny {
-            return PermissionDecision::deny(
-                "permission.denied",
-                layer,
-                Some(rule.rule_id.clone()),
-            );
+            return LayerDecision::ExplicitDeny(rule.rule_id.clone());
         }
-        if !role_ceiling_allows(context.role, request.action, request.resource.kind) {
-            return PermissionDecision::deny(
-                "permission.role_ceiling_exceeded",
-                layer,
-                Some(rule.rule_id.clone()),
-            );
+    }
+    if context.role == NetworkRole::TemporaryCoordinator && request.intent.is_mutating() {
+        return LayerDecision::TemporaryCoordinatorReadOnly;
+    }
+    for rule in rules.iter().filter(|rule| rule.matches(request, context)) {
+        if rule.effect == PermissionEffect::Allow
+            && !role_ceiling_allows(context.role, request.action, request.resource.kind)
+        {
+            return LayerDecision::RoleCeilingExceeded(rule.rule_id.clone());
         }
     }
     if rules
         .iter()
         .any(|rule| rule.effect == PermissionEffect::Allow && rule.matches(request, context))
     {
-        PermissionDecision::Allow
+        LayerDecision::Allow
     } else {
-        PermissionDecision::deny("permission.default_denied", layer, None)
+        LayerDecision::DefaultDenied
     }
 }
 
@@ -508,6 +755,7 @@ mod tests {
                 network_id: network_id.clone(),
                 object_id: None,
             },
+            intent: PermissionIntent::ReadOnly,
         };
         let context = context(
             network_id.clone(),
@@ -564,6 +812,7 @@ mod tests {
                 network_id,
                 object_id: None,
             },
+            intent: PermissionIntent::ReadOnly,
         };
         let network_allow = rule(
             b"network",
@@ -602,6 +851,7 @@ mod tests {
                 network_id,
                 object_id: None,
             },
+            intent: PermissionIntent::ReadOnly,
         };
         let allow = rule(
             b"bad-grant",
@@ -622,47 +872,171 @@ mod tests {
         ));
     }
 
+    fn expected_role_ceiling(
+        role: NetworkRole,
+        action: PolicyAction,
+        resource: ResourceKind,
+    ) -> bool {
+        match role {
+            NetworkRole::Owner => true,
+            NetworkRole::Administrator => !matches!(
+                (action, resource),
+                (PolicyAction::Delete, ResourceKind::Network)
+                    | (_, ResourceKind::Ownership)
+                    | (_, ResourceKind::Keys)
+                    | (PolicyAction::Recover, _)
+            ),
+            NetworkRole::Member => matches!(
+                (action, resource),
+                (
+                    PolicyAction::Read,
+                    ResourceKind::Network
+                        | ResourceKind::Membership
+                        | ResourceKind::Capability
+                        | ResourceKind::FileShare
+                        | ResourceKind::TrafficPolicy
+                ) | (
+                    PolicyAction::Use,
+                    ResourceKind::Capability | ResourceKind::ExitGrant | ResourceKind::FileShare
+                )
+            ),
+            NetworkRole::TemporaryCoordinator => matches!(
+                (action, resource),
+                (
+                    PolicyAction::Read,
+                    ResourceKind::Network
+                        | ResourceKind::Membership
+                        | ResourceKind::SecurityPolicy
+                        | ResourceKind::Capability
+                        | ResourceKind::TrafficPolicy
+                        | ResourceKind::CoordinatorTerm
+                )
+            ),
+        }
+    }
+
     #[test]
-    fn role_operation_resource_matrix_is_conservative() {
-        assert!(role_ceiling_allows(
-            NetworkRole::Owner,
-            PolicyAction::Delete,
-            ResourceKind::Network
-        ));
-        assert!(role_ceiling_allows(
+    fn role_operation_resource_matrix_covers_every_combination() {
+        let mut checked = 0;
+        for role in NetworkRole::ALL {
+            for action in PolicyAction::ALL {
+                for resource in ResourceKind::ALL {
+                    checked += 1;
+                    assert_eq!(
+                        role_ceiling_allows(role, action, resource),
+                        expected_role_ceiling(role, action, resource),
+                        "unexpected role ceiling for {role:?}/{action:?}/{resource:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(checked, 4 * 13 * 12);
+        assert_eq!(checked, 624);
+    }
+
+    #[test]
+    fn access_principals_do_not_conflate_node_and_network_authority() {
+        assert_eq!(AccessPrincipal::NodeOwner.network_role(), None);
+        assert!(!AccessPrincipal::NodeOwner.is_network_member());
+        assert_eq!(
+            AccessPrincipal::Network(NetworkRole::Owner).network_role(),
+            Some(NetworkRole::Owner)
+        );
+        assert!(AccessPrincipal::Network(NetworkRole::Member).is_network_member());
+        assert_eq!(AccessPrincipal::DiscoveryGuest.network_role(), None);
+        assert!(!AccessPrincipal::DiscoveryGuest.is_network_member());
+        assert_eq!(AccessPrincipal::UnauthenticatedPublic.network_role(), None);
+        assert!(!AccessPrincipal::UnauthenticatedPublic.is_network_member());
+    }
+
+    #[test]
+    fn denial_codes_are_stable_and_unique() {
+        let codes = PermissionDenialCode::ALL.map(PermissionDenialCode::as_str);
+        assert_eq!(codes.len(), 14);
+        assert!(codes.iter().all(|code| code.starts_with("permission.")));
+        assert_eq!(
+            codes.iter().copied().collect::<BTreeSet<_>>().len(),
+            codes.len()
+        );
+    }
+
+    #[test]
+    fn explicit_network_denial_is_not_masked_by_local_default_denial() {
+        let (network_id, actor, _) = ids();
+        let context = context(
+            network_id.clone(),
+            actor.clone(),
             NetworkRole::Administrator,
-            PolicyAction::Approve,
-            ResourceKind::Membership
-        ));
-        assert!(!role_ceiling_allows(
-            NetworkRole::Administrator,
-            PolicyAction::Delete,
-            ResourceKind::Network
-        ));
-        assert!(!role_ceiling_allows(
-            NetworkRole::Administrator,
+        );
+        let request = PermissionRequest {
+            action: PolicyAction::Update,
+            resource: ResourceRef {
+                kind: ResourceKind::SecurityPolicy,
+                network_id,
+                object_id: None,
+            },
+            intent: PermissionIntent::Mutating,
+        };
+        let network_deny = rule(
+            b"network-explicit-deny",
+            PermissionEffect::Deny,
+            SubjectSelector::AnyMember,
             PolicyAction::Update,
-            ResourceKind::Ownership
+            ResourceKind::SecurityPolicy,
+        );
+        let decision = evaluate_permissions(&[], &[network_deny], &request, &context);
+        assert!(matches!(
+            decision,
+            PermissionDecision::Deny {
+                code,
+                layer: "network",
+                rule_id: Some(_)
+            } if code == PermissionDenialCode::Denied.as_str()
         ));
-        assert!(role_ceiling_allows(
-            NetworkRole::Member,
-            PolicyAction::Read,
-            ResourceKind::Network
-        ));
-        assert!(!role_ceiling_allows(
-            NetworkRole::Member,
-            PolicyAction::Update,
-            ResourceKind::SecurityPolicy
-        ));
-        assert!(role_ceiling_allows(
+    }
+
+    #[test]
+    fn temporary_coordinator_mutation_is_frozen_after_explicit_denial() {
+        let (network_id, actor, _) = ids();
+        let context = context(
+            network_id.clone(),
+            actor.clone(),
             NetworkRole::TemporaryCoordinator,
+        );
+        let request = |intent| PermissionRequest {
+            action: PolicyAction::Read,
+            resource: ResourceRef {
+                kind: ResourceKind::SecurityPolicy,
+                network_id: network_id.clone(),
+                object_id: None,
+            },
+            intent,
+        };
+        let allow = rule(
+            b"temporary-read-policy",
+            PermissionEffect::Allow,
+            SubjectSelector::AnyMember,
             PolicyAction::Read,
-            ResourceKind::SecurityPolicy
-        ));
-        assert!(!role_ceiling_allows(
-            NetworkRole::TemporaryCoordinator,
-            PolicyAction::Update,
-            ResourceKind::Membership
+            ResourceKind::SecurityPolicy,
+        );
+        assert_eq!(
+            evaluate_permissions(
+                std::slice::from_ref(&allow),
+                std::slice::from_ref(&allow),
+                &request(PermissionIntent::ReadOnly),
+                &context,
+            ),
+            PermissionDecision::Allow
+        );
+        assert!(matches!(
+            evaluate_permissions(
+                std::slice::from_ref(&allow),
+                std::slice::from_ref(&allow),
+                &request(PermissionIntent::Mutating),
+                &context,
+            ),
+            PermissionDecision::Deny { code, .. }
+                if code == PermissionDenialCode::TemporaryCoordinatorReadOnly.as_str()
         ));
     }
 

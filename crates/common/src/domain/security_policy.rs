@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use super::ids::{ContentHash, NetworkId, SecurityRuleId};
 use super::permissions::{
-    evaluate_network_permissions, AccessContext, PermissionDecision, PermissionEffect,
-    PermissionRequest, PermissionRule, SubjectSelector,
+    evaluate_network_permissions, AccessContext, PermissionDecision, PermissionDenialCode,
+    PermissionEffect, PermissionRequest, PermissionRule, SubjectSelector,
 };
 use super::{DomainError, DomainResult};
 
@@ -68,11 +68,11 @@ pub fn evaluate_field_access(
 ) -> PermissionDecision {
     for rule in rules.iter().filter(|rule| rule.matches(field, context)) {
         if rule.effect == PermissionEffect::Deny {
-            return PermissionDecision::Deny {
-                code: "permission.field_denied".into(),
-                layer: "network",
-                rule_id: Some(rule.rule_id.clone()),
-            };
+            return PermissionDecision::deny(
+                PermissionDenialCode::FieldDenied,
+                "network",
+                Some(rule.rule_id.clone()),
+            );
         }
     }
     if rules
@@ -81,11 +81,7 @@ pub fn evaluate_field_access(
     {
         PermissionDecision::Allow
     } else {
-        PermissionDecision::Deny {
-            code: "permission.field_default_denied".into(),
-            layer: "network",
-            rule_id: None,
-        }
+        PermissionDecision::deny(PermissionDenialCode::FieldDefaultDenied, "network", None)
     }
 }
 
@@ -156,11 +152,11 @@ impl NetworkSecurityPolicy {
     ) -> DomainResult<PermissionDecision> {
         self.validate_at(now_unix_ms)?;
         if request.resource.network_id != self.network_id {
-            return Ok(PermissionDecision::Deny {
-                code: "permission.cross_network_denied".into(),
-                layer: "network",
-                rule_id: None,
-            });
+            return Ok(PermissionDecision::deny(
+                PermissionDenialCode::CrossNetworkDenied,
+                "network",
+                None,
+            ));
         }
         Ok(evaluate_network_permissions(&self.rules, request, context))
     }
@@ -277,6 +273,7 @@ impl PolicyApplyPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::PermissionIntent;
     use crate::domain::{
         AccessContext, NetworkRole, NodeId, PermissionRequest, PolicyAction, ResourceKind,
         ResourceRef,
@@ -341,6 +338,7 @@ mod tests {
                 network_id,
                 object_id: None,
             },
+            intent: PermissionIntent::Mutating,
         }
     }
 

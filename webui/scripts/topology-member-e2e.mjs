@@ -359,9 +359,7 @@ function memberFromNode(state, node, networkId) {
   const capabilities = isHomeBob
     ? state.groupPolicy.bob_capabilities
     : network.capabilities;
-  const canManageHome =
-    state.groupPolicy.can_manage_members &&
-    state.groupPolicy.viewer_role !== "member";
+  const canManageHome = state.groupPolicy.can_manage_members;
   const canManage = networkId === "studio" ? true : canManageHome;
   const availableActions =
     isHomeBob && status === "pending"
@@ -1840,7 +1838,7 @@ async function main() {
     updateHomeGroupPolicy(state, {
       bobGroup: "file-readers",
       bobCapabilities: ["file"],
-      viewerRole: "owner",
+      viewerRole: "member",
       canManageMembers: true,
     });
     fixtureServer.broadcastSnapshot();
@@ -2378,7 +2376,7 @@ async function main() {
         before: {
           bob_group: "file-readers",
           bob_capabilities: ["file"],
-          viewer_role: "owner",
+          viewer_role: "member",
           can_manage_members: true,
         },
         restricted: {

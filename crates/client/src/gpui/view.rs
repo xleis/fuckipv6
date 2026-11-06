@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
@@ -12630,6 +12630,7 @@ pub fn run_window(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
 
     fn lifecycle_state_for_status(
         status: NetworkMemberStatus,
@@ -15584,29 +15585,6 @@ mod tests {
         });
         cx.run_until_parked();
         window
-    }
-
-    fn open_shell_window_with_handler(
-        cx: &mut TestAppContext,
-        width: f32,
-        height: f32,
-        handler: Arc<SnapshotCommandHandler>,
-    ) -> (gpui::WindowHandle<GpuiShell>, tokio::runtime::Runtime) {
-        let state = handler.state.clone();
-        let configs = handler.configs.clone();
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .expect("test Tokio runtime");
-        let runtime_guard = runtime.enter();
-        let bus = NodeCommandBus::spawn(handler, NodeEventBus::default(), 4);
-        drop(runtime_guard);
-        let window = cx.open_window(size(px(width), px(height)), move |_, cx| {
-            GpuiShell::new(state, bus, None, configs, cx)
-        });
-        cx.run_until_parked();
-        (window, runtime)
     }
 
     fn bound_keystrokes(

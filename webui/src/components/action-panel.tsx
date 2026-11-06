@@ -3017,6 +3017,7 @@ function ActionCard({
       .then((submission) => {
         if (submission.outcome?.status === "network_members") {
           setNetworkMembers(submission.outcome.data);
+          setResult(outcomeSummary(submission.outcome, locale));
         }
       })
       .catch(() => {

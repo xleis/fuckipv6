@@ -2631,6 +2631,7 @@ describe("action panel member governance", () => {
       "translated:member_directory.lifecycle_state.removed",
     );
     expect(screen.getByTestId("member-detail")).toHaveTextContent("4");
+    expect(screen.getByText("translated:outcome.network_members_loaded")).toBeVisible();
     expect(actionHead).toHaveAttribute("aria-expanded", "true");
   });
 

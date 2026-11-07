@@ -714,6 +714,7 @@ pub(crate) fn operation_kind(command: &NodeCommand) -> OperationKind {
         NodeCommand::UpdateNetworkAllocation(_) => OperationKind::NetworkAllocationUpdate,
         NodeCommand::ApplyConfiguration(_) => OperationKind::PolicyApply,
         NodeCommand::RollbackConfiguration(_) => OperationKind::PolicyRollback,
+        NodeCommand::TestPolicy(_) => OperationKind::PolicyTest,
         NodeCommand::GetSnapshot
         | NodeCommand::GetUiManifest
         | NodeCommand::GetBlacklist { .. }
@@ -729,7 +730,7 @@ pub(crate) fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::ListInvitations(_)
         | NodeCommand::GetInvitationStatus(_)
         | NodeCommand::PreviewInvitation(_)
-        | NodeCommand::GetConfigurationHistory => OperationKind::PolicyTest,
+        | NodeCommand::GetConfigurationHistory => OperationKind::ConfigurationHistory,
     }
 }
 
@@ -782,6 +783,7 @@ pub(crate) fn operation_target(command: &NodeCommand, local_node_id: &NodeId) ->
             network_target(&command.network_name)
         }
         NodeCommand::UpdateNetworkAllocation(command) => network_target(&command.network_name),
+        NodeCommand::TestPolicy(command) => network_target(command.network_id.as_str()),
         NodeCommand::GetBlacklist { network_name }
         | NodeCommand::GetNetworkAllocation { network_name } => network_target(network_name),
         NodeCommand::StartNetworks { .. }
@@ -1210,6 +1212,60 @@ mod tests {
                 auto_connect: false,
             }),
         )
+    }
+
+    fn policy_test_command() -> NodeCommand {
+        let network_id =
+            fuckipv6_common::domain::NetworkId::from_public_key(b"operation-policy-test-network");
+        NodeCommand::TestPolicy(
+            fuckipv6_common::domain::parse_policy_test_input(
+                &serde_json::json!({
+                    "network_id": network_id.to_string(),
+                    "actor": fuckipv6_common::domain::NodeId::from_public_key(
+                        b"operation-policy-test-actor"
+                    ).to_string(),
+                    "role": "member",
+                    "groups": [],
+                    "membership_active": true,
+                    "recent_reauthentication": true,
+                    "emergency_coordinator": false,
+                    "request": {
+                        "action": "read",
+                        "resource": "network",
+                        "resource_network_id": network_id.to_string(),
+                        "intent": "read_only"
+                    },
+                    "now_unix_ms": 1_500
+                })
+                .to_string(),
+            )
+            .expect("valid policy test command"),
+        )
+    }
+
+    #[test]
+    fn policy_test_uses_a_network_scoped_policy_test_operation() {
+        let command = policy_test_command();
+        let NodeCommand::TestPolicy(input) = &command else {
+            panic!("expected policy test command");
+        };
+        let local_node = NodeId::from_public_key(b"operation-service-local-node");
+        assert_eq!(operation_kind(&command), OperationKind::PolicyTest);
+        assert_eq!(
+            operation_target(&command, &local_node),
+            DomainObjectRef {
+                kind: ObjectKind::Network,
+                id: input.network_id.to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn configuration_history_has_a_distinct_operation_kind() {
+        assert_eq!(
+            operation_kind(&NodeCommand::GetConfigurationHistory),
+            OperationKind::ConfigurationHistory
+        );
     }
 
     #[test]

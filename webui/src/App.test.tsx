@@ -27,6 +27,7 @@ import type {
   NodeRoutingSummarySnapshot,
   NodeSnapshot,
   NodeUiManifest,
+  ProjectedNodeCommandOutcome,
 } from "../../contracts/typescript/node-contract-v1";
 import { App } from "./App";
 import {
@@ -2174,7 +2175,7 @@ describe("React WebUI shell", () => {
               network_name: "home",
               snapshot: leftSnapshot,
             },
-          },
+          } as unknown as ProjectedNodeCommandOutcome,
         },
       }),
     );

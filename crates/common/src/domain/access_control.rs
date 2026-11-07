@@ -120,7 +120,7 @@ impl NodeContributionVeto {
         Ok(())
     }
 
-    fn matches(
+    pub(crate) fn matches(
         &self,
         request: &PermissionRequest,
         network_id: &NetworkId,
@@ -319,7 +319,7 @@ impl NetworkAclGrant {
         !self.is_revoked() && !self.is_expired(now_unix_ms)
     }
 
-    fn matches(&self, request: &PermissionRequest, context: &AccessContext) -> bool {
+    pub(crate) fn matches(&self, request: &PermissionRequest, context: &AccessContext) -> bool {
         self.actions.contains(&request.action)
             && self.resources.contains(&request.resource.kind)
             && self.subjects.iter().any(|subject| subject.matches(context))

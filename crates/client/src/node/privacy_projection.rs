@@ -16,8 +16,9 @@ use fuckipv6_common::domain::{
     ActivityEntry, FieldPrivacyPolicy, InvitationPreview, InvitationRedemption,
     InvitationStatusView, IssuedInvitation, JoinRequest, MemberLifecycleChange,
     MemberRemovalPreview, MembershipState, NetworkId, NetworkMemberDirectory,
-    NetworkProfileApplyResult, NetworkProfilePreview, NodeId, PrivacyField, PrivacyObjectState,
-    PrivacyViewer, ProjectedActivityEntry, TopologyConnection, TopologyNode, TopologySnapshot,
+    NetworkProfileApplyResult, NetworkProfilePreview, NodeId, PolicyTestResult, PrivacyField,
+    PrivacyObjectState, PrivacyViewer, ProjectedActivityEntry, TopologyConnection, TopologyNode,
+    TopologySnapshot,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -242,6 +243,7 @@ pub enum ProjectedNodeCommandOutcome {
     ConfigurationPreview(Box<ConfigurationPreview>),
     ConfigurationApplied(Box<ConfigurationApplyResult>),
     ConfigurationHistory(Vec<ConfigurationHistoryEntry>),
+    PolicyTest(Box<PolicyTestResult>),
     Accepted { operation_id: String },
     Completed { message: String },
     Rejected(NodeProblem),
@@ -441,6 +443,9 @@ pub fn project_node_command_result(
         }
         NodeCommandOutcome::ConfigurationHistory(history) => {
             ProjectedNodeCommandOutcome::ConfigurationHistory(history.clone())
+        }
+        NodeCommandOutcome::PolicyTest(result) => {
+            ProjectedNodeCommandOutcome::PolicyTest(result.clone())
         }
         NodeCommandOutcome::Accepted { operation_id } => ProjectedNodeCommandOutcome::Accepted {
             operation_id: operation_id.clone(),
@@ -1695,6 +1700,48 @@ mod tests {
                 "hidden value leaked: {secret}"
             );
         }
+    }
+
+    #[test]
+    fn policy_test_results_are_preserved_without_projection_side_effects() {
+        let home = network("home");
+        let input = fuckipv6_common::domain::parse_policy_test_input(
+            &serde_json::json!({
+                "network_id": home.to_string(),
+                "actor": actor().to_string(),
+                "role": "member",
+                "groups": [],
+                "membership_active": true,
+                "recent_reauthentication": true,
+                "emergency_coordinator": false,
+                "request": {
+                    "action": "read",
+                    "resource": "network",
+                    "resource_network_id": home.to_string(),
+                    "intent": "read_only"
+                },
+                "now_unix_ms": 1_500
+            })
+            .to_string(),
+        )
+        .expect("valid policy test input");
+        let tested = input.evaluate();
+        let result = NodeCommandResult::completed(
+            25,
+            NodeCommandOutcome::PolicyTest(Box::new(tested.clone())),
+        );
+        let context = network_context(
+            home,
+            NetworkRole::Member,
+            MembershipState::Active,
+            Vec::new(),
+        );
+        let projected = project_node_command_result(&result, &context, 1_500)
+            .expect("policy test result projection");
+        let ProjectedNodeCommandOutcome::PolicyTest(projected_result) = projected.outcome else {
+            panic!("expected policy test projection");
+        };
+        assert_eq!(*projected_result, tested);
     }
 
     #[test]

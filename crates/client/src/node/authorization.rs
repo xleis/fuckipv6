@@ -9,11 +9,11 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
-    evaluate_effective_access, resolve_field_privacy_policy, AccessContext, FieldPrivacyPolicy,
-    FieldPrivacyPolicyError, GroupId, MembershipRole, MembershipState, NetworkAcl, NetworkId,
-    NetworkRole, NodeLocalAccessPolicy, OperationId, PermissionCondition, PermissionDenialCode,
-    PermissionEffect, PermissionIntent, PermissionRequest, PermissionRule, PolicyAction,
-    PrivacyViewer, ResourceKind, ResourceRef, SecurityRuleId, SubjectSelector,
+    evaluate_effective_access, resolve_field_privacy_policy, role_baseline_policy, AccessContext,
+    FieldPrivacyPolicy, FieldPrivacyPolicyError, GroupId, MembershipRole, MembershipState,
+    NetworkAcl, NetworkId, NetworkRole, NodeLocalAccessPolicy, OperationId, PermissionDenialCode,
+    PermissionIntent, PermissionRequest, PermissionRule, PolicyAction, PrivacyViewer, ResourceKind,
+    ResourceRef,
 };
 
 use super::command::{NodeCommand, NodeCommandKind};
@@ -618,25 +618,6 @@ fn membership_role_for_privacy(role: NetworkRole) -> MembershipRole {
     }
 }
 
-/// One deterministic baseline rule for a durable membership role. The rule
-/// grants only within the role ceiling; both the resource network and active
-/// membership are conditions, so one network's role cannot authorize another.
-fn role_baseline_policy(network_id: &NetworkId, role: NetworkRole) -> Vec<PermissionRule> {
-    vec![PermissionRule {
-        rule_id: SecurityRuleId::from_public_key(
-            format!("builtin-role:{network_id}:{}", role_name(role)).as_bytes(),
-        ),
-        effect: PermissionEffect::Allow,
-        subjects: vec![SubjectSelector::Role(role)],
-        resources: ResourceKind::ALL.to_vec(),
-        actions: PolicyAction::ALL.to_vec(),
-        conditions: vec![
-            PermissionCondition::MembershipActive,
-            PermissionCondition::ResourceInNetwork(network_id.clone()),
-        ],
-    }]
-}
-
 fn membership_state_name(state: MembershipState) -> &'static str {
     match state {
         MembershipState::Discovered => "discovered",
@@ -719,7 +700,8 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::RestartNode
         | NodeCommandKind::CleanupResiduals
         | NodeCommandKind::ApplyConfiguration
-        | NodeCommandKind::RollbackConfiguration => NodePermission::ManageNetworks,
+        | NodeCommandKind::RollbackConfiguration
+        | NodeCommandKind::TestPolicy => NodePermission::ManageNetworks,
     }
 }
 
@@ -823,6 +805,7 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
             (PolicyAction::Disable, ResourceKind::Capability)
         }
         NodeCommandKind::CleanupResiduals => (PolicyAction::Recover, ResourceKind::Network),
+        NodeCommandKind::TestPolicy => (PolicyAction::Test, ResourceKind::SecurityPolicy),
     }
 }
 
@@ -898,6 +881,9 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
         }
         NodeCommand::ResubmitJoinRequest(command) => {
             NetworkTargets::Named(vec![command.network_id.clone()])
+        }
+        NodeCommand::TestPolicy(command) => {
+            NetworkTargets::Named(vec![command.network_id.to_string()])
         }
         NodeCommand::CreateInvitation(command) => {
             NetworkTargets::Named(vec![command.network_id.to_string()])
@@ -2552,6 +2538,76 @@ mod tests {
             start_home(),
             "permission.role_ceiling_exceeded",
         );
+    }
+
+    fn policy_test_command() -> NodeCommand {
+        let network_id = network_id("home");
+        let input = fuckipv6_common::domain::parse_policy_test_input(
+            &serde_json::json!({
+                "network_id": network_id.to_string(),
+                "actor": actor().to_string(),
+                "role": "owner",
+                "groups": [],
+                "membership_active": true,
+                "recent_reauthentication": true,
+                "emergency_coordinator": false,
+                "request": {
+                    "action": "test",
+                    "resource": "security_policy",
+                    "resource_network_id": network_id.to_string(),
+                    "intent": "read_only"
+                },
+                "now_unix_ms": 1_000
+            })
+            .to_string(),
+        )
+        .expect("valid policy test command");
+        NodeCommand::TestPolicy(input)
+    }
+
+    #[test]
+    fn policy_test_is_manage_networks_scoped_and_uses_the_security_policy_target() {
+        assert_eq!(
+            required_permission(NodeCommandKind::TestPolicy),
+            NodePermission::ManageNetworks
+        );
+        assert_eq!(
+            policy_target(NodeCommandKind::TestPolicy),
+            (PolicyAction::Test, ResourceKind::SecurityPolicy)
+        );
+        let command = policy_test_command();
+        let NodeCommand::TestPolicy(input) = &command else {
+            panic!("expected policy test command");
+        };
+        assert_eq!(
+            command_network_targets(&command),
+            NetworkTargets::Named(vec![input.network_id.to_string()])
+        );
+
+        let local_policy = vec![allow(
+            b"local-policy-test-allow",
+            SubjectSelector::AnyMember,
+            PolicyAction::Test,
+            ResourceKind::SecurityPolicy,
+        )];
+        let network_policy = vec![allow(
+            b"network-policy-test-allow",
+            SubjectSelector::AnyMember,
+            PolicyAction::Test,
+            ResourceKind::SecurityPolicy,
+        )];
+        authorize_command(
+            &network_context(
+                NetworkRole::Owner,
+                [NodePermission::ManageNetworks],
+                &["home"],
+                MembershipState::Active,
+                local_policy,
+                network_policy,
+            ),
+            &command,
+        )
+        .expect("owner with manage permission can test policies");
     }
 
     #[test]

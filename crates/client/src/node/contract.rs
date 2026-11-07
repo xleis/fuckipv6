@@ -538,6 +538,29 @@ mod tests {
                 target_revision: 0,
             }),
             NodeCommand::GetConfigurationHistory,
+            NodeCommand::TestPolicy(fuckipv6_common::domain::PolicyTestInput {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"policy-test-network",
+                ),
+                actor: fuckipv6_common::domain::NodeId::from_public_key(b"policy-test-actor"),
+                role: fuckipv6_common::domain::NetworkRole::Member,
+                groups: Default::default(),
+                membership_active: true,
+                recent_reauthentication: true,
+                emergency_coordinator: false,
+                request: fuckipv6_common::domain::PolicyTestRequest {
+                    action: fuckipv6_common::domain::PolicyAction::Read,
+                    resource: fuckipv6_common::domain::ResourceKind::Network,
+                    resource_network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                        b"policy-test-network",
+                    ),
+                    object_id: None,
+                    intent: fuckipv6_common::domain::PermissionIntent::ReadOnly,
+                },
+                local_policy: None,
+                network_acl: None,
+                now_unix_ms: 1_000,
+            }),
             NodeCommand::Shutdown,
         ]
     }

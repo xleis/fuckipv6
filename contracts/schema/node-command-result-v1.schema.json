@@ -401,6 +401,130 @@
       ],
       "type": "string"
     },
+    "EffectiveAccess": {
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evaluated_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expired_grant_ids": {
+          "items": {
+            "$ref": "#/$defs/SecurityRuleId"
+          },
+          "type": "array"
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectivePolicyLayer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "local_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "matched_allow_rule_ids": {
+          "items": {
+            "$ref": "#/$defs/SecurityRuleId"
+          },
+          "type": "array"
+        },
+        "matched_deny_rule_ids": {
+          "items": {
+            "$ref": "#/$defs/SecurityRuleId"
+          },
+          "type": "array"
+        },
+        "network_acl_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "$ref": "#/$defs/EffectiveAccessReason"
+        },
+        "reauthentication_required_grant_ids": {
+          "items": {
+            "$ref": "#/$defs/SecurityRuleId"
+          },
+          "type": "array"
+        },
+        "reauthentication_satisfied": {
+          "type": "boolean"
+        },
+        "revoked_grant_ids": {
+          "items": {
+            "$ref": "#/$defs/SecurityRuleId"
+          },
+          "type": "array"
+        },
+        "rule_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SecurityRuleId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "allowed",
+        "reason",
+        "network_acl_revision",
+        "local_policy_revision",
+        "matched_allow_rule_ids",
+        "matched_deny_rule_ids",
+        "expired_grant_ids",
+        "revoked_grant_ids",
+        "reauthentication_required_grant_ids",
+        "reauthentication_satisfied",
+        "evaluated_at_unix_ms"
+      ],
+      "type": "object"
+    },
+    "EffectiveAccessReason": {
+      "description": "Stable explanation of the final effect. UI surfaces consume this\nprojection instead of re-implementing rule precedence.",
+      "enum": [
+        "allowed",
+        "cross_network_denied",
+        "network_scope_restricted",
+        "local_contribution_veto",
+        "authorization_expired",
+        "authorization_revoked",
+        "recent_reauthentication_required",
+        "explicit_deny",
+        "role_ceiling_exceeded",
+        "temporary_coordinator_read_only",
+        "default_denied",
+        "invalid_policy"
+      ],
+      "type": "string"
+    },
+    "EffectivePolicyLayer": {
+      "enum": [
+        "local",
+        "network",
+        "request"
+      ],
+      "type": "string"
+    },
     "ExitContributionObligation": {
       "description": "Exit contribution is an explicit network admission obligation, not a\ncapability silently enabled by joining.",
       "enum": [
@@ -2939,6 +3063,22 @@
             },
             "status": {
               "const": "configuration_history",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/PolicyTestResult"
+            },
+            "status": {
+              "const": "policy_test",
               "type": "string"
             }
           },
@@ -5554,6 +5694,7 @@
             "apply_configuration",
             "rollback_configuration",
             "get_configuration_history",
+            "test_policy",
             "shutdown"
           ],
           "type": "string"
@@ -5718,6 +5859,7 @@
         "boolean",
         "client_id",
         "configuration_json",
+        "policy_json",
         "display_name",
         "external_host",
         "fingerprint",
@@ -5850,6 +5992,7 @@
         "positive_timeout",
         "revision",
         "configuration_json",
+        "policy_json",
         "display_name",
         "fingerprint",
         "network_purpose",
@@ -6034,6 +6177,226 @@
         "recover",
         "export",
         "test"
+      ],
+      "type": "string"
+    },
+    "PolicyPrecedence": {
+      "description": "Fixed precedence order consumed by the UI. The evaluator remains the sole\nauthority for the selected outcome; this trace only explains which gate was\nactive and in what order gates were considered.",
+      "enum": [
+        "cross_network_denied",
+        "invalid_or_expired_policy",
+        "network_scope_restricted",
+        "local_contribution_veto",
+        "explicit_deny",
+        "temporary_coordinator_read_only",
+        "role_ceiling_exceeded",
+        "authorization_revoked",
+        "authorization_expired",
+        "recent_reauthentication_required",
+        "default_denied",
+        "allow"
+      ],
+      "type": "string"
+    },
+    "PolicyPrecedenceExplanation": {
+      "properties": {
+        "precedence": {
+          "$ref": "#/$defs/PolicyPrecedence"
+        },
+        "rule_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SecurityRuleId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PolicyRuleSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "triggered": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "precedence",
+        "triggered"
+      ],
+      "type": "object"
+    },
+    "PolicyRuleExplanation": {
+      "properties": {
+        "actions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PolicyAction"
+          },
+          "type": "array"
+        },
+        "applied": {
+          "description": "Whether this rule/factor could contribute to the evaluated decision.\nRevoked, expired and stale-reauthentication grants are matched but not\napplied.",
+          "type": "boolean"
+        },
+        "conditions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionCondition"
+          },
+          "type": "array"
+        },
+        "effect": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionEffect"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "matched": {
+          "description": "Whether this rule/factor matched the submitted request context.",
+          "type": "boolean"
+        },
+        "precedence": {
+          "$ref": "#/$defs/PolicyPrecedence",
+          "description": "The precedence label associated with this rule or factor."
+        },
+        "resources": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ResourceKind"
+          },
+          "type": "array"
+        },
+        "rule_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SecurityRuleId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/PolicyRuleSource"
+        },
+        "source_path": {
+          "type": "string"
+        },
+        "subjects": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SubjectSelector"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "source",
+        "source_path",
+        "matched",
+        "applied",
+        "precedence"
+      ],
+      "type": "object"
+    },
+    "PolicyRuleSource": {
+      "description": "Stable source labels. They identify where a rule or factor came from\nwithout changing the evaluator's final decision.",
+      "enum": [
+        "role_baseline",
+        "local_policy_rule",
+        "local_contribution_veto",
+        "local_network_scope",
+        "network_acl_rule",
+        "network_acl_grant",
+        "request",
+        "access_context"
+      ],
+      "type": "string"
+    },
+    "PolicyTestResult": {
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/EffectiveAccess",
+          "description": "Final outcome and all matched identifiers from the authoritative runtime\nevaluator. Consumers must display these fields as-is."
+        },
+        "explanations": {
+          "items": {
+            "$ref": "#/$defs/PolicyRuleExplanation"
+          },
+          "type": "array"
+        },
+        "precedence": {
+          "items": {
+            "$ref": "#/$defs/PolicyPrecedenceExplanation"
+          },
+          "type": "array"
+        },
+        "validation_issues": {
+          "items": {
+            "$ref": "#/$defs/PolicyValidationIssue"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "decision",
+        "validation_issues",
+        "explanations",
+        "precedence"
+      ],
+      "type": "object"
+    },
+    "PolicyValidationIssue": {
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "path": {
+          "description": "JSON-pointer-style path into the submitted policy document.",
+          "type": "string"
+        },
+        "related_rule_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SecurityRuleId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/PolicyValidationSource"
+        }
+      },
+      "required": [
+        "path",
+        "code",
+        "source",
+        "message"
+      ],
+      "type": "object"
+    },
+    "PolicyValidationSource": {
+      "enum": [
+        "local_policy",
+        "network_acl",
+        "test_input"
       ],
       "type": "string"
     },

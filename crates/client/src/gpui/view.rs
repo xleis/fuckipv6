@@ -2235,6 +2235,26 @@ impl GpuiShell {
                 ));
                 self.configuration.finish();
             }
+            NodeCommandOutcome::PolicyTest(result) => {
+                self.notice = Some(format!(
+                    "{}: {} · {:?} · {}",
+                    t(self.locale, "action.test_policy"),
+                    if result.decision.allowed {
+                        t(self.locale, "policy_test.allowed")
+                    } else {
+                        t(self.locale, "policy_test.denied")
+                    },
+                    result.decision.reason,
+                    tr(
+                        self.locale,
+                        "gpui.policy_test_completed",
+                        &[
+                            ("rules", &result.explanations.len().to_string()),
+                            ("issues", &result.validation_issues.len().to_string()),
+                        ],
+                    )
+                ));
+            }
             NodeCommandOutcome::Accepted { operation_id } => {
                 self.notice = Some(tr(
                     self.locale,
@@ -12420,6 +12440,7 @@ fn action_label(locale: Locale, id: &str) -> String {
         "apply_configuration" => "action.apply_configuration",
         "rollback_configuration" => "action.rollback_configuration",
         "get_configuration_history" => "action.get_configuration_history",
+        "test_policy" => "action.test_policy",
         "shutdown_node" => "action.shutdown_node",
         _ => "common.unknown_action",
     };
@@ -12450,6 +12471,7 @@ fn placeholder_for(
         NodeUiInputKind::TimeoutMs => "1500".into(),
         NodeUiInputKind::Revision => t(locale, "placeholder.revision").into(),
         NodeUiInputKind::ConfigurationJson => t(locale, "placeholder.configuration_json").into(),
+        NodeUiInputKind::PolicyJson => t(locale, "placeholder.policy_json").into(),
         NodeUiInputKind::Fingerprint => t(locale, "placeholder.fingerprint").into(),
         NodeUiInputKind::Purpose => t(locale, "placeholder.network_purpose").into(),
         NodeUiInputKind::Icon => "network".into(),

@@ -417,7 +417,8 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         | NodeCommandKind::ListInvitations
         | NodeCommandKind::GetInvitationStatus
         | NodeCommandKind::PreviewInvitation
-        | NodeCommandKind::GetConfigurationHistory => NodeUiAudit::none(),
+        | NodeCommandKind::GetConfigurationHistory
+        | NodeCommandKind::TestPolicy => NodeUiAudit::none(),
         NodeCommandKind::CreateNetwork => NodeUiAudit::record("network.create"),
         NodeCommandKind::UpdateNetworkProfile => NodeUiAudit::record("network.profile.update"),
         NodeCommandKind::PublishNetworkDiscovery => {
@@ -500,6 +501,7 @@ pub enum NodeUiInputKind {
     Boolean,
     ClientId,
     ConfigurationJson,
+    PolicyJson,
     DisplayName,
     ExternalHost,
     Fingerprint,
@@ -551,6 +553,7 @@ pub enum NodeUiValidation {
     PositiveTimeout,
     Revision,
     ConfigurationJson,
+    PolicyJson,
     DisplayName,
     Fingerprint,
     NetworkPurpose,
@@ -2319,6 +2322,22 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         None,
                     ),
                     action(
+                        "test_policy",
+                        "action.test_policy",
+                        NodeCommandKind::TestPolicy,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::Always,
+                        vec![field(
+                            "policy_json",
+                            "field.policy_json",
+                            NodeUiInputKind::PolicyJson,
+                            true,
+                            NodeUiValidation::PolicyJson,
+                        )],
+                        None,
+                    ),
+                    action(
                         "shutdown_node",
                         "action.shutdown_node",
                         NodeCommandKind::Shutdown,
@@ -2869,6 +2888,30 @@ mod tests {
                 .action
                 .as_deref(),
             Some("network.invitation.redeem")
+        );
+    }
+
+    #[test]
+    fn policy_test_action_is_explicit_read_only_and_uses_strict_policy_json() {
+        let manifest = node_ui_manifest();
+        let action = manifest
+            .pages
+            .iter()
+            .flat_map(|page| &page.actions)
+            .find(|action| action.command == NodeCommandKind::TestPolicy)
+            .expect("policy test action");
+        assert_eq!(action.id, "test_policy");
+        assert_eq!(action.permission, NodePermission::ManageNetworks);
+        assert_eq!(action.backend_status, NodeUiBackendStatus::Implemented);
+        assert_eq!(action.fields.len(), 1);
+        let field = &action.fields[0];
+        assert_eq!(field.id, "policy_json");
+        assert_eq!(field.input, NodeUiInputKind::PolicyJson);
+        assert_eq!(field.validation, NodeUiValidation::PolicyJson);
+        assert!(field.required);
+        assert_eq!(
+            crate::node::audit_for_command(NodeCommandKind::TestPolicy),
+            NodeUiAudit::none()
         );
     }
 

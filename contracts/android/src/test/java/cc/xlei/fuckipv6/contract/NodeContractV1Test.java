@@ -46,7 +46,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 184,
+                NodeContractV1.DTO_CLASS_NAMES.length == 191,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -117,6 +117,28 @@ public final class NodeContractV1Test {
         for (String field : new String[] {"local_policy", "network_acls"}) {
             NodeContractV1.NodeAccessControlSnapshot.class.getDeclaredField(field);
         }
+        for (String field : new String[] {
+            "actor",
+            "emergency_coordinator",
+            "groups",
+            "local_policy",
+            "membership_active",
+            "network_acl",
+            "network_id",
+            "now_unix_ms",
+            "recent_reauthentication",
+            "request",
+            "role"
+        }) {
+            NodeContractV1.PolicyTestInput.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "decision", "explanations", "precedence", "validation_issues"
+        }) {
+            NodeContractV1.PolicyTestResult.class.getDeclaredField(field);
+        }
+        NodeContractV1.NodeCommand.TestPolicy.class.getDeclaredField("payload");
+        NodeContractV1.NodeCommandOutcome.PolicyTest.class.getDeclaredField("data");
         for (String field : new String[] {
             "expires_at_unix_ms", "grants", "issued_at_unix_ms", "network_id", "revision", "rules"
         }) {

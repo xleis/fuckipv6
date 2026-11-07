@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitNodeCapabilities", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyPrecedenceExplanation", "PolicyRuleExplanation", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector"
     };
 
     public enum AclAction {
@@ -267,6 +267,65 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown DisplayEnvironment wire value: " + value);
+        }
+    }
+
+    public enum EffectiveAccessReason {
+        ALLOWED("allowed"),
+        CROSS_NETWORK_DENIED("cross_network_denied"),
+        NETWORK_SCOPE_RESTRICTED("network_scope_restricted"),
+        LOCAL_CONTRIBUTION_VETO("local_contribution_veto"),
+        AUTHORIZATION_EXPIRED("authorization_expired"),
+        AUTHORIZATION_REVOKED("authorization_revoked"),
+        RECENT_REAUTHENTICATION_REQUIRED("recent_reauthentication_required"),
+        EXPLICIT_DENY("explicit_deny"),
+        ROLE_CEILING_EXCEEDED("role_ceiling_exceeded"),
+        TEMPORARY_COORDINATOR_READ_ONLY("temporary_coordinator_read_only"),
+        DEFAULT_DENIED("default_denied"),
+        INVALID_POLICY("invalid_policy");
+
+        private final String wireName;
+
+        EffectiveAccessReason(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static EffectiveAccessReason fromWireName(String value) {
+            for (EffectiveAccessReason candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown EffectiveAccessReason wire value: " + value);
+        }
+    }
+
+    public enum EffectivePolicyLayer {
+        LOCAL("local"),
+        NETWORK("network"),
+        REQUEST("request");
+
+        private final String wireName;
+
+        EffectivePolicyLayer(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static EffectivePolicyLayer fromWireName(String value) {
+            for (EffectivePolicyLayer candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown EffectivePolicyLayer wire value: " + value);
         }
     }
 
@@ -980,6 +1039,7 @@ public final class NodeContractV1 {
         STOP_NETWORKS("stop_networks"),
         STOP_NODE("stop_node"),
         SUBMIT_JOIN_REQUEST("submit_join_request"),
+        TEST_POLICY("test_policy"),
         UNBAN_CLIENT("unban_client"),
         UNPUBLISH_NETWORK_DISCOVERY("unpublish_network_discovery"),
         UPDATE_NETWORK_ALLOCATION("update_network_allocation"),
@@ -1732,6 +1792,7 @@ public final class NodeContractV1 {
         BOOLEAN("boolean"),
         CLIENT_ID("client_id"),
         CONFIGURATION_JSON("configuration_json"),
+        POLICY_JSON("policy_json"),
         DISPLAY_NAME("display_name"),
         EXTERNAL_HOST("external_host"),
         FINGERPRINT("fingerprint"),
@@ -1835,6 +1896,7 @@ public final class NodeContractV1 {
         POSITIVE_TIMEOUT("positive_timeout"),
         REVISION("revision"),
         CONFIGURATION_JSON("configuration_json"),
+        POLICY_JSON("policy_json"),
         DISPLAY_NAME("display_name"),
         FINGERPRINT("fingerprint"),
         NETWORK_PURPOSE("network_purpose"),
@@ -1956,6 +2018,7 @@ public final class NodeContractV1 {
         MEMBERSHIP_RESUME("membership_resume"),
         MEMBERSHIP_EXIT("membership_exit"),
         MEMBERSHIP_UNDO_REMOVE("membership_undo_remove"),
+        CONFIGURATION_HISTORY("configuration_history"),
         POLICY_TEST("policy_test"),
         POLICY_APPLY("policy_apply"),
         POLICY_ROLLBACK("policy_rollback"),
@@ -2050,6 +2113,30 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum PermissionIntent {
+        READ_ONLY("read_only"),
+        MUTATING("mutating");
+
+        private final String wireName;
+
+        PermissionIntent(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static PermissionIntent fromWireName(String value) {
+            for (PermissionIntent candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown PermissionIntent wire value: " + value);
+        }
+    }
+
     public enum PolicyAction {
         READ("read"),
         CREATE("create"),
@@ -2082,6 +2169,95 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown PolicyAction wire value: " + value);
+        }
+    }
+
+    public enum PolicyPrecedence {
+        CROSS_NETWORK_DENIED("cross_network_denied"),
+        INVALID_OR_EXPIRED_POLICY("invalid_or_expired_policy"),
+        NETWORK_SCOPE_RESTRICTED("network_scope_restricted"),
+        LOCAL_CONTRIBUTION_VETO("local_contribution_veto"),
+        EXPLICIT_DENY("explicit_deny"),
+        TEMPORARY_COORDINATOR_READ_ONLY("temporary_coordinator_read_only"),
+        ROLE_CEILING_EXCEEDED("role_ceiling_exceeded"),
+        AUTHORIZATION_REVOKED("authorization_revoked"),
+        AUTHORIZATION_EXPIRED("authorization_expired"),
+        RECENT_REAUTHENTICATION_REQUIRED("recent_reauthentication_required"),
+        DEFAULT_DENIED("default_denied"),
+        ALLOW("allow");
+
+        private final String wireName;
+
+        PolicyPrecedence(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static PolicyPrecedence fromWireName(String value) {
+            for (PolicyPrecedence candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown PolicyPrecedence wire value: " + value);
+        }
+    }
+
+    public enum PolicyRuleSource {
+        ROLE_BASELINE("role_baseline"),
+        LOCAL_POLICY_RULE("local_policy_rule"),
+        LOCAL_CONTRIBUTION_VETO("local_contribution_veto"),
+        LOCAL_NETWORK_SCOPE("local_network_scope"),
+        NETWORK_ACL_RULE("network_acl_rule"),
+        NETWORK_ACL_GRANT("network_acl_grant"),
+        REQUEST("request"),
+        ACCESS_CONTEXT("access_context");
+
+        private final String wireName;
+
+        PolicyRuleSource(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static PolicyRuleSource fromWireName(String value) {
+            for (PolicyRuleSource candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown PolicyRuleSource wire value: " + value);
+        }
+    }
+
+    public enum PolicyValidationSource {
+        LOCAL_POLICY("local_policy"),
+        NETWORK_ACL("network_acl"),
+        TEST_INPUT("test_input");
+
+        private final String wireName;
+
+        PolicyValidationSource(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static PolicyValidationSource fromWireName(String value) {
+            for (PolicyValidationSource candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown PolicyValidationSource wire value: " + value);
         }
     }
 
@@ -2505,6 +2681,41 @@ public final class NodeContractV1 {
         public DomainObjectRef(String id, ObjectKind kind) {
             this.id = id;
             this.kind = kind;
+        }
+    }
+
+    /** DTO for EffectiveAccess. */
+    public static final class EffectiveAccess {
+        public final Boolean allowed;
+        public final String code;
+        public final Long evaluated_at_unix_ms;
+        public final List<String> expired_grant_ids;
+        public final EffectivePolicyLayer layer;
+        public final Long local_policy_revision;
+        public final List<String> matched_allow_rule_ids;
+        public final List<String> matched_deny_rule_ids;
+        public final Long network_acl_revision;
+        public final EffectiveAccessReason reason;
+        public final List<String> reauthentication_required_grant_ids;
+        public final Boolean reauthentication_satisfied;
+        public final List<String> revoked_grant_ids;
+        public final String rule_id;
+
+        public EffectiveAccess(Boolean allowed, String code, Long evaluated_at_unix_ms, List<String> expired_grant_ids, EffectivePolicyLayer layer, Long local_policy_revision, List<String> matched_allow_rule_ids, List<String> matched_deny_rule_ids, Long network_acl_revision, EffectiveAccessReason reason, List<String> reauthentication_required_grant_ids, Boolean reauthentication_satisfied, List<String> revoked_grant_ids, String rule_id) {
+            this.allowed = allowed;
+            this.code = code;
+            this.evaluated_at_unix_ms = evaluated_at_unix_ms;
+            this.expired_grant_ids = expired_grant_ids;
+            this.layer = layer;
+            this.local_policy_revision = local_policy_revision;
+            this.matched_allow_rule_ids = matched_allow_rule_ids;
+            this.matched_deny_rule_ids = matched_deny_rule_ids;
+            this.network_acl_revision = network_acl_revision;
+            this.reason = reason;
+            this.reauthentication_required_grant_ids = reauthentication_required_grant_ids;
+            this.reauthentication_satisfied = reauthentication_satisfied;
+            this.revoked_grant_ids = revoked_grant_ids;
+            this.rule_id = rule_id;
         }
     }
 
@@ -5190,6 +5401,128 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for PolicyPrecedenceExplanation. */
+    public static final class PolicyPrecedenceExplanation {
+        public final PolicyPrecedence precedence;
+        public final String rule_id;
+        public final PolicyRuleSource source;
+        public final Boolean triggered;
+
+        public PolicyPrecedenceExplanation(PolicyPrecedence precedence, String rule_id, PolicyRuleSource source, Boolean triggered) {
+            this.precedence = precedence;
+            this.rule_id = rule_id;
+            this.source = source;
+            this.triggered = triggered;
+        }
+    }
+
+    /** DTO for PolicyRuleExplanation. */
+    public static final class PolicyRuleExplanation {
+        public final List<PolicyAction> actions;
+        public final Boolean applied;
+        public final List<PermissionCondition> conditions;
+        public final PermissionEffect effect;
+        public final Boolean matched;
+        public final PolicyPrecedence precedence;
+        public final List<ResourceKind> resources;
+        public final String rule_id;
+        public final PolicyRuleSource source;
+        public final String source_path;
+        public final List<SubjectSelector> subjects;
+
+        public PolicyRuleExplanation(List<PolicyAction> actions, Boolean applied, List<PermissionCondition> conditions, PermissionEffect effect, Boolean matched, PolicyPrecedence precedence, List<ResourceKind> resources, String rule_id, PolicyRuleSource source, String source_path, List<SubjectSelector> subjects) {
+            this.actions = actions;
+            this.applied = applied;
+            this.conditions = conditions;
+            this.effect = effect;
+            this.matched = matched;
+            this.precedence = precedence;
+            this.resources = resources;
+            this.rule_id = rule_id;
+            this.source = source;
+            this.source_path = source_path;
+            this.subjects = subjects;
+        }
+    }
+
+    /** DTO for PolicyTestInput. */
+    public static final class PolicyTestInput {
+        public final String actor;
+        public final Boolean emergency_coordinator;
+        public final List<String> groups;
+        public final NodeLocalAccessPolicy local_policy;
+        public final Boolean membership_active;
+        public final NetworkAcl network_acl;
+        public final String network_id;
+        public final Long now_unix_ms;
+        public final Boolean recent_reauthentication;
+        public final PolicyTestRequest request;
+        public final NetworkRole role;
+
+        public PolicyTestInput(String actor, Boolean emergency_coordinator, List<String> groups, NodeLocalAccessPolicy local_policy, Boolean membership_active, NetworkAcl network_acl, String network_id, Long now_unix_ms, Boolean recent_reauthentication, PolicyTestRequest request, NetworkRole role) {
+            this.actor = actor;
+            this.emergency_coordinator = emergency_coordinator;
+            this.groups = groups;
+            this.local_policy = local_policy;
+            this.membership_active = membership_active;
+            this.network_acl = network_acl;
+            this.network_id = network_id;
+            this.now_unix_ms = now_unix_ms;
+            this.recent_reauthentication = recent_reauthentication;
+            this.request = request;
+            this.role = role;
+        }
+    }
+
+    /** DTO for PolicyTestRequest. */
+    public static final class PolicyTestRequest {
+        public final PolicyAction action;
+        public final PermissionIntent intent;
+        public final String object_id;
+        public final ResourceKind resource;
+        public final String resource_network_id;
+
+        public PolicyTestRequest(PolicyAction action, PermissionIntent intent, String object_id, ResourceKind resource, String resource_network_id) {
+            this.action = action;
+            this.intent = intent;
+            this.object_id = object_id;
+            this.resource = resource;
+            this.resource_network_id = resource_network_id;
+        }
+    }
+
+    /** DTO for PolicyTestResult. */
+    public static final class PolicyTestResult {
+        public final EffectiveAccess decision;
+        public final List<PolicyRuleExplanation> explanations;
+        public final List<PolicyPrecedenceExplanation> precedence;
+        public final List<PolicyValidationIssue> validation_issues;
+
+        public PolicyTestResult(EffectiveAccess decision, List<PolicyRuleExplanation> explanations, List<PolicyPrecedenceExplanation> precedence, List<PolicyValidationIssue> validation_issues) {
+            this.decision = decision;
+            this.explanations = explanations;
+            this.precedence = precedence;
+            this.validation_issues = validation_issues;
+        }
+    }
+
+    /** DTO for PolicyValidationIssue. */
+    public static final class PolicyValidationIssue {
+        public final String code;
+        public final String message;
+        public final String path;
+        public final String related_rule_id;
+        public final PolicyValidationSource source;
+
+        public PolicyValidationIssue(String code, String message, String path, String related_rule_id, PolicyValidationSource source) {
+            this.code = code;
+            this.message = message;
+            this.path = path;
+            this.related_rule_id = related_rule_id;
+            this.source = source;
+        }
+    }
+
     /** DTO for ProjectedActivityEntry. */
     public static final class ProjectedActivityEntry {
         public final String action;
@@ -6240,6 +6573,15 @@ public final class NodeContractV1 {
                 super(NodeCommandKind.GET_CONFIGURATION_HISTORY);
             }
         }
+
+        public static final class TestPolicy extends NodeCommand {
+            public final PolicyTestInput payload;
+
+            public TestPolicy(PolicyTestInput payload) {
+                super(NodeCommandKind.TEST_POLICY);
+                this.payload = payload;
+            }
+        }
     }
 
     /** Tagged union DTO for NodeCommandOutcome. */
@@ -6534,6 +6876,15 @@ public final class NodeContractV1 {
 
             public ConfigurationHistory(List<ConfigurationHistoryEntry> data) {
                 super("configuration_history");
+                this.data = data;
+            }
+        }
+
+        public static final class PolicyTest extends NodeCommandOutcome {
+            public final PolicyTestResult data;
+
+            public PolicyTest(PolicyTestResult data) {
+                super("policy_test");
                 this.data = data;
             }
         }
@@ -7275,6 +7626,15 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class PolicyTest extends ProjectedNodeCommandOutcome {
+            public final PolicyTestResult data;
+
+            public PolicyTest(PolicyTestResult data) {
+                super("policy_test");
+                this.data = data;
+            }
+        }
+
         public static final class Accepted extends ProjectedNodeCommandOutcome {
             public final AcceptedData data;
 
@@ -7606,6 +7966,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.STOP_NETWORKS ||
             command == NodeCommandKind.STOP_NODE ||
             command == NodeCommandKind.SUBMIT_JOIN_REQUEST ||
+            command == NodeCommandKind.TEST_POLICY ||
             command == NodeCommandKind.UNBAN_CLIENT ||
             command == NodeCommandKind.UNPUBLISH_NETWORK_DISCOVERY ||
             command == NodeCommandKind.UPDATE_NETWORK_ALLOCATION ||

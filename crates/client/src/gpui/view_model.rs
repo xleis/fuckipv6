@@ -4,12 +4,12 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use fuckipv6_common::domain::JoinRequestReviewAction;
 use fuckipv6_common::domain::{
-    CapabilityKind, CapabilityState, ContentHash, ExitContributionObligation,
-    ExitContributionScope, InvitationCode, InvitationId, InvitationRedeemRequest,
-    MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode, NetworkMember,
-    NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberStatus,
-    NetworkProfileUpdate, NetworkVisibility, NodeId, TopologyNode, TopologyNodeHealth,
-    TopologySnapshot,
+    parse_policy_test_input, CapabilityKind, CapabilityState, ContentHash,
+    ExitContributionObligation, ExitContributionScope, InvitationCode, InvitationId,
+    InvitationRedeemRequest, MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode,
+    NetworkMember, NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberOnlineState,
+    NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId, TopologyNode,
+    TopologyNodeHealth, TopologySnapshot,
 };
 use fuckipv6_common::i18n::{t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
@@ -264,11 +264,12 @@ pub enum ActionBinding {
     ApplyConfiguration,
     RollbackConfiguration,
     GetConfigurationHistory,
+    TestPolicy,
     ShutdownNode,
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 54] = [
+    pub const ALL: [Self; 55] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
@@ -322,6 +323,7 @@ impl ActionBinding {
         Self::ApplyConfiguration,
         Self::RollbackConfiguration,
         Self::GetConfigurationHistory,
+        Self::TestPolicy,
         Self::ShutdownNode,
     ];
 
@@ -380,6 +382,7 @@ impl ActionBinding {
             Self::ApplyConfiguration => "apply_configuration",
             Self::RollbackConfiguration => "rollback_configuration",
             Self::GetConfigurationHistory => "get_configuration_history",
+            Self::TestPolicy => "test_policy",
             Self::ShutdownNode => "shutdown_node",
         }
     }
@@ -1392,6 +1395,7 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             ActionBinding::GetConfigurationHistory,
             NodeCommandKind::GetConfigurationHistory,
         ),
+        "test_policy" => (ActionBinding::TestPolicy, NodeCommandKind::TestPolicy),
         "shutdown_node" => (ActionBinding::ShutdownNode, NodeCommandKind::Shutdown),
         _ => {
             return Err(ModelError::UnknownAction {
@@ -2164,6 +2168,17 @@ pub fn build_command(
             },
         )),
         Ok(ActionBinding::GetConfigurationHistory) => Ok(NodeCommand::GetConfigurationHistory),
+        Ok(ActionBinding::TestPolicy) => {
+            let policy_json = required("policy_json")?;
+            let input = parse_policy_test_input(&policy_json).map_err(|issue| {
+                CommandBuildError::InvalidField {
+                    action_id: action.id.clone(),
+                    field_id: "policy_json".into(),
+                    value: format!("{}: {}", issue.path, issue.message),
+                }
+            })?;
+            Ok(NodeCommand::TestPolicy(input))
+        }
         Ok(ActionBinding::ShutdownNode) => Ok(NodeCommand::Shutdown),
         Err(ModelError::UnknownAction { action_id, .. }) => {
             Err(CommandBuildError::UnknownAction { action_id })
@@ -2295,6 +2310,7 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
             HashSet::from(["expected_revision", "networks"])
         }
         "rollback_configuration" => HashSet::from(["expected_revision", "target_revision"]),
+        "test_policy" => HashSet::from(["policy_json"]),
         "start_node" | "stop_node" | "restart_node" | "shutdown_node" => HashSet::from([]),
         _ => return Err(format!("unknown action {}", action.id)),
     };
@@ -5993,7 +6009,7 @@ mod tests {
 
     #[test]
     fn every_manifest_action_has_an_explicit_binding() {
-        assert_eq!(ActionBinding::ALL.len(), 54);
+        assert_eq!(ActionBinding::ALL.len(), 55);
         let manifest = node_ui_manifest();
         let actual = manifest
             .pages
@@ -6034,6 +6050,27 @@ mod tests {
         ));
     }
 
+    fn policy_test_fixture_json() -> String {
+        let network_id = NetworkId::from_public_key(b"gpui-policy-test-network");
+        serde_json::json!({
+            "network_id": network_id.to_string(),
+            "actor": NodeId::from_public_key(b"gpui-policy-test-actor").to_string(),
+            "role": "member",
+            "groups": [],
+            "membership_active": true,
+            "recent_reauthentication": true,
+            "emergency_coordinator": false,
+            "request": {
+                "action": "read",
+                "resource": "network",
+                "resource_network_id": network_id.to_string(),
+                "intent": "read_only"
+            },
+            "now_unix_ms": 1_500
+        })
+        .to_string()
+    }
+
     #[test]
     fn action_builders_use_typed_node_commands() {
         let manifest = node_ui_manifest();
@@ -6064,6 +6101,9 @@ mod tests {
                             .as_str()
                             .to_string(),
                     );
+                }
+                if action.id == "test_policy" {
+                    values.insert("policy_json".into(), policy_test_fixture_json());
                 }
                 if matches!(
                     action.id.as_str(),
@@ -6349,6 +6389,50 @@ mod tests {
             action_block_reason(action, &denied, Some("home")),
             Some(ActionBlockReason::PermissionDenied)
         );
+    }
+
+    #[test]
+    fn policy_test_builder_uses_strict_json_and_reports_field_paths() {
+        let manifest = node_ui_manifest();
+        let action = manifest
+            .pages
+            .iter()
+            .flat_map(|page| &page.actions)
+            .find(|action| action.id == "test_policy")
+            .expect("policy test action");
+        validate_form_contract(action).expect("policy test form contract");
+        let json = policy_test_fixture_json();
+        let expected = parse_policy_test_input(&json).expect("valid policy test input");
+        let command = build_command(
+            action,
+            &HashMap::from([("policy_json".into(), json.clone())]),
+        )
+        .expect("typed policy test command");
+        assert!(matches!(
+            command,
+            NodeCommand::TestPolicy(ref input) if *input == expected
+        ));
+
+        let nested_duplicate = json.replacen(
+            "\"intent\":\"read_only\"",
+            "\"intent\":\"read_only\",\"intent\":\"mutating\"",
+            1,
+        );
+        let error = build_command(
+            action,
+            &HashMap::from([("policy_json".into(), nested_duplicate)]),
+        )
+        .expect_err("duplicate fields must be rejected");
+        assert!(matches!(
+            error,
+            CommandBuildError::InvalidField {
+                ref action_id,
+                ref field_id,
+                ref value,
+            } if action_id == "test_policy"
+                && field_id == "policy_json"
+                && value.contains("/request/intent")
+        ));
     }
 
     #[test]

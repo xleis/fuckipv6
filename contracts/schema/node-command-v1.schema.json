@@ -14,6 +14,15 @@
       "description": "SHA-256/Blake3-style content digest represented without exposing secret input.",
       "type": "string"
     },
+    "ContributionKind": {
+      "description": "Node-local contributions that the owner may veto independently of network\ngovernance. Coordinator participation is deliberately not a local veto:\nCoordinator terms are governed by the separate coordinator contract.",
+      "enum": [
+        "relay",
+        "exit",
+        "file"
+      ],
+      "type": "string"
+    },
     "DiscoveryTransport": {
       "enum": [
         "quic",
@@ -51,6 +60,9 @@
           "type": "string"
         }
       ]
+    },
+    "GroupId": {
+      "type": "string"
     },
     "InvitationCode": {
       "description": "A high-entropy invitation secret. It is intentionally not a URL and its\n`Debug` representation is redacted so generic tracing cannot disclose it.",
@@ -135,6 +147,117 @@
         "member"
       ],
       "type": "string"
+    },
+    "NetworkAcl": {
+      "description": "Revisioned network ACL. Explicit deny rules live in `rules`; direct\nrole/group/node grants live in `grants` and are subject to expiry,\nrevocation and reauthentication freshness.",
+      "properties": {
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "grants": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NetworkAclGrant"
+          },
+          "type": "array"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rules": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionRule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "network_id",
+        "revision",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms"
+      ],
+      "type": "object"
+    },
+    "NetworkAclGrant": {
+      "description": "One explicit direct grant. Grants are additive allow entries; they never\noverride a matching deny in either authorization layer.",
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/PolicyAction"
+          },
+          "type": "array"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "grant_id": {
+          "$ref": "#/$defs/SecurityRuleId"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "requires_recent_reauthentication": {
+          "default": false,
+          "type": "boolean"
+        },
+        "resources": {
+          "items": {
+            "$ref": "#/$defs/ResourceKind"
+          },
+          "type": "array"
+        },
+        "revoked_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "revoked_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "subjects": {
+          "items": {
+            "$ref": "#/$defs/SubjectSelector"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "grant_id",
+        "subjects",
+        "resources",
+        "actions",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms"
+      ],
+      "type": "object"
     },
     "NetworkDiscoveryDocument": {
       "description": "Signed discovery data. Endpoints may change between revisions; the stable\nnetwork ID remains bound to the immutable network public key.",
@@ -426,6 +549,16 @@
       ],
       "type": "object"
     },
+    "NetworkRole": {
+      "description": "Durable network roles plus the runtime-only emergency Coordinator role.",
+      "enum": [
+        "owner",
+        "administrator",
+        "member",
+        "temporary_coordinator"
+      ],
+      "type": "string"
+    },
     "NetworkVisibility": {
       "description": "How much of a network's public profile is discoverable without membership.",
       "enum": [
@@ -546,6 +679,29 @@
       "required": [
         "network_name",
         "client_id"
+      ],
+      "type": "object"
+    },
+    "NodeContributionVeto": {
+      "description": "A non-overridable local contribution veto for one network.",
+      "properties": {
+        "contributions": {
+          "items": {
+            "$ref": "#/$defs/ContributionKind"
+          },
+          "type": "array"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "veto_id": {
+          "$ref": "#/$defs/SecurityRuleId"
+        }
+      },
+      "required": [
+        "veto_id",
+        "network_id",
+        "contributions"
       ],
       "type": "object"
     },
@@ -830,6 +986,54 @@
       ],
       "type": "object"
     },
+    "NodeLocalAccessPolicy": {
+      "description": "The trusted, owner-authored local authorization layer. A network\nadministrator can add further restrictions but can never replace this\ndocument or any of its vetoes.",
+      "properties": {
+        "contribution_vetoes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeContributionVeto"
+          },
+          "type": "array"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_scope": {
+          "$ref": "#/$defs/NodeNetworkScope"
+        },
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rules": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionRule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "node_id",
+        "revision",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms",
+        "network_scope"
+      ],
+      "type": "object"
+    },
     "NodeMemberRemovalPreviewCommand": {
       "properties": {
         "network_id": {
@@ -921,6 +1125,42 @@
         "exit_node"
       ],
       "type": "string"
+    },
+    "NodeNetworkScope": {
+      "description": "A node owner can either participate in every authenticated network or\nexplicitly limit participation to a fixed set. An empty `Only` set is\ninvalid rather than an accidental allow-all sentinel.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "only",
+              "type": "string"
+            },
+            "network_ids": {
+              "items": {
+                "$ref": "#/$defs/NetworkId"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "network_ids"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "NodeNetworkSelection": {
       "description": "How a node should choose the networks it loads at startup.",
@@ -1241,13 +1481,330 @@
       ],
       "type": "object"
     },
+    "PermissionCondition": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "membership_active",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "recent_reauthentication",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "resource_in_network",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/NetworkId"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "non_emergency_coordinator",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PermissionEffect": {
+      "enum": [
+        "allow",
+        "deny"
+      ],
+      "type": "string"
+    },
+    "PermissionIntent": {
+      "description": "Whether a request can mutate durable state. Temporary Coordinators may read\nthe last valid policy and coordinate existing connections, but every\nmutating request is frozen in the domain evaluator.",
+      "enum": [
+        "read_only",
+        "mutating"
+      ],
+      "type": "string"
+    },
+    "PermissionRule": {
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/PolicyAction"
+          },
+          "type": "array"
+        },
+        "conditions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionCondition"
+          },
+          "type": "array"
+        },
+        "effect": {
+          "$ref": "#/$defs/PermissionEffect"
+        },
+        "resources": {
+          "items": {
+            "$ref": "#/$defs/ResourceKind"
+          },
+          "type": "array"
+        },
+        "rule_id": {
+          "$ref": "#/$defs/SecurityRuleId"
+        },
+        "subjects": {
+          "items": {
+            "$ref": "#/$defs/SubjectSelector"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "rule_id",
+        "effect",
+        "subjects",
+        "resources",
+        "actions"
+      ],
+      "type": "object"
+    },
+    "PolicyAction": {
+      "enum": [
+        "read",
+        "create",
+        "update",
+        "delete",
+        "approve",
+        "reject",
+        "remove",
+        "enable",
+        "disable",
+        "use",
+        "recover",
+        "export",
+        "test"
+      ],
+      "type": "string"
+    },
+    "PolicyTestInput": {
+      "additionalProperties": false,
+      "description": "Complete, transport-safe input for a policy test. Candidate documents are\nevaluated in memory and are never applied to the node.",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "emergency_coordinator": {
+          "type": "boolean"
+        },
+        "groups": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/GroupId"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "local_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeLocalAccessPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "membership_active": {
+          "type": "boolean"
+        },
+        "network_acl": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkAcl"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "now_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "recent_reauthentication": {
+          "type": "boolean"
+        },
+        "request": {
+          "$ref": "#/$defs/PolicyTestRequest"
+        },
+        "role": {
+          "$ref": "#/$defs/NetworkRole"
+        }
+      },
+      "required": [
+        "network_id",
+        "actor",
+        "role",
+        "membership_active",
+        "recent_reauthentication",
+        "emergency_coordinator",
+        "request",
+        "now_unix_ms"
+      ],
+      "type": "object"
+    },
+    "PolicyTestRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/PolicyAction"
+        },
+        "intent": {
+          "$ref": "#/$defs/PermissionIntent"
+        },
+        "object_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource": {
+          "$ref": "#/$defs/ResourceKind"
+        },
+        "resource_network_id": {
+          "$ref": "#/$defs/NetworkId"
+        }
+      },
+      "required": [
+        "action",
+        "resource",
+        "resource_network_id",
+        "intent"
+      ],
+      "type": "object"
+    },
     "PublicKey": {
       "description": "Ed25519 public key bytes encoded as URL-safe base64 without padding.",
+      "type": "string"
+    },
+    "ResourceKind": {
+      "enum": [
+        "network",
+        "ownership",
+        "membership",
+        "group",
+        "security_policy",
+        "traffic_policy",
+        "capability",
+        "exit_grant",
+        "file_share",
+        "audit",
+        "coordinator_term",
+        "keys"
+      ],
+      "type": "string"
+    },
+    "SecurityRuleId": {
       "type": "string"
     },
     "Signature": {
       "description": "Signature bytes encoded as URL-safe base64 without padding.",
       "type": "string"
+    },
+    "SubjectSelector": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "any_member",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "role",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/NetworkRole"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "node",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/NodeId"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "group",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/GroupId"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
     }
   },
   "$id": "https://relay.xlei.cc/contracts/schema/node-command-v1.schema.json",
@@ -2198,6 +2755,23 @@
       },
       "required": [
         "command"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Evaluate candidate policy documents with the runtime authorization evaluator\nwithout storing them or emitting audit/activity side effects.",
+      "properties": {
+        "command": {
+          "const": "test_policy",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/PolicyTestInput"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
       ],
       "type": "object"
     }

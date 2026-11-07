@@ -213,6 +213,32 @@ impl PermissionRule {
     }
 }
 
+/// One deterministic baseline rule for a durable membership role. The rule
+/// grants only within the role ceiling; both the resource network and active
+/// membership are conditions, so one network's role cannot authorize another.
+/// Runtime authorization and the policy tester consume this same baseline.
+pub fn role_baseline_policy(network_id: &NetworkId, role: NetworkRole) -> Vec<PermissionRule> {
+    let role_name = match role {
+        NetworkRole::Owner => "owner",
+        NetworkRole::Administrator => "administrator",
+        NetworkRole::Member => "member",
+        NetworkRole::TemporaryCoordinator => "temporary_coordinator",
+    };
+    vec![PermissionRule {
+        rule_id: SecurityRuleId::from_public_key(
+            format!("builtin-role:{network_id}:{role_name}").as_bytes(),
+        ),
+        effect: PermissionEffect::Allow,
+        subjects: vec![SubjectSelector::Role(role)],
+        resources: ResourceKind::ALL.to_vec(),
+        actions: PolicyAction::ALL.to_vec(),
+        conditions: vec![
+            PermissionCondition::MembershipActive,
+            PermissionCondition::ResourceInNetwork(network_id.clone()),
+        ],
+    }]
+}
+
 impl SubjectSelector {
     pub(crate) fn matches(&self, context: &AccessContext) -> bool {
         match self {

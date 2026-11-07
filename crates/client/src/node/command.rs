@@ -13,8 +13,9 @@ use fuckipv6_common::domain::{
     MemberLifecycleAction, MemberLifecycleChange, MemberRemovalPreview, MembershipRole,
     NetworkCreateProfile, NetworkDiscoveryRecord, NetworkEndpoint, NetworkId, NetworkJoinMode,
     NetworkMemberDirectory, NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate,
-    NetworkVisibility, PermissionDenialCode, JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS,
-    JOIN_REQUEST_MAX_REASON_CHARS, NETWORK_PROFILE_MAX_TAG_CHARS,
+    NetworkVisibility, PermissionDenialCode, PolicyTestInput, PolicyTestResult,
+    JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS, JOIN_REQUEST_MAX_REASON_CHARS,
+    NETWORK_PROFILE_MAX_TAG_CHARS,
 };
 #[cfg(test)]
 use fuckipv6_common::domain::{DEFAULT_NETWORK_ICON, DEFAULT_NETWORK_LANGUAGE};
@@ -121,11 +122,12 @@ pub enum NodeCommandKind {
     ApplyConfiguration,
     RollbackConfiguration,
     GetConfigurationHistory,
+    TestPolicy,
     Shutdown,
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 54] = [
+    pub const ALL: [Self; 55] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -179,12 +181,13 @@ impl NodeCommandKind {
         Self::ApplyConfiguration,
         Self::RollbackConfiguration,
         Self::GetConfigurationHistory,
+        Self::TestPolicy,
         Self::Shutdown,
     ];
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 53] = [
+    pub const ACTIONS: [Self; 54] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -237,6 +240,7 @@ impl NodeCommandKind {
         Self::ApplyConfiguration,
         Self::RollbackConfiguration,
         Self::GetConfigurationHistory,
+        Self::TestPolicy,
         Self::Shutdown,
     ];
 
@@ -319,6 +323,7 @@ impl NodeCommandKind {
             Self::ApplyConfiguration => "apply_configuration",
             Self::RollbackConfiguration => "rollback_configuration",
             Self::GetConfigurationHistory => "get_configuration_history",
+            Self::TestPolicy => "test_policy",
         }
     }
 
@@ -504,6 +509,9 @@ pub enum NodeCommand {
     RollbackConfiguration(NodeRollbackConfigurationCommand),
     /// Append-only configuration revision history, newest first.
     GetConfigurationHistory,
+    /// Evaluate candidate policy documents with the runtime authorization evaluator
+    /// without storing them or emitting audit/activity side effects.
+    TestPolicy(PolicyTestInput),
 }
 
 impl NodeCommand {
@@ -563,6 +571,7 @@ impl NodeCommand {
             Self::ApplyConfiguration(_) => NodeCommandKind::ApplyConfiguration,
             Self::RollbackConfiguration(_) => NodeCommandKind::RollbackConfiguration,
             Self::GetConfigurationHistory => NodeCommandKind::GetConfigurationHistory,
+            Self::TestPolicy(_) => NodeCommandKind::TestPolicy,
         }
     }
 
@@ -576,7 +585,8 @@ impl NodeCommand {
             | Self::RestartNode
             | Self::Shutdown
             | Self::GetConfiguration
-            | Self::GetConfigurationHistory => Ok(()),
+            | Self::GetConfigurationHistory
+            | Self::TestPolicy(_) => Ok(()),
             Self::StartNetworks { selection } => validate_selection(selection),
             Self::StopNetworks { networks, all } => {
                 if *all {
@@ -2312,6 +2322,7 @@ pub enum NodeCommandOutcome {
     ConfigurationPreview(Box<ConfigurationPreview>),
     ConfigurationApplied(Box<ConfigurationApplyResult>),
     ConfigurationHistory(Vec<ConfigurationHistoryEntry>),
+    PolicyTest(Box<PolicyTestResult>),
     Accepted { operation_id: String },
     Completed { message: String },
     Rejected(NodeProblem),
@@ -2374,7 +2385,10 @@ impl CommandAuditTrail {
         // A preview is a read-only disclosure. Keep it out of the durable
         // command audit and activity feed; the subsequent confirmed join is the
         // auditable mutation.
-        if request.command.kind() == NodeCommandKind::PreviewJoinNetwork {
+        if matches!(
+            request.command.kind(),
+            NodeCommandKind::PreviewJoinNetwork | NodeCommandKind::TestPolicy
+        ) {
             return;
         }
         let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
@@ -2915,6 +2929,13 @@ impl NodeCommandBus {
         outcome: AuditOutcome,
         reason: &str,
     ) {
+        // Policy tests are read-only simulations. Do not append audit/activity
+        // state, and do not republish the snapshot merely because the test
+        // command completed. Denials are simulated too: no candidate policy is
+        // being applied, so there is no durable security transition to record.
+        if request.command.kind() == NodeCommandKind::TestPolicy {
+            return;
+        }
         let snapshot = match &self.activity_state {
             Some(state) => Some(state.snapshot().await),
             None => None,
@@ -3317,6 +3338,29 @@ mod tests {
                 target_revision: 0,
             }),
             NodeCommand::GetConfigurationHistory,
+            NodeCommand::TestPolicy(fuckipv6_common::domain::PolicyTestInput {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"policy-test-network",
+                ),
+                actor: fuckipv6_common::domain::NodeId::from_public_key(b"policy-test-actor"),
+                role: fuckipv6_common::domain::NetworkRole::Member,
+                groups: Default::default(),
+                membership_active: true,
+                recent_reauthentication: true,
+                emergency_coordinator: false,
+                request: fuckipv6_common::domain::PolicyTestRequest {
+                    action: fuckipv6_common::domain::PolicyAction::Read,
+                    resource: fuckipv6_common::domain::ResourceKind::Network,
+                    resource_network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                        b"policy-test-network",
+                    ),
+                    object_id: None,
+                    intent: fuckipv6_common::domain::PermissionIntent::ReadOnly,
+                },
+                local_policy: None,
+                network_acl: None,
+                now_unix_ms: 1_000,
+            }),
             NodeCommand::Shutdown,
         ]
     }
@@ -3363,8 +3407,8 @@ mod tests {
 
     #[test]
     fn command_kind_inventory_and_sensitive_reauth_contract_are_complete() {
-        assert_eq!(NodeCommandKind::ALL.len(), 54);
-        assert_eq!(NodeCommandKind::ACTIONS.len(), 53);
+        assert_eq!(NodeCommandKind::ALL.len(), 55);
+        assert_eq!(NodeCommandKind::ACTIONS.len(), 54);
         for kind in [
             NodeCommandKind::CreateInvitation,
             NodeCommandKind::RevokeInvitation,
@@ -4063,6 +4107,7 @@ mod tests {
             NodeCommandKind::PreviewInvitation,
             NodeCommandKind::PreviewConfiguration,
             NodeCommandKind::GetConfigurationHistory,
+            NodeCommandKind::TestPolicy,
         ] {
             assert!(!kind.is_write(), "{kind:?}");
         }
@@ -4086,6 +4131,7 @@ mod tests {
                     | NodeCommandKind::PreviewInvitation
                     | NodeCommandKind::PreviewConfiguration
                     | NodeCommandKind::GetConfigurationHistory
+                    | NodeCommandKind::TestPolicy
             ) {
                 assert!(kind.is_write(), "{kind:?}");
             }

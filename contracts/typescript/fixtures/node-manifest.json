@@ -2030,6 +2030,28 @@
           "confirmation": null
         },
         {
+          "id": "test_policy",
+          "label_key": "action.test_policy",
+          "command": "test_policy",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "policy_json",
+              "label_key": "field.policy_json",
+              "input": "policy_json",
+              "required": true,
+              "validation": "policy_json"
+            }
+          ],
+          "confirmation": null
+        },
+        {
           "id": "shutdown_node",
           "label_key": "action.shutdown_node",
           "command": "shutdown",

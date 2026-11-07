@@ -3,7 +3,6 @@ import type {
   NodeApiCommandResponse,
   NodeApiManifestResponse,
   NodeApiOperationResponse,
-  NodeApiSnapshotResponse,
   NodeCommand,
   NodeCommandHttpRequest,
   NodeCommandOutcome,
@@ -27,6 +26,11 @@ import type {
   NetworkMemberDirectory,
 } from "../../../contracts/typescript/node-contract-v1";
 import { ContractError } from "../api/client";
+import {
+  parsePolicyTestInputJson,
+  PolicyJsonError,
+  validatePolicyTestResult,
+} from "./policy-test";
 
 export const HTTP_SCHEMA_VERSION = 1;
 export const MANIFEST_SCHEMA_VERSION = 1;
@@ -131,6 +135,7 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   apply_configuration: "apply_configuration",
   rollback_configuration: "rollback_configuration",
   get_configuration_history: "get_configuration_history",
+  test_policy: "test_policy",
   shutdown_node: "shutdown",
 };
 
@@ -200,6 +205,7 @@ const INPUT_KINDS = new Set([
   "timeout_ms",
   "revision",
   "configuration_json",
+  "policy_json",
   "display_name",
   "fingerprint",
   "discovery_index_url",
@@ -217,6 +223,7 @@ const VALIDATIONS = new Set([
   "positive_timeout",
   "revision",
   "configuration_json",
+  "policy_json",
   "display_name",
   "fingerprint",
   "network_purpose",
@@ -272,6 +279,7 @@ const OUTCOME_STATUSES = new Set([
   "configuration_preview",
   "configuration_applied",
   "configuration_history",
+  "policy_test",
   "identity_rotated",
   "accepted",
   "completed",
@@ -558,64 +566,63 @@ function validateField(actionId: string, field: NodeUiField): void {
   );
 }
 
-export function validateSnapshotResponse(
-  response: NodeApiSnapshotResponse,
-): NodeSnapshot {
+export function validateSnapshotResponse(response: unknown): NodeSnapshot {
   if (!record(response)) fail("snapshot response is missing");
   if (response.schema_version !== HTTP_SCHEMA_VERSION)
     fail("snapshot HTTP schema mismatch");
   return validateSnapshot(response.snapshot);
 }
 
-export function validateSnapshot(snapshot: NodeSnapshot): NodeSnapshot {
+export function validateSnapshot(snapshot: unknown): NodeSnapshot {
   if (!record(snapshot)) fail("snapshot payload is missing");
-  nonNegativeInteger(snapshot.revision, "snapshot revision invalid");
-  if (!record(snapshot.lifecycle)) fail("snapshot lifecycle missing");
-  if (!LIFECYCLE_PHASES.has(snapshot.lifecycle.phase))
+  const value = snapshot as NodeSnapshot;
+  nonNegativeInteger(value.revision, "snapshot revision invalid");
+  if (!record(value.lifecycle)) fail("snapshot lifecycle missing");
+  if (!LIFECYCLE_PHASES.has(value.lifecycle.phase))
     fail("lifecycle phase invalid");
   nonNegativeInteger(
-    snapshot.lifecycle.configured_networks,
+    value.lifecycle.configured_networks,
     "configured_networks invalid",
   );
   nonNegativeInteger(
-    snapshot.lifecycle.active_networks,
+    value.lifecycle.active_networks,
     "active_networks invalid",
   );
-  arrayValue(snapshot.lifecycle.failed_networks, "failed_networks invalid");
-  arrayValue(snapshot.networks, "networks invalid");
-  arrayValue(snapshot.peers, "peers invalid");
-  arrayValue(snapshot.logs, "logs invalid");
-  arrayValue(snapshot.embedded_services, "embedded_services invalid");
+  arrayValue(value.lifecycle.failed_networks, "failed_networks invalid");
+  arrayValue(value.networks, "networks invalid");
+  arrayValue(value.peers, "peers invalid");
+  arrayValue(value.logs, "logs invalid");
+  arrayValue(value.embedded_services, "embedded_services invalid");
   if (
-    !record(snapshot.configuration) ||
-    !Array.isArray(snapshot.configuration.networks)
+    !record(value.configuration) ||
+    !Array.isArray(value.configuration.networks)
   ) {
     fail("configuration networks invalid");
   }
   if (
-    !record(snapshot.permissions) ||
-    !Array.isArray(snapshot.permissions.permissions)
+    !record(value.permissions) ||
+    !Array.isArray(value.permissions.permissions)
   ) {
     fail("permissions invalid");
   }
-  if (snapshot.tun_capabilities !== undefined) {
+  if (value.tun_capabilities !== undefined) {
     if (
-      !record(snapshot.tun_capabilities) ||
-      !Number.isSafeInteger(snapshot.tun_capabilities.schema_version) ||
-      snapshot.tun_capabilities.schema_version < 0 ||
-      !TUN_PLATFORMS.has(snapshot.tun_capabilities.platform) ||
-      typeof snapshot.tun_capabilities.supported !== "boolean" ||
-      typeof snapshot.tun_capabilities.can_rebuild !== "boolean" ||
-      !Array.isArray(snapshot.tun_capabilities.reasons)
+      !record(value.tun_capabilities) ||
+      !Number.isSafeInteger(value.tun_capabilities.schema_version) ||
+      value.tun_capabilities.schema_version < 0 ||
+      !TUN_PLATFORMS.has(value.tun_capabilities.platform) ||
+      typeof value.tun_capabilities.supported !== "boolean" ||
+      typeof value.tun_capabilities.can_rebuild !== "boolean" ||
+      !Array.isArray(value.tun_capabilities.reasons)
     ) {
       fail("TUN capabilities invalid");
     }
-    for (const reason of snapshot.tun_capabilities.reasons) {
+    for (const reason of value.tun_capabilities.reasons) {
       if (!TUN_CAPABILITY_REASONS.has(reason))
         fail(`TUN capability reason invalid: ${reason}`);
     }
   }
-  for (const network of snapshot.networks) {
+  for (const network of value.networks) {
     if (!record(network)) fail("network snapshot invalid");
     stringValue(network.name, "network name invalid", true);
     if (!NETWORK_STATUSES.has(network.status))
@@ -626,8 +633,8 @@ export function validateSnapshot(snapshot: NodeSnapshot): NodeSnapshot {
     if (!record(network.traffic))
       fail(`network traffic invalid: ${network.name}`);
   }
-  if (snapshot.network_profiles !== undefined) {
-    for (const profile of snapshot.network_profiles) {
+  if (value.network_profiles !== undefined) {
+    for (const profile of value.network_profiles) {
       if (!record(profile)) fail("network profile snapshot invalid");
       stringValue(profile.name, "network profile snapshot name invalid", true);
       stringValue(
@@ -690,7 +697,7 @@ export function validateSnapshot(snapshot: NodeSnapshot): NodeSnapshot {
       }
     }
   }
-  for (const peer of snapshot.peers) {
+  for (const peer of value.peers) {
     if (!record(peer)) fail("peer snapshot invalid");
     stringValue(peer.peer_id, "peer id invalid", true);
     stringValue(peer.network_name, "peer network invalid", true);
@@ -698,13 +705,13 @@ export function validateSnapshot(snapshot: NodeSnapshot): NodeSnapshot {
     arrayValue(peer.endpoints, `peer endpoints invalid: ${peer.peer_id}`);
     if (!record(peer.traffic)) fail(`peer traffic invalid: ${peer.peer_id}`);
   }
-  for (const entry of snapshot.logs) {
+  for (const entry of value.logs) {
     if (!record(entry)) fail("log entry invalid");
     stringValue(entry.message, "log message invalid");
     stringValue(entry.target, "log target invalid");
     nonNegativeInteger(entry.unix_ms, "log timestamp invalid");
   }
-  return snapshot;
+  return value;
 }
 
 export function primaryStatus(
@@ -1586,6 +1593,12 @@ export function validateActionValues(
       } catch (error) {
         errors.push(error instanceof Error ? error.message : String(error));
       }
+    } else if (field.validation === "policy_json") {
+      try {
+        parsePolicyTestInputJson(String(value));
+      } catch (error) {
+        errors.push(policyJsonErrorText(error, locale));
+      }
     } else if (field.validation === "display_name") {
       const displayName = String(value).trim();
       if (/\p{Cc}/u.test(displayName)) {
@@ -1697,6 +1710,16 @@ export function validateActionValues(
     }
   }
   return errors;
+}
+
+function policyJsonErrorText(error: unknown, locale: Locale): string {
+  if (error instanceof PolicyJsonError) {
+    return i18n().tr(locale, "validation.policy_json_path", {
+      path: error.path,
+      message: error.message,
+    });
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function buildCommand(
@@ -2198,6 +2221,15 @@ export function buildCommand(
       };
     case "get_configuration_history":
       return { command: "get_configuration_history" };
+    case "test_policy":
+      try {
+        return {
+          command: "test_policy",
+          payload: parsePolicyTestInputJson(requiredString("policy_json")),
+        };
+      } catch (error) {
+        throw new Error(policyJsonErrorText(error, locale));
+      }
     case "start_node":
       return { command: "start_node" };
     case "stop_node":
@@ -2562,7 +2594,7 @@ function memberDirectory(value: unknown): NetworkMemberDirectory {
   return value as NetworkMemberDirectory;
 }
 
-function validatedOutcome(value: unknown): NodeCommandOutcome {
+export function validateCommandOutcome(value: unknown): NodeCommandOutcome {
   if (!record(value) || !OUTCOME_STATUSES.has(String(value.status)))
     fail("unknown command outcome");
   const outcome = value as NodeCommandOutcome;
@@ -2579,6 +2611,8 @@ function validatedOutcome(value: unknown): NodeCommandOutcome {
     configurationApplied(outcome.data);
   if (outcome.status === "configuration_history")
     configurationHistory(outcome.data);
+  if (outcome.status === "policy_test")
+    validatePolicyTestResult(outcome.data);
   if (outcome.status === "network_profile_preview")
     networkProfilePreview(outcome.data);
   if (outcome.status === "network_profile_updated")
@@ -2626,7 +2660,7 @@ export function validateOperationSnapshot(
     fail("operation snapshot has an unknown state");
   if (value.result !== undefined && value.result !== null) {
     if (!record(value.result)) fail("operation result is invalid");
-    validatedOutcome(value.result.outcome);
+    validateCommandOutcome(value.result.outcome);
   }
   return value as NodeOperationSnapshot;
 }
@@ -2636,14 +2670,14 @@ export function operationStateIsTerminal(state: string): boolean {
 }
 
 export function validateCommandResponse(
-  response: NodeApiCommandResponse,
+  response: unknown,
   requestId: number,
 ): NodeCommandOutcome {
   if (!record(response) || response.schema_version !== HTTP_SCHEMA_VERSION)
     fail("command HTTP schema mismatch");
   if (!record(response.result) || response.result.request_id !== requestId)
     fail("command request id mismatch");
-  return validatedOutcome(response.result.outcome);
+  return validateCommandOutcome(response.result.outcome);
 }
 
 export function validateAcceptedCommandResponse(
@@ -2722,6 +2756,20 @@ export function outcomeSummary(
   if (outcome.status === "configuration_history") {
     return i18n().tr(locale, "outcome.configuration_history", {
       count: i18n().formatInteger(locale, outcome.data.length),
+    });
+  }
+  if (outcome.status === "policy_test") {
+    return i18n().tr(locale, "outcome.policy_test", {
+      decision: label(
+        locale,
+        outcome.data.decision.allowed
+          ? "policy.result.allowed"
+          : "policy.result.denied",
+      ),
+      reason: label(
+        locale,
+        `policy.choice.reason.${outcome.data.decision.reason}`,
+      ),
     });
   }
   if (outcome.status === "network_created") {

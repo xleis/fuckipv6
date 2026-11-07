@@ -11,7 +11,10 @@ import type {
   NodeOperationSnapshot,
   NodeSnapshot,
   NetworkMemberDirectory,
+  NodeUiAction,
   NodeUiManifest,
+  PolicyTestInput,
+  PolicyTestResult,
 } from "../../../contracts/typescript/node-contract-v1";
 import {
   buildCommand,
@@ -22,6 +25,7 @@ import {
   outcomeSummary,
   validateAcceptedCommandResponse,
   validateActionValues,
+  validateCommandOutcome,
   validateCommandResponse,
   validateManifestResponse,
   validateOperationResponse,
@@ -29,6 +33,11 @@ import {
   validateSnapshotResponse,
 } from "./invariants";
 import { installTestI18nRuntime } from "../test/runtime";
+import {
+  parsePolicyTestInputJson,
+  PolicyJsonError,
+  validatePolicyTestResult,
+} from "./policy-test";
 
 const manifest = manifestFixture as NodeUiManifest;
 
@@ -1488,5 +1497,176 @@ describe("node UI contract invariants", () => {
         `WebUI command mismatch for ${step.action_id}`,
       ).toEqual(step.wire);
     }
+  });
+
+  it("validates the policy tester manifest contract and builds its strict command", () => {
+    const nodeId = `node_${"N".repeat(43)}`;
+    const networkId = `net_${"W".repeat(43)}`;
+    const policyAction: NodeUiAction = {
+      id: "test_policy",
+      label_key: "action.test_policy",
+      command: "test_policy",
+      backend_status: "implemented",
+      permission: "manage_networks",
+      audit: { policy: "none", action: null },
+      availability: "always",
+      fields: [
+        {
+          id: "policy_json",
+          label_key: "field.policy_json",
+          input: "policy_json",
+          required: true,
+          validation: "policy_json",
+        },
+      ],
+      confirmation: null,
+    };
+    const settings = manifest.pages.find((page) => page.id === "settings");
+    expect(settings).toBeDefined();
+    const manifestPolicyAction = settings!.actions.find(
+      (action) => action.id === "test_policy",
+    );
+    expect(manifestPolicyAction).toEqual(policyAction);
+    expect(validateManifestResponse(manifestResponse(manifest))).toEqual(manifest);
+
+    const input: PolicyTestInput = {
+      network_id: networkId,
+      actor: nodeId,
+      role: "member",
+      groups: [],
+      membership_active: true,
+      recent_reauthentication: false,
+      emergency_coordinator: false,
+      now_unix_ms: 1_700_000_000_000,
+      request: {
+        action: "read",
+        resource: "network",
+        resource_network_id: networkId,
+        object_id: null,
+        intent: "read_only",
+      },
+      local_policy: null,
+      network_acl: null,
+    };
+    expect(
+      buildCommand(
+        manifestPolicyAction!,
+        { policy_json: JSON.stringify(input) },
+        "zh-CN",
+      ),
+    ).toEqual({ command: "test_policy", payload: input });
+  });
+
+  it("rejects malformed policy JSON with exact paths", () => {
+    const nodeId = `node_${"N".repeat(43)}`;
+    const networkId = `net_${"W".repeat(43)}`;
+    const valid = {
+      network_id: networkId,
+      actor: nodeId,
+      role: "member",
+      groups: [] as string[],
+      membership_active: true,
+      recent_reauthentication: false,
+      emergency_coordinator: false,
+      now_unix_ms: 1_700_000_000_000,
+      request: {
+        action: "read",
+        resource: "network",
+        resource_network_id: networkId,
+        object_id: null,
+        intent: "read_only",
+      },
+      local_policy: null,
+      network_acl: null,
+    };
+
+    function parseError(source: string): PolicyJsonError {
+      try {
+        parsePolicyTestInputJson(source);
+      } catch (error) {
+        expect(error).toBeInstanceOf(PolicyJsonError);
+        return error as PolicyJsonError;
+      }
+      throw new Error("expected policy JSON to be rejected");
+    }
+
+    const duplicate = JSON.stringify(valid).replace(
+      `{"network_id":${JSON.stringify(networkId)}`,
+      `{"network_id":${JSON.stringify(networkId)},"network_id":${JSON.stringify(networkId)}`,
+    );
+    expect(parseError(duplicate).path).toBe("/network_id");
+
+    const unknown = JSON.stringify({ ...valid, unexpected: true });
+    expect(parseError(unknown).path).toBe("/unexpected");
+    expect(parseError(`${JSON.stringify(valid)} trailing`).path).toBe("/");
+
+    const invalidArrayElement = JSON.stringify({
+      ...valid,
+      groups: [`group_${"G".repeat(43)}`, "not-a-group"],
+    });
+    expect(parseError(invalidArrayElement).path).toBe("/groups/1");
+  });
+
+  it("validates and summarizes an explainable policy test result", () => {
+    const ruleId = `srule_${"R".repeat(43)}`;
+    const result: PolicyTestResult = {
+      decision: {
+        allowed: false,
+        code: "explicit_deny",
+        evaluated_at_unix_ms: 1_700_000_000_100,
+        expired_grant_ids: [],
+        layer: "local",
+        local_policy_revision: 7,
+        matched_allow_rule_ids: [],
+        matched_deny_rule_ids: [ruleId],
+        network_acl_revision: 4,
+        reason: "explicit_deny",
+        reauthentication_required_grant_ids: [],
+        reauthentication_satisfied: true,
+        revoked_grant_ids: [],
+        rule_id: ruleId,
+      },
+      explanations: [
+        {
+          source: "local_policy_rule",
+          source_path: "/local_policy/rules/0",
+          rule_id: ruleId,
+          effect: "deny",
+          subjects: [{ kind: "any_member" }],
+          resources: ["network"],
+          actions: ["read"],
+          conditions: [{ kind: "membership_active" }],
+          matched: true,
+          applied: true,
+          precedence: "explicit_deny",
+        },
+      ],
+      precedence: [
+        {
+          precedence: "explicit_deny",
+          triggered: true,
+          source: "local_policy_rule",
+          rule_id: ruleId,
+        },
+      ],
+      validation_issues: [
+        {
+          path: "/local_policy/rules/0/actions/0",
+          code: "unknown_action",
+          source: "local_policy",
+          related_rule_id: ruleId,
+          message: "Unknown policy action",
+        },
+      ],
+    };
+    expect(validatePolicyTestResult(result)).toEqual(result);
+    const outcome = validateCommandOutcome({
+      status: "policy_test",
+      data: result,
+    });
+    expect(outcome).toEqual({ status: "policy_test", data: result });
+    expect(outcomeSummary(outcome, "zh-CN")).toBe(
+      "translated:outcome.policy_test",
+    );
   });
 });

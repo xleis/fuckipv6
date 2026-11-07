@@ -79,6 +79,7 @@
             "apply_configuration",
             "rollback_configuration",
             "get_configuration_history",
+            "test_policy",
             "shutdown"
           ],
           "type": "string"
@@ -243,6 +244,7 @@
         "boolean",
         "client_id",
         "configuration_json",
+        "policy_json",
         "display_name",
         "external_host",
         "fingerprint",
@@ -339,6 +341,7 @@
         "positive_timeout",
         "revision",
         "configuration_json",
+        "policy_json",
         "display_name",
         "fingerprint",
         "network_purpose",

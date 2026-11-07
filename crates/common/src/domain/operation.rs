@@ -81,6 +81,7 @@ pub enum OperationKind {
     MembershipResume,
     MembershipExit,
     MembershipUndoRemove,
+    ConfigurationHistory,
     PolicyTest,
     PolicyApply,
     PolicyRollback,

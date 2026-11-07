@@ -76,6 +76,11 @@ import {
   type ConfigurationDraftMemo,
 } from "./components/configuration-workflow";
 import { PageContent } from "./components/page-content";
+import {
+  POLICY_ACTION_IDS,
+  PolicyWorkflow,
+  type PolicyDraftMemo,
+} from "./components/policy-workflow";
 import { StateNotice } from "./components/state-notice";
 import {
   commandEnvelope,
@@ -83,6 +88,7 @@ import {
   label,
   operationStateIsTerminal,
   primaryStatus,
+  validateCommandOutcome,
   validateSnapshot,
   type ActionValues,
 } from "./contract/invariants";
@@ -141,6 +147,7 @@ type UiSessionMemo = {
   searchQuery: string;
   requestedAction: RequestedActionMemo | null;
   configurationDraft: ConfigurationDraftMemo | null;
+  policyDraft: PolicyDraftMemo | null;
 };
 
 const EMPTY_UI_SESSION: UiSessionMemo = {
@@ -149,6 +156,7 @@ const EMPTY_UI_SESSION: UiSessionMemo = {
   searchQuery: "",
   requestedAction: null,
   configurationDraft: null,
+  policyDraft: null,
 };
 
 function errorMessage(error: unknown): string {
@@ -734,6 +742,12 @@ function AppShell({
     },
     [onUiSessionChange],
   );
+  const handlePolicyDraftChange = useCallback(
+    (policyDraft: PolicyDraftMemo | null) => {
+      onUiSessionChange({ policyDraft });
+    },
+    [onUiSessionChange],
+  );
   const searchInputRef = useRef<HTMLInputElement>(null);
   const activePage =
     manifest.pages.find((page) => page.id === pageId) ?? initialPage;
@@ -835,7 +849,7 @@ function AppShell({
         });
     onOperation(operation);
     if (operation.result) {
-      return { outcome: operation.result.outcome, operation };
+      return { outcome: validateCommandOutcome(operation.result.outcome), operation };
     }
     if (operation.state === "succeeded") {
       throw new Error(label(locale, "common.operation_failed"));
@@ -941,7 +955,7 @@ function AppShell({
       }
       const submission = response.result
         ? {
-            outcome: response.result.outcome,
+            outcome: validateCommandOutcome(response.result.outcome),
             operation: response.operation ?? undefined,
           }
         : response.operation
@@ -1350,23 +1364,42 @@ function AppShell({
                       !snapshot.permissions?.permissions.includes("view_state"),
                   }}
                   footer={
-                    activePage.actions.some((action) =>
-                      CONFIGURATION_ACTION_IDS.has(action.id),
-                    ) ? (
-                      <ConfigurationWorkflow
-                        actions={activePage.actions.filter((action) =>
-                          CONFIGURATION_ACTION_IDS.has(action.id),
-                        )}
-                        snapshot={snapshot}
-                        selectedNetwork={selectedNetwork}
-                        locale={locale}
-                        pendingAction={pendingAction}
-                        interactionBlocked={interactionBlocked}
-                        draft={uiSession.configurationDraft}
-                        onDraftChange={handleConfigurationDraftChange}
-                        onSubmit={submitConfigurationAction}
-                      />
-                    ) : null
+                    <>
+                      {activePage.actions.some((action) =>
+                        CONFIGURATION_ACTION_IDS.has(action.id),
+                      ) ? (
+                        <ConfigurationWorkflow
+                          actions={activePage.actions.filter((action) =>
+                            CONFIGURATION_ACTION_IDS.has(action.id),
+                          )}
+                          snapshot={snapshot}
+                          selectedNetwork={selectedNetwork}
+                          locale={locale}
+                          pendingAction={pendingAction}
+                          interactionBlocked={interactionBlocked}
+                          draft={uiSession.configurationDraft}
+                          onDraftChange={handleConfigurationDraftChange}
+                          onSubmit={submitConfigurationAction}
+                        />
+                      ) : null}
+                      {activePage.actions.some((action) =>
+                        POLICY_ACTION_IDS.has(action.id),
+                      ) ? (
+                        <PolicyWorkflow
+                          actions={activePage.actions.filter((action) =>
+                            POLICY_ACTION_IDS.has(action.id),
+                          )}
+                          snapshot={snapshot}
+                          selectedNetwork={selectedNetwork}
+                          locale={locale}
+                          pendingAction={pendingAction}
+                          interactionBlocked={interactionBlocked}
+                          draft={uiSession.policyDraft}
+                          onDraftChange={handlePolicyDraftChange}
+                          onSubmit={submitConfigurationAction}
+                        />
+                      ) : null}
+                    </>
                   }
                   onSelectNetwork={setSelectedNetworkState}
                   onNavigate={navigate}
@@ -1376,7 +1409,9 @@ function AppShell({
               </div>
               <ActionPanel
                 actions={activePage.actions.filter(
-                  (action) => !CONFIGURATION_ACTION_IDS.has(action.id),
+                  (action) =>
+                    !CONFIGURATION_ACTION_IDS.has(action.id) &&
+                    !POLICY_ACTION_IDS.has(action.id),
                 )}
                 snapshot={snapshot}
                 selectedNetwork={selectedNetwork}

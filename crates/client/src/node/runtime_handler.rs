@@ -666,6 +666,10 @@ impl NodeRuntimeHandler {
                         Err(error) => embedded_service_rejection(request_id, &network_name, error),
                     }
                 }
+                super::NodeCommand::TestPolicy(input) => NodeCommandResult::completed(
+                    request_id,
+                    NodeCommandOutcome::PolicyTest(Box::new(input.evaluate())),
+                ),
             }
         })
     }
@@ -3486,11 +3490,38 @@ mod tests {
         NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
     };
     use crate::symmetric::EmbeddedServiceStartRequest;
-    use fuckipv6_common::domain::{ContentHash, InvitationCode, InvitationId};
+    use fuckipv6_common::domain::{
+        ContentHash, InvitationCode, InvitationId, NetworkAcl, NetworkRole, PermissionEffect,
+        PermissionIntent, PermissionRule, PolicyAction, PolicyTestInput, PolicyTestRequest,
+        ResourceKind, SubjectSelector,
+    };
     use fuckipv6_common::{
         ExitNodeCapabilities, ExitNodePlatform, NetworkMode, EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
     };
     use tokio::sync::mpsc;
+
+    fn policy_test_input() -> PolicyTestInput {
+        let network_id = NetworkId::from_public_key(b"policy-test-network");
+        PolicyTestInput {
+            network_id: network_id.clone(),
+            actor: NodeId::from_public_key(b"policy-test-actor"),
+            role: NetworkRole::Owner,
+            groups: Default::default(),
+            membership_active: true,
+            recent_reauthentication: true,
+            emergency_coordinator: false,
+            request: PolicyTestRequest {
+                action: PolicyAction::Read,
+                resource: ResourceKind::Network,
+                resource_network_id: network_id,
+                object_id: None,
+                intent: PermissionIntent::ReadOnly,
+            },
+            local_policy: None,
+            network_acl: None,
+            now_unix_ms: 1_000,
+        }
+    }
 
     fn invitation_preview() -> InvitationPreview {
         let terms = MembershipTerms {
@@ -3744,6 +3775,88 @@ mod tests {
                 );
                 assert_eq!(manifest.pages.len(), 12);
                 assert_eq!(*manifest, crate::node::node_ui_manifest());
+            }
+            outcome => panic!("unexpected outcome: {outcome:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_tests_use_the_runtime_evaluator_without_audit_or_state_side_effects() {
+        let state = NodeStateStore::new();
+        state
+            .update(|snapshot| {
+                snapshot.logs.push(crate::node::NodeLogEntry {
+                    unix_ms: 1,
+                    level: crate::node::NodeLogLevel::Info,
+                    target: "policy-test".into(),
+                    message: "unchanged".into(),
+                });
+            })
+            .await;
+        let bus = spawn_command_bus(
+            state.clone(),
+            MultiNetworkRegistry::new(),
+            NodeEventBus::default(),
+        );
+        let input = policy_test_input();
+        let expected = input.evaluate();
+        let before = state.snapshot().await;
+        let audit_before = bus.audit_entries().len();
+
+        let result = bus
+            .execute_test(NodeCommandRequest::new(76, NodeCommand::TestPolicy(input)))
+            .await
+            .expect("policy test result");
+        match result.outcome {
+            NodeCommandOutcome::PolicyTest(result) => {
+                assert_eq!(*result, expected);
+                assert!(result.decision.allowed);
+            }
+            outcome => panic!("unexpected outcome: {outcome:?}"),
+        }
+
+        assert_eq!(state.snapshot().await, before);
+        assert_eq!(bus.audit_entries().len(), audit_before);
+    }
+
+    #[tokio::test]
+    async fn invalid_candidate_policy_returns_a_successful_explained_test_result() {
+        let bus = spawn_command_bus(
+            NodeStateStore::new(),
+            MultiNetworkRegistry::new(),
+            NodeEventBus::default(),
+        );
+        let mut input = policy_test_input();
+        input.network_acl = Some(NetworkAcl {
+            network_id: input.network_id.clone(),
+            revision: 1,
+            issued_at_unix_ms: 100,
+            expires_at_unix_ms: 10_000,
+            rules: vec![PermissionRule {
+                rule_id: fuckipv6_common::domain::SecurityRuleId::from_public_key(b"invalid-rule"),
+                effect: PermissionEffect::Deny,
+                subjects: vec![SubjectSelector::AnyMember],
+                resources: vec![ResourceKind::Network],
+                actions: vec![PolicyAction::Read],
+                conditions: Vec::new(),
+            }],
+            grants: Vec::new(),
+        });
+        input.network_acl.as_mut().expect("acl").rules[0]
+            .subjects
+            .clear();
+
+        let result = bus
+            .execute_test(NodeCommandRequest::new(77, NodeCommand::TestPolicy(input)))
+            .await
+            .expect("invalid candidate still returns a test result");
+        match result.outcome {
+            NodeCommandOutcome::PolicyTest(result) => {
+                assert!(result.validation_issues.iter().any(|issue| {
+                    issue.path == "/network_acl/rules/0/subjects"
+                        && issue.code == "empty_rule_subjects"
+                }));
+                assert!(!result.decision.allowed);
             }
             outcome => panic!("unexpected outcome: {outcome:?}"),
         }

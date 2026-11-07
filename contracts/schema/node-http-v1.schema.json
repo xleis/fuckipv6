@@ -8,71 +8,6 @@
       ],
       "type": "string"
     },
-    "ActivityEntry": {
-      "description": "Activity is an intentionally separate projection. Adding a field to the\nsecurity audit does not automatically expose that field in product feeds.",
-      "properties": {
-        "action": {
-          "type": "string"
-        },
-        "actor": {
-          "$ref": "#/$defs/NodeId"
-        },
-        "audit_id": {
-          "$ref": "#/$defs/AuditId"
-        },
-        "details": {
-          "additionalProperties": {
-            "type": "string"
-          },
-          "type": "object"
-        },
-        "network_id": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NetworkId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "occurred_at_unix_ms": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "operation_id": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OperationId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "outcome": {
-          "$ref": "#/$defs/AuditOutcome"
-        },
-        "resource": {
-          "type": "string"
-        },
-        "summary": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "audit_id",
-        "actor",
-        "action",
-        "resource",
-        "outcome",
-        "occurred_at_unix_ms",
-        "summary",
-        "details"
-      ],
-      "type": "object"
-    },
     "AuditId": {
       "type": "string"
     },
@@ -2504,7 +2439,7 @@
         "result": {
           "anyOf": [
             {
-              "$ref": "#/$defs/NodeCommandResult"
+              "$ref": "#/$defs/ProjectedNodeCommandResult"
             },
             {
               "type": "null"
@@ -2681,7 +2616,7 @@
               "type": "string"
             },
             "snapshot": {
-              "$ref": "#/$defs/NodeSnapshot"
+              "$ref": "#/$defs/ProjectedNodeSnapshot"
             },
             "type": {
               "const": "snapshot",
@@ -2701,7 +2636,7 @@
         {
           "properties": {
             "event": {
-              "$ref": "#/$defs/NodeEvent"
+              "$ref": "#/$defs/ProjectedNodeEvent"
             },
             "request_id": {
               "format": "uint64",
@@ -2812,7 +2747,7 @@
               "type": "string"
             },
             "identity": {
-              "$ref": "#/$defs/NodeIdentitySnapshot"
+              "$ref": "#/$defs/ProjectedNodeIdentitySnapshot"
             },
             "kind": {
               "const": "node",
@@ -2836,7 +2771,7 @@
               "type": "string"
             },
             "network": {
-              "$ref": "#/$defs/NodeNetworkSnapshot"
+              "$ref": "#/$defs/ProjectedNodeNetworkSnapshot"
             }
           },
           "required": [
@@ -2856,7 +2791,7 @@
               "type": "string"
             },
             "peer": {
-              "$ref": "#/$defs/NodePeerSnapshot"
+              "$ref": "#/$defs/ProjectedNodePeerSnapshot"
             }
           },
           "required": [
@@ -2876,7 +2811,7 @@
               "type": "string"
             },
             "service": {
-              "$ref": "#/$defs/NodeEmbeddedServiceSnapshot"
+              "$ref": "#/$defs/ProjectedNodeEmbeddedServiceSnapshot"
             }
           },
           "required": [
@@ -2984,7 +2919,7 @@
           "type": "string"
         },
         "snapshot": {
-          "$ref": "#/$defs/NodeSnapshot"
+          "$ref": "#/$defs/ProjectedNodeSnapshot"
         }
       },
       "required": [
@@ -4181,7 +4116,7 @@
       "description": "Versioned response DTO containing the exact result returned by the command\nbus. Rejected results remain visible in the body alongside their HTTP status.",
       "properties": {
         "result": {
-          "$ref": "#/$defs/NodeCommandResult"
+          "$ref": "#/$defs/ProjectedNodeCommandResult"
         },
         "schema_version": {
           "format": "uint16",
@@ -4195,592 +4130,6 @@
         "result"
       ],
       "type": "object"
-    },
-    "NodeCommandOutcome": {
-      "oneOf": [
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NodeSnapshot"
-            },
-            "status": {
-              "const": "snapshot",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NodeUiManifest"
-            },
-            "status": {
-              "const": "ui_manifest",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NodeDiagnosticsSnapshot"
-            },
-            "status": {
-              "const": "diagnostics",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NodeResidualCleanupResult"
-            },
-            "status": {
-              "const": "cleanup",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NodeBlacklistSnapshot"
-            },
-            "status": {
-              "const": "blacklist",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NodeNetworkAllocationSnapshot"
-            },
-            "status": {
-              "const": "network_allocation",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NodePeerProbeSnapshot"
-            },
-            "status": {
-              "const": "probe",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NodeCreatedNetwork"
-            },
-            "status": {
-              "const": "network_created",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NetworkProfilePreview"
-            },
-            "status": {
-              "const": "network_profile_preview",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NetworkProfileApplyResult"
-            },
-            "status": {
-              "const": "network_profile_updated",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NodeNetworkJoinPreview"
-            },
-            "status": {
-              "const": "network_join_preview",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NodeNetworkJoinResult"
-            },
-            "status": {
-              "const": "network_joined",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/JoinRequest"
-            },
-            "status": {
-              "const": "join_request_submitted",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NodeJoinRequestListResult"
-            },
-            "status": {
-              "const": "join_requests",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NetworkMemberDirectory"
-            },
-            "status": {
-              "const": "network_members",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/MemberRemovalPreview"
-            },
-            "status": {
-              "const": "member_removal_preview",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/MemberLifecycleChange"
-            },
-            "status": {
-              "const": "member_lifecycle_changed",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NodeJoinRequestReviewAck"
-            },
-            "status": {
-              "const": "join_requests_reviewed",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/JoinRequest"
-            },
-            "status": {
-              "const": "join_request_updated",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/IssuedInvitation"
-            },
-            "status": {
-              "const": "invitation_created",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "items": {
-                "$ref": "#/$defs/InvitationStatusView"
-              },
-              "type": "array"
-            },
-            "status": {
-              "const": "invitations",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/InvitationStatusView"
-            },
-            "status": {
-              "const": "invitation_status",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/InvitationStatusView"
-            },
-            "status": {
-              "const": "invitation_revoked",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/InvitationPreview"
-            },
-            "status": {
-              "const": "invitation_preview",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/InvitationRedemption"
-            },
-            "status": {
-              "const": "invitation_redeemed",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NodeNetworkLeaveResult"
-            },
-            "status": {
-              "const": "network_left",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NodeNetworkMembershipSnapshot"
-            },
-            "status": {
-              "const": "membership_policy_acknowledged",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NodeIdentityRotationSnapshot"
-            },
-            "status": {
-              "const": "identity_rotated",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/ConfigurationDocument"
-            },
-            "status": {
-              "const": "configuration",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/ConfigurationPreview"
-            },
-            "status": {
-              "const": "configuration_preview",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/ConfigurationApplyResult"
-            },
-            "status": {
-              "const": "configuration_applied",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "items": {
-                "$ref": "#/$defs/ConfigurationHistoryEntry"
-              },
-              "type": "array"
-            },
-            "status": {
-              "const": "configuration_history",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "properties": {
-                "operation_id": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "operation_id"
-              ],
-              "type": "object"
-            },
-            "status": {
-              "const": "accepted",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "properties": {
-                "message": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "message"
-              ],
-              "type": "object"
-            },
-            "status": {
-              "const": "completed",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "$ref": "#/$defs/NodeProblem"
-            },
-            "status": {
-              "const": "rejected",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "data"
-          ],
-          "type": "object"
-        }
-      ]
     },
     "NodeCommandRequest": {
       "description": "One request accepted by the node command layer from CLI, IPC, WebUI or GPUI.",
@@ -4797,23 +4146,6 @@
       "required": [
         "request_id",
         "command"
-      ],
-      "type": "object"
-    },
-    "NodeCommandResult": {
-      "properties": {
-        "outcome": {
-          "$ref": "#/$defs/NodeCommandOutcome"
-        },
-        "request_id": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "request_id",
-        "outcome"
       ],
       "type": "object"
     },
@@ -5403,34 +4735,6 @@
       ],
       "type": "string"
     },
-    "NodeEmbeddedServiceSnapshot": {
-      "description": "Non-secret runtime state for one network's embedded signaling and relay\nservices. Invitation tickets, identity material, and host-local paths are\ndeliberately excluded from this shared UI contract.",
-      "properties": {
-        "network_name": {
-          "type": "string"
-        },
-        "relay_addr": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "signaling_addr": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "status": {
-          "$ref": "#/$defs/NodeEmbeddedServiceStatus"
-        }
-      },
-      "required": [
-        "network_name",
-        "status"
-      ],
-      "type": "object"
-    },
     "NodeEmbeddedServiceStatus": {
       "enum": [
         "starting",
@@ -5454,31 +4758,6 @@
       ],
       "type": "string"
     },
-    "NodeEvent": {
-      "description": "Ordered event delivered to every attached UI and control adapter.",
-      "properties": {
-        "kind": {
-          "$ref": "#/$defs/NodeEventKind"
-        },
-        "sequence": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "snapshot_revision": {
-          "description": "Canonical node-state revision in effect when this event was published.\nConsumers must acknowledge it together with `sequence`; an event cursor\nis not valid against a different snapshot epoch.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "sequence",
-        "snapshot_revision",
-        "kind"
-      ],
-      "type": "object"
-    },
     "NodeEventCursor": {
       "description": "Point in the node event stream. Sequence provides exactly-once delivery\nwithin retained history; snapshot revision proves the cursor belongs to the\nsnapshot epoch the consumer is applying.",
       "properties": {
@@ -5498,259 +4777,6 @@
         "snapshot_revision"
       ],
       "type": "object"
-    },
-    "NodeEventKind": {
-      "oneOf": [
-        {
-          "properties": {
-            "data": {
-              "properties": {
-                "revision": {
-                  "format": "uint64",
-                  "minimum": 0,
-                  "type": "integer"
-                }
-              },
-              "required": [
-                "revision"
-              ],
-              "type": "object"
-            },
-            "type": {
-              "const": "state_changed",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "properties": {
-                "network_name": {
-                  "type": "string"
-                },
-                "status": {
-                  "$ref": "#/$defs/NodeNetworkStatus"
-                }
-              },
-              "required": [
-                "network_name",
-                "status"
-              ],
-              "type": "object"
-            },
-            "type": {
-              "const": "network_changed",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "properties": {
-                "network_name": {
-                  "type": "string"
-                },
-                "status": {
-                  "$ref": "#/$defs/NodeEmbeddedServiceStatus"
-                }
-              },
-              "required": [
-                "network_name",
-                "status"
-              ],
-              "type": "object"
-            },
-            "type": {
-              "const": "embedded_service_changed",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "properties": {
-                "level": {
-                  "$ref": "#/$defs/NodeLogLevel"
-                },
-                "message": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "level",
-                "message"
-              ],
-              "type": "object"
-            },
-            "type": {
-              "const": "log_appended",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "properties": {
-                "exit_node": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
-                },
-                "is_exit_node": {
-                  "type": "boolean"
-                },
-                "mode": {
-                  "$ref": "#/$defs/NodeRoutingMode"
-                },
-                "network_name": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "network_name",
-                "mode",
-                "is_exit_node"
-              ],
-              "type": "object"
-            },
-            "type": {
-              "const": "routing_changed",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "properties": {
-                "enabled": {
-                  "type": "boolean"
-                },
-                "network_name": {
-                  "type": "string"
-                },
-                "role": {
-                  "$ref": "#/$defs/NodeNetworkRole"
-                },
-                "roles": {
-                  "items": {
-                    "$ref": "#/$defs/NodeNetworkRole"
-                  },
-                  "type": "array"
-                }
-              },
-              "required": [
-                "network_name",
-                "role",
-                "enabled",
-                "roles"
-              ],
-              "type": "object"
-            },
-            "type": {
-              "const": "role_changed",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "properties": {
-                "request_id": {
-                  "format": "uint64",
-                  "minimum": 0,
-                  "type": "integer"
-                },
-                "success": {
-                  "type": "boolean"
-                }
-              },
-              "required": [
-                "request_id",
-                "success"
-              ],
-              "type": "object"
-            },
-            "type": {
-              "const": "command_completed",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type",
-            "data"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "data": {
-              "properties": {
-                "operation_id": {
-                  "type": "string"
-                },
-                "stage": {
-                  "type": "string"
-                },
-                "state": {
-                  "$ref": "#/$defs/OperationState"
-                }
-              },
-              "required": [
-                "operation_id",
-                "state",
-                "stage"
-              ],
-              "type": "object"
-            },
-            "type": {
-              "const": "operation_changed",
-              "type": "string"
-            }
-          },
-          "required": [
-            "type",
-            "data"
-          ],
-          "type": "object"
-        }
-      ]
     },
     "NodeEventReplayReason": {
       "enum": [
@@ -5936,37 +4962,6 @@
       ],
       "type": "object"
     },
-    "NodeIdentitySnapshot": {
-      "description": "Public node identity metadata. Secret key material must never enter this DTO.",
-      "properties": {
-        "created_at_unix_ms": {
-          "description": "Unix timestamp when the current identity key was created. This remains\noptional so snapshots produced by older nodes can still be decoded.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "display_name": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "node_id": {
-          "type": "string"
-        },
-        "public_key_fingerprint": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "node_id",
-        "public_key_fingerprint"
-      ],
-      "type": "object"
-    },
     "NodeInterfaceAddress": {
       "properties": {
         "address": {
@@ -6004,57 +4999,6 @@
         "unknown"
       ],
       "type": "string"
-    },
-    "NodeInterfaceSnapshot": {
-      "description": "One redacted host network interface captured by the node process.\n\nThe snapshot intentionally omits hardware addresses, routes, policy rules\nand operating-system diagnostics. UI adapters render this projection and\nnever query or mutate host networking themselves.",
-      "properties": {
-        "addresses": {
-          "items": {
-            "$ref": "#/$defs/NodeInterfaceAddress"
-          },
-          "type": "array"
-        },
-        "default_ipv4": {
-          "type": "boolean"
-        },
-        "default_ipv6": {
-          "type": "boolean"
-        },
-        "index": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "kind": {
-          "$ref": "#/$defs/NodeInterfaceKind"
-        },
-        "mtu": {
-          "format": "uint32",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "name": {
-          "type": "string"
-        },
-        "ownership": {
-          "$ref": "#/$defs/NodeInterfaceOwnership"
-        },
-        "status": {
-          "$ref": "#/$defs/NodeInterfaceStatus"
-        }
-      },
-      "required": [
-        "index",
-        "name",
-        "kind",
-        "ownership",
-        "status",
-        "mtu",
-        "addresses",
-        "default_ipv4",
-        "default_ipv6"
-      ],
-      "type": "object"
     },
     "NodeInterfaceStatus": {
       "enum": [
@@ -6811,52 +5755,6 @@
       ],
       "type": "object"
     },
-    "NodeNetworkJoinResult": {
-      "properties": {
-        "config_saved": {
-          "type": "boolean"
-        },
-        "idempotent": {
-          "type": "boolean"
-        },
-        "membership": {
-          "$ref": "#/$defs/NodeNetworkMembershipSnapshot"
-        },
-        "snapshot": {
-          "$ref": "#/$defs/NodeSnapshot"
-        },
-        "started": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "membership",
-        "snapshot",
-        "idempotent",
-        "config_saved",
-        "started"
-      ],
-      "type": "object"
-    },
-    "NodeNetworkLeaveResult": {
-      "properties": {
-        "left": {
-          "type": "boolean"
-        },
-        "network_name": {
-          "type": "string"
-        },
-        "snapshot": {
-          "$ref": "#/$defs/NodeSnapshot"
-        }
-      },
-      "required": [
-        "network_name",
-        "left",
-        "snapshot"
-      ],
-      "type": "object"
-    },
     "NodeNetworkMembersCommand": {
       "properties": {
         "network_id": {
@@ -7181,69 +6079,6 @@
         }
       ]
     },
-    "NodeNetworkSnapshot": {
-      "description": "One local network and the roles this node currently performs in it.",
-      "properties": {
-        "assigned_ipv4": {
-          "format": "ipv4",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "assigned_ipv6": {
-          "format": "ipv6",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "name": {
-          "type": "string"
-        },
-        "p2p_listen_addr": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "peer_count": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "roles": {
-          "items": {
-            "$ref": "#/$defs/NodeNetworkRole"
-          },
-          "type": "array"
-        },
-        "status": {
-          "$ref": "#/$defs/NodeNetworkStatus"
-        },
-        "traffic": {
-          "$ref": "#/$defs/NodeTrafficSnapshot"
-        },
-        "tun_name": {
-          "type": "string"
-        },
-        "uptime_secs": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "name",
-        "tun_name",
-        "status",
-        "uptime_secs",
-        "roles",
-        "peer_count",
-        "traffic"
-      ],
-      "type": "object"
-    },
     "NodeNetworkStatus": {
       "enum": [
         "offline",
@@ -7312,7 +6147,7 @@
         "result": {
           "anyOf": [
             {
-              "$ref": "#/$defs/NodeCommandResult"
+              "$ref": "#/$defs/ProjectedNodeCommandResult"
             },
             {
               "type": "null"
@@ -7384,70 +6219,6 @@
         "virtual_ipv6",
         "p2p_active",
         "timed_out"
-      ],
-      "type": "object"
-    },
-    "NodePeerSnapshot": {
-      "description": "Peer state scoped to a network. The same node may appear in multiple networks.",
-      "properties": {
-        "endpoints": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array"
-        },
-        "loss_rate": {
-          "format": "float",
-          "type": "number"
-        },
-        "network_name": {
-          "type": "string"
-        },
-        "online": {
-          "type": "boolean"
-        },
-        "p2p_active": {
-          "type": "boolean"
-        },
-        "p2p_healthy": {
-          "type": "boolean"
-        },
-        "peer_id": {
-          "type": "string"
-        },
-        "rtt_us": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "traffic": {
-          "$ref": "#/$defs/NodeTrafficSnapshot"
-        },
-        "virtual_ipv4": {
-          "format": "ipv4",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "virtual_ipv6": {
-          "format": "ipv6",
-          "type": "string"
-        }
-      },
-      "required": [
-        "peer_id",
-        "network_name",
-        "virtual_ipv6",
-        "endpoints",
-        "online",
-        "p2p_active",
-        "p2p_healthy",
-        "loss_rate",
-        "traffic"
       ],
       "type": "object"
     },
@@ -8111,239 +6882,6 @@
       ],
       "type": "object"
     },
-    "NodeSnapshot": {
-      "description": "Stable, transport-neutral state rendered by every node UI adapter.",
-      "properties": {
-        "access_control": {
-          "$ref": "#/$defs/NodeAccessControlSnapshot",
-          "description": "Trusted node-owner restrictions and versioned network governance ACLs.\nAuthorization consumes these documents directly; UI capability hints\nare never used as policy input."
-        },
-        "capabilities": {
-          "$ref": "#/$defs/NodeCapabilityRegistrySnapshot",
-          "default": {
-            "capabilities": [
-              {
-                "kind": "coordinator",
-                "state": "unknown"
-              },
-              {
-                "kind": "relay",
-                "state": "unknown"
-              },
-              {
-                "kind": "exit",
-                "state": "unknown"
-              },
-              {
-                "kind": "file",
-                "state": "unknown"
-              }
-            ]
-          },
-          "description": "Unified four-capability projection shared by every UI adapter. Missing\nentries deserialize as `Unknown`; they are never inferred as enabled."
-        },
-        "configuration": {
-          "$ref": "#/$defs/NodeConfigurationSnapshot",
-          "default": {
-            "networks": []
-          }
-        },
-        "control_health": {
-          "$ref": "#/$defs/NodeControlHealth",
-          "default": "unknown",
-          "description": "Health of the UI adapter's control connection. This is local transport\nobservation, not authoritative node state, so changing it must not\nmanufacture a new node revision."
-        },
-        "discovery_index": {
-          "$ref": "#/$defs/NodeDiscoveryIndexSnapshot",
-          "default": {
-            "data_plane_affected": false,
-            "metrics": {
-              "cancellations": 0,
-              "records_accepted": 0,
-              "records_rejected": 0,
-              "request_attempts": 0,
-              "requests_failed": 0,
-              "requests_succeeded": 0,
-              "retries_scheduled": 0
-            },
-            "records": [],
-            "rejected_record_count": 0,
-            "search_history_stored": false,
-            "source": "none",
-            "state": "idle"
-          },
-          "description": "Signed public discovery-index projection. This control-plane state is\nisolated from joined network lifecycle and forwarding data planes."
-        },
-        "embedded_services": {
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/NodeEmbeddedServiceSnapshot"
-          },
-          "type": "array"
-        },
-        "exit_node_capabilities": {
-          "$ref": "#/$defs/ExitNodeCapabilities",
-          "default": {
-            "cleanup": false,
-            "ipv4_forwarding": false,
-            "ipv6_forwarding": false,
-            "nat": false,
-            "platform": "linux",
-            "schema_version": 1,
-            "supported": false,
-            "unsupported_reasons": [
-              "privileges_required",
-              "ipv4_forwarding_unavailable"
-            ]
-          },
-          "description": "Runtime capability truth for this host. Adapters must disable Exit Node\nactions when `supported` is false and render the typed reasons instead\nof inferring success from configuration alone."
-        },
-        "identity": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NodeIdentitySnapshot"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "interface_problems": {
-          "default": [],
-          "description": "Redacted problems encountered while collecting or reconciling host\ninterfaces. Command and runtime failures remain in `last_error` when\nthey are tied to a network lifecycle transition.",
-          "items": {
-            "$ref": "#/$defs/NodeProblem"
-          },
-          "type": "array"
-        },
-        "interfaces": {
-          "default": [],
-          "description": "Authoritative host interface capture for the node page. This is filled\nby the node process from OS network state; UI adapters never probe the\nhost themselves. Missing data deserializes as an empty capture.",
-          "items": {
-            "$ref": "#/$defs/NodeInterfaceSnapshot"
-          },
-          "type": "array"
-        },
-        "last_error": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/NodeProblem"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "lifecycle": {
-          "$ref": "#/$defs/NodeLifecycleSnapshot"
-        },
-        "logs": {
-          "items": {
-            "$ref": "#/$defs/NodeLogEntry"
-          },
-          "type": "array"
-        },
-        "memberships": {
-          "default": [],
-          "description": "Durable local membership acknowledgements, one per stable network ID.\nThis projection contains no private keys, peer addresses or topology.",
-          "items": {
-            "$ref": "#/$defs/NodeNetworkMembershipSnapshot"
-          },
-          "type": "array"
-        },
-        "network_profiles": {
-          "default": [],
-          "description": "Owner-authored public network-profile projections. This field is an\nallowlisted public snapshot: it never contains member identities,\naddresses, topology, activity, invitation tickets or secret material.",
-          "items": {
-            "$ref": "#/$defs/NodeNetworkProfileSnapshot"
-          },
-          "type": "array"
-        },
-        "networks": {
-          "items": {
-            "$ref": "#/$defs/NodeNetworkSnapshot"
-          },
-          "type": "array"
-        },
-        "peers": {
-          "items": {
-            "$ref": "#/$defs/NodePeerSnapshot"
-          },
-          "type": "array"
-        },
-        "permissions": {
-          "$ref": "#/$defs/NodePermissionSnapshot",
-          "default": {
-            "access_model": "trusted_control_plane",
-            "permissions": []
-          }
-        },
-        "recent_activity": {
-          "default": [],
-          "description": "The five most recent user-meaningful command outcomes. Entries are\nalready redacted by the domain audit projection and ordered newest\nfirst, so every UI adapter consumes the same activity feed.",
-          "items": {
-            "$ref": "#/$defs/ActivityEntry"
-          },
-          "type": "array"
-        },
-        "revision": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "routing_summaries": {
-          "default": [],
-          "description": "Authoritative per-network traffic-policy summaries. The node runtime is\nthe only writer; UI adapters never derive \"applied\" state from editable\nconfiguration. Missing data from older peers deserializes as empty.",
-          "items": {
-            "$ref": "#/$defs/NodeRoutingSummarySnapshot"
-          },
-          "type": "array"
-        },
-        "topology": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/TopologySnapshot"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Privacy-filtered topology derived from the cached roster plus live peer\nsessions. `None` means the node has no identity yet, so no graph can be\ndrawn at all; a present but empty snapshot means nothing is joined.\nAdapters never project membership themselves."
-        },
-        "tun_capabilities": {
-          "$ref": "#/$defs/TunCapabilities",
-          "default": {
-            "can_rebuild": false,
-            "platform": "linux",
-            "reasons": [
-              "unknown"
-            ],
-            "schema_version": 1,
-            "supported": true
-          },
-          "description": "Redacted TUN readiness for this node process. Missing or malformed\ncapability data must disable host-network mutations in every adapter."
-        },
-        "ui_mode": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/UiModeResolution"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      },
-      "required": [
-        "revision",
-        "lifecycle",
-        "networks",
-        "peers",
-        "logs"
-      ],
-      "type": "object"
-    },
     "NodeSnapshotResponse": {
       "description": "Versioned DTO returned by the snapshot endpoint.",
       "properties": {
@@ -8354,7 +6892,7 @@
           "type": "integer"
         },
         "snapshot": {
-          "$ref": "#/$defs/NodeSnapshot"
+          "$ref": "#/$defs/ProjectedNodeSnapshot"
         }
       },
       "required": [
@@ -8913,7 +7451,7 @@
               "type": "integer"
             },
             "snapshot": {
-              "$ref": "#/$defs/NodeSnapshot"
+              "$ref": "#/$defs/ProjectedNodeSnapshot"
             },
             "type": {
               "const": "snapshot",
@@ -8930,7 +7468,7 @@
         {
           "properties": {
             "event": {
-              "$ref": "#/$defs/NodeEvent"
+              "$ref": "#/$defs/ProjectedNodeEvent"
             },
             "schema_version": {
               "format": "uint16",
@@ -8962,7 +7500,7 @@
               "type": "integer"
             },
             "snapshot": {
-              "$ref": "#/$defs/NodeSnapshot"
+              "$ref": "#/$defs/ProjectedNodeSnapshot"
             },
             "type": {
               "const": "resync",
@@ -9385,6 +7923,1510 @@
         "file_audit_settings"
       ],
       "type": "string"
+    },
+    "ProjectedActivityEntry": {
+      "description": "Activity projection. Required identity/timeline fields remove the whole\nentry when hidden; optional prose fields are omitted from JSON entirely.",
+      "properties": {
+        "action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "actor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "audit_id": {
+          "$ref": "#/$defs/AuditId"
+        },
+        "details": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "network_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "occurred_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "operation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuditOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "audit_id"
+      ],
+      "type": "object"
+    },
+    "ProjectedNetworkMemberDirectory": {
+      "$ref": "#/$defs/NetworkMemberDirectory",
+      "description": "A member directory that has already passed field projection. The inner\ncanonical value is intentionally private so adapters cannot accidentally\nserialize an unprojected directory through this DTO."
+    },
+    "ProjectedNodeCommandOutcome": {
+      "oneOf": [
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/ProjectedNodeSnapshot"
+            },
+            "status": {
+              "const": "snapshot",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodeUiManifest"
+            },
+            "status": {
+              "const": "ui_manifest",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodeDiagnosticsSnapshot"
+            },
+            "status": {
+              "const": "diagnostics",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodeResidualCleanupResult"
+            },
+            "status": {
+              "const": "cleanup",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodeBlacklistSnapshot"
+            },
+            "status": {
+              "const": "blacklist",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodeNetworkAllocationSnapshot"
+            },
+            "status": {
+              "const": "network_allocation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodePeerProbeSnapshot"
+            },
+            "status": {
+              "const": "probe",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodeCreatedNetwork"
+            },
+            "status": {
+              "const": "network_created",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NetworkProfilePreview"
+            },
+            "status": {
+              "const": "network_profile_preview",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NetworkProfileApplyResult"
+            },
+            "status": {
+              "const": "network_profile_updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodeNetworkJoinPreview"
+            },
+            "status": {
+              "const": "network_join_preview",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/ProjectedNodeNetworkJoinResult"
+            },
+            "status": {
+              "const": "network_joined",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/JoinRequest"
+            },
+            "status": {
+              "const": "join_request_submitted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodeJoinRequestListResult"
+            },
+            "status": {
+              "const": "join_requests",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/ProjectedNetworkMemberDirectory"
+            },
+            "status": {
+              "const": "network_members",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/MemberRemovalPreview"
+            },
+            "status": {
+              "const": "member_removal_preview",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/MemberLifecycleChange"
+            },
+            "status": {
+              "const": "member_lifecycle_changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodeJoinRequestReviewAck"
+            },
+            "status": {
+              "const": "join_requests_reviewed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/JoinRequest"
+            },
+            "status": {
+              "const": "join_request_updated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/IssuedInvitation"
+            },
+            "status": {
+              "const": "invitation_created",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "items": {
+                "$ref": "#/$defs/InvitationStatusView"
+              },
+              "type": "array"
+            },
+            "status": {
+              "const": "invitations",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/InvitationStatusView"
+            },
+            "status": {
+              "const": "invitation_status",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/InvitationStatusView"
+            },
+            "status": {
+              "const": "invitation_revoked",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/InvitationPreview"
+            },
+            "status": {
+              "const": "invitation_preview",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/InvitationRedemption"
+            },
+            "status": {
+              "const": "invitation_redeemed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/ProjectedNodeNetworkLeaveResult"
+            },
+            "status": {
+              "const": "network_left",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodeNetworkMembershipSnapshot"
+            },
+            "status": {
+              "const": "membership_policy_acknowledged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodeIdentityRotationSnapshot"
+            },
+            "status": {
+              "const": "identity_rotated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/ConfigurationDocument"
+            },
+            "status": {
+              "const": "configuration",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/ConfigurationPreview"
+            },
+            "status": {
+              "const": "configuration_preview",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/ConfigurationApplyResult"
+            },
+            "status": {
+              "const": "configuration_applied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "items": {
+                "$ref": "#/$defs/ConfigurationHistoryEntry"
+              },
+              "type": "array"
+            },
+            "status": {
+              "const": "configuration_history",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "operation_id"
+              ],
+              "type": "object"
+            },
+            "status": {
+              "const": "accepted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "properties": {
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message"
+              ],
+              "type": "object"
+            },
+            "status": {
+              "const": "completed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/NodeProblem"
+            },
+            "status": {
+              "const": "rejected",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ProjectedNodeCommandResult": {
+      "description": "Wire-safe command result. Sensitive variants carry projected DTOs rather\nthan canonical snapshots or member directories.",
+      "properties": {
+        "outcome": {
+          "$ref": "#/$defs/ProjectedNodeCommandOutcome"
+        },
+        "request_id": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "request_id",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "ProjectedNodeEmbeddedServiceSnapshot": {
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "relay_addr": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "signaling_addr": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/NodeEmbeddedServiceStatus"
+        }
+      },
+      "required": [
+        "network_name",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ProjectedNodeEvent": {
+      "description": "Event with field-level projection applied. Log contents are omitted for\nnon-owner viewers while the sequence and snapshot revision remain intact so\ncursors still advance without silently skipping an event.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ProjectedNodeEventKind"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "snapshot_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sequence",
+        "snapshot_revision",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "ProjectedNodeEventKind": {
+      "oneOf": [
+        {
+          "properties": {
+            "data": {
+              "properties": {
+                "revision": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "revision"
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "state_changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "properties": {
+                "network_name": {
+                  "type": "string"
+                },
+                "status": {
+                  "$ref": "#/$defs/NodeNetworkStatus"
+                }
+              },
+              "required": [
+                "network_name",
+                "status"
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "network_changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "properties": {
+                "network_name": {
+                  "type": "string"
+                },
+                "status": {
+                  "$ref": "#/$defs/NodeEmbeddedServiceStatus"
+                }
+              },
+              "required": [
+                "network_name",
+                "status"
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "embedded_service_changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "properties": {
+                "level": {
+                  "$ref": "#/$defs/NodeLogLevel"
+                },
+                "message": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "level"
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "log_appended",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "properties": {
+                "exit_node": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "is_exit_node": {
+                  "type": "boolean"
+                },
+                "mode": {
+                  "$ref": "#/$defs/NodeRoutingMode"
+                },
+                "network_name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "network_name",
+                "mode",
+                "is_exit_node"
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "routing_changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "network_name": {
+                  "type": "string"
+                },
+                "role": {
+                  "$ref": "#/$defs/NodeNetworkRole"
+                },
+                "roles": {
+                  "items": {
+                    "$ref": "#/$defs/NodeNetworkRole"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "network_name",
+                "role",
+                "enabled",
+                "roles"
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "role_changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "properties": {
+                "request_id": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "success": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "request_id",
+                "success"
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "command_completed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "properties": {
+                "operation_id": {
+                  "type": "string"
+                },
+                "stage": {
+                  "type": "string"
+                },
+                "state": {
+                  "$ref": "#/$defs/OperationState"
+                }
+              },
+              "required": [
+                "operation_id",
+                "state",
+                "stage"
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "operation_changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ProjectedNodeIdentitySnapshot": {
+      "properties": {
+        "created_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "public_key_fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "node_id"
+      ],
+      "type": "object"
+    },
+    "ProjectedNodeInterfaceSnapshot": {
+      "properties": {
+        "addresses": {
+          "items": {
+            "$ref": "#/$defs/NodeInterfaceAddress"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "default_ipv4": {
+          "type": "boolean"
+        },
+        "default_ipv6": {
+          "type": "boolean"
+        },
+        "index": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/NodeInterfaceKind"
+        },
+        "mtu": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ownership": {
+          "$ref": "#/$defs/NodeInterfaceOwnership"
+        },
+        "status": {
+          "$ref": "#/$defs/NodeInterfaceStatus"
+        }
+      },
+      "required": [
+        "index",
+        "name",
+        "kind",
+        "ownership",
+        "status",
+        "mtu",
+        "default_ipv4",
+        "default_ipv6"
+      ],
+      "type": "object"
+    },
+    "ProjectedNodeNetworkJoinResult": {
+      "properties": {
+        "config_saved": {
+          "type": "boolean"
+        },
+        "idempotent": {
+          "type": "boolean"
+        },
+        "membership": {
+          "$ref": "#/$defs/NodeNetworkMembershipSnapshot"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/ProjectedNodeSnapshot"
+        },
+        "started": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "membership",
+        "snapshot",
+        "idempotent",
+        "config_saved",
+        "started"
+      ],
+      "type": "object"
+    },
+    "ProjectedNodeNetworkLeaveResult": {
+      "properties": {
+        "left": {
+          "type": "boolean"
+        },
+        "network_name": {
+          "type": "string"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/ProjectedNodeSnapshot"
+        }
+      },
+      "required": [
+        "network_name",
+        "left",
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "ProjectedNodeNetworkSnapshot": {
+      "properties": {
+        "assigned_ipv4": {
+          "format": "ipv4",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "assigned_ipv6": {
+          "format": "ipv6",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "p2p_listen_addr": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "peer_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "roles": {
+          "items": {
+            "$ref": "#/$defs/NodeNetworkRole"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeNetworkStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "traffic": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeTrafficSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tun_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uptime_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "ProjectedNodePeerSnapshot": {
+      "properties": {
+        "endpoints": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "loss_rate": {
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "network_name": {
+          "type": "string"
+        },
+        "online": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "p2p_active": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "p2p_healthy": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "peer_id": {
+          "type": "string"
+        },
+        "rtt_us": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "traffic": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeTrafficSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "virtual_ipv4": {
+          "format": "ipv4",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "virtual_ipv6": {
+          "format": "ipv6",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "peer_id",
+        "network_name"
+      ],
+      "type": "object"
+    },
+    "ProjectedNodeSnapshot": {
+      "description": "A node snapshot whose sensitive fields have already been removed. Optional\nhidden values are serialized by omission; arrays that would only contain\nhidden rows are omitted as well.",
+      "properties": {
+        "access_control": {
+          "$ref": "#/$defs/NodeAccessControlSnapshot"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/NodeCapabilityRegistrySnapshot",
+          "default": {
+            "capabilities": [
+              {
+                "kind": "coordinator",
+                "state": "unknown"
+              },
+              {
+                "kind": "relay",
+                "state": "unknown"
+              },
+              {
+                "kind": "exit",
+                "state": "unknown"
+              },
+              {
+                "kind": "file",
+                "state": "unknown"
+              }
+            ]
+          }
+        },
+        "configuration": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeConfigurationSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "control_health": {
+          "$ref": "#/$defs/NodeControlHealth"
+        },
+        "discovery_index": {
+          "$ref": "#/$defs/NodeDiscoveryIndexSnapshot",
+          "default": {
+            "data_plane_affected": false,
+            "metrics": {
+              "cancellations": 0,
+              "records_accepted": 0,
+              "records_rejected": 0,
+              "request_attempts": 0,
+              "requests_failed": 0,
+              "requests_succeeded": 0,
+              "retries_scheduled": 0
+            },
+            "records": [],
+            "rejected_record_count": 0,
+            "search_history_stored": false,
+            "source": "none",
+            "state": "idle"
+          }
+        },
+        "embedded_services": {
+          "items": {
+            "$ref": "#/$defs/ProjectedNodeEmbeddedServiceSnapshot"
+          },
+          "type": "array"
+        },
+        "exit_node_capabilities": {
+          "$ref": "#/$defs/ExitNodeCapabilities",
+          "default": {
+            "cleanup": false,
+            "ipv4_forwarding": false,
+            "ipv6_forwarding": false,
+            "nat": false,
+            "platform": "linux",
+            "schema_version": 1,
+            "supported": false,
+            "unsupported_reasons": [
+              "privileges_required",
+              "ipv4_forwarding_unavailable"
+            ]
+          }
+        },
+        "identity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectedNodeIdentitySnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "interface_problems": {
+          "items": {
+            "$ref": "#/$defs/NodeProblem"
+          },
+          "type": "array"
+        },
+        "interfaces": {
+          "items": {
+            "$ref": "#/$defs/ProjectedNodeInterfaceSnapshot"
+          },
+          "type": "array"
+        },
+        "last_error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeProblem"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/NodeLifecycleSnapshot"
+        },
+        "logs": {
+          "items": {
+            "$ref": "#/$defs/NodeLogEntry"
+          },
+          "type": "array"
+        },
+        "memberships": {
+          "items": {
+            "$ref": "#/$defs/NodeNetworkMembershipSnapshot"
+          },
+          "type": "array"
+        },
+        "network_profiles": {
+          "items": {
+            "$ref": "#/$defs/NodeNetworkProfileSnapshot"
+          },
+          "type": "array"
+        },
+        "networks": {
+          "items": {
+            "$ref": "#/$defs/ProjectedNodeNetworkSnapshot"
+          },
+          "type": "array"
+        },
+        "peers": {
+          "items": {
+            "$ref": "#/$defs/ProjectedNodePeerSnapshot"
+          },
+          "type": "array"
+        },
+        "permissions": {
+          "$ref": "#/$defs/NodePermissionSnapshot",
+          "default": {
+            "access_model": "trusted_control_plane",
+            "permissions": []
+          }
+        },
+        "recent_activity": {
+          "items": {
+            "$ref": "#/$defs/ProjectedActivityEntry"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "routing_summaries": {
+          "items": {
+            "$ref": "#/$defs/NodeRoutingSummarySnapshot"
+          },
+          "type": "array"
+        },
+        "topology": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TopologySnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tun_capabilities": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TunCapabilities"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ui_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UiModeResolution"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "revision",
+        "lifecycle",
+        "control_health"
+      ],
+      "type": "object"
     },
     "PublicKey": {
       "description": "Ed25519 public key bytes encoded as URL-safe base64 without padding.",

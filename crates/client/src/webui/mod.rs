@@ -4005,9 +4005,9 @@ mod tests {
             stale_payload["result"]["outcome"]["data"]["code"],
             "authentication_required"
         );
-        assert_eq!(
-            stale_payload["result"]["outcome"]["data"]["params"]["authorization_code"],
-            "permission.recent_authentication_required"
+        assert!(
+            stale_payload["result"]["outcome"]["data"]["params"].is_null(),
+            "authorization denial parameters must not leak: {stale_payload}"
         );
         assert!(stale_payload["operation"].is_null());
         assert_eq!(command_count.load(Ordering::SeqCst), 1);

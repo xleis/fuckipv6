@@ -2849,6 +2849,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sys-locale",
+ "thiserror 1.0.69",
  "tokio",
  "toml 0.8.23",
  "tracing",

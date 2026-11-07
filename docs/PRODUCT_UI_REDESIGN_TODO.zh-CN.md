@@ -1988,16 +1988,32 @@ Relay/Exit/File 本地贡献否决、到期/撤销/重新认证、畸形与重�
 
 **验收**：越权测试全部失败关闭；节点 owner 的最终本地控制不可被网络治理绕过。
 
-### W10-03 字段级隐私 `[ ]`
+### W10-03 字段级隐私 `[x]`
 
-- [ ] 为成员、节点、拓扑、活动和 File 元数据定义字段可见性；
-- [ ] 支持 Owner-only、Administrator-only、Network、Public 级别；
-- [ ] 默认选择最小可见范围；
-- [ ] 服务端在序列化前裁剪字段；
-- [ ] 搜索、排序、计数和导出不得侧漏隐藏字段；
-- [ ] 记录字段可见性变更及生效版本；
-- [ ] 提供管理员公开预览；
-- [ ] 建立角色 × 字段 × 对象状态测试矩阵。
+- [x] 为成员、节点、拓扑、活动和 File 元数据定义字段可见性；
+- [x] 支持 Owner-only、Administrator-only、Network、Public 级别；
+- [x] 默认选择最小可见范围；
+- [x] 服务端在序列化前裁剪字段；
+- [x] 搜索、排序、计数和导出不得侧漏隐藏字段；
+- [x] 记录字段可见性变更及生效版本；
+- [x] 提供管理员公开预览；
+- [x] 建立角色 × 字段 × 对象状态测试矩阵。
+
+字段隐私策略按网络版本化并记录生效时间；成员、节点、拓扑、活动和 File 元数据均有显式字段规则，未配置时采用字段的最小可见默认值。
+节点本地进程、路径和详细日志永久锁定为 Owner-only，网络策略不能放宽。HTTP legacy/v1、SSE、WebSocket、命令结果、活动事件和
+File/成员目录均在服务端序列化为 `Projected*` DTO，隐藏值在进入响应、缓存或搜索/排序/计数/导出投影前被移除；重复、畸形、
+过期或尚未生效的策略失败关闭。操作查询与取消对非提交者返回 `404`，认证/授权拒绝不回显受保护对象或参数。管理员可通过
+`PublicFieldPreview` 查看公开字段集合和策略 revision，而不会接触隐藏值。
+
+**验证通过（2026-11-07）**：`cargo fmt --all -- --check`、
+`cargo test -p fuckipv6-client --all-features --lib node::http_adapter`（44 passed）、
+`cargo test -p fuckipv6-client --all-features --lib node::privacy_projection`（15 passed）、
+`cargo test -p fuckipv6-common --all-features`（253 passed）、
+`cargo test -p fuckipv6-client --all-features --lib`（890 passed，3 ignored）、
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`、
+`./scripts/check-contracts.sh`（契约 Rust 7 passed，生成物 verified 2，TypeScript/Java 绑定测试通过）、
+`git diff --check`。测试覆盖四层可见性、默认最小范围、角色 × 字段 × 对象状态矩阵、成员/拓扑/活动/File 投影、
+HTTP/SSE/WebSocket/命令结果裁剪、操作存在性隐藏，以及重复或畸形策略失败关闭。
 
 **验收**：隐藏字段不进入响应、缓存、搜索索引或活动正文；不存在仅靠前端遮罩的隐私。
 

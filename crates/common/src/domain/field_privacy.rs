@@ -867,23 +867,29 @@ pub struct FieldPrivacyChangeRecord {
     pub changed_fields: Vec<FieldVisibilityChange>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum FieldPrivacyPolicyError {
+    #[error("field privacy policy is ambiguous or invalid")]
+    Invalid,
+}
+
 /// Resolve one active policy for a network. Duplicate network policies are
 /// ambiguous and therefore fail closed.
 pub fn resolve_field_privacy_policy<'a>(
     policies: &'a [FieldPrivacyPolicy],
     network_id: Option<&NetworkId>,
     now_unix_ms: u64,
-) -> Result<Option<&'a FieldPrivacyPolicy>, ()> {
+) -> Result<Option<&'a FieldPrivacyPolicy>, FieldPrivacyPolicyError> {
     let mut matching = policies
         .iter()
         .filter(|policy| policy.network_id.as_ref() == network_id);
     let first = matching.next();
     if matching.next().is_some() {
-        return Err(());
+        return Err(FieldPrivacyPolicyError::Invalid);
     }
     match first {
         Some(policy) if policy.validate_at(now_unix_ms).is_ok() => Ok(Some(policy)),
-        Some(_) => Err(()),
+        Some(_) => Err(FieldPrivacyPolicyError::Invalid),
         None => Ok(None),
     }
 }
@@ -1721,7 +1727,7 @@ mod tests {
         docs[1].revision = 3;
         assert_eq!(
             resolve_field_privacy_policy(&docs, Some(&network_id()), 1_100),
-            Err(())
+            Err(FieldPrivacyPolicyError::Invalid)
         );
     }
 

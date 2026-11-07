@@ -10,8 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
     evaluate_effective_access, resolve_field_privacy_policy, AccessContext, FieldPrivacyPolicy,
-    GroupId, MembershipRole, MembershipState, NetworkAcl, NetworkId, NetworkRole,
-    NodeLocalAccessPolicy, OperationId, PermissionCondition, PermissionDenialCode,
+    FieldPrivacyPolicyError, GroupId, MembershipRole, MembershipState, NetworkAcl, NetworkId,
+    NetworkRole, NodeLocalAccessPolicy, OperationId, PermissionCondition, PermissionDenialCode,
     PermissionEffect, PermissionIntent, PermissionRequest, PermissionRule, PolicyAction,
     PrivacyViewer, ResourceKind, ResourceRef, SecurityRuleId, SubjectSelector,
 };
@@ -383,9 +383,9 @@ impl NodeCommandContext {
     pub(crate) fn field_privacy_policy_for(
         &self,
         network_id: Option<&NetworkId>,
-    ) -> Result<Option<&FieldPrivacyPolicy>, ()> {
+    ) -> Result<Option<&FieldPrivacyPolicy>, FieldPrivacyPolicyError> {
         if self.field_privacy_invalid {
-            return Err(());
+            return Err(FieldPrivacyPolicyError::Invalid);
         }
         resolve_field_privacy_policy(&self.field_privacy_policies, network_id, unix_time_ms())
     }

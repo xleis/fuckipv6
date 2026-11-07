@@ -46,7 +46,7 @@ use crate::discovery_index::NodeDiscoveryIndexSnapshot;
 use crate::tun::TunCapabilities;
 use crate::ui::UiModeResolution;
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum NodeSnapshotProjectionError {
     #[error("节点字段隐私策略无效")]
     InvalidFieldPolicy,
@@ -382,7 +382,7 @@ pub fn project_node_command_result(
             let viewer = context.privacy_viewer_for(Some(&directory.network_id));
             let policy = context
                 .field_privacy_policy_for(Some(&directory.network_id))
-                .map_err(|()| NodeSnapshotProjectionError::InvalidFieldPolicy)?;
+                .map_err(|_| NodeSnapshotProjectionError::InvalidFieldPolicy)?;
             ProjectedNodeCommandOutcome::NetworkMembers(Box::new(ProjectedNetworkMemberDirectory(
                 project_member_directory(directory, &viewer, policy, now_unix_ms),
             )))
@@ -487,7 +487,7 @@ pub fn project_node_event(
             let viewer = context.privacy_viewer_for(None);
             let policy = context
                 .field_privacy_policy_for(None)
-                .map_err(|()| NodeSnapshotProjectionError::InvalidFieldPolicy)?;
+                .map_err(|_| NodeSnapshotProjectionError::InvalidFieldPolicy)?;
             let message_visible = viewer.local_owner
                 || field_is_visible(
                     policy,
@@ -583,7 +583,7 @@ impl<'a> SnapshotProjector<'a> {
     ) -> Result<Option<&FieldPrivacyPolicy>, NodeSnapshotProjectionError> {
         self.context
             .field_privacy_policy_for(network_id)
-            .map_err(|()| NodeSnapshotProjectionError::InvalidFieldPolicy)
+            .map_err(|_| NodeSnapshotProjectionError::InvalidFieldPolicy)
     }
 
     fn field_visible(
@@ -956,7 +956,7 @@ pub fn project_node_snapshot(
     // row, so malformed trusted control-plane data never silently degrades.
     context
         .field_privacy_policy_for(None)
-        .map_err(|()| NodeSnapshotProjectionError::InvalidFieldPolicy)?;
+        .map_err(|_| NodeSnapshotProjectionError::InvalidFieldPolicy)?;
 
     let projector = SnapshotProjector::new(snapshot, context, now_unix_ms);
     let owner = projector.local_owner();
@@ -1009,7 +1009,7 @@ pub fn project_node_snapshot(
             NodeAccessControlSnapshot::default()
         },
         embedded_services,
-        ui_mode: owner.then(|| snapshot.ui_mode.clone()).flatten(),
+        ui_mode: if owner { snapshot.ui_mode } else { None },
         tun_capabilities: owner.then(|| snapshot.tun_capabilities.clone()),
         interfaces: projector.project_interfaces()?,
         interface_problems: if owner {

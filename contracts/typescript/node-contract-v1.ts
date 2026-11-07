@@ -561,7 +561,7 @@ export type NodeAcknowledgeMembershipPolicyCommand = {
 export type NodeApiCommandResponse = {
   "operation"?: NodeOperationSnapshot | null;
   "request_id": number;
-  "result"?: NodeCommandResult | null;
+  "result"?: ProjectedNodeCommandResult | null;
   "schema_version": number;
   "server_time": string;
 };
@@ -591,10 +591,10 @@ export type NodeApiEvent = {
   "request_id": number;
   "schema_version": number;
   "server_time": string;
-  "snapshot": NodeSnapshot;
+  "snapshot": ProjectedNodeSnapshot;
   "type": "snapshot";
 } | {
-  "event": NodeEvent;
+  "event": ProjectedNodeEvent;
   "request_id": number;
   "schema_version": number;
   "server_time": string;
@@ -618,20 +618,20 @@ export type NodeApiManifestResponse = {
 
 export type NodeApiObject = {
   "id": string;
-  "identity": NodeIdentitySnapshot;
+  "identity": ProjectedNodeIdentitySnapshot;
   "kind": "node";
 } | {
   "id": string;
   "kind": "network";
-  "network": NodeNetworkSnapshot;
+  "network": ProjectedNodeNetworkSnapshot;
 } | {
   "id": string;
   "kind": "peer";
-  "peer": NodePeerSnapshot;
+  "peer": ProjectedNodePeerSnapshot;
 } | {
   "id": string;
   "kind": "embedded_service";
-  "service": NodeEmbeddedServiceSnapshot;
+  "service": ProjectedNodeEmbeddedServiceSnapshot;
 } | {
   "configuration": NodeNetworkConfigSnapshot;
   "id": string;
@@ -656,7 +656,7 @@ export type NodeApiSnapshotResponse = {
   "request_id": number;
   "schema_version": number;
   "server_time": string;
-  "snapshot": NodeSnapshot;
+  "snapshot": ProjectedNodeSnapshot;
 };
 
 export type NodeApplyConfigurationCommand = {
@@ -894,7 +894,7 @@ export type NodeCommandHttpRequest = {
 };
 
 export type NodeCommandHttpResponse = {
-  "result": NodeCommandResult;
+  "result": ProjectedNodeCommandResult;
   "schema_version": number;
 };
 
@@ -1578,7 +1578,7 @@ export type NodeOperationSnapshot = {
   "kind": OperationKind;
   "max_attempts": number;
   "operation_id": OperationId;
-  "result"?: NodeCommandResult | null;
+  "result"?: ProjectedNodeCommandResult | null;
   "stage": string;
   "state": OperationState;
   "target": DomainObjectRef;
@@ -1786,7 +1786,7 @@ export type NodeSnapshot = {
 
 export type NodeSnapshotResponse = {
   "schema_version": number;
-  "snapshot": NodeSnapshot;
+  "snapshot": ProjectedNodeSnapshot;
 };
 
 export type NodeSubmitJoinRequestCommand = {
@@ -1891,16 +1891,16 @@ export type NodeWithdrawJoinRequestCommand = {
 
 export type NodeWsMessage = {
   "schema_version": number;
-  "snapshot": NodeSnapshot;
+  "snapshot": ProjectedNodeSnapshot;
   "type": "snapshot";
 } | {
-  "event": NodeEvent;
+  "event": ProjectedNodeEvent;
   "schema_version": number;
   "type": "event";
 } | {
   "reason": NodeWsResyncReason;
   "schema_version": number;
-  "snapshot": NodeSnapshot;
+  "snapshot": ProjectedNodeSnapshot;
   "type": "resync";
 } | {
   "category": NodeErrorCategory;
@@ -1965,6 +1965,291 @@ export type PermissionRule = {
 export type PolicyAction = "read" | "create" | "update" | "delete" | "approve" | "reject" | "remove" | "enable" | "disable" | "use" | "recover" | "export" | "test";
 
 export type PrivacyField = "member_node_id" | "member_display_name" | "member_identity_fingerprint" | "member_role" | "member_groups" | "member_capabilities" | "member_status" | "member_lifecycle_state" | "member_revision" | "member_access_epoch" | "member_available_actions" | "member_presence" | "member_joined_at" | "node_display_name" | "node_public_key" | "node_platform_and_version" | "node_online_state" | "node_endpoints" | "node_real_network_addresses" | "node_traffic_statistics" | "node_local_processes" | "node_local_paths" | "node_detailed_logs" | "topology_node_id" | "topology_display_name" | "topology_role" | "topology_status" | "topology_presence" | "topology_health" | "topology_capabilities" | "topology_network_membership" | "topology_connections" | "activity_actor" | "activity_action" | "activity_resource" | "activity_outcome" | "activity_occurred_at" | "activity_summary" | "activity_details" | "file_id" | "file_network_id" | "file_display_name" | "file_owner" | "file_mode" | "file_revision" | "file_network_acl" | "file_local_acl" | "file_quota" | "file_path_policy" | "file_timestamps" | "file_audit_settings";
+
+export type ProjectedActivityEntry = {
+  "action"?: string | null;
+  "actor"?: NodeId | null;
+  "audit_id": AuditId;
+  "details"?: Record<string, string> | null;
+  "network_id"?: NetworkId | null;
+  "occurred_at_unix_ms"?: number | null;
+  "operation_id"?: OperationId | null;
+  "outcome"?: AuditOutcome | null;
+  "resource"?: string | null;
+  "summary"?: string | null;
+};
+
+export type ProjectedNetworkMemberDirectory = NetworkMemberDirectory;
+
+export type ProjectedNodeCommandOutcome = {
+  "data": ProjectedNodeSnapshot;
+  "status": "snapshot";
+} | {
+  "data": NodeUiManifest;
+  "status": "ui_manifest";
+} | {
+  "data": NodeDiagnosticsSnapshot;
+  "status": "diagnostics";
+} | {
+  "data": NodeResidualCleanupResult;
+  "status": "cleanup";
+} | {
+  "data": NodeBlacklistSnapshot;
+  "status": "blacklist";
+} | {
+  "data": NodeNetworkAllocationSnapshot;
+  "status": "network_allocation";
+} | {
+  "data": NodePeerProbeSnapshot;
+  "status": "probe";
+} | {
+  "data": NodeCreatedNetwork;
+  "status": "network_created";
+} | {
+  "data": NetworkProfilePreview;
+  "status": "network_profile_preview";
+} | {
+  "data": NetworkProfileApplyResult;
+  "status": "network_profile_updated";
+} | {
+  "data": NodeNetworkJoinPreview;
+  "status": "network_join_preview";
+} | {
+  "data": ProjectedNodeNetworkJoinResult;
+  "status": "network_joined";
+} | {
+  "data": JoinRequest;
+  "status": "join_request_submitted";
+} | {
+  "data": NodeJoinRequestListResult;
+  "status": "join_requests";
+} | {
+  "data": ProjectedNetworkMemberDirectory;
+  "status": "network_members";
+} | {
+  "data": MemberRemovalPreview;
+  "status": "member_removal_preview";
+} | {
+  "data": MemberLifecycleChange;
+  "status": "member_lifecycle_changed";
+} | {
+  "data": NodeJoinRequestReviewAck;
+  "status": "join_requests_reviewed";
+} | {
+  "data": JoinRequest;
+  "status": "join_request_updated";
+} | {
+  "data": IssuedInvitation;
+  "status": "invitation_created";
+} | {
+  "data": Array<InvitationStatusView>;
+  "status": "invitations";
+} | {
+  "data": InvitationStatusView;
+  "status": "invitation_status";
+} | {
+  "data": InvitationStatusView;
+  "status": "invitation_revoked";
+} | {
+  "data": InvitationPreview;
+  "status": "invitation_preview";
+} | {
+  "data": InvitationRedemption;
+  "status": "invitation_redeemed";
+} | {
+  "data": ProjectedNodeNetworkLeaveResult;
+  "status": "network_left";
+} | {
+  "data": NodeNetworkMembershipSnapshot;
+  "status": "membership_policy_acknowledged";
+} | {
+  "data": NodeIdentityRotationSnapshot;
+  "status": "identity_rotated";
+} | {
+  "data": ConfigurationDocument;
+  "status": "configuration";
+} | {
+  "data": ConfigurationPreview;
+  "status": "configuration_preview";
+} | {
+  "data": ConfigurationApplyResult;
+  "status": "configuration_applied";
+} | {
+  "data": Array<ConfigurationHistoryEntry>;
+  "status": "configuration_history";
+} | {
+  "data": {
+  "operation_id": string;
+};
+  "status": "accepted";
+} | {
+  "data": {
+  "message": string;
+};
+  "status": "completed";
+} | {
+  "data": NodeProblem;
+  "status": "rejected";
+};
+
+export type ProjectedNodeCommandResult = {
+  "outcome": ProjectedNodeCommandOutcome;
+  "request_id": number;
+};
+
+export type ProjectedNodeEmbeddedServiceSnapshot = {
+  "network_name": string;
+  "relay_addr"?: string | null;
+  "signaling_addr"?: string | null;
+  "status": NodeEmbeddedServiceStatus;
+};
+
+export type ProjectedNodeEvent = {
+  "kind": ProjectedNodeEventKind;
+  "sequence": number;
+  "snapshot_revision": number;
+};
+
+export type ProjectedNodeEventKind = {
+  "data": {
+  "revision": number;
+};
+  "type": "state_changed";
+} | {
+  "data": {
+  "network_name": string;
+  "status": NodeNetworkStatus;
+};
+  "type": "network_changed";
+} | {
+  "data": {
+  "network_name": string;
+  "status": NodeEmbeddedServiceStatus;
+};
+  "type": "embedded_service_changed";
+} | {
+  "data": {
+  "level": NodeLogLevel;
+  "message"?: string | null;
+};
+  "type": "log_appended";
+} | {
+  "data": {
+  "exit_node"?: string | null;
+  "is_exit_node": boolean;
+  "mode": NodeRoutingMode;
+  "network_name": string;
+};
+  "type": "routing_changed";
+} | {
+  "data": {
+  "enabled": boolean;
+  "network_name": string;
+  "role": NodeNetworkRole;
+  "roles": Array<NodeNetworkRole>;
+};
+  "type": "role_changed";
+} | {
+  "data": {
+  "request_id": number;
+  "success": boolean;
+};
+  "type": "command_completed";
+} | {
+  "data": {
+  "operation_id": string;
+  "stage": string;
+  "state": OperationState;
+};
+  "type": "operation_changed";
+};
+
+export type ProjectedNodeIdentitySnapshot = {
+  "created_at_unix_ms"?: number | null;
+  "display_name"?: string | null;
+  "node_id": string;
+  "public_key_fingerprint"?: string | null;
+};
+
+export type ProjectedNodeInterfaceSnapshot = {
+  "addresses"?: Array<NodeInterfaceAddress> | null;
+  "default_ipv4": boolean;
+  "default_ipv6": boolean;
+  "index": number;
+  "kind": NodeInterfaceKind;
+  "mtu": number;
+  "name": string;
+  "ownership": NodeInterfaceOwnership;
+  "status": NodeInterfaceStatus;
+};
+
+export type ProjectedNodeNetworkJoinResult = {
+  "config_saved": boolean;
+  "idempotent": boolean;
+  "membership": NodeNetworkMembershipSnapshot;
+  "snapshot": ProjectedNodeSnapshot;
+  "started": boolean;
+};
+
+export type ProjectedNodeNetworkLeaveResult = {
+  "left": boolean;
+  "network_name": string;
+  "snapshot": ProjectedNodeSnapshot;
+};
+
+export type ProjectedNodeNetworkSnapshot = {
+  "assigned_ipv4"?: string | null;
+  "assigned_ipv6"?: string | null;
+  "name": string;
+  "p2p_listen_addr"?: string | null;
+  "peer_count"?: number | null;
+  "roles"?: Array<NodeNetworkRole> | null;
+  "status"?: NodeNetworkStatus | null;
+  "traffic"?: NodeTrafficSnapshot | null;
+  "tun_name"?: string | null;
+  "uptime_secs"?: number | null;
+};
+
+export type ProjectedNodePeerSnapshot = {
+  "endpoints"?: Array<string> | null;
+  "loss_rate"?: number | null;
+  "network_name": string;
+  "online"?: boolean | null;
+  "p2p_active"?: boolean | null;
+  "p2p_healthy"?: boolean | null;
+  "peer_id": string;
+  "rtt_us"?: number | null;
+  "traffic"?: NodeTrafficSnapshot | null;
+  "virtual_ipv4"?: string | null;
+  "virtual_ipv6"?: string | null;
+};
+
+export type ProjectedNodeSnapshot = {
+  "access_control"?: NodeAccessControlSnapshot;
+  "capabilities"?: NodeCapabilityRegistrySnapshot;
+  "configuration"?: NodeConfigurationSnapshot | null;
+  "control_health": NodeControlHealth;
+  "discovery_index"?: NodeDiscoveryIndexSnapshot;
+  "embedded_services"?: Array<ProjectedNodeEmbeddedServiceSnapshot>;
+  "exit_node_capabilities"?: ExitNodeCapabilities;
+  "identity"?: ProjectedNodeIdentitySnapshot | null;
+  "interface_problems"?: Array<NodeProblem>;
+  "interfaces"?: Array<ProjectedNodeInterfaceSnapshot>;
+  "last_error"?: NodeProblem | null;
+  "lifecycle": NodeLifecycleSnapshot;
+  "logs"?: Array<NodeLogEntry>;
+  "memberships"?: Array<NodeNetworkMembershipSnapshot>;
+  "network_profiles"?: Array<NodeNetworkProfileSnapshot>;
+  "networks"?: Array<ProjectedNodeNetworkSnapshot>;
+  "peers"?: Array<ProjectedNodePeerSnapshot>;
+  "permissions"?: NodePermissionSnapshot;
+  "recent_activity"?: Array<ProjectedActivityEntry>;
+  "revision": number;
+  "routing_summaries"?: Array<NodeRoutingSummarySnapshot>;
+  "topology"?: TopologySnapshot | null;
+  "tun_capabilities"?: TunCapabilities | null;
+  "ui_mode"?: UiModeResolution | null;
+};
 
 export type PublicKey = string;
 

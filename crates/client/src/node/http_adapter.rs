@@ -34,12 +34,15 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, watch, OwnedSemaphorePermit, Semaphore};
 
+use super::{project_node_command_result, project_node_event, project_node_snapshot};
 use super::{
     NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandContext, NodeCommandOutcome,
     NodeCommandRequest, NodeCommandResult, NodeControlHealth, NodeErrorCategory, NodeEvent,
     NodeEventBus, NodeEventCursor, NodeEventKind, NodeEventReplay, NodeEventReplayReason,
-    NodeProblem, NodeProblemCode, NodeSnapshot, NodeStateStore, NodeUiManifest,
-    NODE_UI_MANIFEST_SCHEMA_VERSION,
+    NodeProblem, NodeProblemCode, NodeSnapshot, NodeSnapshotProjectionError, NodeStateStore,
+    NodeUiManifest, ProjectedNodeCommandResult, ProjectedNodeEmbeddedServiceSnapshot,
+    ProjectedNodeEvent, ProjectedNodeIdentitySnapshot, ProjectedNodeNetworkSnapshot,
+    ProjectedNodePeerSnapshot, ProjectedNodeSnapshot, NODE_UI_MANIFEST_SCHEMA_VERSION,
 };
 
 /// Version of the HTTP/WebSocket envelope contract used by desktop and
@@ -91,7 +94,7 @@ impl NodeApiResponseMeta {
 pub struct NodeApiSnapshotResponse {
     #[serde(flatten)]
     pub meta: NodeApiResponseMeta,
-    pub snapshot: NodeSnapshot,
+    pub snapshot: ProjectedNodeSnapshot,
 }
 
 /// Versioned UI-manifest response used by `GET /api/v1/manifest`.
@@ -108,7 +111,7 @@ pub struct NodeApiCommandResponse {
     #[serde(flatten)]
     pub meta: NodeApiResponseMeta,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<NodeCommandResult>,
+    pub result: Option<ProjectedNodeCommandResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub operation: Option<NodeOperationSnapshot>,
 }
@@ -121,7 +124,7 @@ pub struct NodeOperationSnapshot {
     #[serde(flatten)]
     pub operation: Operation,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<NodeCommandResult>,
+    pub result: Option<ProjectedNodeCommandResult>,
 }
 
 /// Versioned response for operation submission and lookup.
@@ -139,19 +142,19 @@ pub struct NodeApiOperationResponse {
 pub enum NodeApiObject {
     Node {
         id: String,
-        identity: super::NodeIdentitySnapshot,
+        identity: ProjectedNodeIdentitySnapshot,
     },
     Network {
         id: String,
-        network: super::NodeNetworkSnapshot,
+        network: ProjectedNodeNetworkSnapshot,
     },
     Peer {
         id: String,
-        peer: super::NodePeerSnapshot,
+        peer: ProjectedNodePeerSnapshot,
     },
     EmbeddedService {
         id: String,
-        service: super::NodeEmbeddedServiceSnapshot,
+        service: ProjectedNodeEmbeddedServiceSnapshot,
     },
     NetworkConfiguration {
         id: String,
@@ -202,13 +205,13 @@ pub enum NodeApiEvent {
         /// authoritative; replayed events after this cursor are notifications
         /// that the client may deduplicate by sequence.
         cursor: NodeEventCursor,
-        snapshot: Box<NodeSnapshot>,
+        snapshot: Box<ProjectedNodeSnapshot>,
     },
     Event {
         schema_version: u16,
         request_id: u64,
         server_time: String,
-        event: NodeEvent,
+        event: ProjectedNodeEvent,
     },
     ResyncRequired {
         schema_version: u16,
@@ -224,7 +227,7 @@ pub enum NodeApiEvent {
 #[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeSnapshotResponse {
     pub schema_version: u16,
-    pub snapshot: NodeSnapshot,
+    pub snapshot: ProjectedNodeSnapshot,
 }
 
 /// Versioned DTO returned by the UI-manifest endpoint.
@@ -254,7 +257,7 @@ pub struct NodeCommandHttpRequest {
 #[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeCommandHttpResponse {
     pub schema_version: u16,
-    pub result: NodeCommandResult,
+    pub result: ProjectedNodeCommandResult,
 }
 
 /// Stable error codes for HTTP version negotiation and backend failures.
@@ -478,16 +481,16 @@ pub struct NodeHttpErrorResponse {
 pub enum NodeWsMessage {
     Snapshot {
         schema_version: u16,
-        snapshot: Box<NodeSnapshot>,
+        snapshot: Box<ProjectedNodeSnapshot>,
     },
     Event {
         schema_version: u16,
-        event: NodeEvent,
+        event: ProjectedNodeEvent,
     },
     Resync {
         schema_version: u16,
         reason: NodeWsResyncReason,
-        snapshot: Box<NodeSnapshot>,
+        snapshot: Box<ProjectedNodeSnapshot>,
     },
     Error {
         schema_version: u16,
@@ -517,15 +520,20 @@ pub enum NodeWsResyncReason {
     RevisionGap,
 }
 
-/// The event stream had a consistency violation that cannot be recovered by a
-/// snapshot, such as the canonical store moving backwards in revision.
+/// The WebSocket projection could not produce a safe outbound message.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "节点状态 revision 回退: last_revision={last_revision}, observed_revision={observed_revision}"
-)]
-pub struct NodeWsSessionError {
-    pub last_revision: u64,
-    pub observed_revision: u64,
+pub enum NodeWsSessionError {
+    /// The canonical store moved backwards in revision.
+    #[error(
+        "节点状态 revision 回退: last_revision={last_revision}, observed_revision={observed_revision}"
+    )]
+    RevisionRollback {
+        last_revision: u64,
+        observed_revision: u64,
+    },
+    /// Field projection failed closed instead of emitting canonical state.
+    #[error("节点事件字段投影失败: {0}")]
+    Projection(#[from] NodeSnapshotProjectionError),
 }
 
 /// Per-connection cursors over the canonical event stream.
@@ -535,6 +543,7 @@ pub struct NodeWsSessionError {
 pub struct NodeWsSession {
     receiver: broadcast::Receiver<NodeEvent>,
     state: NodeStateStore,
+    context: NodeCommandContext,
     last_sequence: Option<u64>,
     last_revision: u64,
 }
@@ -543,11 +552,13 @@ impl NodeWsSession {
     pub fn new(
         receiver: broadcast::Receiver<NodeEvent>,
         state: NodeStateStore,
+        context: NodeCommandContext,
         initial_revision: u64,
     ) -> Self {
         Self {
             receiver,
             state,
+            context,
             last_sequence: None,
             last_revision: initial_revision,
         }
@@ -591,6 +602,7 @@ impl NodeWsSession {
                 self.last_revision = revision;
             }
 
+            let event = project_node_event(&event, &self.context, unix_time_ms())?;
             return Ok(Some(NodeWsMessage::Event {
                 schema_version: NODE_HTTP_SCHEMA_VERSION,
                 event,
@@ -603,15 +615,16 @@ impl NodeWsSession {
         reason: NodeWsResyncReason,
         minimum_revision: Option<u64>,
     ) -> Result<NodeWsMessage, NodeWsSessionError> {
-        let snapshot = snapshot_for_control_client(self.state.snapshot().await);
+        let canonical = self.state.snapshot().await;
         let required_revision = minimum_revision.unwrap_or(self.last_revision);
-        if snapshot.revision < required_revision {
-            return Err(NodeWsSessionError {
+        if canonical.revision < required_revision {
+            return Err(NodeWsSessionError::RevisionRollback {
                 last_revision: required_revision,
-                observed_revision: snapshot.revision,
+                observed_revision: canonical.revision,
             });
         }
-        self.last_revision = snapshot.revision;
+        let snapshot = project_snapshot_for_control_client(&canonical, &self.context)?;
+        self.last_revision = canonical.revision;
         Ok(NodeWsMessage::Resync {
             schema_version: NODE_HTTP_SCHEMA_VERSION,
             reason,
@@ -634,6 +647,8 @@ pub enum NodeHttpAdapterError {
     ManifestSchemaMismatch { current: u16, supported: u16 },
     #[error("节点 UI manifest 违反共享契约: {violations:?}")]
     InvalidManifest { violations: Vec<String> },
+    #[error("节点字段投影失败: {0}")]
+    Projection(#[from] NodeSnapshotProjectionError),
 }
 
 #[derive(Clone)]
@@ -641,6 +656,30 @@ struct OperationRecord {
     operation: Operation,
     result: Option<NodeCommandResult>,
     cancel: Option<watch::Sender<bool>>,
+}
+
+/// Canonical operation record used inside the adapter. Only [`Self::project`]
+/// may construct the outbound DTO.
+#[derive(Clone)]
+struct OperationView {
+    operation: Operation,
+    result: Option<NodeCommandResult>,
+}
+
+impl OperationView {
+    fn project(
+        &self,
+        context: &NodeCommandContext,
+    ) -> Result<NodeOperationSnapshot, NodeSnapshotProjectionError> {
+        Ok(NodeOperationSnapshot {
+            operation: self.operation.clone(),
+            result: self
+                .result
+                .as_ref()
+                .map(|result| project_result_for_control_client(result, context))
+                .transpose()?,
+        })
+    }
 }
 
 #[derive(Default)]
@@ -711,25 +750,22 @@ impl NodeHttpAdapter {
         self.command_slots.clone().try_acquire_owned().ok()
     }
 
-    fn operation(&self, id: &str) -> Option<NodeOperationSnapshot> {
+    fn operation(&self, id: &str) -> Option<OperationView> {
         let registry = self
             .operations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        registry
-            .records
-            .get(id)
-            .map(|record| NodeOperationSnapshot {
-                operation: record.operation.clone(),
-                result: record.result.clone(),
-            })
+        registry.records.get(id).map(|record| OperationView {
+            operation: record.operation.clone(),
+            result: record.result.clone(),
+        })
     }
 
     fn request_operation_cancellation(
         &self,
         context: &NodeCommandContext,
         id: &str,
-    ) -> Result<NodeOperationSnapshot, OperationCancellationError> {
+    ) -> Result<OperationView, OperationCancellationError> {
         let snapshot = {
             let mut registry = self
                 .operations
@@ -740,7 +776,7 @@ impl NodeHttpAdapter {
             };
             // Operations are private to their submitting principal. Returning
             // not-found for another actor avoids leaking operation existence.
-            if &record.operation.actor.node_id != context.actor() {
+            if !operation_visible_to(context, &record.operation) {
                 return Err(OperationCancellationError::NotFound);
             }
             if record.operation.state.is_terminal() {
@@ -770,7 +806,7 @@ impl NodeHttpAdapter {
             // Progress is best-effort here because cancellation may arrive
             // while queued. The terminal state still waits for the handler.
             let _ = record.operation.progress("cancelling", unix_time_ms());
-            NodeOperationSnapshot {
+            OperationView {
                 operation: record.operation.clone(),
                 result: record.result.clone(),
             }
@@ -783,7 +819,7 @@ impl NodeHttpAdapter {
         &self,
         id: &OperationId,
         wait_timeout: Duration,
-    ) -> Option<NodeOperationSnapshot> {
+    ) -> Option<OperationView> {
         let deadline = tokio::time::Instant::now() + wait_timeout;
         loop {
             if let Some(operation) = self.operation(id.as_str()) {
@@ -807,7 +843,7 @@ impl NodeHttpAdapter {
         context: NodeCommandContext,
         request: NodeCommandRequest,
         idempotency_key: IdempotencyKey,
-    ) -> Result<(NodeOperationSnapshot, bool), OperationSubmitError> {
+    ) -> Result<(OperationView, bool), OperationSubmitError> {
         request.validate().map_err(OperationSubmitError::Invalid)?;
         if !request.command.kind().is_operation() {
             return Err(OperationSubmitError::Internal(
@@ -877,7 +913,7 @@ impl NodeHttpAdapter {
                     let snapshot = registry
                         .records
                         .get(operation_id.as_str())
-                        .map(|record| NodeOperationSnapshot {
+                        .map(|record| OperationView {
                             operation: record.operation.clone(),
                             result: None,
                         })
@@ -888,7 +924,7 @@ impl NodeHttpAdapter {
                     let snapshot = registry
                         .records
                         .get(operation_id.as_str())
-                        .map(|record| NodeOperationSnapshot {
+                        .map(|record| OperationView {
                             operation: record.operation.clone(),
                             result: record.result.clone(),
                         })
@@ -940,25 +976,22 @@ impl NodeHttpAdapter {
             None => self.commands.execute(context, request).await,
         };
         match result {
-            Ok(result) => {
-                let result = result_for_control_client(result);
-                match result.outcome.clone() {
-                    NodeCommandOutcome::Rejected(problem)
-                        if problem.code == NodeProblemCode::Cancelled =>
-                    {
-                        self.cancel_operation(&operation_id, problem, result);
-                    }
-                    NodeCommandOutcome::Rejected(problem)
-                        if problem.code == NodeProblemCode::TimedOut =>
-                    {
-                        self.fail_operation(&operation_id, problem, result, true);
-                    }
-                    NodeCommandOutcome::Rejected(problem) => {
-                        self.fail_operation(&operation_id, problem, result, false);
-                    }
-                    _ => self.succeed_operation(&operation_id, result),
+            Ok(result) => match result.outcome.clone() {
+                NodeCommandOutcome::Rejected(problem)
+                    if problem.code == NodeProblemCode::Cancelled =>
+                {
+                    self.cancel_operation(&operation_id, problem, result);
                 }
-            }
+                NodeCommandOutcome::Rejected(problem)
+                    if problem.code == NodeProblemCode::TimedOut =>
+                {
+                    self.fail_operation(&operation_id, problem, result, true);
+                }
+                NodeCommandOutcome::Rejected(problem) => {
+                    self.fail_operation(&operation_id, problem, result, false);
+                }
+                _ => self.succeed_operation(&operation_id, result),
+            },
             Err(error) => {
                 let problem = NodeProblem::new(NodeProblemCode::Internal, error.to_string());
                 self.fail_operation(
@@ -990,7 +1023,7 @@ impl NodeHttpAdapter {
             {
                 return false;
             }
-            NodeOperationSnapshot {
+            OperationView {
                 operation: record.operation.clone(),
                 result: record.result.clone(),
             }
@@ -1011,7 +1044,7 @@ impl NodeHttpAdapter {
             if record.operation.progress(stage, unix_time_ms()).is_err() {
                 return false;
             }
-            NodeOperationSnapshot {
+            OperationView {
                 operation: record.operation.clone(),
                 result: record.result.clone(),
             }
@@ -1037,7 +1070,7 @@ impl NodeHttpAdapter {
                 return;
             }
             record.result = Some(result);
-            NodeOperationSnapshot {
+            OperationView {
                 operation: record.operation.clone(),
                 result: record.result.clone(),
             }
@@ -1070,7 +1103,7 @@ impl NodeHttpAdapter {
                 return;
             }
             record.result = Some(result);
-            NodeOperationSnapshot {
+            OperationView {
                 operation: record.operation.clone(),
                 result: record.result.clone(),
             }
@@ -1097,7 +1130,7 @@ impl NodeHttpAdapter {
                 return;
             }
             record.result = Some(result);
-            NodeOperationSnapshot {
+            OperationView {
                 operation: record.operation.clone(),
                 result: record.result.clone(),
             }
@@ -1675,6 +1708,16 @@ async fn handle_v1_command(
     {
         let result = super::command::denied(request_id, &denial);
         let status = status_for_command_result(&result);
+        let result = match project_result_for_control_client(&result, &context) {
+            Ok(result) => result,
+            Err(error) => {
+                return HttpApiError::from_adapter(
+                    request_id,
+                    NodeHttpAdapterError::Projection(error),
+                )
+                .into_response();
+            }
+        };
         return (
             status,
             Json(NodeApiCommandResponse {
@@ -1706,6 +1749,7 @@ async fn handle_v1_command(
         };
         let rotates_identity =
             matches!(&payload.request.command, NodeCommand::RotateNodeIdentity(_));
+        let projection_context = context.clone();
         return match adapter
             .submit_operation(context, payload.request, idempotency_key)
             .await
@@ -1723,8 +1767,29 @@ async fn handle_v1_command(
                     operation
                 };
                 if rotates_identity && operation.operation.state.is_terminal() {
-                    if let Some(result) = operation.result.clone() {
-                        let status = status_for_command_result(&result);
+                    if let Some(result) = operation.result.as_ref() {
+                        let status = status_for_command_result(result);
+                        let result =
+                            match project_result_for_control_client(result, &projection_context) {
+                                Ok(result) => result,
+                                Err(error) => {
+                                    return HttpApiError::from_adapter(
+                                        request_id,
+                                        NodeHttpAdapterError::Projection(error),
+                                    )
+                                    .into_response();
+                                }
+                            };
+                        let operation = match operation.project(&projection_context) {
+                            Ok(operation) => operation,
+                            Err(error) => {
+                                return HttpApiError::from_adapter(
+                                    request_id,
+                                    NodeHttpAdapterError::Projection(error),
+                                )
+                                .into_response();
+                            }
+                        };
                         return (
                             status,
                             Json(NodeApiCommandResponse {
@@ -1736,6 +1801,16 @@ async fn handle_v1_command(
                             .into_response();
                     }
                 }
+                let operation = match operation.project(&projection_context) {
+                    Ok(operation) => operation,
+                    Err(error) => {
+                        return HttpApiError::from_adapter(
+                            request_id,
+                            NodeHttpAdapterError::Projection(error),
+                        )
+                        .into_response();
+                    }
+                };
                 (
                     StatusCode::ACCEPTED,
                     Json(NodeApiCommandResponse {
@@ -1768,10 +1843,20 @@ async fn handle_v1_command(
         };
     }
 
+    let projection_context = context.clone();
     match adapter.execute(context, payload.request).await {
         Ok(result) => {
-            let result = result_for_control_client(result);
             let status = status_for_command_result(&result);
+            let result = match project_result_for_control_client(&result, &projection_context) {
+                Ok(result) => result,
+                Err(error) => {
+                    return HttpApiError::from_adapter(
+                        request_id,
+                        NodeHttpAdapterError::Projection(error),
+                    )
+                    .into_response();
+                }
+            };
             (
                 status,
                 Json(NodeApiCommandResponse {
@@ -1802,12 +1887,18 @@ async fn handle_v1_snapshot(
         return (*error).into_response();
     }
 
-    match adapter.snapshot(context).await {
-        Ok(snapshot) => Json(NodeApiSnapshotResponse {
-            meta: NodeApiResponseMeta::new(request_id),
-            snapshot: snapshot_for_control_client(snapshot),
-        })
-        .into_response(),
+    match adapter.snapshot(context.clone()).await {
+        Ok(snapshot) => match project_snapshot_for_control_client(&snapshot, &context) {
+            Ok(snapshot) => Json(NodeApiSnapshotResponse {
+                meta: NodeApiResponseMeta::new(request_id),
+                snapshot,
+            })
+            .into_response(),
+            Err(error) => {
+                HttpApiError::from_adapter(request_id, NodeHttpAdapterError::Projection(error))
+                    .into_response()
+            }
+        },
         Err(error) => HttpApiError::from_adapter(request_id, error).into_response(),
     }
 }
@@ -1840,6 +1931,7 @@ async fn handle_v1_manifest(
 
 async fn handle_v1_operation(
     State(adapter): State<NodeHttpAdapter>,
+    Extension(context): Extension<NodeCommandContext>,
     Path(id): Path<String>,
     query: Result<Query<NodeApiQuery>, QueryRejection>,
 ) -> Response {
@@ -1855,12 +1947,20 @@ async fn handle_v1_operation(
     }
 
     match adapter.operation(&id) {
-        Some(operation) => Json(NodeApiOperationResponse {
-            meta: NodeApiResponseMeta::new(request_id),
-            operation,
-        })
-        .into_response(),
-        None => HttpApiError::not_found(request_id, format!("operation not found: {id}"))
+        Some(operation) if operation_visible_to(&context, &operation.operation) => {
+            match operation.project(&context) {
+                Ok(operation) => Json(NodeApiOperationResponse {
+                    meta: NodeApiResponseMeta::new(request_id),
+                    operation,
+                })
+                .into_response(),
+                Err(error) => {
+                    HttpApiError::from_adapter(request_id, NodeHttpAdapterError::Projection(error))
+                        .into_response()
+                }
+            }
+        }
+        Some(_) | None => HttpApiError::not_found(request_id, format!("operation not found: {id}"))
             .into_response(),
     }
 }
@@ -1883,14 +1983,20 @@ async fn handle_v1_cancel_operation(
     }
 
     match adapter.request_operation_cancellation(&context, &id) {
-        Ok(operation) => (
-            StatusCode::ACCEPTED,
-            Json(NodeApiOperationResponse {
-                meta: NodeApiResponseMeta::new(request_id),
-                operation,
-            }),
-        )
-            .into_response(),
+        Ok(operation) => match operation.project(&context) {
+            Ok(operation) => (
+                StatusCode::ACCEPTED,
+                Json(NodeApiOperationResponse {
+                    meta: NodeApiResponseMeta::new(request_id),
+                    operation,
+                }),
+            )
+                .into_response(),
+            Err(error) => {
+                HttpApiError::from_adapter(request_id, NodeHttpAdapterError::Projection(error))
+                    .into_response()
+            }
+        },
         Err(OperationCancellationError::NotFound) => {
             HttpApiError::not_found(request_id, format!("operation not found: {id}"))
                 .into_response()
@@ -1921,8 +2027,17 @@ async fn handle_v1_object(
         return (*error).into_response();
     }
 
-    let snapshot = match adapter.snapshot(context).await {
-        Ok(snapshot) => snapshot_for_control_client(snapshot),
+    let snapshot = match adapter.snapshot(context.clone()).await {
+        Ok(snapshot) => match project_snapshot_for_control_client(&snapshot, &context) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return HttpApiError::from_adapter(
+                    request_id,
+                    NodeHttpAdapterError::Projection(error),
+                )
+                .into_response();
+            }
+        },
         Err(error) => return HttpApiError::from_adapter(request_id, error).into_response(),
     };
     let object = match kind.as_str() {
@@ -1960,9 +2075,12 @@ async fn handle_v1_object(
             }),
         "network_configuration" => snapshot
             .configuration
-            .networks
-            .into_iter()
-            .find(|configuration| configuration.network_name == id)
+            .and_then(|configuration| {
+                configuration
+                    .networks
+                    .into_iter()
+                    .find(|network| network.network_name == id)
+            })
             .map(|configuration| NodeApiObject::NetworkConfiguration {
                 id: id.clone(),
                 configuration,
@@ -1983,6 +2101,7 @@ async fn handle_v1_object(
 
 struct NodeApiEventStreamState {
     receiver: broadcast::Receiver<NodeEvent>,
+    context: NodeCommandContext,
     initial: Option<NodeApiEvent>,
     replay: std::collections::VecDeque<NodeEvent>,
     request_id: u64,
@@ -2033,8 +2152,17 @@ async fn handle_v1_events(
         None => std::collections::VecDeque::new(),
     };
 
-    let snapshot = match adapter.snapshot(context).await {
-        Ok(snapshot) => snapshot_for_control_client(snapshot),
+    let snapshot = match adapter.snapshot(context.clone()).await {
+        Ok(snapshot) => match project_snapshot_for_control_client(&snapshot, &context) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return HttpApiError::from_adapter(
+                    request_id,
+                    NodeHttpAdapterError::Projection(error),
+                )
+                .into_response();
+            }
+        },
         Err(error) => return HttpApiError::from_adapter(request_id, error).into_response(),
     };
     // The snapshot is authoritative through `snapshot.revision`. The cursor's
@@ -2053,6 +2181,7 @@ async fn handle_v1_events(
     };
     let state = NodeApiEventStreamState {
         receiver,
+        context,
         initial: Some(initial),
         replay,
         request_id,
@@ -2120,6 +2249,13 @@ async fn handle_v1_events(
 
         let cursor = NodeEventCursor::new(event.sequence, event.snapshot_revision);
         state.cursor = cursor;
+        let event = match project_node_event(&event, &state.context, unix_time_ms()) {
+            Ok(event) => event,
+            Err(error) => {
+                tracing::warn!(diagnostic = %error, "node SSE event projection failed closed");
+                return None;
+            }
+        };
         let message = NodeApiEvent::Event {
             schema_version: NODE_HTTP_SCHEMA_VERSION,
             request_id: state.request_id,
@@ -2173,10 +2309,17 @@ async fn handle_command(
         }
     };
 
+    let projection_context = context.clone();
     match adapter.execute(context, payload.request).await {
         Ok(result) => {
-            let result = result_for_control_client(result);
             let status = status_for_command_result(&result);
+            let result = match project_result_for_control_client(&result, &projection_context) {
+                Ok(result) => result,
+                Err(error) => {
+                    return HttpAdapterError::from(NodeHttpAdapterError::Projection(error))
+                        .into_response();
+                }
+            };
             (
                 status,
                 Json(NodeCommandHttpResponse {
@@ -2196,12 +2339,13 @@ async fn handle_snapshot(
     Query(query): Query<NodeHttpQuery>,
 ) -> Result<Json<NodeSnapshotResponse>, HttpAdapterError> {
     require_schema_version(&query)?;
-    let snapshot = snapshot_for_control_client(
-        adapter
-            .snapshot(context)
-            .await
-            .map_err(HttpAdapterError::from)?,
-    );
+    let snapshot = adapter
+        .snapshot(context.clone())
+        .await
+        .map_err(HttpAdapterError::from)?;
+    let snapshot = project_snapshot_for_control_client(&snapshot, &context)
+        .map_err(NodeHttpAdapterError::Projection)
+        .map_err(HttpAdapterError::from)?;
     Ok(Json(NodeSnapshotResponse {
         schema_version: NODE_HTTP_SCHEMA_VERSION,
         snapshot,
@@ -2246,8 +2390,22 @@ async fn run_event_socket(
 ) {
     // Subscribe before fetching the snapshot so no event is lost in the gap.
     let receiver = adapter.events.subscribe();
-    let snapshot = match adapter.snapshot(context).await {
-        Ok(snapshot) => snapshot_for_control_client(snapshot),
+    let snapshot = match adapter.snapshot(context.clone()).await {
+        Ok(snapshot) => match project_snapshot_for_control_client(&snapshot, &context) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let message = NodeWsMessage::Error {
+                    schema_version: NODE_HTTP_SCHEMA_VERSION,
+                    error: NodeErrorDetails::new(
+                        NodeHttpErrorCode::ContractViolation,
+                        error.to_string(),
+                    ),
+                };
+                let _ = send_ws_message(&mut socket, &message).await;
+                let _ = socket.close().await;
+                return;
+            }
+        },
         Err(error) => {
             let message = NodeWsMessage::Error {
                 schema_version: NODE_HTTP_SCHEMA_VERSION,
@@ -2271,7 +2429,8 @@ async fn run_event_socket(
         return;
     }
 
-    let mut session = NodeWsSession::new(receiver, adapter.state.clone(), snapshot.revision);
+    let mut session =
+        NodeWsSession::new(receiver, adapter.state.clone(), context, snapshot.revision);
     loop {
         tokio::select! {
             incoming = socket.recv() => {
@@ -2309,16 +2468,32 @@ async fn run_event_socket(
     }
 }
 
-/// A successful HTTP/WebSocket response is proof that this adapter can reach
-/// the authoritative node state. The observation is applied only to the
-/// outbound projection and never mutates the canonical store or revision.
-fn snapshot_for_control_client(mut snapshot: NodeSnapshot) -> NodeSnapshot {
-    snapshot.control_health = NodeControlHealth::Available;
-    snapshot
+/// Operation records are private to the submitting actor. The local node owner
+/// may inspect all local operations; every other principal receives a 404 to
+/// avoid leaking whether an operation exists.
+fn operation_visible_to(context: &NodeCommandContext, operation: &Operation) -> bool {
+    &operation.actor.node_id == context.actor() || context.is_local_owner()
 }
 
-fn result_for_control_client(mut result: NodeCommandResult) -> NodeCommandResult {
-    match &mut result.outcome {
+/// A successful HTTP/WebSocket response is proof that this adapter can reach
+/// the authoritative node state. This transport observation is applied to a
+/// clone and then field-projected; the canonical store and its revision are
+/// never mutated.
+fn project_snapshot_for_control_client(
+    snapshot: &NodeSnapshot,
+    context: &NodeCommandContext,
+) -> Result<ProjectedNodeSnapshot, NodeSnapshotProjectionError> {
+    let mut outbound = snapshot.clone();
+    outbound.control_health = NodeControlHealth::Available;
+    project_node_snapshot(&outbound, context, unix_time_ms())
+}
+
+fn project_result_for_control_client(
+    result: &NodeCommandResult,
+    context: &NodeCommandContext,
+) -> Result<ProjectedNodeCommandResult, NodeSnapshotProjectionError> {
+    let mut outbound = result.clone();
+    match &mut outbound.outcome {
         NodeCommandOutcome::Snapshot(snapshot) => {
             snapshot.control_health = NodeControlHealth::Available;
         }
@@ -2327,7 +2502,7 @@ fn result_for_control_client(mut result: NodeCommandResult) -> NodeCommandResult
         }
         _ => {}
     }
-    result
+    project_node_command_result(&outbound, context, unix_time_ms())
 }
 
 /// Authentication and authorization failures must be indistinguishable from
@@ -2447,6 +2622,11 @@ impl HttpAdapterError {
                 StatusCode::BAD_GATEWAY,
                 NodeHttpErrorCode::ContractViolation,
                 format!("invalid manifest: {violations:?}"),
+            ),
+            NodeHttpAdapterError::Projection(error) => Self::from_code(
+                StatusCode::BAD_GATEWAY,
+                NodeHttpErrorCode::ContractViolation,
+                error.to_string(),
             ),
         }
     }
@@ -2688,6 +2868,16 @@ impl HttpApiError {
                 response.body.supported_schema_version = Some(NODE_HTTP_SCHEMA_VERSION);
                 response
             }
+            NodeHttpAdapterError::Projection(error) => {
+                tracing::warn!(diagnostic = %error, "node field projection failed closed");
+                let mut response = Self::new(
+                    request_id,
+                    StatusCode::BAD_GATEWAY,
+                    NodeHttpErrorCode::ContractViolation,
+                );
+                response.body.supported_schema_version = Some(NODE_HTTP_SCHEMA_VERSION);
+                response
+            }
         }
     }
 
@@ -2736,17 +2926,24 @@ mod tests {
         body::{to_bytes, Body},
         http::{header, Method, Request, StatusCode},
     };
-    use fuckipv6_common::domain::{IdempotencyKey, ObjectKind, OperationState};
+    use fuckipv6_common::domain::{
+        ActivityEntry, AuditId, AuditOutcome, FieldPrivacyPolicy, FieldVisibility,
+        FieldVisibilityRule, IdempotencyKey, MembershipRole, MembershipState, NetworkId, NodeId,
+        ObjectKind, OperationState, PrivacyField,
+    };
     use futures::{SinkExt, StreamExt};
     use tokio::{net::TcpListener, sync::broadcast, time::timeout};
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
     use tower::ServiceExt;
 
     use super::*;
+    use crate::node::state::NodeAccessControlSnapshot;
     use crate::node::{
-        node_ui_manifest, NodeCommandFuture, NodeCommandHandler, NodeCommandResult,
-        NodeIdentityRotationSnapshot, NodeJoinNetworkCommand, NodeNetworkSnapshot,
-        NodeNetworkStatus, NodeProblemCode, NodeTrafficSnapshot,
+        node_ui_manifest, NetworkCommandScope, NodeCommandFuture, NodeCommandHandler,
+        NodeCommandResult, NodeIdentityRotationSnapshot, NodeIdentitySnapshot,
+        NodeJoinNetworkCommand, NodeLogEntry, NodeLogLevel, NodeNetworkMembershipSnapshot,
+        NodeNetworkSnapshot, NodeNetworkStatus, NodePeerSnapshot, NodeProblemCode,
+        NodeTrafficSnapshot, ProjectedNodeCommandOutcome, ProjectedNodeEventKind,
     };
 
     #[derive(Clone)]
@@ -2904,6 +3101,180 @@ mod tests {
         )
     }
 
+    const HIDDEN_DISPLAY_NAME: &str = "privacy-hidden-display-name";
+    const HIDDEN_FINGERPRINT: &str = "privacy-hidden-fingerprint";
+    const HIDDEN_TUN_NAME: &str = "privacy-hidden-tun0";
+    const HIDDEN_IPV6: &str = "2001:db8::dead:beef";
+    const HIDDEN_ENDPOINT: &str = "203.0.113.44:8443";
+    const HIDDEN_LOG_TARGET: &str = "privacy-hidden-log-target";
+    const HIDDEN_LOG_MESSAGE: &str = "privacy-hidden-log-message";
+    const HIDDEN_ACTIVITY_SUMMARY: &str = "privacy-hidden-activity-summary";
+
+    fn privacy_rule(field: PrivacyField) -> FieldVisibilityRule {
+        FieldVisibilityRule {
+            field,
+            visibility: FieldVisibility::OwnerOnly,
+        }
+    }
+
+    fn privacy_transport_context(snapshot: &NodeSnapshot) -> NodeCommandContext {
+        let membership = snapshot
+            .memberships
+            .first()
+            .expect("privacy fixture membership");
+        let network_id =
+            NetworkId::parse(membership.network_id.clone()).expect("privacy fixture network id");
+        NodeCommandContext::network_session(
+            NodeId::from_public_key(b"privacy-transport-viewer"),
+            "privacy-transport-test",
+            [crate::node::NodePermission::ViewState],
+            [(
+                membership.network_name.clone(),
+                NetworkCommandScope::new(
+                    network_id,
+                    fuckipv6_common::domain::NetworkRole::Administrator,
+                    membership.state,
+                    Vec::new(),
+                ),
+            )],
+            true,
+        )
+        .with_access_control_snapshot(&snapshot.access_control)
+    }
+
+    fn privacy_transport_fixture() -> (NodeSnapshot, NodeCommandContext) {
+        let network_id = NetworkId::from_public_key(b"privacy-transport-home");
+        let node_id = NodeId::from_public_key(b"privacy-transport-node");
+        let peer_id = NodeId::from_public_key(b"privacy-transport-peer");
+        let policy = FieldPrivacyPolicy {
+            network_id: Some(network_id.clone()),
+            revision: 9,
+            issued_at_unix_ms: 0,
+            effective_at_unix_ms: 0,
+            expires_at_unix_ms: u64::MAX,
+            rules: [
+                PrivacyField::NodeDisplayName,
+                PrivacyField::NodePublicKey,
+                PrivacyField::NodeOnlineState,
+                PrivacyField::NodeEndpoints,
+                PrivacyField::NodeRealNetworkAddresses,
+                PrivacyField::NodeTrafficStatistics,
+                PrivacyField::NodeLocalPaths,
+                PrivacyField::NodeDetailedLogs,
+                PrivacyField::ActivityActor,
+            ]
+            .into_iter()
+            .map(privacy_rule)
+            .collect(),
+        };
+        let snapshot = NodeSnapshot {
+            revision: 41,
+            control_health: NodeControlHealth::Available,
+            identity: Some(NodeIdentitySnapshot {
+                node_id: node_id.to_string(),
+                display_name: Some(HIDDEN_DISPLAY_NAME.into()),
+                public_key_fingerprint: HIDDEN_FINGERPRINT.into(),
+                created_at_unix_ms: Some(10),
+            }),
+            access_control: NodeAccessControlSnapshot {
+                local_policy: None,
+                network_acls: Vec::new(),
+                field_privacy_policies: vec![policy],
+            },
+            memberships: vec![NodeNetworkMembershipSnapshot {
+                network_name: "home".into(),
+                network_id: network_id.to_string(),
+                node_id: node_id.to_string(),
+                state: MembershipState::Active,
+                role: MembershipRole::Administrator,
+                local_policy_revision: 0,
+                network_policy_revision: None,
+                privacy_policy_revision: Some(9),
+                member_limit: None,
+                exit_contribution: None,
+                exit_contribution_scope: None,
+                terms_hash: None,
+                current_terms: None,
+                current_terms_hash: None,
+                policy_confirmation_required: false,
+                acknowledged_at_unix_ms: None,
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 1,
+                suspension_reason: None,
+            }],
+            networks: vec![NodeNetworkSnapshot {
+                name: "home".into(),
+                tun_name: HIDDEN_TUN_NAME.into(),
+                status: NodeNetworkStatus::Online,
+                assigned_ipv6: Some(HIDDEN_IPV6.parse().unwrap()),
+                assigned_ipv4: Some("192.0.2.44".parse().unwrap()),
+                p2p_listen_addr: Some(HIDDEN_ENDPOINT.parse().unwrap()),
+                uptime_secs: 42,
+                roles: Vec::new(),
+                peer_count: 1,
+                traffic: NodeTrafficSnapshot {
+                    tun_rx_bytes: 44,
+                    ..NodeTrafficSnapshot::default()
+                },
+            }],
+            peers: vec![NodePeerSnapshot {
+                peer_id: peer_id.to_string(),
+                network_name: "home".into(),
+                virtual_ipv6: HIDDEN_IPV6.parse().unwrap(),
+                virtual_ipv4: Some("192.0.2.45".parse().unwrap()),
+                endpoints: vec![HIDDEN_ENDPOINT.parse().unwrap()],
+                online: true,
+                p2p_active: true,
+                p2p_healthy: true,
+                rtt_us: Some(9_000),
+                loss_rate: 0.5,
+                traffic: NodeTrafficSnapshot {
+                    p2p_rx_bytes: 45,
+                    ..NodeTrafficSnapshot::default()
+                },
+            }],
+            recent_activity: vec![ActivityEntry {
+                audit_id: AuditId::from_public_key(b"privacy-transport-audit"),
+                operation_id: None,
+                actor: node_id,
+                network_id: Some(network_id),
+                action: "privacy.hidden.action".into(),
+                resource: "member:privacy-hidden".into(),
+                outcome: AuditOutcome::Succeeded,
+                occurred_at_unix_ms: 1_500,
+                summary: HIDDEN_ACTIVITY_SUMMARY.into(),
+                details: BTreeMap::from([("secret".into(), "hidden".into())]),
+            }],
+            logs: vec![NodeLogEntry {
+                unix_ms: 1_500,
+                level: NodeLogLevel::Info,
+                target: HIDDEN_LOG_TARGET.into(),
+                message: HIDDEN_LOG_MESSAGE.into(),
+            }],
+            ..NodeSnapshot::default()
+        };
+        let context = privacy_transport_context(&snapshot);
+        (snapshot, context)
+    }
+
+    fn assert_privacy_serialization_omits_hidden_values(label: &str, value: &str) {
+        for secret in [
+            HIDDEN_DISPLAY_NAME,
+            HIDDEN_FINGERPRINT,
+            HIDDEN_TUN_NAME,
+            HIDDEN_IPV6,
+            HIDDEN_ENDPOINT,
+            HIDDEN_LOG_TARGET,
+            HIDDEN_LOG_MESSAGE,
+            HIDDEN_ACTIVITY_SUMMARY,
+        ] {
+            assert!(
+                !value.contains(secret),
+                "{label} leaked hidden value {secret}: {value}"
+            );
+        }
+    }
+
     async fn json_body<T: serde::de::DeserializeOwned>(response: Response) -> T {
         let bytes = to_bytes(response.into_body(), usize::MAX)
             .await
@@ -3001,6 +3372,27 @@ mod tests {
             .expect("operation lookup response")
     }
 
+    async fn fetch_v1_operation_as(
+        adapter: &NodeHttpAdapter,
+        operation_id: &str,
+        context: NodeCommandContext,
+    ) -> Response {
+        adapter
+            .clone()
+            .router()
+            .layer(Extension(context))
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/operations/{operation_id}?schema_version=1"
+                    ))
+                    .body(Body::empty())
+                    .expect("operation lookup request"),
+            )
+            .await
+            .expect("operation lookup response")
+    }
+
     async fn post_v1_cancel(adapter: &NodeHttpAdapter, operation_id: &str) -> Response {
         adapter
             .clone()
@@ -3054,6 +3446,98 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         panic!("operation {operation_id} did not reach a terminal state");
+    }
+
+    #[test]
+    fn transport_dtos_serialize_only_projected_snapshot_and_result_fields() {
+        let (snapshot, context) = privacy_transport_fixture();
+        let projected =
+            project_snapshot_for_control_client(&snapshot, &context).expect("project snapshot");
+
+        assert!(projected.identity.is_none());
+        assert!(projected.logs.is_empty());
+        assert!(projected.recent_activity.is_empty());
+        let network = projected.networks.first().expect("visible network row");
+        assert!(network.tun_name.is_none());
+        assert!(network.assigned_ipv6.is_none());
+        assert!(network.p2p_listen_addr.is_none());
+        let peer = projected.peers.first().expect("visible peer row");
+        assert!(peer.virtual_ipv6.is_none());
+        assert!(peer.endpoints.is_none());
+        assert!(!peer.online.unwrap_or_default());
+
+        let snapshot_json = serde_json::to_string(&NodeApiSnapshotResponse {
+            meta: NodeApiResponseMeta::new(1),
+            snapshot: projected.clone(),
+        })
+        .expect("serialize snapshot response");
+        assert_privacy_serialization_omits_hidden_values("snapshot response", &snapshot_json);
+
+        let result = NodeCommandResult::snapshot(17, snapshot.clone());
+        let projected_result =
+            project_result_for_control_client(&result, &context).expect("project command result");
+        let command_json = serde_json::to_string(&NodeCommandHttpResponse {
+            schema_version: NODE_HTTP_SCHEMA_VERSION,
+            result: projected_result,
+        })
+        .expect("serialize command response");
+        assert_privacy_serialization_omits_hidden_values("command response", &command_json);
+
+        let operation = Operation {
+            operation_id: OperationId::from_public_key(b"privacy-transport-operation"),
+            kind: OperationKind::Diagnostics,
+            actor: DomainActorRef {
+                node_id: context.actor().clone(),
+                display: "privacy-transport-test".into(),
+            },
+            target: DomainObjectRef {
+                kind: ObjectKind::Node,
+                id: context.actor().to_string(),
+            },
+            idempotency_key: IdempotencyKey::from_public_key(b"privacy-transport-idempotency"),
+            state: OperationState::Succeeded,
+            stage: "succeeded".into(),
+            created_at_unix_ms: 1_500,
+            updated_at_unix_ms: 1_500,
+            attempt: 1,
+            max_attempts: 3,
+            error: None,
+            cancellable: false,
+            cancel_blocked_reason: None,
+        };
+        let projected_operation = OperationView {
+            operation,
+            result: Some(result),
+        }
+        .project(&context)
+        .expect("project operation response");
+        assert!(projected_operation.result.is_some());
+        let operation_json = serde_json::to_string(&NodeApiOperationResponse {
+            meta: NodeApiResponseMeta::new(2),
+            operation: projected_operation,
+        })
+        .expect("serialize operation response");
+        assert_privacy_serialization_omits_hidden_values("operation response", &operation_json);
+
+        let object_json = serde_json::to_string(&NodeApiObjectResponse {
+            meta: NodeApiResponseMeta::new(3),
+            object: NodeApiObject::Network {
+                id: network.name.clone(),
+                network: network.clone(),
+            },
+        })
+        .expect("serialize object response");
+        assert_privacy_serialization_omits_hidden_values("network object response", &object_json);
+
+        let object_json = serde_json::to_string(&NodeApiObjectResponse {
+            meta: NodeApiResponseMeta::new(4),
+            object: NodeApiObject::Peer {
+                id: peer.peer_id.clone(),
+                peer: peer.clone(),
+            },
+        })
+        .expect("serialize peer object response");
+        assert_privacy_serialization_omits_hidden_values("peer object response", &object_json);
     }
 
     #[tokio::test]
@@ -3310,7 +3794,10 @@ mod tests {
             .expect("command server time is RFC3339");
         let result = body.result.expect("read command returns a result");
         assert_eq!(result.request_id, 51);
-        assert!(matches!(result.outcome, NodeCommandOutcome::Snapshot(_)));
+        assert!(matches!(
+            result.outcome,
+            ProjectedNodeCommandOutcome::Snapshot(_)
+        ));
     }
 
     #[tokio::test]
@@ -3368,7 +3855,7 @@ mod tests {
             .expect("succeeded operation returns its result");
         assert!(matches!(
             result.outcome,
-            NodeCommandOutcome::Completed { .. }
+            ProjectedNodeCommandOutcome::Completed { .. }
         ));
         assert_eq!(writes.load(Ordering::SeqCst), 1);
     }
@@ -3473,11 +3960,23 @@ mod tests {
             .operation
             .expect("diagnostics return an operation");
 
-        let other_owner = NodeCommandContext::owner_session(
+        let other_owner = NodeCommandContext::network_session(
             NodeId::from_public_key(b"another-webui-owner"),
-            "other-owner",
+            "other-network-member",
+            [crate::node::NodePermission::ViewState],
+            [],
             true,
         );
+        let hidden = fetch_v1_operation_as(
+            &adapter,
+            operation.operation.operation_id.as_str(),
+            other_owner.clone(),
+        )
+        .await;
+        assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+        let hidden: NodeApiErrorResponse = json_body(hidden).await;
+        assert_eq!(hidden.error.code, NodeHttpErrorCode::NotFound);
+
         let hidden = post_v1_cancel_as(
             &adapter,
             operation.operation.operation_id.as_str(),
@@ -3532,7 +4031,7 @@ mod tests {
         let result = body.result.expect("rotation returns a synchronous result");
         assert!(matches!(
             result.outcome,
-            NodeCommandOutcome::IdentityRotated(ref completed)
+            ProjectedNodeCommandOutcome::IdentityRotated(ref completed)
                 if completed.new_node_id == rotation.new_node_id
         ));
         let operation = body.operation.expect("rotation keeps the operation record");
@@ -3614,7 +4113,7 @@ mod tests {
             .expect("background rotation eventually exposes its result");
         assert!(matches!(
             result.outcome,
-            NodeCommandOutcome::IdentityRotated(ref completed)
+            ProjectedNodeCommandOutcome::IdentityRotated(ref completed)
                 if completed.new_fingerprint == rotation.new_fingerprint
         ));
         assert_eq!(writes.load(Ordering::SeqCst), 1);
@@ -3799,14 +4298,13 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let body: NodeApiCommandResponse = json_body(response).await;
         let result = body.result.expect("synchronous rejection result");
-        let NodeCommandOutcome::Rejected(problem) = result.outcome else {
+        let ProjectedNodeCommandOutcome::Rejected(problem) = result.outcome else {
             panic!("expected sensitive command rejection");
         };
         assert_eq!(problem.code, NodeProblemCode::AuthenticationRequired);
-        assert_eq!(
-            problem.params.get("authorization_code").map(String::as_str),
-            Some("permission.recent_authentication_required")
-        );
+        assert!(problem.params.is_empty());
+        assert!(problem.network_name.is_none());
+        assert!(problem.details.is_none());
         assert!(body.operation.is_none());
         assert_eq!(writes.load(Ordering::SeqCst), 0);
     }
@@ -3843,7 +4341,7 @@ mod tests {
         assert!(!serialized.contains(protected_object));
         assert!(!serialized.contains("protected-node-id exists"));
         let body: NodeCommandHttpResponse = serde_json::from_value(raw).expect("decode response");
-        let NodeCommandOutcome::Rejected(problem) = body.result.outcome else {
+        let ProjectedNodeCommandOutcome::Rejected(problem) = body.result.outcome else {
             panic!("expected a rejected command");
         };
         assert_eq!(problem.code, NodeProblemCode::PermissionDenied);
@@ -3877,7 +4375,7 @@ mod tests {
         assert_eq!(error.code, "operation.permission_denied");
         assert_eq!(error.message_key, "error.operation_permission_denied");
         let result = failed.operation.result.expect("failed operation result");
-        let NodeCommandOutcome::Rejected(problem) = result.outcome else {
+        let ProjectedNodeCommandOutcome::Rejected(problem) = result.outcome else {
             panic!("expected a rejected operation result");
         };
         assert_eq!(problem.message, "无权执行此操作");
@@ -4080,7 +4578,7 @@ mod tests {
         assert!(matches!(
             body.object,
             NodeApiObject::Network { id, network }
-                if id == "home" && network.name == "home" && network.uptime_secs == 12
+                if id == "home" && network.name == "home" && network.uptime_secs == Some(12)
         ));
 
         let missing = adapter
@@ -4138,10 +4636,10 @@ mod tests {
         assert!(matches!(
             replayed,
             NodeApiEvent::Event {
-                event: NodeEvent {
+                event: ProjectedNodeEvent {
                     sequence: 1,
                     snapshot_revision: 1,
-                    kind: NodeEventKind::StateChanged { revision: 1 },
+                    kind: ProjectedNodeEventKind::StateChanged { revision: 1 },
                 },
                 ..
             }
@@ -4183,10 +4681,10 @@ mod tests {
         assert!(matches!(
             completed,
             NodeApiEvent::Event {
-                event: NodeEvent {
+                event: ProjectedNodeEvent {
                     sequence: 2,
                     snapshot_revision: 1,
-                    kind: NodeEventKind::CommandCompleted { success: true, .. },
+                    kind: ProjectedNodeEventKind::CommandCompleted { success: true, .. },
                 },
                 ..
             }
@@ -4196,10 +4694,10 @@ mod tests {
         assert!(matches!(
             resumed,
             NodeApiEvent::Event {
-                event: NodeEvent {
+                event: ProjectedNodeEvent {
                     sequence: 3,
                     snapshot_revision: 2,
-                    kind: NodeEventKind::StateChanged { revision: 2 },
+                    kind: ProjectedNodeEventKind::StateChanged { revision: 2 },
                 },
                 ..
             }
@@ -4277,10 +4775,10 @@ mod tests {
             assert!(matches!(
                 completed,
                 NodeApiEvent::Event {
-                    event: NodeEvent {
+                    event: ProjectedNodeEvent {
                         sequence: 1,
                         snapshot_revision: 0,
-                        kind: NodeEventKind::CommandCompleted { success: true, .. },
+                        kind: ProjectedNodeEventKind::CommandCompleted { success: true, .. },
                     },
                     ..
                 }
@@ -4366,7 +4864,7 @@ mod tests {
         assert_eq!(body.result.request_id, 41);
         assert!(matches!(
             body.result.outcome,
-            NodeCommandOutcome::Snapshot(snapshot) if snapshot.revision == 0
+            ProjectedNodeCommandOutcome::Snapshot(snapshot) if snapshot.revision == 0
         ));
     }
 
@@ -4409,7 +4907,7 @@ mod tests {
         assert_eq!(body.result.request_id, 43);
         assert!(matches!(
             body.result.outcome,
-            NodeCommandOutcome::Rejected(problem)
+            ProjectedNodeCommandOutcome::Rejected(problem)
                 if problem.code == NodeProblemCode::Unavailable
         ));
     }
@@ -4561,8 +5059,8 @@ mod tests {
                 if matches!(
                     message,
                     NodeWsMessage::Event {
-                        event: NodeEvent {
-                            kind: NodeEventKind::StateChanged { .. },
+                        event: ProjectedNodeEvent {
+                            kind: ProjectedNodeEventKind::StateChanged { .. },
                             ..
                         },
                         ..
@@ -4577,7 +5075,10 @@ mod tests {
         let NodeWsMessage::Event { event, .. } = live_event else {
             unreachable!();
         };
-        assert_eq!(event.kind, NodeEventKind::StateChanged { revision: 1 });
+        assert_eq!(
+            event.kind,
+            ProjectedNodeEventKind::StateChanged { revision: 1 }
+        );
 
         socket
             .send(ClientMessage::Close(None))
@@ -4587,11 +5088,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn websocket_session_omits_hidden_live_log_content() {
+        let (snapshot, context) = privacy_transport_fixture();
+        let events = NodeEventBus::new(16);
+        let state = NodeStateStore::with_events(events.clone());
+        state.update(|current| *current = snapshot).await;
+        let initial = state.snapshot().await;
+        let mut session =
+            NodeWsSession::new(events.subscribe(), state.clone(), context, initial.revision);
+
+        events.publish(NodeEventKind::LogAppended {
+            level: NodeLogLevel::Info,
+            message: HIDDEN_LOG_MESSAGE.into(),
+        });
+        let message = session
+            .next_message()
+            .await
+            .expect("project live event")
+            .expect("live event message");
+        let NodeWsMessage::Event { event, .. } = message else {
+            panic!("expected live event, got {message:?}");
+        };
+        let ProjectedNodeEventKind::LogAppended { level, message } = event.kind else {
+            panic!("expected projected log event");
+        };
+        assert_eq!(level, NodeLogLevel::Info);
+        assert!(message.is_none());
+    }
+
+    #[tokio::test]
+    async fn websocket_lag_resync_serializes_only_the_projected_snapshot() {
+        let (snapshot, context) = privacy_transport_fixture();
+        let events = NodeEventBus::new(1);
+        let state = NodeStateStore::with_events(events.clone());
+        state.update(|current| *current = snapshot).await;
+        let initial = state.snapshot().await;
+        let mut session =
+            NodeWsSession::new(events.subscribe(), state.clone(), context, initial.revision);
+
+        state.update(|_| {}).await;
+        state.update(|_| {}).await;
+        let message = session
+            .next_message()
+            .await
+            .expect("project lag recovery")
+            .expect("lag recovery message");
+        let NodeWsMessage::Resync {
+            reason, snapshot, ..
+        } = message
+        else {
+            panic!("expected lag recovery, got {message:?}");
+        };
+        assert_eq!(reason, NodeWsResyncReason::Lagged);
+        assert!(snapshot.identity.is_none());
+        assert!(snapshot.logs.is_empty());
+        assert!(snapshot.recent_activity.is_empty());
+        let serialized = serde_json::to_string(&snapshot).expect("serialize resync snapshot");
+        assert_privacy_serialization_omits_hidden_values("websocket resync", &serialized);
+    }
+
+    #[tokio::test]
+    async fn websocket_session_fails_closed_for_ambiguous_field_policies() {
+        let (mut snapshot, _) = privacy_transport_fixture();
+        let duplicate = snapshot.access_control.field_privacy_policies[0].clone();
+        snapshot
+            .access_control
+            .field_privacy_policies
+            .push(duplicate);
+        let context = privacy_transport_context(&snapshot);
+        let events = NodeEventBus::new(16);
+        let state = NodeStateStore::with_events(events.clone());
+        state.update(|current| *current = snapshot).await;
+        let initial = state.snapshot().await;
+        let mut session =
+            NodeWsSession::new(events.subscribe(), state.clone(), context, initial.revision);
+
+        events.publish(NodeEventKind::LogAppended {
+            level: NodeLogLevel::Info,
+            message: HIDDEN_LOG_MESSAGE.into(),
+        });
+        assert!(matches!(
+            session.next_message().await,
+            Err(NodeWsSessionError::Projection(
+                NodeSnapshotProjectionError::InvalidFieldPolicy
+            ))
+        ));
+    }
+
+    #[tokio::test]
     async fn duplicate_and_stale_revisions_are_suppressed() {
         let events = NodeEventBus::new(16);
         let state = NodeStateStore::with_events(events.clone());
         let initial = state.snapshot().await;
-        let mut session = NodeWsSession::new(events.subscribe(), state.clone(), initial.revision);
+        let mut session = NodeWsSession::new(
+            events.subscribe(),
+            state.clone(),
+            crate::node::test_owner_context(),
+            initial.revision,
+        );
 
         state.update(|_| {}).await;
         let first = session
@@ -4602,8 +5196,8 @@ mod tests {
         assert!(matches!(
             first,
             NodeWsMessage::Event {
-                event: NodeEvent {
-                    kind: NodeEventKind::StateChanged { revision: 1 },
+                event: ProjectedNodeEvent {
+                    kind: ProjectedNodeEventKind::StateChanged { revision: 1 },
                     ..
                 },
                 ..
@@ -4620,8 +5214,8 @@ mod tests {
         assert!(matches!(
             second,
             NodeWsMessage::Event {
-                event: NodeEvent {
-                    kind: NodeEventKind::StateChanged { revision: 2 },
+                event: ProjectedNodeEvent {
+                    kind: ProjectedNodeEventKind::StateChanged { revision: 2 },
                     ..
                 },
                 ..
@@ -4634,7 +5228,12 @@ mod tests {
         let events = NodeEventBus::new(16);
         let state = NodeStateStore::with_events(events.clone());
         let initial = state.snapshot().await;
-        let mut session = NodeWsSession::new(events.subscribe(), state.clone(), initial.revision);
+        let mut session = NodeWsSession::new(
+            events.subscribe(),
+            state.clone(),
+            crate::node::test_owner_context(),
+            initial.revision,
+        );
 
         state.update(|snapshot| snapshot.revision = 9).await;
         let message = session
@@ -4661,7 +5260,12 @@ mod tests {
         let events = NodeEventBus::new(1);
         let state = NodeStateStore::with_events(events.clone());
         let initial = state.snapshot().await;
-        let mut session = NodeWsSession::new(events.subscribe(), state.clone(), initial.revision);
+        let mut session = NodeWsSession::new(
+            events.subscribe(),
+            state.clone(),
+            crate::node::test_owner_context(),
+            initial.revision,
+        );
 
         state.update(|_| {}).await;
         state.update(|_| {}).await;
@@ -4687,7 +5291,7 @@ mod tests {
         let (sender, receiver) = broadcast::channel(1);
         drop(sender);
         let state = NodeStateStore::new();
-        let mut session = NodeWsSession::new(receiver, state, 0);
+        let mut session = NodeWsSession::new(receiver, state, crate::node::test_owner_context(), 0);
 
         assert_eq!(session.next_message().await.expect("closed stream"), None);
     }

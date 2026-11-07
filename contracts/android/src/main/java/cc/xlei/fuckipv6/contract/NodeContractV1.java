@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "SubjectSelector"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "ExitNodeCapabilities", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector"
     };
 
     public enum AclAction {
@@ -3333,11 +3333,11 @@ public final class NodeContractV1 {
     public static final class NodeApiCommandResponse {
         public final NodeOperationSnapshot operation;
         public final Long request_id;
-        public final NodeCommandResult result;
+        public final ProjectedNodeCommandResult result;
         public final Integer schema_version;
         public final String server_time;
 
-        public NodeApiCommandResponse(NodeOperationSnapshot operation, Long request_id, NodeCommandResult result, Integer schema_version, String server_time) {
+        public NodeApiCommandResponse(NodeOperationSnapshot operation, Long request_id, ProjectedNodeCommandResult result, Integer schema_version, String server_time) {
             this.operation = operation;
             this.request_id = request_id;
             this.result = result;
@@ -3437,9 +3437,9 @@ public final class NodeContractV1 {
         public final Long request_id;
         public final Integer schema_version;
         public final String server_time;
-        public final NodeSnapshot snapshot;
+        public final ProjectedNodeSnapshot snapshot;
 
-        public NodeApiSnapshotResponse(Long request_id, Integer schema_version, String server_time, NodeSnapshot snapshot) {
+        public NodeApiSnapshotResponse(Long request_id, Integer schema_version, String server_time, ProjectedNodeSnapshot snapshot) {
             this.request_id = request_id;
             this.schema_version = schema_version;
             this.server_time = server_time;
@@ -3573,10 +3573,10 @@ public final class NodeContractV1 {
 
     /** DTO for NodeCommandHttpResponse. */
     public static final class NodeCommandHttpResponse {
-        public final NodeCommandResult result;
+        public final ProjectedNodeCommandResult result;
         public final Integer schema_version;
 
-        public NodeCommandHttpResponse(NodeCommandResult result, Integer schema_version) {
+        public NodeCommandHttpResponse(ProjectedNodeCommandResult result, Integer schema_version) {
             this.result = result;
             this.schema_version = schema_version;
         }
@@ -4557,13 +4557,13 @@ public final class NodeContractV1 {
         public final OperationKind kind;
         public final Long max_attempts;
         public final String operation_id;
-        public final NodeCommandResult result;
+        public final ProjectedNodeCommandResult result;
         public final String stage;
         public final OperationState state;
         public final DomainObjectRef target;
         public final Long updated_at_unix_ms;
 
-        public NodeOperationSnapshot(DomainActorRef actor, Long attempt, String cancel_blocked_reason, Boolean cancellable, Long created_at_unix_ms, OperationError error, String idempotency_key, OperationKind kind, Long max_attempts, String operation_id, NodeCommandResult result, String stage, OperationState state, DomainObjectRef target, Long updated_at_unix_ms) {
+        public NodeOperationSnapshot(DomainActorRef actor, Long attempt, String cancel_blocked_reason, Boolean cancellable, Long created_at_unix_ms, OperationError error, String idempotency_key, OperationKind kind, Long max_attempts, String operation_id, ProjectedNodeCommandResult result, String stage, OperationState state, DomainObjectRef target, Long updated_at_unix_ms) {
             this.actor = actor;
             this.attempt = attempt;
             this.cancel_blocked_reason = cancel_blocked_reason;
@@ -4947,9 +4947,9 @@ public final class NodeContractV1 {
     /** DTO for NodeSnapshotResponse. */
     public static final class NodeSnapshotResponse {
         public final Integer schema_version;
-        public final NodeSnapshot snapshot;
+        public final ProjectedNodeSnapshot snapshot;
 
-        public NodeSnapshotResponse(Integer schema_version, NodeSnapshot snapshot) {
+        public NodeSnapshotResponse(Integer schema_version, ProjectedNodeSnapshot snapshot) {
             this.schema_version = schema_version;
             this.snapshot = snapshot;
         }
@@ -5190,6 +5190,253 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for ProjectedActivityEntry. */
+    public static final class ProjectedActivityEntry {
+        public final String action;
+        public final String actor;
+        public final String audit_id;
+        public final Map<String, Object> details;
+        public final String network_id;
+        public final Long occurred_at_unix_ms;
+        public final String operation_id;
+        public final AuditOutcome outcome;
+        public final String resource;
+        public final String summary;
+
+        public ProjectedActivityEntry(String action, String actor, String audit_id, Map<String, Object> details, String network_id, Long occurred_at_unix_ms, String operation_id, AuditOutcome outcome, String resource, String summary) {
+            this.action = action;
+            this.actor = actor;
+            this.audit_id = audit_id;
+            this.details = details;
+            this.network_id = network_id;
+            this.occurred_at_unix_ms = occurred_at_unix_ms;
+            this.operation_id = operation_id;
+            this.outcome = outcome;
+            this.resource = resource;
+            this.summary = summary;
+        }
+    }
+
+    /** DTO for ProjectedNodeCommandResult. */
+    public static final class ProjectedNodeCommandResult {
+        public final ProjectedNodeCommandOutcome outcome;
+        public final Long request_id;
+
+        public ProjectedNodeCommandResult(ProjectedNodeCommandOutcome outcome, Long request_id) {
+            this.outcome = outcome;
+            this.request_id = request_id;
+        }
+    }
+
+    /** DTO for ProjectedNodeEmbeddedServiceSnapshot. */
+    public static final class ProjectedNodeEmbeddedServiceSnapshot {
+        public final String network_name;
+        public final String relay_addr;
+        public final String signaling_addr;
+        public final NodeEmbeddedServiceStatus status;
+
+        public ProjectedNodeEmbeddedServiceSnapshot(String network_name, String relay_addr, String signaling_addr, NodeEmbeddedServiceStatus status) {
+            this.network_name = network_name;
+            this.relay_addr = relay_addr;
+            this.signaling_addr = signaling_addr;
+            this.status = status;
+        }
+    }
+
+    /** DTO for ProjectedNodeEvent. */
+    public static final class ProjectedNodeEvent {
+        public final ProjectedNodeEventKind kind;
+        public final Long sequence;
+        public final Long snapshot_revision;
+
+        public ProjectedNodeEvent(ProjectedNodeEventKind kind, Long sequence, Long snapshot_revision) {
+            this.kind = kind;
+            this.sequence = sequence;
+            this.snapshot_revision = snapshot_revision;
+        }
+    }
+
+    /** DTO for ProjectedNodeIdentitySnapshot. */
+    public static final class ProjectedNodeIdentitySnapshot {
+        public final Long created_at_unix_ms;
+        public final String display_name;
+        public final String node_id;
+        public final String public_key_fingerprint;
+
+        public ProjectedNodeIdentitySnapshot(Long created_at_unix_ms, String display_name, String node_id, String public_key_fingerprint) {
+            this.created_at_unix_ms = created_at_unix_ms;
+            this.display_name = display_name;
+            this.node_id = node_id;
+            this.public_key_fingerprint = public_key_fingerprint;
+        }
+    }
+
+    /** DTO for ProjectedNodeInterfaceSnapshot. */
+    public static final class ProjectedNodeInterfaceSnapshot {
+        public final List<NodeInterfaceAddress> addresses;
+        public final Boolean default_ipv4;
+        public final Boolean default_ipv6;
+        public final Long index;
+        public final NodeInterfaceKind kind;
+        public final Long mtu;
+        public final String name;
+        public final NodeInterfaceOwnership ownership;
+        public final NodeInterfaceStatus status;
+
+        public ProjectedNodeInterfaceSnapshot(List<NodeInterfaceAddress> addresses, Boolean default_ipv4, Boolean default_ipv6, Long index, NodeInterfaceKind kind, Long mtu, String name, NodeInterfaceOwnership ownership, NodeInterfaceStatus status) {
+            this.addresses = addresses;
+            this.default_ipv4 = default_ipv4;
+            this.default_ipv6 = default_ipv6;
+            this.index = index;
+            this.kind = kind;
+            this.mtu = mtu;
+            this.name = name;
+            this.ownership = ownership;
+            this.status = status;
+        }
+    }
+
+    /** DTO for ProjectedNodeNetworkJoinResult. */
+    public static final class ProjectedNodeNetworkJoinResult {
+        public final Boolean config_saved;
+        public final Boolean idempotent;
+        public final NodeNetworkMembershipSnapshot membership;
+        public final ProjectedNodeSnapshot snapshot;
+        public final Boolean started;
+
+        public ProjectedNodeNetworkJoinResult(Boolean config_saved, Boolean idempotent, NodeNetworkMembershipSnapshot membership, ProjectedNodeSnapshot snapshot, Boolean started) {
+            this.config_saved = config_saved;
+            this.idempotent = idempotent;
+            this.membership = membership;
+            this.snapshot = snapshot;
+            this.started = started;
+        }
+    }
+
+    /** DTO for ProjectedNodeNetworkLeaveResult. */
+    public static final class ProjectedNodeNetworkLeaveResult {
+        public final Boolean left;
+        public final String network_name;
+        public final ProjectedNodeSnapshot snapshot;
+
+        public ProjectedNodeNetworkLeaveResult(Boolean left, String network_name, ProjectedNodeSnapshot snapshot) {
+            this.left = left;
+            this.network_name = network_name;
+            this.snapshot = snapshot;
+        }
+    }
+
+    /** DTO for ProjectedNodeNetworkSnapshot. */
+    public static final class ProjectedNodeNetworkSnapshot {
+        public final String assigned_ipv4;
+        public final String assigned_ipv6;
+        public final String name;
+        public final String p2p_listen_addr;
+        public final Long peer_count;
+        public final List<NodeNetworkRole> roles;
+        public final NodeNetworkStatus status;
+        public final NodeTrafficSnapshot traffic;
+        public final String tun_name;
+        public final Long uptime_secs;
+
+        public ProjectedNodeNetworkSnapshot(String assigned_ipv4, String assigned_ipv6, String name, String p2p_listen_addr, Long peer_count, List<NodeNetworkRole> roles, NodeNetworkStatus status, NodeTrafficSnapshot traffic, String tun_name, Long uptime_secs) {
+            this.assigned_ipv4 = assigned_ipv4;
+            this.assigned_ipv6 = assigned_ipv6;
+            this.name = name;
+            this.p2p_listen_addr = p2p_listen_addr;
+            this.peer_count = peer_count;
+            this.roles = roles;
+            this.status = status;
+            this.traffic = traffic;
+            this.tun_name = tun_name;
+            this.uptime_secs = uptime_secs;
+        }
+    }
+
+    /** DTO for ProjectedNodePeerSnapshot. */
+    public static final class ProjectedNodePeerSnapshot {
+        public final List<String> endpoints;
+        public final Double loss_rate;
+        public final String network_name;
+        public final Boolean online;
+        public final Boolean p2p_active;
+        public final Boolean p2p_healthy;
+        public final String peer_id;
+        public final Long rtt_us;
+        public final NodeTrafficSnapshot traffic;
+        public final String virtual_ipv4;
+        public final String virtual_ipv6;
+
+        public ProjectedNodePeerSnapshot(List<String> endpoints, Double loss_rate, String network_name, Boolean online, Boolean p2p_active, Boolean p2p_healthy, String peer_id, Long rtt_us, NodeTrafficSnapshot traffic, String virtual_ipv4, String virtual_ipv6) {
+            this.endpoints = endpoints;
+            this.loss_rate = loss_rate;
+            this.network_name = network_name;
+            this.online = online;
+            this.p2p_active = p2p_active;
+            this.p2p_healthy = p2p_healthy;
+            this.peer_id = peer_id;
+            this.rtt_us = rtt_us;
+            this.traffic = traffic;
+            this.virtual_ipv4 = virtual_ipv4;
+            this.virtual_ipv6 = virtual_ipv6;
+        }
+    }
+
+    /** DTO for ProjectedNodeSnapshot. */
+    public static final class ProjectedNodeSnapshot {
+        public final NodeAccessControlSnapshot access_control;
+        public final NodeCapabilityRegistrySnapshot capabilities;
+        public final NodeConfigurationSnapshot configuration;
+        public final NodeControlHealth control_health;
+        public final NodeDiscoveryIndexSnapshot discovery_index;
+        public final List<ProjectedNodeEmbeddedServiceSnapshot> embedded_services;
+        public final ExitNodeCapabilities exit_node_capabilities;
+        public final ProjectedNodeIdentitySnapshot identity;
+        public final List<NodeProblem> interface_problems;
+        public final List<ProjectedNodeInterfaceSnapshot> interfaces;
+        public final NodeProblem last_error;
+        public final NodeLifecycleSnapshot lifecycle;
+        public final List<NodeLogEntry> logs;
+        public final List<NodeNetworkMembershipSnapshot> memberships;
+        public final List<NodeNetworkProfileSnapshot> network_profiles;
+        public final List<ProjectedNodeNetworkSnapshot> networks;
+        public final List<ProjectedNodePeerSnapshot> peers;
+        public final NodePermissionSnapshot permissions;
+        public final List<ProjectedActivityEntry> recent_activity;
+        public final Long revision;
+        public final List<NodeRoutingSummarySnapshot> routing_summaries;
+        public final TopologySnapshot topology;
+        public final TunCapabilities tun_capabilities;
+        public final UiModeResolution ui_mode;
+
+        public ProjectedNodeSnapshot(NodeAccessControlSnapshot access_control, NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, NodeDiscoveryIndexSnapshot discovery_index, List<ProjectedNodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, ProjectedNodeIdentitySnapshot identity, List<NodeProblem> interface_problems, List<ProjectedNodeInterfaceSnapshot> interfaces, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, List<NodeLogEntry> logs, List<NodeNetworkMembershipSnapshot> memberships, List<NodeNetworkProfileSnapshot> network_profiles, List<ProjectedNodeNetworkSnapshot> networks, List<ProjectedNodePeerSnapshot> peers, NodePermissionSnapshot permissions, List<ProjectedActivityEntry> recent_activity, Long revision, List<NodeRoutingSummarySnapshot> routing_summaries, TopologySnapshot topology, TunCapabilities tun_capabilities, UiModeResolution ui_mode) {
+            this.access_control = access_control;
+            this.capabilities = capabilities;
+            this.configuration = configuration;
+            this.control_health = control_health;
+            this.discovery_index = discovery_index;
+            this.embedded_services = embedded_services;
+            this.exit_node_capabilities = exit_node_capabilities;
+            this.identity = identity;
+            this.interface_problems = interface_problems;
+            this.interfaces = interfaces;
+            this.last_error = last_error;
+            this.lifecycle = lifecycle;
+            this.logs = logs;
+            this.memberships = memberships;
+            this.network_profiles = network_profiles;
+            this.networks = networks;
+            this.peers = peers;
+            this.permissions = permissions;
+            this.recent_activity = recent_activity;
+            this.revision = revision;
+            this.routing_summaries = routing_summaries;
+            this.topology = topology;
+            this.tun_capabilities = tun_capabilities;
+            this.ui_mode = ui_mode;
+        }
+    }
+
     /** DTO for TopologyBoundary. */
     public static final class TopologyBoundary {
         public final List<CapabilityKind> capabilities;
@@ -5349,9 +5596,9 @@ public final class NodeContractV1 {
             public final Long request_id;
             public final Integer schema_version;
             public final String server_time;
-            public final NodeSnapshot snapshot;
+            public final ProjectedNodeSnapshot snapshot;
 
-            public Snapshot(NodeEventCursor cursor, Long request_id, Integer schema_version, String server_time, NodeSnapshot snapshot) {
+            public Snapshot(NodeEventCursor cursor, Long request_id, Integer schema_version, String server_time, ProjectedNodeSnapshot snapshot) {
                 super("snapshot");
                 this.cursor = cursor;
                 this.request_id = request_id;
@@ -5362,12 +5609,12 @@ public final class NodeContractV1 {
         }
 
         public static final class Event extends NodeApiEvent {
-            public final NodeEvent event;
+            public final ProjectedNodeEvent event;
             public final Long request_id;
             public final Integer schema_version;
             public final String server_time;
 
-            public Event(NodeEvent event, Long request_id, Integer schema_version, String server_time) {
+            public Event(ProjectedNodeEvent event, Long request_id, Integer schema_version, String server_time) {
                 super("event");
                 this.event = event;
                 this.request_id = request_id;
@@ -5406,9 +5653,9 @@ public final class NodeContractV1 {
 
         public static final class Node extends NodeApiObject {
             public final String id;
-            public final NodeIdentitySnapshot identity;
+            public final ProjectedNodeIdentitySnapshot identity;
 
-            public Node(String id, NodeIdentitySnapshot identity) {
+            public Node(String id, ProjectedNodeIdentitySnapshot identity) {
                 super("node");
                 this.id = id;
                 this.identity = identity;
@@ -5417,9 +5664,9 @@ public final class NodeContractV1 {
 
         public static final class Network extends NodeApiObject {
             public final String id;
-            public final NodeNetworkSnapshot network;
+            public final ProjectedNodeNetworkSnapshot network;
 
-            public Network(String id, NodeNetworkSnapshot network) {
+            public Network(String id, ProjectedNodeNetworkSnapshot network) {
                 super("network");
                 this.id = id;
                 this.network = network;
@@ -5428,9 +5675,9 @@ public final class NodeContractV1 {
 
         public static final class Peer extends NodeApiObject {
             public final String id;
-            public final NodePeerSnapshot peer;
+            public final ProjectedNodePeerSnapshot peer;
 
-            public Peer(String id, NodePeerSnapshot peer) {
+            public Peer(String id, ProjectedNodePeerSnapshot peer) {
                 super("peer");
                 this.id = id;
                 this.peer = peer;
@@ -5439,9 +5686,9 @@ public final class NodeContractV1 {
 
         public static final class EmbeddedService extends NodeApiObject {
             public final String id;
-            public final NodeEmbeddedServiceSnapshot service;
+            public final ProjectedNodeEmbeddedServiceSnapshot service;
 
-            public EmbeddedService(String id, NodeEmbeddedServiceSnapshot service) {
+            public EmbeddedService(String id, ProjectedNodeEmbeddedServiceSnapshot service) {
                 super("embedded_service");
                 this.id = id;
                 this.service = service;
@@ -6637,9 +6884,9 @@ public final class NodeContractV1 {
 
         public static final class Snapshot extends NodeWsMessage {
             public final Integer schema_version;
-            public final NodeSnapshot snapshot;
+            public final ProjectedNodeSnapshot snapshot;
 
-            public Snapshot(Integer schema_version, NodeSnapshot snapshot) {
+            public Snapshot(Integer schema_version, ProjectedNodeSnapshot snapshot) {
                 super("snapshot");
                 this.schema_version = schema_version;
                 this.snapshot = snapshot;
@@ -6647,10 +6894,10 @@ public final class NodeContractV1 {
         }
 
         public static final class Event extends NodeWsMessage {
-            public final NodeEvent event;
+            public final ProjectedNodeEvent event;
             public final Integer schema_version;
 
-            public Event(NodeEvent event, Integer schema_version) {
+            public Event(ProjectedNodeEvent event, Integer schema_version) {
                 super("event");
                 this.event = event;
                 this.schema_version = schema_version;
@@ -6660,9 +6907,9 @@ public final class NodeContractV1 {
         public static final class Resync extends NodeWsMessage {
             public final String reason;
             public final Integer schema_version;
-            public final NodeSnapshot snapshot;
+            public final ProjectedNodeSnapshot snapshot;
 
-            public Resync(String reason, Integer schema_version, NodeSnapshot snapshot) {
+            public Resync(String reason, Integer schema_version, ProjectedNodeSnapshot snapshot) {
                 super("resync");
                 this.reason = reason;
                 this.schema_version = schema_version;
@@ -6728,6 +6975,515 @@ public final class NodeContractV1 {
         public static final class NonEmergencyCoordinator extends PermissionCondition {
             public NonEmergencyCoordinator() {
                 super("non_emergency_coordinator");
+            }
+        }
+    }
+
+    /** Tagged union DTO for ProjectedNodeCommandOutcome. */
+    public abstract static class ProjectedNodeCommandOutcome {
+        public final String status;
+
+        private ProjectedNodeCommandOutcome(String status) {
+            this.status = status;
+        }
+
+        public static final class Snapshot extends ProjectedNodeCommandOutcome {
+            public final ProjectedNodeSnapshot data;
+
+            public Snapshot(ProjectedNodeSnapshot data) {
+                super("snapshot");
+                this.data = data;
+            }
+        }
+
+        public static final class UiManifest extends ProjectedNodeCommandOutcome {
+            public final NodeUiManifest data;
+
+            public UiManifest(NodeUiManifest data) {
+                super("ui_manifest");
+                this.data = data;
+            }
+        }
+
+        public static final class Diagnostics extends ProjectedNodeCommandOutcome {
+            public final NodeDiagnosticsSnapshot data;
+
+            public Diagnostics(NodeDiagnosticsSnapshot data) {
+                super("diagnostics");
+                this.data = data;
+            }
+        }
+
+        public static final class Cleanup extends ProjectedNodeCommandOutcome {
+            public final NodeResidualCleanupResult data;
+
+            public Cleanup(NodeResidualCleanupResult data) {
+                super("cleanup");
+                this.data = data;
+            }
+        }
+
+        public static final class Blacklist extends ProjectedNodeCommandOutcome {
+            public final NodeBlacklistSnapshot data;
+
+            public Blacklist(NodeBlacklistSnapshot data) {
+                super("blacklist");
+                this.data = data;
+            }
+        }
+
+        public static final class NetworkAllocation extends ProjectedNodeCommandOutcome {
+            public final NodeNetworkAllocationSnapshot data;
+
+            public NetworkAllocation(NodeNetworkAllocationSnapshot data) {
+                super("network_allocation");
+                this.data = data;
+            }
+        }
+
+        public static final class Probe extends ProjectedNodeCommandOutcome {
+            public final NodePeerProbeSnapshot data;
+
+            public Probe(NodePeerProbeSnapshot data) {
+                super("probe");
+                this.data = data;
+            }
+        }
+
+        public static final class NetworkCreated extends ProjectedNodeCommandOutcome {
+            public final NodeCreatedNetwork data;
+
+            public NetworkCreated(NodeCreatedNetwork data) {
+                super("network_created");
+                this.data = data;
+            }
+        }
+
+        public static final class NetworkProfilePreview extends ProjectedNodeCommandOutcome {
+            public final NetworkProfilePreview data;
+
+            public NetworkProfilePreview(NetworkProfilePreview data) {
+                super("network_profile_preview");
+                this.data = data;
+            }
+        }
+
+        public static final class NetworkProfileUpdated extends ProjectedNodeCommandOutcome {
+            public final NetworkProfileApplyResult data;
+
+            public NetworkProfileUpdated(NetworkProfileApplyResult data) {
+                super("network_profile_updated");
+                this.data = data;
+            }
+        }
+
+        public static final class NetworkJoinPreview extends ProjectedNodeCommandOutcome {
+            public final NodeNetworkJoinPreview data;
+
+            public NetworkJoinPreview(NodeNetworkJoinPreview data) {
+                super("network_join_preview");
+                this.data = data;
+            }
+        }
+
+        public static final class NetworkJoined extends ProjectedNodeCommandOutcome {
+            public final ProjectedNodeNetworkJoinResult data;
+
+            public NetworkJoined(ProjectedNodeNetworkJoinResult data) {
+                super("network_joined");
+                this.data = data;
+            }
+        }
+
+        public static final class JoinRequestSubmitted extends ProjectedNodeCommandOutcome {
+            public final JoinRequest data;
+
+            public JoinRequestSubmitted(JoinRequest data) {
+                super("join_request_submitted");
+                this.data = data;
+            }
+        }
+
+        public static final class JoinRequests extends ProjectedNodeCommandOutcome {
+            public final NodeJoinRequestListResult data;
+
+            public JoinRequests(NodeJoinRequestListResult data) {
+                super("join_requests");
+                this.data = data;
+            }
+        }
+
+        public static final class NetworkMembers extends ProjectedNodeCommandOutcome {
+            public final NetworkMemberDirectory data;
+
+            public NetworkMembers(NetworkMemberDirectory data) {
+                super("network_members");
+                this.data = data;
+            }
+        }
+
+        public static final class MemberRemovalPreview extends ProjectedNodeCommandOutcome {
+            public final MemberRemovalPreview data;
+
+            public MemberRemovalPreview(MemberRemovalPreview data) {
+                super("member_removal_preview");
+                this.data = data;
+            }
+        }
+
+        public static final class MemberLifecycleChanged extends ProjectedNodeCommandOutcome {
+            public final MemberLifecycleChange data;
+
+            public MemberLifecycleChanged(MemberLifecycleChange data) {
+                super("member_lifecycle_changed");
+                this.data = data;
+            }
+        }
+
+        public static final class JoinRequestsReviewed extends ProjectedNodeCommandOutcome {
+            public final NodeJoinRequestReviewAck data;
+
+            public JoinRequestsReviewed(NodeJoinRequestReviewAck data) {
+                super("join_requests_reviewed");
+                this.data = data;
+            }
+        }
+
+        public static final class JoinRequestUpdated extends ProjectedNodeCommandOutcome {
+            public final JoinRequest data;
+
+            public JoinRequestUpdated(JoinRequest data) {
+                super("join_request_updated");
+                this.data = data;
+            }
+        }
+
+        public static final class InvitationCreated extends ProjectedNodeCommandOutcome {
+            public final IssuedInvitation data;
+
+            public InvitationCreated(IssuedInvitation data) {
+                super("invitation_created");
+                this.data = data;
+            }
+        }
+
+        public static final class Invitations extends ProjectedNodeCommandOutcome {
+            public final List<InvitationStatusView> data;
+
+            public Invitations(List<InvitationStatusView> data) {
+                super("invitations");
+                this.data = data;
+            }
+        }
+
+        public static final class InvitationStatus extends ProjectedNodeCommandOutcome {
+            public final InvitationStatusView data;
+
+            public InvitationStatus(InvitationStatusView data) {
+                super("invitation_status");
+                this.data = data;
+            }
+        }
+
+        public static final class InvitationRevoked extends ProjectedNodeCommandOutcome {
+            public final InvitationStatusView data;
+
+            public InvitationRevoked(InvitationStatusView data) {
+                super("invitation_revoked");
+                this.data = data;
+            }
+        }
+
+        public static final class InvitationPreview extends ProjectedNodeCommandOutcome {
+            public final InvitationPreview data;
+
+            public InvitationPreview(InvitationPreview data) {
+                super("invitation_preview");
+                this.data = data;
+            }
+        }
+
+        public static final class InvitationRedeemed extends ProjectedNodeCommandOutcome {
+            public final InvitationRedemption data;
+
+            public InvitationRedeemed(InvitationRedemption data) {
+                super("invitation_redeemed");
+                this.data = data;
+            }
+        }
+
+        public static final class NetworkLeft extends ProjectedNodeCommandOutcome {
+            public final ProjectedNodeNetworkLeaveResult data;
+
+            public NetworkLeft(ProjectedNodeNetworkLeaveResult data) {
+                super("network_left");
+                this.data = data;
+            }
+        }
+
+        public static final class MembershipPolicyAcknowledged extends ProjectedNodeCommandOutcome {
+            public final NodeNetworkMembershipSnapshot data;
+
+            public MembershipPolicyAcknowledged(NodeNetworkMembershipSnapshot data) {
+                super("membership_policy_acknowledged");
+                this.data = data;
+            }
+        }
+
+        public static final class IdentityRotated extends ProjectedNodeCommandOutcome {
+            public final NodeIdentityRotationSnapshot data;
+
+            public IdentityRotated(NodeIdentityRotationSnapshot data) {
+                super("identity_rotated");
+                this.data = data;
+            }
+        }
+
+        public static final class Configuration extends ProjectedNodeCommandOutcome {
+            public final ConfigurationDocument data;
+
+            public Configuration(ConfigurationDocument data) {
+                super("configuration");
+                this.data = data;
+            }
+        }
+
+        public static final class ConfigurationPreview extends ProjectedNodeCommandOutcome {
+            public final ConfigurationPreview data;
+
+            public ConfigurationPreview(ConfigurationPreview data) {
+                super("configuration_preview");
+                this.data = data;
+            }
+        }
+
+        public static final class ConfigurationApplied extends ProjectedNodeCommandOutcome {
+            public final ConfigurationApplyResult data;
+
+            public ConfigurationApplied(ConfigurationApplyResult data) {
+                super("configuration_applied");
+                this.data = data;
+            }
+        }
+
+        public static final class ConfigurationHistory extends ProjectedNodeCommandOutcome {
+            public final List<ConfigurationHistoryEntry> data;
+
+            public ConfigurationHistory(List<ConfigurationHistoryEntry> data) {
+                super("configuration_history");
+                this.data = data;
+            }
+        }
+
+        public static final class Accepted extends ProjectedNodeCommandOutcome {
+            public final AcceptedData data;
+
+            public Accepted(AcceptedData data) {
+                super("accepted");
+                this.data = data;
+            }
+            /** DTO for AcceptedData. */
+            public static final class AcceptedData {
+                public final String operation_id;
+
+                public AcceptedData(String operation_id) {
+                    this.operation_id = operation_id;
+                }
+            }
+        }
+
+        public static final class Completed extends ProjectedNodeCommandOutcome {
+            public final CompletedData data;
+
+            public Completed(CompletedData data) {
+                super("completed");
+                this.data = data;
+            }
+            /** DTO for CompletedData. */
+            public static final class CompletedData {
+                public final String message;
+
+                public CompletedData(String message) {
+                    this.message = message;
+                }
+            }
+        }
+
+        public static final class Rejected extends ProjectedNodeCommandOutcome {
+            public final NodeProblem data;
+
+            public Rejected(NodeProblem data) {
+                super("rejected");
+                this.data = data;
+            }
+        }
+    }
+
+    /** Tagged union DTO for ProjectedNodeEventKind. */
+    public abstract static class ProjectedNodeEventKind {
+        public final String type;
+
+        private ProjectedNodeEventKind(String type) {
+            this.type = type;
+        }
+
+        public static final class StateChanged extends ProjectedNodeEventKind {
+            public final StateChangedData data;
+
+            public StateChanged(StateChangedData data) {
+                super("state_changed");
+                this.data = data;
+            }
+            /** DTO for StateChangedData. */
+            public static final class StateChangedData {
+                public final Long revision;
+
+                public StateChangedData(Long revision) {
+                    this.revision = revision;
+                }
+            }
+        }
+
+        public static final class NetworkChanged extends ProjectedNodeEventKind {
+            public final NetworkChangedData data;
+
+            public NetworkChanged(NetworkChangedData data) {
+                super("network_changed");
+                this.data = data;
+            }
+            /** DTO for NetworkChangedData. */
+            public static final class NetworkChangedData {
+                public final String network_name;
+                public final NodeNetworkStatus status;
+
+                public NetworkChangedData(String network_name, NodeNetworkStatus status) {
+                    this.network_name = network_name;
+                    this.status = status;
+                }
+            }
+        }
+
+        public static final class EmbeddedServiceChanged extends ProjectedNodeEventKind {
+            public final EmbeddedServiceChangedData data;
+
+            public EmbeddedServiceChanged(EmbeddedServiceChangedData data) {
+                super("embedded_service_changed");
+                this.data = data;
+            }
+            /** DTO for EmbeddedServiceChangedData. */
+            public static final class EmbeddedServiceChangedData {
+                public final String network_name;
+                public final NodeEmbeddedServiceStatus status;
+
+                public EmbeddedServiceChangedData(String network_name, NodeEmbeddedServiceStatus status) {
+                    this.network_name = network_name;
+                    this.status = status;
+                }
+            }
+        }
+
+        public static final class LogAppended extends ProjectedNodeEventKind {
+            public final LogAppendedData data;
+
+            public LogAppended(LogAppendedData data) {
+                super("log_appended");
+                this.data = data;
+            }
+            /** DTO for LogAppendedData. */
+            public static final class LogAppendedData {
+                public final NodeLogLevel level;
+                public final String message;
+
+                public LogAppendedData(NodeLogLevel level, String message) {
+                    this.level = level;
+                    this.message = message;
+                }
+            }
+        }
+
+        public static final class RoutingChanged extends ProjectedNodeEventKind {
+            public final RoutingChangedData data;
+
+            public RoutingChanged(RoutingChangedData data) {
+                super("routing_changed");
+                this.data = data;
+            }
+            /** DTO for RoutingChangedData. */
+            public static final class RoutingChangedData {
+                public final String exit_node;
+                public final Boolean is_exit_node;
+                public final NodeRoutingMode mode;
+                public final String network_name;
+
+                public RoutingChangedData(String exit_node, Boolean is_exit_node, NodeRoutingMode mode, String network_name) {
+                    this.exit_node = exit_node;
+                    this.is_exit_node = is_exit_node;
+                    this.mode = mode;
+                    this.network_name = network_name;
+                }
+            }
+        }
+
+        public static final class RoleChanged extends ProjectedNodeEventKind {
+            public final RoleChangedData data;
+
+            public RoleChanged(RoleChangedData data) {
+                super("role_changed");
+                this.data = data;
+            }
+            /** DTO for RoleChangedData. */
+            public static final class RoleChangedData {
+                public final Boolean enabled;
+                public final String network_name;
+                public final NodeNetworkRole role;
+                public final List<NodeNetworkRole> roles;
+
+                public RoleChangedData(Boolean enabled, String network_name, NodeNetworkRole role, List<NodeNetworkRole> roles) {
+                    this.enabled = enabled;
+                    this.network_name = network_name;
+                    this.role = role;
+                    this.roles = roles;
+                }
+            }
+        }
+
+        public static final class CommandCompleted extends ProjectedNodeEventKind {
+            public final CommandCompletedData data;
+
+            public CommandCompleted(CommandCompletedData data) {
+                super("command_completed");
+                this.data = data;
+            }
+            /** DTO for CommandCompletedData. */
+            public static final class CommandCompletedData {
+                public final Long request_id;
+                public final Boolean success;
+
+                public CommandCompletedData(Long request_id, Boolean success) {
+                    this.request_id = request_id;
+                    this.success = success;
+                }
+            }
+        }
+
+        public static final class OperationChanged extends ProjectedNodeEventKind {
+            public final OperationChangedData data;
+
+            public OperationChanged(OperationChangedData data) {
+                super("operation_changed");
+                this.data = data;
+            }
+            /** DTO for OperationChangedData. */
+            public static final class OperationChangedData {
+                public final String operation_id;
+                public final String stage;
+                public final OperationState state;
+
+                public OperationChangedData(String operation_id, String stage, OperationState state) {
+                    this.operation_id = operation_id;
+                    this.stage = stage;
+                    this.state = state;
+                }
             }
         }
     }

@@ -25,10 +25,10 @@ pub(crate) fn test_owner_context() -> NodeCommandContext {
 }
 pub use command::{
     validate_network_name, NodeAcknowledgeMembershipPolicyCommand, NodeApplyConfigurationCommand,
-    NodeBatchReviewJoinRequestsCommand, NodeBlacklistSnapshot, NodeChangeMemberLifecycleCommand,
-    NodeCleanupFailureReason, NodeCleanupFailureSnapshot, NodeCleanupStepSnapshot,
-    NodeCleanupStepStatus, NodeClientBlacklistCommand, NodeCommand, NodeCommandBus,
-    NodeCommandBusError, NodeCommandFuture, NodeCommandHandler, NodeCommandKind,
+    NodeApplyPolicyCommand, NodeBatchReviewJoinRequestsCommand, NodeBlacklistSnapshot,
+    NodeChangeMemberLifecycleCommand, NodeCleanupFailureReason, NodeCleanupFailureSnapshot,
+    NodeCleanupStepSnapshot, NodeCleanupStepStatus, NodeClientBlacklistCommand, NodeCommand,
+    NodeCommandBus, NodeCommandBusError, NodeCommandFuture, NodeCommandHandler, NodeCommandKind,
     NodeCommandOutcome, NodeCommandRequest, NodeCommandResult, NodeCreateInvitationCommand,
     NodeCreateNetworkCommand, NodeCreatedNetwork, NodeDiagnosticCheck, NodeDiagnosticLayer,
     NodeDiagnosticRecoveryAction, NodeDiagnosticState, NodeDiagnosticsSnapshot,
@@ -40,9 +40,10 @@ pub use command::{
     NodeNetworkJoinPreview, NodeNetworkJoinResult, NodeNetworkLeaveResult,
     NodeNetworkMembersCommand, NodeNetworkProfileCommand, NodePeerProbeSnapshot,
     NodePreviewConfigurationCommand, NodePreviewInvitationCommand, NodePreviewJoinNetworkCommand,
-    NodeProbePeerCommand, NodeRedeemInvitationCommand, NodeResidualCleanupResult,
-    NodeResubmitJoinRequestCommand, NodeReviewJoinRequestCommand, NodeRevokeInvitationCommand,
-    NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand, NodeRuntimeResidueSnapshot,
+    NodePreviewPolicyCommand, NodePreviewPolicyRollbackCommand, NodeProbePeerCommand,
+    NodeRedeemInvitationCommand, NodeResidualCleanupResult, NodeResubmitJoinRequestCommand,
+    NodeReviewJoinRequestCommand, NodeRevokeInvitationCommand, NodeRollbackConfigurationCommand,
+    NodeRollbackPolicyCommand, NodeRotateNodeIdentityCommand, NodeRuntimeResidueSnapshot,
     NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeSubmitJoinRequestCommand,
     NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand, NodeWithdrawJoinRequestCommand,
 };

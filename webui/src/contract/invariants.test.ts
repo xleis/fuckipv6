@@ -13,6 +13,12 @@ import type {
   NetworkMemberDirectory,
   NodeUiAction,
   NodeUiManifest,
+  PolicyApplyResult,
+  PolicyHistoryEntry,
+  PolicyPreview,
+  PolicyRiskSummary,
+  PolicyRollbackResult,
+  PolicySnapshot,
   PolicyTestInput,
   PolicyTestResult,
 } from "../../../contracts/typescript/node-contract-v1";
@@ -34,8 +40,10 @@ import {
 } from "./invariants";
 import { installTestI18nRuntime } from "../test/runtime";
 import {
+  parsePolicySnapshotJson,
   parsePolicyTestInputJson,
   PolicyJsonError,
+  validatePolicySnapshot,
   validatePolicyTestResult,
 } from "./policy-test";
 
@@ -200,7 +208,9 @@ describe("node UI contract invariants", () => {
   it("rejects a manifest with a missing page", () => {
     const invalid = structuredClone(manifest);
     invalid.pages = invalid.pages.filter((page) => page.id !== "topology");
-    expect(() => validateManifestResponse(manifestResponse(invalid))).toThrow("page set/order mismatch");
+    expect(() => validateManifestResponse(manifestResponse(invalid))).toThrow(
+      "page set/order mismatch",
+    );
   });
 
   it("rejects manifest page-state or block-reason vocabulary drift", () => {
@@ -211,9 +221,10 @@ describe("node UI contract invariants", () => {
     ).toThrow("page state vocabulary mismatch");
 
     const invalidReasons = structuredClone(manifest);
-    invalidReasons.action_block_reasons = invalidReasons.action_block_reasons.filter(
-      (reason) => reason !== "exit_node_unsupported",
-    );
+    invalidReasons.action_block_reasons =
+      invalidReasons.action_block_reasons.filter(
+        (reason) => reason !== "exit_node_unsupported",
+      );
     expect(() =>
       validateManifestResponse(manifestResponse(invalidReasons)),
     ).toThrow("action block reason vocabulary mismatch");
@@ -260,9 +271,13 @@ describe("node UI contract invariants", () => {
       }).revision,
     ).toBe(3);
 
-    const invalid = emptySnapshot() as unknown as { lifecycle: { phase: string } };
+    const invalid = emptySnapshot() as unknown as {
+      lifecycle: { phase: string };
+    };
     invalid.lifecycle.phase = "unknown";
-    expect(() => validateSnapshot(invalid as unknown as NodeSnapshot)).toThrow("lifecycle phase invalid");
+    expect(() => validateSnapshot(invalid as unknown as NodeSnapshot)).toThrow(
+      "lifecycle phase invalid",
+    );
   });
 
   it("builds a versioned command envelope with request and idempotency identities", () => {
@@ -297,7 +312,9 @@ describe("node UI contract invariants", () => {
 
     expect(envelope.schema_version).toBe(1);
     expect(envelope.request.request_id).toBe(42);
-    expect(envelope.idempotency_key).toBe("8a4229b8-4088-4b4f-b1fe-adcbed27ac59");
+    expect(envelope.idempotency_key).toBe(
+      "8a4229b8-4088-4b4f-b1fe-adcbed27ac59",
+    );
     expect(envelope.request.command).toEqual({
       command: "create_network",
       payload: {
@@ -383,9 +400,9 @@ describe("node UI contract invariants", () => {
       ],
     ] as const) {
       expect(validateActionValues(join, values, "zh-CN")).toEqual([error]);
-      expect(() => commandEnvelope(42, join, values, "zh-CN", "idempotency")).toThrow(
-        error,
-      );
+      expect(() =>
+        commandEnvelope(42, join, values, "zh-CN", "idempotency"),
+      ).toThrow(error);
     }
   });
 
@@ -532,7 +549,10 @@ describe("node UI contract invariants", () => {
     expect(
       validateActionValues(
         createNetwork,
-        { ...valid, tags: Array.from({ length: 13 }, (_, i) => `tag${i}`).join(",") },
+        {
+          ...valid,
+          tags: Array.from({ length: 13 }, (_, i) => `tag${i}`).join(","),
+        },
         "zh-CN",
       ),
     ).toEqual(["translated:validation.network_tags_too_many"]);
@@ -842,8 +862,7 @@ describe("node UI contract invariants", () => {
           {
             node_id: "node-owner",
             display_name: "Owner",
-            identity_fingerprint:
-              "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            identity_fingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
             role: "owner" as const,
             groups: ["owner" as const],
             capabilities: null,
@@ -1326,7 +1345,10 @@ describe("node UI contract invariants", () => {
     expect(
       buildCommand(
         actions.get("submit_join_request")!,
-        { network_id: networkId, reason: "Need access from the branch office." },
+        {
+          network_id: networkId,
+          reason: "Need access from the branch office.",
+        },
         "en",
       ),
     ).toEqual({
@@ -1527,7 +1549,9 @@ describe("node UI contract invariants", () => {
       (action) => action.id === "test_policy",
     );
     expect(manifestPolicyAction).toEqual(policyAction);
-    expect(validateManifestResponse(manifestResponse(manifest))).toEqual(manifest);
+    expect(validateManifestResponse(manifestResponse(manifest))).toEqual(
+      manifest,
+    );
 
     const input: PolicyTestInput = {
       network_id: networkId,
@@ -1668,5 +1692,309 @@ describe("node UI contract invariants", () => {
     expect(outcomeSummary(outcome, "zh-CN")).toBe(
       "translated:outcome.policy_test",
     );
+  });
+
+  it("strictly parses policy snapshots and rejects unknown, duplicate, or malformed data", () => {
+    const snapshot: PolicySnapshot = {
+      local_policy: null,
+      network_acls: [],
+    };
+    const source = JSON.stringify(snapshot);
+    expect(parsePolicySnapshotJson(source)).toEqual(snapshot);
+    expect(validatePolicySnapshot(snapshot)).toEqual(snapshot);
+
+    function parseError(input: string): PolicyJsonError {
+      try {
+        parsePolicySnapshotJson(input);
+      } catch (error) {
+        expect(error).toBeInstanceOf(PolicyJsonError);
+        return error as PolicyJsonError;
+      }
+      throw new Error("expected policy snapshot to be rejected");
+    }
+
+    expect(parseError('{"network_acls":[],"unexpected":true}').path).toBe(
+      "/unexpected",
+    );
+    expect(parseError('{"network_acls":[],"network_acls":[]}').path).toBe(
+      "/network_acls",
+    );
+    try {
+      validatePolicySnapshot({ local_policy: [] });
+      throw new Error("expected malformed policy snapshot to be rejected");
+    } catch (error) {
+      expect(error).toBeInstanceOf(PolicyJsonError);
+      expect((error as PolicyJsonError).path).toBe("/local_policy");
+    }
+  });
+
+  it("builds revisioned preview, apply, rollback, and policy read commands", () => {
+    const actions = new Map(
+      manifest.pages
+        .flatMap((page) => page.actions)
+        .map((action) => [action.id, action]),
+    );
+    const networkId = `net_${"P".repeat(43)}`;
+    const snapshot: PolicySnapshot = {
+      local_policy: null,
+      network_acls: [],
+    };
+    const candidateJson = JSON.stringify(snapshot);
+
+    expect(buildCommand(actions.get("get_policy")!, {}, "en")).toEqual({
+      command: "get_policy",
+    });
+    expect(
+      buildCommand(
+        actions.get("preview_policy")!,
+        { expected_revision: "3", candidate_json: candidateJson },
+        "en",
+      ),
+    ).toEqual({
+      command: "preview_policy",
+      payload: { expected_revision: 3, candidate: snapshot },
+    });
+    expect(
+      buildCommand(
+        actions.get("preview_policy_rollback")!,
+        { expected_revision: "5", target_revision: "2" },
+        "en",
+      ),
+    ).toEqual({
+      command: "preview_policy_rollback",
+      payload: { expected_revision: 5, target_revision: 2 },
+    });
+    expect(
+      buildCommand(
+        actions.get("apply_policy")!,
+        {
+          expected_revision: "5",
+          candidate_json: candidateJson,
+          network_ids: networkId,
+          includes_local_policy: "true",
+          confirm_privilege_expansion: "false",
+        },
+        "en",
+      ),
+    ).toEqual({
+      command: "apply_policy",
+      payload: {
+        expected_revision: 5,
+        candidate: snapshot,
+        network_ids: [networkId],
+        includes_local_policy: true,
+        confirm_privilege_expansion: false,
+      },
+    });
+    expect(
+      buildCommand(
+        actions.get("rollback_policy")!,
+        {
+          expected_revision: "5",
+          target_revision: "2",
+          network_ids: networkId,
+          includes_local_policy: "true",
+          confirm_privilege_expansion: "true",
+        },
+        "en",
+      ),
+    ).toEqual({
+      command: "rollback_policy",
+      payload: {
+        expected_revision: 5,
+        target_revision: 2,
+        network_ids: [networkId],
+        includes_local_policy: true,
+        confirm_privilege_expansion: true,
+      },
+    });
+    expect(buildCommand(actions.get("get_policy_history")!, {}, "en")).toEqual({
+      command: "get_policy_history",
+    });
+  });
+
+  it("validates policy, preview, apply, history, and rollback outcomes", () => {
+    const networkId = `net_${"P".repeat(43)}`;
+    const snapshot: PolicySnapshot = {
+      local_policy: null,
+      network_acls: [],
+    };
+    const risk: PolicyRiskSummary = {
+      level: "none",
+      privilege_expansion: false,
+      reasons: [],
+      requires_explicit_confirmation: false,
+      requires_recent_reauthentication: false,
+    };
+    const audit = (
+      action: "apply" | "rollback",
+      revision: number,
+    ): PolicyHistoryEntry => ({
+      action,
+      actor: "node-admin",
+      affected_objects: [],
+      diffs: [],
+      local_policy_revision: null,
+      network_acl_revisions: {},
+      occurred_at: "2026-11-08T00:00:00Z",
+      previous_revision: revision - 1,
+      revision,
+      risk,
+      source: "webui",
+      transaction_id: `txn_${action}_${revision}`,
+      ...(action === "rollback" ? { target_revision: 2 } : {}),
+    });
+    const preview: PolicyPreview = {
+      affected_objects: [],
+      can_apply: false,
+      candidate: snapshot,
+      current: snapshot,
+      current_revision: 4,
+      diffs: [],
+      expected_revision: 4,
+      has_changes: false,
+      includes_local_policy: false,
+      network_ids: [networkId],
+      revision_conflict: false,
+      risk,
+      rollback_target_revision: null,
+    };
+    const applied: PolicyApplyResult = {
+      affected_objects: [],
+      audit: audit("apply", 5),
+      diffs: [],
+      no_op: false,
+      previous_revision: 4,
+      revision: 5,
+      risk,
+      snapshot,
+    };
+    const history: PolicyHistoryEntry[] = [audit("apply", 5)];
+    const rolledBack: PolicyRollbackResult = {
+      affected_objects: [],
+      audit: audit("rollback", 6),
+      diffs: [],
+      previous_revision: 5,
+      revision: 6,
+      risk,
+      snapshot,
+      target_revision: 2,
+    };
+
+    for (const outcome of [
+      { status: "policy" as const, data: { revision: 5, snapshot } },
+      { status: "policy_preview" as const, data: preview },
+      { status: "policy_applied" as const, data: applied },
+      {
+        status: "policy_history" as const,
+        data: { current_revision: 5, entries: history },
+      },
+      { status: "policy_rolled_back" as const, data: rolledBack },
+    ]) {
+      expect(validateCommandOutcome(outcome)).toEqual(outcome);
+    }
+  });
+
+  it("keeps no-op policy applies at the same revision without audit", () => {
+    const snapshot: PolicySnapshot = {
+      local_policy: null,
+      network_acls: [],
+    };
+    const risk: PolicyRiskSummary = {
+      level: "none",
+      privilege_expansion: false,
+      reasons: [],
+      requires_explicit_confirmation: false,
+      requires_recent_reauthentication: false,
+    };
+    const noOp: PolicyApplyResult = {
+      affected_objects: [],
+      diffs: [],
+      no_op: true,
+      previous_revision: 5,
+      revision: 5,
+      risk,
+      snapshot,
+    };
+    expect(
+      validateCommandOutcome({ status: "policy_applied", data: noOp }),
+    ).toEqual({ status: "policy_applied", data: noOp });
+
+    expect(() =>
+      validateCommandOutcome({
+        status: "policy_applied",
+        data: { ...noOp, revision: 6 },
+      }),
+    ).toThrow("policy no-op moved revision");
+    expect(() =>
+      validateCommandOutcome({
+        status: "policy_applied",
+        data: {
+          ...noOp,
+          audit: {
+            action: "apply",
+            actor: "node-admin",
+            affected_objects: [],
+            diffs: [],
+            network_acl_revisions: {},
+            occurred_at: "2026-11-08T00:00:00Z",
+            previous_revision: 5,
+            revision: 5,
+            risk,
+            source: "webui",
+            transaction_id: "txn_noop",
+          },
+        },
+      }),
+    ).toThrow("policy no-op unexpectedly has audit");
+  });
+
+  it("requires rollback results to carry a rollback audit event", () => {
+    const snapshot: PolicySnapshot = {
+      local_policy: null,
+      network_acls: [],
+    };
+    const risk: PolicyRiskSummary = {
+      level: "none",
+      privilege_expansion: false,
+      reasons: [],
+      requires_explicit_confirmation: false,
+      requires_recent_reauthentication: false,
+    };
+    const result: PolicyRollbackResult = {
+      affected_objects: [],
+      audit: {
+        action: "rollback",
+        actor: "node-admin",
+        affected_objects: [],
+        diffs: [],
+        network_acl_revisions: {},
+        occurred_at: "2026-11-08T00:00:00Z",
+        previous_revision: 6,
+        revision: 7,
+        risk,
+        source: "webui",
+        target_revision: 3,
+        transaction_id: "txn_rollback_7",
+      },
+      diffs: [],
+      previous_revision: 6,
+      revision: 7,
+      risk,
+      snapshot,
+      target_revision: 3,
+    };
+    expect(
+      validateCommandOutcome({ status: "policy_rolled_back", data: result }),
+    ).toEqual({ status: "policy_rolled_back", data: result });
+
+    const mismatched = structuredClone(result);
+    mismatched.audit.action = "apply";
+    expect(() =>
+      validateCommandOutcome({
+        status: "policy_rolled_back",
+        data: mismatched,
+      }),
+    ).toThrow("policy rollback audit action mismatch");
   });
 });

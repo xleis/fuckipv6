@@ -16,7 +16,7 @@ use fuckipv6_common::ui_layout::navigation_module_for_page;
 use fuckipv6_common::NetworkMode;
 
 use crate::node::{
-    NodeAcknowledgeMembershipPolicyCommand, NodeApplyConfigurationCommand,
+    NodeAcknowledgeMembershipPolicyCommand, NodeApplyConfigurationCommand, NodeApplyPolicyCommand,
     NodeBatchReviewJoinRequestsCommand, NodeChangeMemberLifecycleCommand,
     NodeClientBlacklistCommand, NodeCommand, NodeCommandKind, NodeControlHealth,
     NodeCreateInvitationCommand, NodeCreateNetworkCommand, NodeEmbeddedServiceStatus,
@@ -26,15 +26,17 @@ use crate::node::{
     NodeNetworkAllocation, NodeNetworkDiscoveryCommand, NodeNetworkMembersCommand,
     NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus,
     NodePermission, NodePhase, NodePreviewConfigurationCommand, NodePreviewInvitationCommand,
-    NodePreviewJoinNetworkCommand, NodePrimaryStatus, NodeProbePeerCommand,
-    NodeRedeemInvitationCommand, NodeResubmitJoinRequestCommand, NodeReviewJoinRequestCommand,
-    NodeRevokeInvitationCommand, NodeRollbackConfigurationCommand, NodeRotateNodeIdentityCommand,
+    NodePreviewJoinNetworkCommand, NodePreviewPolicyCommand, NodePreviewPolicyRollbackCommand,
+    NodePrimaryStatus, NodeProbePeerCommand, NodeRedeemInvitationCommand,
+    NodeResubmitJoinRequestCommand, NodeReviewJoinRequestCommand, NodeRevokeInvitationCommand,
+    NodeRollbackConfigurationCommand, NodeRollbackPolicyCommand, NodeRotateNodeIdentityCommand,
     NodeRoutingDefaultAction, NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
     NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeSnapshot,
     NodeSubmitJoinRequestCommand, NodeUiAction, NodeUiActionBlockReason, NodeUiAvailability,
     NodeUiBackendStatus, NodeUiManifest, NodeUiPage, NodeUiPermission,
     NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand, NodeWithdrawJoinRequestCommand,
 };
+use crate::policy_transaction::PolicySnapshot;
 use crate::tun::{TunCapabilityReason, TunPlatform};
 use crate::ui::{DisplayEnvironment, UiMode};
 
@@ -264,12 +266,18 @@ pub enum ActionBinding {
     ApplyConfiguration,
     RollbackConfiguration,
     GetConfigurationHistory,
+    GetPolicy,
+    PreviewPolicy,
+    PreviewPolicyRollback,
+    ApplyPolicy,
+    RollbackPolicy,
+    GetPolicyHistory,
     TestPolicy,
     ShutdownNode,
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 55] = [
+    pub const ALL: [Self; 61] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
@@ -323,6 +331,12 @@ impl ActionBinding {
         Self::ApplyConfiguration,
         Self::RollbackConfiguration,
         Self::GetConfigurationHistory,
+        Self::GetPolicy,
+        Self::PreviewPolicy,
+        Self::PreviewPolicyRollback,
+        Self::ApplyPolicy,
+        Self::RollbackPolicy,
+        Self::GetPolicyHistory,
         Self::TestPolicy,
         Self::ShutdownNode,
     ];
@@ -382,6 +396,12 @@ impl ActionBinding {
             Self::ApplyConfiguration => "apply_configuration",
             Self::RollbackConfiguration => "rollback_configuration",
             Self::GetConfigurationHistory => "get_configuration_history",
+            Self::GetPolicy => "get_policy",
+            Self::PreviewPolicy => "preview_policy",
+            Self::PreviewPolicyRollback => "preview_policy_rollback",
+            Self::ApplyPolicy => "apply_policy",
+            Self::RollbackPolicy => "rollback_policy",
+            Self::GetPolicyHistory => "get_policy_history",
             Self::TestPolicy => "test_policy",
             Self::ShutdownNode => "shutdown_node",
         }
@@ -1395,6 +1415,21 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             ActionBinding::GetConfigurationHistory,
             NodeCommandKind::GetConfigurationHistory,
         ),
+        "get_policy" => (ActionBinding::GetPolicy, NodeCommandKind::GetPolicy),
+        "preview_policy" => (ActionBinding::PreviewPolicy, NodeCommandKind::PreviewPolicy),
+        "preview_policy_rollback" => (
+            ActionBinding::PreviewPolicyRollback,
+            NodeCommandKind::PreviewPolicyRollback,
+        ),
+        "apply_policy" => (ActionBinding::ApplyPolicy, NodeCommandKind::ApplyPolicy),
+        "rollback_policy" => (
+            ActionBinding::RollbackPolicy,
+            NodeCommandKind::RollbackPolicy,
+        ),
+        "get_policy_history" => (
+            ActionBinding::GetPolicyHistory,
+            NodeCommandKind::GetPolicyHistory,
+        ),
         "test_policy" => (ActionBinding::TestPolicy, NodeCommandKind::TestPolicy),
         "shutdown_node" => (ActionBinding::ShutdownNode, NodeCommandKind::Shutdown),
         _ => {
@@ -2168,6 +2203,92 @@ pub fn build_command(
             },
         )),
         Ok(ActionBinding::GetConfigurationHistory) => Ok(NodeCommand::GetConfigurationHistory),
+        Ok(ActionBinding::GetPolicy) => Ok(NodeCommand::GetPolicy),
+        Ok(ActionBinding::PreviewPolicy) => {
+            Ok(NodeCommand::PreviewPolicy(NodePreviewPolicyCommand {
+                expected_revision: parse_number(
+                    action,
+                    "expected_revision",
+                    &required("expected_revision")?,
+                )?,
+                candidate: parse_policy_snapshot(
+                    action,
+                    "candidate_json",
+                    &required("candidate_json")?,
+                )?,
+            }))
+        }
+        Ok(ActionBinding::PreviewPolicyRollback) => Ok(NodeCommand::PreviewPolicyRollback(
+            NodePreviewPolicyRollbackCommand {
+                expected_revision: parse_number(
+                    action,
+                    "expected_revision",
+                    &required("expected_revision")?,
+                )?,
+                target_revision: parse_number(
+                    action,
+                    "target_revision",
+                    &required("target_revision")?,
+                )?,
+            },
+        )),
+        Ok(ActionBinding::ApplyPolicy) => Ok(NodeCommand::ApplyPolicy(NodeApplyPolicyCommand {
+            expected_revision: parse_number(
+                action,
+                "expected_revision",
+                &required("expected_revision")?,
+            )?,
+            candidate: parse_policy_snapshot(
+                action,
+                "candidate_json",
+                &required("candidate_json")?,
+            )?,
+            network_ids: parse_policy_network_ids(
+                action,
+                "network_ids",
+                &required("network_ids")?,
+            )?,
+            includes_local_policy: parse_bool(
+                action,
+                "includes_local_policy",
+                &required("includes_local_policy")?,
+            )?,
+            confirm_privilege_expansion: parse_bool(
+                action,
+                "confirm_privilege_expansion",
+                &required("confirm_privilege_expansion")?,
+            )?,
+        })),
+        Ok(ActionBinding::RollbackPolicy) => {
+            Ok(NodeCommand::RollbackPolicy(NodeRollbackPolicyCommand {
+                expected_revision: parse_number(
+                    action,
+                    "expected_revision",
+                    &required("expected_revision")?,
+                )?,
+                target_revision: parse_number(
+                    action,
+                    "target_revision",
+                    &required("target_revision")?,
+                )?,
+                network_ids: parse_policy_network_ids(
+                    action,
+                    "network_ids",
+                    &required("network_ids")?,
+                )?,
+                includes_local_policy: parse_bool(
+                    action,
+                    "includes_local_policy",
+                    &required("includes_local_policy")?,
+                )?,
+                confirm_privilege_expansion: parse_bool(
+                    action,
+                    "confirm_privilege_expansion",
+                    &required("confirm_privilege_expansion")?,
+                )?,
+            }))
+        }
+        Ok(ActionBinding::GetPolicyHistory) => Ok(NodeCommand::GetPolicyHistory),
         Ok(ActionBinding::TestPolicy) => {
             let policy_json = required("policy_json")?;
             let input = parse_policy_test_input(&policy_json).map_err(|issue| {
@@ -2310,6 +2431,23 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
             HashSet::from(["expected_revision", "networks"])
         }
         "rollback_configuration" => HashSet::from(["expected_revision", "target_revision"]),
+        "get_policy" | "get_policy_history" => HashSet::from([]),
+        "preview_policy" => HashSet::from(["expected_revision", "candidate_json"]),
+        "preview_policy_rollback" => HashSet::from(["expected_revision", "target_revision"]),
+        "apply_policy" => HashSet::from([
+            "expected_revision",
+            "candidate_json",
+            "network_ids",
+            "includes_local_policy",
+            "confirm_privilege_expansion",
+        ]),
+        "rollback_policy" => HashSet::from([
+            "expected_revision",
+            "target_revision",
+            "network_ids",
+            "includes_local_policy",
+            "confirm_privilege_expansion",
+        ]),
         "test_policy" => HashSet::from(["policy_json"]),
         "start_node" | "stop_node" | "restart_node" | "shutdown_node" => HashSet::from([]),
         _ => return Err(format!("unknown action {}", action.id)),
@@ -2477,6 +2615,50 @@ fn parse_bool(
             value: value.into(),
         }),
     }
+}
+
+fn parse_policy_snapshot(
+    action: &NodeUiAction,
+    field_id: &str,
+    value: &str,
+) -> Result<PolicySnapshot, CommandBuildError> {
+    serde_json::from_str(value).map_err(|_| CommandBuildError::InvalidField {
+        action_id: action.id.clone(),
+        field_id: field_id.into(),
+        value: value.into(),
+    })
+}
+
+fn parse_policy_network_ids(
+    action: &NodeUiAction,
+    field_id: &str,
+    value: &str,
+) -> Result<Vec<String>, CommandBuildError> {
+    let ids = value
+        .split([',', ' ', '\t', '\n', '\r'])
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let unique = ids.iter().collect::<HashSet<_>>();
+    if ids.is_empty()
+        || unique.len() != ids.len()
+        || ids.iter().any(|id| {
+            !id.strip_prefix("net_").is_some_and(|suffix| {
+                suffix.len() == 43
+                    && suffix
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+            })
+        })
+    {
+        return Err(CommandBuildError::InvalidField {
+            action_id: action.id.clone(),
+            field_id: field_id.into(),
+            value: value.into(),
+        });
+    }
+    Ok(ids)
 }
 
 fn parse_selection(
@@ -6009,7 +6191,7 @@ mod tests {
 
     #[test]
     fn every_manifest_action_has_an_explicit_binding() {
-        assert_eq!(ActionBinding::ALL.len(), 55);
+        assert_eq!(ActionBinding::ALL.len(), 61);
         let manifest = node_ui_manifest();
         let actual = manifest
             .pages
@@ -6104,6 +6286,32 @@ mod tests {
                 }
                 if action.id == "test_policy" {
                     values.insert("policy_json".into(), policy_test_fixture_json());
+                }
+                if matches!(
+                    action.id.as_str(),
+                    "preview_policy" | "apply_policy" | "rollback_policy"
+                ) {
+                    values.insert("expected_revision".into(), "1".into());
+                }
+                if matches!(action.id.as_str(), "preview_policy_rollback") {
+                    values.insert("expected_revision".into(), "1".into());
+                }
+                if matches!(
+                    action.id.as_str(),
+                    "preview_policy_rollback" | "rollback_policy"
+                ) {
+                    values.insert("target_revision".into(), "1".into());
+                }
+                if matches!(action.id.as_str(), "preview_policy" | "apply_policy") {
+                    values.insert("candidate_json".into(), "{}".into());
+                }
+                if matches!(action.id.as_str(), "apply_policy" | "rollback_policy") {
+                    values.insert(
+                        "network_ids".into(),
+                        NetworkId::from_public_key(b"policy-command-network").to_string(),
+                    );
+                    values.insert("includes_local_policy".into(), "false".into());
+                    values.insert("confirm_privilege_expansion".into(), "true".into());
                 }
                 if matches!(
                     action.id.as_str(),

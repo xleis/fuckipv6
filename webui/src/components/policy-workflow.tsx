@@ -1,20 +1,26 @@
+import * as Dialog from "@radix-ui/react-dialog";
 import {
   AlertTriangle,
   Braces,
   CheckCircle2,
   CircleSlash2,
+  Clock3,
   FileJson,
   Gavel,
   GitBranch,
+  GitCompare,
+  History,
   ListChecks,
   LoaderCircle,
   Play,
   Plus,
   RefreshCw,
+  RotateCcw,
   ShieldAlert,
   ShieldCheck,
   Trash2,
   Upload,
+  X,
 } from "lucide-react";
 import {
   useEffect,
@@ -39,7 +45,15 @@ import type {
   PermissionIntent,
   PermissionRule,
   PolicyAction,
+  PolicyAffectedObject,
+  PolicyApplyResult,
+  PolicyCurrent,
+  PolicyHistorySnapshot,
+  PolicyPreview,
+  PolicyRiskSummary,
+  PolicyRollbackResult,
   PolicyRuleExplanation,
+  PolicySnapshot,
   PolicyTestInput,
   PolicyTestResult,
   ResourceKind,
@@ -49,6 +63,7 @@ import {
   blockReasonText,
   executionBlockReason,
   label,
+  outcomeSummary,
   problemText,
   type ActionValues,
 } from "../contract/invariants";
@@ -59,7 +74,15 @@ import {
 import { tr } from "../i18n";
 import { pageStateDefinition, type PageStateKind } from "../state-matrix";
 
-export const POLICY_ACTION_IDS = new Set(["test_policy"]);
+export const POLICY_ACTION_IDS = new Set([
+  "test_policy",
+  "get_policy",
+  "preview_policy",
+  "preview_policy_rollback",
+  "apply_policy",
+  "rollback_policy",
+  "get_policy_history",
+]);
 
 const NODE_ID = /^node_[A-Za-z0-9_-]{43}$/;
 const NETWORK_ID = /^net_[A-Za-z0-9_-]{43}$/;
@@ -165,6 +188,10 @@ export type PolicyDraftMemo = {
   editor: string;
   mode: "structured" | "advanced";
   result: PolicyTestResult | null;
+  current: PolicyCurrent | null;
+  history: PolicyHistorySnapshot | null;
+  preview: PolicyPreview | null;
+  applied: PolicyApplyResult | PolicyRollbackResult | null;
   importName: string;
   activeIssuePath: string;
 };
@@ -185,12 +212,12 @@ type PolicyWorkflowProps = {
 };
 
 type EditorMode = PolicyDraftMemo["mode"];
+type BusyState = "load" | "history" | "preview" | "apply" | "rollback" | null;
 
 function generatedId(prefix: string, index: number): string {
-  const seed =
-    `${Date.now().toString(36)}${index.toString(36)}${Math.random()
-      .toString(36)
-      .slice(2)}`.replace(/[^A-Za-z0-9_-]/g, "");
+  const seed = `${Date.now().toString(36)}${index.toString(36)}${Math.random()
+    .toString(36)
+    .slice(2)}`.replace(/[^A-Za-z0-9_-]/g, "");
   return `${prefix}${seed.slice(0, 43).padEnd(43, "A")}`;
 }
 
@@ -258,7 +285,8 @@ function defaultStructuredDraft(
     (entry) => entry.network_name === selectedNetwork,
   );
   const now = Date.now();
-  const actor = validId(membership?.node_id, NODE_ID) ||
+  const actor =
+    validId(membership?.node_id, NODE_ID) ||
     validId(snapshot.identity?.node_id, NODE_ID);
   const role =
     membership?.role === "owner" ||
@@ -366,21 +394,24 @@ function scopeFromDraft(draft: PolicyStructuredDraft): NodeNetworkScope {
 export function structuredPolicyInput(
   draft: PolicyStructuredDraft,
 ): PolicyTestInput {
-  const localPolicy: NodeLocalAccessPolicy | undefined = draft.includeLocalPolicy
-    ? {
-        node_id: draft.actor.trim(),
-        revision: Number(draft.localRevision),
-        issued_at_unix_ms: Number(draft.localIssuedAt),
-        expires_at_unix_ms: Number(draft.localExpiresAt),
-        network_scope: scopeFromDraft(draft),
-        rules: draft.localRules.map(ruleFromDraft),
-        contribution_vetoes: draft.vetoes.map((veto) => ({
-          veto_id: veto.vetoId.trim(),
-          network_id: draft.networkId.trim(),
-          contributions: csv(veto.contributions) as NodeContributionVeto["contributions"],
-        })),
-      }
-    : undefined;
+  const localPolicy: NodeLocalAccessPolicy | undefined =
+    draft.includeLocalPolicy
+      ? {
+          node_id: draft.actor.trim(),
+          revision: Number(draft.localRevision),
+          issued_at_unix_ms: Number(draft.localIssuedAt),
+          expires_at_unix_ms: Number(draft.localExpiresAt),
+          network_scope: scopeFromDraft(draft),
+          rules: draft.localRules.map(ruleFromDraft),
+          contribution_vetoes: draft.vetoes.map((veto) => ({
+            veto_id: veto.vetoId.trim(),
+            network_id: draft.networkId.trim(),
+            contributions: csv(
+              veto.contributions,
+            ) as NodeContributionVeto["contributions"],
+          })),
+        }
+      : undefined;
   const networkAcl: NetworkAcl | undefined = draft.includeNetworkAcl
     ? {
         network_id: draft.networkId.trim(),
@@ -430,8 +461,7 @@ function ruleDraftFromRule(rule: PermissionRule): PolicyRuleDraft {
   return {
     ruleId: rule.rule_id,
     subjectKind: subject?.kind ?? "any_member",
-    subjectValue:
-      subject && "value" in subject ? String(subject.value) : "",
+    subjectValue: subject && "value" in subject ? String(subject.value) : "",
     resources: rule.resources.join(","),
     actions: rule.actions.join(","),
     effect: rule.effect,
@@ -444,8 +474,7 @@ function grantDraftFromGrant(grant: NetworkAclGrant): PolicyGrantDraft {
   return {
     grantId: grant.grant_id,
     subjectKind: subject?.kind ?? "any_member",
-    subjectValue:
-      subject && "value" in subject ? String(subject.value) : "",
+    subjectValue: subject && "value" in subject ? String(subject.value) : "",
     resources: grant.resources.join(","),
     actions: grant.actions.join(","),
     issuedAt: String(grant.issued_at_unix_ms),
@@ -458,6 +487,16 @@ function grantDraftFromGrant(grant: NetworkAclGrant): PolicyGrantDraft {
     revokedBy: grant.revoked_by ?? "",
     requiresRecentReauthentication:
       grant.requires_recent_reauthentication ?? false,
+  };
+}
+
+export function structuredPolicySnapshot(
+  draft: PolicyStructuredDraft,
+): PolicySnapshot {
+  const input = structuredPolicyInput(draft);
+  return {
+    ...(input.local_policy ? { local_policy: input.local_policy } : {}),
+    ...(input.network_acl ? { network_acls: [input.network_acl] } : {}),
   };
 }
 
@@ -490,7 +529,8 @@ export function structuredDraftFromPolicyInput(
     localExpiresAt: String(
       localPolicy?.expires_at_unix_ms ?? fallback.localExpiresAt,
     ),
-    networkScopeKind: localPolicy?.network_scope.kind ?? fallback.networkScopeKind,
+    networkScopeKind:
+      localPolicy?.network_scope.kind ?? fallback.networkScopeKind,
     networkIds:
       localPolicy?.network_scope.kind === "only"
         ? localPolicy.network_scope.network_ids.join(",")
@@ -503,9 +543,7 @@ export function structuredDraftFromPolicyInput(
       })) ?? [],
     includeNetworkAcl: Boolean(networkAcl),
     aclRevision: String(networkAcl?.revision ?? fallback.aclRevision),
-    aclIssuedAt: String(
-      networkAcl?.issued_at_unix_ms ?? fallback.aclIssuedAt,
-    ),
+    aclIssuedAt: String(networkAcl?.issued_at_unix_ms ?? fallback.aclIssuedAt),
     aclExpiresAt: String(
       networkAcl?.expires_at_unix_ms ?? fallback.aclExpiresAt,
     ),
@@ -590,6 +628,69 @@ function grantList(
     : label(locale, "policy.result.none");
 }
 
+function timestampText(locale: Locale, value: string): string {
+  const timestamp = new Date(value);
+  return Number.isNaN(timestamp.getTime())
+    ? value
+    : timestamp.toLocaleString(locale);
+}
+
+function riskLevelText(locale: Locale, risk: PolicyRiskSummary): string {
+  return label(locale, `policy.risk.level.${risk.level}`);
+}
+
+function riskReasonText(locale: Locale, reason: string): string {
+  return label(locale, `policy.risk.reason.${reason}`);
+}
+
+function diffChangeText(locale: Locale, change: string): string {
+  return label(locale, `policy.diff.change.${change}`);
+}
+
+function affectedObjectText(
+  locale: Locale,
+  object: PolicyAffectedObject,
+): string {
+  const objectLabel = label(locale, `policy.object.kind.${object.kind}`);
+  const identifiers = [object.network_id, object.object_id].filter(
+    (value): value is string => Boolean(value),
+  );
+  return identifiers.length
+    ? `${objectLabel} · ${identifiers.join(" · ")}`
+    : objectLabel;
+}
+
+function policyJson(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
+function structuredSnapshotDraft(
+  snapshot: PolicySnapshot,
+  fallback: PolicyStructuredDraft,
+): PolicyStructuredDraft {
+  const acl =
+    snapshot.network_acls?.find(
+      (entry) => entry.network_id === fallback.networkId,
+    ) ?? snapshot.network_acls?.[0];
+  const input = structuredPolicyInput(fallback);
+  const next = structuredDraftFromPolicyInput(
+    {
+      ...input,
+      local_policy: snapshot.local_policy ?? null,
+      network_acl: acl ?? null,
+    },
+    fallback,
+  );
+  return {
+    ...next,
+    includeLocalPolicy: Boolean(snapshot.local_policy),
+    includeNetworkAcl: Boolean(acl),
+    networkId: acl?.network_id ?? next.networkId,
+    resourceNetworkId:
+      acl?.network_id ?? next.resourceNetworkId ?? next.networkId,
+  };
+}
+
 type FieldProps = {
   id: string;
   labelText: string;
@@ -646,7 +747,10 @@ function RuleEditor({
         <Trash2 size={14} />
       </button>
       <div className="policy-rule-grid">
-        <Field id={`${prefix}-id`} labelText={label(locale, "policy.field.rule_id")}>
+        <Field
+          id={`${prefix}-id`}
+          labelText={label(locale, "policy.field.rule_id")}
+        >
           <input
             id={`${prefix}-id`}
             value={rule.ruleId}
@@ -793,7 +897,10 @@ function GrantEditor({
         <Trash2 size={14} />
       </button>
       <div className="policy-rule-grid">
-        <Field id={`${prefix}-id`} labelText={label(locale, "policy.field.grant_id")}>
+        <Field
+          id={`${prefix}-id`}
+          labelText={label(locale, "policy.field.grant_id")}
+        >
           <input
             id={`${prefix}-id`}
             value={grant.grantId}
@@ -925,7 +1032,9 @@ function GrantEditor({
             })
           }
         />
-        <span>{label(locale, "policy.field.requires_recent_authentication")}</span>
+        <span>
+          {label(locale, "policy.field.requires_recent_authentication")}
+        </span>
       </label>
     </fieldset>
   );
@@ -960,7 +1069,10 @@ function VetoEditor({
         <Trash2 size={14} />
       </button>
       <div className="policy-rule-grid policy-veto-grid">
-        <Field id={`${prefix}-id`} labelText={label(locale, "policy.field.veto_id")}>
+        <Field
+          id={`${prefix}-id`}
+          labelText={label(locale, "policy.field.veto_id")}
+        >
           <input
             id={`${prefix}-id`}
             value={veto.vetoId}
@@ -1006,7 +1118,9 @@ function ExplanationCard({
           <strong>
             {choice(locale, "policy.choice.source", explanation.source)}
           </strong>
-          <span>{choice(locale, "policy.choice.precedence", explanation.precedence)}</span>
+          <span>
+            {choice(locale, "policy.choice.precedence", explanation.precedence)}
+          </span>
         </div>
         <div className="policy-explanation-state">
           <span className={explanation.matched ? "matched" : ""}>
@@ -1031,14 +1145,19 @@ function ExplanationCard({
         <div>
           <dt>{label(locale, "policy.explain.path")}</dt>
           <dd>
-            <button type="button" onClick={() => onLocate(explanation.source_path)}>
+            <button
+              type="button"
+              onClick={() => onLocate(explanation.source_path)}
+            >
               <code>{explanation.source_path}</code>
             </button>
           </dd>
         </div>
         <div>
           <dt>{label(locale, "policy.explain.rule")}</dt>
-          <dd><code>{explanation.rule_id ?? "—"}</code></dd>
+          <dd>
+            <code>{explanation.rule_id ?? "—"}</code>
+          </dd>
         </div>
         <div>
           <dt>{label(locale, "policy.explain.effect")}</dt>
@@ -1050,22 +1169,34 @@ function ExplanationCard({
         </div>
         <div>
           <dt>{label(locale, "policy.explain.subjects")}</dt>
-          <dd>{valueList(locale, "policy.choice.subject", explanation.subjects?.map(encodedSubject))}</dd>
+          <dd>
+            {valueList(
+              locale,
+              "policy.choice.subject",
+              explanation.subjects?.map(encodedSubject),
+            )}
+          </dd>
         </div>
         <div>
           <dt>{label(locale, "policy.explain.resources")}</dt>
-          <dd>{valueList(locale, "policy.choice.resource", explanation.resources)}</dd>
+          <dd>
+            {valueList(locale, "policy.choice.resource", explanation.resources)}
+          </dd>
         </div>
         <div>
           <dt>{label(locale, "policy.explain.actions")}</dt>
-          <dd>{valueList(locale, "policy.choice.action", explanation.actions)}</dd>
+          <dd>
+            {valueList(locale, "policy.choice.action", explanation.actions)}
+          </dd>
         </div>
         <div>
           <dt>{label(locale, "policy.explain.conditions")}</dt>
           <dd>
             {explanation.conditions?.length
               ? explanation.conditions
-                  .map((condition) => choice(locale, "policy.choice.condition", condition.kind))
+                  .map((condition) =>
+                    choice(locale, "policy.choice.condition", condition.kind),
+                  )
                   .join(", ")
               : label(locale, "policy.result.none")}
           </dd>
@@ -1087,11 +1218,28 @@ export function PolicyWorkflow({
   onSubmit,
 }: PolicyWorkflowProps): JSX.Element {
   const action = actions.find((candidate) => candidate.id === "test_policy");
+  const getAction = actions.find((candidate) => candidate.id === "get_policy");
+  const previewAction = actions.find(
+    (candidate) => candidate.id === "preview_policy",
+  );
+  const previewRollbackAction = actions.find(
+    (candidate) => candidate.id === "preview_policy_rollback",
+  );
+  const applyAction = actions.find(
+    (candidate) => candidate.id === "apply_policy",
+  );
+  const rollbackAction = actions.find(
+    (candidate) => candidate.id === "rollback_policy",
+  );
+  const historyAction = actions.find(
+    (candidate) => candidate.id === "get_policy_history",
+  );
   const titleId = useId();
   const editorId = useId();
   const importId = useId();
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const initialLoadStarted = useRef(false);
   const [structured, setStructured] = useState<PolicyStructuredDraft>(
     draft?.structured ?? defaultStructuredDraft(snapshot, selectedNetwork),
   );
@@ -1102,28 +1250,153 @@ export function PolicyWorkflow({
   const [result, setResult] = useState<PolicyTestResult | null>(
     draft?.result ?? null,
   );
+  const [current, setCurrent] = useState<PolicyCurrent | null>(
+    draft?.current ?? null,
+  );
+  const [history, setHistory] = useState<PolicyHistorySnapshot | null>(
+    draft?.history ?? null,
+  );
+  const [preview, setPreview] = useState<PolicyPreview | null>(
+    draft?.preview ?? null,
+  );
+  const [applied, setApplied] = useState<
+    PolicyApplyResult | PolicyRollbackResult | null
+  >(draft?.applied ?? null);
   const [importName, setImportName] = useState(draft?.importName ?? "");
   const [activeIssuePath, setActiveIssuePath] = useState(
     draft?.activeIssuePath ?? "",
   );
   const [jsonError, setJsonError] = useState("");
   const [submitError, setSubmitError] = useState("");
+  const [transactionError, setTransactionError] = useState("");
+  const [historyError, setHistoryError] = useState("");
   const [notice, setNotice] = useState("");
   const [running, setRunning] = useState(false);
+  const [busy, setBusy] = useState<BusyState>(
+    draft?.current ? null : getAction ? "load" : null,
+  );
+  const [confirmPrivilegeExpansion, setConfirmPrivilegeExpansion] =
+    useState(false);
+  const [confirmingApply, setConfirmingApply] = useState(false);
+  const [confirmingRollback, setConfirmingRollback] = useState(false);
 
   const pageBlocked = interactionBlocked
     ? pageStateDefinition(interactionBlocked)
     : null;
-  const executionBlocked = action
+  const testBlocked = action
     ? executionBlockReason(action, snapshot, selectedNetwork)
     : "backend_unavailable";
-  const pending = Boolean(pendingAction) || running;
-  const runReason =
-    (pending && label(locale, "common.control_pending")) ||
-    (pageBlocked && label(locale, pageBlocked.titleKey)) ||
-    blockReasonText(executionBlocked, locale) ||
-    (!action && label(locale, "blocked.backend_unavailable")) ||
-    "";
+  const previewBlocked = previewAction
+    ? executionBlockReason(previewAction, snapshot, selectedNetwork)
+    : "backend_unavailable";
+  const applyBlocked = applyAction
+    ? executionBlockReason(applyAction, snapshot, selectedNetwork)
+    : "backend_unavailable";
+  const previewRollbackBlocked = previewRollbackAction
+    ? executionBlockReason(previewRollbackAction, snapshot, selectedNetwork)
+    : "backend_unavailable";
+  const rollbackBlocked = rollbackAction
+    ? executionBlockReason(rollbackAction, snapshot, selectedNetwork)
+    : "backend_unavailable";
+  const historyBlocked = historyAction
+    ? executionBlockReason(historyAction, snapshot, selectedNetwork)
+    : "backend_unavailable";
+  const pending = Boolean(pendingAction) || running || busy !== null;
+  const pendingReason = pending ? label(locale, "common.control_pending") : "";
+  const pageReason = pageBlocked ? label(locale, pageBlocked.titleKey) : "";
+  const unavailableReason = label(locale, "blocked.backend_unavailable");
+  const firstReason = (...reasons: Array<string | false | null>): string =>
+    reasons.find((reason): reason is string => Boolean(reason)) ?? "";
+  const runReason = firstReason(
+    pendingReason,
+    pageReason,
+    blockReasonText(testBlocked, locale),
+    !action && unavailableReason,
+  );
+  const previewReason = firstReason(
+    pendingReason,
+    pageReason,
+    blockReasonText(previewBlocked, locale),
+    !previewAction && unavailableReason,
+    !current && label(locale, "policy.transaction.load_required"),
+    Boolean(jsonError) && label(locale, "policy.transaction.invalid_editor"),
+  );
+  const stalePreview = Boolean(
+    preview &&
+    current &&
+    !preview.revision_conflict &&
+    preview.expected_revision !== current.revision,
+  );
+  const missingPrivilegeConfirmation = Boolean(
+    preview?.risk.requires_explicit_confirmation && !confirmPrivilegeExpansion,
+  );
+  const rollbackPreview =
+    preview?.rollback_target_revision !== null &&
+    preview?.rollback_target_revision !== undefined;
+  const canApply = Boolean(
+    preview &&
+    !rollbackPreview &&
+    preview.can_apply &&
+    preview.has_changes &&
+    !preview.revision_conflict &&
+    !stalePreview &&
+    !missingPrivilegeConfirmation &&
+    !applyBlocked &&
+    !pageBlocked &&
+    !pending,
+  );
+  const canRollback = Boolean(
+    preview &&
+    rollbackPreview &&
+    preview.can_apply &&
+    preview.has_changes &&
+    !preview.revision_conflict &&
+    !stalePreview &&
+    !missingPrivilegeConfirmation &&
+    !rollbackBlocked &&
+    !pageBlocked &&
+    !pending,
+  );
+  const applyReason = firstReason(
+    pendingReason,
+    pageReason,
+    blockReasonText(applyBlocked, locale),
+    !applyAction && unavailableReason,
+    !preview && label(locale, "policy.transaction.preview_required"),
+    Boolean(preview?.revision_conflict) &&
+      label(locale, "policy.transaction.revision_conflict"),
+    stalePreview && label(locale, "policy.transaction.stale_preview"),
+    Boolean(preview && !preview.has_changes) &&
+      label(locale, "policy.transaction.no_changes"),
+    Boolean(preview && !preview.can_apply) &&
+      label(locale, "policy.transaction.blocked"),
+    missingPrivilegeConfirmation &&
+      label(locale, "policy.transaction.confirm_required"),
+  );
+  const rollbackReason = firstReason(
+    pendingReason,
+    pageReason,
+    blockReasonText(rollbackBlocked, locale),
+    !rollbackAction && unavailableReason,
+    !preview && label(locale, "policy.transaction.preview_required"),
+    !rollbackPreview &&
+      label(locale, "policy.transaction.rollback_preview_required"),
+    Boolean(preview?.revision_conflict) &&
+      label(locale, "policy.transaction.revision_conflict"),
+    stalePreview && label(locale, "policy.transaction.stale_preview"),
+    Boolean(preview && !preview.has_changes) &&
+      label(locale, "policy.transaction.no_changes"),
+    Boolean(preview && !preview.can_apply) &&
+      label(locale, "policy.transaction.blocked"),
+    missingPrivilegeConfirmation &&
+      label(locale, "policy.transaction.confirm_required"),
+  );
+  const historyRefreshReason = firstReason(
+    pendingReason,
+    pageReason,
+    blockReasonText(historyBlocked, locale),
+    !historyAction && unavailableReason,
+  );
 
   useEffect(() => {
     onDraftChange?.({
@@ -1131,18 +1404,100 @@ export function PolicyWorkflow({
       editor,
       mode,
       result,
+      current,
+      history,
+      preview,
+      applied,
       importName,
       activeIssuePath,
     });
   }, [
     activeIssuePath,
+    applied,
+    current,
     editor,
+    history,
     importName,
     mode,
     onDraftChange,
+    preview,
     result,
     structured,
   ]);
+
+  async function request(
+    requestAction: NodeUiAction | undefined,
+    values: ActionValues,
+  ): Promise<NodeCommandOutcome> {
+    if (!requestAction)
+      throw new Error(label(locale, "common.operation_failed"));
+    const outcome = await onSubmit(requestAction, values);
+    const rejected = rejectedMessage(outcome, locale);
+    if (rejected) throw new Error(rejected);
+    return outcome;
+  }
+
+  async function refreshHistory(): Promise<void> {
+    if (!historyAction || historyBlocked) return;
+    try {
+      const outcome = await request(historyAction, {});
+      if (outcome.status !== "policy_history") {
+        throw new Error(label(locale, "common.operation_failed"));
+      }
+      setHistory(outcome.data);
+      setHistoryError("");
+    } catch (historyFailure) {
+      setHistoryError(
+        historyFailure instanceof Error
+          ? historyFailure.message
+          : String(historyFailure),
+      );
+    }
+  }
+
+  async function loadPolicy(): Promise<void> {
+    if (!getAction) return;
+    setBusy("load");
+    setTransactionError("");
+    setHistoryError("");
+    setNotice("");
+    try {
+      const outcome = await request(getAction, {});
+      if (outcome.status !== "policy") {
+        throw new Error(label(locale, "common.operation_failed"));
+      }
+      setCurrent(outcome.data);
+      setPreview(null);
+      setApplied(null);
+      setConfirmPrivilegeExpansion(false);
+      setNotice(outcomeSummary(outcome, locale));
+      await refreshHistory();
+    } catch (loadFailure) {
+      setTransactionError(
+        loadFailure instanceof Error
+          ? loadFailure.message
+          : String(loadFailure),
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  useEffect(() => {
+    if (!getAction || initialLoadStarted.current) return;
+    initialLoadStarted.current = true;
+    void loadPolicy();
+    // The authoritative revision is loaded once when the settings page mounts.
+    // AppShell recreates submit callbacks, so they must not restart this flow.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [getAction]);
+
+  function invalidateTransactionPreview(): void {
+    setPreview(null);
+    setApplied(null);
+    setConfirmPrivilegeExpansion(false);
+    setTransactionError("");
+  }
 
   function clearTransientState(): void {
     setResult(null);
@@ -1150,6 +1505,7 @@ export function PolicyWorkflow({
     setSubmitError("");
     setNotice("");
     setActiveIssuePath("");
+    invalidateTransactionPreview();
   }
 
   function updateStructured(next: PolicyStructuredDraft): void {
@@ -1162,6 +1518,7 @@ export function PolicyWorkflow({
     setSubmitError("");
     setNotice("");
     setActiveIssuePath("");
+    invalidateTransactionPreview();
   }
 
   function updateRule(
@@ -1192,13 +1549,17 @@ export function PolicyWorkflow({
       ...structured,
       [key]: [
         ...structured[key],
-        emptyRule(structured[key].length, source === "local" ? "deny" : "allow"),
+        emptyRule(
+          structured[key].length,
+          source === "local" ? "deny" : "allow",
+        ),
       ],
     });
   }
 
   function selectMode(nextMode: EditorMode): void {
     if (nextMode === mode) return;
+    invalidateTransactionPreview();
     if (nextMode === "advanced") {
       setEditor(prettyPolicy(structuredPolicyInput(structured)));
       setMode("advanced");
@@ -1225,6 +1586,7 @@ export function PolicyWorkflow({
     setSubmitError("");
     setNotice("");
     setImportName("");
+    invalidateTransactionPreview();
     try {
       const parsed = parsePolicyTestInputJson(value);
       setStructured(structuredDraftFromPolicyInput(parsed, structured));
@@ -1236,7 +1598,9 @@ export function PolicyWorkflow({
     }
   }
 
-  async function importFile(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+  async function importFile(
+    event: ChangeEvent<HTMLInputElement>,
+  ): Promise<void> {
     const file = event.target.files?.[0];
     if (!file) return;
     const source = await file.text();
@@ -1269,8 +1633,12 @@ export function PolicyWorkflow({
   }
 
   async function runTest(): Promise<void> {
-    if (!action || executionBlocked || pageBlocked || pending) return;
-    clearTransientState();
+    if (!action || testBlocked || pageBlocked || pending) return;
+    setResult(null);
+    setJsonError("");
+    setSubmitError("");
+    setNotice("");
+    setActiveIssuePath("");
     let parsed: PolicyTestInput;
     try {
       parsed = parsePolicyTestInputJson(editor);
@@ -1299,6 +1667,168 @@ export function PolicyWorkflow({
     }
   }
 
+  async function previewDraft(): Promise<void> {
+    if (!previewAction || !current || previewBlocked || pageBlocked || pending)
+      return;
+    setBusy("preview");
+    setTransactionError("");
+    setNotice("");
+    setApplied(null);
+    setConfirmPrivilegeExpansion(false);
+    try {
+      const candidate = structuredPolicySnapshot(structured);
+      const outcome = await request(previewAction, {
+        expected_revision: String(current.revision),
+        candidate_json: policyJson(candidate),
+      });
+      if (outcome.status !== "policy_preview") {
+        throw new Error(label(locale, "common.operation_failed"));
+      }
+      setPreview(outcome.data);
+      setNotice(outcomeSummary(outcome, locale));
+    } catch (previewFailure) {
+      setPreview(null);
+      setTransactionError(
+        previewFailure instanceof Error
+          ? previewFailure.message
+          : String(previewFailure),
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function applyPreview(): Promise<void> {
+    if (!applyAction || !preview || !canApply || rollbackPreview) return;
+    setConfirmingApply(false);
+    setBusy("apply");
+    setTransactionError("");
+    setNotice("");
+    try {
+      const outcome = await request(applyAction, {
+        expected_revision: String(preview.expected_revision),
+        candidate_json: policyJson(preview.candidate),
+        network_ids: preview.network_ids.join(","),
+        includes_local_policy: String(preview.includes_local_policy),
+        confirm_privilege_expansion: String(confirmPrivilegeExpansion),
+      });
+      if (outcome.status !== "policy_applied") {
+        throw new Error(label(locale, "common.operation_failed"));
+      }
+      setApplied(outcome.data);
+      setCurrent({
+        revision: outcome.data.revision,
+        snapshot: outcome.data.snapshot,
+      });
+      setPreview(null);
+      setConfirmPrivilegeExpansion(false);
+      setNotice(outcomeSummary(outcome, locale));
+      await refreshHistory();
+    } catch (applyFailure) {
+      setTransactionError(
+        applyFailure instanceof Error
+          ? applyFailure.message
+          : String(applyFailure),
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function previewRollback(targetRevision: number): Promise<void> {
+    if (
+      !previewRollbackAction ||
+      !current ||
+      previewRollbackBlocked ||
+      pageBlocked ||
+      pending
+    )
+      return;
+    setBusy("preview");
+    setTransactionError("");
+    setNotice("");
+    setApplied(null);
+    setConfirmPrivilegeExpansion(false);
+    try {
+      const outcome = await request(previewRollbackAction, {
+        expected_revision: String(current.revision),
+        target_revision: String(targetRevision),
+      });
+      if (outcome.status !== "policy_preview") {
+        throw new Error(label(locale, "common.operation_failed"));
+      }
+      setPreview(outcome.data);
+      setNotice(outcomeSummary(outcome, locale));
+    } catch (rollbackPreviewFailure) {
+      setPreview(null);
+      setTransactionError(
+        rollbackPreviewFailure instanceof Error
+          ? rollbackPreviewFailure.message
+          : String(rollbackPreviewFailure),
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function rollbackPreviewed(): Promise<void> {
+    if (
+      !rollbackAction ||
+      !preview ||
+      preview.rollback_target_revision === null ||
+      preview.rollback_target_revision === undefined ||
+      !canRollback
+    )
+      return;
+    setConfirmingRollback(false);
+    setBusy("rollback");
+    setTransactionError("");
+    setNotice("");
+    try {
+      const outcome = await request(rollbackAction, {
+        expected_revision: String(preview.expected_revision),
+        target_revision: String(preview.rollback_target_revision),
+        network_ids: preview.network_ids.join(","),
+        includes_local_policy: String(preview.includes_local_policy),
+        confirm_privilege_expansion: String(confirmPrivilegeExpansion),
+      });
+      if (outcome.status !== "policy_rolled_back") {
+        throw new Error(label(locale, "common.operation_failed"));
+      }
+      setApplied(outcome.data);
+      setCurrent({
+        revision: outcome.data.revision,
+        snapshot: outcome.data.snapshot,
+      });
+      setPreview(null);
+      setConfirmPrivilegeExpansion(false);
+      setNotice(outcomeSummary(outcome, locale));
+      await refreshHistory();
+    } catch (rollbackFailure) {
+      setTransactionError(
+        rollbackFailure instanceof Error
+          ? rollbackFailure.message
+          : String(rollbackFailure),
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function loadCurrentIntoEditor(): void {
+    if (!current) return;
+    const next = structuredSnapshotDraft(current.snapshot, structured);
+    setStructured(next);
+    setEditor(prettyPolicy(structuredPolicyInput(next)));
+    setMode("structured");
+    setResult(null);
+    setJsonError("");
+    setSubmitError("");
+    setNotice(label(locale, "policy.transaction.loaded_into_editor"));
+    setActiveIssuePath("");
+    invalidateTransactionPreview();
+  }
+
   function reset(): void {
     const next = defaultStructuredDraft(snapshot, selectedNetwork);
     setStructured(next);
@@ -1310,6 +1840,7 @@ export function PolicyWorkflow({
     setJsonError("");
     setSubmitError("");
     setNotice("");
+    invalidateTransactionPreview();
   }
 
   const resultDecision = result?.decision;
@@ -1343,6 +1874,599 @@ export function PolicyWorkflow({
         </div>
       </div>
 
+      <section
+        className="policy-transaction"
+        aria-labelledby={`${titleId}-transaction`}
+      >
+        <div className="policy-transaction-heading">
+          <div>
+            <span>{label(locale, "policy.transaction.eyebrow")}</span>
+            <h3 id={`${titleId}-transaction`}>
+              {label(locale, "policy.transaction.title")}
+            </h3>
+            <p>{label(locale, "policy.transaction.description")}</p>
+          </div>
+          <div className="policy-heading-actions">
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={Boolean(
+                firstReason(
+                  pendingReason,
+                  pageReason,
+                  blockReasonText(
+                    getAction
+                      ? executionBlockReason(
+                          getAction,
+                          snapshot,
+                          selectedNetwork,
+                        )
+                      : "backend_unavailable",
+                    locale,
+                  ),
+                  !getAction && unavailableReason,
+                ),
+              )}
+              onClick={() => void loadPolicy()}
+            >
+              {busy === "load" ? (
+                <LoaderCircle className="spin" size={15} />
+              ) : (
+                <RefreshCw size={15} />
+              )}
+              {label(locale, "policy.transaction.reload")}
+            </button>
+          </div>
+        </div>
+
+        <div className="policy-transaction-note" role="note">
+          <ShieldAlert size={17} />
+          <span>{label(locale, "policy.transaction.complete_snapshot")}</span>
+        </div>
+
+        {transactionError ? (
+          <div className="inline-notice danger" role="alert">
+            <AlertTriangle size={16} />
+            <span>{transactionError}</span>
+          </div>
+        ) : null}
+        {notice ? (
+          <div className="inline-notice success" role="status">
+            <CheckCircle2 size={16} />
+            <span>{notice}</span>
+          </div>
+        ) : null}
+
+        <div className="policy-transaction-grid">
+          <section
+            className="policy-transaction-card"
+            aria-labelledby={`${titleId}-current`}
+          >
+            <div className="policy-subsection-heading">
+              <h4 id={`${titleId}-current`}>
+                <ShieldCheck size={16} />
+                {label(locale, "policy.current.title")}
+              </h4>
+              {current ? (
+                <span className="status-pill neutral">
+                  {tr(locale, "policy.current.revision", {
+                    revision: current.revision,
+                  })}
+                </span>
+              ) : null}
+            </div>
+            {busy === "load" && !current ? (
+              <div className="policy-transaction-empty" role="status">
+                <LoaderCircle className="spin" size={20} />
+                <p>{label(locale, "policy.current.loading")}</p>
+              </div>
+            ) : !current ? (
+              <div className="policy-transaction-empty">
+                <ShieldAlert size={20} />
+                <p>{label(locale, "policy.current.empty")}</p>
+              </div>
+            ) : (
+              <>
+                <dl className="policy-transaction-facts">
+                  <div>
+                    <dt>{label(locale, "policy.current.local_policy")}</dt>
+                    <dd>
+                      {current.snapshot.local_policy
+                        ? tr(locale, "policy.current.rules_count", {
+                            count:
+                              current.snapshot.local_policy.rules?.length ?? 0,
+                          })
+                        : label(locale, "policy.current.none")}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "policy.current.network_acls")}</dt>
+                    <dd>
+                      {current.snapshot.network_acls?.length
+                        ? current.snapshot.network_acls
+                            .map((entry) =>
+                              tr(locale, "policy.current.acl_revision", {
+                                network: entry.network_id,
+                                revision: entry.revision,
+                              }),
+                            )
+                            .join(" · ")
+                        : label(locale, "policy.current.none")}
+                    </dd>
+                  </div>
+                </dl>
+                <button
+                  className="secondary-button compact"
+                  type="button"
+                  onClick={loadCurrentIntoEditor}
+                >
+                  <FileJson size={14} />
+                  {label(locale, "policy.current.load_into_editor")}
+                </button>
+              </>
+            )}
+          </section>
+
+          <section
+            className="policy-transaction-card"
+            aria-labelledby={`${titleId}-preview`}
+          >
+            <div className="policy-subsection-heading">
+              <h4 id={`${titleId}-preview`}>
+                <GitCompare size={16} />
+                {label(locale, "policy.preview.title")}
+              </h4>
+              <button
+                className="primary-button compact"
+                type="button"
+                disabled={Boolean(previewReason)}
+                onClick={() => void previewDraft()}
+              >
+                {busy === "preview" ? (
+                  <LoaderCircle className="spin" size={15} />
+                ) : (
+                  <GitCompare size={15} />
+                )}
+                {label(locale, "policy.preview")}
+              </button>
+            </div>
+            {previewReason ? (
+              <small className="control-reason" role="status">
+                {previewReason}
+              </small>
+            ) : null}
+            {!preview ? (
+              <div className="policy-transaction-empty">
+                <GitCompare size={20} />
+                <p>{label(locale, "policy.preview.empty")}</p>
+              </div>
+            ) : (
+              <div className="policy-preview-body">
+                {preview.revision_conflict ? (
+                  <div className="inline-notice warning" role="alert">
+                    <ShieldAlert size={16} />
+                    <div>
+                      <strong>
+                        {label(locale, "policy.transaction.revision_conflict")}
+                      </strong>
+                      <p>
+                        {tr(
+                          locale,
+                          "policy.transaction.revision_conflict_detail",
+                          {
+                            expected: preview.expected_revision,
+                            current: preview.current_revision,
+                          },
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                ) : null}
+                {stalePreview ? (
+                  <div className="inline-notice warning" role="alert">
+                    <AlertTriangle size={16} />
+                    <span>
+                      {label(locale, "policy.transaction.stale_preview")}
+                    </span>
+                  </div>
+                ) : null}
+                <div className={`policy-risk risk-${preview.risk.level}`}>
+                  <div className="policy-risk-heading">
+                    <strong>{label(locale, "policy.risk.title")}</strong>
+                    <span className="status-pill neutral">
+                      {riskLevelText(locale, preview.risk)}
+                    </span>
+                  </div>
+                  {preview.risk.reasons.length ? (
+                    <ul>
+                      {preview.risk.reasons.map((reason) => (
+                        <li key={reason}>{riskReasonText(locale, reason)}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p>{label(locale, "policy.risk.none")}</p>
+                  )}
+                  <div className="policy-risk-flags">
+                    <span>
+                      {label(locale, "policy.risk.privilege_expansion")}:{" "}
+                      {preview.risk.privilege_expansion
+                        ? label(locale, "policy.yes")
+                        : label(locale, "policy.no")}
+                    </span>
+                    <span>
+                      {label(locale, "policy.risk.recent_authentication")}:{" "}
+                      {preview.risk.requires_recent_reauthentication
+                        ? label(locale, "policy.required")
+                        : label(locale, "policy.not_required")}
+                    </span>
+                  </div>
+                  {preview.risk.requires_explicit_confirmation ? (
+                    <label className="policy-check policy-risk-confirm">
+                      <input
+                        type="checkbox"
+                        checked={confirmPrivilegeExpansion}
+                        onChange={(event) =>
+                          setConfirmPrivilegeExpansion(event.target.checked)
+                        }
+                      />
+                      <span>
+                        {label(
+                          locale,
+                          "policy.transaction.confirm_privilege_expansion",
+                        )}
+                      </span>
+                    </label>
+                  ) : null}
+                </div>
+
+                {!preview.has_changes ? (
+                  <div className="inline-notice neutral" role="status">
+                    <CircleSlash2 size={16} />
+                    <span>
+                      {label(locale, "policy.transaction.no_changes")}
+                    </span>
+                  </div>
+                ) : null}
+
+                <div className="policy-transaction-summary">
+                  <span>
+                    {tr(locale, "policy.preview.diff_count", {
+                      count: preview.diffs.length,
+                    })}
+                  </span>
+                  <span>
+                    {label(locale, "policy.preview.network_scope")}:{" "}
+                    {preview.network_ids.length
+                      ? preview.network_ids.join(", ")
+                      : label(locale, "policy.current.none")}
+                  </span>
+                  <span>
+                    {label(locale, "policy.preview.includes_local")}:{" "}
+                    {preview.includes_local_policy
+                      ? label(locale, "policy.yes")
+                      : label(locale, "policy.no")}
+                  </span>
+                </div>
+
+                <section className="policy-affected">
+                  <h5>{label(locale, "policy.preview.affected_objects")}</h5>
+                  {preview.affected_objects.length ? (
+                    <ul>
+                      {preview.affected_objects.map((object, index) => (
+                        <li
+                          key={`${object.kind}:${object.network_id ?? ""}:${object.object_id ?? ""}:${index}`}
+                        >
+                          {affectedObjectText(locale, object)}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p>{label(locale, "policy.current.none")}</p>
+                  )}
+                </section>
+
+                <section className="policy-transaction-diffs">
+                  <h5>{label(locale, "policy.preview.diffs")}</h5>
+                  {preview.diffs.length === 0 ? (
+                    <p>{label(locale, "policy.transaction.no_changes")}</p>
+                  ) : (
+                    <ol>
+                      {preview.diffs.map((diff, index) => (
+                        <li key={`${diff.path}:${diff.change}:${index}`}>
+                          <div className="policy-diff-heading">
+                            <code>{diff.path}</code>
+                            <span>{diffChangeText(locale, diff.change)}</span>
+                          </div>
+                          <div className="policy-diff-values">
+                            <div>
+                              <span>{label(locale, "policy.diff.before")}</span>
+                              <pre>{policyJson(diff.before)}</pre>
+                            </div>
+                            <div>
+                              <span>{label(locale, "policy.diff.after")}</span>
+                              <pre>{policyJson(diff.after)}</pre>
+                            </div>
+                          </div>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                </section>
+
+                <details className="policy-candidate-json">
+                  <summary>{label(locale, "policy.preview.candidate")}</summary>
+                  <pre>{policyJson(preview.candidate)}</pre>
+                </details>
+
+                <div className="policy-transaction-actions">
+                  {rollbackPreview ? (
+                    <button
+                      className="danger-button"
+                      type="button"
+                      disabled={Boolean(rollbackReason)}
+                      onClick={() => setConfirmingRollback(true)}
+                    >
+                      <RotateCcw size={15} />
+                      {label(locale, "policy.rollback.execute")}
+                    </button>
+                  ) : (
+                    <button
+                      className="primary-button"
+                      type="button"
+                      disabled={Boolean(applyReason)}
+                      onClick={() => setConfirmingApply(true)}
+                    >
+                      <ShieldCheck size={15} />
+                      {label(locale, "policy.apply")}
+                    </button>
+                  )}
+                  {rollbackPreview ? (
+                    rollbackReason ? (
+                      <small className="control-reason" role="status">
+                        {rollbackReason}
+                      </small>
+                    ) : null
+                  ) : applyReason ? (
+                    <small className="control-reason" role="status">
+                      {applyReason}
+                    </small>
+                  ) : null}
+                </div>
+              </div>
+            )}
+          </section>
+
+          <section
+            className="policy-transaction-card"
+            aria-labelledby={`${titleId}-history`}
+          >
+            <div className="policy-subsection-heading">
+              <h4 id={`${titleId}-history`}>
+                <History size={16} />
+                {label(locale, "policy.history.title")}
+              </h4>
+              <button
+                className="secondary-button compact"
+                type="button"
+                disabled={Boolean(historyRefreshReason)}
+                onClick={() => void refreshHistory()}
+              >
+                {busy === "history" ? (
+                  <LoaderCircle className="spin" size={15} />
+                ) : (
+                  <RefreshCw size={15} />
+                )}
+                {label(locale, "policy.history.refresh")}
+              </button>
+            </div>
+            {historyError ? (
+              <div className="inline-notice danger" role="alert">
+                <AlertTriangle size={16} />
+                <span>{historyError}</span>
+              </div>
+            ) : !history ? (
+              <div className="policy-transaction-empty" role="status">
+                <History size={20} />
+                <p>{label(locale, "policy.history.empty")}</p>
+              </div>
+            ) : history.entries.length === 0 ? (
+              <div className="policy-transaction-empty">
+                <History size={20} />
+                <p>{label(locale, "policy.history.empty")}</p>
+              </div>
+            ) : (
+              <ol className="policy-history-list">
+                {history.entries.map((entry) => {
+                  const entryRollbackReason = firstReason(
+                    pendingReason,
+                    pageReason,
+                    blockReasonText(previewRollbackBlocked, locale),
+                    !previewRollbackAction && unavailableReason,
+                    !current &&
+                      label(locale, "policy.transaction.load_required"),
+                    Boolean(current && entry.revision === current.revision) &&
+                      label(locale, "policy.history.current"),
+                  );
+                  return (
+                    <li key={entry.transaction_id}>
+                      <div className="policy-history-summary">
+                        <div>
+                          <strong>
+                            {tr(locale, "policy.history.revision", {
+                              revision: entry.revision,
+                            })}
+                          </strong>
+                          <span>
+                            {label(
+                              locale,
+                              `policy.history.action.${entry.action}`,
+                            )}
+                            {entry.target_revision !== null &&
+                            entry.target_revision !== undefined
+                              ? ` · ${tr(locale, "policy.history.target", {
+                                  revision: entry.target_revision,
+                                })}`
+                              : ""}
+                          </span>
+                        </div>
+                        <span
+                          className={`status-pill risk-${entry.risk.level}`}
+                        >
+                          {riskLevelText(locale, entry.risk)}
+                        </span>
+                      </div>
+                      <div className="policy-history-meta">
+                        <span>
+                          <Clock3 size={13} />
+                          {timestampText(locale, entry.occurred_at)}
+                        </span>
+                        <span>{entry.source || entry.actor}</span>
+                      </div>
+                      <div className="policy-history-control">
+                        <button
+                          className="secondary-button compact"
+                          type="button"
+                          disabled={Boolean(entryRollbackReason)}
+                          onClick={() => void previewRollback(entry.revision)}
+                        >
+                          <RotateCcw size={14} />
+                          {label(locale, "policy.rollback.action")}
+                        </button>
+                        {entryRollbackReason ? (
+                          <small className="control-reason" role="status">
+                            {entryRollbackReason}
+                          </small>
+                        ) : null}
+                      </div>
+                      <details>
+                        <summary>
+                          {label(locale, "policy.history.details")}
+                        </summary>
+                        <dl className="policy-history-facts">
+                          <div>
+                            <dt>
+                              {label(locale, "policy.history.transaction_id")}
+                            </dt>
+                            <dd>
+                              <code>{entry.transaction_id}</code>
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>
+                              {label(
+                                locale,
+                                "policy.history.previous_revision",
+                              )}
+                            </dt>
+                            <dd>{entry.previous_revision}</dd>
+                          </div>
+                          <div>
+                            <dt>{label(locale, "policy.history.actor")}</dt>
+                            <dd>{entry.actor}</dd>
+                          </div>
+                          <div>
+                            <dt>
+                              {label(locale, "policy.preview.affected_objects")}
+                            </dt>
+                            <dd>
+                              {entry.affected_objects.length
+                                ? entry.affected_objects
+                                    .map((object) =>
+                                      affectedObjectText(locale, object),
+                                    )
+                                    .join(" · ")
+                                : label(locale, "policy.current.none")}
+                            </dd>
+                          </div>
+                        </dl>
+                        {entry.risk.reasons.length ? (
+                          <ul className="policy-history-reasons">
+                            {entry.risk.reasons.map((reason) => (
+                              <li key={reason}>
+                                {riskReasonText(locale, reason)}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
+                        <ol className="policy-history-diffs">
+                          {entry.diffs.map((diff, index) => (
+                            <li key={`${diff.path}:${diff.change}:${index}`}>
+                              <code>{diff.path}</code>
+                              <span>{diffChangeText(locale, diff.change)}</span>
+                            </li>
+                          ))}
+                        </ol>
+                      </details>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+          </section>
+        </div>
+
+        {applied ? (
+          <section className="policy-applied" aria-live="polite">
+            <div className="policy-subsection-heading">
+              <h4>
+                <CheckCircle2 size={16} />
+                {label(locale, "policy.applied.title")}
+              </h4>
+              <span className="status-pill success">
+                {tr(locale, "policy.applied.revision", {
+                  previous: applied.previous_revision,
+                  revision: applied.revision,
+                })}
+              </span>
+            </div>
+            {"audit" in applied && applied.audit ? (
+              <dl className="policy-history-facts">
+                <div>
+                  <dt>{label(locale, "policy.applied.transaction")}</dt>
+                  <dd>
+                    <code>{applied.audit.transaction_id}</code>
+                  </dd>
+                </div>
+                <div>
+                  <dt>{label(locale, "policy.applied.action")}</dt>
+                  <dd>
+                    {label(
+                      locale,
+                      `policy.history.action.${applied.audit.action}`,
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{label(locale, "policy.applied.affected_objects")}</dt>
+                  <dd>
+                    {applied.affected_objects.length
+                      ? applied.affected_objects
+                          .map((object) => affectedObjectText(locale, object))
+                          .join(" · ")
+                      : label(locale, "policy.current.none")}
+                  </dd>
+                </div>
+              </dl>
+            ) : (
+              <p>{label(locale, "policy.applied.no_changes")}</p>
+            )}
+            {applied.diffs.length ? (
+              <details>
+                <summary>{label(locale, "policy.applied.details")}</summary>
+                <ol className="policy-history-diffs">
+                  {applied.diffs.map((diff, index) => (
+                    <li key={`${diff.path}:${diff.change}:${index}`}>
+                      <code>{diff.path}</code>
+                      <span>{diffChangeText(locale, diff.change)}</span>
+                    </li>
+                  ))}
+                </ol>
+              </details>
+            ) : null}
+          </section>
+        ) : null}
+      </section>
+
       <div className="policy-workspace-grid">
         <form
           className="policy-editor-card"
@@ -1356,7 +2480,10 @@ export function PolicyWorkflow({
               <span>{label(locale, "policy.editor.eyebrow")}</span>
               <h3>{label(locale, "policy.editor.title")}</h3>
             </div>
-            <div className="policy-mode-switch" aria-label={label(locale, "policy.mode.label")}>
+            <div
+              className="policy-mode-switch"
+              aria-label={label(locale, "policy.mode.label")}
+            >
               <button
                 type="button"
                 className={mode === "structured" ? "active" : ""}
@@ -1382,35 +2509,53 @@ export function PolicyWorkflow({
               <p className="policy-editor-help">
                 {label(locale, "policy.editor.help")}
               </p>
-              <section className="policy-form-section" aria-labelledby={`${titleId}-context`}>
+              <section
+                className="policy-form-section"
+                aria-labelledby={`${titleId}-context`}
+              >
                 <h4 id={`${titleId}-context`}>
                   <ListChecks size={16} />
                   {label(locale, "policy.section.context")}
                 </h4>
                 <div className="policy-context-grid">
-                  <Field id="policy-network-id" labelText={label(locale, "policy.field.network_id")}>
+                  <Field
+                    id="policy-network-id"
+                    labelText={label(locale, "policy.field.network_id")}
+                  >
                     <input
                       id="policy-network-id"
                       value={structured.networkId}
                       spellCheck={false}
                       placeholder="net_..."
                       onChange={(event) =>
-                        updateStructured({ ...structured, networkId: event.target.value })
+                        updateStructured({
+                          ...structured,
+                          networkId: event.target.value,
+                        })
                       }
                     />
                   </Field>
-                  <Field id="policy-actor" labelText={label(locale, "policy.field.actor")}>
+                  <Field
+                    id="policy-actor"
+                    labelText={label(locale, "policy.field.actor")}
+                  >
                     <input
                       id="policy-actor"
                       value={structured.actor}
                       spellCheck={false}
                       placeholder="node_..."
                       onChange={(event) =>
-                        updateStructured({ ...structured, actor: event.target.value })
+                        updateStructured({
+                          ...structured,
+                          actor: event.target.value,
+                        })
                       }
                     />
                   </Field>
-                  <Field id="policy-role" labelText={label(locale, "policy.field.role")}>
+                  <Field
+                    id="policy-role"
+                    labelText={label(locale, "policy.field.role")}
+                  >
                     <select
                       id="policy-role"
                       value={structured.role}
@@ -1418,7 +2563,8 @@ export function PolicyWorkflow({
                         updateStructured({
                           ...structured,
                           role: event.target.value as NetworkRole,
-                          emergencyCoordinator: event.target.value === "temporary_coordinator",
+                          emergencyCoordinator:
+                            event.target.value === "temporary_coordinator",
                         })
                       }
                     >
@@ -1429,23 +2575,35 @@ export function PolicyWorkflow({
                       ))}
                     </select>
                   </Field>
-                  <Field id="policy-groups" labelText={label(locale, "policy.field.groups")}>
+                  <Field
+                    id="policy-groups"
+                    labelText={label(locale, "policy.field.groups")}
+                  >
                     <input
                       id="policy-groups"
                       value={structured.groups}
                       placeholder="group_..."
                       onChange={(event) =>
-                        updateStructured({ ...structured, groups: event.target.value })
+                        updateStructured({
+                          ...structured,
+                          groups: event.target.value,
+                        })
                       }
                     />
                   </Field>
-                  <Field id="policy-now" labelText={label(locale, "policy.field.now_unix_ms")}>
+                  <Field
+                    id="policy-now"
+                    labelText={label(locale, "policy.field.now_unix_ms")}
+                  >
                     <input
                       id="policy-now"
                       inputMode="numeric"
                       value={structured.nowUnixMs}
                       onChange={(event) =>
-                        updateStructured({ ...structured, nowUnixMs: event.target.value })
+                        updateStructured({
+                          ...structured,
+                          nowUnixMs: event.target.value,
+                        })
                       }
                     />
                   </Field>
@@ -1462,7 +2620,9 @@ export function PolicyWorkflow({
                         })
                       }
                     />
-                    <span>{label(locale, "policy.field.membership_active")}</span>
+                    <span>
+                      {label(locale, "policy.field.membership_active")}
+                    </span>
                   </label>
                   <label className="policy-check">
                     <input
@@ -1475,7 +2635,9 @@ export function PolicyWorkflow({
                         })
                       }
                     />
-                    <span>{label(locale, "policy.field.recent_reauthentication")}</span>
+                    <span>
+                      {label(locale, "policy.field.recent_reauthentication")}
+                    </span>
                   </label>
                   <label className="policy-check">
                     <input
@@ -1488,18 +2650,26 @@ export function PolicyWorkflow({
                         })
                       }
                     />
-                    <span>{label(locale, "policy.field.emergency_coordinator")}</span>
+                    <span>
+                      {label(locale, "policy.field.emergency_coordinator")}
+                    </span>
                   </label>
                 </div>
               </section>
 
-              <section className="policy-form-section" aria-labelledby={`${titleId}-request`}>
+              <section
+                className="policy-form-section"
+                aria-labelledby={`${titleId}-request`}
+              >
                 <h4 id={`${titleId}-request`}>
                   <Gavel size={16} />
                   {label(locale, "policy.section.request")}
                 </h4>
                 <div className="policy-context-grid">
-                  <Field id="policy-action" labelText={label(locale, "policy.field.action")}>
+                  <Field
+                    id="policy-action"
+                    labelText={label(locale, "policy.field.action")}
+                  >
                     <select
                       id="policy-action"
                       value={structured.action}
@@ -1517,7 +2687,10 @@ export function PolicyWorkflow({
                       ))}
                     </select>
                   </Field>
-                  <Field id="policy-resource" labelText={label(locale, "policy.field.resource")}>
+                  <Field
+                    id="policy-resource"
+                    labelText={label(locale, "policy.field.resource")}
+                  >
                     <select
                       id="policy-resource"
                       value={structured.resource}
@@ -1537,7 +2710,10 @@ export function PolicyWorkflow({
                   </Field>
                   <Field
                     id="policy-resource-network"
-                    labelText={label(locale, "policy.field.resource_network_id")}
+                    labelText={label(
+                      locale,
+                      "policy.field.resource_network_id",
+                    )}
                   >
                     <input
                       id="policy-resource-network"
@@ -1551,7 +2727,10 @@ export function PolicyWorkflow({
                       }
                     />
                   </Field>
-                  <Field id="policy-object-id" labelText={label(locale, "policy.field.object_id")}>
+                  <Field
+                    id="policy-object-id"
+                    labelText={label(locale, "policy.field.object_id")}
+                  >
                     <input
                       id="policy-object-id"
                       value={structured.objectId}
@@ -1563,7 +2742,10 @@ export function PolicyWorkflow({
                       }
                     />
                   </Field>
-                  <Field id="policy-intent" labelText={label(locale, "policy.field.intent")}>
+                  <Field
+                    id="policy-intent"
+                    labelText={label(locale, "policy.field.intent")}
+                  >
                     <select
                       id="policy-intent"
                       value={structured.intent}
@@ -1584,7 +2766,10 @@ export function PolicyWorkflow({
                 </div>
               </section>
 
-              <section className="policy-form-section" aria-labelledby={`${titleId}-local`}>
+              <section
+                className="policy-form-section"
+                aria-labelledby={`${titleId}-local`}
+              >
                 <div className="policy-section-subheading">
                   <h4 id={`${titleId}-local`}>
                     <ShieldAlert size={16} />
@@ -1607,7 +2792,10 @@ export function PolicyWorkflow({
                 {structured.includeLocalPolicy ? (
                   <>
                     <div className="policy-context-grid policy-metadata-grid">
-                      <Field id="policy-local-revision" labelText={label(locale, "policy.field.local_revision")}>
+                      <Field
+                        id="policy-local-revision"
+                        labelText={label(locale, "policy.field.local_revision")}
+                      >
                         <input
                           id="policy-local-revision"
                           inputMode="numeric"
@@ -1620,7 +2808,13 @@ export function PolicyWorkflow({
                           }
                         />
                       </Field>
-                      <Field id="policy-local-issued" labelText={label(locale, "policy.field.issued_at_unix_ms")}>
+                      <Field
+                        id="policy-local-issued"
+                        labelText={label(
+                          locale,
+                          "policy.field.issued_at_unix_ms",
+                        )}
+                      >
                         <input
                           id="policy-local-issued"
                           inputMode="numeric"
@@ -1633,7 +2827,13 @@ export function PolicyWorkflow({
                           }
                         />
                       </Field>
-                      <Field id="policy-local-expires" labelText={label(locale, "policy.field.expires_at_unix_ms")}>
+                      <Field
+                        id="policy-local-expires"
+                        labelText={label(
+                          locale,
+                          "policy.field.expires_at_unix_ms",
+                        )}
+                      >
                         <input
                           id="policy-local-expires"
                           inputMode="numeric"
@@ -1646,23 +2846,34 @@ export function PolicyWorkflow({
                           }
                         />
                       </Field>
-                      <Field id="policy-local-scope" labelText={label(locale, "policy.field.network_scope")}>
+                      <Field
+                        id="policy-local-scope"
+                        labelText={label(locale, "policy.field.network_scope")}
+                      >
                         <select
                           id="policy-local-scope"
                           value={structured.networkScopeKind}
                           onChange={(event) =>
                             updateStructured({
                               ...structured,
-                              networkScopeKind: event.target.value as "all" | "only",
+                              networkScopeKind: event.target.value as
+                                "all" | "only",
                             })
                           }
                         >
-                          <option value="all">{label(locale, "policy.scope.all")}</option>
-                          <option value="only">{label(locale, "policy.scope.only")}</option>
+                          <option value="all">
+                            {label(locale, "policy.scope.all")}
+                          </option>
+                          <option value="only">
+                            {label(locale, "policy.scope.only")}
+                          </option>
                         </select>
                       </Field>
                       {structured.networkScopeKind === "only" ? (
-                        <Field id="policy-local-network-ids" labelText={label(locale, "policy.field.network_ids")}>
+                        <Field
+                          id="policy-local-network-ids"
+                          labelText={label(locale, "policy.field.network_ids")}
+                        >
                           <input
                             id="policy-local-network-ids"
                             value={structured.networkIds}
@@ -1678,7 +2889,11 @@ export function PolicyWorkflow({
                     </div>
                     <div className="policy-list-heading">
                       <h5>{label(locale, "policy.section.rules")}</h5>
-                      <button className="secondary-button compact" type="button" onClick={() => addRule("local")}>
+                      <button
+                        className="secondary-button compact"
+                        type="button"
+                        onClick={() => addRule("local")}
+                      >
                         <Plus size={14} />
                         {label(locale, "policy.add.rule")}
                       </button>
@@ -1698,10 +2913,19 @@ export function PolicyWorkflow({
                     </div>
                     <div className="policy-list-heading">
                       <h5>{label(locale, "policy.section.vetoes")}</h5>
-                      <button className="secondary-button compact" type="button" onClick={() => updateStructured({
-                        ...structured,
-                        vetoes: [...structured.vetoes, emptyVeto(structured.vetoes.length)],
-                      })}>
+                      <button
+                        className="secondary-button compact"
+                        type="button"
+                        onClick={() =>
+                          updateStructured({
+                            ...structured,
+                            vetoes: [
+                              ...structured.vetoes,
+                              emptyVeto(structured.vetoes.length),
+                            ],
+                          })
+                        }
+                      >
                         <Plus size={14} />
                         {label(locale, "policy.add.veto")}
                       </button>
@@ -1716,15 +2940,18 @@ export function PolicyWorkflow({
                           onChange={(next) =>
                             updateStructured({
                               ...structured,
-                              vetoes: structured.vetoes.map((entry, vetoIndex) =>
-                                vetoIndex === index ? next : entry,
+                              vetoes: structured.vetoes.map(
+                                (entry, vetoIndex) =>
+                                  vetoIndex === index ? next : entry,
                               ),
                             })
                           }
                           onRemove={() =>
                             updateStructured({
                               ...structured,
-                              vetoes: structured.vetoes.filter((_, vetoIndex) => vetoIndex !== index),
+                              vetoes: structured.vetoes.filter(
+                                (_, vetoIndex) => vetoIndex !== index,
+                              ),
                             })
                           }
                         />
@@ -1734,7 +2961,10 @@ export function PolicyWorkflow({
                 ) : null}
               </section>
 
-              <section className="policy-form-section" aria-labelledby={`${titleId}-acl`}>
+              <section
+                className="policy-form-section"
+                aria-labelledby={`${titleId}-acl`}
+              >
                 <div className="policy-section-subheading">
                   <h4 id={`${titleId}-acl`}>
                     <GitBranch size={16} />
@@ -1757,7 +2987,10 @@ export function PolicyWorkflow({
                 {structured.includeNetworkAcl ? (
                   <>
                     <div className="policy-context-grid policy-metadata-grid">
-                      <Field id="policy-acl-revision" labelText={label(locale, "policy.field.acl_revision")}>
+                      <Field
+                        id="policy-acl-revision"
+                        labelText={label(locale, "policy.field.acl_revision")}
+                      >
                         <input
                           id="policy-acl-revision"
                           inputMode="numeric"
@@ -1770,7 +3003,13 @@ export function PolicyWorkflow({
                           }
                         />
                       </Field>
-                      <Field id="policy-acl-issued" labelText={label(locale, "policy.field.issued_at_unix_ms")}>
+                      <Field
+                        id="policy-acl-issued"
+                        labelText={label(
+                          locale,
+                          "policy.field.issued_at_unix_ms",
+                        )}
+                      >
                         <input
                           id="policy-acl-issued"
                           inputMode="numeric"
@@ -1783,7 +3022,13 @@ export function PolicyWorkflow({
                           }
                         />
                       </Field>
-                      <Field id="policy-acl-expires" labelText={label(locale, "policy.field.expires_at_unix_ms")}>
+                      <Field
+                        id="policy-acl-expires"
+                        labelText={label(
+                          locale,
+                          "policy.field.expires_at_unix_ms",
+                        )}
+                      >
                         <input
                           id="policy-acl-expires"
                           inputMode="numeric"
@@ -1799,7 +3044,11 @@ export function PolicyWorkflow({
                     </div>
                     <div className="policy-list-heading">
                       <h5>{label(locale, "policy.section.rules")}</h5>
-                      <button className="secondary-button compact" type="button" onClick={() => addRule("acl")}>
+                      <button
+                        className="secondary-button compact"
+                        type="button"
+                        onClick={() => addRule("acl")}
+                      >
                         <Plus size={14} />
                         {label(locale, "policy.add.rule")}
                       </button>
@@ -1819,13 +3068,22 @@ export function PolicyWorkflow({
                     </div>
                     <div className="policy-list-heading">
                       <h5>{label(locale, "policy.section.grants")}</h5>
-                      <button className="secondary-button compact" type="button" onClick={() => updateStructured({
-                        ...structured,
-                        grants: [
-                          ...structured.grants,
-                          emptyGrant(structured.grants.length, Number(structured.nowUnixMs)),
-                        ],
-                      })}>
+                      <button
+                        className="secondary-button compact"
+                        type="button"
+                        onClick={() =>
+                          updateStructured({
+                            ...structured,
+                            grants: [
+                              ...structured.grants,
+                              emptyGrant(
+                                structured.grants.length,
+                                Number(structured.nowUnixMs),
+                              ),
+                            ],
+                          })
+                        }
+                      >
                         <Plus size={14} />
                         {label(locale, "policy.add.grant")}
                       </button>
@@ -1840,15 +3098,18 @@ export function PolicyWorkflow({
                           onChange={(next) =>
                             updateStructured({
                               ...structured,
-                              grants: structured.grants.map((entry, grantIndex) =>
-                                grantIndex === index ? next : entry,
+                              grants: structured.grants.map(
+                                (entry, grantIndex) =>
+                                  grantIndex === index ? next : entry,
                               ),
                             })
                           }
                           onRemove={() =>
                             updateStructured({
                               ...structured,
-                              grants: structured.grants.filter((_, grantIndex) => grantIndex !== index),
+                              grants: structured.grants.filter(
+                                (_, grantIndex) => grantIndex !== index,
+                              ),
                             })
                           }
                         />
@@ -1879,7 +3140,11 @@ export function PolicyWorkflow({
                 onChange={(event) => changeAdvanced(event.target.value)}
               />
               {jsonError ? (
-                <p id={editorErrorId} className="policy-json-error" role="alert">
+                <p
+                  id={editorErrorId}
+                  className="policy-json-error"
+                  role="alert"
+                >
                   <AlertTriangle size={15} />
                   <span>{jsonError}</span>
                   {activeIssuePath ? <code>{activeIssuePath}</code> : null}
@@ -1898,7 +3163,9 @@ export function PolicyWorkflow({
                 </span>
               ) : null}
               {runReason ? (
-                <small className="control-reason" role="status">{runReason}</small>
+                <small className="control-reason" role="status">
+                  {runReason}
+                </small>
               ) : null}
             </div>
             <div className="policy-submit-actions">
@@ -1943,8 +3210,14 @@ export function PolicyWorkflow({
               <h3>{label(locale, "policy.result.title")}</h3>
             </div>
             {resultDecision ? (
-              <span className={`policy-decision-pill ${resultDecision.allowed ? "allowed" : "denied"}`}>
-                {resultDecision.allowed ? <CheckCircle2 size={15} /> : <ShieldAlert size={15} />}
+              <span
+                className={`policy-decision-pill ${resultDecision.allowed ? "allowed" : "denied"}`}
+              >
+                {resultDecision.allowed ? (
+                  <CheckCircle2 size={15} />
+                ) : (
+                  <ShieldAlert size={15} />
+                )}
                 {label(
                   locale,
                   resultDecision.allowed
@@ -1962,9 +3235,15 @@ export function PolicyWorkflow({
             </div>
           ) : (
             <div className="policy-result-content">
-              <div className={`policy-decision ${resultDecision.allowed ? "allowed" : "denied"}`}>
+              <div
+                className={`policy-decision ${resultDecision.allowed ? "allowed" : "denied"}`}
+              >
                 <div className="policy-decision-title">
-                  {resultDecision.allowed ? <CheckCircle2 size={22} /> : <ShieldAlert size={22} />}
+                  {resultDecision.allowed ? (
+                    <CheckCircle2 size={22} />
+                  ) : (
+                    <ShieldAlert size={22} />
+                  )}
                   <strong>
                     {label(
                       locale,
@@ -1973,28 +3252,47 @@ export function PolicyWorkflow({
                         : "policy.result.denied",
                     )}
                   </strong>
-                  <span>{choice(locale, "policy.choice.reason", resultDecision.reason)}</span>
+                  <span>
+                    {choice(
+                      locale,
+                      "policy.choice.reason",
+                      resultDecision.reason,
+                    )}
+                  </span>
                 </div>
                 <dl className="policy-decision-grid">
                   <div>
                     <dt>{label(locale, "policy.result.code")}</dt>
-                    <dd><code>{resultDecision.code ?? "—"}</code></dd>
+                    <dd>
+                      <code>{resultDecision.code ?? "—"}</code>
+                    </dd>
                   </div>
                   <div>
                     <dt>{label(locale, "policy.result.layer")}</dt>
                     <dd>
                       {resultDecision.layer
-                        ? choice(locale, "policy.choice.layer", resultDecision.layer)
+                        ? choice(
+                            locale,
+                            "policy.choice.layer",
+                            resultDecision.layer,
+                          )
                         : "—"}
                     </dd>
                   </div>
                   <div>
                     <dt>{label(locale, "policy.result.rule")}</dt>
-                    <dd><code>{resultDecision.rule_id ?? "—"}</code></dd>
+                    <dd>
+                      <code>{resultDecision.rule_id ?? "—"}</code>
+                    </dd>
                   </div>
                   <div>
                     <dt>{label(locale, "policy.result.evaluated_at")}</dt>
-                    <dd>{formatTimestamp(locale, resultDecision.evaluated_at_unix_ms)}</dd>
+                    <dd>
+                      {formatTimestamp(
+                        locale,
+                        resultDecision.evaluated_at_unix_ms,
+                      )}
+                    </dd>
                   </div>
                   <div>
                     <dt>{label(locale, "policy.result.local_revision")}</dt>
@@ -2018,16 +3316,31 @@ export function PolicyWorkflow({
                 </dl>
                 <div className="policy-grant-row">
                   <span>
-                    <strong>{label(locale, "policy.result.expired_grants")}</strong>
-                    <code>{grantList(locale, resultDecision.expired_grant_ids)}</code>
+                    <strong>
+                      {label(locale, "policy.result.expired_grants")}
+                    </strong>
+                    <code>
+                      {grantList(locale, resultDecision.expired_grant_ids)}
+                    </code>
                   </span>
                   <span>
-                    <strong>{label(locale, "policy.result.revoked_grants")}</strong>
-                    <code>{grantList(locale, resultDecision.revoked_grant_ids)}</code>
+                    <strong>
+                      {label(locale, "policy.result.revoked_grants")}
+                    </strong>
+                    <code>
+                      {grantList(locale, resultDecision.revoked_grant_ids)}
+                    </code>
                   </span>
                   <span>
-                    <strong>{label(locale, "policy.result.reauth_grants")}</strong>
-                    <code>{grantList(locale, resultDecision.reauthentication_required_grant_ids)}</code>
+                    <strong>
+                      {label(locale, "policy.result.reauth_grants")}
+                    </strong>
+                    <code>
+                      {grantList(
+                        locale,
+                        resultDecision.reauthentication_required_grant_ids,
+                      )}
+                    </code>
                   </span>
                 </div>
               </div>
@@ -2039,10 +3352,14 @@ export function PolicyWorkflow({
                 </div>
                 <ul>
                   <li>{label(locale, "policy.deny_priority.local_veto")}</li>
-                  <li>{label(locale, "policy.deny_priority.expired_revoked")}</li>
+                  <li>
+                    {label(locale, "policy.deny_priority.expired_revoked")}
+                  </li>
                   <li>{label(locale, "policy.deny_priority.temporary")}</li>
                   <li>{label(locale, "policy.deny_priority.network_scope")}</li>
-                  <li>{label(locale, "policy.deny_priority.no_recommendation")}</li>
+                  <li>
+                    {label(locale, "policy.deny_priority.no_recommendation")}
+                  </li>
                 </ul>
               </section>
 
@@ -2064,17 +3381,28 @@ export function PolicyWorkflow({
                     {result.validation_issues.map((issue, index) => (
                       <li
                         key={`${issue.path}:${issue.code}:${index}`}
-                        className={activeIssuePath === issue.path ? "active" : ""}
+                        className={
+                          activeIssuePath === issue.path ? "active" : ""
+                        }
                       >
-                        <button type="button" onClick={() => focusPath(issue.path)}>
+                        <button
+                          type="button"
+                          onClick={() => focusPath(issue.path)}
+                        >
                           <span className="policy-validation-source">
-                            {choice(locale, "policy.validation.source", issue.source)}
+                            {choice(
+                              locale,
+                              "policy.validation.source",
+                              issue.source,
+                            )}
                           </span>
                           <code>{issue.path || "/"}</code>
                           <strong>{issue.message}</strong>
                           <small>
                             {issue.code}
-                            {issue.related_rule_id ? ` · ${issue.related_rule_id}` : ""}
+                            {issue.related_rule_id
+                              ? ` · ${issue.related_rule_id}`
+                              : ""}
                           </small>
                           <span className="policy-validation-focus">
                             {label(locale, "policy.validation.focus")}
@@ -2098,13 +3426,21 @@ export function PolicyWorkflow({
                       className={entry.triggered ? "triggered" : ""}
                     >
                       <span className="policy-precedence-index">
-                        {result.precedence.findIndex((item) => item.precedence === entry.precedence) + 1}
+                        {result.precedence.findIndex(
+                          (item) => item.precedence === entry.precedence,
+                        ) + 1}
                       </span>
                       <span>
-                        {choice(locale, "policy.choice.precedence", entry.precedence)}
+                        {choice(
+                          locale,
+                          "policy.choice.precedence",
+                          entry.precedence,
+                        )}
                       </span>
                       {entry.source ? (
-                        <small>{choice(locale, "policy.choice.source", entry.source)}</small>
+                        <small>
+                          {choice(locale, "policy.choice.source", entry.source)}
+                        </small>
                       ) : null}
                       {entry.rule_id ? <code>{entry.rule_id}</code> : null}
                     </li>
@@ -2138,6 +3474,183 @@ export function PolicyWorkflow({
           )}
         </aside>
       </div>
+
+      <Dialog.Root open={confirmingApply} onOpenChange={setConfirmingApply}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content confirm-dialog">
+            <div className="dialog-heading">
+              <div className="dialog-icon danger">
+                <ShieldCheck size={20} />
+              </div>
+              <div>
+                <Dialog.Title>
+                  {label(locale, "confirm.apply_policy.title")}
+                </Dialog.Title>
+                <Dialog.Description>
+                  {label(locale, "confirm.apply_policy.consequence")}
+                </Dialog.Description>
+              </div>
+            </div>
+            {preview ? (
+              <dl className="dialog-facts">
+                <div>
+                  <dt>{label(locale, "policy.current.title")}</dt>
+                  <dd>
+                    {tr(locale, "policy.current.revision", {
+                      revision: preview.expected_revision,
+                    })}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{label(locale, "policy.preview.diffs")}</dt>
+                  <dd>{preview.diffs.length}</dd>
+                </div>
+                <div>
+                  <dt>{label(locale, "policy.preview.affected_objects")}</dt>
+                  <dd>{preview.affected_objects.length}</dd>
+                </div>
+                <div>
+                  <dt>{label(locale, "policy.risk.title")}</dt>
+                  <dd>
+                    {riskLevelText(locale, preview.risk)}
+                    {preview.risk.reasons.length
+                      ? ` · ${preview.risk.reasons
+                          .map((reason) => riskReasonText(locale, reason))
+                          .join(" · ")}`
+                      : ""}
+                  </dd>
+                </div>
+              </dl>
+            ) : null}
+            <div className="dialog-actions">
+              <Dialog.Close asChild>
+                <button className="secondary-button" type="button">
+                  {label(locale, "common.cancel")}
+                </button>
+              </Dialog.Close>
+              <div className="configuration-control dialog-control">
+                <button
+                  className="danger-button"
+                  type="button"
+                  disabled={!canApply || Boolean(applyReason)}
+                  onClick={() => void applyPreview()}
+                >
+                  {label(locale, "confirm.apply_policy.action")}
+                </button>
+                {applyReason ? (
+                  <small className="control-reason" role="status">
+                    {applyReason}
+                  </small>
+                ) : null}
+              </div>
+            </div>
+            <Dialog.Close asChild>
+              <button
+                className="icon-button dialog-close"
+                type="button"
+                aria-label={label(locale, "common.close")}
+              >
+                <X size={17} />
+              </button>
+            </Dialog.Close>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root
+        open={confirmingRollback}
+        onOpenChange={setConfirmingRollback}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content confirm-dialog">
+            <div className="dialog-heading">
+              <div className="dialog-icon danger">
+                <RotateCcw size={20} />
+              </div>
+              <div>
+                <Dialog.Title>
+                  {label(locale, "confirm.rollback_policy.title")}
+                </Dialog.Title>
+                <Dialog.Description>
+                  {label(locale, "confirm.rollback_policy.consequence")}
+                </Dialog.Description>
+              </div>
+            </div>
+            {preview ? (
+              <dl className="dialog-facts">
+                <div>
+                  <dt>{label(locale, "policy.current.title")}</dt>
+                  <dd>
+                    {tr(locale, "policy.current.revision", {
+                      revision: preview.expected_revision,
+                    })}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{label(locale, "policy.rollback.action")}</dt>
+                  <dd>
+                    {tr(locale, "policy.history.target", {
+                      revision: preview.rollback_target_revision ?? 0,
+                    })}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{label(locale, "policy.preview.diffs")}</dt>
+                  <dd>{preview.diffs.length}</dd>
+                </div>
+                <div>
+                  <dt>{label(locale, "policy.risk.title")}</dt>
+                  <dd>
+                    {riskLevelText(locale, preview.risk)}
+                    {preview.risk.reasons.length
+                      ? ` · ${preview.risk.reasons
+                          .map((reason) => riskReasonText(locale, reason))
+                          .join(" · ")}`
+                      : ""}
+                  </dd>
+                </div>
+              </dl>
+            ) : null}
+            <div className="inline-notice warning" role="note">
+              <AlertTriangle size={16} />
+              <span>{label(locale, "policy.rollback.new_revision")}</span>
+            </div>
+            <div className="dialog-actions">
+              <Dialog.Close asChild>
+                <button className="secondary-button" type="button">
+                  {label(locale, "common.cancel")}
+                </button>
+              </Dialog.Close>
+              <div className="configuration-control dialog-control">
+                <button
+                  className="danger-button"
+                  type="button"
+                  disabled={!canRollback || Boolean(rollbackReason)}
+                  onClick={() => void rollbackPreviewed()}
+                >
+                  {label(locale, "confirm.rollback_policy.action")}
+                </button>
+                {rollbackReason ? (
+                  <small className="control-reason" role="status">
+                    {rollbackReason}
+                  </small>
+                ) : null}
+              </div>
+            </div>
+            <Dialog.Close asChild>
+              <button
+                className="icon-button dialog-close"
+                type="button"
+                aria-label={label(locale, "common.close")}
+              >
+                <X size={17} />
+              </button>
+            </Dialog.Close>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </section>
   );
 }

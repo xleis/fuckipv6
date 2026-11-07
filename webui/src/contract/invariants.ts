@@ -14,6 +14,19 @@ import type {
   NetworkProfileApplyResult,
   NetworkProfilePreview,
   NodeOperationSnapshot,
+  PolicyAffectedObject,
+  PolicyApplyResult,
+  PolicyCurrent,
+  PolicyDiffEntry,
+  PolicyHistoryEntry,
+  PolicyHistorySnapshot,
+  PolicyObjectKind,
+  PolicyPreview,
+  PolicyRiskLevel,
+  PolicyRiskReason,
+  PolicyRiskSummary,
+  PolicyRollbackResult,
+  PolicySnapshot,
   NodeProblem,
   NodeSnapshot,
   NodeUiAction,
@@ -27,8 +40,10 @@ import type {
 } from "../../../contracts/typescript/node-contract-v1";
 import { ContractError } from "../api/client";
 import {
+  parsePolicySnapshotJson,
   parsePolicyTestInputJson,
   PolicyJsonError,
+  validatePolicySnapshot,
   validatePolicyTestResult,
 } from "./policy-test";
 
@@ -136,6 +151,12 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   rollback_configuration: "rollback_configuration",
   get_configuration_history: "get_configuration_history",
   test_policy: "test_policy",
+  get_policy: "get_policy",
+  preview_policy: "preview_policy",
+  preview_policy_rollback: "preview_policy_rollback",
+  apply_policy: "apply_policy",
+  rollback_policy: "rollback_policy",
+  get_policy_history: "get_policy_history",
   shutdown_node: "shutdown",
 };
 
@@ -206,6 +227,8 @@ const INPUT_KINDS = new Set([
   "revision",
   "configuration_json",
   "policy_json",
+  "policy_snapshot_json",
+  "policy_network_ids",
   "display_name",
   "fingerprint",
   "discovery_index_url",
@@ -224,6 +247,8 @@ const VALIDATIONS = new Set([
   "revision",
   "configuration_json",
   "policy_json",
+  "policy_snapshot_json",
+  "policy_network_ids",
   "display_name",
   "fingerprint",
   "network_purpose",
@@ -279,6 +304,11 @@ const OUTCOME_STATUSES = new Set([
   "configuration_preview",
   "configuration_applied",
   "configuration_history",
+  "policy",
+  "policy_preview",
+  "policy_applied",
+  "policy_history",
+  "policy_rolled_back",
   "policy_test",
   "identity_rotated",
   "accepted",
@@ -365,6 +395,54 @@ const TUN_CAPABILITY_REASONS = new Set([
   "tool_unavailable",
   "unknown",
 ]);
+
+const POLICY_OBJECT_KINDS = new Set<PolicyObjectKind>([
+  "local_policy",
+  "network_acl",
+  "permission_rule",
+  "network_acl_grant",
+  "contribution_veto",
+  "network_scope",
+]);
+const POLICY_CHANGE_KINDS = new Set<string>([
+  "local_policy_added",
+  "local_policy_updated",
+  "local_policy_removed",
+  "network_acl_added",
+  "network_acl_updated",
+  "network_acl_removed",
+  "permission_rule_added",
+  "permission_rule_updated",
+  "permission_rule_removed",
+  "grant_added",
+  "grant_updated",
+  "grant_removed",
+  "veto_added",
+  "veto_updated",
+  "veto_removed",
+  "network_scope_changed",
+  "validity_changed",
+]);
+const POLICY_RISK_LEVELS = new Set<PolicyRiskLevel>([
+  "none",
+  "elevated",
+  "high",
+]);
+const POLICY_RISK_REASONS = new Set<PolicyRiskReason>([
+  "allow_rule_added",
+  "deny_rule_removed",
+  "permission_rule_expanded",
+  "network_acl_grant_added",
+  "network_acl_grant_expanded",
+  "grant_reauthentication_removed",
+  "grant_validity_extended",
+  "local_policy_removed",
+  "network_acl_removed",
+  "network_scope_expanded",
+  "contribution_veto_removed",
+  "policy_validity_extended",
+]);
+const POLICY_CHANGE_ACTIONS = new Set(["apply", "rollback"]);
 
 export type ActionValues = Record<string, string | boolean>;
 export type BlockReason = NodeUiActionBlockReason;
@@ -1017,6 +1095,26 @@ function splitNames(value: string | boolean | undefined): string[] {
     .filter(Boolean);
 }
 
+function policyNetworkIds(
+  value: string | boolean | undefined,
+  locale: Locale,
+): string[] {
+  const ids = String(value ?? "")
+    .split(/[,\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const seen = new Set<string>();
+  for (const id of ids) {
+    if (!/^net_[A-Za-z0-9_-]{43}$/.test(id) || seen.has(id)) {
+      throw new Error(label(locale, "validation.policy_network_ids_invalid"));
+    }
+    seen.add(id);
+  }
+  if (ids.length === 0)
+    throw new Error(label(locale, "validation.policy_network_ids_required"));
+  return ids;
+}
+
 function networkSelection(
   value: string | boolean | undefined,
 ): NodeNetworkSelection {
@@ -1161,6 +1259,185 @@ function configurationHistory(value: unknown): ConfigurationHistoryEntry[] {
     }
   }
   return value as ConfigurationHistoryEntry[];
+}
+
+function policySnapshot(value: unknown): PolicySnapshot {
+  try {
+    return validatePolicySnapshot(value);
+  } catch (error) {
+    fail(error instanceof Error ? error.message : "policy snapshot invalid");
+  }
+}
+
+function policyAffectedObjects(value: unknown): PolicyAffectedObject[] {
+  for (const entry of arrayValue(value, "policy affected objects invalid")) {
+    if (
+      !record(entry) ||
+      !POLICY_OBJECT_KINDS.has(entry.kind as PolicyObjectKind)
+    ) {
+      fail("policy affected object invalid");
+    }
+    if (entry.network_id !== undefined && entry.network_id !== null)
+      stringValue(entry.network_id, "policy affected network id invalid", true);
+    if (entry.object_id !== undefined && entry.object_id !== null)
+      stringValue(entry.object_id, "policy affected object id invalid", true);
+  }
+  return value as PolicyAffectedObject[];
+}
+
+function policyDiffs(value: unknown): PolicyDiffEntry[] {
+  for (const entry of arrayValue(value, "policy diff entries invalid")) {
+    if (!record(entry)) fail("policy diff entry invalid");
+    stringValue(entry.path, "policy diff path invalid", true);
+    if (!POLICY_CHANGE_KINDS.has(String(entry.change)))
+      fail("policy diff change invalid");
+  }
+  return value as PolicyDiffEntry[];
+}
+
+function policyRisk(value: unknown): PolicyRiskSummary {
+  if (!record(value)) fail("policy risk summary invalid");
+  if (!POLICY_RISK_LEVELS.has(value.level as PolicyRiskLevel))
+    fail("policy risk level invalid");
+  for (const reason of arrayValue(value.reasons, "policy risk reasons invalid"))
+    if (!POLICY_RISK_REASONS.has(reason as PolicyRiskReason))
+      fail("policy risk reason invalid");
+  booleanValueRaw(
+    value.privilege_expansion,
+    "policy privilege expansion flag invalid",
+  );
+  booleanValueRaw(
+    value.requires_explicit_confirmation,
+    "policy explicit confirmation flag invalid",
+  );
+  booleanValueRaw(
+    value.requires_recent_reauthentication,
+    "policy recent authentication flag invalid",
+  );
+  return value as PolicyRiskSummary;
+}
+
+function policyCurrent(value: unknown): PolicyCurrent {
+  if (!record(value)) fail("current policy invalid");
+  nonNegativeInteger(value.revision, "current policy revision invalid");
+  policySnapshot(value.snapshot);
+  return value as PolicyCurrent;
+}
+
+function policyPreview(value: unknown): PolicyPreview {
+  if (!record(value)) fail("policy preview invalid");
+  nonNegativeInteger(
+    value.expected_revision,
+    "policy expected revision invalid",
+  );
+  nonNegativeInteger(value.current_revision, "policy current revision invalid");
+  policySnapshot(value.current);
+  policySnapshot(value.candidate);
+  policyDiffs(value.diffs);
+  policyAffectedObjects(value.affected_objects);
+  policyRisk(value.risk);
+  for (const networkId of stringArray(
+    value.network_ids,
+    "policy network ids invalid",
+  )) {
+    if (!/^net_[A-Za-z0-9_-]{43}$/.test(networkId))
+      fail("policy network id invalid");
+  }
+  for (const field of [
+    "can_apply",
+    "has_changes",
+    "includes_local_policy",
+    "revision_conflict",
+  ] as const)
+    booleanValueRaw(value[field], `policy ${field} flag invalid`);
+  if (
+    value.rollback_target_revision !== undefined &&
+    value.rollback_target_revision !== null
+  )
+    nonNegativeInteger(
+      value.rollback_target_revision,
+      "policy rollback target invalid",
+    );
+  return value as PolicyPreview;
+}
+
+function policyHistoryEntry(value: unknown): PolicyHistoryEntry {
+  if (!record(value)) fail("policy history entry invalid");
+  if (!POLICY_CHANGE_ACTIONS.has(String(value.action)))
+    fail("policy history action invalid");
+  stringValue(value.actor, "policy history actor invalid", true);
+  stringValue(value.source, "policy history source invalid", true);
+  stringValue(value.transaction_id, "policy transaction id invalid", true);
+  stringValue(value.occurred_at, "policy history timestamp invalid", true);
+  nonNegativeInteger(
+    value.previous_revision,
+    "policy previous revision invalid",
+  );
+  nonNegativeInteger(value.revision, "policy history revision invalid");
+  policyDiffs(value.diffs);
+  policyAffectedObjects(value.affected_objects);
+  policyRisk(value.risk);
+  if (!record(value.network_acl_revisions))
+    fail("policy ACL revisions invalid");
+  for (const revision of Object.values(value.network_acl_revisions))
+    nonNegativeInteger(revision, "policy ACL revision invalid");
+  for (const field of ["local_policy_revision", "target_revision"] as const) {
+    if (value[field] !== undefined && value[field] !== null)
+      nonNegativeInteger(value[field], `policy ${field} invalid`);
+  }
+  return value as PolicyHistoryEntry;
+}
+
+function policyHistory(value: unknown): PolicyHistorySnapshot {
+  if (!record(value)) fail("policy history invalid");
+  nonNegativeInteger(value.current_revision, "policy history revision invalid");
+  for (const entry of arrayValue(
+    value.entries,
+    "policy history entries invalid",
+  ))
+    policyHistoryEntry(entry);
+  return value as PolicyHistorySnapshot;
+}
+
+function policyApplied(value: unknown): PolicyApplyResult {
+  if (!record(value)) fail("policy apply result invalid");
+  nonNegativeInteger(
+    value.previous_revision,
+    "policy previous revision invalid",
+  );
+  nonNegativeInteger(value.revision, "policy applied revision invalid");
+  policySnapshot(value.snapshot);
+  policyDiffs(value.diffs);
+  policyAffectedObjects(value.affected_objects);
+  policyRisk(value.risk);
+  const noOp = booleanValueRaw(value.no_op, "policy no-op flag invalid");
+  if (noOp && value.revision !== value.previous_revision)
+    fail("policy no-op moved revision");
+  if (noOp && value.audit !== undefined && value.audit !== null)
+    fail("policy no-op unexpectedly has audit");
+  if (!noOp && (!record(value.audit) || value.audit === null))
+    fail("policy apply is missing audit");
+  if (record(value.audit)) policyHistoryEntry(value.audit);
+  return value as PolicyApplyResult;
+}
+
+function policyRolledBack(value: unknown): PolicyRollbackResult {
+  if (!record(value)) fail("policy rollback result invalid");
+  nonNegativeInteger(
+    value.previous_revision,
+    "policy previous revision invalid",
+  );
+  nonNegativeInteger(value.revision, "policy rolled back revision invalid");
+  nonNegativeInteger(value.target_revision, "policy rollback target invalid");
+  policySnapshot(value.snapshot);
+  policyDiffs(value.diffs);
+  policyAffectedObjects(value.affected_objects);
+  policyRisk(value.risk);
+  if (!record(value.audit)) fail("policy rollback is missing audit");
+  const audit = policyHistoryEntry(value.audit);
+  if (audit.action !== "rollback")
+    fail("policy rollback audit action mismatch");
+  return value as PolicyRollbackResult;
 }
 
 function stringArray(value: unknown, message: string): string[] {
@@ -1598,6 +1875,18 @@ export function validateActionValues(
         parsePolicyTestInputJson(String(value));
       } catch (error) {
         errors.push(policyJsonErrorText(error, locale));
+      }
+    } else if (field.validation === "policy_snapshot_json") {
+      try {
+        parsePolicySnapshotJson(String(value));
+      } catch (error) {
+        errors.push(policyJsonErrorText(error, locale));
+      }
+    } else if (field.validation === "policy_network_ids") {
+      try {
+        policyNetworkIds(value, locale);
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : String(error));
       }
     } else if (field.validation === "display_name") {
       const displayName = String(value).trim();
@@ -2230,6 +2519,96 @@ export function buildCommand(
       } catch (error) {
         throw new Error(policyJsonErrorText(error, locale));
       }
+    case "get_policy":
+      return { command: "get_policy" };
+    case "preview_policy":
+      try {
+        return {
+          command: "preview_policy",
+          payload: {
+            expected_revision: revisionValue(
+              requireValue("expected_revision"),
+              label(locale, "field.expected_revision"),
+              locale,
+            ),
+            candidate: parsePolicySnapshotJson(
+              requiredString("candidate_json"),
+            ),
+          },
+        };
+      } catch (error) {
+        throw new Error(policyJsonErrorText(error, locale));
+      }
+    case "preview_policy_rollback":
+      return {
+        command: "preview_policy_rollback",
+        payload: {
+          expected_revision: revisionValue(
+            requireValue("expected_revision"),
+            label(locale, "field.expected_revision"),
+            locale,
+          ),
+          target_revision: revisionValue(
+            requireValue("target_revision"),
+            label(locale, "field.target_revision"),
+            locale,
+          ),
+        },
+      };
+    case "apply_policy":
+      try {
+        return {
+          command: "apply_policy",
+          payload: {
+            expected_revision: revisionValue(
+              requireValue("expected_revision"),
+              label(locale, "field.expected_revision"),
+              locale,
+            ),
+            candidate: parsePolicySnapshotJson(
+              requiredString("candidate_json"),
+            ),
+            network_ids: policyNetworkIds(requireValue("network_ids"), locale),
+            includes_local_policy: booleanValue(
+              requireValue("includes_local_policy"),
+              locale,
+            ),
+            confirm_privilege_expansion: booleanValue(
+              requireValue("confirm_privilege_expansion"),
+              locale,
+            ),
+          },
+        };
+      } catch (error) {
+        throw new Error(policyJsonErrorText(error, locale));
+      }
+    case "rollback_policy":
+      return {
+        command: "rollback_policy",
+        payload: {
+          expected_revision: revisionValue(
+            requireValue("expected_revision"),
+            label(locale, "field.expected_revision"),
+            locale,
+          ),
+          target_revision: revisionValue(
+            requireValue("target_revision"),
+            label(locale, "field.target_revision"),
+            locale,
+          ),
+          network_ids: policyNetworkIds(requireValue("network_ids"), locale),
+          includes_local_policy: booleanValue(
+            requireValue("includes_local_policy"),
+            locale,
+          ),
+          confirm_privilege_expansion: booleanValue(
+            requireValue("confirm_privilege_expansion"),
+            locale,
+          ),
+        },
+      };
+    case "get_policy_history":
+      return { command: "get_policy_history" };
     case "start_node":
       return { command: "start_node" };
     case "stop_node":
@@ -2290,7 +2669,11 @@ function optionalNullableInteger(value: unknown, message: string): void {
 
 function memberRemovalPreview(value: unknown): void {
   if (!record(value)) fail("member removal preview invalid");
-  stringValue(value.network_id, "member removal preview network id invalid", true);
+  stringValue(
+    value.network_id,
+    "member removal preview network id invalid",
+    true,
+  );
   stringValue(
     value.target_node_id,
     "member removal preview target node id invalid",
@@ -2301,8 +2684,7 @@ function memberRemovalPreview(value: unknown): void {
     "member removal preview role invalid",
     true,
   );
-  if (!MEMBERSHIP_ROLES.has(role))
-    fail("member removal preview role invalid");
+  if (!MEMBERSHIP_ROLES.has(role)) fail("member removal preview role invalid");
   const status = stringValue(
     value.status,
     "member removal preview status invalid",
@@ -2317,16 +2699,12 @@ function memberRemovalPreview(value: unknown): void {
   );
   if (!MEMBER_LIFECYCLE_STATUSES.has(lifecycleState))
     fail("member removal preview lifecycle state invalid");
-  nonNegativeInteger(
-    value.revision,
-    "member removal preview revision invalid",
-  );
+  nonNegativeInteger(value.revision, "member removal preview revision invalid");
   nonNegativeInteger(
     value.access_epoch,
     "member removal preview access epoch invalid",
   );
-  if (!record(value.presence))
-    fail("member removal preview presence invalid");
+  if (!record(value.presence)) fail("member removal preview presence invalid");
   stringValue(
     value.presence.state,
     "member removal preview presence state invalid",
@@ -2415,12 +2793,18 @@ function memberLifecycleChange(value: unknown): void {
   if (!MEMBER_LIFECYCLE_STATUSES.has(status))
     fail("member lifecycle status invalid");
   nonNegativeInteger(value.revision, "member lifecycle revision invalid");
-  if (Number(value.revision) < 1)
-    fail("member lifecycle revision invalid");
-  nonNegativeInteger(value.access_epoch, "member lifecycle access epoch invalid");
+  if (Number(value.revision) < 1) fail("member lifecycle revision invalid");
+  nonNegativeInteger(
+    value.access_epoch,
+    "member lifecycle access epoch invalid",
+  );
   if (Number(value.access_epoch) < 1)
     fail("member lifecycle access epoch invalid");
-  stringValue(value.operation_id, "member lifecycle operation id invalid", true);
+  stringValue(
+    value.operation_id,
+    "member lifecycle operation id invalid",
+    true,
+  );
   stringValue(value.audit_id, "member lifecycle audit id invalid", true);
   for (const flag of [
     "idempotent",
@@ -2546,7 +2930,8 @@ function memberDirectory(value: unknown): NetworkMemberDirectory {
         return value;
       });
       unique(actions, `member ${index} available action`);
-      if (!canManage) fail(`member ${index} exposes actions without governance`);
+      if (!canManage)
+        fail(`member ${index} exposes actions without governance`);
     }
 
     if (!record(entry.presence)) fail(`member ${index} presence invalid`);
@@ -2611,8 +2996,12 @@ export function validateCommandOutcome(value: unknown): NodeCommandOutcome {
     configurationApplied(outcome.data);
   if (outcome.status === "configuration_history")
     configurationHistory(outcome.data);
-  if (outcome.status === "policy_test")
-    validatePolicyTestResult(outcome.data);
+  if (outcome.status === "policy_test") validatePolicyTestResult(outcome.data);
+  if (outcome.status === "policy") policyCurrent(outcome.data);
+  if (outcome.status === "policy_preview") policyPreview(outcome.data);
+  if (outcome.status === "policy_applied") policyApplied(outcome.data);
+  if (outcome.status === "policy_history") policyHistory(outcome.data);
+  if (outcome.status === "policy_rolled_back") policyRolledBack(outcome.data);
   if (outcome.status === "network_profile_preview")
     networkProfilePreview(outcome.data);
   if (outcome.status === "network_profile_updated")
@@ -2756,6 +3145,51 @@ export function outcomeSummary(
   if (outcome.status === "configuration_history") {
     return i18n().tr(locale, "outcome.configuration_history", {
       count: i18n().formatInteger(locale, outcome.data.length),
+    });
+  }
+  if (outcome.status === "policy") {
+    return i18n().tr(locale, "outcome.policy_loaded", {
+      revision: i18n().formatInteger(locale, outcome.data.revision),
+    });
+  }
+  if (outcome.status === "policy_preview") {
+    return i18n().tr(
+      locale,
+      outcome.data.revision_conflict
+        ? "outcome.policy_preview_conflict"
+        : "outcome.policy_previewed",
+      {
+        revision: i18n().formatInteger(locale, outcome.data.current_revision),
+        changes: i18n().formatInteger(locale, outcome.data.diffs.length),
+        objects: i18n().formatInteger(
+          locale,
+          outcome.data.affected_objects.length,
+        ),
+      },
+    );
+  }
+  if (outcome.status === "policy_applied") {
+    return i18n().tr(
+      locale,
+      outcome.data.no_op
+        ? "outcome.policy_unchanged"
+        : "outcome.policy_applied",
+      {
+        previous: i18n().formatInteger(locale, outcome.data.previous_revision),
+        revision: i18n().formatInteger(locale, outcome.data.revision),
+      },
+    );
+  }
+  if (outcome.status === "policy_history") {
+    return i18n().tr(locale, "outcome.policy_history", {
+      count: i18n().formatInteger(locale, outcome.data.entries.length),
+      revision: i18n().formatInteger(locale, outcome.data.current_revision),
+    });
+  }
+  if (outcome.status === "policy_rolled_back") {
+    return i18n().tr(locale, "outcome.policy_rolled_back", {
+      target: i18n().formatInteger(locale, outcome.data.target_revision),
+      revision: i18n().formatInteger(locale, outcome.data.revision),
     });
   }
   if (outcome.status === "policy_test") {

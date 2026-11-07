@@ -33,6 +33,7 @@ mod network_setup;
 pub mod node;
 pub mod owner_security;
 pub mod p2p;
+pub mod policy_transaction;
 pub mod remote_node;
 pub mod routing;
 pub mod runtime_process;

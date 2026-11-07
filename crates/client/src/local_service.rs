@@ -517,6 +517,12 @@ fn command_timeout(command: &crate::node::NodeCommand) -> Duration {
         | NodeCommandKind::ApplyConfiguration
         | NodeCommandKind::RollbackConfiguration
         | NodeCommandKind::GetConfigurationHistory
+        | NodeCommandKind::GetPolicy
+        | NodeCommandKind::PreviewPolicy
+        | NodeCommandKind::PreviewPolicyRollback
+        | NodeCommandKind::ApplyPolicy
+        | NodeCommandKind::RollbackPolicy
+        | NodeCommandKind::GetPolicyHistory
         | NodeCommandKind::TestPolicy => COMMAND_TIMEOUT,
     }
 }

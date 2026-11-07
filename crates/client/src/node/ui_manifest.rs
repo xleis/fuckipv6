@@ -418,6 +418,10 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         | NodeCommandKind::GetInvitationStatus
         | NodeCommandKind::PreviewInvitation
         | NodeCommandKind::GetConfigurationHistory
+        | NodeCommandKind::GetPolicy
+        | NodeCommandKind::PreviewPolicy
+        | NodeCommandKind::PreviewPolicyRollback
+        | NodeCommandKind::GetPolicyHistory
         | NodeCommandKind::TestPolicy => NodeUiAudit::none(),
         NodeCommandKind::CreateNetwork => NodeUiAudit::record("network.create"),
         NodeCommandKind::UpdateNetworkProfile => NodeUiAudit::record("network.profile.update"),
@@ -473,6 +477,8 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         NodeCommandKind::CleanupResiduals => NodeUiAudit::record("node.cleanup_residuals"),
         NodeCommandKind::ApplyConfiguration => NodeUiAudit::record("configuration.apply"),
         NodeCommandKind::RollbackConfiguration => NodeUiAudit::record("configuration.rollback"),
+        NodeCommandKind::ApplyPolicy => NodeUiAudit::record("policy.apply"),
+        NodeCommandKind::RollbackPolicy => NodeUiAudit::record("policy.rollback"),
         NodeCommandKind::Shutdown => NodeUiAudit::record("node.shutdown"),
     }
 }
@@ -502,6 +508,8 @@ pub enum NodeUiInputKind {
     ClientId,
     ConfigurationJson,
     PolicyJson,
+    PolicySnapshotJson,
+    PolicyNetworkIds,
     DisplayName,
     ExternalHost,
     Fingerprint,
@@ -554,6 +562,8 @@ pub enum NodeUiValidation {
     Revision,
     ConfigurationJson,
     PolicyJson,
+    PolicySnapshotJson,
+    PolicyNetworkIds,
     DisplayName,
     Fingerprint,
     NetworkPurpose,
@@ -2338,6 +2348,178 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         None,
                     ),
                     action(
+                        "get_policy",
+                        "action.get_policy",
+                        NodeCommandKind::GetPolicy,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::Always,
+                        vec![],
+                        None,
+                    ),
+                    action(
+                        "preview_policy",
+                        "action.preview_policy",
+                        NodeCommandKind::PreviewPolicy,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::Always,
+                        vec![
+                            field(
+                                "expected_revision",
+                                "field.expected_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "candidate_json",
+                                "field.policy_candidate_json",
+                                NodeUiInputKind::PolicySnapshotJson,
+                                true,
+                                NodeUiValidation::PolicySnapshotJson,
+                            ),
+                        ],
+                        None,
+                    ),
+                    action(
+                        "preview_policy_rollback",
+                        "action.preview_policy_rollback",
+                        NodeCommandKind::PreviewPolicyRollback,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::Always,
+                        vec![
+                            field(
+                                "expected_revision",
+                                "field.expected_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "target_revision",
+                                "field.target_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                        ],
+                        None,
+                    ),
+                    action(
+                        "apply_policy",
+                        "action.apply_policy",
+                        NodeCommandKind::ApplyPolicy,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::Always,
+                        vec![
+                            field(
+                                "expected_revision",
+                                "field.expected_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "candidate_json",
+                                "field.policy_candidate_json",
+                                NodeUiInputKind::PolicySnapshotJson,
+                                true,
+                                NodeUiValidation::PolicySnapshotJson,
+                            ),
+                            field(
+                                "network_ids",
+                                "field.policy_network_ids",
+                                NodeUiInputKind::PolicyNetworkIds,
+                                true,
+                                NodeUiValidation::PolicyNetworkIds,
+                            ),
+                            field(
+                                "includes_local_policy",
+                                "field.policy_includes_local",
+                                NodeUiInputKind::Boolean,
+                                true,
+                                NodeUiValidation::None,
+                            ),
+                            field(
+                                "confirm_privilege_expansion",
+                                "field.policy_confirm_privilege_expansion",
+                                NodeUiInputKind::Boolean,
+                                true,
+                                NodeUiValidation::None,
+                            ),
+                        ],
+                        Some(confirmation(
+                            NodeCommandKind::ApplyPolicy,
+                            "confirm.apply_policy.title",
+                            "confirm.apply_policy.consequence",
+                            true,
+                        )),
+                    ),
+                    action(
+                        "rollback_policy",
+                        "action.rollback_policy",
+                        NodeCommandKind::RollbackPolicy,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::Always,
+                        vec![
+                            field(
+                                "expected_revision",
+                                "field.expected_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "target_revision",
+                                "field.target_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "network_ids",
+                                "field.policy_network_ids",
+                                NodeUiInputKind::PolicyNetworkIds,
+                                true,
+                                NodeUiValidation::PolicyNetworkIds,
+                            ),
+                            field(
+                                "includes_local_policy",
+                                "field.policy_includes_local",
+                                NodeUiInputKind::Boolean,
+                                true,
+                                NodeUiValidation::None,
+                            ),
+                            field(
+                                "confirm_privilege_expansion",
+                                "field.policy_confirm_privilege_expansion",
+                                NodeUiInputKind::Boolean,
+                                true,
+                                NodeUiValidation::None,
+                            ),
+                        ],
+                        Some(confirmation(
+                            NodeCommandKind::RollbackPolicy,
+                            "confirm.rollback_policy.title",
+                            "confirm.rollback_policy.consequence",
+                            true,
+                        )),
+                    ),
+                    action(
+                        "get_policy_history",
+                        "action.get_policy_history",
+                        NodeCommandKind::GetPolicyHistory,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::Always,
+                        vec![],
+                        None,
+                    ),
+                    action(
                         "shutdown_node",
                         "action.shutdown_node",
                         NodeCommandKind::Shutdown,
@@ -2913,6 +3095,59 @@ mod tests {
             crate::node::audit_for_command(NodeCommandKind::TestPolicy),
             NodeUiAudit::none()
         );
+    }
+
+    #[test]
+    fn policy_transaction_actions_publish_scope_auth_and_audit_contracts() {
+        let manifest = node_ui_manifest();
+        let action = |command| {
+            manifest
+                .pages
+                .iter()
+                .flat_map(|page| &page.actions)
+                .find(|action| action.command == command)
+                .expect("policy transaction action")
+        };
+
+        for command in [
+            NodeCommandKind::GetPolicy,
+            NodeCommandKind::PreviewPolicy,
+            NodeCommandKind::PreviewPolicyRollback,
+            NodeCommandKind::GetPolicyHistory,
+        ] {
+            let action = action(command);
+            assert_eq!(action.permission, NodePermission::ViewState);
+            assert_eq!(crate::node::audit_for_command(command), NodeUiAudit::none());
+        }
+
+        let preview = action(NodeCommandKind::PreviewPolicy);
+        assert_eq!(preview.fields.len(), 2);
+        assert_eq!(preview.fields[1].input, NodeUiInputKind::PolicySnapshotJson);
+        assert_eq!(
+            preview.fields[1].validation,
+            NodeUiValidation::PolicySnapshotJson
+        );
+
+        for (command, audit) in [
+            (NodeCommandKind::ApplyPolicy, "policy.apply"),
+            (NodeCommandKind::RollbackPolicy, "policy.rollback"),
+        ] {
+            let action = action(command);
+            assert_eq!(action.permission, NodePermission::ManageNetworks);
+            let confirmation = action.confirmation.as_ref().expect("confirmation");
+            assert!(confirmation.destructive);
+            assert!(confirmation.recent_authentication_required);
+            assert_eq!(
+                crate::node::audit_for_command(command).action.as_deref(),
+                Some(audit)
+            );
+            assert!(action
+                .fields
+                .iter()
+                .any(|field| field.id == "confirm_privilege_expansion"));
+            assert!(action.fields.iter().any(|field| field.id == "network_ids"
+                && field.validation == NodeUiValidation::PolicyNetworkIds));
+        }
     }
 
     #[test]

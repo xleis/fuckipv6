@@ -614,6 +614,39 @@
       ],
       "type": "object"
     },
+    "NodeApplyPolicyCommand": {
+      "properties": {
+        "candidate": {
+          "$ref": "#/$defs/PolicySnapshot"
+        },
+        "confirm_privilege_expansion": {
+          "default": false,
+          "description": "Explicit acknowledgement of the high-risk privilege-expansion summary.",
+          "type": "boolean"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "includes_local_policy": {
+          "default": false,
+          "type": "boolean"
+        },
+        "network_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "candidate"
+      ],
+      "type": "object"
+    },
     "NodeBatchReviewJoinRequestsCommand": {
       "properties": {
         "network_id": {
@@ -1244,6 +1277,43 @@
       ],
       "type": "object"
     },
+    "NodePreviewPolicyCommand": {
+      "description": "A complete normalized policy snapshot. The server computes the actual\naffected scope so the caller can review it before supplying the scope to an\napply command.",
+      "properties": {
+        "candidate": {
+          "$ref": "#/$defs/PolicySnapshot"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "candidate"
+      ],
+      "type": "object"
+    },
+    "NodePreviewPolicyRollbackCommand": {
+      "properties": {
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "target_revision"
+      ],
+      "type": "object"
+    },
     "NodeProbePeerCommand": {
       "properties": {
         "network_name": {
@@ -1348,6 +1418,40 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "target_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "target_revision"
+      ],
+      "type": "object"
+    },
+    "NodeRollbackPolicyCommand": {
+      "properties": {
+        "confirm_privilege_expansion": {
+          "default": false,
+          "type": "boolean"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "includes_local_policy": {
+          "default": false,
+          "type": "boolean"
+        },
+        "network_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "target_revision": {
           "format": "uint64",
@@ -1612,6 +1716,28 @@
         "test"
       ],
       "type": "string"
+    },
+    "PolicySnapshot": {
+      "description": "Complete policy documents governed by one optimistic transaction. Network\nACLs are normalized by stable network ID and never by caller-selected order.",
+      "properties": {
+        "local_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeLocalAccessPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "network_acls": {
+          "items": {
+            "$ref": "#/$defs/NetworkAcl"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
     },
     "PolicyTestInput": {
       "additionalProperties": false,
@@ -2750,6 +2876,100 @@
       "properties": {
         "command": {
           "const": "get_configuration_history",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Current authoritative policy revision and normalized policy snapshot.",
+      "properties": {
+        "command": {
+          "const": "get_policy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Compute a policy diff and risk summary without writing it.",
+      "properties": {
+        "command": {
+          "const": "preview_policy",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodePreviewPolicyCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Compute the diff and risk for restoring a previous revision without writing it.",
+      "properties": {
+        "command": {
+          "const": "preview_policy_rollback",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodePreviewPolicyRollbackCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Atomically replace the complete policy snapshot under one revision.",
+      "properties": {
+        "command": {
+          "const": "apply_policy",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeApplyPolicyCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Restore a previous policy generation as a new auditable revision.",
+      "properties": {
+        "command": {
+          "const": "rollback_policy",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeRollbackPolicyCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Append-only policy revision history, newest first.",
+      "properties": {
+        "command": {
+          "const": "get_policy_history",
           "type": "string"
         }
       },

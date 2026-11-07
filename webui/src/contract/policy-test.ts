@@ -17,6 +17,7 @@ import type {
   PolicyPrecedenceExplanation,
   PolicyRuleExplanation,
   PolicyRuleSource,
+  PolicySnapshot,
   PolicyTestInput,
   PolicyTestRequest,
   PolicyTestResult,
@@ -141,6 +142,7 @@ const ROOT_FIELDS = new Set([
   "network_acl",
   "now_unix_ms",
 ]);
+const SNAPSHOT_FIELDS = new Set(["local_policy", "network_acls"]);
 const REQUEST_FIELDS = new Set([
   "action",
   "resource",
@@ -351,6 +353,40 @@ export function parsePolicyTestInputJson(source: string): PolicyTestInput {
     fail("/", error instanceof Error ? error.message : String(error));
   }
   return policyTestInputAt(parsed, "");
+}
+
+/**
+ * Strictly parse the complete policy transaction document. Unknown fields,
+ * duplicate keys, and trailing input fail closed before a preview is requested.
+ */
+export function parsePolicySnapshotJson(source: string): PolicySnapshot {
+  const duplicatePath = duplicateObjectKeyPath(source);
+  if (duplicatePath !== null)
+    fail(duplicatePath, "duplicate field is not allowed");
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(source);
+  } catch (error) {
+    fail("/", error instanceof Error ? error.message : String(error));
+  }
+  return validatePolicySnapshot(parsed);
+}
+
+export function validatePolicySnapshot(value: unknown): PolicySnapshot {
+  const snapshot = objectAt(value, "", SNAPSHOT_FIELDS, []);
+  if (snapshot.local_policy !== undefined && snapshot.local_policy !== null)
+    localPolicyAt(snapshot.local_policy, "/local_policy");
+  if (snapshot.network_acls !== undefined) {
+    const networkIds = new Set<string>();
+    arrayAt(snapshot.network_acls, "/network_acls").forEach((acl, index) => {
+      const parsed = networkAclAt(acl, `/network_acls/${index}`);
+      if (networkIds.has(parsed.network_id))
+        fail(`/network_acls/${index}/network_id`, "duplicate network ACL");
+      networkIds.add(parsed.network_id);
+    });
+  }
+  return value as PolicySnapshot;
 }
 
 export function validatePolicyTestResult(value: unknown): PolicyTestResult {

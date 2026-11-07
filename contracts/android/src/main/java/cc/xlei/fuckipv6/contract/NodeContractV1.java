@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitNodeCapabilities", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyPrecedenceExplanation", "PolicyRuleExplanation", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitNodeCapabilities", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeApplyPolicyCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodePreviewPolicyCommand", "NodePreviewPolicyRollbackCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRollbackPolicyCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyAffectedObject", "PolicyApplyResult", "PolicyCurrent", "PolicyDiffEntry", "PolicyHistoryEntry", "PolicyHistorySnapshot", "PolicyPrecedenceExplanation", "PolicyPreview", "PolicyRiskSummary", "PolicyRollbackResult", "PolicyRuleExplanation", "PolicySnapshot", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector"
     };
 
     public enum AclAction {
@@ -994,6 +994,7 @@ public final class NodeContractV1 {
     public enum NodeCommandKind {
         ACKNOWLEDGE_MEMBERSHIP_POLICY("acknowledge_membership_policy"),
         APPLY_CONFIGURATION("apply_configuration"),
+        APPLY_POLICY("apply_policy"),
         BAN_CLIENT("ban_client"),
         BATCH_REVIEW_JOIN_REQUESTS("batch_review_join_requests"),
         CHANGE_MEMBER_LIFECYCLE("change_member_lifecycle"),
@@ -1006,6 +1007,8 @@ public final class NodeContractV1 {
         GET_INVITATION_STATUS("get_invitation_status"),
         GET_NETWORK_ALLOCATION("get_network_allocation"),
         GET_NODE_DIAGNOSTICS("get_node_diagnostics"),
+        GET_POLICY("get_policy"),
+        GET_POLICY_HISTORY("get_policy_history"),
         GET_SNAPSHOT("get_snapshot"),
         GET_UI_MANIFEST("get_ui_manifest"),
         JOIN_NETWORK("join_network"),
@@ -1018,6 +1021,8 @@ public final class NodeContractV1 {
         PREVIEW_JOIN_NETWORK("preview_join_network"),
         PREVIEW_MEMBER_REMOVAL("preview_member_removal"),
         PREVIEW_NETWORK_PROFILE("preview_network_profile"),
+        PREVIEW_POLICY("preview_policy"),
+        PREVIEW_POLICY_ROLLBACK("preview_policy_rollback"),
         PROBE_PEER("probe_peer"),
         PUBLISH_NETWORK_DISCOVERY("publish_network_discovery"),
         REBUILD_TUN("rebuild_tun"),
@@ -1030,6 +1035,7 @@ public final class NodeContractV1 {
         REVIEW_JOIN_REQUEST("review_join_request"),
         REVOKE_INVITATION("revoke_invitation"),
         ROLLBACK_CONFIGURATION("rollback_configuration"),
+        ROLLBACK_POLICY("rollback_policy"),
         ROTATE_NODE_IDENTITY("rotate_node_identity"),
         SET_NETWORK_ROLE("set_network_role"),
         SET_NODE_DISPLAY_NAME("set_node_display_name"),
@@ -1793,6 +1799,8 @@ public final class NodeContractV1 {
         CLIENT_ID("client_id"),
         CONFIGURATION_JSON("configuration_json"),
         POLICY_JSON("policy_json"),
+        POLICY_SNAPSHOT_JSON("policy_snapshot_json"),
+        POLICY_NETWORK_IDS("policy_network_ids"),
         DISPLAY_NAME("display_name"),
         EXTERNAL_HOST("external_host"),
         FINGERPRINT("fingerprint"),
@@ -1897,6 +1905,8 @@ public final class NodeContractV1 {
         REVISION("revision"),
         CONFIGURATION_JSON("configuration_json"),
         POLICY_JSON("policy_json"),
+        POLICY_SNAPSHOT_JSON("policy_snapshot_json"),
+        POLICY_NETWORK_IDS("policy_network_ids"),
         DISPLAY_NAME("display_name"),
         FINGERPRINT("fingerprint"),
         NETWORK_PURPOSE("network_purpose"),
@@ -2172,6 +2182,97 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum PolicyChangeAction {
+        APPLY("apply"),
+        ROLLBACK("rollback");
+
+        private final String wireName;
+
+        PolicyChangeAction(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static PolicyChangeAction fromWireName(String value) {
+            for (PolicyChangeAction candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown PolicyChangeAction wire value: " + value);
+        }
+    }
+
+    public enum PolicyChangeKind {
+        LOCAL_POLICY_ADDED("local_policy_added"),
+        LOCAL_POLICY_UPDATED("local_policy_updated"),
+        LOCAL_POLICY_REMOVED("local_policy_removed"),
+        NETWORK_ACL_ADDED("network_acl_added"),
+        NETWORK_ACL_UPDATED("network_acl_updated"),
+        NETWORK_ACL_REMOVED("network_acl_removed"),
+        PERMISSION_RULE_ADDED("permission_rule_added"),
+        PERMISSION_RULE_UPDATED("permission_rule_updated"),
+        PERMISSION_RULE_REMOVED("permission_rule_removed"),
+        GRANT_ADDED("grant_added"),
+        GRANT_UPDATED("grant_updated"),
+        GRANT_REMOVED("grant_removed"),
+        VETO_ADDED("veto_added"),
+        VETO_UPDATED("veto_updated"),
+        VETO_REMOVED("veto_removed"),
+        NETWORK_SCOPE_CHANGED("network_scope_changed"),
+        VALIDITY_CHANGED("validity_changed");
+
+        private final String wireName;
+
+        PolicyChangeKind(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static PolicyChangeKind fromWireName(String value) {
+            for (PolicyChangeKind candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown PolicyChangeKind wire value: " + value);
+        }
+    }
+
+    public enum PolicyObjectKind {
+        LOCAL_POLICY("local_policy"),
+        NETWORK_ACL("network_acl"),
+        PERMISSION_RULE("permission_rule"),
+        NETWORK_ACL_GRANT("network_acl_grant"),
+        CONTRIBUTION_VETO("contribution_veto"),
+        NETWORK_SCOPE("network_scope");
+
+        private final String wireName;
+
+        PolicyObjectKind(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static PolicyObjectKind fromWireName(String value) {
+            for (PolicyObjectKind candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown PolicyObjectKind wire value: " + value);
+        }
+    }
+
     public enum PolicyPrecedence {
         CROSS_NETWORK_DENIED("cross_network_denied"),
         INVALID_OR_EXPIRED_POLICY("invalid_or_expired_policy"),
@@ -2203,6 +2304,65 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown PolicyPrecedence wire value: " + value);
+        }
+    }
+
+    public enum PolicyRiskLevel {
+        NONE("none"),
+        ELEVATED("elevated"),
+        HIGH("high");
+
+        private final String wireName;
+
+        PolicyRiskLevel(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static PolicyRiskLevel fromWireName(String value) {
+            for (PolicyRiskLevel candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown PolicyRiskLevel wire value: " + value);
+        }
+    }
+
+    public enum PolicyRiskReason {
+        ALLOW_RULE_ADDED("allow_rule_added"),
+        DENY_RULE_REMOVED("deny_rule_removed"),
+        PERMISSION_RULE_EXPANDED("permission_rule_expanded"),
+        NETWORK_ACL_GRANT_ADDED("network_acl_grant_added"),
+        NETWORK_ACL_GRANT_EXPANDED("network_acl_grant_expanded"),
+        GRANT_REAUTHENTICATION_REMOVED("grant_reauthentication_removed"),
+        GRANT_VALIDITY_EXTENDED("grant_validity_extended"),
+        LOCAL_POLICY_REMOVED("local_policy_removed"),
+        NETWORK_ACL_REMOVED("network_acl_removed"),
+        NETWORK_SCOPE_EXPANDED("network_scope_expanded"),
+        CONTRIBUTION_VETO_REMOVED("contribution_veto_removed"),
+        POLICY_VALIDITY_EXTENDED("policy_validity_extended");
+
+        private final String wireName;
+
+        PolicyRiskReason(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static PolicyRiskReason fromWireName(String value) {
+            for (PolicyRiskReason candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown PolicyRiskReason wire value: " + value);
         }
     }
 
@@ -3669,6 +3829,23 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeApplyPolicyCommand. */
+    public static final class NodeApplyPolicyCommand {
+        public final PolicySnapshot candidate;
+        public final Boolean confirm_privilege_expansion;
+        public final Long expected_revision;
+        public final Boolean includes_local_policy;
+        public final List<String> network_ids;
+
+        public NodeApplyPolicyCommand(PolicySnapshot candidate, Boolean confirm_privilege_expansion, Long expected_revision, Boolean includes_local_policy, List<String> network_ids) {
+            this.candidate = candidate;
+            this.confirm_privilege_expansion = confirm_privilege_expansion;
+            this.expected_revision = expected_revision;
+            this.includes_local_policy = includes_local_policy;
+            this.network_ids = network_ids;
+        }
+    }
+
     /** DTO for NodeBatchReviewJoinRequestsCommand. */
     public static final class NodeBatchReviewJoinRequestsCommand {
         public final String network_id;
@@ -4885,6 +5062,28 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodePreviewPolicyCommand. */
+    public static final class NodePreviewPolicyCommand {
+        public final PolicySnapshot candidate;
+        public final Long expected_revision;
+
+        public NodePreviewPolicyCommand(PolicySnapshot candidate, Long expected_revision) {
+            this.candidate = candidate;
+            this.expected_revision = expected_revision;
+        }
+    }
+
+    /** DTO for NodePreviewPolicyRollbackCommand. */
+    public static final class NodePreviewPolicyRollbackCommand {
+        public final Long expected_revision;
+        public final Long target_revision;
+
+        public NodePreviewPolicyRollbackCommand(Long expected_revision, Long target_revision) {
+            this.expected_revision = expected_revision;
+            this.target_revision = target_revision;
+        }
+    }
+
     /** DTO for NodeProbePeerCommand. */
     public static final class NodeProbePeerCommand {
         public final String network_name;
@@ -5006,6 +5205,23 @@ public final class NodeContractV1 {
 
         public NodeRollbackConfigurationCommand(Long expected_revision, Long target_revision) {
             this.expected_revision = expected_revision;
+            this.target_revision = target_revision;
+        }
+    }
+
+    /** DTO for NodeRollbackPolicyCommand. */
+    public static final class NodeRollbackPolicyCommand {
+        public final Boolean confirm_privilege_expansion;
+        public final Long expected_revision;
+        public final Boolean includes_local_policy;
+        public final List<String> network_ids;
+        public final Long target_revision;
+
+        public NodeRollbackPolicyCommand(Boolean confirm_privilege_expansion, Long expected_revision, Boolean includes_local_policy, List<String> network_ids, Long target_revision) {
+            this.confirm_privilege_expansion = confirm_privilege_expansion;
+            this.expected_revision = expected_revision;
+            this.includes_local_policy = includes_local_policy;
+            this.network_ids = network_ids;
             this.target_revision = target_revision;
         }
     }
@@ -5401,6 +5617,112 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for PolicyAffectedObject. */
+    public static final class PolicyAffectedObject {
+        public final PolicyObjectKind kind;
+        public final String network_id;
+        public final String object_id;
+
+        public PolicyAffectedObject(PolicyObjectKind kind, String network_id, String object_id) {
+            this.kind = kind;
+            this.network_id = network_id;
+            this.object_id = object_id;
+        }
+    }
+
+    /** DTO for PolicyApplyResult. */
+    public static final class PolicyApplyResult {
+        public final List<PolicyAffectedObject> affected_objects;
+        public final PolicyHistoryEntry audit;
+        public final List<PolicyDiffEntry> diffs;
+        public final Boolean no_op;
+        public final Long previous_revision;
+        public final Long revision;
+        public final PolicyRiskSummary risk;
+        public final PolicySnapshot snapshot;
+
+        public PolicyApplyResult(List<PolicyAffectedObject> affected_objects, PolicyHistoryEntry audit, List<PolicyDiffEntry> diffs, Boolean no_op, Long previous_revision, Long revision, PolicyRiskSummary risk, PolicySnapshot snapshot) {
+            this.affected_objects = affected_objects;
+            this.audit = audit;
+            this.diffs = diffs;
+            this.no_op = no_op;
+            this.previous_revision = previous_revision;
+            this.revision = revision;
+            this.risk = risk;
+            this.snapshot = snapshot;
+        }
+    }
+
+    /** DTO for PolicyCurrent. */
+    public static final class PolicyCurrent {
+        public final Long revision;
+        public final PolicySnapshot snapshot;
+
+        public PolicyCurrent(Long revision, PolicySnapshot snapshot) {
+            this.revision = revision;
+            this.snapshot = snapshot;
+        }
+    }
+
+    /** DTO for PolicyDiffEntry. */
+    public static final class PolicyDiffEntry {
+        public final Object after;
+        public final Object before;
+        public final PolicyChangeKind change;
+        public final String path;
+
+        public PolicyDiffEntry(Object after, Object before, PolicyChangeKind change, String path) {
+            this.after = after;
+            this.before = before;
+            this.change = change;
+            this.path = path;
+        }
+    }
+
+    /** DTO for PolicyHistoryEntry. */
+    public static final class PolicyHistoryEntry {
+        public final PolicyChangeAction action;
+        public final String actor;
+        public final List<PolicyAffectedObject> affected_objects;
+        public final List<PolicyDiffEntry> diffs;
+        public final Long local_policy_revision;
+        public final Map<String, Object> network_acl_revisions;
+        public final String occurred_at;
+        public final Long previous_revision;
+        public final Long revision;
+        public final PolicyRiskSummary risk;
+        public final String source;
+        public final Long target_revision;
+        public final String transaction_id;
+
+        public PolicyHistoryEntry(PolicyChangeAction action, String actor, List<PolicyAffectedObject> affected_objects, List<PolicyDiffEntry> diffs, Long local_policy_revision, Map<String, Object> network_acl_revisions, String occurred_at, Long previous_revision, Long revision, PolicyRiskSummary risk, String source, Long target_revision, String transaction_id) {
+            this.action = action;
+            this.actor = actor;
+            this.affected_objects = affected_objects;
+            this.diffs = diffs;
+            this.local_policy_revision = local_policy_revision;
+            this.network_acl_revisions = network_acl_revisions;
+            this.occurred_at = occurred_at;
+            this.previous_revision = previous_revision;
+            this.revision = revision;
+            this.risk = risk;
+            this.source = source;
+            this.target_revision = target_revision;
+            this.transaction_id = transaction_id;
+        }
+    }
+
+    /** DTO for PolicyHistorySnapshot. */
+    public static final class PolicyHistorySnapshot {
+        public final Long current_revision;
+        public final List<PolicyHistoryEntry> entries;
+
+        public PolicyHistorySnapshot(Long current_revision, List<PolicyHistoryEntry> entries) {
+            this.current_revision = current_revision;
+            this.entries = entries;
+        }
+    }
+
     /** DTO for PolicyPrecedenceExplanation. */
     public static final class PolicyPrecedenceExplanation {
         public final PolicyPrecedence precedence;
@@ -5413,6 +5735,79 @@ public final class NodeContractV1 {
             this.rule_id = rule_id;
             this.source = source;
             this.triggered = triggered;
+        }
+    }
+
+    /** DTO for PolicyPreview. */
+    public static final class PolicyPreview {
+        public final List<PolicyAffectedObject> affected_objects;
+        public final Boolean can_apply;
+        public final PolicySnapshot candidate;
+        public final PolicySnapshot current;
+        public final Long current_revision;
+        public final List<PolicyDiffEntry> diffs;
+        public final Long expected_revision;
+        public final Boolean has_changes;
+        public final Boolean includes_local_policy;
+        public final List<String> network_ids;
+        public final Boolean revision_conflict;
+        public final PolicyRiskSummary risk;
+        public final Long rollback_target_revision;
+
+        public PolicyPreview(List<PolicyAffectedObject> affected_objects, Boolean can_apply, PolicySnapshot candidate, PolicySnapshot current, Long current_revision, List<PolicyDiffEntry> diffs, Long expected_revision, Boolean has_changes, Boolean includes_local_policy, List<String> network_ids, Boolean revision_conflict, PolicyRiskSummary risk, Long rollback_target_revision) {
+            this.affected_objects = affected_objects;
+            this.can_apply = can_apply;
+            this.candidate = candidate;
+            this.current = current;
+            this.current_revision = current_revision;
+            this.diffs = diffs;
+            this.expected_revision = expected_revision;
+            this.has_changes = has_changes;
+            this.includes_local_policy = includes_local_policy;
+            this.network_ids = network_ids;
+            this.revision_conflict = revision_conflict;
+            this.risk = risk;
+            this.rollback_target_revision = rollback_target_revision;
+        }
+    }
+
+    /** DTO for PolicyRiskSummary. */
+    public static final class PolicyRiskSummary {
+        public final PolicyRiskLevel level;
+        public final Boolean privilege_expansion;
+        public final List<PolicyRiskReason> reasons;
+        public final Boolean requires_explicit_confirmation;
+        public final Boolean requires_recent_reauthentication;
+
+        public PolicyRiskSummary(PolicyRiskLevel level, Boolean privilege_expansion, List<PolicyRiskReason> reasons, Boolean requires_explicit_confirmation, Boolean requires_recent_reauthentication) {
+            this.level = level;
+            this.privilege_expansion = privilege_expansion;
+            this.reasons = reasons;
+            this.requires_explicit_confirmation = requires_explicit_confirmation;
+            this.requires_recent_reauthentication = requires_recent_reauthentication;
+        }
+    }
+
+    /** DTO for PolicyRollbackResult. */
+    public static final class PolicyRollbackResult {
+        public final List<PolicyAffectedObject> affected_objects;
+        public final PolicyHistoryEntry audit;
+        public final List<PolicyDiffEntry> diffs;
+        public final Long previous_revision;
+        public final Long revision;
+        public final PolicyRiskSummary risk;
+        public final PolicySnapshot snapshot;
+        public final Long target_revision;
+
+        public PolicyRollbackResult(List<PolicyAffectedObject> affected_objects, PolicyHistoryEntry audit, List<PolicyDiffEntry> diffs, Long previous_revision, Long revision, PolicyRiskSummary risk, PolicySnapshot snapshot, Long target_revision) {
+            this.affected_objects = affected_objects;
+            this.audit = audit;
+            this.diffs = diffs;
+            this.previous_revision = previous_revision;
+            this.revision = revision;
+            this.risk = risk;
+            this.snapshot = snapshot;
+            this.target_revision = target_revision;
         }
     }
 
@@ -5442,6 +5837,17 @@ public final class NodeContractV1 {
             this.source = source;
             this.source_path = source_path;
             this.subjects = subjects;
+        }
+    }
+
+    /** DTO for PolicySnapshot. */
+    public static final class PolicySnapshot {
+        public final NodeLocalAccessPolicy local_policy;
+        public final List<NetworkAcl> network_acls;
+
+        public PolicySnapshot(NodeLocalAccessPolicy local_policy, List<NetworkAcl> network_acls) {
+            this.local_policy = local_policy;
+            this.network_acls = network_acls;
         }
     }
 
@@ -6574,6 +6980,54 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class GetPolicy extends NodeCommand {
+            public GetPolicy() {
+                super(NodeCommandKind.GET_POLICY);
+            }
+        }
+
+        public static final class PreviewPolicy extends NodeCommand {
+            public final NodePreviewPolicyCommand payload;
+
+            public PreviewPolicy(NodePreviewPolicyCommand payload) {
+                super(NodeCommandKind.PREVIEW_POLICY);
+                this.payload = payload;
+            }
+        }
+
+        public static final class PreviewPolicyRollback extends NodeCommand {
+            public final NodePreviewPolicyRollbackCommand payload;
+
+            public PreviewPolicyRollback(NodePreviewPolicyRollbackCommand payload) {
+                super(NodeCommandKind.PREVIEW_POLICY_ROLLBACK);
+                this.payload = payload;
+            }
+        }
+
+        public static final class ApplyPolicy extends NodeCommand {
+            public final NodeApplyPolicyCommand payload;
+
+            public ApplyPolicy(NodeApplyPolicyCommand payload) {
+                super(NodeCommandKind.APPLY_POLICY);
+                this.payload = payload;
+            }
+        }
+
+        public static final class RollbackPolicy extends NodeCommand {
+            public final NodeRollbackPolicyCommand payload;
+
+            public RollbackPolicy(NodeRollbackPolicyCommand payload) {
+                super(NodeCommandKind.ROLLBACK_POLICY);
+                this.payload = payload;
+            }
+        }
+
+        public static final class GetPolicyHistory extends NodeCommand {
+            public GetPolicyHistory() {
+                super(NodeCommandKind.GET_POLICY_HISTORY);
+            }
+        }
+
         public static final class TestPolicy extends NodeCommand {
             public final PolicyTestInput payload;
 
@@ -6876,6 +7330,51 @@ public final class NodeContractV1 {
 
             public ConfigurationHistory(List<ConfigurationHistoryEntry> data) {
                 super("configuration_history");
+                this.data = data;
+            }
+        }
+
+        public static final class Policy extends NodeCommandOutcome {
+            public final PolicyCurrent data;
+
+            public Policy(PolicyCurrent data) {
+                super("policy");
+                this.data = data;
+            }
+        }
+
+        public static final class PolicyPreview extends NodeCommandOutcome {
+            public final PolicyPreview data;
+
+            public PolicyPreview(PolicyPreview data) {
+                super("policy_preview");
+                this.data = data;
+            }
+        }
+
+        public static final class PolicyApplied extends NodeCommandOutcome {
+            public final PolicyApplyResult data;
+
+            public PolicyApplied(PolicyApplyResult data) {
+                super("policy_applied");
+                this.data = data;
+            }
+        }
+
+        public static final class PolicyHistory extends NodeCommandOutcome {
+            public final PolicyHistorySnapshot data;
+
+            public PolicyHistory(PolicyHistorySnapshot data) {
+                super("policy_history");
+                this.data = data;
+            }
+        }
+
+        public static final class PolicyRolledBack extends NodeCommandOutcome {
+            public final PolicyRollbackResult data;
+
+            public PolicyRolledBack(PolicyRollbackResult data) {
+                super("policy_rolled_back");
                 this.data = data;
             }
         }
@@ -7626,6 +8125,51 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class Policy extends ProjectedNodeCommandOutcome {
+            public final PolicyCurrent data;
+
+            public Policy(PolicyCurrent data) {
+                super("policy");
+                this.data = data;
+            }
+        }
+
+        public static final class PolicyPreview extends ProjectedNodeCommandOutcome {
+            public final PolicyPreview data;
+
+            public PolicyPreview(PolicyPreview data) {
+                super("policy_preview");
+                this.data = data;
+            }
+        }
+
+        public static final class PolicyApplied extends ProjectedNodeCommandOutcome {
+            public final PolicyApplyResult data;
+
+            public PolicyApplied(PolicyApplyResult data) {
+                super("policy_applied");
+                this.data = data;
+            }
+        }
+
+        public static final class PolicyHistory extends ProjectedNodeCommandOutcome {
+            public final PolicyHistorySnapshot data;
+
+            public PolicyHistory(PolicyHistorySnapshot data) {
+                super("policy_history");
+                this.data = data;
+            }
+        }
+
+        public static final class PolicyRolledBack extends ProjectedNodeCommandOutcome {
+            public final PolicyRollbackResult data;
+
+            public PolicyRolledBack(PolicyRollbackResult data) {
+                super("policy_rolled_back");
+                this.data = data;
+            }
+        }
+
         public static final class PolicyTest extends ProjectedNodeCommandOutcome {
             public final PolicyTestResult data;
 
@@ -7922,6 +8466,7 @@ public final class NodeContractV1 {
     public static boolean isManifestAction(NodeCommandKind command) {
         return             command == NodeCommandKind.ACKNOWLEDGE_MEMBERSHIP_POLICY ||
             command == NodeCommandKind.APPLY_CONFIGURATION ||
+            command == NodeCommandKind.APPLY_POLICY ||
             command == NodeCommandKind.BAN_CLIENT ||
             command == NodeCommandKind.BATCH_REVIEW_JOIN_REQUESTS ||
             command == NodeCommandKind.CHANGE_MEMBER_LIFECYCLE ||
@@ -7934,6 +8479,8 @@ public final class NodeContractV1 {
             command == NodeCommandKind.GET_INVITATION_STATUS ||
             command == NodeCommandKind.GET_NETWORK_ALLOCATION ||
             command == NodeCommandKind.GET_NODE_DIAGNOSTICS ||
+            command == NodeCommandKind.GET_POLICY ||
+            command == NodeCommandKind.GET_POLICY_HISTORY ||
             command == NodeCommandKind.GET_SNAPSHOT ||
             command == NodeCommandKind.JOIN_NETWORK ||
             command == NodeCommandKind.LEAVE_NETWORK ||
@@ -7945,6 +8492,8 @@ public final class NodeContractV1 {
             command == NodeCommandKind.PREVIEW_JOIN_NETWORK ||
             command == NodeCommandKind.PREVIEW_MEMBER_REMOVAL ||
             command == NodeCommandKind.PREVIEW_NETWORK_PROFILE ||
+            command == NodeCommandKind.PREVIEW_POLICY ||
+            command == NodeCommandKind.PREVIEW_POLICY_ROLLBACK ||
             command == NodeCommandKind.PROBE_PEER ||
             command == NodeCommandKind.PUBLISH_NETWORK_DISCOVERY ||
             command == NodeCommandKind.REBUILD_TUN ||
@@ -7957,6 +8506,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.REVIEW_JOIN_REQUEST ||
             command == NodeCommandKind.REVOKE_INVITATION ||
             command == NodeCommandKind.ROLLBACK_CONFIGURATION ||
+            command == NodeCommandKind.ROLLBACK_POLICY ||
             command == NodeCommandKind.ROTATE_NODE_IDENTITY ||
             command == NodeCommandKind.SET_NETWORK_ROLE ||
             command == NodeCommandKind.SET_NODE_DISPLAY_NAME ||

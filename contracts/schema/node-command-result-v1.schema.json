@@ -3075,6 +3075,86 @@
         {
           "properties": {
             "data": {
+              "$ref": "#/$defs/PolicyCurrent"
+            },
+            "status": {
+              "const": "policy",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/PolicyPreview"
+            },
+            "status": {
+              "const": "policy_preview",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/PolicyApplyResult"
+            },
+            "status": {
+              "const": "policy_applied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/PolicyHistorySnapshot"
+            },
+            "status": {
+              "const": "policy_history",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/PolicyRollbackResult"
+            },
+            "status": {
+              "const": "policy_rolled_back",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
               "$ref": "#/$defs/PolicyTestResult"
             },
             "status": {
@@ -5694,6 +5774,12 @@
             "apply_configuration",
             "rollback_configuration",
             "get_configuration_history",
+            "get_policy",
+            "preview_policy",
+            "preview_policy_rollback",
+            "apply_policy",
+            "rollback_policy",
+            "get_policy_history",
             "test_policy",
             "shutdown"
           ],
@@ -5860,6 +5946,8 @@
         "client_id",
         "configuration_json",
         "policy_json",
+        "policy_snapshot_json",
+        "policy_network_ids",
         "display_name",
         "external_host",
         "fingerprint",
@@ -5993,6 +6081,8 @@
         "revision",
         "configuration_json",
         "policy_json",
+        "policy_snapshot_json",
+        "policy_network_ids",
         "display_name",
         "fingerprint",
         "network_purpose",
@@ -6180,6 +6270,261 @@
       ],
       "type": "string"
     },
+    "PolicyAffectedObject": {
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/PolicyObjectKind"
+        },
+        "network_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "object_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "PolicyApplyResult": {
+      "properties": {
+        "affected_objects": {
+          "items": {
+            "$ref": "#/$defs/PolicyAffectedObject"
+          },
+          "type": "array"
+        },
+        "audit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PolicyHistoryEntry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diffs": {
+          "items": {
+            "$ref": "#/$defs/PolicyDiffEntry"
+          },
+          "type": "array"
+        },
+        "no_op": {
+          "type": "boolean"
+        },
+        "previous_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "risk": {
+          "$ref": "#/$defs/PolicyRiskSummary"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/PolicySnapshot"
+        }
+      },
+      "required": [
+        "previous_revision",
+        "revision",
+        "no_op",
+        "snapshot",
+        "diffs",
+        "affected_objects",
+        "risk"
+      ],
+      "type": "object"
+    },
+    "PolicyChangeAction": {
+      "enum": [
+        "apply",
+        "rollback"
+      ],
+      "type": "string"
+    },
+    "PolicyChangeKind": {
+      "enum": [
+        "local_policy_added",
+        "local_policy_updated",
+        "local_policy_removed",
+        "network_acl_added",
+        "network_acl_updated",
+        "network_acl_removed",
+        "permission_rule_added",
+        "permission_rule_updated",
+        "permission_rule_removed",
+        "grant_added",
+        "grant_updated",
+        "grant_removed",
+        "veto_added",
+        "veto_updated",
+        "veto_removed",
+        "network_scope_changed",
+        "validity_changed"
+      ],
+      "type": "string"
+    },
+    "PolicyCurrent": {
+      "properties": {
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/PolicySnapshot"
+        }
+      },
+      "required": [
+        "revision",
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "PolicyDiffEntry": {
+      "properties": {
+        "after": true,
+        "before": true,
+        "change": {
+          "$ref": "#/$defs/PolicyChangeKind"
+        },
+        "path": {
+          "description": "Stable JSON Pointer rooted at the policy snapshot.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "change"
+      ],
+      "type": "object"
+    },
+    "PolicyHistoryEntry": {
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/PolicyChangeAction"
+        },
+        "actor": {
+          "type": "string"
+        },
+        "affected_objects": {
+          "items": {
+            "$ref": "#/$defs/PolicyAffectedObject"
+          },
+          "type": "array"
+        },
+        "diffs": {
+          "items": {
+            "$ref": "#/$defs/PolicyDiffEntry"
+          },
+          "type": "array"
+        },
+        "local_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "network_acl_revisions": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "occurred_at": {
+          "type": "string"
+        },
+        "previous_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "risk": {
+          "$ref": "#/$defs/PolicyRiskSummary"
+        },
+        "source": {
+          "type": "string"
+        },
+        "target_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "transaction_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "transaction_id",
+        "revision",
+        "previous_revision",
+        "action",
+        "actor",
+        "source",
+        "occurred_at",
+        "network_acl_revisions",
+        "diffs",
+        "affected_objects",
+        "risk"
+      ],
+      "type": "object"
+    },
+    "PolicyHistorySnapshot": {
+      "properties": {
+        "current_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/PolicyHistoryEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "current_revision",
+        "entries"
+      ],
+      "type": "object"
+    },
+    "PolicyObjectKind": {
+      "enum": [
+        "local_policy",
+        "network_acl",
+        "permission_rule",
+        "network_acl_grant",
+        "contribution_veto",
+        "network_scope"
+      ],
+      "type": "string"
+    },
     "PolicyPrecedence": {
       "description": "Fixed precedence order consumed by the UI. The evaluator remains the sole\nauthority for the selected outcome; this trace only explains which gate was\nactive and in what order gates were considered.",
       "enum": [
@@ -6230,6 +6575,188 @@
       "required": [
         "precedence",
         "triggered"
+      ],
+      "type": "object"
+    },
+    "PolicyPreview": {
+      "properties": {
+        "affected_objects": {
+          "items": {
+            "$ref": "#/$defs/PolicyAffectedObject"
+          },
+          "type": "array"
+        },
+        "can_apply": {
+          "type": "boolean"
+        },
+        "candidate": {
+          "$ref": "#/$defs/PolicySnapshot"
+        },
+        "current": {
+          "$ref": "#/$defs/PolicySnapshot"
+        },
+        "current_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "diffs": {
+          "items": {
+            "$ref": "#/$defs/PolicyDiffEntry"
+          },
+          "type": "array"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "has_changes": {
+          "type": "boolean"
+        },
+        "includes_local_policy": {
+          "type": "boolean"
+        },
+        "network_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "revision_conflict": {
+          "type": "boolean"
+        },
+        "risk": {
+          "$ref": "#/$defs/PolicyRiskSummary"
+        },
+        "rollback_target_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expected_revision",
+        "current_revision",
+        "revision_conflict",
+        "current",
+        "candidate",
+        "network_ids",
+        "includes_local_policy",
+        "diffs",
+        "affected_objects",
+        "risk",
+        "has_changes",
+        "can_apply"
+      ],
+      "type": "object"
+    },
+    "PolicyRiskLevel": {
+      "enum": [
+        "none",
+        "elevated",
+        "high"
+      ],
+      "type": "string"
+    },
+    "PolicyRiskReason": {
+      "enum": [
+        "allow_rule_added",
+        "deny_rule_removed",
+        "permission_rule_expanded",
+        "network_acl_grant_added",
+        "network_acl_grant_expanded",
+        "grant_reauthentication_removed",
+        "grant_validity_extended",
+        "local_policy_removed",
+        "network_acl_removed",
+        "network_scope_expanded",
+        "contribution_veto_removed",
+        "policy_validity_extended"
+      ],
+      "type": "string"
+    },
+    "PolicyRiskSummary": {
+      "properties": {
+        "level": {
+          "$ref": "#/$defs/PolicyRiskLevel"
+        },
+        "privilege_expansion": {
+          "type": "boolean"
+        },
+        "reasons": {
+          "items": {
+            "$ref": "#/$defs/PolicyRiskReason"
+          },
+          "type": "array"
+        },
+        "requires_explicit_confirmation": {
+          "type": "boolean"
+        },
+        "requires_recent_reauthentication": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "level",
+        "privilege_expansion",
+        "requires_recent_reauthentication",
+        "requires_explicit_confirmation",
+        "reasons"
+      ],
+      "type": "object"
+    },
+    "PolicyRollbackResult": {
+      "properties": {
+        "affected_objects": {
+          "items": {
+            "$ref": "#/$defs/PolicyAffectedObject"
+          },
+          "type": "array"
+        },
+        "audit": {
+          "$ref": "#/$defs/PolicyHistoryEntry"
+        },
+        "diffs": {
+          "items": {
+            "$ref": "#/$defs/PolicyDiffEntry"
+          },
+          "type": "array"
+        },
+        "previous_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "risk": {
+          "$ref": "#/$defs/PolicyRiskSummary"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/PolicySnapshot"
+        },
+        "target_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "previous_revision",
+        "revision",
+        "target_revision",
+        "snapshot",
+        "diffs",
+        "affected_objects",
+        "risk",
+        "audit"
       ],
       "type": "object"
     },
@@ -6324,6 +6851,28 @@
         "access_context"
       ],
       "type": "string"
+    },
+    "PolicySnapshot": {
+      "description": "Complete policy documents governed by one optimistic transaction. Network\nACLs are normalized by stable network ID and never by caller-selected order.",
+      "properties": {
+        "local_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeLocalAccessPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "network_acls": {
+          "items": {
+            "$ref": "#/$defs/NetworkAcl"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
     },
     "PolicyTestResult": {
       "properties": {

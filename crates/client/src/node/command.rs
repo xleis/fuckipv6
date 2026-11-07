@@ -37,6 +37,10 @@ use super::{
     NodeNetworkSelection, NodeProblem, NodeProblemCode, NodeRoutingMode, NodeSnapshot,
     NodeStateStore, NodeUiManifest, NodeValidationIssue,
 };
+use crate::policy_transaction::{
+    PolicyApplyResult, PolicyCurrent, PolicyHistorySnapshot, PolicyPreview, PolicyRollbackResult,
+    PolicySnapshot,
+};
 
 #[cfg(test)]
 use fuckipv6_common::domain::NodeId;
@@ -122,12 +126,18 @@ pub enum NodeCommandKind {
     ApplyConfiguration,
     RollbackConfiguration,
     GetConfigurationHistory,
+    GetPolicy,
+    PreviewPolicy,
+    PreviewPolicyRollback,
+    ApplyPolicy,
+    RollbackPolicy,
+    GetPolicyHistory,
     TestPolicy,
     Shutdown,
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 55] = [
+    pub const ALL: [Self; 61] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -181,13 +191,19 @@ impl NodeCommandKind {
         Self::ApplyConfiguration,
         Self::RollbackConfiguration,
         Self::GetConfigurationHistory,
+        Self::GetPolicy,
+        Self::PreviewPolicy,
+        Self::PreviewPolicyRollback,
+        Self::ApplyPolicy,
+        Self::RollbackPolicy,
+        Self::GetPolicyHistory,
         Self::TestPolicy,
         Self::Shutdown,
     ];
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 54] = [
+    pub const ACTIONS: [Self; 60] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -240,6 +256,12 @@ impl NodeCommandKind {
         Self::ApplyConfiguration,
         Self::RollbackConfiguration,
         Self::GetConfigurationHistory,
+        Self::GetPolicy,
+        Self::PreviewPolicy,
+        Self::PreviewPolicyRollback,
+        Self::ApplyPolicy,
+        Self::RollbackPolicy,
+        Self::GetPolicyHistory,
         Self::TestPolicy,
         Self::Shutdown,
     ];
@@ -254,6 +276,8 @@ impl NodeCommandKind {
             Self::Shutdown
                 | Self::ApplyConfiguration
                 | Self::RollbackConfiguration
+                | Self::ApplyPolicy
+                | Self::RollbackPolicy
                 | Self::RestartNode
                 | Self::RebuildTun
                 | Self::SetNodeDisplayName
@@ -323,6 +347,12 @@ impl NodeCommandKind {
             Self::ApplyConfiguration => "apply_configuration",
             Self::RollbackConfiguration => "rollback_configuration",
             Self::GetConfigurationHistory => "get_configuration_history",
+            Self::GetPolicy => "get_policy",
+            Self::PreviewPolicy => "preview_policy",
+            Self::PreviewPolicyRollback => "preview_policy_rollback",
+            Self::ApplyPolicy => "apply_policy",
+            Self::RollbackPolicy => "rollback_policy",
+            Self::GetPolicyHistory => "get_policy_history",
             Self::TestPolicy => "test_policy",
         }
     }
@@ -371,6 +401,8 @@ impl NodeCommandKind {
                 | Self::Shutdown
                 | Self::ApplyConfiguration
                 | Self::RollbackConfiguration
+                | Self::ApplyPolicy
+                | Self::RollbackPolicy
         )
     }
 
@@ -509,6 +541,18 @@ pub enum NodeCommand {
     RollbackConfiguration(NodeRollbackConfigurationCommand),
     /// Append-only configuration revision history, newest first.
     GetConfigurationHistory,
+    /// Current authoritative policy revision and normalized policy snapshot.
+    GetPolicy,
+    /// Compute a policy diff and risk summary without writing it.
+    PreviewPolicy(NodePreviewPolicyCommand),
+    /// Compute the diff and risk for restoring a previous revision without writing it.
+    PreviewPolicyRollback(NodePreviewPolicyRollbackCommand),
+    /// Atomically replace the complete policy snapshot under one revision.
+    ApplyPolicy(NodeApplyPolicyCommand),
+    /// Restore a previous policy generation as a new auditable revision.
+    RollbackPolicy(NodeRollbackPolicyCommand),
+    /// Append-only policy revision history, newest first.
+    GetPolicyHistory,
     /// Evaluate candidate policy documents with the runtime authorization evaluator
     /// without storing them or emitting audit/activity side effects.
     TestPolicy(PolicyTestInput),
@@ -571,6 +615,12 @@ impl NodeCommand {
             Self::ApplyConfiguration(_) => NodeCommandKind::ApplyConfiguration,
             Self::RollbackConfiguration(_) => NodeCommandKind::RollbackConfiguration,
             Self::GetConfigurationHistory => NodeCommandKind::GetConfigurationHistory,
+            Self::GetPolicy => NodeCommandKind::GetPolicy,
+            Self::PreviewPolicy(_) => NodeCommandKind::PreviewPolicy,
+            Self::PreviewPolicyRollback(_) => NodeCommandKind::PreviewPolicyRollback,
+            Self::ApplyPolicy(_) => NodeCommandKind::ApplyPolicy,
+            Self::RollbackPolicy(_) => NodeCommandKind::RollbackPolicy,
+            Self::GetPolicyHistory => NodeCommandKind::GetPolicyHistory,
             Self::TestPolicy(_) => NodeCommandKind::TestPolicy,
         }
     }
@@ -586,6 +636,8 @@ impl NodeCommand {
             | Self::Shutdown
             | Self::GetConfiguration
             | Self::GetConfigurationHistory
+            | Self::GetPolicy
+            | Self::GetPolicyHistory
             | Self::TestPolicy(_) => Ok(()),
             Self::StartNetworks { selection } => validate_selection(selection),
             Self::StopNetworks { networks, all } => {
@@ -682,6 +734,10 @@ impl NodeCommand {
             Self::PreviewConfiguration(command) => command.validate(),
             Self::ApplyConfiguration(command) => command.validate(),
             Self::RollbackConfiguration(command) => command.validate(),
+            Self::PreviewPolicy(command) => command.validate(),
+            Self::PreviewPolicyRollback(command) => command.validate(),
+            Self::ApplyPolicy(command) => command.validate(),
+            Self::RollbackPolicy(command) => command.validate(),
         }
     }
 }
@@ -723,6 +779,95 @@ impl NodeRollbackConfigurationCommand {
     fn validate(&self) -> Result<(), NodeProblem> {
         Ok(())
     }
+}
+
+/// A complete normalized policy snapshot. The server computes the actual
+/// affected scope so the caller can review it before supplying the scope to an
+/// apply command.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodePreviewPolicyCommand {
+    pub expected_revision: u64,
+    pub candidate: PolicySnapshot,
+}
+
+impl NodePreviewPolicyCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodePreviewPolicyRollbackCommand {
+    pub expected_revision: u64,
+    pub target_revision: u64,
+}
+
+impl NodePreviewPolicyRollbackCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        if self.target_revision == 0 {
+            return Err(invalid("回滚目标 revision 必须大于 0"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeApplyPolicyCommand {
+    pub expected_revision: u64,
+    pub candidate: PolicySnapshot,
+    #[serde(default)]
+    pub network_ids: Vec<String>,
+    #[serde(default)]
+    pub includes_local_policy: bool,
+    /// Explicit acknowledgement of the high-risk privilege-expansion summary.
+    #[serde(default)]
+    pub confirm_privilege_expansion: bool,
+}
+
+impl NodeApplyPolicyCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_policy_scope(&self.network_ids)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeRollbackPolicyCommand {
+    pub expected_revision: u64,
+    pub target_revision: u64,
+    #[serde(default)]
+    pub network_ids: Vec<String>,
+    #[serde(default)]
+    pub includes_local_policy: bool,
+    #[serde(default)]
+    pub confirm_privilege_expansion: bool,
+}
+
+impl NodeRollbackPolicyCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        if self.target_revision == 0 {
+            return Err(invalid("回滚目标 revision 必须大于 0"));
+        }
+        validate_policy_scope(&self.network_ids)
+    }
+}
+
+fn validate_policy_scope(network_ids: &[String]) -> Result<(), NodeProblem> {
+    if network_ids
+        .iter()
+        .any(|network_id| network_id.trim().is_empty())
+    {
+        return Err(invalid("策略影响范围不能包含空网络 ID"));
+    }
+    if network_ids
+        .iter()
+        .map(|network_id| network_id.trim())
+        .collect::<HashSet<_>>()
+        .len()
+        != network_ids.len()
+    {
+        return Err(invalid("策略影响范围不能包含重复网络 ID"));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -2322,6 +2467,11 @@ pub enum NodeCommandOutcome {
     ConfigurationPreview(Box<ConfigurationPreview>),
     ConfigurationApplied(Box<ConfigurationApplyResult>),
     ConfigurationHistory(Vec<ConfigurationHistoryEntry>),
+    Policy(PolicyCurrent),
+    PolicyPreview(Box<PolicyPreview>),
+    PolicyApplied(Box<PolicyApplyResult>),
+    PolicyHistory(Box<PolicyHistorySnapshot>),
+    PolicyRolledBack(Box<PolicyRollbackResult>),
     PolicyTest(Box<PolicyTestResult>),
     Accepted { operation_id: String },
     Completed { message: String },
@@ -3338,6 +3488,36 @@ mod tests {
                 target_revision: 0,
             }),
             NodeCommand::GetConfigurationHistory,
+            NodeCommand::GetPolicy,
+            NodeCommand::PreviewPolicy(NodePreviewPolicyCommand {
+                expected_revision: 1,
+                candidate: PolicySnapshot::default(),
+            }),
+            NodeCommand::PreviewPolicyRollback(NodePreviewPolicyRollbackCommand {
+                expected_revision: 1,
+                target_revision: 1,
+            }),
+            NodeCommand::ApplyPolicy(NodeApplyPolicyCommand {
+                expected_revision: 1,
+                candidate: PolicySnapshot::default(),
+                network_ids: vec![fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"policy-command-network",
+                )
+                .to_string()],
+                includes_local_policy: false,
+                confirm_privilege_expansion: true,
+            }),
+            NodeCommand::RollbackPolicy(NodeRollbackPolicyCommand {
+                expected_revision: 1,
+                target_revision: 1,
+                network_ids: vec![fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"policy-command-network",
+                )
+                .to_string()],
+                includes_local_policy: false,
+                confirm_privilege_expansion: true,
+            }),
+            NodeCommand::GetPolicyHistory,
             NodeCommand::TestPolicy(fuckipv6_common::domain::PolicyTestInput {
                 network_id: fuckipv6_common::domain::NetworkId::from_public_key(
                     b"policy-test-network",
@@ -3407,8 +3587,8 @@ mod tests {
 
     #[test]
     fn command_kind_inventory_and_sensitive_reauth_contract_are_complete() {
-        assert_eq!(NodeCommandKind::ALL.len(), 55);
-        assert_eq!(NodeCommandKind::ACTIONS.len(), 54);
+        assert_eq!(NodeCommandKind::ALL.len(), 61);
+        assert_eq!(NodeCommandKind::ACTIONS.len(), 60);
         for kind in [
             NodeCommandKind::CreateInvitation,
             NodeCommandKind::RevokeInvitation,
@@ -4107,6 +4287,10 @@ mod tests {
             NodeCommandKind::PreviewInvitation,
             NodeCommandKind::PreviewConfiguration,
             NodeCommandKind::GetConfigurationHistory,
+            NodeCommandKind::GetPolicy,
+            NodeCommandKind::PreviewPolicy,
+            NodeCommandKind::PreviewPolicyRollback,
+            NodeCommandKind::GetPolicyHistory,
             NodeCommandKind::TestPolicy,
         ] {
             assert!(!kind.is_write(), "{kind:?}");
@@ -4131,6 +4315,10 @@ mod tests {
                     | NodeCommandKind::PreviewInvitation
                     | NodeCommandKind::PreviewConfiguration
                     | NodeCommandKind::GetConfigurationHistory
+                    | NodeCommandKind::GetPolicy
+                    | NodeCommandKind::PreviewPolicy
+                    | NodeCommandKind::PreviewPolicyRollback
+                    | NodeCommandKind::GetPolicyHistory
                     | NodeCommandKind::TestPolicy
             ) {
                 assert!(kind.is_write(), "{kind:?}");

@@ -1351,6 +1351,11 @@ fn status_for_command_result(result: &NodeCommandResult) -> StatusCode {
         | NodeCommandOutcome::ConfigurationPreview(_)
         | NodeCommandOutcome::ConfigurationApplied(_)
         | NodeCommandOutcome::ConfigurationHistory(_)
+        | NodeCommandOutcome::Policy(_)
+        | NodeCommandOutcome::PolicyPreview(_)
+        | NodeCommandOutcome::PolicyApplied(_)
+        | NodeCommandOutcome::PolicyHistory(_)
+        | NodeCommandOutcome::PolicyRolledBack(_)
         | NodeCommandOutcome::PolicyTest(_)
         | NodeCommandOutcome::MemberRemovalPreview(_)
         | NodeCommandOutcome::MemberLifecycleChanged(_)
@@ -1441,8 +1446,12 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
             OperationKind::ClientBlacklistUpdate
         }
         NodeCommand::UpdateNetworkAllocation(_) => OperationKind::NetworkAllocationUpdate,
-        NodeCommand::ApplyConfiguration(_) => OperationKind::PolicyApply,
-        NodeCommand::RollbackConfiguration(_) => OperationKind::PolicyRollback,
+        NodeCommand::ApplyConfiguration(_) | NodeCommand::ApplyPolicy(_) => {
+            OperationKind::PolicyApply
+        }
+        NodeCommand::RollbackConfiguration(_) | NodeCommand::RollbackPolicy(_) => {
+            OperationKind::PolicyRollback
+        }
         NodeCommand::GetDiagnostics => OperationKind::Diagnostics,
         // Synchronous read-only commands never enter the operation registry.
         // Keeping a total mapping avoids a panic if a future caller violates
@@ -1463,7 +1472,11 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::GetInvitationStatus(_)
         | NodeCommand::PreviewInvitation(_)
         | NodeCommand::GetConfigurationHistory => OperationKind::ConfigurationHistory,
-        NodeCommand::TestPolicy(_) => OperationKind::PolicyTest,
+        NodeCommand::GetPolicy
+        | NodeCommand::PreviewPolicy(_)
+        | NodeCommand::PreviewPolicyRollback(_)
+        | NodeCommand::GetPolicyHistory
+        | NodeCommand::TestPolicy(_) => OperationKind::PolicyTest,
     }
 }
 
@@ -1535,6 +1548,12 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
         | NodeCommand::ApplyConfiguration(_)
         | NodeCommand::RollbackConfiguration(_)
         | NodeCommand::GetConfigurationHistory
+        | NodeCommand::GetPolicy
+        | NodeCommand::PreviewPolicy(_)
+        | NodeCommand::PreviewPolicyRollback(_)
+        | NodeCommand::ApplyPolicy(_)
+        | NodeCommand::RollbackPolicy(_)
+        | NodeCommand::GetPolicyHistory
         | NodeCommand::RefreshDiscoveryIndex { .. }
         | NodeCommand::RetryDiscoveryIndex
         | NodeCommand::SetNodeDisplayName(_)

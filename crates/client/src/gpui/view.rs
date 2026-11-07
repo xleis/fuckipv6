@@ -2235,6 +2235,51 @@ impl GpuiShell {
                 ));
                 self.configuration.finish();
             }
+            NodeCommandOutcome::Policy(current) => {
+                self.notice = Some(format!(
+                    "{}: revision {} · {} network ACL(s)",
+                    t(self.locale, "action.get_policy"),
+                    current.revision,
+                    current.snapshot.network_acls.len()
+                ));
+            }
+            NodeCommandOutcome::PolicyPreview(preview) => {
+                self.notice = Some(format!(
+                    "{}: revision {} → {} · {} diff(s) · risk {:?} · can_apply={}",
+                    t(self.locale, "action.preview_policy"),
+                    preview.current_revision,
+                    preview.expected_revision,
+                    preview.diffs.len(),
+                    preview.risk.level,
+                    preview.can_apply
+                ));
+            }
+            NodeCommandOutcome::PolicyApplied(result) => {
+                self.notice = Some(format!(
+                    "{}: revision {} → {} · no_op={}",
+                    t(self.locale, "action.apply_policy"),
+                    result.previous_revision,
+                    result.revision,
+                    result.no_op
+                ));
+            }
+            NodeCommandOutcome::PolicyHistory(history) => {
+                self.notice = Some(format!(
+                    "{}: {} entries · current revision {}",
+                    t(self.locale, "action.get_policy_history"),
+                    history.entries.len(),
+                    history.current_revision
+                ));
+            }
+            NodeCommandOutcome::PolicyRolledBack(result) => {
+                self.notice = Some(format!(
+                    "{}: target {} · revision {} → {}",
+                    t(self.locale, "action.rollback_policy"),
+                    result.target_revision,
+                    result.previous_revision,
+                    result.revision
+                ));
+            }
             NodeCommandOutcome::PolicyTest(result) => {
                 self.notice = Some(format!(
                     "{}: {} · {:?} · {}",
@@ -12440,6 +12485,12 @@ fn action_label(locale: Locale, id: &str) -> String {
         "apply_configuration" => "action.apply_configuration",
         "rollback_configuration" => "action.rollback_configuration",
         "get_configuration_history" => "action.get_configuration_history",
+        "get_policy" => "action.get_policy",
+        "preview_policy" => "action.preview_policy",
+        "preview_policy_rollback" => "action.preview_policy_rollback",
+        "apply_policy" => "action.apply_policy",
+        "rollback_policy" => "action.rollback_policy",
+        "get_policy_history" => "action.get_policy_history",
         "test_policy" => "action.test_policy",
         "shutdown_node" => "action.shutdown_node",
         _ => "common.unknown_action",

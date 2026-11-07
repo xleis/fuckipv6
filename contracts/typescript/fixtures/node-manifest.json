@@ -2052,6 +2052,202 @@
           "confirmation": null
         },
         {
+          "id": "get_policy",
+          "label_key": "action.get_policy",
+          "command": "get_policy",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [],
+          "confirmation": null
+        },
+        {
+          "id": "preview_policy",
+          "label_key": "action.preview_policy",
+          "command": "preview_policy",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "candidate_json",
+              "label_key": "field.policy_candidate_json",
+              "input": "policy_snapshot_json",
+              "required": true,
+              "validation": "policy_snapshot_json"
+            }
+          ],
+          "confirmation": null
+        },
+        {
+          "id": "preview_policy_rollback",
+          "label_key": "action.preview_policy_rollback",
+          "command": "preview_policy_rollback",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "target_revision",
+              "label_key": "field.target_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            }
+          ],
+          "confirmation": null
+        },
+        {
+          "id": "apply_policy",
+          "label_key": "action.apply_policy",
+          "command": "apply_policy",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "policy.apply"
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "candidate_json",
+              "label_key": "field.policy_candidate_json",
+              "input": "policy_snapshot_json",
+              "required": true,
+              "validation": "policy_snapshot_json"
+            },
+            {
+              "id": "network_ids",
+              "label_key": "field.policy_network_ids",
+              "input": "policy_network_ids",
+              "required": true,
+              "validation": "policy_network_ids"
+            },
+            {
+              "id": "includes_local_policy",
+              "label_key": "field.policy_includes_local",
+              "input": "boolean",
+              "required": true,
+              "validation": "none"
+            },
+            {
+              "id": "confirm_privilege_expansion",
+              "label_key": "field.policy_confirm_privilege_expansion",
+              "input": "boolean",
+              "required": true,
+              "validation": "none"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.apply_policy.title",
+            "consequence_key": "confirm.apply_policy.consequence",
+            "destructive": true,
+            "recent_authentication_required": true
+          }
+        },
+        {
+          "id": "rollback_policy",
+          "label_key": "action.rollback_policy",
+          "command": "rollback_policy",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "policy.rollback"
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "target_revision",
+              "label_key": "field.target_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "network_ids",
+              "label_key": "field.policy_network_ids",
+              "input": "policy_network_ids",
+              "required": true,
+              "validation": "policy_network_ids"
+            },
+            {
+              "id": "includes_local_policy",
+              "label_key": "field.policy_includes_local",
+              "input": "boolean",
+              "required": true,
+              "validation": "none"
+            },
+            {
+              "id": "confirm_privilege_expansion",
+              "label_key": "field.policy_confirm_privilege_expansion",
+              "input": "boolean",
+              "required": true,
+              "validation": "none"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.rollback_policy.title",
+            "consequence_key": "confirm.rollback_policy.consequence",
+            "destructive": true,
+            "recent_authentication_required": true
+          }
+        },
+        {
+          "id": "get_policy_history",
+          "label_key": "action.get_policy_history",
+          "command": "get_policy_history",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [],
+          "confirmation": null
+        },
+        {
           "id": "shutdown_node",
           "label_key": "action.shutdown_node",
           "command": "shutdown",

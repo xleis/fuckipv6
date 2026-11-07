@@ -538,6 +538,30 @@ mod tests {
                 target_revision: 0,
             }),
             NodeCommand::GetConfigurationHistory,
+            NodeCommand::GetPolicy,
+            NodeCommand::PreviewPolicy(crate::node::NodePreviewPolicyCommand {
+                expected_revision: 0,
+                candidate: crate::policy_transaction::PolicySnapshot::default(),
+            }),
+            NodeCommand::PreviewPolicyRollback(crate::node::NodePreviewPolicyRollbackCommand {
+                expected_revision: 0,
+                target_revision: 1,
+            }),
+            NodeCommand::ApplyPolicy(crate::node::NodeApplyPolicyCommand {
+                expected_revision: 0,
+                candidate: crate::policy_transaction::PolicySnapshot::default(),
+                network_ids: Vec::new(),
+                includes_local_policy: false,
+                confirm_privilege_expansion: false,
+            }),
+            NodeCommand::RollbackPolicy(crate::node::NodeRollbackPolicyCommand {
+                expected_revision: 0,
+                target_revision: 1,
+                network_ids: Vec::new(),
+                includes_local_policy: false,
+                confirm_privilege_expansion: false,
+            }),
+            NodeCommand::GetPolicyHistory,
             NodeCommand::TestPolicy(fuckipv6_common::domain::PolicyTestInput {
                 network_id: fuckipv6_common::domain::NetworkId::from_public_key(
                     b"policy-test-network",

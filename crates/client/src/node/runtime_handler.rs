@@ -34,6 +34,7 @@ use crate::node::command::{
     NodeJoinRequestReviewOutcome, NodeMemberRemovalPreviewCommand, NodeNetworkProfileCommand,
     NodeResubmitJoinRequestCommand, NodeSubmitJoinRequestCommand,
 };
+use crate::policy_transaction::{PolicySnapshot, PolicyTransactionError, PolicyTransactionStore};
 use crate::symmetric::EmbeddedServiceManager;
 
 #[derive(Clone)]
@@ -54,8 +55,10 @@ pub struct NodeRuntimeHandler {
     services: EmbeddedServiceManager,
     runtime: Option<NetworkRuntimeManager>,
     configs: Option<ConfigManager>,
+    policy_store: Option<PolicyTransactionStore>,
     discovery: Option<DiscoveryIndexManager>,
     join_gate: Arc<Mutex<()>>,
+    policy_gate: Arc<Mutex<()>>,
 }
 
 impl NodeRuntimeHandler {
@@ -74,8 +77,10 @@ impl NodeRuntimeHandler {
             services,
             runtime: None,
             configs: None,
+            policy_store: None,
             discovery: None,
             join_gate: Arc::new(Mutex::new(())),
+            policy_gate: Arc::new(Mutex::new(())),
         }
     }
 
@@ -87,14 +92,17 @@ impl NodeRuntimeHandler {
         configs: ConfigManager,
     ) -> Self {
         let discovery = DiscoveryIndexManager::production(&configs);
+        let policy_store = PolicyTransactionStore::new(configs.config_dir().to_path_buf());
         Self {
             state,
             registry,
             services,
             runtime: Some(runtime),
             configs: Some(configs),
+            policy_store: Some(policy_store),
             discovery: Some(discovery),
             join_gate: Arc::new(Mutex::new(())),
+            policy_gate: Arc::new(Mutex::new(())),
         }
     }
 
@@ -109,8 +117,10 @@ impl NodeRuntimeHandler {
         let services = self.services.clone();
         let runtime = self.runtime.clone();
         let configs = self.configs.clone();
+        let policy_store = self.policy_store.clone();
         let discovery = self.discovery.clone();
         let join_gate = self.join_gate.clone();
+        let policy_gate = self.policy_gate.clone();
 
         Box::pin(async move {
             let request_id = request.request_id;
@@ -120,6 +130,12 @@ impl NodeRuntimeHandler {
 
             match request.command {
                 super::NodeCommand::GetSnapshot => {
+                    if let Some(policy_store) = policy_store.as_ref() {
+                        let _guard = policy_gate.lock().await;
+                        if let Err(error) = refresh_policy_state(&state, policy_store).await {
+                            return policy_transaction_rejection(request_id, error);
+                        }
+                    }
                     if let Some(discovery) = discovery.as_ref() {
                         state.replace_discovery_index(discovery.snapshot()).await;
                     }
@@ -221,6 +237,60 @@ impl NodeRuntimeHandler {
                 super::NodeCommand::GetConfigurationHistory => match configs {
                     Some(configs) => configuration_history(&configs, request_id).await,
                     None => unavailable(request_id, "读取配置历史需要节点配置管理器"),
+                },
+                super::NodeCommand::GetPolicy => match policy_store {
+                    Some(policy_store) => {
+                        get_policy(&state, &policy_store, &policy_gate, request_id).await
+                    }
+                    None => unavailable(request_id, "读取策略需要节点配置管理器"),
+                },
+                super::NodeCommand::PreviewPolicy(command) => match policy_store {
+                    Some(policy_store) => {
+                        preview_policy(&state, &policy_store, request_id, command).await
+                    }
+                    None => unavailable(request_id, "策略预览需要节点配置管理器"),
+                },
+                super::NodeCommand::PreviewPolicyRollback(command) => match policy_store {
+                    Some(policy_store) => {
+                        preview_policy_rollback(&state, &policy_store, request_id, command).await
+                    }
+                    None => unavailable(request_id, "策略回滚预览需要节点配置管理器"),
+                },
+                super::NodeCommand::ApplyPolicy(command) => match (policy_store, context) {
+                    (Some(policy_store), Some(context)) => {
+                        apply_policy(
+                            &state,
+                            &policy_store,
+                            &policy_gate,
+                            request_id,
+                            command,
+                            context.actor,
+                            context.source,
+                        )
+                        .await
+                    }
+                    (None, _) => unavailable(request_id, "策略应用需要节点配置管理器"),
+                    (_, None) => unavailable(request_id, "策略应用缺少受信任的认证上下文"),
+                },
+                super::NodeCommand::RollbackPolicy(command) => match (policy_store, context) {
+                    (Some(policy_store), Some(context)) => {
+                        rollback_policy(
+                            &state,
+                            &policy_store,
+                            &policy_gate,
+                            request_id,
+                            command,
+                            context.actor,
+                            context.source,
+                        )
+                        .await
+                    }
+                    (None, _) => unavailable(request_id, "策略回滚需要节点配置管理器"),
+                    (_, None) => unavailable(request_id, "策略回滚缺少受信任的认证上下文"),
+                },
+                super::NodeCommand::GetPolicyHistory => match policy_store {
+                    Some(policy_store) => policy_history(&state, &policy_store, request_id).await,
+                    None => unavailable(request_id, "读取策略历史需要节点配置管理器"),
                 },
                 super::NodeCommand::GetDiagnostics => match runtime {
                     Some(runtime) => diagnostics_runtime(&runtime, request_id, cancel).await,
@@ -1271,6 +1341,317 @@ fn validation_code_name(code: ConfigurationValidationCode) -> &'static str {
         ConfigurationValidationCode::MissingNetwork => "missing_network",
         ConfigurationValidationCode::InvalidValue => "invalid_value",
         ConfigurationValidationCode::Unsupported => "unsupported",
+    }
+}
+
+fn policy_snapshot_from_state(snapshot: &super::NodeSnapshot) -> PolicySnapshot {
+    PolicySnapshot {
+        local_policy: snapshot.access_control.local_policy.clone(),
+        network_acls: snapshot.access_control.network_acls.clone(),
+    }
+}
+
+async fn policy_fallback(state: &NodeStateStore) -> PolicySnapshot {
+    policy_snapshot_from_state(&state.snapshot().await)
+}
+
+/// Replace only the policy-owned portion of the authoritative snapshot. Field
+/// privacy documents are governed separately and must survive policy writes.
+async fn publish_policy_snapshot(state: &NodeStateStore, snapshot: PolicySnapshot) -> bool {
+    let current = state.snapshot().await;
+    if current.access_control.local_policy == snapshot.local_policy
+        && current.access_control.network_acls == snapshot.network_acls
+    {
+        return false;
+    }
+    state
+        .update(|current| {
+            current.access_control.local_policy = snapshot.local_policy;
+            current.access_control.network_acls = snapshot.network_acls;
+        })
+        .await;
+    true
+}
+
+async fn refresh_policy_state(
+    state: &NodeStateStore,
+    store: &PolicyTransactionStore,
+) -> std::result::Result<(), PolicyTransactionError> {
+    let fallback = policy_fallback(state).await;
+    let store = store.clone();
+    let current = tokio::task::spawn_blocking(move || store.current(&fallback))
+        .await
+        .map_err(|error| PolicyTransactionError::Persistence(error.to_string()))??;
+    publish_policy_snapshot(state, current.snapshot).await;
+    Ok(())
+}
+
+fn policy_transaction_rejection(
+    request_id: u64,
+    error: PolicyTransactionError,
+) -> NodeCommandResult {
+    let problem = match error {
+        PolicyTransactionError::RevisionConflict { expected, current } => {
+            NodeProblem::new(NodeProblemCode::Conflict, "策略已被其他操作修改")
+                .with_message_key("policy.error.revision_conflict")
+                .with_param("expected_revision", expected.to_string())
+                .with_param("current_revision", current.to_string())
+                .with_revision_conflict(expected, current)
+        }
+        PolicyTransactionError::ScopeMismatch { declared, actual } => NodeProblem::new(
+            NodeProblemCode::InvalidRequest,
+            "声明的策略影响范围与候选实际变更不一致",
+        )
+        .with_message_key("policy.error.scope_mismatch")
+        .with_param("declared_networks", declared.join(","))
+        .with_param("actual_networks", actual.join(","))
+        .with_validation_issues(vec![NodeValidationIssue {
+            path: "network_ids".into(),
+            code: "scope_mismatch".into(),
+            message: "必须准确声明预览中受影响的所有网络和本地策略".into(),
+        }]),
+        PolicyTransactionError::InvalidCandidate(message) => {
+            NodeProblem::new(NodeProblemCode::InvalidRequest, "策略候选校验失败")
+                .with_message_key("policy.error.invalid_candidate")
+                .with_validation_issues(vec![NodeValidationIssue {
+                    path: "candidate".into(),
+                    code: "invalid_candidate".into(),
+                    message,
+                }])
+        }
+        PolicyTransactionError::ExplicitConfirmationRequired => NodeProblem::new(
+            NodeProblemCode::InvalidRequest,
+            "高风险权限扩大必须显式确认后才能应用",
+        )
+        .with_message_key("policy.error.explicit_confirmation_required")
+        .with_param("confirmation_required", "true"),
+        PolicyTransactionError::RevisionNotFound(revision) => {
+            NodeProblem::new(NodeProblemCode::NotFound, "目标策略 revision 不存在")
+                .with_message_key("policy.error.target_revision_not_found")
+                .with_param("target_revision", revision.to_string())
+        }
+        PolicyTransactionError::Persistence(details) => {
+            tracing::error!(%details, "策略事务持久化失败，旧策略保持有效");
+            NodeProblem::new(
+                NodeProblemCode::Internal,
+                "策略持久化失败，旧 revision 保持不变",
+            )
+            .with_message_key("policy.error.persistence_failed")
+        }
+    };
+    NodeCommandResult::rejected(request_id, problem)
+}
+
+async fn get_policy(
+    state: &NodeStateStore,
+    store: &PolicyTransactionStore,
+    policy_gate: &Mutex<()>,
+    request_id: u64,
+) -> NodeCommandResult {
+    let _guard = policy_gate.lock().await;
+    let fallback = policy_fallback(state).await;
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || store.current(&fallback)).await {
+        Ok(Ok(current)) => {
+            publish_policy_snapshot(state, current.snapshot.clone()).await;
+            NodeCommandResult::completed(request_id, NodeCommandOutcome::Policy(current))
+        }
+        Ok(Err(error)) => policy_transaction_rejection(request_id, error),
+        Err(error) => policy_transaction_rejection(
+            request_id,
+            PolicyTransactionError::Persistence(format!("读取策略任务异常终止: {error}")),
+        ),
+    }
+}
+
+async fn preview_policy(
+    state: &NodeStateStore,
+    store: &PolicyTransactionStore,
+    request_id: u64,
+    command: super::NodePreviewPolicyCommand,
+) -> NodeCommandResult {
+    let fallback = policy_fallback(state).await;
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || {
+        store.preview(&fallback, command.expected_revision, command.candidate)
+    })
+    .await
+    {
+        Ok(Ok(preview)) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::PolicyPreview(Box::new(preview)),
+        ),
+        Ok(Err(error)) => policy_transaction_rejection(request_id, error),
+        Err(error) => policy_transaction_rejection(
+            request_id,
+            PolicyTransactionError::Persistence(format!("策略预览任务异常终止: {error}")),
+        ),
+    }
+}
+
+async fn preview_policy_rollback(
+    state: &NodeStateStore,
+    store: &PolicyTransactionStore,
+    request_id: u64,
+    command: super::NodePreviewPolicyRollbackCommand,
+) -> NodeCommandResult {
+    let fallback = policy_fallback(state).await;
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || {
+        store.preview_rollback(
+            &fallback,
+            command.expected_revision,
+            command.target_revision,
+        )
+    })
+    .await
+    {
+        Ok(Ok(preview)) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::PolicyPreview(Box::new(preview)),
+        ),
+        Ok(Err(error)) => policy_transaction_rejection(request_id, error),
+        Err(error) => policy_transaction_rejection(
+            request_id,
+            PolicyTransactionError::Persistence(format!("策略回滚预览任务异常终止: {error}")),
+        ),
+    }
+}
+
+async fn authoritative_policy_snapshot(
+    store: &PolicyTransactionStore,
+    fallback: &PolicySnapshot,
+    result_snapshot: &PolicySnapshot,
+) -> PolicySnapshot {
+    let store = store.clone();
+    let fallback = fallback.clone();
+    match tokio::task::spawn_blocking(move || store.current_snapshot(&fallback)).await {
+        Ok(Ok(snapshot)) => snapshot,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "策略已提交但读取最新权威快照失败，先发布本次提交快照");
+            result_snapshot.clone()
+        }
+        Err(error) => {
+            tracing::warn!(%error, "策略已提交但权威快照任务异常，先发布本次提交快照");
+            result_snapshot.clone()
+        }
+    }
+}
+
+async fn apply_policy(
+    state: &NodeStateStore,
+    store: &PolicyTransactionStore,
+    policy_gate: &Mutex<()>,
+    request_id: u64,
+    command: super::NodeApplyPolicyCommand,
+    actor: String,
+    source: String,
+) -> NodeCommandResult {
+    let _guard = policy_gate.lock().await;
+    let fallback = policy_fallback(state).await;
+    let authoritative_store = store.clone();
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || {
+        store.apply(
+            &fallback,
+            command.expected_revision,
+            command.candidate,
+            &command.network_ids,
+            command.includes_local_policy,
+            command.confirm_privilege_expansion,
+            &actor,
+            &source,
+        )
+    })
+    .await
+    {
+        Ok(Ok(result)) => {
+            if !result.no_op {
+                let fallback = policy_fallback(state).await;
+                let snapshot = authoritative_policy_snapshot(
+                    &authoritative_store,
+                    &fallback,
+                    &result.snapshot,
+                )
+                .await;
+                publish_policy_snapshot(state, snapshot).await;
+            }
+            NodeCommandResult::completed(
+                request_id,
+                NodeCommandOutcome::PolicyApplied(Box::new(result)),
+            )
+        }
+        Ok(Err(error)) => policy_transaction_rejection(request_id, error),
+        Err(error) => policy_transaction_rejection(
+            request_id,
+            PolicyTransactionError::Persistence(format!("策略应用任务异常终止: {error}")),
+        ),
+    }
+}
+
+async fn rollback_policy(
+    state: &NodeStateStore,
+    store: &PolicyTransactionStore,
+    policy_gate: &Mutex<()>,
+    request_id: u64,
+    command: super::NodeRollbackPolicyCommand,
+    actor: String,
+    source: String,
+) -> NodeCommandResult {
+    let _guard = policy_gate.lock().await;
+    let fallback = policy_fallback(state).await;
+    let authoritative_store = store.clone();
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || {
+        store.rollback(
+            &fallback,
+            command.expected_revision,
+            command.target_revision,
+            &command.network_ids,
+            command.includes_local_policy,
+            command.confirm_privilege_expansion,
+            &actor,
+            &source,
+        )
+    })
+    .await
+    {
+        Ok(Ok(result)) => {
+            let fallback = policy_fallback(state).await;
+            let snapshot =
+                authoritative_policy_snapshot(&authoritative_store, &fallback, &result.snapshot)
+                    .await;
+            publish_policy_snapshot(state, snapshot).await;
+            NodeCommandResult::completed(
+                request_id,
+                NodeCommandOutcome::PolicyRolledBack(Box::new(result)),
+            )
+        }
+        Ok(Err(error)) => policy_transaction_rejection(request_id, error),
+        Err(error) => policy_transaction_rejection(
+            request_id,
+            PolicyTransactionError::Persistence(format!("策略回滚任务异常终止: {error}")),
+        ),
+    }
+}
+
+async fn policy_history(
+    state: &NodeStateStore,
+    store: &PolicyTransactionStore,
+    request_id: u64,
+) -> NodeCommandResult {
+    let fallback = policy_fallback(state).await;
+    let store = store.clone();
+    match tokio::task::spawn_blocking(move || store.history_snapshot(&fallback)).await {
+        Ok(Ok(history)) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::PolicyHistory(Box::new(history)),
+        ),
+        Ok(Err(error)) => policy_transaction_rejection(request_id, error),
+        Err(error) => policy_transaction_rejection(
+            request_id,
+            PolicyTransactionError::Persistence(format!("读取策略历史任务异常终止: {error}")),
+        ),
     }
 }
 
@@ -3489,11 +3870,13 @@ mod tests {
         NodeProbePeerCommand, NodeRoutingMode, NodeSetNetworkRoleCommand,
         NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
     };
+    use crate::policy_transaction::PolicyChangeAction;
     use crate::symmetric::EmbeddedServiceStartRequest;
     use fuckipv6_common::domain::{
-        ContentHash, InvitationCode, InvitationId, NetworkAcl, NetworkRole, PermissionEffect,
-        PermissionIntent, PermissionRule, PolicyAction, PolicyTestInput, PolicyTestRequest,
-        ResourceKind, SubjectSelector,
+        ContentHash, InvitationCode, InvitationId, NetworkAcl, NetworkAclGrant, NetworkId,
+        NetworkRole, NodeId, NodeLocalAccessPolicy, NodeNetworkScope, PermissionCondition,
+        PermissionEffect, PermissionIntent, PermissionRule, PolicyAction, PolicyTestInput,
+        PolicyTestRequest, ResourceKind, SecurityRuleId, SubjectSelector,
     };
     use fuckipv6_common::{
         ExitNodeCapabilities, ExitNodePlatform, NetworkMode, EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
@@ -3521,6 +3904,138 @@ mod tests {
             network_acl: None,
             now_unix_ms: 1_000,
         }
+    }
+
+    fn policy_transaction_network_id() -> NetworkId {
+        NetworkId::from_public_key(b"runtime-policy-network")
+    }
+
+    fn policy_transaction_rule(
+        name: &str,
+        effect: PermissionEffect,
+        action: PolicyAction,
+        resource: ResourceKind,
+        conditions: Vec<PermissionCondition>,
+    ) -> PermissionRule {
+        PermissionRule {
+            rule_id: SecurityRuleId::from_public_key(name.as_bytes()),
+            effect,
+            subjects: vec![SubjectSelector::AnyMember],
+            resources: vec![resource],
+            actions: vec![action],
+            conditions,
+        }
+    }
+
+    fn policy_transaction_snapshot() -> PolicySnapshot {
+        let now = unix_time_ms();
+        let network_id = policy_transaction_network_id();
+        PolicySnapshot {
+            local_policy: Some(NodeLocalAccessPolicy {
+                node_id: NodeId::from_public_key(b"runtime-policy-owner"),
+                revision: 1,
+                issued_at_unix_ms: now.saturating_sub(60_000),
+                expires_at_unix_ms: now + 86_400_000,
+                network_scope: NodeNetworkScope::Only(vec![network_id.clone()]),
+                contribution_vetoes: Vec::new(),
+                rules: vec![policy_transaction_rule(
+                    "runtime-local-read",
+                    PermissionEffect::Allow,
+                    PolicyAction::Read,
+                    ResourceKind::Network,
+                    vec![PermissionCondition::RecentReauthentication],
+                )],
+            }),
+            network_acls: vec![NetworkAcl {
+                network_id,
+                revision: 1,
+                issued_at_unix_ms: now.saturating_sub(60_000),
+                expires_at_unix_ms: now + 86_400_000,
+                rules: vec![policy_transaction_rule(
+                    "runtime-acl-read",
+                    PermissionEffect::Allow,
+                    PolicyAction::Read,
+                    ResourceKind::Network,
+                    Vec::new(),
+                )],
+                grants: Vec::new(),
+            }],
+        }
+    }
+
+    fn policy_transaction_candidate(document_revision: u64) -> PolicySnapshot {
+        let mut candidate = policy_transaction_snapshot();
+        let local = candidate.local_policy.as_mut().expect("local policy");
+        local.revision = document_revision;
+        local.rules = vec![policy_transaction_rule(
+            "runtime-local-expanded",
+            PermissionEffect::Allow,
+            PolicyAction::Update,
+            ResourceKind::SecurityPolicy,
+            Vec::new(),
+        )];
+        let acl = candidate.network_acls.get_mut(0).expect("network acl");
+        acl.revision = document_revision;
+        acl.rules = vec![policy_transaction_rule(
+            "runtime-acl-expanded",
+            PermissionEffect::Allow,
+            PolicyAction::Update,
+            ResourceKind::SecurityPolicy,
+            Vec::new(),
+        )];
+        acl.grants.push(NetworkAclGrant {
+            grant_id: SecurityRuleId::from_public_key(b"runtime-policy-grant"),
+            subjects: vec![SubjectSelector::AnyMember],
+            resources: vec![ResourceKind::SecurityPolicy],
+            actions: vec![PolicyAction::Update],
+            issued_at_unix_ms: acl.issued_at_unix_ms,
+            expires_at_unix_ms: acl.expires_at_unix_ms,
+            revoked_at_unix_ms: None,
+            revoked_by: None,
+            requires_recent_reauthentication: true,
+        });
+        candidate
+    }
+
+    async fn policy_runtime_bus(
+        name: &str,
+    ) -> (
+        NodeCommandBus,
+        NodeStateStore,
+        NodeEventBus,
+        PolicyTransactionStore,
+        std::path::PathBuf,
+    ) {
+        let dir = std::env::temp_dir().join(format!(
+            "fuckipv6-runtime-policy-{name}-{}-{}",
+            std::process::id(),
+            unix_time_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let configs = ConfigManager::new_for_dir(dir.clone()).expect("config manager");
+        let events = NodeEventBus::default();
+        let state = NodeStateStore::with_events(events.clone());
+        state
+            .update(|snapshot| {
+                snapshot.access_control.local_policy = policy_transaction_snapshot().local_policy;
+                snapshot.access_control.network_acls = policy_transaction_snapshot().network_acls;
+            })
+            .await;
+        let mut handler = NodeRuntimeHandler::with_services(
+            state.clone(),
+            MultiNetworkRegistry::new(),
+            EmbeddedServiceManager::spawn_with_config(4, configs),
+        );
+        handler.policy_store = Some(PolicyTransactionStore::new(dir.clone()));
+        let bus =
+            NodeCommandBus::spawn_with_state(Arc::new(handler), events.clone(), 32, state.clone());
+        (
+            bus,
+            state,
+            events,
+            PolicyTransactionStore::new(dir.clone()),
+            dir,
+        )
     }
 
     fn invitation_preview() -> InvitationPreview {
@@ -3860,6 +4375,496 @@ mod tests {
             }
             outcome => panic!("unexpected outcome: {outcome:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn policy_preview_apply_history_and_rollback_use_one_authoritative_revision_stream() {
+        let (bus, state, _events, store, dir) = policy_runtime_bus("workflow").await;
+        let base = policy_transaction_snapshot();
+        let first_candidate = policy_transaction_candidate(2);
+        let network_ids = vec![policy_transaction_network_id().to_string()];
+
+        let preview = bus
+            .execute_test(NodeCommandRequest::new(
+                80,
+                NodeCommand::PreviewPolicy(super::super::NodePreviewPolicyCommand {
+                    expected_revision: 0,
+                    candidate: first_candidate.clone(),
+                }),
+            ))
+            .await
+            .expect("preview result");
+        let preview = match preview.outcome {
+            NodeCommandOutcome::PolicyPreview(preview) => *preview,
+            outcome => panic!("unexpected preview outcome: {outcome:?}"),
+        };
+        assert!(!preview.revision_conflict);
+        assert!(preview.has_changes);
+        assert_eq!(preview.network_ids, network_ids);
+        assert!(preview.includes_local_policy);
+        assert!(preview.risk.requires_explicit_confirmation);
+
+        let applied = bus
+            .execute_test(NodeCommandRequest::new(
+                81,
+                NodeCommand::ApplyPolicy(super::super::NodeApplyPolicyCommand {
+                    expected_revision: preview.expected_revision,
+                    candidate: first_candidate.clone(),
+                    network_ids: preview.network_ids.clone(),
+                    includes_local_policy: preview.includes_local_policy,
+                    confirm_privilege_expansion: true,
+                }),
+            ))
+            .await
+            .expect("apply result");
+        let applied = match applied.outcome {
+            NodeCommandOutcome::PolicyApplied(applied) => *applied,
+            outcome => panic!("unexpected apply outcome: {outcome:?}"),
+        };
+        assert_eq!(applied.previous_revision, 0);
+        assert_eq!(applied.revision, 1);
+        assert!(!applied.no_op);
+        assert_eq!(applied.snapshot, first_candidate);
+        assert_eq!(applied.audit.as_ref().expect("apply audit").revision, 1);
+
+        let current = bus
+            .execute_test(NodeCommandRequest::new(82, NodeCommand::GetPolicy))
+            .await
+            .expect("get policy result");
+        match current.outcome {
+            NodeCommandOutcome::Policy(current) => {
+                assert_eq!(current.revision, 1);
+                assert_eq!(current.snapshot, first_candidate);
+            }
+            outcome => panic!("unexpected get policy outcome: {outcome:?}"),
+        }
+        assert_eq!(
+            state.snapshot().await.access_control.local_policy,
+            first_candidate.local_policy
+        );
+
+        let second_candidate = policy_transaction_candidate(3);
+        let second_preview = bus
+            .execute_test(NodeCommandRequest::new(
+                83,
+                NodeCommand::PreviewPolicy(super::super::NodePreviewPolicyCommand {
+                    expected_revision: 1,
+                    candidate: second_candidate.clone(),
+                }),
+            ))
+            .await
+            .expect("second preview result");
+        let second_preview = match second_preview.outcome {
+            NodeCommandOutcome::PolicyPreview(preview) => *preview,
+            outcome => panic!("unexpected second preview outcome: {outcome:?}"),
+        };
+        let second = bus
+            .execute_test(NodeCommandRequest::new(
+                84,
+                NodeCommand::ApplyPolicy(super::super::NodeApplyPolicyCommand {
+                    expected_revision: 1,
+                    candidate: second_candidate.clone(),
+                    network_ids: second_preview.network_ids,
+                    includes_local_policy: second_preview.includes_local_policy,
+                    confirm_privilege_expansion: true,
+                }),
+            ))
+            .await
+            .expect("second apply result");
+        assert!(matches!(
+            second.outcome,
+            NodeCommandOutcome::PolicyApplied(result) if result.revision == 2
+        ));
+
+        let history = bus
+            .execute_test(NodeCommandRequest::new(85, NodeCommand::GetPolicyHistory))
+            .await
+            .expect("policy history result");
+        match history.outcome {
+            NodeCommandOutcome::PolicyHistory(history) => {
+                assert_eq!(history.current_revision, 2);
+                assert_eq!(history.entries.len(), 2);
+                assert_eq!(history.entries[0].revision, 2);
+                assert_eq!(history.entries[0].action, PolicyChangeAction::Apply);
+            }
+            outcome => panic!("unexpected history outcome: {outcome:?}"),
+        }
+
+        let rollback_preview = bus
+            .execute_test(NodeCommandRequest::new(
+                86,
+                NodeCommand::PreviewPolicyRollback(
+                    super::super::NodePreviewPolicyRollbackCommand {
+                        expected_revision: 2,
+                        target_revision: 1,
+                    },
+                ),
+            ))
+            .await
+            .expect("rollback preview result");
+        let rollback_preview = match rollback_preview.outcome {
+            NodeCommandOutcome::PolicyPreview(preview) => *preview,
+            outcome => panic!("unexpected rollback preview outcome: {outcome:?}"),
+        };
+        assert_eq!(rollback_preview.rollback_target_revision, Some(1));
+        assert!(rollback_preview.has_changes);
+
+        let rolled_back = bus
+            .execute_test(NodeCommandRequest::new(
+                87,
+                NodeCommand::RollbackPolicy(super::super::NodeRollbackPolicyCommand {
+                    expected_revision: 2,
+                    target_revision: 1,
+                    network_ids: rollback_preview.network_ids,
+                    includes_local_policy: rollback_preview.includes_local_policy,
+                    confirm_privilege_expansion: true,
+                }),
+            ))
+            .await
+            .expect("rollback result");
+        match rolled_back.outcome {
+            NodeCommandOutcome::PolicyRolledBack(result) => {
+                assert_eq!(result.previous_revision, 2);
+                assert_eq!(result.revision, 3);
+                assert_eq!(result.target_revision, 1);
+                assert_eq!(result.audit.action, PolicyChangeAction::Rollback);
+                assert_eq!(result.audit.target_revision, Some(1));
+                assert_eq!(result.revision, result.audit.revision);
+            }
+            outcome => panic!("unexpected rollback outcome: {outcome:?}"),
+        }
+
+        assert_eq!(
+            store
+                .current_snapshot(&base)
+                .expect("store current")
+                .local_policy,
+            state.snapshot().await.access_control.local_policy
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn stale_policy_apply_returns_conflict_without_overwriting_the_winner() {
+        let (bus, state, _events, store, dir) = policy_runtime_bus("conflict").await;
+        let base = policy_transaction_snapshot();
+        let candidate = policy_transaction_candidate(2);
+        let network_ids = vec![policy_transaction_network_id().to_string()];
+        let winner = store
+            .apply(
+                &base,
+                0,
+                candidate.clone(),
+                &network_ids,
+                true,
+                true,
+                "other-owner",
+                "test",
+            )
+            .expect("external winner");
+        assert_eq!(winner.revision, 1);
+
+        let problem = execute_rejected(
+            &bus,
+            88,
+            NodeCommand::ApplyPolicy(super::super::NodeApplyPolicyCommand {
+                expected_revision: 0,
+                candidate,
+                network_ids,
+                includes_local_policy: true,
+                confirm_privilege_expansion: true,
+            }),
+        )
+        .await;
+        assert_problem(&problem, NodeProblemCode::Conflict, false);
+        assert_eq!(problem.message_key, "policy.error.revision_conflict");
+        assert_eq!(
+            problem.params.get("expected_revision").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            problem.params.get("current_revision").map(String::as_str),
+            Some("1")
+        );
+        let current = store
+            .current_snapshot(&base)
+            .expect("current after conflict");
+        assert_eq!(current, winner.snapshot);
+        assert_eq!(
+            state.snapshot().await.access_control.local_policy,
+            base.local_policy
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn no_op_policy_apply_does_not_publish_a_policy_change_or_history_entry() {
+        let (bus, state, _events, store, dir) = policy_runtime_bus("no-op").await;
+        let base = policy_transaction_snapshot();
+        let mut updates = state.subscribe();
+        let result = bus
+            .execute_test(NodeCommandRequest::new(
+                89,
+                NodeCommand::ApplyPolicy(super::super::NodeApplyPolicyCommand {
+                    expected_revision: 0,
+                    candidate: base.clone(),
+                    network_ids: Vec::new(),
+                    includes_local_policy: false,
+                    confirm_privilege_expansion: false,
+                }),
+            ))
+            .await
+            .expect("no-op apply result");
+        match result.outcome {
+            NodeCommandOutcome::PolicyApplied(result) => {
+                assert!(result.no_op);
+                assert_eq!(result.previous_revision, 0);
+                assert_eq!(result.revision, 0);
+                assert!(result.audit.is_none());
+            }
+            outcome => panic!("unexpected no-op outcome: {outcome:?}"),
+        }
+        while updates.has_changed().expect("watch remains open") {
+            let snapshot = updates.borrow_and_update().clone();
+            assert_eq!(snapshot.access_control.local_policy, base.local_policy);
+            assert_eq!(snapshot.access_control.network_acls, base.network_acls);
+        }
+        assert_eq!(store.current_snapshot(&base).expect("store current"), base);
+        assert!(store.history(&base).expect("history").is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn successful_policy_apply_and_rollback_publish_authoritative_state_changes() {
+        let (bus, state, _events, _store, dir) = policy_runtime_bus("state-events").await;
+        let first = policy_transaction_candidate(2);
+        let network_ids = vec![policy_transaction_network_id().to_string()];
+        let mut updates = state.subscribe();
+        let applied = bus
+            .execute_test(NodeCommandRequest::new(
+                90,
+                NodeCommand::ApplyPolicy(super::super::NodeApplyPolicyCommand {
+                    expected_revision: 0,
+                    candidate: first.clone(),
+                    network_ids: network_ids.clone(),
+                    includes_local_policy: true,
+                    confirm_privilege_expansion: true,
+                }),
+            ))
+            .await
+            .expect("apply result");
+        assert!(matches!(
+            applied.outcome,
+            NodeCommandOutcome::PolicyApplied(result) if !result.no_op
+        ));
+        let mut apply_published = false;
+        while updates.has_changed().expect("watch remains open") {
+            let snapshot = updates.borrow_and_update().clone();
+            apply_published |= snapshot.access_control.local_policy == first.local_policy
+                && snapshot.access_control.network_acls == first.network_acls;
+        }
+        assert!(apply_published);
+
+        let rolled_back = bus
+            .execute_test(NodeCommandRequest::new(
+                91,
+                NodeCommand::RollbackPolicy(super::super::NodeRollbackPolicyCommand {
+                    expected_revision: 1,
+                    target_revision: 1,
+                    network_ids: network_ids.clone(),
+                    includes_local_policy: true,
+                    confirm_privilege_expansion: true,
+                }),
+            ))
+            .await
+            .expect("rollback result");
+        assert!(matches!(
+            rolled_back.outcome,
+            NodeCommandOutcome::PolicyRolledBack(result) if result.revision == 2
+        ));
+        let mut rollback_published = false;
+        while updates.has_changed().expect("watch remains open") {
+            let snapshot = updates.borrow_and_update().clone();
+            let local = snapshot
+                .access_control
+                .local_policy
+                .as_ref()
+                .expect("local policy");
+            rollback_published |= local.revision == 3;
+        }
+        assert!(rollback_published);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn concurrent_policy_apply_and_rollback_cannot_move_the_revision_backwards() {
+        let (bus, _state, _events, store, dir) = policy_runtime_bus("concurrent").await;
+        let base = policy_transaction_snapshot();
+        let first = policy_transaction_candidate(2);
+        let network_ids = vec![policy_transaction_network_id().to_string()];
+        let applied = bus
+            .execute_test(NodeCommandRequest::new(
+                92,
+                NodeCommand::ApplyPolicy(super::super::NodeApplyPolicyCommand {
+                    expected_revision: 0,
+                    candidate: first,
+                    network_ids: network_ids.clone(),
+                    includes_local_policy: true,
+                    confirm_privilege_expansion: true,
+                }),
+            ))
+            .await
+            .expect("initial apply result");
+        assert!(matches!(
+            applied.outcome,
+            NodeCommandOutcome::PolicyApplied(result) if result.revision == 1
+        ));
+
+        let second = policy_transaction_candidate(3);
+        let apply = bus.execute_test(NodeCommandRequest::new(
+            93,
+            NodeCommand::ApplyPolicy(super::super::NodeApplyPolicyCommand {
+                expected_revision: 1,
+                candidate: second,
+                network_ids: network_ids.clone(),
+                includes_local_policy: true,
+                confirm_privilege_expansion: true,
+            }),
+        ));
+        let rollback = bus.execute_test(NodeCommandRequest::new(
+            94,
+            NodeCommand::RollbackPolicy(super::super::NodeRollbackPolicyCommand {
+                expected_revision: 1,
+                target_revision: 1,
+                network_ids,
+                includes_local_policy: true,
+                confirm_privilege_expansion: true,
+            }),
+        ));
+        let (apply_result, rollback_result) = tokio::join!(apply, rollback);
+        let outcomes = [
+            apply_result.expect("apply result").outcome,
+            rollback_result.expect("rollback result").outcome,
+        ];
+        let mut success_revisions = Vec::new();
+        let mut conflicts = 0;
+        for outcome in outcomes {
+            match outcome {
+                NodeCommandOutcome::PolicyApplied(result) => {
+                    success_revisions.push(result.revision);
+                }
+                NodeCommandOutcome::PolicyRolledBack(result) => {
+                    success_revisions.push(result.revision);
+                }
+                NodeCommandOutcome::Rejected(problem) => {
+                    assert_problem(&problem, NodeProblemCode::Conflict, false);
+                    conflicts += 1;
+                }
+                outcome => panic!("unexpected concurrent outcome: {outcome:?}"),
+            }
+        }
+        assert_eq!(success_revisions, vec![2]);
+        assert_eq!(conflicts, 1);
+        assert!(store
+            .current_snapshot(&base)
+            .expect("current")
+            .local_policy
+            .is_some());
+        let current = bus
+            .execute_test(NodeCommandRequest::new(95, NodeCommand::GetPolicy))
+            .await
+            .expect("current policy result");
+        assert!(matches!(
+            current.outcome,
+            NodeCommandOutcome::Policy(current) if current.revision == 2
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn policy_apply_and_rollback_reject_stale_webui_authentication() {
+        let (bus, state, _events, _store, dir) = policy_runtime_bus("reauth").await;
+        let context = NodeCommandContext::owner_session_for_snapshot(
+            &state.snapshot().await,
+            "webui:stale-owner",
+            false,
+        );
+        for (request_id, command) in [
+            (
+                96,
+                NodeCommand::ApplyPolicy(super::super::NodeApplyPolicyCommand {
+                    expected_revision: 0,
+                    candidate: policy_transaction_candidate(2),
+                    network_ids: vec![policy_transaction_network_id().to_string()],
+                    includes_local_policy: true,
+                    confirm_privilege_expansion: true,
+                }),
+            ),
+            (
+                97,
+                NodeCommand::RollbackPolicy(super::super::NodeRollbackPolicyCommand {
+                    expected_revision: 0,
+                    target_revision: 1,
+                    network_ids: vec![policy_transaction_network_id().to_string()],
+                    includes_local_policy: true,
+                    confirm_privilege_expansion: true,
+                }),
+            ),
+        ] {
+            let result = bus
+                .execute(
+                    context.clone(),
+                    NodeCommandRequest::new(request_id, command),
+                )
+                .await
+                .expect("authenticated command result");
+            let NodeCommandOutcome::Rejected(problem) = result.outcome else {
+                panic!("stale authentication must be rejected");
+            };
+            assert_problem(&problem, NodeProblemCode::AuthenticationRequired, false);
+            assert_eq!(
+                problem.params.get("authorization_code").map(String::as_str),
+                Some("permission.recent_authentication_required")
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn get_snapshot_refreshes_policy_written_by_an_external_store_operation() {
+        let (bus, state, _events, store, dir) = policy_runtime_bus("external").await;
+        let base = policy_transaction_snapshot();
+        let candidate = policy_transaction_candidate(2);
+        let winner = store
+            .apply(
+                &base,
+                0,
+                candidate.clone(),
+                &[policy_transaction_network_id().to_string()],
+                true,
+                true,
+                "external-owner",
+                "test",
+            )
+            .expect("external apply");
+        assert_eq!(winner.revision, 1);
+        assert_eq!(
+            state.snapshot().await.access_control.local_policy,
+            base.local_policy
+        );
+
+        let result = bus
+            .execute_test(NodeCommandRequest::new(98, NodeCommand::GetSnapshot))
+            .await
+            .expect("snapshot result");
+        match result.outcome {
+            NodeCommandOutcome::Snapshot(snapshot) => {
+                assert_eq!(snapshot.access_control.local_policy, candidate.local_policy);
+                assert_eq!(snapshot.access_control.network_acls, candidate.network_acls);
+            }
+            outcome => panic!("unexpected snapshot outcome: {outcome:?}"),
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

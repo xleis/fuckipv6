@@ -44,6 +44,9 @@ use crate::config_transaction::{
     ConfigurationPreview,
 };
 use crate::discovery_index::NodeDiscoveryIndexSnapshot;
+use crate::policy_transaction::{
+    PolicyApplyResult, PolicyCurrent, PolicyHistorySnapshot, PolicyPreview, PolicyRollbackResult,
+};
 use crate::tun::TunCapabilities;
 use crate::ui::UiModeResolution;
 
@@ -243,6 +246,11 @@ pub enum ProjectedNodeCommandOutcome {
     ConfigurationPreview(Box<ConfigurationPreview>),
     ConfigurationApplied(Box<ConfigurationApplyResult>),
     ConfigurationHistory(Vec<ConfigurationHistoryEntry>),
+    Policy(PolicyCurrent),
+    PolicyPreview(Box<PolicyPreview>),
+    PolicyApplied(Box<PolicyApplyResult>),
+    PolicyHistory(Box<PolicyHistorySnapshot>),
+    PolicyRolledBack(Box<PolicyRollbackResult>),
     PolicyTest(Box<PolicyTestResult>),
     Accepted { operation_id: String },
     Completed { message: String },
@@ -443,6 +451,19 @@ pub fn project_node_command_result(
         }
         NodeCommandOutcome::ConfigurationHistory(history) => {
             ProjectedNodeCommandOutcome::ConfigurationHistory(history.clone())
+        }
+        NodeCommandOutcome::Policy(current) => ProjectedNodeCommandOutcome::Policy(current.clone()),
+        NodeCommandOutcome::PolicyPreview(preview) => {
+            ProjectedNodeCommandOutcome::PolicyPreview(preview.clone())
+        }
+        NodeCommandOutcome::PolicyApplied(applied) => {
+            ProjectedNodeCommandOutcome::PolicyApplied(applied.clone())
+        }
+        NodeCommandOutcome::PolicyHistory(history) => {
+            ProjectedNodeCommandOutcome::PolicyHistory(history.clone())
+        }
+        NodeCommandOutcome::PolicyRolledBack(rolled_back) => {
+            ProjectedNodeCommandOutcome::PolicyRolledBack(rolled_back.clone())
         }
         NodeCommandOutcome::PolicyTest(result) => {
             ProjectedNodeCommandOutcome::PolicyTest(result.clone())

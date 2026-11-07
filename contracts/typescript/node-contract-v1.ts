@@ -2,9 +2,9 @@
 // Regenerate with scripts/generate-contracts.sh.
 
 export const NODE_CONTRACT_SCHEMA_VERSION = 1 as const;
-export const NODE_COMMAND_KINDS = ["acknowledge_membership_policy", "apply_configuration", "ban_client", "batch_review_join_requests", "change_member_lifecycle", "cleanup_node_residuals", "create_invitation", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_invitation_status", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "get_ui_manifest", "join_network", "leave_network", "list_invitations", "list_join_requests", "list_network_members", "preview_configuration", "preview_invitation", "preview_join_network", "preview_member_removal", "preview_network_profile", "probe_peer", "publish_network_discovery", "rebuild_tun", "redeem_invitation", "refresh_discovery_index", "restart_networks", "restart_node", "resubmit_join_request", "retry_discovery_index", "review_join_request", "revoke_invitation", "rollback_configuration", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "submit_join_request", "test_policy", "unban_client", "unpublish_network_discovery", "update_network_allocation", "update_network_discovery", "update_network_profile", "update_routing", "withdraw_join_request"] as const;
+export const NODE_COMMAND_KINDS = ["acknowledge_membership_policy", "apply_configuration", "apply_policy", "ban_client", "batch_review_join_requests", "change_member_lifecycle", "cleanup_node_residuals", "create_invitation", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_invitation_status", "get_network_allocation", "get_node_diagnostics", "get_policy", "get_policy_history", "get_snapshot", "get_ui_manifest", "join_network", "leave_network", "list_invitations", "list_join_requests", "list_network_members", "preview_configuration", "preview_invitation", "preview_join_network", "preview_member_removal", "preview_network_profile", "preview_policy", "preview_policy_rollback", "probe_peer", "publish_network_discovery", "rebuild_tun", "redeem_invitation", "refresh_discovery_index", "restart_networks", "restart_node", "resubmit_join_request", "retry_discovery_index", "review_join_request", "revoke_invitation", "rollback_configuration", "rollback_policy", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "submit_join_request", "test_policy", "unban_client", "unpublish_network_discovery", "update_network_allocation", "update_network_discovery", "update_network_profile", "update_routing", "withdraw_join_request"] as const;
 export type NodeCommandKindWire = (typeof NODE_COMMAND_KINDS)[number];
-export const NODE_MANIFEST_ACTION_COMMAND_KINDS = ["acknowledge_membership_policy", "apply_configuration", "ban_client", "batch_review_join_requests", "change_member_lifecycle", "cleanup_node_residuals", "create_invitation", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_invitation_status", "get_network_allocation", "get_node_diagnostics", "get_snapshot", "join_network", "leave_network", "list_invitations", "list_join_requests", "list_network_members", "preview_configuration", "preview_invitation", "preview_join_network", "preview_member_removal", "preview_network_profile", "probe_peer", "publish_network_discovery", "rebuild_tun", "redeem_invitation", "refresh_discovery_index", "restart_networks", "restart_node", "resubmit_join_request", "retry_discovery_index", "review_join_request", "revoke_invitation", "rollback_configuration", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "submit_join_request", "test_policy", "unban_client", "unpublish_network_discovery", "update_network_allocation", "update_network_discovery", "update_network_profile", "update_routing", "withdraw_join_request"] as const;
+export const NODE_MANIFEST_ACTION_COMMAND_KINDS = ["acknowledge_membership_policy", "apply_configuration", "apply_policy", "ban_client", "batch_review_join_requests", "change_member_lifecycle", "cleanup_node_residuals", "create_invitation", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_invitation_status", "get_network_allocation", "get_node_diagnostics", "get_policy", "get_policy_history", "get_snapshot", "join_network", "leave_network", "list_invitations", "list_join_requests", "list_network_members", "preview_configuration", "preview_invitation", "preview_join_network", "preview_member_removal", "preview_network_profile", "preview_policy", "preview_policy_rollback", "probe_peer", "publish_network_discovery", "rebuild_tun", "redeem_invitation", "refresh_discovery_index", "restart_networks", "restart_node", "resubmit_join_request", "retry_discovery_index", "review_join_request", "revoke_invitation", "rollback_configuration", "rollback_policy", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "submit_join_request", "test_policy", "unban_client", "unpublish_network_discovery", "update_network_allocation", "update_network_discovery", "update_network_profile", "update_routing", "withdraw_join_request"] as const;
 export type NodeManifestActionCommandKind =
   (typeof NODE_MANIFEST_ACTION_COMMAND_KINDS)[number];
 
@@ -685,6 +685,14 @@ export type NodeApplyConfigurationCommand = {
   "networks": Record<string, unknown>;
 };
 
+export type NodeApplyPolicyCommand = {
+  "candidate": PolicySnapshot;
+  "confirm_privilege_expansion"?: boolean;
+  "expected_revision": number;
+  "includes_local_policy"?: boolean;
+  "network_ids"?: Array<string>;
+};
+
 export type NodeBatchReviewJoinRequestsCommand = {
   "network_id": string;
   "reviews": Array<NodeJoinRequestReviewItem>;
@@ -907,6 +915,22 @@ export type NodeCommand = {
 } | {
   "command": "get_configuration_history";
 } | {
+  "command": "get_policy";
+} | {
+  "command": "preview_policy";
+  "payload": NodePreviewPolicyCommand;
+} | {
+  "command": "preview_policy_rollback";
+  "payload": NodePreviewPolicyRollbackCommand;
+} | {
+  "command": "apply_policy";
+  "payload": NodeApplyPolicyCommand;
+} | {
+  "command": "rollback_policy";
+  "payload": NodeRollbackPolicyCommand;
+} | {
+  "command": "get_policy_history";
+} | {
   "command": "test_policy";
   "payload": PolicyTestInput;
 };
@@ -1018,6 +1042,21 @@ export type NodeCommandOutcome = {
 } | {
   "data": Array<ConfigurationHistoryEntry>;
   "status": "configuration_history";
+} | {
+  "data": PolicyCurrent;
+  "status": "policy";
+} | {
+  "data": PolicyPreview;
+  "status": "policy_preview";
+} | {
+  "data": PolicyApplyResult;
+  "status": "policy_applied";
+} | {
+  "data": PolicyHistorySnapshot;
+  "status": "policy_history";
+} | {
+  "data": PolicyRollbackResult;
+  "status": "policy_rolled_back";
 } | {
   "data": PolicyTestResult;
   "status": "policy_test";
@@ -1659,6 +1698,16 @@ export type NodePreviewJoinNetworkCommand = {
   "network_id": string;
 };
 
+export type NodePreviewPolicyCommand = {
+  "candidate": PolicySnapshot;
+  "expected_revision": number;
+};
+
+export type NodePreviewPolicyRollbackCommand = {
+  "expected_revision": number;
+  "target_revision": number;
+};
+
 export type NodeProbePeerCommand = {
   "network_name": string;
   "target": string;
@@ -1716,6 +1765,14 @@ export type NodeRevokeInvitationCommand = {
 
 export type NodeRollbackConfigurationCommand = {
   "expected_revision": number;
+  "target_revision": number;
+};
+
+export type NodeRollbackPolicyCommand = {
+  "confirm_privilege_expansion"?: boolean;
+  "expected_revision": number;
+  "includes_local_policy"?: boolean;
+  "network_ids"?: Array<string>;
   "target_revision": number;
 };
 
@@ -1837,7 +1894,7 @@ export type NodeUiAction = {
   "audit": NodeUiAudit;
   "availability": NodeUiAvailability;
   "backend_status": NodeUiBackendStatus;
-  "command": "get_snapshot" | "get_node_diagnostics" | "start_networks" | "stop_networks" | "restart_networks" | "rebuild_tun" | "create_network" | "preview_network_profile" | "update_network_profile" | "publish_network_discovery" | "update_network_discovery" | "unpublish_network_discovery" | "refresh_discovery_index" | "retry_discovery_index" | "preview_join_network" | "join_network" | "submit_join_request" | "list_join_requests" | "list_network_members" | "preview_member_removal" | "change_member_lifecycle" | "review_join_request" | "batch_review_join_requests" | "withdraw_join_request" | "resubmit_join_request" | "create_invitation" | "list_invitations" | "get_invitation_status" | "revoke_invitation" | "preview_invitation" | "redeem_invitation" | "leave_network" | "acknowledge_membership_policy" | "update_routing" | "set_network_role" | "set_node_display_name" | "rotate_node_identity" | "get_blacklist" | "ban_client" | "unban_client" | "get_network_allocation" | "update_network_allocation" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "cleanup_node_residuals" | "get_configuration" | "preview_configuration" | "apply_configuration" | "rollback_configuration" | "get_configuration_history" | "test_policy" | "shutdown";
+  "command": "get_snapshot" | "get_node_diagnostics" | "start_networks" | "stop_networks" | "restart_networks" | "rebuild_tun" | "create_network" | "preview_network_profile" | "update_network_profile" | "publish_network_discovery" | "update_network_discovery" | "unpublish_network_discovery" | "refresh_discovery_index" | "retry_discovery_index" | "preview_join_network" | "join_network" | "submit_join_request" | "list_join_requests" | "list_network_members" | "preview_member_removal" | "change_member_lifecycle" | "review_join_request" | "batch_review_join_requests" | "withdraw_join_request" | "resubmit_join_request" | "create_invitation" | "list_invitations" | "get_invitation_status" | "revoke_invitation" | "preview_invitation" | "redeem_invitation" | "leave_network" | "acknowledge_membership_policy" | "update_routing" | "set_network_role" | "set_node_display_name" | "rotate_node_identity" | "get_blacklist" | "ban_client" | "unban_client" | "get_network_allocation" | "update_network_allocation" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "cleanup_node_residuals" | "get_configuration" | "preview_configuration" | "apply_configuration" | "rollback_configuration" | "get_configuration_history" | "get_policy" | "preview_policy" | "preview_policy_rollback" | "apply_policy" | "rollback_policy" | "get_policy_history" | "test_policy" | "shutdown";
   "confirmation"?: NodeUiConfirmation | null;
   "fields": Array<NodeUiField>;
   "id": string;
@@ -1873,7 +1930,7 @@ export type NodeUiField = {
   "validation": NodeUiValidation;
 };
 
-export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "policy_json" | "display_name" | "external_host" | "fingerprint" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "purpose" | "icon" | "language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution" | "exit_contribution_scope" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "node_id" | "member_lifecycle_action" | "member_lifecycle_reason" | "invitation_code" | "coordinator_url" | "port" | "revision" | "role" | "routing_mode" | "url_or_ticket" | "discovery_index_url" | "timeout_ms";
+export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "policy_json" | "policy_snapshot_json" | "policy_network_ids" | "display_name" | "external_host" | "fingerprint" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "purpose" | "icon" | "language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution" | "exit_contribution_scope" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "node_id" | "member_lifecycle_action" | "member_lifecycle_reason" | "invitation_code" | "coordinator_url" | "port" | "revision" | "role" | "routing_mode" | "url_or_ticket" | "discovery_index_url" | "timeout_ms";
 
 export type NodeUiManifest = {
   "action_block_reasons": Array<NodeUiActionBlockReason>;
@@ -1891,7 +1948,7 @@ export type NodeUiPage = {
 
 export type NodeUiPageState = "initial_loading" | "error" | "maintenance" | "permission_denied" | "unsupported" | "offline" | "control_unavailable" | "node_failed" | "degraded" | "stale" | "refreshing" | "empty" | "ready";
 
-export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_mode" | "network_selection" | "role" | "routing_mode" | "positive_timeout" | "revision" | "configuration_json" | "policy_json" | "display_name" | "fingerprint" | "network_purpose" | "network_icon" | "network_language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution" | "exit_contribution_scope" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "node_id" | "member_lifecycle_action" | "member_lifecycle_reason" | "invitation_code" | "coordinator_url";
+export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_mode" | "network_selection" | "role" | "routing_mode" | "positive_timeout" | "revision" | "configuration_json" | "policy_json" | "policy_snapshot_json" | "policy_network_ids" | "display_name" | "fingerprint" | "network_purpose" | "network_icon" | "network_language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution" | "exit_contribution_scope" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "node_id" | "member_lifecycle_action" | "member_lifecycle_reason" | "invitation_code" | "coordinator_url";
 
 export type NodeUpdateNetworkAllocationCommand = {
   "allocation": NodeNetworkAllocation;
@@ -1993,6 +2050,62 @@ export type PermissionRule = {
 
 export type PolicyAction = "read" | "create" | "update" | "delete" | "approve" | "reject" | "remove" | "enable" | "disable" | "use" | "recover" | "export" | "test";
 
+export type PolicyAffectedObject = {
+  "kind": PolicyObjectKind;
+  "network_id"?: string | null;
+  "object_id"?: string | null;
+};
+
+export type PolicyApplyResult = {
+  "affected_objects": Array<PolicyAffectedObject>;
+  "audit"?: PolicyHistoryEntry | null;
+  "diffs": Array<PolicyDiffEntry>;
+  "no_op": boolean;
+  "previous_revision": number;
+  "revision": number;
+  "risk": PolicyRiskSummary;
+  "snapshot": PolicySnapshot;
+};
+
+export type PolicyChangeAction = "apply" | "rollback";
+
+export type PolicyChangeKind = "local_policy_added" | "local_policy_updated" | "local_policy_removed" | "network_acl_added" | "network_acl_updated" | "network_acl_removed" | "permission_rule_added" | "permission_rule_updated" | "permission_rule_removed" | "grant_added" | "grant_updated" | "grant_removed" | "veto_added" | "veto_updated" | "veto_removed" | "network_scope_changed" | "validity_changed";
+
+export type PolicyCurrent = {
+  "revision": number;
+  "snapshot": PolicySnapshot;
+};
+
+export type PolicyDiffEntry = {
+  "after"?: unknown;
+  "before"?: unknown;
+  "change": PolicyChangeKind;
+  "path": string;
+};
+
+export type PolicyHistoryEntry = {
+  "action": PolicyChangeAction;
+  "actor": string;
+  "affected_objects": Array<PolicyAffectedObject>;
+  "diffs": Array<PolicyDiffEntry>;
+  "local_policy_revision"?: number | null;
+  "network_acl_revisions": Record<string, number>;
+  "occurred_at": string;
+  "previous_revision": number;
+  "revision": number;
+  "risk": PolicyRiskSummary;
+  "source": string;
+  "target_revision"?: number | null;
+  "transaction_id": string;
+};
+
+export type PolicyHistorySnapshot = {
+  "current_revision": number;
+  "entries": Array<PolicyHistoryEntry>;
+};
+
+export type PolicyObjectKind = "local_policy" | "network_acl" | "permission_rule" | "network_acl_grant" | "contribution_veto" | "network_scope";
+
 export type PolicyPrecedence = "cross_network_denied" | "invalid_or_expired_policy" | "network_scope_restricted" | "local_contribution_veto" | "explicit_deny" | "temporary_coordinator_read_only" | "role_ceiling_exceeded" | "authorization_revoked" | "authorization_expired" | "recent_reauthentication_required" | "default_denied" | "allow";
 
 export type PolicyPrecedenceExplanation = {
@@ -2000,6 +2113,45 @@ export type PolicyPrecedenceExplanation = {
   "rule_id"?: SecurityRuleId | null;
   "source"?: PolicyRuleSource | null;
   "triggered": boolean;
+};
+
+export type PolicyPreview = {
+  "affected_objects": Array<PolicyAffectedObject>;
+  "can_apply": boolean;
+  "candidate": PolicySnapshot;
+  "current": PolicySnapshot;
+  "current_revision": number;
+  "diffs": Array<PolicyDiffEntry>;
+  "expected_revision": number;
+  "has_changes": boolean;
+  "includes_local_policy": boolean;
+  "network_ids": Array<string>;
+  "revision_conflict": boolean;
+  "risk": PolicyRiskSummary;
+  "rollback_target_revision"?: number | null;
+};
+
+export type PolicyRiskLevel = "none" | "elevated" | "high";
+
+export type PolicyRiskReason = "allow_rule_added" | "deny_rule_removed" | "permission_rule_expanded" | "network_acl_grant_added" | "network_acl_grant_expanded" | "grant_reauthentication_removed" | "grant_validity_extended" | "local_policy_removed" | "network_acl_removed" | "network_scope_expanded" | "contribution_veto_removed" | "policy_validity_extended";
+
+export type PolicyRiskSummary = {
+  "level": PolicyRiskLevel;
+  "privilege_expansion": boolean;
+  "reasons": Array<PolicyRiskReason>;
+  "requires_explicit_confirmation": boolean;
+  "requires_recent_reauthentication": boolean;
+};
+
+export type PolicyRollbackResult = {
+  "affected_objects": Array<PolicyAffectedObject>;
+  "audit": PolicyHistoryEntry;
+  "diffs": Array<PolicyDiffEntry>;
+  "previous_revision": number;
+  "revision": number;
+  "risk": PolicyRiskSummary;
+  "snapshot": PolicySnapshot;
+  "target_revision": number;
 };
 
 export type PolicyRuleExplanation = {
@@ -2017,6 +2169,11 @@ export type PolicyRuleExplanation = {
 };
 
 export type PolicyRuleSource = "role_baseline" | "local_policy_rule" | "local_contribution_veto" | "local_network_scope" | "network_acl_rule" | "network_acl_grant" | "request" | "access_context";
+
+export type PolicySnapshot = {
+  "local_policy"?: NodeLocalAccessPolicy | null;
+  "network_acls"?: Array<NetworkAcl>;
+};
 
 export type PolicyTestInput = {
   "actor": NodeId;
@@ -2170,6 +2327,21 @@ export type ProjectedNodeCommandOutcome = {
 } | {
   "data": Array<ConfigurationHistoryEntry>;
   "status": "configuration_history";
+} | {
+  "data": PolicyCurrent;
+  "status": "policy";
+} | {
+  "data": PolicyPreview;
+  "status": "policy_preview";
+} | {
+  "data": PolicyApplyResult;
+  "status": "policy_applied";
+} | {
+  "data": PolicyHistorySnapshot;
+  "status": "policy_history";
+} | {
+  "data": PolicyRollbackResult;
+  "status": "policy_rolled_back";
 } | {
   "data": PolicyTestResult;
   "status": "policy_test";

@@ -712,9 +712,17 @@ pub(crate) fn operation_kind(command: &NodeCommand) -> OperationKind {
             OperationKind::ClientBlacklistUpdate
         }
         NodeCommand::UpdateNetworkAllocation(_) => OperationKind::NetworkAllocationUpdate,
-        NodeCommand::ApplyConfiguration(_) => OperationKind::PolicyApply,
-        NodeCommand::RollbackConfiguration(_) => OperationKind::PolicyRollback,
-        NodeCommand::TestPolicy(_) => OperationKind::PolicyTest,
+        NodeCommand::ApplyConfiguration(_) | NodeCommand::ApplyPolicy(_) => {
+            OperationKind::PolicyApply
+        }
+        NodeCommand::RollbackConfiguration(_) | NodeCommand::RollbackPolicy(_) => {
+            OperationKind::PolicyRollback
+        }
+        NodeCommand::TestPolicy(_)
+        | NodeCommand::GetPolicy
+        | NodeCommand::PreviewPolicy(_)
+        | NodeCommand::PreviewPolicyRollback(_)
+        | NodeCommand::GetPolicyHistory => OperationKind::PolicyTest,
         NodeCommand::GetSnapshot
         | NodeCommand::GetUiManifest
         | NodeCommand::GetBlacklist { .. }
@@ -802,6 +810,12 @@ pub(crate) fn operation_target(command: &NodeCommand, local_node_id: &NodeId) ->
         | NodeCommand::ApplyConfiguration(_)
         | NodeCommand::RollbackConfiguration(_)
         | NodeCommand::GetConfigurationHistory
+        | NodeCommand::GetPolicy
+        | NodeCommand::PreviewPolicy(_)
+        | NodeCommand::PreviewPolicyRollback(_)
+        | NodeCommand::ApplyPolicy(_)
+        | NodeCommand::RollbackPolicy(_)
+        | NodeCommand::GetPolicyHistory
         | NodeCommand::RefreshDiscoveryIndex { .. }
         | NodeCommand::RetryDiscoveryIndex
         | NodeCommand::SetNodeDisplayName(_)

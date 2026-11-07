@@ -16,6 +16,14 @@ import type {
   NodeSnapshot,
   NodeUiAction,
   NodeUiManifest,
+  PolicyApplyResult,
+  PolicyCurrent,
+  PolicyHistoryEntry,
+  PolicyHistorySnapshot,
+  PolicyPreview,
+  PolicyRiskSummary,
+  PolicyRollbackResult,
+  PolicySnapshot,
   PolicyTestInput,
   PolicyTestResult,
 } from "../../../contracts/typescript/node-contract-v1";
@@ -113,6 +121,259 @@ function policyResult(
   };
 }
 
+const emptyPolicySnapshot: PolicySnapshot = {
+  local_policy: null,
+  network_acls: [],
+};
+
+function policySnapshotWithRule(): PolicySnapshot {
+  return {
+    local_policy: {
+      node_id: nodeId,
+      revision: 7,
+      issued_at_unix_ms: 1_700_000_000_000,
+      expires_at_unix_ms: 1_900_000_000_000,
+      network_scope: { kind: "only", network_ids: [networkId] },
+      rules: [
+        {
+          rule_id: ruleId,
+          subjects: [{ kind: "any_member" }],
+          resources: ["network"],
+          actions: ["read"],
+          effect: "deny",
+          conditions: [{ kind: "membership_active" }],
+        },
+      ],
+    },
+    network_acls: [],
+  };
+}
+
+function riskSummary(
+  overrides: Partial<PolicyRiskSummary> = {},
+): PolicyRiskSummary {
+  return {
+    level: "none",
+    privilege_expansion: false,
+    reasons: [],
+    requires_explicit_confirmation: false,
+    requires_recent_reauthentication: false,
+    ...overrides,
+  };
+}
+
+function policyHistoryEntry(
+  overrides: Partial<PolicyHistoryEntry> = {},
+): PolicyHistoryEntry {
+  return {
+    action: "apply",
+    actor: nodeId,
+    affected_objects: [],
+    diffs: [
+      {
+        path: "/local_policy/revision",
+        before: 6,
+        after: 7,
+        change: "local_policy_updated",
+      },
+    ],
+    network_acl_revisions: {},
+    occurred_at: "2026-11-08T00:00:00Z",
+    previous_revision: 6,
+    revision: 7,
+    risk: riskSummary(),
+    source: "webui",
+    transaction_id: "tx_apply_7",
+    ...overrides,
+  };
+}
+
+function currentPolicy(
+  revision = 7,
+  snapshotValue: PolicySnapshot = emptyPolicySnapshot,
+): PolicyCurrent {
+  return { revision, snapshot: snapshotValue };
+}
+
+function policyHistory(
+  entries: PolicyHistoryEntry[] = [policyHistoryEntry()],
+  currentRevision = 7,
+): PolicyHistorySnapshot {
+  return { current_revision: currentRevision, entries };
+}
+
+function policyPreview(
+  overrides: Partial<PolicyPreview> = {},
+): PolicyPreview {
+  return {
+    affected_objects: [{ kind: "local_policy", network_id: networkId }],
+    can_apply: true,
+    candidate: {},
+    current: emptyPolicySnapshot,
+    current_revision: 7,
+    diffs: [
+      {
+        path: "/local_policy/revision",
+        before: 7,
+        after: 8,
+        change: "local_policy_updated",
+      },
+    ],
+    expected_revision: 7,
+    has_changes: true,
+    includes_local_policy: false,
+    network_ids: [networkId],
+    revision_conflict: false,
+    risk: riskSummary(),
+    rollback_target_revision: null,
+    ...overrides,
+  };
+}
+
+function policyApplied(
+  overrides: Partial<PolicyApplyResult> = {},
+): PolicyApplyResult {
+  const revision = overrides.revision ?? 8;
+  return {
+    affected_objects: [{ kind: "local_policy", network_id: networkId }],
+    audit: policyHistoryEntry({
+      revision,
+      previous_revision: 7,
+      transaction_id: `tx_apply_${revision}`,
+    }),
+    diffs: [
+      {
+        path: "/local_policy/revision",
+        before: 7,
+        after: 8,
+        change: "local_policy_updated",
+      },
+    ],
+    no_op: false,
+    previous_revision: 7,
+    revision,
+    risk: riskSummary(),
+    snapshot: emptyPolicySnapshot,
+    ...overrides,
+  };
+}
+
+function policyRolledBack(
+  overrides: Partial<PolicyRollbackResult> = {},
+): PolicyRollbackResult {
+  const revision = overrides.revision ?? 8;
+  const targetRevision = overrides.target_revision ?? 5;
+  return {
+    affected_objects: [{ kind: "local_policy", network_id: networkId }],
+    audit: policyHistoryEntry({
+      action: "rollback",
+      previous_revision: 7,
+      revision,
+      target_revision: targetRevision,
+      transaction_id: `tx_rollback_${revision}`,
+    }),
+    diffs: [
+      {
+        path: "/local_policy/revision",
+        before: 7,
+        after: 5,
+        change: "local_policy_updated",
+      },
+    ],
+    previous_revision: 7,
+    revision,
+    risk: riskSummary(),
+    snapshot: emptyPolicySnapshot,
+    target_revision: targetRevision,
+    ...overrides,
+  };
+}
+
+type PolicyResponderOptions = {
+  current?: PolicyCurrent;
+  history?: PolicyHistorySnapshot;
+  preview?: PolicyPreview | ((values: ActionValues) => PolicyPreview);
+  previewRollback?: PolicyPreview;
+  applied?: PolicyApplyResult;
+  rolledBack?: PolicyRollbackResult;
+  testResult?: PolicyTestResult | (() => PolicyTestResult);
+};
+
+function policyResponder(options: PolicyResponderOptions = {}) {
+  return vi.fn(
+    async (
+      action: NodeUiAction,
+      values: ActionValues,
+    ): Promise<NodeCommandOutcome> => {
+      switch (action.id) {
+        case "get_policy":
+          return {
+            status: "policy",
+            data: options.current ?? currentPolicy(),
+          };
+        case "get_policy_history":
+          return {
+            status: "policy_history",
+            data: options.history ?? policyHistory(),
+          };
+        case "test_policy": {
+          const result =
+            typeof options.testResult === "function"
+              ? options.testResult()
+              : (options.testResult ?? policyResult(true));
+          return { status: "policy_test", data: result };
+        }
+        case "preview_policy": {
+          const preview =
+            typeof options.preview === "function"
+              ? options.preview(values)
+              : (options.preview ?? policyPreview());
+          return { status: "policy_preview", data: preview };
+        }
+        case "preview_policy_rollback":
+          return {
+            status: "policy_preview",
+            data:
+              options.previewRollback ??
+              policyPreview({
+                expected_revision: 7,
+                current_revision: 7,
+                rollback_target_revision: 5,
+              }),
+          };
+        case "apply_policy":
+          return {
+            status: "policy_applied",
+            data: options.applied ?? policyApplied(),
+          };
+        case "rollback_policy":
+          return {
+            status: "policy_rolled_back",
+            data: options.rolledBack ?? policyRolledBack(),
+          };
+        default:
+          throw new Error(`unexpected action ${action.id}`);
+      }
+    },
+  );
+}
+
+function callsFor(
+  onSubmit: ReturnType<typeof policyResponder>,
+  actionId: string,
+) {
+  return onSubmit.mock.calls.filter(([action]) => action.id === actionId);
+}
+
+async function waitForInitialPolicyLoad(
+  onSubmit: ReturnType<typeof policyResponder>,
+): Promise<void> {
+  await waitFor(() => {
+    expect(callsFor(onSubmit, "get_policy")).toHaveLength(1);
+    expect(callsFor(onSubmit, "get_policy_history")).toHaveLength(1);
+  });
+}
+
 function renderWorkflow(
   onSubmit: (
     action: NodeUiAction,
@@ -147,16 +408,7 @@ afterEach(() => {
 describe("explainable policy workflow", () => {
   it("builds test_policy from structured fields without requiring JSON", async () => {
     const user = userEvent.setup();
-    const onSubmit = vi.fn(
-      async (
-        action: NodeUiAction,
-        values: ActionValues,
-      ): Promise<NodeCommandOutcome> => {
-        void action;
-        void values;
-        return { status: "policy_test", data: policyResult(true) };
-      },
-    );
+    const onSubmit = policyResponder();
     const { container } = renderWorkflow(onSubmit, {
       snapshot: snapshotWithContext,
     });
@@ -177,8 +429,8 @@ describe("explainable policy workflow", () => {
       screen.getByRole("button", { name: "translated:policy.run" }),
     );
 
-    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
-    const [action, values] = onSubmit.mock.calls[0];
+    await waitFor(() => expect(callsFor(onSubmit, "test_policy")).toHaveLength(1));
+    const [action, values] = callsFor(onSubmit, "test_policy")[0];
     expect(action.id).toBe("test_policy");
     expect(Object.keys(values)).toEqual(["policy_json"]);
     expect(JSON.parse(String(values.policy_json))).toMatchObject({
@@ -201,12 +453,7 @@ describe("explainable policy workflow", () => {
 
   it("imports a complete advanced JSON document and maps it back to structured fields", async () => {
     const user = userEvent.setup();
-    const onSubmit = vi.fn(
-      async (): Promise<NodeCommandOutcome> => ({
-        status: "policy_test",
-        data: policyResult(false),
-      }),
-    );
+    const onSubmit = policyResponder({ testResult: policyResult(false) });
     const { container } = renderWorkflow(onSubmit, {
       snapshot: snapshotWithContext,
     });
@@ -303,12 +550,7 @@ describe("explainable policy workflow", () => {
 
   it("rejects duplicate JSON keys and exposes the exact field path", async () => {
     const user = userEvent.setup();
-    const onSubmit = vi.fn(
-      async (): Promise<NodeCommandOutcome> => ({
-        status: "policy_test",
-        data: policyResult(true),
-      }),
-    );
+    const onSubmit = policyResponder();
     const { container } = renderWorkflow(onSubmit, {
       snapshot: snapshotWithContext,
     });
@@ -333,18 +575,268 @@ describe("explainable policy workflow", () => {
     await user.click(
       screen.getByRole("button", { name: "translated:policy.run" }),
     );
-    expect(onSubmit).not.toHaveBeenCalled();
+    expect(callsFor(onSubmit, "test_policy")).toHaveLength(0);
+  });
+
+  it("loads the authoritative policy and audit history before editing", async () => {
+    const onSubmit = policyResponder({
+      current: currentPolicy(7, policySnapshotWithRule()),
+      history: policyHistory([
+        policyHistoryEntry({ transaction_id: "tx_authoritative_7" }),
+      ]),
+    });
+    renderWorkflow(onSubmit, { snapshot: snapshotWithContext });
+
+    await waitForInitialPolicyLoad(onSubmit);
+
+    expect(callsFor(onSubmit, "get_policy")[0][1]).toEqual({});
+    expect(callsFor(onSubmit, "get_policy_history")[0][1]).toEqual({});
+    expect(
+      screen.getByText("translated:policy.current.rules_count"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("tx_authoritative_7")).toBeInTheDocument();
+  });
+
+  it("previews and atomically applies the exact revisioned candidate", async () => {
+    const user = userEvent.setup();
+    const onSubmit = policyResponder({
+      preview: policyPreview({
+        includes_local_policy: true,
+        risk: riskSummary({
+          level: "high",
+          privilege_expansion: true,
+          reasons: ["allow_rule_added"],
+          requires_explicit_confirmation: true,
+          requires_recent_reauthentication: true,
+        }),
+      }),
+    });
+    renderWorkflow(onSubmit, { snapshot: snapshotWithContext });
+    await waitForInitialPolicyLoad(onSubmit);
+
+    await user.click(
+      screen.getByRole("button", { name: "translated:policy.preview" }),
+    );
+    await waitFor(() =>
+      expect(callsFor(onSubmit, "preview_policy")).toHaveLength(1),
+    );
+
+    const previewValues = callsFor(onSubmit, "preview_policy")[0][1];
+    expect(previewValues.expected_revision).toBe("7");
+    const previewCandidate = JSON.parse(
+      String(previewValues.candidate_json),
+    ) as PolicySnapshot;
+
+    const applyButton = screen.getByRole("button", {
+      name: "translated:policy.apply",
+    });
+    expect(applyButton).toBeDisabled();
+    expect(
+      screen.getByText("translated:policy.transaction.confirm_required"),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: "translated:policy.transaction.confirm_privilege_expansion",
+      }),
+    );
+    expect(applyButton).toBeEnabled();
+    await user.click(applyButton);
+
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByText("translated:confirm.apply_policy.title"),
+    ).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "translated:confirm.apply_policy.action",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(callsFor(onSubmit, "apply_policy")).toHaveLength(1),
+    );
+    const applyValues = callsFor(onSubmit, "apply_policy")[0][1];
+    expect(applyValues).toMatchObject({
+      expected_revision: "7",
+      network_ids: networkId,
+      includes_local_policy: "true",
+      confirm_privilege_expansion: "true",
+    });
+    expect(JSON.parse(String(applyValues.candidate_json))).toEqual(
+      previewCandidate,
+    );
+    await waitFor(() =>
+      expect(callsFor(onSubmit, "get_policy_history")).toHaveLength(2),
+    );
+    expect(
+      screen.getByText("translated:policy.applied.title"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("tx_apply_8")).toBeInTheDocument();
+  });
+
+  it("blocks apply when the preview reports a revision conflict", async () => {
+    const user = userEvent.setup();
+    const onSubmit = policyResponder({
+      preview: policyPreview({
+        current_revision: 9,
+        revision_conflict: true,
+        can_apply: false,
+      }),
+    });
+    renderWorkflow(onSubmit, { snapshot: snapshotWithContext });
+    await waitForInitialPolicyLoad(onSubmit);
+
+    await user.click(
+      screen.getByRole("button", { name: "translated:policy.preview" }),
+    );
+    await waitFor(() =>
+      expect(callsFor(onSubmit, "preview_policy")).toHaveLength(1),
+    );
+
+    expect(
+      screen.getAllByText("translated:policy.transaction.revision_conflict")
+        .length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getByRole("button", { name: "translated:policy.apply" }),
+    ).toBeDisabled();
+  });
+
+  it("blocks apply when the current revision advances after preview", async () => {
+    const user = userEvent.setup();
+    const onSubmit = policyResponder({
+      preview: policyPreview({
+        expected_revision: 6,
+        current_revision: 7,
+      }),
+    });
+    renderWorkflow(onSubmit, { snapshot: snapshotWithContext });
+    await waitForInitialPolicyLoad(onSubmit);
+
+    await user.click(
+      screen.getByRole("button", { name: "translated:policy.preview" }),
+    );
+    await waitFor(() =>
+      expect(callsFor(onSubmit, "preview_policy")).toHaveLength(1),
+    );
+
+    expect(
+      screen.getAllByText("translated:policy.transaction.stale_preview")
+        .length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getByRole("button", { name: "translated:policy.apply" }),
+    ).toBeDisabled();
+  });
+
+  it("explains a no-op preview without allowing a new revision", async () => {
+    const user = userEvent.setup();
+    const onSubmit = policyResponder({
+      preview: policyPreview({
+        can_apply: false,
+        diffs: [],
+        has_changes: false,
+      }),
+    });
+    renderWorkflow(onSubmit, { snapshot: snapshotWithContext });
+    await waitForInitialPolicyLoad(onSubmit);
+
+    await user.click(
+      screen.getByRole("button", { name: "translated:policy.preview" }),
+    );
+    await waitFor(() =>
+      expect(callsFor(onSubmit, "preview_policy")).toHaveLength(1),
+    );
+
+    expect(
+      screen.getAllByText("translated:policy.transaction.no_changes").length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getByRole("button", { name: "translated:policy.apply" }),
+    ).toBeDisabled();
+  });
+
+  it("previews and rolls back through a new revision with audit evidence", async () => {
+    const user = userEvent.setup();
+    const onSubmit = policyResponder({
+      history: policyHistory([
+        policyHistoryEntry({
+          revision: 7,
+          previous_revision: 6,
+          transaction_id: "tx_current_7",
+        }),
+        policyHistoryEntry({
+          revision: 5,
+          previous_revision: 4,
+          transaction_id: "tx_target_5",
+        }),
+      ]),
+      previewRollback: policyPreview({
+        expected_revision: 7,
+        current_revision: 7,
+        rollback_target_revision: 5,
+      }),
+      rolledBack: policyRolledBack(),
+    });
+    renderWorkflow(onSubmit, { snapshot: snapshotWithContext });
+    await waitForInitialPolicyLoad(onSubmit);
+
+    const rollbackButtons = await screen.findAllByRole("button", {
+      name: "translated:policy.rollback.action",
+    });
+    await user.click(rollbackButtons[1]);
+    await waitFor(() =>
+      expect(callsFor(onSubmit, "preview_policy_rollback")).toHaveLength(1),
+    );
+    expect(callsFor(onSubmit, "preview_policy_rollback")[0][1]).toEqual({
+      expected_revision: "7",
+      target_revision: "5",
+    });
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:policy.rollback.execute",
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByText("translated:confirm.rollback_policy.title"),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("translated:policy.rollback.new_revision"),
+    ).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "translated:confirm.rollback_policy.action",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(callsFor(onSubmit, "rollback_policy")).toHaveLength(1),
+    );
+    expect(callsFor(onSubmit, "rollback_policy")[0][1]).toMatchObject({
+      expected_revision: "7",
+      target_revision: "5",
+      network_ids: networkId,
+      includes_local_policy: "false",
+      confirm_privilege_expansion: "false",
+    });
+    await waitFor(() =>
+      expect(callsFor(onSubmit, "get_policy_history")).toHaveLength(2),
+    );
+    expect(screen.getByText("tx_rollback_8")).toBeInTheDocument();
+    expect(
+      screen.getByText("translated:policy.history.action.rollback"),
+    ).toBeInTheDocument();
   });
 
   it("renders allowed and denied outcomes from the authoritative result", async () => {
     const user = userEvent.setup();
     let allowed = true;
-    const onSubmit = vi.fn(
-      async (): Promise<NodeCommandOutcome> => ({
-        status: "policy_test",
-        data: policyResult(allowed),
-      }),
-    );
+    const onSubmit = policyResponder({
+      testResult: () => policyResult(allowed),
+    });
     renderWorkflow(onSubmit, { snapshot: snapshotWithContext });
 
     await user.click(
@@ -371,10 +863,8 @@ describe("explainable policy workflow", () => {
 
   it("locates validation issues in advanced JSON", async () => {
     const user = userEvent.setup();
-    const onSubmit = vi.fn(
-      async (): Promise<NodeCommandOutcome> => ({
-        status: "policy_test",
-        data: policyResult(false, {
+    const onSubmit = policyResponder({
+      testResult: policyResult(false, {
           validation_issues: [
             {
               path: "/request/action",
@@ -385,8 +875,7 @@ describe("explainable policy workflow", () => {
             },
           ],
         }),
-      }),
-    );
+    });
     const { container } = renderWorkflow(onSubmit, {
       snapshot: snapshotWithContext,
     });
@@ -440,12 +929,7 @@ describe("explainable policy workflow", () => {
         },
       ],
     });
-    const onSubmit = vi.fn(
-      async (): Promise<NodeCommandOutcome> => ({
-        status: "policy_test",
-        data: result,
-      }),
-    );
+    const onSubmit = policyResponder({ testResult: result });
     renderWorkflow(onSubmit, { snapshot: snapshotWithContext });
 
     await user.click(
@@ -489,10 +973,7 @@ describe("explainable policy workflow", () => {
   });
 
   it("does not coerce the visual fixture's invalid node id into the actor", () => {
-    renderWorkflow(vi.fn(async (): Promise<NodeCommandOutcome> => ({
-      status: "policy_test",
-      data: policyResult(true),
-    })));
+    renderWorkflow(policyResponder());
 
     expect(
       screen.getByRole("textbox", { name: "translated:policy.field.actor" }),

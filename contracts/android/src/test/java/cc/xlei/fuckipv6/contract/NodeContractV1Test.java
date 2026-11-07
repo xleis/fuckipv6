@@ -46,7 +46,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 191,
+                NodeContractV1.DTO_CLASS_NAMES.length == 205,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -139,6 +139,63 @@ public final class NodeContractV1Test {
         }
         NodeContractV1.NodeCommand.TestPolicy.class.getDeclaredField("payload");
         NodeContractV1.NodeCommandOutcome.PolicyTest.class.getDeclaredField("data");
+        for (String field : new String[] {"candidate", "expected_revision"}) {
+            NodeContractV1.NodePreviewPolicyCommand.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {"expected_revision", "target_revision"}) {
+            NodeContractV1.NodePreviewPolicyRollbackCommand.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "candidate", "confirm_privilege_expansion", "expected_revision",
+            "includes_local_policy", "network_ids"
+        }) {
+            NodeContractV1.NodeApplyPolicyCommand.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "confirm_privilege_expansion", "expected_revision", "includes_local_policy",
+            "network_ids", "target_revision"
+        }) {
+            NodeContractV1.NodeRollbackPolicyCommand.class.getDeclaredField(field);
+        }
+        NodeContractV1.NodeCommand.PreviewPolicy.class.getDeclaredField("payload");
+        NodeContractV1.NodeCommand.PreviewPolicyRollback.class.getDeclaredField("payload");
+        NodeContractV1.NodeCommand.ApplyPolicy.class.getDeclaredField("payload");
+        NodeContractV1.NodeCommand.RollbackPolicy.class.getDeclaredField("payload");
+        for (Class<?> outcome : new Class<?>[] {
+            NodeContractV1.NodeCommandOutcome.Policy.class,
+            NodeContractV1.NodeCommandOutcome.PolicyPreview.class,
+            NodeContractV1.NodeCommandOutcome.PolicyApplied.class,
+            NodeContractV1.NodeCommandOutcome.PolicyHistory.class,
+            NodeContractV1.NodeCommandOutcome.PolicyRolledBack.class
+        }) {
+            outcome.getDeclaredField("data");
+        }
+        for (String field : new String[] {
+            "affected_objects", "audit", "diffs", "no_op", "previous_revision",
+            "revision", "risk", "snapshot"
+        }) {
+            NodeContractV1.PolicyApplyResult.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "affected_objects", "can_apply", "candidate", "current", "current_revision",
+            "diffs", "expected_revision", "has_changes", "includes_local_policy",
+            "network_ids", "revision_conflict", "risk", "rollback_target_revision"
+        }) {
+            NodeContractV1.PolicyPreview.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "affected_objects", "audit", "diffs", "previous_revision", "revision",
+            "risk", "snapshot", "target_revision"
+        }) {
+            NodeContractV1.PolicyRollbackResult.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "action", "actor", "affected_objects", "diffs", "local_policy_revision",
+            "network_acl_revisions", "occurred_at", "previous_revision", "revision",
+            "risk", "source", "target_revision", "transaction_id"
+        }) {
+            NodeContractV1.PolicyHistoryEntry.class.getDeclaredField(field);
+        }
         for (String field : new String[] {
             "expires_at_unix_ms", "grants", "issued_at_unix_ms", "network_id", "revision", "rules"
         }) {

@@ -216,6 +216,9 @@ fn infer_activity_object_kind(resource: &str) -> String {
 }
 
 fn classify_activity_category(action: &str, outcome: AuditOutcome) -> ActivityCategory {
+    if action.starts_with("traffic.failure.") {
+        return ActivityCategory::SystemEvent;
+    }
     if outcome == AuditOutcome::Denied {
         return ActivityCategory::SecurityEvent;
     }
@@ -243,6 +246,9 @@ fn classify_activity_category(action: &str, outcome: AuditOutcome) -> ActivityCa
 }
 
 fn classify_activity_severity(action: &str, outcome: AuditOutcome) -> ActivitySeverity {
+    if action.starts_with("traffic.failure.") {
+        return ActivitySeverity::Warning;
+    }
     if outcome == AuditOutcome::Denied {
         return ActivitySeverity::Warning;
     }

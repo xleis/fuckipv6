@@ -57,7 +57,7 @@
 | W8 网络创建与发现 | `[~]` | P1 | W3,W4,W5 | 创建、发现、开放/审批/私有邀请和强制 Exit 知情已完成；索引故障隔离与发现全链路测试待完成 |
 | W9 成员、组与拓扑 | `[~]` | P1 | W8 | 成员列表、邀请审批、组目录和拓扑聚合已完成；多网络视觉、交互、性能与 E2E 进行中 |
 | W10 安全与隐私 | `[x]` | P1 | W9 | 权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计、安全页面状态和可重复治理证据闭环均已完成 |
-| W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承已完成；测试器、原子应用、失败关闭待完成 |
+| W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略已完成；测试器、原子应用、自动恢复与页面待完成 |
 | W12 Exit | `[ ]` | P1 | W10,W11 | 治理、Google、DNS、网速报告 |
 | W13 Relay | `[ ]` | P1 | W10 | 授权、配额、健康、回退 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
@@ -2303,16 +2303,36 @@ PID 重用会形成不同的实例键。`ApplicationIdentityResolver` 只消费�
 
 **验收**：应用分流可解释、可测试；未知身份不会因规则漏洞被错误放行。
 
-### W11-04 未知应用与失败策略 `[ ]`
+### W11-04 未知应用与失败策略 `[x]`
 
-- [ ] 为未知应用、DNS 失败、Exit 不可用、网络选择失败定义决策；
-- [ ] 用户可选择失败关闭或显式直连，但默认失败关闭；
-- [ ] 明确哪些失败可以 fallback，哪些绝不能直连；
-- [ ] UI 在应用策略前显示 fallback 后果；
-- [ ] 运行时可动态降级但必须产生可见状态和活动；
-- [ ] 防止 fallback 绕过固定 Exit 或拒绝规则；
-- [ ] 覆盖 DNS 污染、连接超时和部分连接失败；
-- [ ] 所有 fallback 事件进入审计。
+- [x] 为未知应用、DNS 失败、Exit 不可用、网络选择失败定义决策；
+- [x] 用户可选择失败关闭或显式直连，但默认失败关闭；
+- [x] 明确哪些失败可以 fallback，哪些绝不能直连；
+- [x] UI 在应用策略前显示 fallback 后果；
+- [x] 运行时可动态降级但必须产生可见状态和活动；
+- [x] 防止 fallback 绕过固定 Exit 或拒绝规则；
+- [x] 覆盖 DNS 污染、连接超时和部分连接失败；
+- [x] 所有 fallback 事件进入审计。
+
+`TrafficPolicy` 现在将 `TrafficFailurePolicy` 纳入同一 revision/内容哈希；字段缺失时默认失败关闭，不存在隐藏直连。失败类型包括未知应用、
+DNS 解析超时、DNS 污染、Exit 不可用、网络选择不可用、连接超时和部分连接失败。只有未知应用、Exit 不可用、网络选择失败和连接超时
+可由 owner/管理员显式确认后直连；DNS 超时/污染和部分连接失败永远失败关闭，因为他们无法在保持原安全属性的前提下安全切换路径。
+
+显式直连要求列出被允许的失败类，并记录确认主体与时间；空集合或未确认配置会被拒绝，把绝不能直连的失败类写入策略也会以
+`domain.traffic_direct_fallback_unsafe` 失败。求值顺序先检查拒绝规则、固定 Exit、固定网络和本身已直连的动作，任何硬约束都不会被
+fallback 绕过。`TrafficFailurePolicy::preview` 对全部失败类返回稳定 `consequence_key`，UI 必须在应用前展示；运行时使用同一
+`decide` 方法生成 `TrafficFailureOutcome`、可见的 `TrafficRuntimeDegradation` 和重试恢复动作。
+
+每个失败决策都要求审计；`audit_entry` 生成真实 `AuditEntry`，直连事件固定为 `traffic.failure.direct_fallback`，失败关闭事件为
+`traffic.failure.fail_closed`，并投影为 `SystemEvent`/`Warning` 活动。测试覆盖默认失败关闭、显式确认、硬约束不可绕过、UI 预览、
+DNS 污染、连接超时、部分连接失败、降级状态及审计/活动投影。真实 TUN/DNS 探测适配器、运行时自动降级接线和页面展示仍由 W11-07、
+W11-08 完成，本项只完成可测试的共享领域契约，不得据此宣称失败策略已在线生效。
+
+**验证通过（2026-11-08）**：`cargo fmt --all -- --check`、
+`cargo test -p fuckipv6-common --lib domain::traffic_failure`（8 passed）、
+`cargo test -p fuckipv6-common --lib domain::traffic_`（27 passed）、
+`cargo test -p fuckipv6-common --lib`、`cargo check --workspace`、`cargo test --workspace`、
+`cargo clippy --workspace --all-targets -- -D warnings`、`python3 scripts/check-docs.py` 和 `git diff --check`。
 
 **验收**：不存在静默泄漏真实出口；降级状态必须对用户可见且可恢复。
 

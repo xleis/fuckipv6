@@ -386,7 +386,8 @@ Exit 不可用时必须失败关闭并明确报告，不能静默直连。
 - 每个动作明确为：直连、进入网络、使用指定 Exit、拒绝。
 - 列表底部必须存在明确的默认动作。
 - 回环、链路本地、组播和系统安全所需路由由系统内置且不可被普通规则覆盖，但必须可见和可解释。
-- 规则指定的网络或 Exit 不可用时失败关闭。
+- 规则指定的网络或 Exit 不可用时默认失败关闭；只有 owner/管理员显式确认的失败类可直连，且固定 Exit、固定网络和拒绝规则不可被 fallback 绕过。
+- DNS 污染、DNS 解析超时和部分连接失败绝不直连；未知应用、Exit/网络选择失败和连接超时可由用户显式允许直连。
 - 任何修改先显示受影响规则、最终路径和验证结果，再原子应用，并支持回滚。
 
 ### 11.4 规则编辑器
@@ -1048,7 +1049,7 @@ Node 所有者始终可以进一步限制本机暴露，网络管理员不能绕
 | WebUI | 两套表面并存 | 单一产品 UI 的浏览器适配 | 必须删除双表面和旧 controller 语义竞争 |
 | Android | 目标方案 | Compose + 前台 VpnService + 全能力 | 第一版尚未形成可验收实现 |
 | 公网控制面 | 远程 WebUI 依赖反向代理和旧 JWT/密码体系 | HTTPS + Passkey + 单所有者 + 初始化码 | 认证、初始化、安全头和会话模型均需重建 |
-| 应用分流 | 已有路径/平台应用 ID、来源、子进程继承和 Unknown 失败关闭领域契约；尚无真实进程采集适配器 | 路径/平台应用 ID、子进程继承、不可识别标记 | 跨平台采集与权限探测未接线，UI 还没有完整测试器 |
+| 应用分流 | 已有路径/平台应用 ID、来源、子进程继承、Unknown 与路由失败策略领域契约；尚无真实进程采集和数据面 adapter | 路径/平台应用 ID、子进程继承、不可识别标记、失败关闭 | 跨平台采集、TUN/DNS 降级接线、UI 测试器仍未完成 |
 | 自动发现 | 有网络发现目标 | 签名索引、开放/审批、申请理由 | 索引、签名记录和加入流程未完成 |
 | 隐私治理 | 当前主要是基础状态可见性 | 成员/管理员/所有者分层字段权限 | 字段级策略、默认值和审计未实现 |
 
@@ -2508,8 +2509,11 @@ DNS：<授权 resolver>
 | `RoleGrant` | network_id, subject, role | owner/admin/member 等 |
 | `Group` | network_id, id, kind, selector | 自定义组/动态组 |
 | `Capability` | network_id, node_id, kind, state, limits | Coordinator/Relay/Exit/File |
-| `TrafficPolicy` | node_id, revision, default_policy, rules | 节点级有序规则集；默认动作必须显式确认 |
+| `TrafficPolicy` | node_id, revision, default_policy, failure_policy, rules | 节点级有序规则集；默认动作和直连 fallback 必须显式确认 |
 | `TrafficRule` | id, priority, matcher, action, enabled | 按可见顺序首条命中；同字段 OR、不同字段 AND |
+| `TrafficFailurePolicy` | direct_fallback(allowed_failures, confirmed_by, confirmed_at) | 缺省失败关闭；硬约束优先，禁止不安全 fallback |
+| `TrafficFailureDecision` | failure, outcome, reason, consequence_key, recovery_action | UI 预览和运行时共用的失败决策；带稳定解释键 |
+| `TrafficRuntimeDegradation` | state, failure, consequence_key, recovery_action, audit_required | 当前降级状态；不得与已配置策略混淆 |
 | `ApplicationIdentityCapability` | platform, formats, state | 平台应用条件是否可用；禁用时必须解释 |
 | `ProcessApplicationObservation` | process(pid,start), parent, class, lifetime, identity, source | 注入式进程识别事实；不含命令行/环境 |
 | `ApplicationIdentityResolution` | identity, source, inherited_through | 可解释应用身份与继承链；无法识别为 Unknown |

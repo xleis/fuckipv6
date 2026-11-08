@@ -10,6 +10,9 @@ use super::application_identity::{
     ApplicationIdentityFormat,
 };
 use super::ids::{ContentHash, NetworkId, NodeId, TrafficRuleId};
+use super::traffic_failure::{
+    TrafficFailureDecision, TrafficFailureKind, TrafficFailurePolicy, TrafficFailureRouteContext,
+};
 use super::{DomainError, DomainResult};
 
 #[derive(
@@ -477,6 +480,10 @@ pub struct TrafficPolicy {
     pub node_id: NodeId,
     pub revision: u64,
     pub default_policy: TrafficDefaultPolicy,
+    /// Failure handling is part of the policy revision, not an ambient mode.
+    /// Missing values deserialize to the fail-closed default.
+    #[serde(default)]
+    pub failure_policy: TrafficFailurePolicy,
     #[serde(default)]
     pub rules: Vec<TrafficRule>,
 }
@@ -489,6 +496,7 @@ impl TrafficPolicy {
             ));
         }
         self.validate_default_policy()?;
+        self.failure_policy.validate()?;
         let mut rule_ids = BTreeSet::new();
         for (index, rule) in self.rules.iter().enumerate() {
             rule.matcher.validate()?;
@@ -574,6 +582,26 @@ impl TrafficPolicy {
         })
     }
 
+    /// Evaluate the failure policy that is versioned with this traffic
+    /// policy. The UI must call this method for previews and the runtime must
+    /// call the same method after a real failure.
+    pub fn decide_failure(
+        &self,
+        route: &TrafficFailureRouteContext,
+        failure: TrafficFailureKind,
+    ) -> DomainResult<TrafficFailureDecision> {
+        self.validate()?;
+        self.failure_policy.decide(route, failure)
+    }
+
+    pub fn preview_failure_policy(
+        &self,
+        route: &TrafficFailureRouteContext,
+    ) -> DomainResult<Vec<TrafficFailureDecision>> {
+        self.validate()?;
+        self.failure_policy.preview(route)
+    }
+
     pub fn content_hash(&self) -> DomainResult<ContentHash> {
         let bytes = serde_json::to_vec(self)
             .map_err(|_| DomainError::invalid_value("traffic policy cannot be encoded"))?;
@@ -649,6 +677,7 @@ impl TrafficPolicy {
                 .checked_add(1)
                 .ok_or_else(|| DomainError::invalid_value("traffic policy revision overflowed"))?,
             default_policy: self.default_policy.clone(),
+            failure_policy: self.failure_policy.clone(),
             rules: ordered,
         };
         self.validate_successor(&candidate)?;
@@ -860,6 +889,7 @@ mod tests {
             node_id: node(),
             revision: 1,
             default_policy: default_policy(TrafficAction::Reject),
+            failure_policy: TrafficFailurePolicy::fail_closed(),
             rules: vec![
                 TrafficRule {
                     rule_id: first_id.clone(),
@@ -909,6 +939,7 @@ mod tests {
             node_id: node(),
             revision: 1,
             default_policy: default_policy(TrafficAction::Direct),
+            failure_policy: TrafficFailurePolicy::fail_closed(),
             rules: Vec::new(),
         };
         policy.validate().unwrap();
@@ -930,6 +961,7 @@ mod tests {
             node_id: node(),
             revision: 1,
             default_policy: default_policy(TrafficAction::Direct),
+            failure_policy: TrafficFailurePolicy::fail_closed(),
             rules: Vec::new(),
         };
         let mut candidate = policy.clone();
@@ -955,6 +987,7 @@ mod tests {
             node_id: node(),
             revision: 7,
             default_policy: default_policy(TrafficAction::Direct),
+            failure_policy: TrafficFailurePolicy::fail_closed(),
             rules: vec![first.clone(), second.clone()],
         };
         let reordered = policy
@@ -983,6 +1016,7 @@ mod tests {
             node_id: node(),
             revision: 1,
             default_policy: default_policy(TrafficAction::Direct),
+            failure_policy: TrafficFailurePolicy::fail_closed(),
             rules: vec![rule(0, TrafficAction::Direct), second],
         };
         assert_eq!(
@@ -1151,6 +1185,7 @@ mod tests {
             node_id: node(),
             revision: 3,
             default_policy: default_policy(TrafficAction::Reject),
+            failure_policy: TrafficFailurePolicy::fail_closed(),
             rules: vec![TrafficRule {
                 matcher: broad,
                 ..rule(0, TrafficAction::Direct)
@@ -1168,6 +1203,7 @@ mod tests {
             node_id: node(),
             revision: 1,
             default_policy: default_policy(TrafficAction::Reject),
+            failure_policy: TrafficFailurePolicy::fail_closed(),
             rules: vec![
                 TrafficRule {
                     matcher: TrafficMatch {
@@ -1217,11 +1253,44 @@ mod tests {
     }
 
     #[test]
+    fn failure_policy_is_versioned_and_defaults_to_fail_closed() {
+        let policy = TrafficPolicy {
+            node_id: node(),
+            revision: 1,
+            default_policy: default_policy(TrafficAction::Reject),
+            failure_policy: TrafficFailurePolicy::fail_closed(),
+            rules: Vec::new(),
+        };
+        policy.validate().unwrap();
+        let route = TrafficFailureRouteContext::new(TrafficAction::Exit(NodeId::from_public_key(
+            b"failed-exit",
+        )));
+        assert_eq!(
+            policy
+                .decide_failure(&route, TrafficFailureKind::ExitUnavailable)
+                .unwrap()
+                .outcome,
+            super::super::traffic_failure::TrafficFailureOutcome::FailClosed
+        );
+
+        let mut encoded = serde_json::to_value(&policy).unwrap();
+        encoded
+            .as_object_mut()
+            .unwrap()
+            .remove("failure_policy")
+            .expect("serialized traffic policy must expose failure_policy");
+        let decoded: TrafficPolicy = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, policy);
+        assert_eq!(decoded.failure_policy, TrafficFailurePolicy::fail_closed());
+    }
+
+    #[test]
     fn api_order_round_trips_to_the_same_runtime_decision() {
         let policy = TrafficPolicy {
             node_id: node(),
             revision: 1,
             default_policy: default_policy(TrafficAction::Reject),
+            failure_policy: TrafficFailurePolicy::fail_closed(),
             rules: vec![
                 rule(0, TrafficAction::Direct),
                 rule(1, TrafficAction::Network(network())),
@@ -1270,6 +1339,7 @@ mod tests {
                 node_id: node(),
                 revision: 1,
                 default_policy: default_policy(TrafficAction::Reject),
+                failure_policy: TrafficFailurePolicy::fail_closed(),
                 rules,
             };
 

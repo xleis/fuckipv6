@@ -28,6 +28,7 @@ pub mod permissions;
 pub mod policy_test;
 pub mod security_policy;
 pub mod topology;
+pub mod traffic_failure;
 pub mod traffic_policy;
 
 pub use access_control::*;
@@ -50,6 +51,7 @@ pub use permissions::*;
 pub use policy_test::*;
 pub use security_policy::*;
 pub use topology::*;
+pub use traffic_failure::*;
 pub use traffic_policy::*;
 
 /// Stable, machine-readable domain violation.

@@ -2467,13 +2467,16 @@ current/candidate revision、应用与回滚 payload。但当前生产 manifest 
 - [ ] 失败注入覆盖休眠、切网、Exit 断开和 DNS 超时；
 - [ ] E2E 覆盖域名和应用分流及回滚；
 - [ ] 验证拒绝/失败关闭时无真实源 IP 泄漏；
-- [ ] 验证固定 Exit 不可被 fallback 绕过；
+- [x] 验证固定 Exit 不可被 fallback 绕过；
 - [ ] 网络报告包含规则、目标、结果和清理情况；
 - [ ] 未通过前不宣称翻墙、分流或抗干扰可用。
 
 **验证通过（2026-11-09）**：`cargo test -p fuckipv6-common --lib domain::traffic_policy`（26 passed）和
 `cargo test -p fuckipv6-common --lib domain::traffic_policy_test`（7 passed）。测试直接调用生产领域求值器，覆盖首条命中顺序、
 字段内 AND/值列表 OR、IPv4/IPv6 CIDR 与域名标签边界、未知应用不猜测，以及顺序 API 往返后仍产生相同运行时决策。
+
+`cargo test -p fuckipv6-common --lib domain::traffic_failure`（8 passed）还验证了显式 direct fallback 配置下，固定 Exit、
+固定网络和 Reject 规则仍分别以 `FixedExit`、`FixedNetwork`、`RejectRule` 失败关闭，且不会产生 fallback 记录。
 
 **验收**：路由声明由可复核测试支撑；任何静态规则示例都不能代替运行时证据。
 

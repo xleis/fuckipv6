@@ -673,7 +673,7 @@ pub(crate) struct RoleUpdateResult {
 #[derive(Debug, Clone)]
 struct NetworkLaunchRequest {
     network_name: String,
-    network_id: Option<String>,
+    network_id: Option<NetworkId>,
     config_path: String,
     config: ClientConfig,
 }
@@ -743,6 +743,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
             let mut runtime = commands::prepare_client_runtime_ext(
                 &request.config_path,
                 request.config,
+                request.network_id.clone(),
                 Some(&request.network_name),
                 false,
             )
@@ -913,7 +914,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
             });
 
             Ok(StartedNetworkRuntime {
-                network_id: request.network_id,
+                network_id: request.network_id.map(|network_id| network_id.to_string()),
                 signaling,
                 tun_name,
                 assigned_ipv6,
@@ -3322,7 +3323,17 @@ impl NetworkRuntimeActor {
         .await;
 
         let network_name = spec.name.clone();
-        let network_id = spec.network_id.clone();
+        let network_id = spec
+            .network_id
+            .as_deref()
+            .map(|network_id| NetworkId::parse(network_id.to_owned()))
+            .transpose()
+            .map_err(|error| {
+                RuntimeControlError::Invalid(format!(
+                    "网络 [{}] 的权威网络 ID 无法解析: {error}",
+                    spec.name
+                ))
+            })?;
         let launch = self.launcher.launch(NetworkLaunchRequest {
             network_name: network_name.clone(),
             network_id,
@@ -5730,6 +5741,7 @@ mod tests {
         residual_cleanup_delays_ms: Arc<Mutex<HashMap<String, u64>>>,
         lost_owners: Arc<Mutex<HashSet<String>>>,
         launched_tun_names: Arc<Mutex<Vec<(String, String)>>>,
+        launched_network_ids: Arc<Mutex<Vec<Option<String>>>>,
     }
 
     struct FakeResidualRuntimeOwner {
@@ -5912,6 +5924,13 @@ mod tests {
                 .expect("launched tun names lock poisoned")
                 .clone()
         }
+
+        fn launched_network_ids(&self) -> Vec<Option<String>> {
+            self.launched_network_ids
+                .lock()
+                .expect("launched network ids lock poisoned")
+                .clone()
+        }
     }
 
     impl NetworkRuntimeLauncher for FakeLauncher {
@@ -5935,6 +5954,7 @@ mod tests {
             let residual_cleanup_delays_ms = self.residual_cleanup_delays_ms.clone();
             let lost_owners = self.lost_owners.clone();
             let launched_tun_names = self.launched_tun_names.clone();
+            let launched_network_ids = self.launched_network_ids.clone();
             let registry = self.registry.clone();
 
             Box::pin(async move {
@@ -5958,6 +5978,10 @@ mod tests {
                     .lock()
                     .expect("launch lock poisoned")
                     .push(request.network_name.clone());
+                launched_network_ids
+                    .lock()
+                    .expect("launched network ids lock poisoned")
+                    .push(request.network_id.as_ref().map(ToString::to_string));
                 let tun_name = crate::multi_network::derive_tun_name(
                     Some(&request.network_name),
                     &request.config.tun.name,
@@ -6138,7 +6162,7 @@ mod tests {
                 });
 
                 Ok(StartedNetworkRuntime {
-                    network_id: request.network_id.clone(),
+                    network_id: request.network_id.map(|network_id| network_id.to_string()),
                     signaling: None,
                     tun_name,
                     assigned_ipv6: Ipv6Addr::LOCALHOST,
@@ -8044,6 +8068,38 @@ mod tests {
             .is_empty());
         assert!(harness.configs.network_exists("detached"));
 
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn runtime_launch_receives_authoritative_network_id() {
+        let harness = TestHarness::new("launch-authoritative-network-id").await;
+        harness
+            .configs
+            .create_network("identified", "ws://127.0.0.1:6666", true)
+            .expect("create identified config");
+        let network_id = NetworkId::from_public_key(b"runtime-authoritative-network");
+        harness
+            .configs
+            .set_network_id_metadata("identified", network_id.as_str())
+            .expect("persist authoritative network id");
+        let plan = NodeRuntimePlan::load(
+            &harness.configs,
+            NodeNetworkSelection::Named(vec!["identified".into()]),
+        )
+        .expect("load identified plan");
+
+        let summary = harness
+            .runtime
+            .start_plan(plan)
+            .await
+            .expect("start identified network");
+
+        assert_eq!(summary.started, vec!["identified"]);
+        assert_eq!(
+            harness.fake.launched_network_ids(),
+            vec![Some(network_id.to_string())]
+        );
         harness.shutdown().await;
     }
 

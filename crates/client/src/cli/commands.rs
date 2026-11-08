@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use fuckipv6_common::domain::NetworkId;
 #[cfg(test)]
 use fuckipv6_common::is_encrypted_config_path;
 use fuckipv6_common::recent_error_log_lines;
@@ -475,6 +476,7 @@ pub(crate) struct ClientRuntime {
     pub(crate) signaling: Arc<SignalingClient>,
     pub(crate) p2p: P2pEngine,
     pub(crate) identity: Identity,
+    pub(crate) network_id: Option<NetworkId>,
     pub(crate) outbound: OutboundDispatcher,
     #[cfg(target_os = "linux")]
     pub(crate) route_manager: LinuxRouteManager,
@@ -529,6 +531,7 @@ impl Drop for ClientRuntime {
 pub(crate) async fn prepare_client_runtime_ext(
     config_path: &str,
     mut config: ClientConfig,
+    network_id: Option<NetworkId>,
     network_name: Option<&str>,
     enable_ipc: bool,
 ) -> Result<ClientRuntime> {
@@ -691,6 +694,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         signaling,
         p2p,
         identity: relay_identity,
+        network_id,
         outbound,
         #[cfg(target_os = "linux")]
         route_manager,

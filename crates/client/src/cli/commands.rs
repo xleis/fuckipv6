@@ -130,6 +130,123 @@ pub struct RuntimeOptions {
     pub ui_mode: Option<crate::ui::UiModeResolution>,
 }
 
+/// Owns every handle required to stop and recreate one TUN data path.
+///
+/// `TunDevice` clones share one Linux link lifetime, so replacing only the
+/// runtime-held handle leaves the reader task pinning the old link. Keeping the
+/// device, reader task and buffer-pool channels together makes quiesce-before-
+/// delete an invariant instead of a shutdown-only convention.
+pub(crate) struct RuntimeTunIo {
+    tun: Option<TunDevice>,
+    packet_rx: mpsc::UnboundedReceiver<Vec<TunPacket>>,
+    buffer_tx: mpsc::UnboundedSender<TunPacket>,
+    reader_task: Option<JoinHandle<()>>,
+    descriptor: TunIoDescriptor,
+}
+
+#[derive(Clone)]
+struct TunIoDescriptor {
+    name: String,
+    assigned_ips: VirtualIps,
+    mtu: u16,
+}
+
+impl RuntimeTunIo {
+    fn new(
+        config: &ClientConfig,
+        assigned_ips: &VirtualIps,
+        tun: TunDevice,
+        stats: &StatsCollector,
+    ) -> Self {
+        let descriptor = TunIoDescriptor {
+            name: config.tun.name.clone(),
+            assigned_ips: assigned_ips.clone(),
+            mtu: config.tun.mtu,
+        };
+        let (packet_rx, buffer_tx, reader_task) = spawn_tun_reader_pool(&tun, stats);
+        Self {
+            tun: Some(tun),
+            packet_rx,
+            buffer_tx,
+            reader_task: Some(reader_task),
+            descriptor,
+        }
+    }
+
+    fn name(&self) -> &str {
+        &self.descriptor.name
+    }
+
+    fn packet_rx(&mut self) -> &mut mpsc::UnboundedReceiver<Vec<TunPacket>> {
+        &mut self.packet_rx
+    }
+
+    fn buffer_tx(&self) -> mpsc::UnboundedSender<TunPacket> {
+        self.buffer_tx.clone()
+    }
+
+    fn tun_mut(&mut self) -> Option<&mut TunDevice> {
+        self.tun.as_mut()
+    }
+
+    async fn stop_reader(&mut self) -> Result<()> {
+        let Some(task) = self.reader_task.take() else {
+            return Ok(());
+        };
+        task.abort();
+        match task.await {
+            Ok(()) => Ok(()),
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(error) => Err(anyhow::anyhow!("TUN reader task failed: {error}")),
+        }
+    }
+
+    async fn stop_reader_within(&mut self, deadline: Instant) -> CleanupStatus {
+        stop_runtime_task(&mut self.reader_task, deadline).await
+    }
+
+    fn abort_reader(&self) {
+        abort_task(&self.reader_task);
+    }
+
+    /// Recreate the TUN link after the reader has fully released its clone.
+    /// The old handle is dropped even when deletion reports a missing link, but
+    /// creation still must succeed before the runtime reports recovery.
+    #[allow(dead_code)] // Consumed by the Linux recovery backend in the next wiring step.
+    async fn recreate(&mut self, stats: &StatsCollector) -> Result<()> {
+        self.stop_reader().await?;
+        if let Some(mut old_tun) = self.tun.take() {
+            if let Err(error) = old_tun.delete().await {
+                tracing::warn!("恢复时删除旧 TUN 未完成，将尝试重建同名设备: {error:#}");
+            }
+        }
+
+        let tun = TunDevice::create_dual_stack(
+            &self.descriptor.name,
+            &self.descriptor.assigned_ips,
+            24,
+            64,
+            self.descriptor.mtu,
+        )
+        .await
+        .context("恢复时重建 TUN 设备失败")?;
+        let (packet_rx, buffer_tx, reader_task) = spawn_tun_reader_pool(&tun, stats);
+        self.tun = Some(tun);
+        self.packet_rx = packet_rx;
+        self.buffer_tx = buffer_tx;
+        self.reader_task = Some(reader_task);
+        Ok(())
+    }
+
+    async fn delete(&mut self) -> Result<()> {
+        self.stop_reader().await?;
+        if let Some(mut tun) = self.tun.take() {
+            tun.delete().await?;
+        }
+        Ok(())
+    }
+}
+
 /// Legacy config-file launch is intentionally no longer a separate runtime
 /// entrypoint. A node must be started once, and all clients attach through the
 /// authenticated local IPC boundary.
@@ -275,7 +392,7 @@ pub(crate) struct ClientRuntime {
     pub(crate) route_manager: LinuxRouteManager,
     #[cfg(target_os = "linux")]
     pub(crate) exit_forwarder: Option<LinuxExitForwarder>,
-    pub(crate) tun: TunDevice,
+    pub(crate) tun_io: RuntimeTunIo,
     pub(crate) assigned_ip: Ipv6Addr,
     pub(crate) assigned_ips: VirtualIps,
     pub(crate) stats: StatsCollector,
@@ -283,21 +400,18 @@ pub(crate) struct ClientRuntime {
     pub(crate) route_engine: SmartRouteEngine,
     pub(crate) exit_node_manager: ExitNodeManager,
     pub(crate) configured_exit_node: Option<String>,
-    pub(crate) tun_packet_rx: mpsc::UnboundedReceiver<Vec<TunPacket>>,
-    pub(crate) tun_buffer_tx: mpsc::UnboundedSender<TunPacket>,
     pub(crate) heartbeat_interval: tokio::time::Interval,
     pub(crate) config_path: String,
     pub(crate) config: ClientConfig,
     pub(crate) control_rx: mpsc::UnboundedReceiver<ipc::RuntimeCommand>,
     pub(crate) ipc_task: Option<JoinHandle<()>>,
     pub(crate) config_reload_task: Option<JoinHandle<()>>,
-    pub(crate) tun_reader_task: Option<JoinHandle<()>>,
     pub(crate) relay_reconnect_task: Option<JoinHandle<()>>,
 }
 
 impl ClientRuntime {
     pub(crate) fn tun_name(&self) -> &str {
-        self.tun.name()
+        self.tun_io.name()
     }
 
     pub(crate) async fn run_with_shutdown(
@@ -317,7 +431,7 @@ impl Drop for ClientRuntime {
         self.signaling.shutdown();
         abort_task(&self.ipc_task);
         abort_task(&self.config_reload_task);
-        abort_task(&self.tun_reader_task);
+        self.tun_io.abort_reader();
         abort_task(&self.relay_reconnect_task);
     }
 }
@@ -465,7 +579,6 @@ pub(crate) async fn prepare_client_runtime_ext(
         config_path,
         &config,
         &p2p,
-        &tun,
         &stats,
         assigned_ip,
         enable_ipc,
@@ -483,6 +596,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         config.tun.name
     );
 
+    let tun_io = RuntimeTunIo::new(&config, &assigned_ips, tun, &stats);
     Ok(ClientRuntime {
         signaling,
         p2p,
@@ -492,7 +606,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         route_manager,
         #[cfg(target_os = "linux")]
         exit_forwarder,
-        tun,
+        tun_io,
         assigned_ip,
         assigned_ips,
         stats,
@@ -500,15 +614,12 @@ pub(crate) async fn prepare_client_runtime_ext(
         route_engine,
         exit_node_manager,
         configured_exit_node,
-        tun_packet_rx: tasks.tun_packet_rx,
-        tun_buffer_tx: tasks.tun_buffer_tx,
         heartbeat_interval,
         config_path: config_path.to_string(),
         config,
         control_rx,
         ipc_task: Some(tasks.ipc_task),
         config_reload_task: Some(tasks.config_reload_task),
-        tun_reader_task: Some(tasks.tun_reader_task),
         relay_reconnect_task: None,
     })
 }
@@ -577,11 +688,8 @@ fn websocket_host_port(url: &str) -> Result<(String, u16)> {
 }
 
 struct RuntimeTasks {
-    tun_packet_rx: mpsc::UnboundedReceiver<Vec<TunPacket>>,
-    tun_buffer_tx: mpsc::UnboundedSender<TunPacket>,
     ipc_task: JoinHandle<()>,
     config_reload_task: JoinHandle<()>,
-    tun_reader_task: JoinHandle<()>,
 }
 
 fn load_identity(config: &ClientConfig) -> Result<Identity> {
@@ -716,7 +824,6 @@ fn spawn_runtime_tasks_ext(
     config_path: &str,
     config: &ClientConfig,
     p2p: &P2pEngine,
-    tun: &TunDevice,
     stats: &StatsCollector,
     assigned_ip: Ipv6Addr,
     enable_ipc: bool,
@@ -737,27 +844,9 @@ fn spawn_runtime_tasks_ext(
         config.clone(),
         p2p.clone(),
     );
-    let (tun_packet_tx, tun_packet_rx) = mpsc::unbounded_channel::<Vec<TunPacket>>();
-    let (tun_buffer_tx, tun_buffer_rx) = mpsc::unbounded_channel::<TunPacket>();
-
-    for _ in 0..TUN_BUFFER_POOL_SIZE {
-        let _ = tun_buffer_tx.send(TunPacket::empty(vec![0u8; TUN_BUFFER_ALLOCATION_SIZE]));
-    }
-
-    let tun_reader_task = spawn_tun_reader(
-        tun.clone(),
-        tun_packet_tx,
-        tun_buffer_rx,
-        tun_buffer_tx.clone(),
-        stats.clone(),
-    );
-
     RuntimeTasks {
-        tun_packet_rx,
-        tun_buffer_tx,
         ipc_task,
         config_reload_task,
-        tun_reader_task,
     }
 }
 
@@ -766,20 +855,10 @@ fn spawn_runtime_tasks(
     config_path: &str,
     config: &ClientConfig,
     p2p: &P2pEngine,
-    tun: &TunDevice,
     stats: &StatsCollector,
     assigned_ip: Ipv6Addr,
 ) -> RuntimeTasks {
-    spawn_runtime_tasks_ext(
-        config_path,
-        config,
-        p2p,
-        tun,
-        stats,
-        assigned_ip,
-        true,
-        None,
-    )
+    spawn_runtime_tasks_ext(config_path, config, p2p, stats, assigned_ip, true, None)
 }
 
 async fn connect_quic_relay(
@@ -853,7 +932,7 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
     loop {
         tokio::select! {
             // 从TUN设备读取数据包
-            Some(packets) = runtime.tun_packet_rx.recv() => {
+            Some(packets) = runtime.tun_io.packet_rx().recv() => {
                 for packet in packets {
                     handle_tun_reader_packet(runtime, packet).await;
                 }
@@ -1065,9 +1144,10 @@ async fn apply_runtime_routing(
     let exit_action = exit_forwarding_action(is_exit_node, runtime.exit_forwarder.is_some());
     #[cfg(target_os = "linux")]
     let mut staged_exit_forwarder = if exit_action == ExitForwardingAction::Install {
-        let forwarder = LinuxExitForwarder::install(&updated_config.exit_node, runtime.tun.name())
-            .await
-            .map_err(|error| format!("安装 Exit Node 内核转发失败: {error:#}"))?;
+        let forwarder =
+            LinuxExitForwarder::install(&updated_config.exit_node, runtime.tun_io.name())
+                .await
+                .map_err(|error| format!("安装 Exit Node 内核转发失败: {error:#}"))?;
         Some(forwarder.ok_or_else(|| "Exit Node 配置已启用，但未创建内核转发器".to_string())?)
     } else {
         None
@@ -1171,7 +1251,7 @@ async fn apply_linux_routing_mode(
         .route_manager
         .reconfigure(
             mode,
-            runtime.tun.name(),
+            runtime.tun_io.name(),
             &runtime.assigned_ips,
             &virtual_cidrs,
             &direct_cidrs,
@@ -1203,7 +1283,7 @@ async fn handle_tun_reader_packet(runtime: &mut ClientRuntime, packet: TunPacket
         recycle_tun_buffer(runtime, packet);
         return;
     };
-    let outbound = OutboundPacket::pooled(src_ip, dst_ip, packet, runtime.tun_buffer_tx.clone());
+    let outbound = OutboundPacket::pooled(src_ip, dst_ip, packet, runtime.tun_io.buffer_tx());
 
     match runtime.outbound.submit(outbound) {
         OutboundSubmitOutcome::Queued => {}
@@ -1219,7 +1299,7 @@ async fn handle_tun_reader_packet(runtime: &mut ClientRuntime, packet: TunPacket
 }
 
 fn recycle_tun_buffer(runtime: &ClientRuntime, packet: TunPacket) {
-    let _ = runtime.tun_buffer_tx.send(packet.recycle());
+    let _ = runtime.tun_io.buffer_tx().send(packet.recycle());
 }
 
 async fn record_p2p_rx_for_peer(stats: &StatsCollector, peer: &PeerRouteInfo, bytes: usize) {
@@ -1235,7 +1315,9 @@ async fn record_p2p_rx_for_peer(stats: &StatsCollector, peer: &PeerRouteInfo, by
 
 async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacket, source: &str) {
     if let Some(payload) = admit_inbound_packet(runtime, packet).await {
-        write_payload_to_tun(&mut runtime.tun, &runtime.stats, &payload, source).await;
+        if let Some(tun) = runtime.tun_io.tun_mut() {
+            write_payload_to_tun(tun, &runtime.stats, &payload, source).await;
+        }
     }
 }
 
@@ -1250,7 +1332,9 @@ async fn handle_inbound_packet_batch(
             payloads.push(payload);
         }
     }
-    write_payloads_to_tun(&mut runtime.tun, &runtime.stats, &payloads, source).await;
+    if let Some(tun) = runtime.tun_io.tun_mut() {
+        write_payloads_to_tun(tun, &runtime.stats, &payloads, source).await;
+    }
 }
 
 /// Authenticate, authorize, and classify one ingress packet without writing it
@@ -1603,7 +1687,7 @@ async fn shutdown_runtime(runtime: &mut ClientRuntime) -> RuntimeCleanupOutcome 
     let (ipc, config_reload, tun_reader, relay_reconnect) = tokio::join!(
         stop_runtime_task(&mut runtime.ipc_task, task_deadline),
         stop_runtime_task(&mut runtime.config_reload_task, task_deadline),
-        stop_runtime_task(&mut runtime.tun_reader_task, task_deadline),
+        runtime.tun_io.stop_reader_within(task_deadline),
         stop_runtime_task(&mut runtime.relay_reconnect_task, task_deadline),
     );
     outcome.record("控制监听任务", ipc);
@@ -1672,7 +1756,7 @@ async fn shutdown_runtime(runtime: &mut ClientRuntime) -> RuntimeCleanupOutcome 
     }
 
     let tun = match phase_timeout(deadline, TASK_STOP_TIMEOUT) {
-        Some(timeout) => match tokio::time::timeout(timeout, runtime.tun.delete()).await {
+        Some(timeout) => match tokio::time::timeout(timeout, runtime.tun_io.delete()).await {
             Ok(Ok(())) => CleanupStatus::Removed,
             Ok(Err(error)) => cleanup_status_from_result(Err(error)),
             Err(_) => CleanupStatus::Deferred("TUN 删除超过总期限，资源仍由运行时持有".into()),
@@ -1682,6 +1766,29 @@ async fn shutdown_runtime(runtime: &mut ClientRuntime) -> RuntimeCleanupOutcome 
     outcome.record("TUN 设备", tun);
 
     outcome
+}
+
+fn spawn_tun_reader_pool(
+    tun: &TunDevice,
+    stats: &StatsCollector,
+) -> (
+    mpsc::UnboundedReceiver<Vec<TunPacket>>,
+    mpsc::UnboundedSender<TunPacket>,
+    JoinHandle<()>,
+) {
+    let (tun_packet_tx, tun_packet_rx) = mpsc::unbounded_channel::<Vec<TunPacket>>();
+    let (tun_buffer_tx, tun_buffer_rx) = mpsc::unbounded_channel::<TunPacket>();
+    for _ in 0..TUN_BUFFER_POOL_SIZE {
+        let _ = tun_buffer_tx.send(TunPacket::empty(vec![0u8; TUN_BUFFER_ALLOCATION_SIZE]));
+    }
+    let reader_task = spawn_tun_reader(
+        tun.clone(),
+        tun_packet_tx,
+        tun_buffer_rx,
+        tun_buffer_tx.clone(),
+        stats.clone(),
+    );
+    (tun_packet_rx, tun_buffer_tx, reader_task)
 }
 
 fn spawn_tun_reader(

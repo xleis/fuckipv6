@@ -83,6 +83,11 @@ import {
 } from "./components/policy-workflow";
 import { StateNotice } from "./components/state-notice";
 import {
+  TRAFFIC_POLICY_ACTION_IDS,
+  TrafficRoutingWorkflow,
+  type TrafficPolicyDraftMemo,
+} from "./components/traffic-routing-workflow";
+import {
   commandEnvelope,
   defaultNetworkName,
   label,
@@ -148,6 +153,7 @@ type UiSessionMemo = {
   requestedAction: RequestedActionMemo | null;
   configurationDraft: ConfigurationDraftMemo | null;
   policyDraft: PolicyDraftMemo | null;
+  trafficPolicyDraft: TrafficPolicyDraftMemo | null;
 };
 
 const EMPTY_UI_SESSION: UiSessionMemo = {
@@ -157,6 +163,7 @@ const EMPTY_UI_SESSION: UiSessionMemo = {
   requestedAction: null,
   configurationDraft: null,
   policyDraft: null,
+  trafficPolicyDraft: null,
 };
 
 function errorMessage(error: unknown): string {
@@ -745,6 +752,12 @@ function AppShell({
   const handlePolicyDraftChange = useCallback(
     (policyDraft: PolicyDraftMemo | null) => {
       onUiSessionChange({ policyDraft });
+    },
+    [onUiSessionChange],
+  );
+  const handleTrafficPolicyDraftChange = useCallback(
+    (trafficPolicyDraft: TrafficPolicyDraftMemo | null) => {
+      onUiSessionChange({ trafficPolicyDraft });
     },
     [onUiSessionChange],
   );
@@ -1407,6 +1420,24 @@ function AppShell({
                           onSubmit={submitConfigurationAction}
                         />
                       ) : null}
+                      {activePage.actions.some((action) =>
+                        TRAFFIC_POLICY_ACTION_IDS.has(action.id),
+                      ) ? (
+                        <TrafficRoutingWorkflow
+                          actions={activePage.actions.filter((action) =>
+                            TRAFFIC_POLICY_ACTION_IDS.has(action.id),
+                          )}
+                          snapshot={snapshot}
+                          selectedNetwork={selectedNetwork}
+                          locale={locale}
+                          pendingAction={pendingAction}
+                          interactionBlocked={interactionBlocked}
+                          draft={uiSession.trafficPolicyDraft}
+                          onDraftChange={handleTrafficPolicyDraftChange}
+                          onSubmit={submitConfigurationAction}
+                          onNavigate={navigate}
+                        />
+                      ) : null}
                     </>
                   }
                   onSelectNetwork={setSelectedNetworkState}
@@ -1419,7 +1450,8 @@ function AppShell({
                 actions={activePage.actions.filter(
                   (action) =>
                     !CONFIGURATION_ACTION_IDS.has(action.id) &&
-                    !POLICY_ACTION_IDS.has(action.id),
+                    !POLICY_ACTION_IDS.has(action.id) &&
+                    !TRAFFIC_POLICY_ACTION_IDS.has(action.id),
                 )}
                 snapshot={snapshot}
                 selectedNetwork={selectedNetwork}

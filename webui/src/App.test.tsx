@@ -28,6 +28,7 @@ import type {
   NodeSnapshot,
   NodeUiManifest,
   ProjectedNodeCommandOutcome,
+  TrafficRoutingPageModel,
 } from "../../contracts/typescript/node-contract-v1";
 import { App } from "./App";
 import {
@@ -75,6 +76,56 @@ vi.mock("./api/session", async (importOriginal) => {
 
 const manifest = manifestFixture as NodeUiManifest;
 const populatedSnapshot = productFixture.snapshot as NodeSnapshot;
+
+function trafficRoutingPageFixture(): TrafficRoutingPageModel {
+  return {
+    authority_revision: 12,
+    can_edit: true,
+    default_policy: {
+      action: { kind: "direct" },
+      confirmed_at_unix_ms: 1_700_000_000_000,
+      confirmed_by: "owner",
+      target: { id: "direct", kind: "direct", resolved: true },
+    },
+    failure_policy: {},
+    hard_constraints: {},
+    node_id: "node-visual-01",
+    rules: [
+      {
+        action: { kind: "network", value: "network-home" },
+        description: "Home traffic",
+        enabled: true,
+        matcher: { domain_suffixes: ["example.com"] },
+        move_down: null,
+        move_up: null,
+        priority: 1,
+        risks: [],
+        rule_id: "rule-home",
+        target: { id: "network-home", kind: "network", resolved: true },
+      },
+    ],
+    targets: [
+      {
+        id: "direct",
+        kind: "direct",
+        label: "Direct",
+        search_terms: ["direct"],
+      },
+      {
+        id: "network-home",
+        kind: "network",
+        label: "Home",
+        navigation: {
+          network_name: "home",
+          object_id: "network-home",
+          page_id: "networks",
+        },
+        search_terms: ["home"],
+      },
+    ],
+    workflow: { revision: 12, status: "applied" },
+  };
+}
 
 const snapshot: NodeSnapshot = {
   revision: 11,
@@ -1062,6 +1113,51 @@ describe("React WebUI shell", () => {
         name: "translated:common.current_network",
       }),
     ).toHaveValue("studio");
+  });
+
+  it("mounts one authoritative traffic workflow and no duplicate exit-node editor", async () => {
+    const user = userEvent.setup();
+    authenticate({
+      ...populatedSnapshot,
+      traffic_routing_page: trafficRoutingPageFixture(),
+    });
+    const { container } = renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    await user.click(
+      screen.getByRole("button", { name: "translated:nav.nodes" }),
+    );
+    await user.click(
+      screen.getByRole("tab", { name: "translated:nav.routing" }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "translated:page.routing" }),
+    ).toBeInTheDocument();
+    expect(container.querySelectorAll(".traffic-routing-workspace")).toHaveLength(
+      1,
+    );
+    const actionPanel = container.querySelector(
+      '[data-ui-region="action-panel"]',
+    );
+    expect(actionPanel).not.toBeNull();
+    const routingPage = manifest.pages.find((page) => page.id === "routing");
+    const trafficActionLabels = (routingPage?.actions ?? [])
+      .filter((action) => action.id.includes("traffic_policy"))
+      .map((action) => `translated:${action.label_key}`);
+    for (const label of trafficActionLabels) {
+      expect(within(actionPanel as HTMLElement).queryByText(label)).toBeNull();
+    }
+
+    await user.click(
+      screen.getByRole("button", { name: "translated:nav.networks" }),
+    );
+    await user.click(
+      screen.getByRole("tab", { name: "translated:nav.exit_node" }),
+    );
+    await screen.findByRole("heading", { name: "translated:page.exit_node" });
+    expect(container.querySelector(".traffic-routing-workspace")).toBeNull();
+    expect(container.querySelector("[data-routing-authority]")).toBeNull();
   });
 
   it("renders one authoritative page state with node failure ahead of control failure", async () => {

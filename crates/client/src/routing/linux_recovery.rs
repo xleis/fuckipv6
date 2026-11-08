@@ -2,29 +2,46 @@
 //!
 //! The coordinator owns trigger sequencing and timeouts. This adapter reads the
 //! actual kernel routing/DNS state and mutates only the TUN, policy routes and
-//! resolver resources owned by the current runtime. OS events and reachability
-//! probes are kept outside this layer so their implementations can be tested
-//! independently.
+//! resolver resources owned by the current runtime. OS events remain outside
+//! this layer; exit/relay disconnects are represented by the path state passed
+//! to each recovery pass.
 
+use std::collections::BTreeMap;
+use std::fs::OpenOptions;
 use std::future::Future;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use fuckipv6_common::domain::{
+    AuditEntry, AuditId, NetworkId, NodeId, TrafficFailureAuditContext, TrafficFailureDecision,
+    TrafficFailureRouteContext,
+};
+use tokio::net::lookup_host;
 use tokio::process::Command;
 use tokio::time::timeout;
 
 use super::doh_dns;
 use super::linux_route::LinuxRouteManager;
 use super::recovery::{
-    DnsRecoverySnapshot, PathRecoveryState, RecoveryOperationError, RecoveryRepairReport,
-    RecoveryResourceSnapshot, RecoveryResourceState, RecoveryTrigger, RouteRecoverySnapshot,
-    TunRecoverySnapshot,
+    DnsRecoverySnapshot, FailureApplication, InvalidatedPath, PathRecoveryState, RecoveryBackend,
+    RecoveryOperationError, RecoveryProbeObservation, RecoveryProbeStage, RecoveryProbeState,
+    RecoveryProbeTarget, RecoveryRepairReport, RecoveryResourceSnapshot, RecoveryResourceState,
+    RecoveryTrigger, RouteRecoverySnapshot, TunRecoverySnapshot,
 };
 
-const LINK_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const LINK_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+const PROBE_STAGE_TIMEOUT: Duration = Duration::from_secs(2);
+const RECOVERY_AUDIT_FILE: &str = "recovery-audit.jsonl";
+const GOOGLE_PROBE_HOST: &str = "www.google.com";
+const YOUTUBE_PROBE_HOST: &str = "www.youtube.com";
 
-type TunRecoveryFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<(), RecoveryOperationError>> + Send + 'a>>;
+type RecoveryFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, RecoveryOperationError>> + Send + 'a>>;
+type TunRecoveryFuture<'a> = RecoveryFuture<'a, ()>;
 
 /// Small lifecycle boundary implemented by the runtime's TUN owner. Snapshot
 /// and cleanup remain in the adapter; platform owners only have to recreate the
@@ -37,12 +54,25 @@ pub(crate) trait LinuxRecoveryTun: Send {
     fn recreate(&mut self) -> TunRecoveryFuture<'_>;
 }
 
+/// Server-owned identity and routing context needed to make a failure audit
+/// durable. Values are typed and therefore cannot be replaced by free-form UI
+/// labels or network names.
+#[derive(Debug, Clone)]
+pub(crate) struct RecoveryAuditContext {
+    pub(crate) config_root: PathBuf,
+    pub(crate) actor: NodeId,
+    pub(crate) network_id: Option<NetworkId>,
+    pub(crate) route_context: TrafficFailureRouteContext,
+}
+
 /// Real TUN/route/DNS resource coordinator used by Linux runtimes.
 pub(crate) struct LinuxRecoveryAdapter<'a> {
     tun: &'a mut dyn LinuxRecoveryTun,
     routes: &'a mut LinuxRouteManager,
     exit_path: PathRecoveryState,
     relay_path: PathRecoveryState,
+    audit: RecoveryAuditContext,
+    controlled_probes: BTreeMap<String, String>,
 }
 
 impl<'a> LinuxRecoveryAdapter<'a> {
@@ -51,12 +81,16 @@ impl<'a> LinuxRecoveryAdapter<'a> {
         routes: &'a mut LinuxRouteManager,
         exit_path: PathRecoveryState,
         relay_path: PathRecoveryState,
+        audit: RecoveryAuditContext,
+        controlled_probes: BTreeMap<String, String>,
     ) -> Self {
         Self {
             tun,
             routes,
             exit_path,
             relay_path,
+            audit,
+            controlled_probes,
         }
     }
 
@@ -127,6 +161,202 @@ impl<'a> LinuxRecoveryAdapter<'a> {
 
         Ok(repair)
     }
+
+    fn probe_target_host(&self, target: &RecoveryProbeTarget) -> Option<String> {
+        probe_host_for_target(target, &self.controlled_probes)
+    }
+}
+
+impl RecoveryBackend for LinuxRecoveryAdapter<'_> {
+    fn snapshot(&mut self) -> RecoveryFuture<'_, RecoveryResourceSnapshot> {
+        Box::pin(async move {
+            LinuxRecoveryAdapter::snapshot(self)
+                .await
+                .map_err(|_| RecoveryOperationError::new("recovery.snapshot_failed"))
+        })
+    }
+
+    fn reconcile(&mut self, trigger: RecoveryTrigger) -> RecoveryFuture<'_, RecoveryRepairReport> {
+        Box::pin(async move {
+            LinuxRecoveryAdapter::reconcile(self, trigger)
+                .await
+                .map_err(|_| RecoveryOperationError::new("recovery.reconcile_failed"))
+        })
+    }
+
+    fn revoke_path(&mut self, path: InvalidatedPath) -> RecoveryFuture<'_, ()> {
+        Box::pin(async move {
+            match path {
+                InvalidatedPath::Exit => self.exit_path = PathRecoveryState::Disconnected,
+                InvalidatedPath::Relay => self.relay_path = PathRecoveryState::Disconnected,
+            }
+            Ok(())
+        })
+    }
+
+    fn apply_failure_decision(
+        &mut self,
+        application: FailureApplication,
+    ) -> RecoveryFuture<'_, ()> {
+        Box::pin(async move {
+            let occurred_at_unix_ms = unix_time_ms().max(1);
+            let audit_id = AuditId::from_public_key(
+                format!(
+                    "{}:{}:{}",
+                    application.diagnostic_id,
+                    application.decision.failure.as_str(),
+                    occurred_at_unix_ms
+                )
+                .as_bytes(),
+            );
+            let entry = build_failure_audit_entry(
+                &application.decision,
+                &self.audit,
+                audit_id,
+                &application.diagnostic_id,
+                occurred_at_unix_ms,
+            )
+            .map_err(|_| RecoveryOperationError::new("recovery.audit_invalid"))?;
+            append_recovery_audit(&self.audit.config_root, &entry)
+                .await
+                .map_err(|_| RecoveryOperationError::new("recovery.audit_write_failed"))
+        })
+    }
+
+    fn probe(
+        &mut self,
+        target: RecoveryProbeTarget,
+    ) -> RecoveryFuture<'_, RecoveryProbeObservation> {
+        Box::pin(async move {
+            let Some(host) = self.probe_target_host(&target) else {
+                return Ok(RecoveryProbeObservation {
+                    state: RecoveryProbeState::Unsupported,
+                    failed_stage: None,
+                    error_code: Some("recovery.probe_target_unsupported".into()),
+                });
+            };
+            probe_https_host(&host).await
+        })
+    }
+}
+
+fn probe_host_for_target(
+    target: &RecoveryProbeTarget,
+    controlled_probes: &BTreeMap<String, String>,
+) -> Option<String> {
+    match target {
+        RecoveryProbeTarget::Google => Some(GOOGLE_PROBE_HOST.into()),
+        RecoveryProbeTarget::YouTube => Some(YOUTUBE_PROBE_HOST.into()),
+        RecoveryProbeTarget::Controlled(id) => controlled_probes.get(id).cloned(),
+    }
+}
+
+fn build_failure_audit_entry(
+    decision: &TrafficFailureDecision,
+    audit: &RecoveryAuditContext,
+    audit_id: AuditId,
+    diagnostic_id: &str,
+    occurred_at_unix_ms: u64,
+) -> fuckipv6_common::domain::DomainResult<AuditEntry> {
+    decision.audit_entry(TrafficFailureAuditContext {
+        audit_id,
+        actor: audit.actor.clone(),
+        network_id: audit.network_id.clone(),
+        occurred_at_unix_ms,
+        requested_action: audit.route_context.requested_action.clone(),
+        fixed_exit: audit.route_context.fixed_exit.clone(),
+        fixed_network: audit.route_context.fixed_network.clone(),
+        diagnostic_id: Some(diagnostic_id.to_string()),
+    })
+}
+
+async fn append_recovery_audit(root: &Path, entry: &AuditEntry) -> Result<()> {
+    let root = root.to_path_buf();
+    let entry = entry.clone();
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&root).context("创建恢复审计目录失败")?;
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+            .context("设置恢复审计目录权限失败")?;
+        let path = root.join(RECOVERY_AUDIT_FILE);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .context("打开恢复审计文件失败")?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .context("设置恢复审计文件权限失败")?;
+        serde_json::to_writer(&mut file, &entry).context("编码恢复审计记录失败")?;
+        file.write_all(b"\n").context("写入恢复审计记录失败")?;
+        file.flush().context("刷新恢复审计记录失败")?;
+        file.sync_all().context("同步恢复审计记录失败")
+    })
+    .await
+    .context("恢复审计任务失败")?
+}
+
+async fn probe_https_host(host: &str) -> Result<RecoveryProbeObservation, RecoveryOperationError> {
+    let addresses = match timeout(PROBE_STAGE_TIMEOUT, lookup_host((host, 443))).await {
+        Ok(Ok(addresses)) => addresses.collect::<Vec<_>>(),
+        Ok(Err(_)) | Err(_) => {
+            return Ok(probe_failure(
+                RecoveryProbeStage::Dns,
+                "recovery.probe_dns_failed",
+            ))
+        }
+    };
+    let Some(address) = addresses.first().copied() else {
+        return Ok(probe_failure(
+            RecoveryProbeStage::Dns,
+            "recovery.probe_dns_empty",
+        ));
+    };
+
+    match timeout(PROBE_STAGE_TIMEOUT, tokio::net::TcpStream::connect(address)).await {
+        Ok(Ok(stream)) => drop(stream),
+        Ok(Err(_)) | Err(_) => {
+            return Ok(probe_failure(
+                RecoveryProbeStage::Tcp,
+                "recovery.probe_tcp_failed",
+            ))
+        }
+    }
+
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .https_only(true)
+        .resolve(host, address)
+        .timeout(PROBE_STAGE_TIMEOUT)
+        .build()
+        .map_err(|_| RecoveryOperationError::new("recovery.probe_client_failed"))?;
+    let url = format!("https://{host}/");
+    match client.get(url).send().await {
+        Ok(_) => Ok(RecoveryProbeObservation {
+            state: RecoveryProbeState::Passed,
+            failed_stage: None,
+            error_code: None,
+        }),
+        Err(_) => Ok(probe_failure(
+            RecoveryProbeStage::Tls,
+            "recovery.probe_tls_failed",
+        )),
+    }
+}
+
+fn probe_failure(stage: RecoveryProbeStage, error_code: &str) -> RecoveryProbeObservation {
+    RecoveryProbeObservation {
+        state: RecoveryProbeState::Failed,
+        failed_stage: Some(stage),
+        error_code: Some(error_code.into()),
+    }
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
 }
 
 fn tun_is_healthy(snapshot: &TunRecoverySnapshot) -> bool {
@@ -136,7 +366,7 @@ fn tun_is_healthy(snapshot: &TunRecoverySnapshot) -> bool {
 }
 
 fn route_is_healthy(snapshot: &RouteRecoverySnapshot) -> bool {
-    snapshot.installed_routes >= snapshot.expected_routes
+    snapshot.expected_routes == snapshot.installed_routes
         && snapshot.missing_routes == 0
         && snapshot.duplicate_routes == 0
         && snapshot.residual_routes == 0
@@ -217,6 +447,27 @@ fn tun_link_details_are_valid(details: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fuckipv6_common::domain::{
+        TrafficAction, TrafficFailureDecisionReason, TrafficFailureKind, TrafficFailureOutcome,
+        TrafficFailurePolicy,
+    };
+
+    fn decision() -> TrafficFailureDecision {
+        TrafficFailurePolicy::fail_closed()
+            .decide(
+                &TrafficFailureRouteContext::new(TrafficAction::Reject),
+                TrafficFailureKind::ExitUnavailable,
+            )
+            .expect("decision")
+    }
+
+    fn unique_test_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "fuckipv6-recovery-{label}-{}-{}",
+            std::process::id(),
+            unix_time_ms()
+        ))
+    }
 
     #[test]
     fn interface_validation_rejects_names_that_cannot_be_owned_safely() {
@@ -288,5 +539,75 @@ mod tests {
         assert!(dns_is_healthy(&dns));
         dns.insecure_fallback_detected = true;
         assert!(!dns_is_healthy(&dns));
+    }
+
+    #[test]
+    fn failure_audit_is_typed_redacted_and_secure() {
+        let root = unique_test_root("audit");
+        let actor = NodeId::from_public_key(b"local-node");
+        let context = RecoveryAuditContext {
+            config_root: root.clone(),
+            actor: actor.clone(),
+            network_id: Some(NetworkId::from_public_key(b"network")),
+            route_context: TrafficFailureRouteContext::new(TrafficAction::Reject),
+        };
+        let entry = build_failure_audit_entry(
+            &decision(),
+            &context,
+            AuditId::from_public_key(b"audit"),
+            "diag-recovery-test",
+            1,
+        )
+        .expect("audit entry");
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        runtime
+            .block_on(append_recovery_audit(&root, &entry))
+            .expect("append audit");
+
+        let path = root.join(RECOVERY_AUDIT_FILE);
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("audit metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let contents = std::fs::read_to_string(&path).expect("audit content");
+        assert_eq!(contents.lines().count(), 1);
+        assert!(!contents.contains("www.google.com"));
+        assert!(!contents.contains("127.0.0.1"));
+        let decoded: AuditEntry = serde_json::from_str(contents.trim()).expect("audit json");
+        assert_eq!(decoded.actor, actor);
+        assert_eq!(
+            decoded.details.get("diagnostic_id").map(String::as_str),
+            Some("diag-recovery-test")
+        );
+        assert_eq!(
+            decoded.details.get("reason_code").map(String::as_str),
+            Some(TrafficFailureDecisionReason::RejectRule.as_str())
+        );
+        assert_eq!(
+            decoded.details.get("outcome").map(String::as_str),
+            Some(TrafficFailureOutcome::FailClosed.as_str())
+        );
+        std::fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
+    fn probe_targets_use_real_hosts_and_reject_unconfigured_controls() {
+        let map = BTreeMap::from([("deployment".into(), "probe.example".into())]);
+        assert_eq!(
+            probe_host_for_target(&RecoveryProbeTarget::Google, &map),
+            Some(GOOGLE_PROBE_HOST.into())
+        );
+        assert_eq!(
+            probe_host_for_target(&RecoveryProbeTarget::Controlled("deployment".into()), &map),
+            Some("probe.example".into())
+        );
+        assert_eq!(
+            probe_host_for_target(&RecoveryProbeTarget::Controlled("missing".into()), &map),
+            None
+        );
     }
 }

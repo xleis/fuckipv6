@@ -22,6 +22,7 @@ import type {
   TrafficPolicyRollbackResult,
   TrafficPolicyTestComparison,
   TrafficRoutingPageModel,
+  TrafficRoutingRuleImpactView,
   TrafficRoutingRuleView,
   TrafficRoutingTarget,
   TrafficRule,
@@ -937,6 +938,97 @@ describe("authoritative traffic routing workflow", () => {
       container.querySelectorAll(".traffic-rule-impact"),
     ).toHaveLength(2);
     expect(container.querySelector("[data-hit-sample]")).toBeNull();
+  });
+
+  it("renders authoritative hit samples and distinguishes an observed zero-hit window", () => {
+    const noHits: TrafficRoutingRuleImpactView = {
+      impact: {
+        activity_effect: { kind: "no_observed_traffic" },
+        activity_ids: [],
+        change: "disable",
+        diagnostic_ids: [],
+        hit_samples: [],
+        previous_action: { kind: "direct" },
+        rule_id: "rule-a",
+      },
+      status: "available",
+    };
+    const observed: TrafficRoutingRuleImpactView = {
+      impact: {
+        activity_effect: { kind: "observed_traffic_reassigned", sample_count: 1 },
+        activity_ids: ["activity-1"],
+        change: "delete",
+        diagnostic_ids: ["diagnostic-1"],
+        hit_samples: [
+          {
+            activity_id: "activity-1",
+            after_action: { kind: "exit", value: "peer-tokyo" },
+            after_reason: "default",
+            after_rule_id: null,
+            before_action: { kind: "network", value: "home" },
+            diagnostic_id: "diagnostic-1",
+            flow: {
+              application: { kind: "unknown" },
+              destination_ip: "203.0.113.10",
+              destination_port: 443,
+              domain: "api.example.net",
+              protocol: "tcp",
+            },
+            sample_id: "sample-1",
+          },
+        ],
+        previous_action: { kind: "network", value: "home" },
+        rule_id: "rule-b",
+      },
+      status: "available",
+    };
+    const page = routingPage({
+      observation: {
+        hits: [],
+        observed_flow_count: 1,
+        status: "available",
+        window_end_unix_ms: 1_700_000_060_000,
+        window_start_unix_ms: 1_700_000_000_000,
+      },
+      rules: [
+        ruleView("rule-a", 1, { kind: "direct" }, {}, {
+          disable_impact: noHits,
+          enabled: false,
+        }),
+        ruleView("rule-b", 2, { kind: "network", value: "home" }, {}, {
+          delete_impact: observed,
+        }),
+      ],
+    });
+    const { container } = renderWorkflow(noOpOutcome, { page });
+
+    const disabledImpact = ruleCard(container, "rule-a");
+    expect(
+      disabledImpact.querySelector('[data-rule-impact-status="available"]'),
+    ).toBeInTheDocument();
+    expect(
+      disabledImpact.querySelector("[data-impact-no-hits]"),
+    ).toBeInTheDocument();
+    expect(disabledImpact.querySelector("[data-hit-sample]")).toBeNull();
+
+    fireEvent.click(
+      within(ruleCard(container, "rule-b")).getByRole("button", {
+        name: "translated:traffic.routing.rule.delete 2",
+      }),
+    );
+    const deletedRule = ruleCard(container, "rule-b");
+    expect(
+      deletedRule.querySelector('[data-rule-impact-status="available"]'),
+    ).toBeInTheDocument();
+    expect(
+      deletedRule.querySelector('[data-hit-sample="sample-1"]'),
+    ).toHaveTextContent("api.example.net:443");
+    expect(
+      deletedRule.querySelector('[data-activity-id="activity-1"]'),
+    ).toHaveTextContent("activity-1");
+    expect(
+      deletedRule.querySelector('[data-diagnostic-id="diagnostic-1"]'),
+    ).toHaveTextContent("diagnostic-1");
   });
 
   it("does not expose a raw traffic policy form through the action panel", () => {

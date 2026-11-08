@@ -12640,6 +12640,55 @@
       },
       "type": "object"
     },
+    "TrafficRoutingHitSample": {
+      "properties": {
+        "activity_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "after_action": {
+          "$ref": "#/$defs/TrafficAction"
+        },
+        "after_reason": {
+          "$ref": "#/$defs/TrafficDecisionReason"
+        },
+        "after_rule_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrafficRuleId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "before_action": {
+          "$ref": "#/$defs/TrafficAction"
+        },
+        "diagnostic_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flow": {
+          "$ref": "#/$defs/TrafficFlow"
+        },
+        "sample_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sample_id",
+        "flow",
+        "before_action",
+        "after_action",
+        "after_reason"
+      ],
+      "type": "object"
+    },
     "TrafficRoutingMoveAction": {
       "description": "One equivalent pointer/keyboard/button action. Adapters bind drag-and-drop\nand keyboard gestures to the same action ID rather than implementing a\nsecond ordering path.",
       "properties": {
@@ -12697,6 +12746,92 @@
       ],
       "type": "object"
     },
+    "TrafficRoutingObservation": {
+      "description": "A bounded observation window produced by the real traffic data plane. Only\nsamples that the runtime actually observed are present here; adapters must\nnever synthesize hits from tests, fixtures or configuration.",
+      "oneOf": [
+        {
+          "properties": {
+            "hits": {
+              "items": {
+                "$ref": "#/$defs/TrafficRoutingObservedHit"
+              },
+              "type": "array"
+            },
+            "observed_flow_count": {
+              "description": "Total observed flows in the window, including flows outside the\nbounded sample list.",
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "const": "available",
+              "type": "string"
+            },
+            "window_end_unix_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "window_start_unix_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "status",
+            "window_start_unix_ms",
+            "window_end_unix_ms",
+            "observed_flow_count"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason_code": {
+              "type": "string"
+            },
+            "status": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason_code"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TrafficRoutingObservedHit": {
+      "description": "One real observed flow that matched the rule. `activity_id` or\n`diagnostic_id` provides the stable one-click source for the tester.",
+      "properties": {
+        "activity_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "diagnostic_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flow": {
+          "$ref": "#/$defs/TrafficFlow"
+        },
+        "sample_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sample_id",
+        "flow"
+      ],
+      "type": "object"
+    },
     "TrafficRoutingPageModel": {
       "properties": {
         "authority_revision": {
@@ -12732,6 +12867,14 @@
         "node_id": {
           "$ref": "#/$defs/NodeId"
         },
+        "observation": {
+          "$ref": "#/$defs/TrafficRoutingObservation",
+          "default": {
+            "reason_code": "runtime.traffic_observation_unavailable",
+            "status": "unavailable"
+          },
+          "description": "Observation availability is part of the authoritative page so the UI\ncan distinguish an observed zero-hit window from missing data."
+        },
         "rules": {
           "items": {
             "$ref": "#/$defs/TrafficRoutingRuleView"
@@ -12760,6 +12903,48 @@
       ],
       "type": "object"
     },
+    "TrafficRoutingRuleActivityEffect": {
+      "description": "The observable consequence of disabling or deleting a rule. `NoObservedTraffic`\nmeans an available observation window confirmed zero matching flows; it is\nnever used when the observation source is unavailable.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "observed_traffic_reassigned",
+              "type": "string"
+            },
+            "sample_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "sample_count"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "no_observed_traffic",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TrafficRoutingRuleChange": {
+      "enum": [
+        "disable",
+        "delete"
+      ],
+      "type": "string"
+    },
     "TrafficRoutingRuleDirection": {
       "enum": [
         "up",
@@ -12767,13 +12952,109 @@
       ],
       "type": "string"
     },
+    "TrafficRoutingRuleImpact": {
+      "properties": {
+        "activity_effect": {
+          "$ref": "#/$defs/TrafficRoutingRuleActivityEffect"
+        },
+        "activity_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "change": {
+          "$ref": "#/$defs/TrafficRoutingRuleChange"
+        },
+        "diagnostic_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "hit_samples": {
+          "items": {
+            "$ref": "#/$defs/TrafficRoutingHitSample"
+          },
+          "type": "array"
+        },
+        "previous_action": {
+          "$ref": "#/$defs/TrafficAction"
+        },
+        "rule_id": {
+          "$ref": "#/$defs/TrafficRuleId"
+        }
+      },
+      "required": [
+        "rule_id",
+        "change",
+        "previous_action",
+        "activity_effect",
+        "activity_ids",
+        "diagnostic_ids",
+        "hit_samples"
+      ],
+      "type": "object"
+    },
+    "TrafficRoutingRuleImpactView": {
+      "oneOf": [
+        {
+          "properties": {
+            "impact": {
+              "$ref": "#/$defs/TrafficRoutingRuleImpact"
+            },
+            "status": {
+              "const": "available",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "impact"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason_code": {
+              "type": "string"
+            },
+            "status": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason_code"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "TrafficRoutingRuleView": {
       "properties": {
         "action": {
           "$ref": "#/$defs/TrafficAction"
         },
+        "delete_impact": {
+          "$ref": "#/$defs/TrafficRoutingRuleImpactView",
+          "default": {
+            "reason_code": "runtime.traffic_observation_unavailable",
+            "status": "unavailable"
+          },
+          "description": "Authoritative consequence of deleting this rule."
+        },
         "description": {
           "type": "string"
+        },
+        "disable_impact": {
+          "$ref": "#/$defs/TrafficRoutingRuleImpactView",
+          "default": {
+            "reason_code": "runtime.traffic_observation_unavailable",
+            "status": "unavailable"
+          },
+          "description": "Authoritative consequence of disabling this rule. The default keeps old\nsnapshots honest: absence of observation data is unavailable, not zero\nhits."
         },
         "enabled": {
           "type": "boolean"

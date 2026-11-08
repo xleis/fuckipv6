@@ -46,7 +46,9 @@ import type {
   TrafficPolicyTestDecision,
   TrafficPolicyTestInput,
   TrafficProtocol,
+  TrafficRoutingObservation,
   TrafficRoutingPageModel,
+  TrafficRoutingRuleImpactView,
   TrafficRoutingTarget,
   TrafficRule,
   TrafficRuleId,
@@ -321,6 +323,87 @@ function applicationChip(application: ApplicationIdentity): string {
   return application.kind === "unknown"
     ? "unknown"
     : `${application.kind}:${application.value}`;
+}
+
+function RuleImpactPanel({
+  locale,
+  observation,
+  page,
+  view,
+}: {
+  locale: Locale;
+  observation: TrafficRoutingObservation | undefined;
+  page: TrafficRoutingPageModel;
+  view: TrafficRoutingRuleImpactView | undefined;
+}): JSX.Element {
+  const status = view?.status ?? "unavailable";
+  return (
+    <div className="traffic-rule-impact" role="status" data-rule-impact-status={status}>
+      <ShieldAlert size={15} />
+      <div>
+        <strong>{label(locale, "traffic.routing.rule.impact_title")}</strong>
+        {view?.status === "available" ? (
+          view.impact.activity_effect.kind === "no_observed_traffic" ? (
+            <span data-impact-no-hits="true">
+              {label(locale, "traffic.routing.rule.impact_no_hits")}
+            </span>
+          ) : (
+            <>
+              <span>
+                {tr(locale, "traffic.routing.rule.impact_reassigned", {
+                  count: view.impact.activity_effect.sample_count,
+                })}
+              </span>
+              {observation?.status === "available" ? (
+                <span className="traffic-muted">
+                  {tr(locale, "traffic.routing.rule.impact_window", {
+                    start: new Date(
+                      observation.window_start_unix_ms,
+                    ).toLocaleString(locale),
+                    end: new Date(observation.window_end_unix_ms).toLocaleString(locale),
+                  })}
+                </span>
+              ) : null}
+              <ul className="traffic-rule-impact-list">
+                {view.impact.hit_samples.map((sample) => (
+                  <li data-hit-sample={sample.sample_id} key={sample.sample_id}>
+                    <strong>
+                      {(sample.flow.domain ?? sample.flow.destination_ip) +
+                        `:${sample.flow.destination_port}`}
+                    </strong>
+                    <span>
+                      {sample.flow.protocol} · {applicationChip(sample.flow.application)}
+                    </span>
+                    <span>
+                      {label(locale, "traffic.routing.rule.impact_before")}:{" "}
+                      {policyActionLabel(view.impact.previous_action, page)}
+                      {" → "}
+                      {label(locale, "traffic.routing.rule.impact_after")}:{" "}
+                      {policyActionLabel(sample.after_action, page)}
+                    </span>
+                    {sample.activity_id ? (
+                      <span data-activity-id={sample.activity_id}>
+                        {label(locale, "traffic.routing.rule.impact_activity")}:{" "}
+                        <code>{sample.activity_id}</code>
+                      </span>
+                    ) : null}
+                    {sample.diagnostic_id ? (
+                      <span data-diagnostic-id={sample.diagnostic_id}>
+                        {label(locale, "traffic.routing.rule.impact_diagnostic")}:{" "}
+                        <code>{sample.diagnostic_id}</code>
+                      </span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )
+        ) : (
+          <span>{label(locale, "traffic.routing.rule.impact_unavailable")}</span>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function policyActionLabel(
@@ -1445,13 +1528,16 @@ export function TrafficRoutingWorkflow({
                   ) : null}
 
                   {(!rule.enabled || pendingDelete === rule.rule_id) ? (
-                    <div className="traffic-rule-impact" role="status">
-                      <ShieldAlert size={15} />
-                      <div>
-                        <strong>{label(locale, "traffic.routing.rule.impact_title")}</strong>
-                        <span>{label(locale, "traffic.routing.rule.impact_unavailable")}</span>
-                      </div>
-                    </div>
+                    <RuleImpactPanel
+                      locale={locale}
+                      observation={activePage.observation}
+                      page={activePage}
+                      view={
+                        pendingDelete === rule.rule_id
+                          ? authorityRule?.delete_impact
+                          : authorityRule?.disable_impact
+                      }
+                    />
                   ) : null}
 
                   {pendingDelete === rule.rule_id ? (

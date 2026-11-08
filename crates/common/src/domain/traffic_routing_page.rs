@@ -316,10 +316,106 @@ pub struct TrafficRoutingRuleView {
     pub action: TrafficAction,
     pub target: TrafficRoutingTargetRef,
     pub risks: Vec<TrafficMatchRisk>,
+    /// Authoritative consequence of disabling this rule. The default keeps old
+    /// snapshots honest: absence of observation data is unavailable, not zero
+    /// hits.
+    #[serde(default)]
+    pub disable_impact: TrafficRoutingRuleImpactView,
+    /// Authoritative consequence of deleting this rule.
+    #[serde(default)]
+    pub delete_impact: TrafficRoutingRuleImpactView,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub move_up: Option<TrafficRoutingMoveAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub move_down: Option<TrafficRoutingMoveAction>,
+}
+
+/// A bounded observation window produced by the real traffic data plane. Only
+/// samples that the runtime actually observed are present here; adapters must
+/// never synthesize hits from tests, fixtures or configuration.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum TrafficRoutingObservation {
+    Available {
+        window_start_unix_ms: u64,
+        window_end_unix_ms: u64,
+        /// Total observed flows in the window, including flows outside the
+        /// bounded sample list.
+        observed_flow_count: usize,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        hits: Vec<TrafficRoutingObservedHit>,
+    },
+    Unavailable {
+        reason_code: String,
+    },
+}
+
+impl Default for TrafficRoutingObservation {
+    fn default() -> Self {
+        Self::unavailable("runtime.traffic_observation_unavailable")
+    }
+}
+
+impl TrafficRoutingObservation {
+    pub fn unavailable(reason_code: impl Into<String>) -> Self {
+        Self::Unavailable {
+            reason_code: reason_code.into(),
+        }
+    }
+
+    fn validate(&self) -> DomainResult<()> {
+        match self {
+            Self::Available {
+                window_start_unix_ms,
+                window_end_unix_ms,
+                observed_flow_count,
+                hits,
+            } => {
+                if *window_start_unix_ms == 0 || *window_end_unix_ms < *window_start_unix_ms {
+                    return Err(DomainError::invalid_value(
+                        "traffic observation window is invalid",
+                    ));
+                }
+                if *observed_flow_count < hits.len() {
+                    return Err(DomainError::invalid_value(
+                        "traffic observation sample count exceeds observed flows",
+                    ));
+                }
+                let mut sample_ids = std::collections::BTreeSet::new();
+                for hit in hits {
+                    validate_identifier("hit sample", &hit.sample_id)?;
+                    if !sample_ids.insert(&hit.sample_id) {
+                        return Err(DomainError::invariant(
+                            "traffic observation contains duplicate hit samples",
+                        ));
+                    }
+                    if let Some(activity_id) = &hit.activity_id {
+                        validate_identifier("activity", activity_id)?;
+                    }
+                    if let Some(diagnostic_id) = &hit.diagnostic_id {
+                        validate_identifier("diagnostic", diagnostic_id)?;
+                    }
+                }
+                Ok(())
+            }
+            Self::Unavailable { reason_code } => validate_code(reason_code),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum TrafficRoutingRuleImpactView {
+    Available { impact: TrafficRoutingRuleImpact },
+    Unavailable { reason_code: String },
+}
+
+impl Default for TrafficRoutingRuleImpactView {
+    fn default() -> Self {
+        Self::Unavailable {
+            reason_code: "runtime.traffic_observation_unavailable".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -344,6 +440,10 @@ pub struct TrafficRoutingPageModel {
     pub failure_policy: TrafficFailurePolicy,
     pub rules: Vec<TrafficRoutingRuleView>,
     pub targets: Vec<TrafficRoutingTarget>,
+    /// Observation availability is part of the authoritative page so the UI
+    /// can distinguish an observed zero-hit window from missing data.
+    #[serde(default)]
+    pub observation: TrafficRoutingObservation,
     /// Whether the current caller may create a draft or apply it. Read-only
     /// callers still receive the authoritative page and target navigation.
     pub can_edit: bool,
@@ -357,9 +457,28 @@ impl TrafficRoutingPageModel {
         targets: Vec<TrafficRoutingTarget>,
         can_edit: bool,
     ) -> DomainResult<Self> {
+        Self::from_policy_with_observation(
+            policy,
+            workflow,
+            hard_constraints,
+            targets,
+            can_edit,
+            TrafficRoutingObservation::default(),
+        )
+    }
+
+    pub fn from_policy_with_observation(
+        policy: &TrafficPolicy,
+        workflow: TrafficRoutingWorkflowState,
+        hard_constraints: TrafficRoutingHardConstraints,
+        targets: Vec<TrafficRoutingTarget>,
+        can_edit: bool,
+        observation: TrafficRoutingObservation,
+    ) -> DomainResult<Self> {
         policy.validate()?;
         workflow.validate()?;
         hard_constraints.validate()?;
+        observation.validate()?;
         validate_targets(&targets)?;
         let mut normalized_targets = targets;
         normalized_targets.sort_by(|left, right| {
@@ -373,8 +492,19 @@ impl TrafficRoutingPageModel {
             .rules
             .iter()
             .enumerate()
-            .map(|(index, rule)| rule_view(rule, index, policy.rules.len(), &normalized_targets))
-            .collect();
+            .map(|(index, rule)| {
+                let mut view = rule_view(rule, index, policy.rules.len(), &normalized_targets);
+                view.disable_impact = rule_impact_view(
+                    policy,
+                    rule,
+                    TrafficRoutingRuleChange::Disable,
+                    &observation,
+                )?;
+                view.delete_impact =
+                    rule_impact_view(policy, rule, TrafficRoutingRuleChange::Delete, &observation)?;
+                Ok(view)
+            })
+            .collect::<DomainResult<Vec<_>>>()?;
         let hard_constraint_target = hard_constraints.target_ref(&normalized_targets);
         Ok(Self {
             node_id: policy.node_id.clone(),
@@ -394,6 +524,7 @@ impl TrafficRoutingPageModel {
             failure_policy: policy.failure_policy.clone(),
             rules,
             targets: normalized_targets,
+            observation,
             can_edit,
         })
     }
@@ -493,6 +624,8 @@ fn rule_view(
         action: rule.action.clone(),
         target: TrafficRoutingTargetRef::resolve(&rule.action, targets),
         risks: rule.matcher.risks(),
+        disable_impact: TrafficRoutingRuleImpactView::default(),
+        delete_impact: TrafficRoutingRuleImpactView::default(),
         move_up: move_action(TrafficRoutingRuleDirection::Up),
         move_down: move_action(TrafficRoutingRuleDirection::Down),
     }
@@ -564,8 +697,9 @@ pub struct TrafficRoutingHitSample {
     pub after_rule_id: Option<TrafficRuleId>,
 }
 
-/// The observable consequence of disabling or deleting a rule. With no known
-/// hits, the UI must say that impact is unknown rather than inventing traffic.
+/// The observable consequence of disabling or deleting a rule. `NoObservedTraffic`
+/// means an available observation window confirmed zero matching flows; it is
+/// never used when the observation source is unavailable.
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TrafficRoutingRuleActivityEffect {
@@ -674,6 +808,26 @@ pub fn preview_rule_impact(
         diagnostic_ids: diagnostic_ids.into_iter().collect(),
         hit_samples,
     })
+}
+
+fn rule_impact_view(
+    policy: &TrafficPolicy,
+    rule: &TrafficRule,
+    change: TrafficRoutingRuleChange,
+    observation: &TrafficRoutingObservation,
+) -> DomainResult<TrafficRoutingRuleImpactView> {
+    match observation {
+        TrafficRoutingObservation::Available { hits, .. } => {
+            Ok(TrafficRoutingRuleImpactView::Available {
+                impact: preview_rule_impact(policy, &rule.rule_id, change, hits)?,
+            })
+        }
+        TrafficRoutingObservation::Unavailable { reason_code } => {
+            Ok(TrafficRoutingRuleImpactView::Unavailable {
+                reason_code: reason_code.clone(),
+            })
+        }
+    }
 }
 
 fn validate_revision(revision: u64) -> DomainResult<()> {
@@ -833,6 +987,86 @@ mod tests {
         assert_eq!(model.rules.len(), 2);
         assert!(model.rules[0].matcher.applications.is_empty());
         assert!(model.can_edit);
+    }
+
+    #[test]
+    fn page_carries_available_impact_and_hit_samples() {
+        let policy = policy();
+        let model = TrafficRoutingPageModel::from_policy_with_observation(
+            &policy,
+            TrafficRoutingWorkflowState::Applied { revision: 7 },
+            TrafficRoutingHardConstraints::default(),
+            targets(),
+            true,
+            TrafficRoutingObservation::Available {
+                window_start_unix_ms: 1_700_000_000_000,
+                window_end_unix_ms: 1_700_000_060_000,
+                observed_flow_count: 12,
+                hits: vec![TrafficRoutingObservedHit {
+                    sample_id: "sample-1".into(),
+                    activity_id: Some("activity-1".into()),
+                    diagnostic_id: Some("diagnostic-1".into()),
+                    flow: flow("api.example.com"),
+                }],
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            model.observation,
+            TrafficRoutingObservation::Available {
+                observed_flow_count: 12,
+                ..
+            }
+        ));
+        let TrafficRoutingRuleImpactView::Available { impact } = &model.rules[0].disable_impact
+        else {
+            panic!("available observation must expose disable impact");
+        };
+        assert_eq!(impact.hit_samples.len(), 1);
+        assert_eq!(impact.hit_samples[0].sample_id, "sample-1");
+        assert_eq!(impact.activity_ids, vec!["activity-1"]);
+        assert_eq!(impact.diagnostic_ids, vec!["diagnostic-1"]);
+    }
+
+    #[test]
+    fn available_zero_hits_and_unavailable_are_distinct() {
+        let zero_hits = TrafficRoutingPageModel::from_policy_with_observation(
+            &policy(),
+            TrafficRoutingWorkflowState::Applied { revision: 7 },
+            TrafficRoutingHardConstraints::default(),
+            targets(),
+            true,
+            TrafficRoutingObservation::Available {
+                window_start_unix_ms: 1_700_000_000_000,
+                window_end_unix_ms: 1_700_000_060_000,
+                observed_flow_count: 0,
+                hits: Vec::new(),
+            },
+        )
+        .unwrap();
+        let TrafficRoutingRuleImpactView::Available { impact } = &zero_hits.rules[0].disable_impact
+        else {
+            panic!("zero-hit observation must still be available");
+        };
+        assert_eq!(
+            impact.activity_effect,
+            TrafficRoutingRuleActivityEffect::NoObservedTraffic
+        );
+
+        let unavailable = TrafficRoutingPageModel::from_policy_with_observation(
+            &policy(),
+            TrafficRoutingWorkflowState::Applied { revision: 7 },
+            TrafficRoutingHardConstraints::default(),
+            targets(),
+            true,
+            TrafficRoutingObservation::unavailable("runtime.collector_offline"),
+        )
+        .unwrap();
+        assert!(matches!(
+            unavailable.rules[0].delete_impact,
+            TrafficRoutingRuleImpactView::Unavailable { .. }
+        ));
     }
 
     #[test]

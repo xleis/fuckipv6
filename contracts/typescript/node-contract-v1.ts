@@ -2965,6 +2965,17 @@ export type TrafficRoutingHardConstraints = {
   "fixed_network"?: NetworkId | null;
 };
 
+export type TrafficRoutingHitSample = {
+  "activity_id"?: string | null;
+  "after_action": TrafficAction;
+  "after_reason": TrafficDecisionReason;
+  "after_rule_id"?: TrafficRuleId | null;
+  "before_action": TrafficAction;
+  "diagnostic_id"?: string | null;
+  "flow": TrafficFlow;
+  "sample_id": string;
+};
+
 export type TrafficRoutingMoveAction = {
   "action_id": string;
   "direction": TrafficRoutingRuleDirection;
@@ -2980,6 +2991,24 @@ export type TrafficRoutingNavigation = {
   "page_id": string;
 };
 
+export type TrafficRoutingObservation = {
+  "hits"?: Array<TrafficRoutingObservedHit>;
+  "observed_flow_count": number;
+  "status": "available";
+  "window_end_unix_ms": number;
+  "window_start_unix_ms": number;
+} | {
+  "reason_code": string;
+  "status": "unavailable";
+};
+
+export type TrafficRoutingObservedHit = {
+  "activity_id"?: string | null;
+  "diagnostic_id"?: string | null;
+  "flow": TrafficFlow;
+  "sample_id": string;
+};
+
 export type TrafficRoutingPageModel = {
   "authority_revision": number;
   "can_edit": boolean;
@@ -2988,16 +3017,46 @@ export type TrafficRoutingPageModel = {
   "hard_constraint_target"?: TrafficRoutingTargetRef | null;
   "hard_constraints"?: TrafficRoutingHardConstraints;
   "node_id": NodeId;
+  "observation"?: TrafficRoutingObservation;
   "rules": Array<TrafficRoutingRuleView>;
   "targets": Array<TrafficRoutingTarget>;
   "workflow": TrafficRoutingWorkflowState;
 };
 
+export type TrafficRoutingRuleActivityEffect = {
+  "kind": "observed_traffic_reassigned";
+  "sample_count": number;
+} | {
+  "kind": "no_observed_traffic";
+};
+
+export type TrafficRoutingRuleChange = "disable" | "delete";
+
 export type TrafficRoutingRuleDirection = "up" | "down";
+
+export type TrafficRoutingRuleImpact = {
+  "activity_effect": TrafficRoutingRuleActivityEffect;
+  "activity_ids": Array<string>;
+  "change": TrafficRoutingRuleChange;
+  "diagnostic_ids": Array<string>;
+  "hit_samples": Array<TrafficRoutingHitSample>;
+  "previous_action": TrafficAction;
+  "rule_id": TrafficRuleId;
+};
+
+export type TrafficRoutingRuleImpactView = {
+  "impact": TrafficRoutingRuleImpact;
+  "status": "available";
+} | {
+  "reason_code": string;
+  "status": "unavailable";
+};
 
 export type TrafficRoutingRuleView = {
   "action": TrafficAction;
+  "delete_impact"?: TrafficRoutingRuleImpactView;
   "description": string;
+  "disable_impact"?: TrafficRoutingRuleImpactView;
   "enabled": boolean;
   "matcher": TrafficMatch;
   "move_down"?: TrafficRoutingMoveAction | null;

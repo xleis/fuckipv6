@@ -7529,6 +7529,33 @@ button:disabled {
   color: var(--text-secondary);
 }
 
+.traffic-rule-impact-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.traffic-rule-impact-list li {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.traffic-rule-impact-list li > span {
+  overflow-wrap: anywhere;
+}
+
+.traffic-rule-impact-list code {
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+}
+
 .traffic-delete-confirm,
 .traffic-rollback-confirmation {
   display: grid;

@@ -46,7 +46,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 246,
+                NodeContractV1.DTO_CLASS_NAMES.length == 252,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -208,14 +208,14 @@ public final class NodeContractV1Test {
         NodeContractV1.ProjectedNodeSnapshot.class.getDeclaredField("traffic_routing_page");
         for (String field : new String[] {
             "authority_revision", "can_edit", "default_policy", "failure_policy",
-            "hard_constraint_target", "hard_constraints", "node_id", "rules", "targets",
-            "workflow"
+            "hard_constraint_target", "hard_constraints", "node_id", "observation", "rules",
+            "targets", "workflow"
         }) {
             NodeContractV1.TrafficRoutingPageModel.class.getDeclaredField(field);
         }
         for (String field : new String[] {
-            "action", "description", "enabled", "matcher", "move_down", "move_up",
-            "priority", "risks", "rule_id", "target"
+            "action", "delete_impact", "description", "disable_impact", "enabled", "matcher",
+            "move_down", "move_up", "priority", "risks", "rule_id", "target"
         }) {
             NodeContractV1.TrafficRoutingRuleView.class.getDeclaredField(field);
         }
@@ -224,6 +224,49 @@ public final class NodeContractV1Test {
         }) {
             NodeContractV1.TrafficRoutingTarget.class.getDeclaredField(field);
         }
+        for (String field : new String[] {
+            "activity_effect", "activity_ids", "change", "diagnostic_ids", "hit_samples",
+            "previous_action", "rule_id"
+        }) {
+            NodeContractV1.TrafficRoutingRuleImpact.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "activity_id", "after_action", "after_reason", "after_rule_id", "before_action",
+            "diagnostic_id", "flow", "sample_id"
+        }) {
+            NodeContractV1.TrafficRoutingHitSample.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {"activity_id", "diagnostic_id", "flow", "sample_id"}) {
+            NodeContractV1.TrafficRoutingObservedHit.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "hits", "observed_flow_count", "window_end_unix_ms", "window_start_unix_ms"
+        }) {
+            NodeContractV1.TrafficRoutingObservation.Available.class.getDeclaredField(field);
+        }
+        NodeContractV1.TrafficRoutingObservation.Unavailable.class.getDeclaredField("reason_code");
+        NodeContractV1.TrafficRoutingRuleImpactView.Available.class.getDeclaredField("impact");
+        NodeContractV1.TrafficRoutingRuleImpactView.Unavailable.class.getDeclaredField(
+                "reason_code");
+        NodeContractV1.TrafficRoutingRuleActivityEffect.ObservedTrafficReassigned.class
+                .getDeclaredField("sample_count");
+        assertSame(
+                "available",
+                new NodeContractV1.TrafficRoutingObservation.Available(
+                        Collections.emptyList(), 0L, 2L, 1L).status,
+                "available traffic observation tag");
+        assertSame(
+                "unavailable",
+                new NodeContractV1.TrafficRoutingObservation.Unavailable("collector_offline").status,
+                "unavailable traffic observation tag");
+        assertSame(
+                "available",
+                new NodeContractV1.TrafficRoutingRuleImpactView.Available(null).status,
+                "available rule impact tag");
+        assertSame(
+                "no_observed_traffic",
+                new NodeContractV1.TrafficRoutingRuleActivityEffect.NoObservedTraffic().kind,
+                "observed zero-hit rule effect tag");
         for (String field : new String[] {
             "affected_objects", "can_apply", "candidate", "candidate_revision", "current",
             "current_revision", "diffs", "expected_revision", "has_changes",

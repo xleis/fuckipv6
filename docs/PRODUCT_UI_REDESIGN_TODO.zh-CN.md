@@ -2451,7 +2451,7 @@ Exit 断开失败关闭、Relay 断开失败关闭，以及真实 UDP DNS 超时
 - [x] 草稿、应用中、已应用、失败、陈旧状态清晰；
 - [x] 规则条件使用结构化编辑，不要求手写底层配置；
 - [x] 目标对象可搜索和跳转；
-- [ ] 删除/停用规则显示活动影响和命中样例；
+- [x] 删除/停用规则显示活动影响和命中样例；
 - [ ] GPUI/WebUI/Android 布局和语义一致；
 - [x] 不在节点页复制第二套编辑器。
 
@@ -2463,14 +2463,16 @@ manifest action 的 `backend_status` 门禁，并在请求中携带权威 revisi
 跳转只使用服务端提供的 `page_id`/`network_name`。
 
 自动化用 fake backend 跑通测试 → 预览 → 应用 → 历史 → 回滚预览 → 回滚确认的 WebUI 闭环，并验证结构化测试输入、
-current/candidate revision、应用与回滚 payload。但当前生产 manifest 仍只有 `test_traffic_policy` 为 `implemented`，
-其余流量策略写操作保持 `unavailable`。契约也未暴露权威 observed hits，因此删除/停用规则只显示“无权威观测数据”，
-不伪造活动影响或命中样例。GPUI/Android 尚未完成同等布局与语义接线，完整验收仍未满足。
+current/candidate revision、应用与回滚 payload。页面契约现已区分观测源可用与不可用：可用窗口同时携带观测流量总数和
+权威命中样例，零命中明确表示为“已观察且未命中”，不可用时才显示“无权威观测数据”，UI 不从本地配置推断命中。
+不过当前生产 manifest 仍只有 `test_traffic_policy` 为 `implemented`，其余流量策略写操作保持 `unavailable`，
+生产运行时也尚未提供逐流 observed hits，因此该能力目前只完成契约与页面展示闭环。GPUI/Android 尚未完成同等布局与
+语义接线，完整验收仍未满足。
 
-**验证通过（2026-11-09）**：WebUI `npm test -- --run`（269 passed，其中流量路由工作流 11 passed）、
+**验证通过（2026-11-09）**：WebUI `npm test -- --run`（270 passed，其中流量路由工作流 12 passed）、
 `npm run typecheck`、`npm run lint`、`npm run build`、`node scripts/test_i18n_runtime.mjs`、
-`cargo test -p fuckipv6-common --all-features i18n`、`cargo test -p fuckipv6-client --all-features`、
-`python3 scripts/check-docs.py` 和 `git diff --check`。
+`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`./scripts/check-contracts.sh`、`python3 scripts/check-docs.py` 和 `git diff --check`。
 
 **验收**：用户能完成从规则设计、测试、应用、观察到回滚的完整闭环。
 

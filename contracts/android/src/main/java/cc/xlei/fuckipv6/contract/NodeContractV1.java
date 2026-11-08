@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "ConfirmedTrafficDirectFallback", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitNodeCapabilities", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeApplyPolicyCommand", "NodeApplyTrafficPolicyCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodePreviewPolicyCommand", "NodePreviewPolicyRollbackCommand", "NodePreviewTrafficPolicyCommand", "NodePreviewTrafficPolicyRollbackCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRollbackPolicyCommand", "NodeRollbackTrafficPolicyCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTestTrafficPolicyCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyAffectedObject", "PolicyApplyResult", "PolicyCurrent", "PolicyDiffEntry", "PolicyHistoryEntry", "PolicyHistorySnapshot", "PolicyPrecedenceExplanation", "PolicyPreview", "PolicyRiskSummary", "PolicyRollbackResult", "PolicyRuleExplanation", "PolicySnapshot", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "PortRange", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TrafficDefaultPolicy", "TrafficFailureDecision", "TrafficFailurePolicy", "TrafficFlow", "TrafficMatch", "TrafficPolicy", "TrafficPolicyAffectedObject", "TrafficPolicyApplyResult", "TrafficPolicyCurrent", "TrafficPolicyDiffEntry", "TrafficPolicyDraft", "TrafficPolicyHistoryEntry", "TrafficPolicyHistorySnapshot", "TrafficPolicyPreview", "TrafficPolicyRollbackResult", "TrafficPolicyTestComparison", "TrafficPolicyTestDelta", "TrafficPolicyTestInput", "TrafficRoutingDefaultPolicyView", "TrafficRoutingHardConstraints", "TrafficRoutingMoveAction", "TrafficRoutingNavigation", "TrafficRoutingPageModel", "TrafficRoutingRuleView", "TrafficRoutingTarget", "TrafficRoutingTargetRef", "TrafficRule", "TrafficRuleRisk", "TunCapabilities", "UiModeResolution", "ApplicationIdentity", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector", "TrafficAction", "TrafficMatchRisk", "TrafficPolicyTestContextSource", "TrafficPolicyTestDecision", "TrafficRoutingWorkflowState"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "ConfirmedTrafficDirectFallback", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitNodeCapabilities", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeApplyPolicyCommand", "NodeApplyTrafficPolicyCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodePreviewPolicyCommand", "NodePreviewPolicyRollbackCommand", "NodePreviewTrafficPolicyCommand", "NodePreviewTrafficPolicyRollbackCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRollbackPolicyCommand", "NodeRollbackTrafficPolicyCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTestTrafficPolicyCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyAffectedObject", "PolicyApplyResult", "PolicyCurrent", "PolicyDiffEntry", "PolicyHistoryEntry", "PolicyHistorySnapshot", "PolicyPrecedenceExplanation", "PolicyPreview", "PolicyRiskSummary", "PolicyRollbackResult", "PolicyRuleExplanation", "PolicySnapshot", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "PortRange", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TrafficDefaultPolicy", "TrafficFailureDecision", "TrafficFailurePolicy", "TrafficFlow", "TrafficMatch", "TrafficPolicy", "TrafficPolicyAffectedObject", "TrafficPolicyApplyResult", "TrafficPolicyCurrent", "TrafficPolicyDiffEntry", "TrafficPolicyDraft", "TrafficPolicyHistoryEntry", "TrafficPolicyHistorySnapshot", "TrafficPolicyPreview", "TrafficPolicyRollbackResult", "TrafficPolicyTestComparison", "TrafficPolicyTestDelta", "TrafficPolicyTestInput", "TrafficRoutingDefaultPolicyView", "TrafficRoutingHardConstraints", "TrafficRoutingHitSample", "TrafficRoutingMoveAction", "TrafficRoutingNavigation", "TrafficRoutingObservedHit", "TrafficRoutingPageModel", "TrafficRoutingRuleImpact", "TrafficRoutingRuleView", "TrafficRoutingTarget", "TrafficRoutingTargetRef", "TrafficRule", "TrafficRuleRisk", "TunCapabilities", "UiModeResolution", "ApplicationIdentity", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector", "TrafficAction", "TrafficMatchRisk", "TrafficPolicyTestContextSource", "TrafficPolicyTestDecision", "TrafficRoutingObservation", "TrafficRoutingRuleActivityEffect", "TrafficRoutingRuleImpactView", "TrafficRoutingWorkflowState"
     };
 
     public enum AclAction {
@@ -2923,6 +2923,30 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown TrafficProtocol wire value: " + value);
+        }
+    }
+
+    public enum TrafficRoutingRuleChange {
+        DISABLE("disable"),
+        DELETE("delete");
+
+        private final String wireName;
+
+        TrafficRoutingRuleChange(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static TrafficRoutingRuleChange fromWireName(String value) {
+            for (TrafficRoutingRuleChange candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown TrafficRoutingRuleChange wire value: " + value);
         }
     }
 
@@ -7148,6 +7172,29 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for TrafficRoutingHitSample. */
+    public static final class TrafficRoutingHitSample {
+        public final String activity_id;
+        public final TrafficAction after_action;
+        public final TrafficDecisionReason after_reason;
+        public final String after_rule_id;
+        public final TrafficAction before_action;
+        public final String diagnostic_id;
+        public final TrafficFlow flow;
+        public final String sample_id;
+
+        public TrafficRoutingHitSample(String activity_id, TrafficAction after_action, TrafficDecisionReason after_reason, String after_rule_id, TrafficAction before_action, String diagnostic_id, TrafficFlow flow, String sample_id) {
+            this.activity_id = activity_id;
+            this.after_action = after_action;
+            this.after_reason = after_reason;
+            this.after_rule_id = after_rule_id;
+            this.before_action = before_action;
+            this.diagnostic_id = diagnostic_id;
+            this.flow = flow;
+            this.sample_id = sample_id;
+        }
+    }
+
     /** DTO for TrafficRoutingMoveAction. */
     public static final class TrafficRoutingMoveAction {
         public final String action_id;
@@ -7180,6 +7227,21 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for TrafficRoutingObservedHit. */
+    public static final class TrafficRoutingObservedHit {
+        public final String activity_id;
+        public final String diagnostic_id;
+        public final TrafficFlow flow;
+        public final String sample_id;
+
+        public TrafficRoutingObservedHit(String activity_id, String diagnostic_id, TrafficFlow flow, String sample_id) {
+            this.activity_id = activity_id;
+            this.diagnostic_id = diagnostic_id;
+            this.flow = flow;
+            this.sample_id = sample_id;
+        }
+    }
+
     /** DTO for TrafficRoutingPageModel. */
     public static final class TrafficRoutingPageModel {
         public final Long authority_revision;
@@ -7189,11 +7251,12 @@ public final class NodeContractV1 {
         public final TrafficRoutingTargetRef hard_constraint_target;
         public final TrafficRoutingHardConstraints hard_constraints;
         public final String node_id;
+        public final TrafficRoutingObservation observation;
         public final List<TrafficRoutingRuleView> rules;
         public final List<TrafficRoutingTarget> targets;
         public final TrafficRoutingWorkflowState workflow;
 
-        public TrafficRoutingPageModel(Long authority_revision, Boolean can_edit, TrafficRoutingDefaultPolicyView default_policy, TrafficFailurePolicy failure_policy, TrafficRoutingTargetRef hard_constraint_target, TrafficRoutingHardConstraints hard_constraints, String node_id, List<TrafficRoutingRuleView> rules, List<TrafficRoutingTarget> targets, TrafficRoutingWorkflowState workflow) {
+        public TrafficRoutingPageModel(Long authority_revision, Boolean can_edit, TrafficRoutingDefaultPolicyView default_policy, TrafficFailurePolicy failure_policy, TrafficRoutingTargetRef hard_constraint_target, TrafficRoutingHardConstraints hard_constraints, String node_id, TrafficRoutingObservation observation, List<TrafficRoutingRuleView> rules, List<TrafficRoutingTarget> targets, TrafficRoutingWorkflowState workflow) {
             this.authority_revision = authority_revision;
             this.can_edit = can_edit;
             this.default_policy = default_policy;
@@ -7201,16 +7264,40 @@ public final class NodeContractV1 {
             this.hard_constraint_target = hard_constraint_target;
             this.hard_constraints = hard_constraints;
             this.node_id = node_id;
+            this.observation = observation;
             this.rules = rules;
             this.targets = targets;
             this.workflow = workflow;
         }
     }
 
+    /** DTO for TrafficRoutingRuleImpact. */
+    public static final class TrafficRoutingRuleImpact {
+        public final TrafficRoutingRuleActivityEffect activity_effect;
+        public final List<String> activity_ids;
+        public final TrafficRoutingRuleChange change;
+        public final List<String> diagnostic_ids;
+        public final List<TrafficRoutingHitSample> hit_samples;
+        public final TrafficAction previous_action;
+        public final String rule_id;
+
+        public TrafficRoutingRuleImpact(TrafficRoutingRuleActivityEffect activity_effect, List<String> activity_ids, TrafficRoutingRuleChange change, List<String> diagnostic_ids, List<TrafficRoutingHitSample> hit_samples, TrafficAction previous_action, String rule_id) {
+            this.activity_effect = activity_effect;
+            this.activity_ids = activity_ids;
+            this.change = change;
+            this.diagnostic_ids = diagnostic_ids;
+            this.hit_samples = hit_samples;
+            this.previous_action = previous_action;
+            this.rule_id = rule_id;
+        }
+    }
+
     /** DTO for TrafficRoutingRuleView. */
     public static final class TrafficRoutingRuleView {
         public final TrafficAction action;
+        public final TrafficRoutingRuleImpactView delete_impact;
         public final String description;
+        public final TrafficRoutingRuleImpactView disable_impact;
         public final Boolean enabled;
         public final TrafficMatch matcher;
         public final TrafficRoutingMoveAction move_down;
@@ -7220,9 +7307,11 @@ public final class NodeContractV1 {
         public final String rule_id;
         public final TrafficRoutingTargetRef target;
 
-        public TrafficRoutingRuleView(TrafficAction action, String description, Boolean enabled, TrafficMatch matcher, TrafficRoutingMoveAction move_down, TrafficRoutingMoveAction move_up, Long priority, List<TrafficMatchRisk> risks, String rule_id, TrafficRoutingTargetRef target) {
+        public TrafficRoutingRuleView(TrafficAction action, TrafficRoutingRuleImpactView delete_impact, String description, TrafficRoutingRuleImpactView disable_impact, Boolean enabled, TrafficMatch matcher, TrafficRoutingMoveAction move_down, TrafficRoutingMoveAction move_up, Long priority, List<TrafficMatchRisk> risks, String rule_id, TrafficRoutingTargetRef target) {
             this.action = action;
+            this.delete_impact = delete_impact;
             this.description = description;
+            this.disable_impact = disable_impact;
             this.enabled = enabled;
             this.matcher = matcher;
             this.move_down = move_down;
@@ -9802,6 +9891,90 @@ public final class NodeContractV1 {
             public RouteSummary(TrafficAction action) {
                 super("route_summary");
                 this.action = action;
+            }
+        }
+    }
+
+    /** Tagged union DTO for TrafficRoutingObservation. */
+    public abstract static class TrafficRoutingObservation {
+        public final String status;
+
+        private TrafficRoutingObservation(String status) {
+            this.status = status;
+        }
+
+        public static final class Available extends TrafficRoutingObservation {
+            public final List<TrafficRoutingObservedHit> hits;
+            public final Long observed_flow_count;
+            public final Long window_end_unix_ms;
+            public final Long window_start_unix_ms;
+
+            public Available(List<TrafficRoutingObservedHit> hits, Long observed_flow_count, Long window_end_unix_ms, Long window_start_unix_ms) {
+                super("available");
+                this.hits = hits;
+                this.observed_flow_count = observed_flow_count;
+                this.window_end_unix_ms = window_end_unix_ms;
+                this.window_start_unix_ms = window_start_unix_ms;
+            }
+        }
+
+        public static final class Unavailable extends TrafficRoutingObservation {
+            public final String reason_code;
+
+            public Unavailable(String reason_code) {
+                super("unavailable");
+                this.reason_code = reason_code;
+            }
+        }
+    }
+
+    /** Tagged union DTO for TrafficRoutingRuleActivityEffect. */
+    public abstract static class TrafficRoutingRuleActivityEffect {
+        public final String kind;
+
+        private TrafficRoutingRuleActivityEffect(String kind) {
+            this.kind = kind;
+        }
+
+        public static final class ObservedTrafficReassigned extends TrafficRoutingRuleActivityEffect {
+            public final Long sample_count;
+
+            public ObservedTrafficReassigned(Long sample_count) {
+                super("observed_traffic_reassigned");
+                this.sample_count = sample_count;
+            }
+        }
+
+        public static final class NoObservedTraffic extends TrafficRoutingRuleActivityEffect {
+            public NoObservedTraffic() {
+                super("no_observed_traffic");
+            }
+        }
+    }
+
+    /** Tagged union DTO for TrafficRoutingRuleImpactView. */
+    public abstract static class TrafficRoutingRuleImpactView {
+        public final String status;
+
+        private TrafficRoutingRuleImpactView(String status) {
+            this.status = status;
+        }
+
+        public static final class Available extends TrafficRoutingRuleImpactView {
+            public final TrafficRoutingRuleImpact impact;
+
+            public Available(TrafficRoutingRuleImpact impact) {
+                super("available");
+                this.impact = impact;
+            }
+        }
+
+        public static final class Unavailable extends TrafficRoutingRuleImpactView {
+            public final String reason_code;
+
+            public Unavailable(String reason_code) {
+                super("unavailable");
+                this.reason_code = reason_code;
             }
         }
     }

@@ -14,6 +14,8 @@ use std::future::Future;
 #[cfg(target_os = "linux")]
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+#[cfg(target_os = "linux")]
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,18 +38,28 @@ use crate::remote_node::RemoteNodeSession;
 #[cfg(target_os = "linux")]
 use crate::routing::linux_exit::LinuxExitForwarder;
 #[cfg(target_os = "linux")]
-use crate::routing::linux_recovery::LinuxRecoveryTun;
+use crate::routing::linux_recovery::{
+    LinuxRecoveryAdapter, LinuxRecoveryTun, RecoveryAuditContext,
+};
 #[cfg(target_os = "linux")]
 use crate::routing::linux_recovery_events::{LinuxRecoveryEvent, LinuxRecoveryEventWatcher};
 #[cfg(target_os = "linux")]
 use crate::routing::linux_route::LinuxRouteManager;
 use crate::routing::recovery::RecoveryTrigger;
 #[cfg(target_os = "linux")]
+use crate::routing::recovery::{
+    PathRecoveryState, RecoveryCoordinator, RecoveryReport, RecoveryRequest,
+};
+#[cfg(target_os = "linux")]
 use crate::routing::table::{parse_linux_ip_routes, RouteEntry};
 use crate::routing::ExitNodeManager;
 use crate::signaling::client::{SignalingClient, SignalingEvent};
 use crate::stats::StatsCollector;
 use crate::tun::TunDevice;
+#[cfg(target_os = "linux")]
+use fuckipv6_common::domain::{
+    NodeId, TrafficAction, TrafficFailurePolicy, TrafficFailureRouteContext,
+};
 use fuckipv6_secure_session::{AEAD_TAG_LEN, DATA_HEADER_LEN};
 
 const TUN_PACKET_BUFFER_SIZE: usize = 65536;
@@ -518,6 +530,13 @@ pub(crate) struct ClientRuntime {
     #[cfg(target_os = "linux")]
     pub(crate) exit_forwarder: Option<LinuxExitForwarder>,
     pub(crate) recovery_events: RuntimeRecoveryEvents,
+    recovery_trigger_tx: RuntimeRecoveryTriggerSender,
+    #[cfg(target_os = "linux")]
+    exit_recovery_path: PathRecoveryState,
+    #[cfg(target_os = "linux")]
+    relay_recovery_path: PathRecoveryState,
+    #[cfg(target_os = "linux")]
+    configured_exit_node_id: Option<NodeId>,
     pub(crate) tun_io: RuntimeTunIo,
     pub(crate) assigned_ip: Ipv6Addr,
     pub(crate) assigned_ips: VirtualIps,
@@ -603,6 +622,14 @@ pub(crate) async fn prepare_client_runtime_ext(
     }
     let exit_node_manager = ExitNodeManager::new(config.exit_node.clone());
     let configured_exit_node = config.routing.exit_node.clone();
+    #[cfg(target_os = "linux")]
+    let configured_exit_node_id = match configured_exit_node.as_deref() {
+        Some(target) => {
+            let known_peers = signaling.known_peers().await;
+            resolve_configured_exit_node_id(Some(target), &known_peers)
+        }
+        None => None,
+    };
 
     #[cfg(target_os = "linux")]
     let (route_manager, exit_forwarder) = {
@@ -685,7 +712,7 @@ pub(crate) async fn prepare_client_runtime_ext(
     // 创建性能统计收集器
     let stats = StatsCollector::new();
     let (recovery_events, recovery_trigger_tx) = RuntimeRecoveryEvents::spawn();
-    let relay_state = RelayState::with_recovery_trigger_sender(recovery_trigger_tx);
+    let relay_state = RelayState::with_recovery_trigger_sender(recovery_trigger_tx.clone());
     let outbound = OutboundDispatcher::new(
         Arc::new(P2pOutboundTransport::new(
             p2p.clone(),
@@ -726,6 +753,12 @@ pub(crate) async fn prepare_client_runtime_ext(
     );
 
     let tun_io = RuntimeTunIo::new(&config, &assigned_ips, tun, &stats);
+    #[cfg(target_os = "linux")]
+    let relay_recovery_path = if outbound.relay_handle().await.is_some() {
+        PathRecoveryState::Connected
+    } else {
+        PathRecoveryState::Disconnected
+    };
     Ok(ClientRuntime {
         signaling,
         p2p,
@@ -737,6 +770,13 @@ pub(crate) async fn prepare_client_runtime_ext(
         #[cfg(target_os = "linux")]
         exit_forwarder,
         recovery_events,
+        recovery_trigger_tx,
+        #[cfg(target_os = "linux")]
+        exit_recovery_path: PathRecoveryState::Unknown,
+        #[cfg(target_os = "linux")]
+        relay_recovery_path,
+        #[cfg(target_os = "linux")]
+        configured_exit_node_id,
         tun_io,
         assigned_ip,
         assigned_ips,
@@ -1051,6 +1091,200 @@ async fn connect_quic_relay(
 
 pub(crate) type DisconnectReply = tokio::sync::oneshot::Sender<std::result::Result<(), String>>;
 
+#[cfg(target_os = "linux")]
+fn resolve_configured_exit_node_id(
+    configured_exit_node: Option<&str>,
+    peers: &[PeerInfo],
+) -> Option<NodeId> {
+    let target = configured_exit_node
+        .map(str::trim)
+        .filter(|target| !target.is_empty())?;
+    peers
+        .iter()
+        .find(|peer| peer_is_configured_exit(peer, Some(target)))
+        .map(|peer| NodeId::from_public_key(&peer.public_key))
+}
+
+#[cfg(target_os = "linux")]
+async fn refresh_configured_exit_node_id(runtime: &mut ClientRuntime) {
+    let Some(target) = runtime.configured_exit_node.clone() else {
+        runtime.configured_exit_node_id = None;
+        return;
+    };
+
+    let mut peers = runtime.signaling.known_peers().await;
+    peers.extend(runtime.p2p.get_peers().await);
+    if let Some(node_id) = resolve_configured_exit_node_id(Some(&target), &peers) {
+        runtime.configured_exit_node_id = Some(node_id);
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn refresh_linux_recovery_paths(runtime: &mut ClientRuntime) {
+    refresh_configured_exit_node_id(runtime).await;
+    runtime.exit_recovery_path = match runtime.configured_exit_node.as_deref() {
+        Some(target) => {
+            if runtime.p2p.resolve_exit_peer(Some(target)).await.is_some() {
+                PathRecoveryState::Connected
+            } else {
+                PathRecoveryState::Disconnected
+            }
+        }
+        None => PathRecoveryState::Unknown,
+    };
+    runtime.relay_recovery_path = if runtime.outbound.relay_handle().await.is_some() {
+        PathRecoveryState::Connected
+    } else {
+        PathRecoveryState::Disconnected
+    };
+}
+
+#[cfg(target_os = "linux")]
+fn invalidate_linux_recovery_path(
+    trigger: RecoveryTrigger,
+    exit_path: &mut PathRecoveryState,
+    relay_path: &mut PathRecoveryState,
+) {
+    match trigger {
+        RecoveryTrigger::ExitDisconnected => *exit_path = PathRecoveryState::Disconnected,
+        RecoveryTrigger::RelayDisconnected => *relay_path = PathRecoveryState::Disconnected,
+        RecoveryTrigger::SleepWake | RecoveryTrigger::NetworkChanged | RecoveryTrigger::Manual => {}
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_recovery_route_context(
+    mode: fuckipv6_common::RoutingMode,
+    network_id: Option<&NetworkId>,
+    configured_exit_node: Option<&str>,
+    configured_exit_node_id: Option<&NodeId>,
+) -> TrafficFailureRouteContext {
+    if let Some(exit_node_id) = configured_exit_node_id {
+        return TrafficFailureRouteContext {
+            requested_action: TrafficAction::Exit(exit_node_id.clone()),
+            fixed_exit: Some(exit_node_id.clone()),
+            fixed_network: None,
+        };
+    }
+
+    // A configured Exit that cannot be resolved to an authenticated identity
+    // is not permission to bypass it. Keep the decision explicit and closed.
+    if configured_exit_node.is_some_and(|target| !target.trim().is_empty()) {
+        return TrafficFailureRouteContext::new(TrafficAction::Reject);
+    }
+
+    let requested_action = match mode {
+        fuckipv6_common::RoutingMode::MeshOnly => TrafficAction::Direct,
+        fuckipv6_common::RoutingMode::BypassMainland
+        | fuckipv6_common::RoutingMode::GlobalProxy => network_id
+            .cloned()
+            .map(TrafficAction::Network)
+            .unwrap_or(TrafficAction::Reject),
+    };
+    TrafficFailureRouteContext::new(requested_action)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_recovery_request(
+    trigger: RecoveryTrigger,
+    route_context: TrafficFailureRouteContext,
+) -> RecoveryRequest {
+    RecoveryRequest::new(trigger, route_context, TrafficFailurePolicy::fail_closed())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_recovery_audit_root(config_path: &str) -> std::path::PathBuf {
+    Path::new(config_path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
+}
+
+#[cfg(target_os = "linux")]
+fn log_linux_recovery_report(report: &RecoveryReport) {
+    let failed_probe = report
+        .probes
+        .iter()
+        .find(|probe| probe.failed_stage.is_some() || probe.error_code.is_some());
+    let failed_probe_stage = failed_probe.and_then(|probe| probe.failed_stage);
+    let probe_error_code = failed_probe
+        .and_then(|probe| probe.error_code.as_deref())
+        .unwrap_or("none");
+    if report.is_success() {
+        tracing::info!(
+            diagnostic_id = %report.diagnostic_id,
+            trigger = ?report.trigger,
+            status = ?report.status,
+            error_code = report.error_code.as_deref().unwrap_or("none"),
+            tun_recreated = report.repair.tun_recreated,
+            routes_restored = report.repair.routes_restored,
+            residual_routes_removed = report.repair.residual_routes_removed,
+            duplicate_routes_removed = report.repair.duplicate_routes_removed,
+            stale_interface_routes_removed = report.repair.stale_interface_routes_removed,
+            dns_reconfigured = report.repair.dns_reconfigured,
+            failed_probe_stage = ?failed_probe_stage,
+            probe_error_code,
+            "Linux 网络自动恢复完成"
+        );
+    } else {
+        tracing::warn!(
+            diagnostic_id = %report.diagnostic_id,
+            trigger = ?report.trigger,
+            status = ?report.status,
+            error_code = report.error_code.as_deref().unwrap_or("none"),
+            tun_recreated = report.repair.tun_recreated,
+            routes_restored = report.repair.routes_restored,
+            residual_routes_removed = report.repair.residual_routes_removed,
+            duplicate_routes_removed = report.repair.duplicate_routes_removed,
+            stale_interface_routes_removed = report.repair.stale_interface_routes_removed,
+            dns_reconfigured = report.repair.dns_reconfigured,
+            failed_probe_stage = ?failed_probe_stage,
+            probe_error_code,
+            "Linux 网络自动恢复未完全成功，失效路径保持失败关闭"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn handle_linux_recovery_trigger(runtime: &mut ClientRuntime, trigger: RecoveryTrigger) {
+    refresh_configured_exit_node_id(runtime).await;
+    invalidate_linux_recovery_path(
+        trigger,
+        &mut runtime.exit_recovery_path,
+        &mut runtime.relay_recovery_path,
+    );
+
+    let route_context = linux_recovery_route_context(
+        runtime.route_engine.routing_mode(),
+        runtime.network_id.as_ref(),
+        runtime.configured_exit_node.as_deref(),
+        runtime.configured_exit_node_id.as_ref(),
+    );
+    let request = linux_recovery_request(trigger, route_context.clone());
+    let audit = RecoveryAuditContext {
+        config_root: linux_recovery_audit_root(&runtime.config_path),
+        actor: NodeId::from_public_key(&runtime.identity.public_key_bytes()),
+        network_id: runtime.network_id.clone(),
+        route_context,
+    };
+    let exit_path = runtime.exit_recovery_path;
+    let relay_path = runtime.relay_recovery_path;
+    let mut adapter = LinuxRecoveryAdapter::new(
+        &mut runtime.tun_io,
+        &mut runtime.route_manager,
+        exit_path,
+        relay_path,
+        audit,
+        std::collections::BTreeMap::new(),
+    );
+    let report = RecoveryCoordinator.recover(&mut adapter, request).await;
+    drop(adapter);
+
+    refresh_linux_recovery_paths(runtime).await;
+    log_linux_recovery_report(&report);
+}
+
 enum RuntimeCommandOutcome {
     Continue,
     Disconnect(DisconnectReply),
@@ -1090,11 +1324,16 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
             // unobserved background channel.
             trigger = runtime.recovery_events.next_trigger() => {
                 match trigger {
-                    Some(trigger) => tracing::warn!(
-                        trigger = ?trigger,
-                        diagnostic_id = "recovery.linux.event_received",
-                        "收到 Linux 系统恢复触发事件"
-                    ),
+                    Some(trigger) => {
+                        #[cfg(target_os = "linux")]
+                        handle_linux_recovery_trigger(runtime, trigger).await;
+                        #[cfg(not(target_os = "linux"))]
+                        tracing::warn!(
+                            trigger = ?trigger,
+                            diagnostic_id = "recovery.platform_unavailable",
+                            "当前平台尚未接入生产 TUN、路由和 DNS 自动恢复适配器"
+                        );
+                    }
                     None => tracing::warn!(
                         diagnostic_id = "recovery.linux.event_channel_closed",
                         "Linux 恢复事件通道已关闭；本次运行不再接收系统休眠或网络变化事件"
@@ -1126,6 +1365,10 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                             .clear_relay_with_recovery(generation)
                             .await
                         {
+                            #[cfg(target_os = "linux")]
+                            {
+                                runtime.relay_recovery_path = PathRecoveryState::Disconnected;
+                            }
                             tracing::warn!("QUIC 中继接收流已断开，重置中继等待自愈重连");
                             relay.client.close().await;
                         }
@@ -1158,6 +1401,11 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                     && runtime.outbound.begin_relay_reconnect().await
                 {
                     runtime.relay_reconnect_task = Some(spawn_relay_reconnect(runtime));
+                } else if runtime.outbound.relay_handle().await.is_some() {
+                    #[cfg(target_os = "linux")]
+                    {
+                        runtime.relay_recovery_path = PathRecoveryState::Connected;
+                    }
                 }
             }
 
@@ -1336,6 +1584,11 @@ async fn apply_runtime_routing(
     runtime.exit_node_manager.set_enabled(is_exit_node);
     runtime.configured_exit_node = exit_node.clone();
     runtime.config = updated_config;
+    #[cfg(target_os = "linux")]
+    {
+        runtime.configured_exit_node_id = None;
+        refresh_linux_recovery_paths(runtime).await;
+    }
 
     #[cfg(target_os = "linux")]
     match exit_action {
@@ -1647,7 +1900,7 @@ async fn handle_runtime_signaling_event(
             }
             sync_linux_relay_bypasses(runtime).await;
         }
-        SignalingAction::PeerRemoved(client_id) => {
+        SignalingAction::PeerRemoved { client_id, .. } => {
             if let Err(error) = runtime.route_manager.remove_peer_bypasses(client_id).await {
                 tracing::warn!("无法删除节点 {client_id} 的物理网络旁路: {error:#}");
             }
@@ -1676,7 +1929,15 @@ async fn handle_runtime_signaling_event(
         SignalingAction::PeersUpsert(peers) => {
             tracing::debug!("已更新 {} 个节点的运行时状态", peers.len());
         }
-        SignalingAction::PeerRemoved(client_id) => {
+        SignalingAction::PeerRemoved {
+            client_id,
+            removed_peer,
+        } => {
+            request_exit_recovery_on_offline(
+                &runtime.recovery_trigger_tx,
+                removed_peer.as_ref(),
+                runtime.configured_exit_node.as_deref(),
+            );
             tracing::debug!("已移除节点 {client_id} 的运行时状态");
         }
         SignalingAction::None => {}
@@ -2959,8 +3220,14 @@ enum SignalingAction {
     None,
     Reconnected,
     PeersUpsert(Vec<PeerInfo>),
-    PeerRemoved(String),
-    RelayedPacket { src_ip: IpAddr, payload: Bytes },
+    PeerRemoved {
+        client_id: String,
+        removed_peer: Option<PeerInfo>,
+    },
+    RelayedPacket {
+        src_ip: IpAddr,
+        payload: Bytes,
+    },
 }
 
 async fn handle_signaling_event(
@@ -2985,8 +3252,11 @@ async fn handle_signaling_event(
         }
 
         SignalingEvent::PeerOffline { client_id } => {
-            remove_offline_peer(p2p, stats, client_id.clone()).await;
-            return SignalingAction::PeerRemoved(client_id);
+            let removed_peer = remove_offline_peer(p2p, stats, client_id.clone()).await;
+            return SignalingAction::PeerRemoved {
+                client_id,
+                removed_peer,
+            };
         }
 
         SignalingEvent::ConnectInfo { peer } | SignalingEvent::ConnectNotify { peer } => {
@@ -3090,10 +3360,55 @@ async fn add_peer_from_signaling(p2p: &P2pEngine, peer: PeerInfo) {
     }
 }
 
-async fn remove_offline_peer(p2p: &P2pEngine, stats: &StatsCollector, client_id: String) {
+async fn remove_offline_peer(
+    p2p: &P2pEngine,
+    stats: &StatsCollector,
+    client_id: String,
+) -> Option<PeerInfo> {
     tracing::info!("节点离线: {}", client_id);
-    if let Some(peer_ip) = p2p.remove_peer_by_id(&client_id).await {
-        stats.remove_peer(peer_ip).await;
+    let removed_peer = p2p.remove_peer_by_id(&client_id).await?;
+    let stats_ip = removed_peer
+        .virtual_ips
+        .primary_ip()
+        .unwrap_or(IpAddr::V6(removed_peer.virtual_ip));
+    stats.remove_peer(stats_ip).await;
+    Some(removed_peer)
+}
+
+/// Whether an actually removed peer is the Exit target from this runtime's
+/// configuration. The configured target accepts either a client ID or one of
+/// the peer's virtual IP addresses, matching route resolution semantics.
+fn peer_is_configured_exit(peer: &PeerInfo, configured_exit_node: Option<&str>) -> bool {
+    let Some(target) = configured_exit_node
+        .map(str::trim)
+        .filter(|target| !target.is_empty())
+    else {
+        return false;
+    };
+
+    if let Ok(ipv6) = target.parse::<Ipv6Addr>() {
+        return peer.virtual_ip == ipv6;
+    }
+    if let Ok(ipv4) = target.parse::<Ipv4Addr>() {
+        return peer.virtual_ips.ipv4 == Some(ipv4);
+    }
+    peer.client_id == target
+}
+
+fn request_exit_recovery_on_offline(
+    sender: &RuntimeRecoveryTriggerSender,
+    removed_peer: Option<&PeerInfo>,
+    configured_exit_node: Option<&str>,
+) {
+    if !removed_peer.is_some_and(|peer| peer_is_configured_exit(peer, configured_exit_node)) {
+        return;
+    }
+    if !sender.try_trigger(RecoveryTrigger::ExitDisconnected) {
+        tracing::warn!(
+            trigger = ?RecoveryTrigger::ExitDisconnected,
+            diagnostic_id = "recovery.trigger_queue_unavailable",
+            "Exit 已下线，但恢复触发队列已满或已关闭"
+        );
     }
 }
 
@@ -5573,6 +5888,182 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
                 tx_packets: 8,
                 tx_bytes: 1024,
             })
+        );
+    }
+
+    #[test]
+    fn configured_exit_matching_uses_only_the_removed_peer_identity() {
+        let peer = PeerInfo::new_with_ips(
+            "exit-peer".to_string(),
+            VirtualIps::dual_stack("10.8.0.1".parse().unwrap(), "fd00::1001".parse().unwrap()),
+            vec![0; 32],
+            Vec::new(),
+            NatType::Open,
+        );
+
+        for target in [
+            Some("exit-peer"),
+            Some("fd00::1001"),
+            Some("10.8.0.1"),
+            Some("  exit-peer  "),
+        ] {
+            assert!(
+                peer_is_configured_exit(&peer, target),
+                "configured Exit target {target:?} must match the removed peer"
+            );
+        }
+        for target in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("another-peer"),
+            Some("fd00::1002"),
+            Some("10.8.0.2"),
+        ] {
+            assert!(
+                !peer_is_configured_exit(&peer, target),
+                "configured Exit target {target:?} must not match the removed peer"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovery_trigger_invalidates_only_the_disconnected_path() {
+        let mut exit_path = PathRecoveryState::Connected;
+        let mut relay_path = PathRecoveryState::Connected;
+
+        invalidate_linux_recovery_path(
+            RecoveryTrigger::ExitDisconnected,
+            &mut exit_path,
+            &mut relay_path,
+        );
+        assert_eq!(exit_path, PathRecoveryState::Disconnected);
+        assert_eq!(relay_path, PathRecoveryState::Connected);
+
+        exit_path = PathRecoveryState::Connected;
+        invalidate_linux_recovery_path(
+            RecoveryTrigger::RelayDisconnected,
+            &mut exit_path,
+            &mut relay_path,
+        );
+        assert_eq!(exit_path, PathRecoveryState::Connected);
+        assert_eq!(relay_path, PathRecoveryState::Disconnected);
+
+        invalidate_linux_recovery_path(
+            RecoveryTrigger::NetworkChanged,
+            &mut exit_path,
+            &mut relay_path,
+        );
+        assert_eq!(exit_path, PathRecoveryState::Connected);
+        assert_eq!(relay_path, PathRecoveryState::Disconnected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn configured_exit_recovery_context_is_fixed_and_fail_closed() {
+        let peer = PeerInfo::new_with_ips(
+            "exit-peer".to_string(),
+            VirtualIps::dual_stack("10.8.0.1".parse().unwrap(), "fd00::1001".parse().unwrap()),
+            vec![7; 32],
+            Vec::new(),
+            NatType::Open,
+        );
+        let exit_id =
+            resolve_configured_exit_node_id(Some("exit-peer"), std::slice::from_ref(&peer))
+                .expect("configured Exit identity must resolve from its authenticated peer");
+        assert_eq!(exit_id, NodeId::from_public_key(&peer.public_key));
+
+        let context = linux_recovery_route_context(
+            fuckipv6_common::RoutingMode::GlobalProxy,
+            None,
+            Some("exit-peer"),
+            Some(&exit_id),
+        );
+        assert_eq!(
+            context.requested_action,
+            TrafficAction::Exit(exit_id.clone())
+        );
+        assert_eq!(context.fixed_exit, Some(exit_id));
+        assert!(context.validate().is_ok());
+        assert_eq!(
+            linux_recovery_request(RecoveryTrigger::ExitDisconnected, context).failure_policy,
+            TrafficFailurePolicy::fail_closed()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unresolved_exit_and_network_modes_never_open_a_recovery_bypass() {
+        let unresolved_exit = linux_recovery_route_context(
+            fuckipv6_common::RoutingMode::GlobalProxy,
+            Some(&NetworkId::from_public_key(b"recovery-network")),
+            Some("offline-exit"),
+            None,
+        );
+        assert_eq!(unresolved_exit.requested_action, TrafficAction::Reject);
+        assert_eq!(unresolved_exit.fixed_exit, None);
+        assert!(unresolved_exit.validate().is_ok());
+
+        let network = NetworkId::from_public_key(b"recovery-network");
+        let proxied = linux_recovery_route_context(
+            fuckipv6_common::RoutingMode::GlobalProxy,
+            Some(&network),
+            None,
+            None,
+        );
+        assert_eq!(
+            proxied.requested_action,
+            TrafficAction::Network(network.clone())
+        );
+        assert_eq!(proxied.fixed_network, None);
+        assert!(proxied.validate().is_ok());
+
+        let mesh_only = linux_recovery_route_context(
+            fuckipv6_common::RoutingMode::MeshOnly,
+            Some(&network),
+            None,
+            None,
+        );
+        assert_eq!(mesh_only.requested_action, TrafficAction::Direct);
+        assert!(mesh_only.validate().is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovery_audit_is_rooted_beside_the_network_config() {
+        assert_eq!(
+            linux_recovery_audit_root("/run/user/1000/fuckipv6/office/config.toml"),
+            PathBuf::from("/run/user/1000/fuckipv6/office")
+        );
+        assert_eq!(linux_recovery_audit_root("config.toml"), PathBuf::from("."));
+    }
+
+    #[tokio::test]
+    async fn exit_recovery_is_requested_only_for_the_removed_configured_exit() {
+        let (mut events, sender) = RuntimeRecoveryEvents::without_os_watcher_for_test();
+        let peer = PeerInfo::new_with_ips(
+            "exit-peer".to_string(),
+            VirtualIps::dual_stack("10.8.0.1".parse().unwrap(), "fd00::1001".parse().unwrap()),
+            vec![0; 32],
+            Vec::new(),
+            NatType::Open,
+        );
+
+        request_exit_recovery_on_offline(&sender, None, Some("exit-peer"));
+        request_exit_recovery_on_offline(&sender, Some(&peer), None);
+        request_exit_recovery_on_offline(&sender, Some(&peer), Some("another-peer"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), events.next_trigger())
+                .await
+                .is_err(),
+            "missing, stale, or unrelated peer removals must not request recovery"
+        );
+
+        request_exit_recovery_on_offline(&sender, Some(&peer), Some("fd00::1001"));
+        assert_eq!(
+            events.next_trigger().await,
+            Some(RecoveryTrigger::ExitDisconnected)
         );
     }
 

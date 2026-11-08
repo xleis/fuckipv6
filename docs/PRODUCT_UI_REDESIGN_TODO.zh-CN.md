@@ -2400,7 +2400,7 @@ pending journal 保留，`current` 返回 `RecoveryRequired` 而不是暴露半�
 
 **验收**：事务只暴露一个权威已应用 revision；失败会恢复上一可用策略，无法补偿时保留恢复日志并拒绝读取半配置状态。
 
-### W11-07 路由与 DNS 自动恢复 `[~]`
+### W11-07 路由与 DNS 自动恢复 `[x]`
 
 - [x] 恢复协调器在 `SleepWake` 触发器下重新验证 TUN、路由和 DNS；
 - [x] 恢复协调器在 `NetworkChanged` 触发器下重新评估策略并重配 DNS；
@@ -2416,19 +2416,33 @@ DNS 不安全 fallback 时不执行可达性探测，避免把“探测偶然成
 `NetworkSelectionUnavailable` 决策；撤销失败会覆盖任何 direct fallback 许可。报告包含诊断 ID、前后快照、修复计数、撤销路径、失败决策、降级状态、
 探测目标/阶段/耗时和稳定错误码，不包含接口名、地址、resolver URL、命令输出或目标主机名。
 
-自动化和 fake backend 仅证明可注入协调器、超时与失败关闭契约，未访问真实网络或修改主机路由。以下真实平台接线仍待完成，因此本项保持进行中：
+- [x] 接入真实 OS 休眠/唤醒和网络变化监听源；
+- [x] 接入生产 TUN、系统路由和 DNS/DoH/DoT 快照/协调适配器；
+- [x] 接入生产 Exit/Relay 路径撤销、审计持久化和受控可达性探针；
+- [x] 在隔离主机/network namespace 中加入真实休眠、切网、Exit/Relay 断开和 DNS 超时故障注入。
 
-- [ ] 接入真实 OS 休眠/唤醒和网络变化监听源；
-- [ ] 接入生产 TUN、系统路由和 DNS/DoH/DoT 快照/协调适配器；
-- [ ] 接入生产 Exit/Relay 路径撤销、审计持久化和受控可达性探针；
-- [ ] 在隔离主机/network namespace 中加入真实休眠、切网、Exit/Relay 断开和 DNS 超时故障注入。
+主循环通过有界恢复事件队列消费 Linux D-Bus 事件：systemd-logind 仅在 `PrepareForSleep(false)` 恢复时触发 `SleepWake`，
+NetworkManager 仅在稳定的本地、站点、全局或 VPN 已连接状态触发 `NetworkChanged`；事件源独立重连，不可用时显式报告而不冒充监听成功。
+Exit 或 Relay 断开会在真实传输状态变化后入队，陈旧 generation 不会产生误触发。生产 `LinuxRecoveryAdapter` 读取实际 TUN、策略路由和
+DNS/DoH/DoT 资源，按 TUN → 策略路由/DNS 顺序补偿，并在恢复后重新采集快照验证。
 
-**验证通过（2026-11-08）**：`cargo fmt --all -- --check`、
-`cargo test -p fuckipv6-client --lib routing::recovery --no-default-features`（10 passed）、
+固定 Exit 使用已认证 Peer 解析出的长期 `NodeId`，不会因 Temporary 下线丢失身份；已配置但无法解析的 Exit 使用 `Reject`，代理模式缺少
+Network 时同样拒绝，MeshOnly 才允许 Direct。所有运行时恢复请求使用 fail-closed 失败策略，Exit/Relay 触发只撤销对应路径，恢复结束后
+重新同步真实路径状态。失败决策写入网络配置目录下的 `recovery-audit.jsonl`，目录权限为 `0700`、文件为 `0600` 并使用
+`O_NOFOLLOW`；日志和审计仅保留诊断 ID、触发类型、状态、错误码、修复计数和探测阶段，不输出接口名、地址、resolver URL、
+命令输出或目标主机名。默认可达性探针使用 Google/YouTube，部署受控目标只能由显式配置提供。
+
+**验证通过（2026-11-09）**：`cargo fmt --all -- --check`、
+`cargo test -p fuckipv6-client --lib routing::recovery --no-default-features`（11 passed）、
+`cargo test -p fuckipv6-client --lib cli::commands::tests --no-default-features`（32 passed）、
+`cargo test -p fuckipv6-client --test recovery_linux --no-default-features`（5 ignored，需特权拓扑）、
 `cargo check --workspace`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
-`python3 scripts/check-docs.py` 和 `git diff --check`。
+`python3 scripts/check-docs.py` 和 `git diff --check`。普通用户执行 `./scripts/test-recovery-netns.sh` 返回 77 并要求 root；
+使用 root 后在私有 network/mount namespace 中实际执行 5 项故障注入，全部通过：休眠唤醒重建 TUN/路由/DNS、切网恢复策略路由与 DNS、
+Exit 断开失败关闭、Relay 断开失败关闭，以及真实 UDP DNS 超时被识别为 `probe.dns_timeout` 并进入 fail-closed 降级。
 
-**验收**：可注入恢复状态机能够有界地完成常见网络变化的协调、失败关闭、清理和验证；真实 OS 事件源与生产适配器接入前，不得宣称自动恢复已完成。
+**验收**：Linux 生产运行时已由真实 OS 事件触发，在硬超时内完成 TUN、策略路由和 DNS 快照、补偿、失败关闭、安全审计与分阶段可达性验证；
+隔离拓扑证明常见故障不会静默绕过失效路径。
 
 ### W11-08 流量路由页面 `[~]`
 

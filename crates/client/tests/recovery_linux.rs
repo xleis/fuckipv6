@@ -253,6 +253,10 @@ impl RealNetnsBackend {
         state.exit_path = PathRecoveryState::Disconnected;
     }
 
+    async fn disconnect_relay(&self) {
+        self.state.lock().await.relay_path = PathRecoveryState::Disconnected;
+    }
+
     async fn use_dns_timeout_probe(&self) {
         self.state.lock().await.probe_mode = ProbeMode::DnsTimeout;
     }
@@ -261,6 +265,12 @@ impl RealNetnsBackend {
         tokio::fs::read_to_string(&self.audit_path)
             .await
             .is_ok_and(|contents| contents.contains("exit_unavailable"))
+    }
+
+    async fn audit_contains_relay_disconnect(&self) -> bool {
+        tokio::fs::read_to_string(&self.audit_path)
+            .await
+            .is_ok_and(|contents| contents.contains("network_selection_unavailable"))
     }
 
     async fn shutdown(&self) {
@@ -548,6 +558,35 @@ async fn native_exit_disconnect_revokes_real_path_and_fails_closed() {
 
 #[tokio::test]
 #[ignore = "requires the isolated privileged topology from scripts/test-recovery-netns.sh"]
+async fn native_relay_disconnect_revokes_real_path_and_fails_closed() {
+    require_isolated_topology();
+    let mut backend = RealNetnsBackend::start().await;
+    backend.disconnect_relay().await;
+
+    let report = RecoveryCoordinator
+        .recover(&mut backend, request(RecoveryTrigger::RelayDisconnected))
+        .await;
+
+    assert_eq!(
+        report.status,
+        fuckipv6_client::routing::recovery::RecoveryStatus::DegradedFailClosed
+    );
+    assert_eq!(report.revoked_paths, vec![InvalidatedPath::Relay]);
+    let decision = report.failure_decisions.first().expect("failure decision");
+    assert_eq!(
+        decision.failure,
+        TrafficFailureKind::NetworkSelectionUnavailable
+    );
+    assert_eq!(
+        report.degradation.as_ref().unwrap().state,
+        TrafficRuntimeDegradationState::DegradedFailClosed
+    );
+    assert!(backend.audit_contains_relay_disconnect().await);
+    backend.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires the isolated privileged topology from scripts/test-recovery-netns.sh"]
 async fn native_dns_timeout_is_distinguished_from_success() {
     require_isolated_topology();
     let mut backend = RealNetnsBackend::start().await;
@@ -559,16 +598,22 @@ async fn native_dns_timeout_is_distinguished_from_success() {
 
     assert_eq!(
         report.status,
-        fuckipv6_client::routing::recovery::RecoveryStatus::Failed
+        fuckipv6_client::routing::recovery::RecoveryStatus::DegradedFailClosed
     );
     assert_eq!(
         report.error_code.as_deref(),
-        Some("recovery.reachability_failed")
+        Some("recovery.reachability_blocked_by_fail_closed")
     );
     let probe = report.probes.first().expect("DNS timeout probe");
     assert_eq!(probe.state, RecoveryProbeState::Failed);
     assert_eq!(probe.failed_stage, Some(RecoveryProbeStage::Dns));
     assert_eq!(probe.error_code.as_deref(), Some("probe.dns_timeout"));
     assert!(probe.duration_ms >= 100);
+    assert_eq!(
+        report.degradation.as_ref().unwrap().state,
+        TrafficRuntimeDegradationState::DegradedFailClosed
+    );
+    let decision = report.failure_decisions.first().expect("failure decision");
+    assert_eq!(decision.failure, TrafficFailureKind::ConnectionTimeout);
     backend.shutdown().await;
 }

@@ -1271,8 +1271,13 @@ impl P2pEngine {
         self.incoming_rx.lock().await.recv_batch(max).await
     }
 
-    /// 移除对等节点（通过客户端ID）
-    pub async fn remove_peer_by_id(&self, client_id: &str) -> Option<IpAddr> {
+    /// 移除对等节点（通过客户端ID），并返回实际被移除的节点身份。
+    ///
+    /// A `PeerOffline` notification can race with a replacement registration
+    /// that reuses the same client ID. Callers must use this returned identity
+    /// rather than the notification payload when deciding whether a route or
+    /// Exit dependency actually went away.
+    pub async fn remove_peer_by_id(&self, client_id: &str) -> Option<PeerInfo> {
         let secure = {
             let connections = self.connections.read().await;
             connections.get(client_id)?.secure.clone()
@@ -1305,7 +1310,7 @@ impl P2pEngine {
             }
         }
         tracing::info!("已注销对等节点: {} ({:?})", client_id, primary_ip);
-        primary_ip.or(Some(IpAddr::V6(conn.peer_info.virtual_ip)))
+        Some(conn.peer_info)
     }
 
     /// 将任一虚拟 IP（IPv4 或 IPv6）映射到已认证的客户端 ID。
@@ -3452,10 +3457,13 @@ mod tests {
             Some(*removed_ipv6)
         );
 
-        assert_eq!(
-            engine.remove_peer_by_id(removed_id).await,
-            Some(IpAddr::V4(*removed_ipv4))
-        );
+        let removed = engine
+            .remove_peer_by_id(removed_id)
+            .await
+            .expect("registered peer must be returned");
+        assert_eq!(removed.client_id, *removed_id);
+        assert_eq!(removed.virtual_ip, *removed_ipv6);
+        assert_eq!(removed.virtual_ips.ipv4, Some(*removed_ipv4));
         assert!(
             !engine
                 .receiver_index
@@ -4138,10 +4146,12 @@ mod tests {
             "a revoked session must reject sends while it is still indexed"
         );
 
-        assert_eq!(
-            engine_b.remove_peer_by_id("a").await,
-            Some(IpAddr::V6(ip_a))
-        );
+        let removed = engine_b
+            .remove_peer_by_id("a")
+            .await
+            .expect("registered peer must be returned");
+        assert_eq!(removed.client_id, "a");
+        assert_eq!(removed.virtual_ip, ip_a);
         assert!(!old_secure.is_established().await);
         assert_eq!(old_secure.authenticated_peer().await, None);
         assert!(matches!(
@@ -4355,10 +4365,12 @@ mod tests {
         let removal_probe = initiator_engine
             .encrypt_for_peer(responder_ip, b"must not survive removal")
             .await?;
-        assert_eq!(
-            responder_engine.remove_peer_by_id(responder_id).await,
-            Some(IpAddr::V6(initiator_ip))
-        );
+        let removed = responder_engine
+            .remove_peer_by_id(responder_id)
+            .await
+            .expect("registered peer must be returned");
+        assert_eq!(removed.client_id, responder_id);
+        assert_eq!(removed.virtual_ip, initiator_ip);
         assert!(responder_engine
             .decrypt_from_peer(initiator_ip, &removal_probe)
             .await
@@ -4453,7 +4465,9 @@ mod tests {
             !removal_completed_early,
             "peer removal must not revoke the session while a sealed datagram is between seal and UDP send"
         );
-        assert_eq!(removed, Some(IpAddr::V6(ip_b)));
+        let removed = removed.expect("peer removal must return the removed identity");
+        assert_eq!(removed.client_id, "b");
+        assert_eq!(removed.virtual_ip, ip_b);
         assert!(
             engine_a
                 .send_to(ip_b, ip_a, b"late plaintext")

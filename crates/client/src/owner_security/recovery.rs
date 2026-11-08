@@ -149,7 +149,7 @@ impl LocalRecovery {
         let display_name = config
             .node_display_name()?
             .unwrap_or_else(|| store.owner.display_name.clone());
-        let audit = OwnerSecurityAudit::new(config.config_dir())?;
+        let audit = OwnerSecurityAudit::new(config.config_dir(), node_id.clone())?;
         let webauthn = OwnerWebauthn::new(port)?;
         let (shutdown, _) = watch::channel(false);
         let recovery = Self {
@@ -955,7 +955,7 @@ mod tests {
             )
             .is_err());
 
-        let audit = std::fs::read_to_string(recovery.audit.path())?;
+        let audit = std::fs::read_to_string(recovery.audit.active_path())?;
         assert!(audit.contains("local_owner_recovery_completed"));
         assert!(!audit.contains(old_code));
         assert!(!audit.contains(&new_code));

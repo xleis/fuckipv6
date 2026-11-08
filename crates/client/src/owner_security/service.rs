@@ -1,4 +1,4 @@
-use super::audit::OwnerSecurityAudit;
+use super::audit::{AuditExportBundle, AuditLedgerHealth, OwnerSecurityAudit};
 use super::store::{
     CommitOutcome, OwnerLoad, OwnerPersistence, OwnerStore, SessionChannel, StoredSession,
 };
@@ -7,7 +7,9 @@ use crate::config_manager::ConfigManager;
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use fuckipv6_common::domain::{NodeId, PasskeyCredentialId, PasskeyCredentialRef, SessionRef};
+use fuckipv6_common::domain::{
+    AuditExportFilter, NodeId, PasskeyCredentialId, PasskeyCredentialRef, SessionRef,
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
@@ -86,6 +88,10 @@ pub(crate) enum OwnerSecurityError {
     InvalidSession,
     #[error("该操作需要最近五分钟内完成 Passkey 重认证")]
     RecentAuthenticationRequired,
+    #[error("导出安全审计前必须显式确认")]
+    AuditExportConfirmationRequired,
+    #[error("安全审计导出范围无效: {0}")]
+    InvalidAuditExportFilter(String),
     #[error("Passkey 凭据不存在")]
     PasskeyNotFound,
     #[error("Passkey 凭据已存在，拒绝替换")]
@@ -223,7 +229,7 @@ impl OwnerSecurityService {
             .node_display_name()?
             .unwrap_or_else(|| "本机所有者".to_string());
         let persistence = OwnerPersistence::new(config.config_dir().to_path_buf())?;
-        let audit = OwnerSecurityAudit::new(config.config_dir())?;
+        let audit = OwnerSecurityAudit::new(config.config_dir(), node_id.clone())?;
         let (state, bootstrap_code) = match persistence.load()? {
             OwnerLoad::Uninitialized => {
                 let code = generate_secret()?;
@@ -284,9 +290,39 @@ impl OwnerSecurityService {
         )
     }
 
+    pub(crate) fn audit_health(&self) -> AuditLedgerHealth {
+        self.audit.health()
+    }
+
+    pub(crate) fn export_audit(
+        &self,
+        channel: OwnerBootstrapChannel,
+        session_token: &str,
+        confirmed: bool,
+        filter: &AuditExportFilter,
+    ) -> ServiceResult<AuditExportBundle> {
+        let now_unix_ms = unix_time_ms()?;
+        let session = self.authenticate_session_at(channel, session_token, now_unix_ms)?;
+        if !session.recently_authenticated(now_unix_ms) {
+            return Err(OwnerSecurityError::RecentAuthenticationRequired);
+        }
+        if !confirmed {
+            return Err(OwnerSecurityError::AuditExportConfirmationRequired);
+        }
+        self.audit.export(filter).map_err(|error| {
+            match error.downcast::<super::audit::AuditLedgerError>() {
+                Ok(super::audit::AuditLedgerError::InvalidExportFilter(message)) => {
+                    OwnerSecurityError::InvalidAuditExportFilter(message)
+                }
+                Ok(error) => OwnerSecurityError::Internal(error.into()),
+                Err(error) => OwnerSecurityError::Internal(error),
+            }
+        })
+    }
+
     #[cfg(test)]
-    pub(crate) fn audit_path(&self) -> &std::path::Path {
-        self.audit.path()
+    pub(crate) fn audit_path(&self) -> std::path::PathBuf {
+        self.audit.active_path()
     }
 
     pub(crate) fn status(&self) -> ServiceResult<BootstrapStatus> {
@@ -1299,7 +1335,7 @@ mod tests {
         persistence.provision_bootstrap_code(&code)?;
         let service = OwnerSecurityService {
             persistence,
-            audit: OwnerSecurityAudit::new(&dir)?,
+            audit: OwnerSecurityAudit::new(&dir, NodeId::from_public_key(b"owner-service-test"))?,
             local_webauthn: OwnerWebauthn::new(8080)?,
             public_webauthn: None,
             node_id: NodeId::from_public_key(b"owner-service-test"),
@@ -1325,7 +1361,7 @@ mod tests {
     fn reopen_service(dir: &std::path::Path) -> Result<OwnerSecurityService> {
         Ok(OwnerSecurityService {
             persistence: OwnerPersistence::new(dir.to_path_buf())?,
-            audit: OwnerSecurityAudit::new(dir)?,
+            audit: OwnerSecurityAudit::new(dir, NodeId::from_public_key(b"owner-service-test"))?,
             local_webauthn: OwnerWebauthn::new(8080)?,
             public_webauthn: None,
             node_id: NodeId::from_public_key(b"owner-service-test"),

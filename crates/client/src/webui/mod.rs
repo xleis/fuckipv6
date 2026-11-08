@@ -32,7 +32,7 @@ pub use controller::{
     CoordinatorTrafficDto, HostRequest, LogsResponse, PeerUiInfo, RuntimeTrafficDto,
     UnifiedSnapshotResponse, UpdateRoutingRequest,
 };
-use fuckipv6_common::domain::PasskeyCredentialId;
+use fuckipv6_common::domain::{AuditExportFilter, PasskeyCredentialId};
 use fuckipv6_common::i18n::{LanguagePreference, Locale};
 use fuckipv6_coordinator::signaling::session::PeerSnapshot;
 use fuckipv6_coordinator::webui::{
@@ -1090,6 +1090,14 @@ fn owner_security_router(
             "/api/v1/auth/passkeys/{credential_id}",
             delete(handle_owner_passkey_revoke),
         )
+        .route(
+            "/api/v1/owner/security/audit/health",
+            get(handle_owner_audit_health),
+        )
+        .route(
+            "/api/v1/owner/security/audit/export",
+            post(handle_owner_audit_export),
+        )
         .with_state(owner)
         .route_layer(middleware::from_fn_with_state(
             access,
@@ -1305,12 +1313,14 @@ fn owner_service_error(error: OwnerSecurityError) -> Response {
         | OwnerSecurityError::AuthenticationCeremonyMissing
         | OwnerSecurityError::PasskeyNotFound => StatusCode::NOT_FOUND,
         OwnerSecurityError::InvalidSession => StatusCode::UNAUTHORIZED,
-        OwnerSecurityError::RecentAuthenticationRequired => StatusCode::FORBIDDEN,
+        OwnerSecurityError::RecentAuthenticationRequired
+        | OwnerSecurityError::AuditExportConfirmationRequired => StatusCode::FORBIDDEN,
         OwnerSecurityError::PasskeyAlreadyExists
         | OwnerSecurityError::PasskeyAlreadyRevoked
         | OwnerSecurityError::PasskeyLimitReached
         | OwnerSecurityError::LastPasskey => StatusCode::CONFLICT,
-        OwnerSecurityError::InvalidPasskeyLabel => StatusCode::BAD_REQUEST,
+        OwnerSecurityError::InvalidPasskeyLabel
+        | OwnerSecurityError::InvalidAuditExportFilter(_) => StatusCode::BAD_REQUEST,
         OwnerSecurityError::NotInitialized | OwnerSecurityError::RecoveryNotConfirmed => {
             StatusCode::BAD_REQUEST
         }
@@ -1328,11 +1338,13 @@ fn owner_service_error(error: OwnerSecurityError) -> Response {
         OwnerSecurityError::NotInitialized => "owner_not_initialized",
         OwnerSecurityError::InvalidSession => "invalid_session",
         OwnerSecurityError::RecentAuthenticationRequired => "recent_authentication_required",
+        OwnerSecurityError::AuditExportConfirmationRequired => "audit_export_confirmation_required",
         OwnerSecurityError::PasskeyNotFound => "passkey_not_found",
         OwnerSecurityError::PasskeyAlreadyExists => "passkey_already_exists",
         OwnerSecurityError::PasskeyAlreadyRevoked => "passkey_already_revoked",
         OwnerSecurityError::PasskeyLimitReached => "passkey_limit_reached",
         OwnerSecurityError::InvalidPasskeyLabel => "invalid_passkey_label",
+        OwnerSecurityError::InvalidAuditExportFilter(_) => "invalid_audit_export_filter",
         OwnerSecurityError::LastPasskey => "last_passkey",
         OwnerSecurityError::RecoveryNotConfirmed => "recovery_not_confirmed",
         OwnerSecurityError::CorruptState => "owner_state_corrupt",
@@ -1454,6 +1466,13 @@ struct WebauthnAuthenticationFinishRequest {
 #[derive(Deserialize)]
 struct PasskeyRegistrationStartRequest {
     label: String,
+}
+
+#[derive(Deserialize)]
+struct AuditExportRequest {
+    confirmed: bool,
+    #[serde(default)]
+    filter: AuditExportFilter,
 }
 
 #[derive(Serialize)]
@@ -1591,6 +1610,44 @@ async fn handle_owner_reauthentication_finish(
     };
     match owner.finish_authentication(channel, &request.credential) {
         Ok(issued) => issued_owner_session_response(channel, issued, &expected_origin),
+        Err(error) => owner_service_error(error),
+    }
+}
+
+async fn handle_owner_audit_health(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(channel): Extension<OwnerBootstrapChannel>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(token) = owner_session_cookie(&headers) else {
+        return owner_api_error(StatusCode::UNAUTHORIZED, "所有者会话缺失或已过期");
+    };
+    if let Err(error) = owner.authenticate_session(channel, token) {
+        return owner_service_error(error);
+    }
+    (StatusCode::OK, Json(owner.audit_health())).into_response()
+}
+
+async fn handle_owner_audit_export(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(channel): Extension<OwnerBootstrapChannel>,
+    headers: HeaderMap,
+    Json(request): Json<AuditExportRequest>,
+) -> Response {
+    let Some(token) = owner_session_cookie(&headers) else {
+        return owner_api_error(StatusCode::UNAUTHORIZED, "所有者会话缺失或已过期");
+    };
+    match owner.export_audit(channel, token, request.confirmed, &request.filter) {
+        Ok(bundle) => {
+            let mut response = (StatusCode::OK, Json(bundle)).into_response();
+            response.headers_mut().insert(
+                header::CONTENT_DISPOSITION,
+                HeaderValue::from_static(
+                    "attachment; filename=\"owner-security-audit-export.json\"",
+                ),
+            );
+            response
+        }
         Err(error) => owner_service_error(error),
     }
 }
@@ -3774,6 +3831,208 @@ mod tests {
         let public_payload = response_json(public_response).await;
         assert_eq!(public_payload["channel"], "public");
         assert_eq!(public_payload["expected_origin"], "https://relay.xlei.cc");
+    }
+
+    #[tokio::test]
+    async fn owner_audit_export_requires_session_recent_auth_confirmation_and_scope() {
+        let fixture = owner_app_fixture(8080);
+        let export_body = r#"{"confirmed":true}"#;
+
+        let anonymous = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                local_browser_mutation_request(
+                    "/api/v1/owner/security/audit/export",
+                    export_body,
+                    None,
+                    Some("http://localhost:8080"),
+                    Some("same-origin"),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("anonymous audit export");
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+
+        let (cookie, issued) = initialize_owner_and_issue_local_session(&fixture);
+        let unconfirmed = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                local_browser_mutation_request(
+                    "/api/v1/owner/security/audit/export",
+                    r#"{"confirmed":false}"#,
+                    Some(cookie.as_str()),
+                    Some("http://localhost:8080"),
+                    Some("same-origin"),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("unconfirmed audit export");
+        assert_eq!(unconfirmed.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response_json(unconfirmed).await["code"],
+            "audit_export_confirmation_required"
+        );
+
+        fixture
+            .service
+            .age_session_for_test(issued.token.as_str(), Duration::from_secs(301))
+            .expect("age audit export session");
+        let stale = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                local_browser_mutation_request(
+                    "/api/v1/owner/security/audit/export",
+                    export_body,
+                    Some(cookie.as_str()),
+                    Some("http://localhost:8080"),
+                    Some("same-origin"),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("stale audit export");
+        assert_eq!(stale.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response_json(stale).await["code"],
+            "recent_authentication_required"
+        );
+
+        let fresh = fixture
+            .service
+            .issue_session_for_test(OwnerBootstrapChannel::Local)
+            .expect("fresh audit export session");
+        let fresh_cookie = format!("{OWNER_SESSION_COOKIE}={}", fresh.token.as_str());
+        let invalid = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                local_browser_mutation_request(
+                    "/api/v1/owner/security/audit/export",
+                    r#"{"confirmed":true,"filter":{"from_unix_ms":2,"to_unix_ms":1}}"#,
+                    Some(fresh_cookie.as_str()),
+                    Some("http://localhost:8080"),
+                    Some("same-origin"),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("invalid audit export scope");
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(invalid).await["code"],
+            "invalid_audit_export_filter"
+        );
+
+        let health = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/v1/owner/security/audit/health")
+                    .header(header::COOKIE, fresh_cookie.as_str())
+                    .body(Body::empty())
+                    .expect("audit health request"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("audit health response");
+        assert_eq!(health.status(), StatusCode::OK);
+        assert_no_store(&health);
+        let health_payload = response_json(health).await;
+        assert_eq!(health_payload["healthy"], true);
+
+        let scoped_body = r#"{"confirmed":true,"filter":{"object_kind":"owner_security_endpoint","object_id":"/api/v1/owner/security/audit/health"}}"#;
+        let scoped = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                local_browser_mutation_request(
+                    "/api/v1/owner/security/audit/export",
+                    scoped_body,
+                    Some(fresh_cookie.as_str()),
+                    Some("http://localhost:8080"),
+                    Some("same-origin"),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("scoped audit export");
+        assert_eq!(scoped.status(), StatusCode::OK);
+        assert_no_store(&scoped);
+        assert_eq!(
+            scoped
+                .headers()
+                .get(header::CONTENT_DISPOSITION)
+                .and_then(|value| value.to_str().ok()),
+            Some("attachment; filename=\"owner-security-audit-export.json\"")
+        );
+        let scoped_payload = response_json(scoped).await;
+        let records = scoped_payload["records"]
+            .as_array()
+            .expect("audit export records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0]["entry"]["resource"],
+            "/api/v1/owner/security/audit/health"
+        );
+        assert_eq!(
+            scoped_payload["manifest"]["verification"]["record_count"],
+            health_payload["record_count"].as_u64().unwrap() + 1
+        );
+        let serialized = scoped_payload.to_string();
+        assert!(!serialized.contains("bootstrap-code"));
+        assert!(!serialized.contains("recovery-code"));
+        assert!(!serialized.contains(fresh.token.as_str()));
+    }
+
+    #[tokio::test]
+    async fn owner_audit_export_fails_closed_after_tampering() {
+        let fixture = owner_app_fixture(8080);
+        let cookie = initialize_owner_and_issue_local_cookie(&fixture);
+        let health = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                Request::builder()
+                    .uri("/api/v1/owner/security/audit/health")
+                    .header(header::COOKIE, cookie.as_str())
+                    .body(Body::empty())
+                    .expect("audit health before tamper"),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("audit health before tamper");
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let path = fixture.service.audit_path();
+        let content = std::fs::read_to_string(&path).expect("audit ledger before tamper");
+        let mut value: serde_json::Value =
+            serde_json::from_str(content.lines().next().expect("audit record"))
+                .expect("audit record JSON");
+        value["entry"]["summary"] = serde_json::json!("tampered");
+        std::fs::write(&path, format!("{value}\n")).expect("tamper audit ledger");
+
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(request_from(
+                local_browser_mutation_request(
+                    "/api/v1/owner/security/audit/export",
+                    r#"{"confirmed":true}"#,
+                    Some(cookie.as_str()),
+                    Some("http://localhost:8080"),
+                    Some("same-origin"),
+                ),
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ))
+            .await
+            .expect("tampered audit export");
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

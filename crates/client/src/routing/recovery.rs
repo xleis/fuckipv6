@@ -605,18 +605,18 @@ impl RecoveryCoordinator {
         }
 
         let expected_probe_count = request.probes.len();
-        for target in request.probes {
+        for target in &request.probes {
             let started = Instant::now();
             let result = match bounded(deadline, backend.probe(target.clone())).await {
                 Ok(observation) => RecoveryProbeResult {
-                    target,
+                    target: target.clone(),
                     state: observation.state,
                     failed_stage: observation.failed_stage,
                     duration_ms: elapsed_ms(started),
                     error_code: observation.error_code,
                 },
                 Err(BoundedError::Failed) => RecoveryProbeResult {
-                    target,
+                    target: target.clone(),
                     state: RecoveryProbeState::Failed,
                     failed_stage: None,
                     duration_ms: elapsed_ms(started),
@@ -635,15 +635,30 @@ impl RecoveryCoordinator {
                 .iter()
                 .all(|probe| probe.state == RecoveryProbeState::Passed);
         if !probes_passed {
-            if report.degradation.as_ref().is_some_and(|degradation| {
+            let already_fail_closed = report.degradation.as_ref().is_some_and(|degradation| {
                 degradation.state == TrafficRuntimeDegradationState::DegradedFailClosed
-            }) {
-                return report.finish(
+            });
+            if !already_fail_closed {
+                apply_fail_closed(
+                    backend,
+                    deadline,
+                    &request,
+                    &mut report,
+                    TrafficFailureKind::ConnectionTimeout,
+                )
+                .await;
+            }
+            let fail_closed = report.degradation.as_ref().is_some_and(|degradation| {
+                degradation.state == TrafficRuntimeDegradationState::DegradedFailClosed
+            });
+            return if fail_closed {
+                report.finish(
                     RecoveryStatus::DegradedFailClosed,
                     Some("recovery.reachability_blocked_by_fail_closed"),
-                );
-            }
-            return report.finish(RecoveryStatus::Failed, Some("recovery.reachability_failed"));
+                )
+            } else {
+                report.finish(RecoveryStatus::Failed, Some("recovery.reachability_failed"))
+            };
         }
 
         let status = report
@@ -1175,14 +1190,29 @@ mod tests {
 
         let report = RecoveryCoordinator.recover(&mut backend, request).await;
 
-        assert_eq!(report.status, RecoveryStatus::Failed);
+        assert_eq!(report.status, RecoveryStatus::DegradedFailClosed);
         assert_eq!(
             report.error_code.as_deref(),
-            Some("recovery.reachability_failed")
+            Some("recovery.reachability_blocked_by_fail_closed")
         );
         assert_eq!(report.probes[0].state, RecoveryProbeState::Failed);
         assert_eq!(report.probes[0].failed_stage, Some(RecoveryProbeStage::Tls));
         assert!(!report.is_success());
+        assert!(report.fail_closed_required);
+        let applications = backend.applications();
+        assert_eq!(applications.len(), 1);
+        assert_eq!(
+            applications[0].decision.failure,
+            TrafficFailureKind::ConnectionTimeout
+        );
+        assert_eq!(
+            applications[0].decision.outcome,
+            TrafficFailureOutcome::FailClosed
+        );
+        assert_eq!(
+            report.degradation.as_ref().unwrap().state,
+            TrafficRuntimeDegradationState::DegradedFailClosed
+        );
     }
 
     #[tokio::test]

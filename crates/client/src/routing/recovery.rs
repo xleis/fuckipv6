@@ -354,7 +354,7 @@ pub struct FailureApplication {
 /// TUN/routes/DNS, so each method must be cancellation safe and idempotent: a
 /// coordinator deadline can cancel a pending future and a later pass must be
 /// able to finish cleanup.
-pub trait RecoveryBackend: Send + Sync {
+pub trait RecoveryBackend: Send {
     fn snapshot(&mut self) -> RecoveryFuture<'_, RecoveryResourceSnapshot>;
 
     /// Re-evaluate current policy and DNS for this trigger, then reconcile owned

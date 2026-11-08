@@ -35,11 +35,13 @@ use crate::remote_node::RemoteNodeSession;
 #[cfg(target_os = "linux")]
 use crate::routing::linux_exit::LinuxExitForwarder;
 #[cfg(target_os = "linux")]
+use crate::routing::linux_recovery::LinuxRecoveryTun;
+#[cfg(target_os = "linux")]
 use crate::routing::linux_recovery_events::{LinuxRecoveryEvent, LinuxRecoveryEventWatcher};
 #[cfg(target_os = "linux")]
 use crate::routing::linux_route::LinuxRouteManager;
-#[cfg(target_os = "linux")]
 use crate::routing::recovery::RecoveryTrigger;
+#[cfg(target_os = "linux")]
 use crate::routing::table::{parse_linux_ip_routes, RouteEntry};
 use crate::routing::ExitNodeManager;
 use crate::signaling::client::{SignalingClient, SignalingEvent};
@@ -145,6 +147,7 @@ pub(crate) struct RuntimeTunIo {
     buffer_tx: mpsc::UnboundedSender<TunPacket>,
     reader_task: Option<JoinHandle<()>>,
     descriptor: TunIoDescriptor,
+    stats: StatsCollector,
 }
 
 #[derive(Clone)]
@@ -173,6 +176,7 @@ impl RuntimeTunIo {
             buffer_tx,
             reader_task: Some(reader_task),
             descriptor,
+            stats: stats.clone(),
         }
     }
 
@@ -215,7 +219,6 @@ impl RuntimeTunIo {
     /// Recreate the TUN link after the reader has fully released its clone.
     /// The old handle is dropped even when deletion reports a missing link, but
     /// creation still must succeed before the runtime reports recovery.
-    #[allow(dead_code)] // Consumed by the Linux recovery backend in the next wiring step.
     async fn recreate(&mut self, stats: &StatsCollector) -> Result<()> {
         self.stop_reader().await?;
         if let Some(mut old_tun) = self.tun.take() {
@@ -247,6 +250,34 @@ impl RuntimeTunIo {
             tun.delete().await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxRecoveryTun for RuntimeTunIo {
+    fn name(&self) -> &str {
+        RuntimeTunIo::name(self)
+    }
+
+    fn recreate(
+        &mut self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<(), crate::routing::recovery::RecoveryOperationError>,
+                > + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            RuntimeTunIo::recreate(self, &self.stats.clone())
+                .await
+                .map_err(|_| {
+                    crate::routing::recovery::RecoveryOperationError::new(
+                        "recovery.tun_recreate_failed",
+                    )
+                })
+        })
     }
 }
 

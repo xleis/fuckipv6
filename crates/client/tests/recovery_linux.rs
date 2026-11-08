@@ -128,7 +128,10 @@ async fn shutdown_tun(state: &mut BackendState) {
 async fn snapshot_state(state: &BackendState, resolv_conf: &Path) -> RecoveryResourceSnapshot {
     let tun_present = link_exists(TUN_NAME) && state.tun.is_some();
     let routes = match state.routes.as_ref() {
-        Some(routes) => routes.recovery_snapshot().await,
+        Some(routes) => routes
+            .recovery_snapshot()
+            .await
+            .expect("isolated route snapshot must be readable"),
         None => RouteRecoverySnapshot {
             expected_routes: 1,
             installed_routes: 0,

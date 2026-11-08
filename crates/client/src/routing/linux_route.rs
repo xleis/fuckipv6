@@ -698,7 +698,7 @@ impl LinuxRouteManager {
     /// Read the kernel's current policy-routing state for this manager. The
     /// snapshot contains counts only so it can be persisted without leaking
     /// interface names or addresses.
-    pub async fn recovery_snapshot(&self) -> RouteRecoverySnapshot {
+    pub async fn recovery_snapshot(&self) -> Result<RouteRecoverySnapshot> {
         let mut snapshot = RouteRecoverySnapshot {
             expected_routes: 0,
             installed_routes: 0,
@@ -715,13 +715,13 @@ impl LinuxRouteManager {
             let table = self.table_id.to_string();
             let rules = run_ip_query(family, &["rule", "show"])
                 .await
-                .unwrap_or_default();
+                .context("读取 Linux 策略路由规则失败")?;
             let rule_counts = parse_policy_rule_snapshot(&rules, self.table_id);
             snapshot.residual_routes += rule_counts.residual;
 
             let routes = run_ip_query(family, &["route", "show", "table", &table])
                 .await
-                .unwrap_or_default();
+                .context("读取 Linux 策略路由表失败")?;
             let route_counts = parse_table_route_snapshot(&routes, self.table_id, &self.tun_name);
             snapshot.residual_routes += route_counts.residual;
             snapshot.stale_interface_routes += route_counts.stale_interface;
@@ -734,7 +734,7 @@ impl LinuxRouteManager {
                 snapshot.installed_routes += 1;
             }
         }
-        snapshot
+        Ok(snapshot)
     }
 }
 
@@ -967,18 +967,18 @@ fn run_ip_rule_sync(action: &str, rule: &RuleSpec) -> Result<()> {
     run_sync_command(command, "回滚策略路由规则", action == "del")
 }
 
-async fn run_ip_query(family: Family, args: &[&str]) -> Option<String> {
+async fn run_ip_query(family: Family, args: &[&str]) -> Result<String> {
     let mut command = family_command(family);
     command.args(args);
     command.kill_on_drop(true);
     let output = timeout(SYNC_COMMAND_TIMEOUT, command.output())
         .await
-        .ok()?
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+        .context("Linux 路由查询超时")?
+        .context("无法执行 Linux 路由查询")?;
+    if !output.status.success() {
+        anyhow::bail!("Linux 路由查询返回失败状态");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

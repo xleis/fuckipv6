@@ -23,6 +23,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{timeout, Instant};
 
+use super::recovery::{DnsRecoveryMode, DnsRecoverySnapshot, RecoveryResourceState};
 use crate::network_setup::{ensure_stage, NetworkSetupStage};
 
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.2:53";
@@ -32,6 +33,55 @@ const LOCK_PATH: &str = "/run/fuckipv6-dns.lock";
 const BACKUP_PATH: &str = "/run/fuckipv6-resolv.conf.backup";
 const DNS_MESSAGE_LIMIT: usize = 65_535;
 const DNS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Read the live resolver configuration without treating a shared guard as
+/// proof of DNS safety. Only the configured loopback bridge address is
+/// authorized; any other resolver indicates an unsafe fallback.
+pub(crate) fn recovery_snapshot() -> Result<DnsRecoverySnapshot> {
+    let managed_resolver = listen_addr_from_env()?.ip();
+    recovery_snapshot_at(Path::new(RESOLV_CONF_PATH), managed_resolver)
+}
+
+fn recovery_snapshot_at(path: &Path, managed_resolver: IpAddr) -> Result<DnsRecoverySnapshot> {
+    let contents = std::fs::read_to_string(path).context("读取 DNS 解析配置失败")?;
+    let mut authorized_resolvers = 0usize;
+    let mut unsecured_resolvers = 0usize;
+    for line in contents.lines() {
+        let mut fields = line.split_whitespace();
+        if fields.next() != Some("nameserver") {
+            continue;
+        }
+        match fields.next().and_then(|value| value.parse::<IpAddr>().ok()) {
+            Some(address) if address == managed_resolver => authorized_resolvers += 1,
+            Some(_) | None => unsecured_resolvers += 1,
+        }
+    }
+
+    let (mode, state, insecure_fallback_detected) =
+        if authorized_resolvers > 0 && unsecured_resolvers == 0 {
+            (DnsRecoveryMode::Doh, RecoveryResourceState::Healthy, false)
+        } else if authorized_resolvers == 0 && unsecured_resolvers == 0 {
+            (
+                DnsRecoveryMode::Disabled,
+                RecoveryResourceState::Missing,
+                false,
+            )
+        } else {
+            (
+                DnsRecoveryMode::SystemResolver,
+                RecoveryResourceState::Degraded,
+                true,
+            )
+        };
+
+    Ok(DnsRecoverySnapshot {
+        mode,
+        state,
+        authorized_resolvers,
+        unsecured_resolvers,
+        insecure_fallback_detected,
+    })
+}
 
 /// Owns the loopback DoH bridge and the temporary resolv.conf override.
 #[derive(Debug)]
@@ -531,6 +581,91 @@ mod tests {
         assert!(managed.contains("nameserver 127.0.0.2"));
         assert!(!managed.contains("nameserver 10.0.0.1"));
         assert!(!managed.contains("nameserver 2001:db8::1"));
+    }
+
+    #[test]
+    fn recovery_snapshot_accepts_only_the_managed_resolver() {
+        let (directory, resolv_conf, _backup, _lock_path, _lock) = test_paths("snapshot-managed");
+        std::fs::write(
+            &resolv_conf,
+            b"search recovery.invalid\nnameserver 127.0.0.2\n",
+        )
+        .expect("write managed resolver");
+
+        let snapshot = recovery_snapshot_at(&resolv_conf, "127.0.0.2".parse().unwrap())
+            .expect("managed resolver snapshot");
+
+        assert_eq!(snapshot.mode, DnsRecoveryMode::Doh);
+        assert_eq!(snapshot.state, RecoveryResourceState::Healthy);
+        assert_eq!(snapshot.authorized_resolvers, 1);
+        assert_eq!(snapshot.unsecured_resolvers, 0);
+        assert!(!snapshot.insecure_fallback_detected);
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn recovery_snapshot_rejects_mixed_resolvers_as_insecure_fallback() {
+        let (directory, resolv_conf, _backup, _lock_path, _lock) = test_paths("snapshot-mixed");
+        std::fs::write(
+            &resolv_conf,
+            b"nameserver 127.0.0.2\nnameserver 203.0.113.53\n",
+        )
+        .expect("write mixed resolver");
+
+        let snapshot = recovery_snapshot_at(&resolv_conf, "127.0.0.2".parse().unwrap())
+            .expect("mixed resolver snapshot");
+
+        assert_eq!(snapshot.mode, DnsRecoveryMode::SystemResolver);
+        assert_eq!(snapshot.state, RecoveryResourceState::Degraded);
+        assert_eq!(snapshot.authorized_resolvers, 1);
+        assert_eq!(snapshot.unsecured_resolvers, 1);
+        assert!(snapshot.insecure_fallback_detected);
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn recovery_snapshot_reports_missing_resolver_as_disabled() {
+        let (directory, resolv_conf, _backup, _lock_path, _lock) = test_paths("snapshot-missing");
+        std::fs::write(&resolv_conf, b"search recovery.invalid\n").expect("write empty resolver");
+
+        let snapshot = recovery_snapshot_at(&resolv_conf, "127.0.0.2".parse().unwrap())
+            .expect("missing resolver snapshot");
+
+        assert_eq!(snapshot.mode, DnsRecoveryMode::Disabled);
+        assert_eq!(snapshot.state, RecoveryResourceState::Missing);
+        assert_eq!(snapshot.authorized_resolvers, 0);
+        assert_eq!(snapshot.unsecured_resolvers, 0);
+        assert!(!snapshot.insecure_fallback_detected);
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn recovery_snapshot_treats_malformed_nameserver_as_unsecured() {
+        let (directory, resolv_conf, _backup, _lock_path, _lock) = test_paths("snapshot-malformed");
+        std::fs::write(&resolv_conf, b"nameserver not-an-address\n")
+            .expect("write malformed resolver");
+
+        let snapshot = recovery_snapshot_at(&resolv_conf, "127.0.0.2".parse().unwrap())
+            .expect("malformed resolver snapshot");
+
+        assert_eq!(snapshot.mode, DnsRecoveryMode::SystemResolver);
+        assert_eq!(snapshot.state, RecoveryResourceState::Degraded);
+        assert_eq!(snapshot.authorized_resolvers, 0);
+        assert_eq!(snapshot.unsecured_resolvers, 1);
+        assert!(snapshot.insecure_fallback_detected);
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn recovery_snapshot_fails_when_resolver_file_is_unreadable() {
+        let (directory, resolv_conf, _backup, _lock_path, _lock) =
+            test_paths("snapshot-unreadable");
+
+        let error = recovery_snapshot_at(&resolv_conf, "127.0.0.2".parse().unwrap())
+            .expect_err("missing resolver file must not be treated as healthy");
+
+        assert!(error.to_string().contains("读取 DNS 解析配置失败"));
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]

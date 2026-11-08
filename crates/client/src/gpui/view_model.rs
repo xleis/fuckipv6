@@ -4,13 +4,17 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use fuckipv6_common::domain::JoinRequestReviewAction;
 use fuckipv6_common::domain::{
-    parse_policy_test_input, ActivityCategory, ActivityEntry, ActivitySeverity, AuditOutcome,
-    CapabilityKind, CapabilityState, ContentHash, ExitContributionObligation,
-    ExitContributionScope, InvitationCode, InvitationId, InvitationRedeemRequest,
-    MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode, NetworkMember,
-    NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberStatus,
-    NetworkProfileUpdate, NetworkVisibility, NodeId, TopologyNode, TopologyNodeHealth,
-    TopologySnapshot, TrafficPolicy, TrafficPolicyTestInput,
+    parse_policy_test_input, ActivityCategory, ActivityEntry, ActivitySeverity,
+    ApplicationIdentity, AuditOutcome, CapabilityKind, CapabilityState, ContentHash,
+    ExitContributionObligation, ExitContributionScope, InvitationCode, InvitationId,
+    InvitationRedeemRequest, MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode,
+    NetworkMember, NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberOnlineState,
+    NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId, TopologyNode,
+    TopologyNodeHealth, TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy, TrafficFlow,
+    TrafficMatch, TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput, TrafficProtocol,
+    TrafficRoutingHitSample, TrafficRoutingObservation, TrafficRoutingPageModel,
+    TrafficRoutingRuleActivityEffect, TrafficRoutingRuleImpactView, TrafficRoutingTarget,
+    TrafficRoutingTargetKind, TrafficRoutingTargetRef, TrafficRoutingWorkflowState,
 };
 use fuckipv6_common::i18n::{t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
@@ -984,6 +988,9 @@ pub struct RowModel {
 pub struct RowNavigation {
     pub page_id: String,
     pub network_name: Option<String>,
+    /// Stable object identity used by destinations that can open a concrete
+    /// node or network rather than only selecting a page.
+    pub object_id: Option<String>,
     pub label: String,
 }
 
@@ -3339,6 +3346,7 @@ fn row_with_navigation(
         navigation: Some(RowNavigation {
             page_id: page_id.into(),
             network_name: Some(network_name.into()),
+            object_id: None,
             label: label.into(),
         }),
     }
@@ -3356,6 +3364,7 @@ fn row_with_page_navigation(
         navigation: Some(RowNavigation {
             page_id: page_id.into(),
             network_name: None,
+            object_id: None,
             label: label.into(),
         }),
     }
@@ -4313,6 +4322,7 @@ fn activity_object_navigation(
             Some(RowNavigation {
                 page_id: "topology".into(),
                 network_name: Some(network_name),
+                object_id: Some(object_id.to_owned()),
                 label,
             })
         }
@@ -4345,6 +4355,7 @@ fn activity_object_navigation(
             Some(RowNavigation {
                 page_id: "topology".into(),
                 network_name,
+                object_id: Some(object_id.to_owned()),
                 label,
             })
         }
@@ -4353,6 +4364,7 @@ fn activity_object_navigation(
             (identity.node_id == object_id).then(|| RowNavigation {
                 page_id: "identity".into(),
                 network_name: None,
+                object_id: Some(object_id.to_owned()),
                 label,
             })
         }
@@ -4484,65 +4496,629 @@ fn project_activity(
     )
 }
 
+fn routing_workflow_state_key(workflow: &TrafficRoutingWorkflowState) -> &'static str {
+    match workflow {
+        TrafficRoutingWorkflowState::Unconfigured { .. } => "traffic.routing.state.unconfigured",
+        TrafficRoutingWorkflowState::Draft { .. } => "traffic.routing.state.draft",
+        TrafficRoutingWorkflowState::Applying { .. } => "traffic.routing.state.applying",
+        TrafficRoutingWorkflowState::Applied { .. } => "traffic.routing.state.applied",
+        TrafficRoutingWorkflowState::Failed { .. } => "traffic.routing.state.failed",
+        TrafficRoutingWorkflowState::Stale { .. } => "traffic.routing.state.stale",
+    }
+}
+
+fn routing_workflow_detail(workflow: &TrafficRoutingWorkflowState, locale: Locale) -> String {
+    let status = t(locale, routing_workflow_state_key(workflow));
+    match workflow {
+        TrafficRoutingWorkflowState::Unconfigured { reason_code } => {
+            format!("{status} · reason={reason_code}")
+        }
+        TrafficRoutingWorkflowState::Draft { base_revision } => {
+            format!("{status} · base_revision={base_revision}")
+        }
+        TrafficRoutingWorkflowState::Applying {
+            base_revision,
+            candidate_revision,
+            operation_id,
+        } => format!(
+            "{status} · base_revision={base_revision} · candidate_revision={candidate_revision} · operation_id={operation_id}"
+        ),
+        TrafficRoutingWorkflowState::Applied { revision } => {
+            format!("{status} · revision={revision}")
+        }
+        TrafficRoutingWorkflowState::Failed {
+            base_revision,
+            candidate_revision,
+            stage,
+            reason_code,
+        } => format!(
+            "{status} · base_revision={base_revision} · candidate_revision={candidate_revision} · stage={stage} · reason={reason_code}"
+        ),
+        TrafficRoutingWorkflowState::Stale {
+            revision,
+            reason_code,
+        } => format!("{status} · revision={revision} · reason={reason_code}"),
+    }
+}
+
+fn routing_target_kind_key(kind: TrafficRoutingTargetKind) -> &'static str {
+    match kind {
+        TrafficRoutingTargetKind::Direct => "gpui.routing.target_kind.direct",
+        TrafficRoutingTargetKind::Network => "gpui.routing.target_kind.network",
+        TrafficRoutingTargetKind::Exit => "gpui.routing.target_kind.exit",
+        TrafficRoutingTargetKind::Reject => "gpui.routing.target_kind.reject",
+    }
+}
+
+fn routing_target_kind_value(kind: TrafficRoutingTargetKind) -> &'static str {
+    match kind {
+        TrafficRoutingTargetKind::Direct => "direct",
+        TrafficRoutingTargetKind::Network => "network",
+        TrafficRoutingTargetKind::Exit => "exit",
+        TrafficRoutingTargetKind::Reject => "reject",
+    }
+}
+
+fn routing_action_kind_and_id(action: &TrafficAction) -> (TrafficRoutingTargetKind, String) {
+    match action {
+        TrafficAction::Direct => (TrafficRoutingTargetKind::Direct, "direct".into()),
+        TrafficAction::Network(network_id) => (
+            TrafficRoutingTargetKind::Network,
+            network_id.as_str().to_owned(),
+        ),
+        TrafficAction::Exit(node_id) => {
+            (TrafficRoutingTargetKind::Exit, node_id.as_str().to_owned())
+        }
+        TrafficAction::Reject => (TrafficRoutingTargetKind::Reject, "reject".into()),
+    }
+}
+
+fn routing_target_ref_label(
+    page: &TrafficRoutingPageModel,
+    target: &TrafficRoutingTargetRef,
+    locale: Locale,
+) -> String {
+    let label = page
+        .target(target.kind, &target.id)
+        .map(|target| target.label.clone())
+        .unwrap_or_else(|| format!("{}:{}", routing_target_kind_value(target.kind), target.id));
+    if target.resolved {
+        label
+    } else {
+        format!(
+            "{label} · {}",
+            t(locale, "traffic.routing.target.unresolved")
+        )
+    }
+}
+
+fn routing_action_label(
+    page: &TrafficRoutingPageModel,
+    action: &TrafficAction,
+    locale: Locale,
+) -> String {
+    let (kind, id) = routing_action_kind_and_id(action);
+    let target = TrafficRoutingTargetRef {
+        kind,
+        id: id.clone(),
+        resolved: page.target(kind, &id).is_some(),
+    };
+    routing_target_ref_label(page, &target, locale)
+}
+
+fn routing_target_navigation(
+    target: &TrafficRoutingTarget,
+    locale: Locale,
+) -> Option<RowNavigation> {
+    let navigation = target.navigation.as_ref()?;
+    Some(RowNavigation {
+        page_id: navigation.page_id.clone(),
+        network_name: navigation.network_name.clone(),
+        object_id: Some(navigation.object_id.clone()),
+        label: t(locale, "traffic.routing.targets.jump").to_string(),
+    })
+}
+
+fn routing_target_row(target: &TrafficRoutingTarget, locale: Locale) -> RowModel {
+    let mut detail = tr(
+        locale,
+        "gpui.routing.target_detail",
+        &[
+            ("kind", t(locale, routing_target_kind_key(target.kind))),
+            ("id", &target.id),
+        ],
+    );
+    let navigation = routing_target_navigation(target, locale);
+    if navigation.is_none() {
+        detail.push_str(" · ");
+        detail.push_str(t(locale, "traffic.routing.targets.no_navigation"));
+    }
+    RowModel {
+        title: target.label.clone(),
+        detail,
+        navigation,
+    }
+}
+
+pub(crate) fn routing_target_search_rows(
+    snapshot: &NodeSnapshot,
+    query: &str,
+    locale: Locale,
+) -> Vec<RowModel> {
+    snapshot
+        .traffic_routing_page
+        .as_ref()
+        .map(|page| {
+            page.search_targets(query)
+                .into_iter()
+                .map(|target| routing_target_row(target, locale))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn routing_list(values: Vec<String>, locale: Locale) -> String {
+    if values.is_empty() {
+        t(locale, "common.none").to_string()
+    } else {
+        values.join(t(locale, "common.list_separator"))
+    }
+}
+
+fn routing_protocol_label(protocol: TrafficProtocol) -> &'static str {
+    match protocol {
+        TrafficProtocol::Tcp => "TCP",
+        TrafficProtocol::Udp => "UDP",
+        TrafficProtocol::Icmp => "ICMP",
+    }
+}
+
+fn routing_application_label(application: &ApplicationIdentity) -> String {
+    match application {
+        ApplicationIdentity::ExecutablePath(path) => format!("executable_path:{path}"),
+        ApplicationIdentity::PackageId(package) => format!("package_id:{package}"),
+        ApplicationIdentity::Unknown => "unknown".into(),
+    }
+}
+
+fn routing_match_detail(matcher: &TrafficMatch, locale: Locale) -> String {
+    let exact_domains = routing_list(
+        matcher
+            .exact_domains
+            .iter()
+            .map(|domain| domain.as_str().to_owned())
+            .collect(),
+        locale,
+    );
+    let domain_suffixes = routing_list(
+        matcher
+            .domain_suffixes
+            .iter()
+            .map(|suffix| suffix.as_str().to_owned())
+            .collect(),
+        locale,
+    );
+    let destination_cidrs = routing_list(
+        matcher
+            .destination_cidrs
+            .iter()
+            .map(|cidr| cidr.as_str().to_owned())
+            .collect(),
+        locale,
+    );
+    let destination_ports = routing_list(
+        matcher
+            .destination_ports
+            .iter()
+            .map(|range| {
+                if range.start == range.end {
+                    range.start.to_string()
+                } else {
+                    format!("{}-{}", range.start, range.end)
+                }
+            })
+            .collect(),
+        locale,
+    );
+    let protocols = routing_list(
+        matcher
+            .protocols
+            .iter()
+            .map(|protocol| routing_protocol_label(*protocol).to_owned())
+            .collect(),
+        locale,
+    );
+    let applications = routing_list(
+        matcher
+            .applications
+            .iter()
+            .map(routing_application_label)
+            .collect(),
+        locale,
+    );
+    format!(
+        "{}: {exact_domains} · {}: {domain_suffixes} · {}: {destination_cidrs} · {}: {destination_ports} · {}: {protocols} · {}: {applications}",
+        t(locale, "traffic.routing.match.exact_domains"),
+        t(locale, "traffic.routing.match.domain_suffixes"),
+        t(locale, "traffic.routing.match.destination_cidrs"),
+        t(locale, "traffic.routing.match.destination_ports"),
+        t(locale, "traffic.routing.match.protocols"),
+        t(locale, "traffic.routing.match.applications"),
+    )
+}
+
+fn routing_risk_label(risk: &TrafficMatchRisk, locale: Locale) -> String {
+    match risk {
+        TrafficMatchRisk::AlwaysMatches => {
+            t(locale, "gpui.routing.risk.always_matches").to_string()
+        }
+        TrafficMatchRisk::AnyDestination => {
+            t(locale, "gpui.routing.risk.any_destination").to_string()
+        }
+        TrafficMatchRisk::AnyPort => t(locale, "gpui.routing.risk.any_port").to_string(),
+        TrafficMatchRisk::AnyProtocol => t(locale, "gpui.routing.risk.any_protocol").to_string(),
+        TrafficMatchRisk::AnyApplication => {
+            t(locale, "gpui.routing.risk.any_application").to_string()
+        }
+        TrafficMatchRisk::BroadCidr { cidr, prefix_len } => tr(
+            locale,
+            "gpui.routing.risk.broad_cidr",
+            &[("cidr", cidr), ("prefix_len", &prefix_len.to_string())],
+        ),
+        TrafficMatchRisk::FullPortRange { start, end } => tr(
+            locale,
+            "gpui.routing.risk.full_port_range",
+            &[("start", &start.to_string()), ("end", &end.to_string())],
+        ),
+    }
+}
+
+fn routing_flow_detail(flow: &TrafficFlow) -> String {
+    let destination = flow
+        .domain
+        .as_ref()
+        .map(|domain| domain.as_str().to_owned())
+        .unwrap_or_else(|| flow.destination_ip.to_string());
+    format!(
+        "{destination}:{} · {} · {}",
+        flow.destination_port,
+        routing_protocol_label(flow.protocol),
+        routing_application_label(&flow.application)
+    )
+}
+
+fn routing_hit_sample_detail(
+    page: &TrafficRoutingPageModel,
+    sample: &TrafficRoutingHitSample,
+    locale: Locale,
+) -> String {
+    let activity = sample
+        .activity_id
+        .as_deref()
+        .unwrap_or_else(|| t(locale, "common.not_available"));
+    let diagnostic = sample
+        .diagnostic_id
+        .as_deref()
+        .unwrap_or_else(|| t(locale, "common.not_available"));
+    let rule = sample
+        .after_rule_id
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| t(locale, "common.none").to_string());
+    format!(
+        "{} {activity} · {} {diagnostic} · {} {} · {} {} → {} · {} {rule}",
+        t(locale, "traffic.routing.rule.impact_activity"),
+        t(locale, "traffic.routing.rule.impact_diagnostic"),
+        t(locale, "gpui.routing.flow"),
+        routing_flow_detail(&sample.flow),
+        t(locale, "traffic.routing.rule.impact_before"),
+        routing_action_label(page, &sample.before_action, locale),
+        routing_action_label(page, &sample.after_action, locale),
+        t(locale, "traffic.routing.rule.impact_after"),
+    )
+}
+
+fn routing_impact_detail(
+    page: &TrafficRoutingPageModel,
+    impact: &TrafficRoutingRuleImpactView,
+    locale: Locale,
+) -> String {
+    match impact {
+        TrafficRoutingRuleImpactView::Available { impact } => {
+            let effect = match &impact.activity_effect {
+                TrafficRoutingRuleActivityEffect::ObservedTrafficReassigned { sample_count } => tr(
+                    locale,
+                    "traffic.routing.rule.impact_reassigned",
+                    &[("count", &sample_count.to_string())],
+                ),
+                TrafficRoutingRuleActivityEffect::NoObservedTraffic => {
+                    t(locale, "traffic.routing.rule.impact_no_hits").to_string()
+                }
+            };
+            let samples = impact
+                .hit_samples
+                .iter()
+                .map(|sample| routing_hit_sample_detail(page, sample, locale))
+                .collect::<Vec<_>>();
+            if samples.is_empty() {
+                effect
+            } else {
+                format!(
+                    "{effect} · {}: {}",
+                    t(locale, "gpui.routing.hit_samples"),
+                    samples.join(t(locale, "common.list_separator"))
+                )
+            }
+        }
+        TrafficRoutingRuleImpactView::Unavailable { reason_code } => format!(
+            "{} · reason={reason_code}",
+            t(locale, "traffic.routing.rule.impact_unavailable")
+        ),
+    }
+}
+
 fn project_routing(
     snapshot: &NodeSnapshot,
     locale: Locale,
 ) -> (Vec<MetricModel>, Vec<SectionModel>) {
-    let rows = snapshot
-        .configuration
-        .networks
-        .iter()
-        .map(|network| {
-            let routing = t(locale, routing_mode_key(network.routing_mode));
-            let exit = display_optional_text(locale, network.exit_node.as_deref());
-            let direct = format!("{:?}", network.direct_cidrs);
-            let proxy = format!("{:?}", network.proxy_cidrs);
-            let enabled = display_bool(locale, network.exit_node_enabled);
-            let allowed_clients = format!("{:?}", network.exit_node_allowed_clients);
-            let allow_lan = display_bool(locale, network.exit_node_allow_lan_access);
-            let region = display_optional_text(locale, network.exit_node_region.as_deref());
-            row(
-                network.network_name.clone(),
-                tr(
-                    locale,
-                    "gpui.routing_detail",
-                    &[
-                        ("routing", routing),
-                        ("exit", &exit),
-                        ("direct", &direct),
-                        ("proxy", &proxy),
-                        ("enabled", enabled),
-                        ("allowed_clients", &allowed_clients),
-                        ("allow_lan", allow_lan),
-                        ("region", &region),
-                    ],
-                ),
+    let Some(page) = snapshot.traffic_routing_page.as_ref() else {
+        return (
+            Vec::new(),
+            vec![section(
+                t(locale, "traffic.routing.authority.unavailable"),
+                t(locale, "traffic.routing.authority.unavailable_detail"),
+                vec![row(
+                    t(locale, "traffic.routing.authority.unavailable"),
+                    t(locale, "traffic.routing.authority.unavailable_detail"),
+                )],
+            )],
+        );
+    };
+
+    let mut authority_rows = vec![row(
+        t(locale, "gpui.routing.workflow"),
+        routing_workflow_detail(&page.workflow, locale),
+    )];
+
+    let confirmed_by = match page.default_policy.confirmed_by {
+        TrafficDefaultConfirmedBy::Owner => t(locale, "join_request.role.owner"),
+        TrafficDefaultConfirmedBy::Administrator => t(locale, "join_request.role.administrator"),
+    };
+    let confirmed_at =
+        routing_timestamp_label(Some(page.default_policy.confirmed_at_unix_ms), locale);
+    authority_rows.push(row(
+        t(locale, "traffic.routing.default_policy"),
+        format!(
+            "{}: {} · {}: {confirmed_by} · confirmed_at: {confirmed_at}",
+            t(locale, "traffic.routing.action"),
+            routing_action_label(page, &page.default_policy.action, locale),
+            t(locale, "traffic.routing.confirmed_by"),
+        ),
+    ));
+
+    let failure_policy = page
+        .failure_policy
+        .direct_fallback
+        .as_ref()
+        .map(|fallback| {
+            tr(
+                locale,
+                "traffic.routing.direct_fallback",
+                &[(
+                    "failures",
+                    &fallback
+                        .allowed_failures
+                        .iter()
+                        .map(|failure| failure.as_str())
+                        .collect::<Vec<_>>()
+                        .join(t(locale, "common.list_separator")),
+                )],
             )
         })
+        .unwrap_or_else(|| t(locale, "traffic.routing.fail_closed").to_string());
+    authority_rows.push(row(
+        t(locale, "traffic.routing.failure_policy"),
+        failure_policy,
+    ));
+
+    let hard_constraints = page
+        .hard_constraint_target
+        .as_ref()
+        .map(|target| {
+            format!(
+                "{} · {}",
+                routing_target_ref_label(page, target, locale),
+                t(locale, "traffic.routing.hard_constraint_note"),
+            )
+        })
+        .unwrap_or_else(|| t(locale, "traffic.routing.no_hard_constraint").to_string());
+    authority_rows.push(row(
+        t(locale, "traffic.routing.hard_constraints"),
+        hard_constraints,
+    ));
+    if !page.can_edit {
+        authority_rows.push(row(
+            t(locale, "traffic.routing.read_only"),
+            t(locale, "traffic.routing.read_only"),
+        ));
+    }
+
+    let rule_rows = page
+        .rules
+        .iter()
+        .map(|rule| {
+            let risks = if rule.risks.is_empty() {
+                t(locale, "common.none").to_string()
+            } else {
+                rule.risks
+                    .iter()
+                    .map(|risk| routing_risk_label(risk, locale))
+                    .collect::<Vec<_>>()
+                    .join(t(locale, "common.list_separator"))
+            };
+            let title = if rule.description.trim().is_empty() {
+                format!("#{} · {}", rule.priority, rule.rule_id)
+            } else {
+                format!("#{} · {}", rule.priority, rule.description)
+            };
+            let detail = format!(
+                "{}: {} · {}: {} · {}: {} · {}: {risks}",
+                t(locale, "traffic.routing.rule.enabled"),
+                display_bool(locale, rule.enabled),
+                t(locale, "traffic.routing.rule.action"),
+                routing_target_ref_label(page, &rule.target, locale),
+                t(locale, "traffic.routing.match.exact_domains"),
+                routing_match_detail(&rule.matcher, locale),
+                t(locale, "gpui.routing.rule_risks"),
+            );
+            let mut item = row(title, detail);
+            let (kind, id) = routing_action_kind_and_id(&rule.action);
+            item.navigation = page
+                .target(kind, &id)
+                .and_then(|target| routing_target_navigation(target, locale));
+            item
+        })
         .collect::<Vec<_>>();
+
+    let impact_rows = page
+        .rules
+        .iter()
+        .flat_map(|rule| {
+            [
+                row(
+                    format!(
+                        "{} · {}",
+                        rule.rule_id,
+                        t(locale, "policy.choice.action.disable")
+                    ),
+                    routing_impact_detail(page, &rule.disable_impact, locale),
+                ),
+                row(
+                    format!(
+                        "{} · {}",
+                        rule.rule_id,
+                        t(locale, "policy.choice.action.delete")
+                    ),
+                    routing_impact_detail(page, &rule.delete_impact, locale),
+                ),
+            ]
+        })
+        .collect::<Vec<_>>();
+
+    let observation_rows = match &page.observation {
+        TrafficRoutingObservation::Available {
+            window_start_unix_ms,
+            window_end_unix_ms,
+            observed_flow_count,
+            hits,
+        } => {
+            let mut rows = vec![row(
+                tr(
+                    locale,
+                    "gpui.routing.observed_flows",
+                    &[("count", &observed_flow_count.to_string())],
+                ),
+                tr(
+                    locale,
+                    "traffic.routing.rule.impact_window",
+                    &[
+                        (
+                            "start",
+                            &routing_timestamp_label(Some(*window_start_unix_ms), locale),
+                        ),
+                        (
+                            "end",
+                            &routing_timestamp_label(Some(*window_end_unix_ms), locale),
+                        ),
+                    ],
+                ),
+            )];
+            if hits.is_empty() {
+                rows.push(row(
+                    t(locale, "gpui.routing.no_hits"),
+                    t(locale, "traffic.routing.rule.impact_no_hits"),
+                ));
+            } else {
+                rows.extend(hits.iter().map(|hit| {
+                    let activity = hit
+                        .activity_id
+                        .as_deref()
+                        .unwrap_or_else(|| t(locale, "common.not_available"));
+                    let diagnostic = hit
+                        .diagnostic_id
+                        .as_deref()
+                        .unwrap_or_else(|| t(locale, "common.not_available"));
+                    row(
+                        hit.sample_id.clone(),
+                        format!(
+                            "{} {activity} · {} {diagnostic} · {} {}",
+                            t(locale, "traffic.routing.rule.impact_activity"),
+                            t(locale, "traffic.routing.rule.impact_diagnostic"),
+                            t(locale, "gpui.routing.flow"),
+                            routing_flow_detail(&hit.flow),
+                        ),
+                    )
+                }));
+            }
+            rows
+        }
+        TrafficRoutingObservation::Unavailable { reason_code } => vec![row(
+            t(locale, "gpui.routing.observation_unavailable"),
+            format!("reason={reason_code}"),
+        )],
+    };
+
+    let target_rows = page
+        .targets
+        .iter()
+        .map(|target| routing_target_row(target, locale))
+        .collect::<Vec<_>>();
+
     (
         vec![
             metric(
-                t(locale, "gpui.metric.configured_networks"),
-                snapshot.configuration.networks.len(),
-                "NodeConfigurationSnapshot",
+                t(locale, "traffic.routing.authority_revision"),
+                page.authority_revision,
+                "TrafficRoutingPageModel.authority_revision",
             ),
             metric(
-                t(locale, "gpui.metric.exit_enabled"),
-                snapshot
-                    .configuration
-                    .networks
-                    .iter()
-                    .filter(|network| network.exit_node_enabled)
-                    .count(),
-                "exit_node_enabled",
+                t(locale, "traffic.routing.rules.title"),
+                page.rules.len(),
+                "TrafficRoutingPageModel.rules",
+            ),
+            metric(
+                t(locale, "traffic.routing.targets"),
+                page.targets.len(),
+                "TrafficRoutingPageModel.targets",
             ),
         ],
-        vec![section(
-            t(locale, "gpui.section.routing_config"),
-            t(locale, "gpui.empty.routing"),
-            rows,
-        )],
+        vec![
+            section(
+                t(locale, "traffic.routing.eyebrow"),
+                t(locale, "traffic.routing.authority.unavailable_detail"),
+                authority_rows,
+            ),
+            section(
+                t(locale, "traffic.routing.rules.title"),
+                t(locale, "traffic.routing.rules.empty"),
+                rule_rows,
+            ),
+            section(
+                t(locale, "traffic.routing.rule.impact_title"),
+                t(locale, "traffic.routing.rules.empty"),
+                impact_rows,
+            ),
+            section(
+                t(locale, "gpui.routing.observation"),
+                t(locale, "gpui.routing.no_hits"),
+                observation_rows,
+            ),
+            section(
+                t(locale, "traffic.routing.targets"),
+                t(locale, "traffic.routing.targets.no_results"),
+                target_rows,
+            ),
+        ],
     )
 }
 
@@ -5829,9 +6405,11 @@ mod tests {
         NodeRoutingTargetSnapshot, NodeTrafficSnapshot, NodeUiField, NodeUiValidation,
     };
     use fuckipv6_common::domain::{
-        ActivityEntry, AuditId, AuditOutcome, MembershipState, NetworkMemberPresence, NodeId,
-        TopologyBoundary, TopologyConnection, TopologyConnectionState, TopologyNode,
-        TopologyNodeNetwork,
+        ActivityEntry, AuditId, AuditOutcome, DomainSuffix, MembershipState, NetworkMemberPresence,
+        NodeId, PortRange, TopologyBoundary, TopologyConnection, TopologyConnectionState,
+        TopologyNode, TopologyNodeNetwork, TrafficDefaultPolicy, TrafficFailurePolicy,
+        TrafficMatch, TrafficRoutingHardConstraints, TrafficRoutingObservedHit, TrafficRule,
+        TrafficRuleId,
     };
     use serde::Deserialize;
     use std::collections::BTreeMap;
@@ -6177,6 +6755,76 @@ mod tests {
         assert_eq!(retain_member_selection(Some(&selected), &[]), None);
     }
 
+    fn traffic_routing_page_fixture(
+        observation: TrafficRoutingObservation,
+    ) -> TrafficRoutingPageModel {
+        let node_id = NodeId::from_public_key(b"gpui-routing-node");
+        let network_id = NetworkId::from_public_key(b"gpui-routing-network");
+        let exit_id = NodeId::from_public_key(b"gpui-routing-tokyo-exit");
+        let policy = TrafficPolicy {
+            node_id,
+            revision: 7,
+            default_policy: TrafficDefaultPolicy {
+                action: TrafficAction::Exit(exit_id.clone()),
+                confirmed_by: TrafficDefaultConfirmedBy::Owner,
+                confirmed_at_unix_ms: 1_700_000_000_000,
+            },
+            failure_policy: TrafficFailurePolicy::fail_closed(),
+            rules: vec![TrafficRule {
+                rule_id: TrafficRuleId::from_public_key(b"gpui-routing-rule"),
+                priority: 1,
+                enabled: true,
+                matcher: TrafficMatch {
+                    domain_suffixes: vec![DomainSuffix::parse("example.com").unwrap()],
+                    destination_ports: vec![PortRange {
+                        start: 443,
+                        end: 443,
+                    }],
+                    protocols: vec![TrafficProtocol::Tcp],
+                    ..TrafficMatch::default()
+                },
+                action: TrafficAction::Direct,
+                description: "Development traffic".into(),
+            }],
+        };
+        TrafficRoutingPageModel::from_policy_with_observation(
+            &policy,
+            TrafficRoutingWorkflowState::Applied { revision: 7 },
+            TrafficRoutingHardConstraints::default(),
+            vec![
+                TrafficRoutingTarget::direct(),
+                TrafficRoutingTarget::reject(),
+                TrafficRoutingTarget::network(network_id, "Home"),
+                TrafficRoutingTarget::exit(exit_id, "Tokyo Exit"),
+            ],
+            true,
+            observation,
+        )
+        .expect("traffic routing page fixture")
+    }
+
+    fn traffic_routing_observation_with_hit() -> TrafficRoutingObservation {
+        TrafficRoutingObservation::Available {
+            window_start_unix_ms: 1_700_000_000_000,
+            window_end_unix_ms: 1_700_000_060_000,
+            observed_flow_count: 12,
+            hits: vec![TrafficRoutingObservedHit {
+                sample_id: "sample-1".into(),
+                activity_id: Some("activity-1".into()),
+                diagnostic_id: Some("diagnostic-1".into()),
+                flow: TrafficFlow {
+                    domain: Some(
+                        fuckipv6_common::domain::DomainName::parse("api.example.com").unwrap(),
+                    ),
+                    destination_ip: "203.0.113.10".parse().unwrap(),
+                    destination_port: 443,
+                    protocol: TrafficProtocol::Tcp,
+                    application: ApplicationIdentity::Unknown,
+                },
+            }],
+        }
+    }
+
     fn populated_snapshot() -> NodeSnapshot {
         let mut snapshot = NodeSnapshot::default();
         snapshot.lifecycle.phase = NodePhase::Running;
@@ -6251,6 +6899,166 @@ mod tests {
                 identity_configured: true,
             });
         snapshot
+    }
+
+    #[test]
+    fn traffic_routing_page_missing_is_unavailable_and_never_uses_legacy_config() {
+        let mut snapshot = populated_snapshot();
+        snapshot.traffic_routing_page = None;
+        let (metrics, sections) = project_routing(&snapshot, Locale::En);
+        assert!(metrics.is_empty());
+
+        let text = sections
+            .iter()
+            .flat_map(|section| {
+                std::iter::once(section.title.as_str()).chain(
+                    section
+                        .rows
+                        .iter()
+                        .flat_map(|row| [row.title.as_str(), row.detail.as_str()]),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains(t(Locale::En, "traffic.routing.authority.unavailable")));
+        assert!(!text.contains("10.0.0.0/8"));
+        assert!(!text.contains("peer-1"));
+        assert!(!text.contains("Mesh only"));
+    }
+
+    #[test]
+    fn traffic_routing_page_projects_authority_workflow_rules_and_targets() {
+        let mut snapshot = populated_snapshot();
+        snapshot.traffic_routing_page = Some(traffic_routing_page_fixture(
+            traffic_routing_observation_with_hit(),
+        ));
+        let (metrics, sections) = project_routing(&snapshot, Locale::En);
+
+        assert_eq!(metrics[0].value, "7");
+        assert_eq!(metrics[1].value, "1");
+        assert_eq!(metrics[2].value, "4");
+
+        let authority = sections
+            .iter()
+            .find(|section| section.title == t(Locale::En, "traffic.routing.eyebrow"))
+            .expect("routing authority section");
+        let authority_text = authority
+            .rows
+            .iter()
+            .map(|row| format!("{} {}", row.title, row.detail))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(authority_text.contains(t(Locale::En, "traffic.routing.state.applied")));
+        assert!(authority_text.contains("Tokyo Exit"));
+        assert!(authority_text.contains(t(Locale::En, "traffic.routing.fail_closed")));
+
+        let rules = sections
+            .iter()
+            .find(|section| section.title == t(Locale::En, "traffic.routing.rules.title"))
+            .expect("routing rules section");
+        assert_eq!(rules.rows.len(), 1);
+        assert!(rules.rows[0].title.contains("Development traffic"));
+        assert!(rules.rows[0]
+            .detail
+            .contains(t(Locale::En, "traffic.routing.rule.enabled")));
+        assert!(rules.rows[0].detail.contains("Direct"));
+
+        let targets = sections
+            .iter()
+            .find(|section| section.title == t(Locale::En, "traffic.routing.targets"))
+            .expect("routing targets section");
+        assert!(targets.rows.iter().any(|row| row.title == "Tokyo Exit"));
+        assert!(targets.rows.iter().any(|row| row.title == "Home"));
+    }
+
+    #[test]
+    fn traffic_routing_impact_distinguishes_observed_zero_hit_and_unavailable() {
+        let zero_hits = TrafficRoutingObservation::Available {
+            window_start_unix_ms: 1_700_000_000_000,
+            window_end_unix_ms: 1_700_000_060_000,
+            observed_flow_count: 0,
+            hits: Vec::new(),
+        };
+        let mut snapshot = populated_snapshot();
+        snapshot.traffic_routing_page = Some(traffic_routing_page_fixture(zero_hits));
+        let (_, sections) = project_routing(&snapshot, Locale::En);
+        let impact = sections
+            .iter()
+            .find(|section| section.title == t(Locale::En, "traffic.routing.rule.impact_title"))
+            .expect("zero-hit impact section");
+        assert!(impact.rows.iter().all(|row| row
+            .detail
+            .contains(t(Locale::En, "traffic.routing.rule.impact_no_hits"))));
+
+        snapshot.traffic_routing_page = Some(traffic_routing_page_fixture(
+            TrafficRoutingObservation::unavailable("runtime.collector_offline"),
+        ));
+        let (_, sections) = project_routing(&snapshot, Locale::En);
+        let impact = sections
+            .iter()
+            .find(|section| section.title == t(Locale::En, "traffic.routing.rule.impact_title"))
+            .expect("unavailable impact section");
+        assert!(impact.rows.iter().all(|row| {
+            row.detail
+                .contains(t(Locale::En, "traffic.routing.rule.impact_unavailable"))
+                && row.detail.contains("runtime.collector_offline")
+        }));
+    }
+
+    #[test]
+    fn traffic_routing_hit_samples_expose_activity_and_diagnostic_links() {
+        let mut snapshot = populated_snapshot();
+        snapshot.traffic_routing_page = Some(traffic_routing_page_fixture(
+            traffic_routing_observation_with_hit(),
+        ));
+        let (_, sections) = project_routing(&snapshot, Locale::En);
+        let impact = sections
+            .iter()
+            .find(|section| section.title == t(Locale::En, "traffic.routing.rule.impact_title"))
+            .expect("routing impact section");
+        let text = impact
+            .rows
+            .iter()
+            .map(|row| format!("{} {}", row.title, row.detail))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("activity-1"));
+        assert!(text.contains("diagnostic-1"));
+        assert!(text.contains("api.example.com:443"));
+        assert!(text.contains(t(Locale::En, "gpui.routing.hit_samples")));
+    }
+
+    #[test]
+    fn traffic_routing_target_search_only_uses_authoritative_aliases() {
+        let mut snapshot = populated_snapshot();
+        snapshot.traffic_routing_page = Some(traffic_routing_page_fixture(
+            TrafficRoutingObservation::default(),
+        ));
+
+        let tokyo = routing_target_search_rows(&snapshot, "TOKYO", Locale::En);
+        assert_eq!(tokyo.len(), 1);
+        assert_eq!(tokyo[0].title, "Tokyo Exit");
+        let navigation = tokyo[0].navigation.as_ref().expect("exit navigation");
+        assert_eq!(navigation.page_id, "topology");
+        assert!(navigation
+            .object_id
+            .as_deref()
+            .is_some_and(|id| !id.is_empty()));
+
+        let home = routing_target_search_rows(&snapshot, "home", Locale::En);
+        assert_eq!(home.len(), 1);
+        assert_eq!(home[0].title, "Home");
+        assert_eq!(
+            home[0]
+                .navigation
+                .as_ref()
+                .and_then(|navigation| navigation.network_name.as_deref()),
+            Some("Home")
+        );
+
+        assert!(routing_target_search_rows(&snapshot, "fk-home", Locale::En).is_empty());
+        assert!(routing_target_search_rows(&snapshot, "peer-1", Locale::En).is_empty());
+        assert!(routing_target_search_rows(&snapshot, "   ", Locale::En).is_empty());
     }
 
     fn activity_entry(audit_key: &[u8], occurred_at_unix_ms: u64) -> ActivityEntry {

@@ -57,7 +57,7 @@
 | W8 网络创建与发现 | `[~]` | P1 | W3,W4,W5 | 创建、发现、开放/审批/私有邀请和强制 Exit 知情已完成；索引故障隔离与发现全链路测试待完成 |
 | W9 成员、组与拓扑 | `[~]` | P1 | W8 | 成员列表、邀请审批、组目录和拓扑聚合已完成；多网络视觉、交互、性能与 E2E 进行中 |
 | W10 安全与隐私 | `[x]` | P1 | W9 | 权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计、安全页面状态和可重复治理证据闭环均已完成 |
-| W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约和 W11-09 隔离路由 E2E/失败关闭/网络报告已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，真实命中观测、GPUI/Android 一致性、生产后端接线及真实平台监听/适配待完成 |
+| W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约和 W11-09 隔离路由 E2E/失败关闭/网络报告已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，GPUI 已接入同一页面的权威投影、规则/目标/影响展示和精确跳转，真实命中观测、GPUI/WebUI/Android 三端一致、生产后端接线及真实平台监听/适配待完成 |
 | W12 Exit | `[ ]` | P1 | W10,W11 | 治理、Google、DNS、网速报告 |
 | W13 Relay | `[ ]` | P1 | W10 | 授权、配额、健康、回退 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
@@ -2465,14 +2465,24 @@ manifest action 的 `backend_status` 门禁，并在请求中携带权威 revisi
 自动化用 fake backend 跑通测试 → 预览 → 应用 → 历史 → 回滚预览 → 回滚确认的 WebUI 闭环，并验证结构化测试输入、
 current/candidate revision、应用与回滚 payload。页面契约现已区分观测源可用与不可用：可用窗口同时携带观测流量总数和
 权威命中样例，零命中明确表示为“已观察且未命中”，不可用时才显示“无权威观测数据”，UI 不从本地配置推断命中。
-不过当前生产 manifest 仍只有 `test_traffic_policy` 为 `implemented`，其余流量策略写操作保持 `unavailable`，
-生产运行时也尚未提供逐流 observed hits，因此该能力目前只完成契约与页面展示闭环。GPUI/Android 尚未完成同等布局与
-语义接线，完整验收仍未满足。
+GPUI 的 routing 页面同样只消费 `snapshot.traffic_routing_page`，页面缺失时显示权威模型不可用，不从旧
+`configuration.networks` 回退构造策略。页面展示 authority revision、工作流、默认与失败策略、硬约束、只读状态、规则、
+风险、命中影响、观测窗口/样例以及 activity/diagnostic/flow 跳转；规则和目标的顺序、活动影响与命中样例均使用同一
+权威页面模型。GPUI 目标搜索只调用 `TrafficRoutingPageModel::search_targets` 匹配服务端提供的名称与别名，并优先按
+服务端 `object_id` 打开精确拓扑节点，缺少对象身份时才回退到网络边界。新增测试覆盖页面缺失 fail-closed、权威字段/
+风险/目标投影、observed-zero-hit 与 unavailable 区分、命中样例链接、权威搜索和精确导航；GPUI `gpui::` 测试共
+124 passed。Android UI 尚不存在，三端一致项由 W16 阻塞，不能据此勾选。
+
+当前生产 manifest 仍只有 `test_traffic_policy` 为 `implemented`，其余流量策略写操作保持 `unavailable`；生产运行时
+仍未设置 `traffic_routing_page`，也未提供真实逐流 observed hits，因此 WebUI/GPUI 目前只完成权威契约与页面投影闭环，
+生产后端和真实平台数据面仍未闭环，完整验收仍未满足。
 
 **验证通过（2026-11-09）**：WebUI `npm test -- --run`（270 passed，其中流量路由工作流 12 passed）、
-`npm run typecheck`、`npm run lint`、`npm run build`、`node scripts/test_i18n_runtime.mjs`、
-`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、
-`./scripts/check-contracts.sh`、`python3 scripts/check-docs.py` 和 `git diff --check`。
+`npm run typecheck`、`npm run lint`、`npm run build`、`cargo check -p fuckipv6-client --lib`、
+`cargo test -p fuckipv6-client --lib 'gpui::'`（124 passed）、`cargo test --workspace`、
+`cargo clippy --workspace --all-targets -- -D warnings`、`node scripts/test_i18n_runtime.mjs`、
+`./scripts/check-contracts.sh`、`python3 scripts/check-docs.py`、`cargo fmt --all -- --check` 和
+`git diff --check`。
 
 **验收**：用户能完成从规则设计、测试、应用、观察到回滚的完整闭环。
 

@@ -45,11 +45,12 @@ use super::view_model::{
     action_block_reason, activity_filter_options, build_command,
     build_page_model_with_activity_filters, default_form_values, filter_network_members,
     member_lifecycle_action_key, member_lifecycle_action_value, membership_role_value,
-    network_membership_id, network_status_key, retain_member_selection, search_node_snapshot,
-    sort_network_members, topology_member_actions, topology_node_detail, topology_presentation,
-    validate_manifest_bindings, ActionBinding, ActivityFilters, MemberCapabilityFilter,
-    MemberDirectoryFilters, MemberHealthFilter, OverviewModel, PageKind, RowModel, RowNavigation,
-    SearchResult, SectionModel, TopologyPresentationCondition, TopologyPresentationSignals,
+    network_membership_id, network_status_key, retain_member_selection, routing_target_search_rows,
+    search_node_snapshot, sort_network_members, topology_member_actions, topology_node_detail,
+    topology_presentation, validate_manifest_bindings, ActionBinding, ActivityFilters,
+    MemberCapabilityFilter, MemberDirectoryFilters, MemberHealthFilter, OverviewModel, PageKind,
+    RowModel, RowNavigation, SearchResult, SectionModel, TopologyPresentationCondition,
+    TopologyPresentationSignals,
 };
 use crate::config_manager::ConfigManager;
 use crate::config_transaction::{
@@ -296,6 +297,8 @@ struct GpuiShell {
     discovery_query: String,
     discovery_debounced_query: String,
     discovery_search_generation: u64,
+    routing_target_query: String,
+    routing_target_search_input: Option<Entity<NativeTextInput>>,
     discovery_filters: DiscoveryFilters,
     activity_filters: ActivityFilters,
     activity_time_window: ActivityTimeWindow,
@@ -387,6 +390,8 @@ impl GpuiShell {
             discovery_query: String::new(),
             discovery_debounced_query: String::new(),
             discovery_search_generation: 0,
+            routing_target_query: String::new(),
+            routing_target_search_input: None,
             discovery_filters: DiscoveryFilters::default(),
             activity_filters: ActivityFilters::default(),
             activity_time_window: ActivityTimeWindow::default(),
@@ -481,6 +486,26 @@ impl GpuiShell {
         .detach();
         shell.discovery_search_input = Some(discovery_search_input);
 
+        let routing_target_search_input = cx.new(|cx| {
+            NativeTextInput::new(
+                "routing-target-search-input",
+                t(locale, "traffic.routing.targets.search"),
+                t(locale, "traffic.routing.targets.search_placeholder"),
+                "",
+                cx,
+            )
+            .compact()
+        });
+        cx.subscribe(
+            &routing_target_search_input,
+            |shell: &mut Self, _, event: &TextInputEvent, cx| {
+                shell.routing_target_query = event.value.clone();
+                cx.notify();
+            },
+        )
+        .detach();
+        shell.routing_target_search_input = Some(routing_target_search_input);
+
         shell.watch_state(updates, cx);
         shell.submit_raw(NodeCommand::GetUiManifest, cx);
         shell.submit_raw(NodeCommand::GetSnapshot, cx);
@@ -528,6 +553,15 @@ impl GpuiShell {
                 input.set_accessibility_copy(
                     t(self.locale, "discovery.search.label"),
                     t(self.locale, "discovery.search.placeholder"),
+                    cx,
+                );
+            });
+        }
+        if let Some(input) = &self.routing_target_search_input {
+            input.update(cx, |input, cx| {
+                input.set_accessibility_copy(
+                    t(self.locale, "traffic.routing.targets.search"),
+                    t(self.locale, "traffic.routing.targets.search_placeholder"),
                     cx,
                 );
             });
@@ -2508,6 +2542,14 @@ impl GpuiShell {
         cx.notify();
     }
 
+    fn clear_routing_target_search(&mut self, cx: &mut Context<Self>) {
+        self.routing_target_query.clear();
+        if let Some(input) = &self.routing_target_search_input {
+            input.update(cx, |input, cx| input.set_value("", cx));
+        }
+        cx.notify();
+    }
+
     fn discovery_projection(&self) -> DiscoveryProjection {
         project_discovery(
             &self.snapshot,
@@ -3702,7 +3744,50 @@ impl GpuiShell {
                     .iter()
                     .any(|network| network.name == network_name);
             if network_exists {
-                self.select_network_context(network_name, cx);
+                self.select_network_context(network_name.clone(), cx);
+            }
+            if navigation.page_id == "topology" {
+                let network_id = self.snapshot.topology.as_ref().and_then(|topology| {
+                    topology
+                        .boundaries
+                        .iter()
+                        .find(|boundary| boundary.name == network_name)
+                        .map(|boundary| boundary.network_id.clone())
+                });
+                if let Some(network_id) = network_id {
+                    self.select_topology_network(network_id, cx);
+                }
+            }
+        }
+
+        if navigation.page_id == "topology" {
+            if let Some(object_id) = navigation.object_id.as_deref() {
+                let network_id = self.snapshot.topology.as_ref().and_then(|topology| {
+                    let node = topology
+                        .nodes
+                        .iter()
+                        .find(|node| node.node_id.as_str() == object_id)?;
+                    let preferred = navigation.network_name.as_ref().and_then(|network_name| {
+                        topology
+                            .boundaries
+                            .iter()
+                            .find(|boundary| &boundary.name == network_name)
+                            .map(|boundary| &boundary.network_id)
+                    });
+                    preferred
+                        .filter(|network_id| node.belongs_to(network_id))
+                        .or_else(|| {
+                            node.networks
+                                .iter()
+                                .map(|network| &network.network_id)
+                                .find(|network_id| topology.boundary(network_id).is_some())
+                        })
+                        .cloned()
+                });
+                if let Some(network_id) = network_id {
+                    self.select_topology_network(network_id, cx);
+                }
+                self.open_topology_node(object_id.to_owned(), cx);
             }
         }
 
@@ -6314,6 +6399,7 @@ impl GpuiShell {
                                             &RowNavigation {
                                                 page_id: "peers".into(),
                                                 network_name: Some(peers_name.clone()),
+                                                object_id: None,
                                                 label: t(shell.locale, "nav.peers").to_string(),
                                             },
                                             cx,
@@ -6338,6 +6424,7 @@ impl GpuiShell {
                                             &RowNavigation {
                                                 page_id: "routing".into(),
                                                 network_name: Some(routing_name.clone()),
+                                                object_id: None,
                                                 label: t(shell.locale, "nav.routing").to_string(),
                                             },
                                             cx,
@@ -6362,6 +6449,7 @@ impl GpuiShell {
                                             &RowNavigation {
                                                 page_id: "traffic".into(),
                                                 network_name: Some(traffic_name.clone()),
+                                                object_id: None,
                                                 label: t(shell.locale, "nav.traffic").to_string(),
                                             },
                                             cx,
@@ -8200,6 +8288,10 @@ impl GpuiShell {
             );
             content = content.child(self.activity_filters_card(cx));
         }
+        if self.selected_page == "routing" {
+            content = content.child(self.routing_target_search_card(cx));
+            content = content.child(self.routing_authority_notices());
+        }
         let section_cards = model
             .sections
             .iter()
@@ -8235,6 +8327,134 @@ impl GpuiShell {
             || self.activity_filters.category.is_some()
             || self.activity_filters.severity.is_some()
             || self.activity_filters.outcome.is_some()
+    }
+
+    fn routing_target_search_card(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let query = self.routing_target_query.trim().to_owned();
+        let rows = if query.is_empty() {
+            Vec::new()
+        } else {
+            routing_target_search_rows(&self.snapshot, &query, self.locale)
+        };
+        let search_input = self
+            .routing_target_search_input
+            .as_ref()
+            .map(|input| input.clone().into_any_element());
+        let clear_search = (!query.is_empty()).then(|| {
+            button(
+                SharedString::from("clear-routing-target-search"),
+                "",
+                ButtonVariant::Ghost,
+                false,
+            )
+            .absolute()
+            .right(px(4.0))
+            .top(px(3.0))
+            .w(px(28.0))
+            .h(px(28.0))
+            .px_0()
+            .border_0()
+            .aria_label(t(self.locale, "common.search_clear").to_string())
+            .child(lucide_icon(
+                include_bytes!("../../assets/icons/x.svg"),
+                14.0,
+                COLOR_MUTED,
+            ))
+            .on_click(cx.listener(|shell, _, _, cx| shell.clear_routing_target_search(cx)))
+        });
+        let search_control = div()
+            .id("routing-target-search")
+            .debug_selector(|| "visual-routing-target-search-control".into())
+            .relative()
+            .flex()
+            .items_center()
+            .w_full()
+            .h(px(34.0))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(11.0))
+                    .top(px(9.0))
+                    .child(lucide_icon(
+                        include_bytes!("../../assets/icons/search.svg"),
+                        15.0,
+                        COLOR_FAINT,
+                    )),
+            )
+            .children(search_input)
+            .children(clear_search);
+
+        let mut results = Vec::new();
+        if !query.is_empty() {
+            if rows.is_empty() {
+                results.push(
+                    empty_state(t(self.locale, "traffic.routing.targets.no_results"))
+                        .debug_selector(|| "visual-routing-target-search-empty".into())
+                        .into_any_element(),
+                );
+            } else {
+                results.extend(rows.iter().enumerate().map(|(index, row)| {
+                    div()
+                        .debug_selector(move || format!("visual-routing-target-result-{index}"))
+                        .child(self.row_card_with_navigation_selector(
+                            row,
+                            Some(routing_target_result_navigation_selector(index)),
+                            cx,
+                        ))
+                        .into_any_element()
+                }));
+            }
+        }
+
+        surface_card()
+            .id("routing-target-search")
+            .debug_selector(|| "visual-routing-target-search".into())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "traffic.routing.targets.search").to_string()),
+                    )
+                    .child(
+                        div().text_xs().text_color(rgba(COLOR_MUTED)).child(
+                            t(self.locale, "traffic.routing.targets.search_hint").to_string(),
+                        ),
+                    ),
+            )
+            .child(search_control)
+            .children(results)
+            .into_any_element()
+    }
+
+    fn routing_authority_notices(&self) -> gpui::AnyElement {
+        div()
+            .debug_selector(|| "visual-routing-authority-notices".into())
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(activity_sync_notice(
+                "visual-routing-authority-notice",
+                t(self.locale, "gpui.routing.authority_notice").to_string(),
+                t(self.locale, "traffic.routing.authority.unavailable_detail").to_string(),
+                SemanticState::Info,
+            ))
+            .child(activity_sync_notice(
+                "visual-routing-backend-notice",
+                t(self.locale, "gpui.routing.backend_notice").to_string(),
+                t(self.locale, "blocked.backend_unavailable").to_string(),
+                SemanticState::Warning,
+            ))
+            .into_any_element()
     }
 
     fn activity_sync_notices(&self) -> Vec<gpui::AnyElement> {
@@ -12932,6 +13152,20 @@ fn primary_status_semantic(status: NodePrimaryStatus) -> SemanticState {
     }
 }
 
+fn routing_target_result_navigation_selector(index: usize) -> &'static str {
+    match index {
+        0 => "visual-routing-target-navigation-0",
+        1 => "visual-routing-target-navigation-1",
+        2 => "visual-routing-target-navigation-2",
+        3 => "visual-routing-target-navigation-3",
+        4 => "visual-routing-target-navigation-4",
+        5 => "visual-routing-target-navigation-5",
+        6 => "visual-routing-target-navigation-6",
+        7 => "visual-routing-target-navigation-7",
+        _ => "visual-routing-target-navigation-other",
+    }
+}
+
 impl GpuiShell {
     fn section_card(&self, section: &SectionModel, cx: &mut Context<Self>) -> gpui::AnyElement {
         let rows = if section.rows.is_empty() {
@@ -12967,6 +13201,15 @@ impl GpuiShell {
     }
 
     fn row_card(&self, row: &RowModel, cx: &mut Context<Self>) -> gpui::AnyElement {
+        self.row_card_with_navigation_selector(row, None, cx)
+    }
+
+    fn row_card_with_navigation_selector(
+        &self,
+        row: &RowModel,
+        navigation_selector: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let mut card = div()
             .flex()
             .flex_col()
@@ -12989,10 +13232,14 @@ impl GpuiShell {
 
         if let Some(navigation) = row.navigation.clone() {
             let identity = navigation
-                .network_name
+                .object_id
                 .as_deref()
+                .or(navigation.network_name.as_deref())
                 .unwrap_or(navigation.page_id.as_str())
                 .to_string();
+            let selector = navigation_selector.map(str::to_owned).unwrap_or_else(|| {
+                format!("visual-row-navigation-{}-{identity}", navigation.page_id)
+            });
             card = card.child(
                 button(
                     SharedString::from(format!("row-navigation-{}-{identity}", navigation.page_id)),
@@ -13000,6 +13247,7 @@ impl GpuiShell {
                     ButtonVariant::Secondary,
                     false,
                 )
+                .debug_selector(move || selector)
                 .on_click(cx.listener(move |shell, _, _, cx| {
                     shell.navigate_to_row(&navigation, cx);
                 })),
@@ -13338,7 +13586,9 @@ mod tests {
         JoinRequestId, MembershipState, MembershipTerms, NetworkDiscoveryDocument,
         NetworkDiscoveryRecord, NetworkEndpoint, NetworkId, NetworkMemberPresence, NodeId,
         Signature, TopologyBoundary, TopologyConnection, TopologyNode, TopologyNodeHealth,
-        TopologyNodeNetwork,
+        TopologyNodeNetwork, TrafficAction, TrafficDefaultConfirmedBy, TrafficDefaultPolicy,
+        TrafficFailurePolicy, TrafficPolicy, TrafficRoutingHardConstraints,
+        TrafficRoutingPageModel, TrafficRoutingTarget, TrafficRoutingWorkflowState, TrafficRule,
     };
     use gpui::{Modifiers, OwnedMenuItem, TestAppContext, VisualTestContext};
     use serde_json::{json, Map, Value};
@@ -13825,6 +14075,32 @@ mod tests {
         directory: NetworkMemberDirectory,
     }
 
+    fn routing_widget_page(exit_id: NodeId) -> TrafficRoutingPageModel {
+        let policy = TrafficPolicy {
+            node_id: NodeId::from_public_key(b"gpui-routing-viewer"),
+            revision: 7,
+            default_policy: TrafficDefaultPolicy {
+                action: TrafficAction::Exit(exit_id.clone()),
+                confirmed_by: TrafficDefaultConfirmedBy::Owner,
+                confirmed_at_unix_ms: 1_700_000_000_000,
+            },
+            failure_policy: TrafficFailurePolicy::fail_closed(),
+            rules: Vec::<TrafficRule>::new(),
+        };
+        TrafficRoutingPageModel::from_policy(
+            &policy,
+            TrafficRoutingWorkflowState::Applied { revision: 7 },
+            TrafficRoutingHardConstraints::default(),
+            vec![
+                TrafficRoutingTarget::direct(),
+                TrafficRoutingTarget::reject(),
+                TrafficRoutingTarget::exit(exit_id, "Tokyo Exit"),
+            ],
+            true,
+        )
+        .expect("GPUI routing page fixture")
+    }
+
     fn topology_widget_fixture() -> TopologyWidgetFixture {
         let network_id = NetworkId::from_public_key(b"gpui-topology-network");
         let relay_id = NodeId::from_public_key(b"gpui-topology-relay");
@@ -14025,6 +14301,116 @@ mod tests {
         shell.topology_directory_error = None;
         shell.topology_directory_request = None;
         cx.notify();
+    }
+
+    #[gpui::test]
+    fn routing_navigation_opens_the_exact_authoritative_topology_node(cx: &mut TestAppContext) {
+        let fixture = topology_widget_fixture();
+        let relay_id = fixture.relay_id.as_str().to_string();
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                install_topology_widget_fixture(shell, &fixture, cx);
+                shell.navigate_to_row(
+                    &RowNavigation {
+                        page_id: "topology".into(),
+                        network_name: Some("gpui-topology".into()),
+                        object_id: Some(relay_id.clone()),
+                        label: t(shell.locale, "traffic.routing.targets.jump").to_string(),
+                    },
+                    cx,
+                );
+                assert_eq!(shell.selected_page, "topology");
+                assert_eq!(
+                    shell.selected_topology_node_id.as_deref(),
+                    Some(relay_id.as_str())
+                );
+            })
+            .expect("navigate to authoritative topology node");
+    }
+
+    #[gpui::test]
+    fn routing_target_search_renders_authoritative_matches_and_navigates(cx: &mut TestAppContext) {
+        let fixture = topology_widget_fixture();
+        let relay_id = fixture.relay_id.as_str().to_string();
+        let page = routing_widget_page(fixture.relay_id.clone());
+        let mut snapshot = fixture.snapshot.clone();
+        snapshot.traffic_routing_page = Some(page);
+        let window = open_shell_window(cx, 1400.0, 1000.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.locale = Locale::En;
+                shell.selected_page = "routing".into();
+                shell.error = None;
+                shell.notice = None;
+                shell.routing_target_query = "tokyo".into();
+                shell.apply_snapshot(snapshot, cx);
+                shell.selected_page = "routing".into();
+                cx.notify();
+            })
+            .expect("install routing search fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        assert!(visible
+            .debug_bounds("visual-routing-target-search")
+            .is_some());
+        assert!(visible
+            .debug_bounds("visual-routing-authority-notice")
+            .is_some());
+        assert!(visible
+            .debug_bounds("visual-routing-backend-notice")
+            .is_some());
+        assert!(visible
+            .debug_bounds("visual-routing-target-result-0")
+            .is_some());
+        assert!(visible
+            .debug_bounds("visual-routing-target-result-1")
+            .is_none());
+        assert!(visible
+            .debug_bounds("visual-routing-target-search-empty")
+            .is_none());
+
+        let navigation = visible
+            .debug_bounds(routing_target_result_navigation_selector(0))
+            .expect("authoritative target navigation");
+        visible.simulate_click(navigation.center(), Modifiers::default());
+        visible.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert_eq!(shell.selected_page, "topology");
+                assert_eq!(
+                    shell.selected_topology_node_id.as_deref(),
+                    Some(relay_id.as_str())
+                );
+            })
+            .expect("verify routing search navigation");
+
+        let window = open_shell_window(cx, 1400.0, 1000.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.locale = Locale::En;
+                shell.selected_page = "routing".into();
+                shell.error = None;
+                shell.notice = None;
+                shell.routing_target_query = "not-an-authoritative-target".into();
+                let mut snapshot = fixture.snapshot.clone();
+                snapshot.traffic_routing_page = Some(routing_widget_page(fixture.relay_id.clone()));
+                shell.apply_snapshot(snapshot, cx);
+                shell.selected_page = "routing".into();
+                cx.notify();
+            })
+            .expect("install empty routing search fixture");
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        assert!(visible
+            .debug_bounds("visual-routing-target-search-empty")
+            .is_some());
+        assert!(visible
+            .debug_bounds("visual-routing-target-result-0")
+            .is_none());
     }
 
     fn topology_node_selector(index: usize) -> &'static str {
@@ -15400,6 +15786,7 @@ mod tests {
                     &RowNavigation {
                         page_id: "peers".into(),
                         network_name: Some("home".into()),
+                        object_id: None,
                         label: t(shell.locale, "nav.peers").to_string(),
                     },
                     cx,
@@ -16525,6 +16912,7 @@ mod tests {
                     &RowNavigation {
                         page_id: "routing".into(),
                         network_name: Some("home".into()),
+                        object_id: None,
                         label: t(Locale::En, "routing.manage").to_string(),
                     },
                     cx,

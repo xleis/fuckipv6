@@ -11,11 +11,12 @@ import type {
 } from "../../../contracts/typescript/node-contract-v1";
 import type { ActivityPresentationSignals } from "../activity";
 import { PageContent } from "./page-content";
-import { installTestI18nRuntime } from "../test/runtime";
+import { installTestI18nRuntime, translated } from "../test/runtime";
 
 const manifest = manifestFixture as NodeUiManifest;
 const networksPage = manifest.pages.find((page) => page.id === "networks") as NodeUiPage;
 const activityPage = manifest.pages.find((page) => page.id === "activity") as NodeUiPage;
+const settingsPage = manifest.pages.find((page) => page.id === "settings") as NodeUiPage;
 const baseSnapshot = productFixture.snapshot as NodeSnapshot;
 const oldTermsHash = "hash_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const currentTermsHash = "hash_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
@@ -82,6 +83,26 @@ function renderNetworks(snapshot: NodeSnapshot, onRequestAction = vi.fn()) {
   return onRequestAction;
 }
 
+function renderSettings(
+  snapshot: NodeSnapshot,
+  actions = settingsPage.actions,
+) {
+  return render(
+    <PageContent
+      page={settingsPage}
+      snapshot={snapshot}
+      locale="zh-CN"
+      selectedNetwork="home"
+      recentDiagnostics={null}
+      onSelectNetwork={() => {}}
+      onNavigate={() => {}}
+      onRequestAction={() => {}}
+      onRunAction={async () => {}}
+      manifestActions={actions}
+    />,
+  );
+}
+
 function activity(overrides: Partial<ActivityEntry> = {}): ActivityEntry {
   return {
     audit_id: "audit-default",
@@ -132,6 +153,86 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+});
+
+describe("security and privacy settings", () => {
+  it("renders factual security state in the shared order without promotional copy", () => {
+    const { container } = renderSettings(baseSnapshot);
+    const facts = Array.from(
+      container.querySelectorAll("[data-security-fact]"),
+    ).map((fact) => fact.getAttribute("data-security-fact"));
+
+    expect(facts).toEqual([
+      "owner_identity",
+      "node_id",
+      "public_key_fingerprint",
+      "access_model",
+      "granted_permissions",
+      "local_policy_revision",
+      "local_policy_validity",
+      "local_policy_rules",
+      "local_policy_vetoes",
+      "network_acls",
+      "field_privacy_policies",
+      "membership_policy_revisions",
+      "policy_write_access",
+    ]);
+
+    const ownerSection = container.querySelector(
+      '[data-settings-group="owner-security"]',
+    ) as HTMLElement | null;
+    expect(ownerSection).not.toBeNull();
+    expect(ownerSection).toHaveTextContent(
+      translated("settings.section.owner_security"),
+    );
+    expect(
+      within(ownerSection as HTMLElement).queryByText(
+        translated("identity.security.title"),
+      ),
+    ).not.toBeInTheDocument();
+    expect(
+      within(ownerSection as HTMLElement).queryByText(
+        translated("settings.advanced.webui_session.detail"),
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the read-only policy reason, permission, request path, and command", () => {
+    const permissions = baseSnapshot.permissions;
+    if (!permissions) throw new Error("fixture permissions missing");
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      permissions: {
+        ...permissions,
+        permissions: permissions.permissions.filter(
+          (permission) => permission !== "manage_networks",
+        ),
+      },
+    };
+    const actions = settingsPage.actions.filter(
+      (action) => action.id === "apply_policy",
+    );
+    const { container } = renderSettings(snapshot, actions);
+    const access = container.querySelector(
+      '[data-security-fact="policy_write_access"]',
+    ) as HTMLElement | null;
+
+    expect(access).not.toBeNull();
+    expect(access).toHaveAttribute("data-tone", "warn");
+    expect(access).toHaveTextContent(
+      translated("settings.policy_access.read_only"),
+    );
+    expect(access).toHaveTextContent("translated:blocked.permission_denied");
+    expect(access).toHaveTextContent(
+      translated("settings.policy_access.required_permission"),
+    );
+    expect(access).toHaveTextContent(
+      translated("settings.policy_access.request_path"),
+    );
+    expect(access).toHaveTextContent(
+      translated("settings.policy_access.command"),
+    );
+  });
 });
 
 describe("membership policy reconfirmation", () => {

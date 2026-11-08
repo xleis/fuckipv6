@@ -29,7 +29,11 @@ import type {
 } from "../../../contracts/typescript/node-contract-v1";
 import type { ActionValues } from "../contract/invariants";
 import { installTestI18nRuntime } from "../test/runtime";
-import { POLICY_ACTION_IDS, PolicyWorkflow } from "./policy-workflow";
+import {
+  POLICY_ACTION_IDS,
+  PolicyWorkflow,
+  type PolicyDraftMemo,
+} from "./policy-workflow";
 
 const manifest = manifestFixture as NodeUiManifest;
 const snapshot = productFixture.snapshot as NodeSnapshot;
@@ -43,6 +47,14 @@ const groupId = `group_${"G".repeat(43)}`;
 const ruleId = `srule_${"R".repeat(43)}`;
 const grantId = `srule_${"Q".repeat(43)}`;
 const vetoId = `srule_${"V".repeat(43)}`;
+const confirmFactOrder = [
+  "scope",
+  "revision",
+  "duration",
+  "undo",
+  "failure",
+  "audit",
+];
 
 const snapshotWithContext: NodeSnapshot = {
   ...snapshot,
@@ -382,6 +394,8 @@ function renderWorkflow(
   overrides: {
     actions?: NodeUiAction[];
     snapshot?: NodeSnapshot;
+    draft?: PolicyDraftMemo | null;
+    onDraftChange?: (draft: PolicyDraftMemo) => void;
   } = {},
 ) {
   return render(
@@ -392,6 +406,8 @@ function renderWorkflow(
       locale="zh-CN"
       pendingAction={null}
       interactionBlocked={null}
+      draft={overrides.draft}
+      onDraftChange={overrides.onDraftChange}
       onSubmit={onSubmit}
     />,
   );
@@ -647,6 +663,17 @@ describe("explainable policy workflow", () => {
     expect(
       within(dialog).getByText("translated:confirm.apply_policy.title"),
     ).toBeInTheDocument();
+    expect(
+      Array.from(dialog.querySelectorAll("[data-confirm-fact]")).map((fact) =>
+        fact.getAttribute("data-confirm-fact"),
+      ),
+    ).toEqual(confirmFactOrder);
+    expect(
+      within(dialog).getByText("translated:confirm.policy.duration"),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("translated:confirm.policy.undo"),
+    ).toBeInTheDocument();
     await user.click(
       within(dialog).getByRole("button", {
         name: "translated:confirm.apply_policy.action",
@@ -684,8 +711,12 @@ describe("explainable policy workflow", () => {
         can_apply: false,
       }),
     });
-    renderWorkflow(onSubmit, { snapshot: snapshotWithContext });
+    const { container } = renderWorkflow(onSubmit, {
+      snapshot: snapshotWithContext,
+    });
     await waitForInitialPolicyLoad(onSubmit);
+
+    expect(screen.getByText("translated:policy.state.idle")).toBeInTheDocument();
 
     await user.click(
       screen.getByRole("button", { name: "translated:policy.preview" }),
@@ -701,6 +732,75 @@ describe("explainable policy workflow", () => {
     expect(
       screen.getByRole("button", { name: "translated:policy.apply" }),
     ).toBeDisabled();
+    expect(
+      container.querySelector('[data-policy-state="conflict"]'),
+    ).toHaveTextContent("translated:policy.state.conflict");
+  });
+
+  it("explains read-only policy access and associates it with the apply control", async () => {
+    const user = userEvent.setup();
+    const onSubmit = policyResponder();
+    const captured: { draft: PolicyDraftMemo | null } = { draft: null };
+    renderWorkflow(onSubmit, {
+      snapshot: snapshotWithContext,
+      onDraftChange: (draft) => {
+        captured.draft = draft;
+      },
+    });
+    await waitForInitialPolicyLoad(onSubmit);
+    await user.click(
+      screen.getByRole("button", { name: "translated:policy.preview" }),
+    );
+    await waitFor(() =>
+      expect(callsFor(onSubmit, "preview_policy")).toHaveLength(1),
+    );
+    await waitFor(() => expect(captured.draft?.preview).not.toBeNull());
+    const draft = captured.draft;
+    if (!draft) throw new Error("policy draft was not captured");
+    cleanup();
+
+    const permissions = snapshotWithContext.permissions;
+    if (!permissions) throw new Error("fixture permissions missing");
+    const deniedSnapshot: NodeSnapshot = {
+      ...snapshotWithContext,
+      permissions: {
+        ...permissions,
+        permissions: permissions.permissions.filter(
+          (permission) => permission !== "manage_networks",
+        ),
+      },
+    };
+    renderWorkflow(onSubmit, {
+      actions: policyActions.filter((action) =>
+        [
+          "preview_policy",
+          "preview_policy_rollback",
+          "apply_policy",
+          "rollback_policy",
+        ].includes(action.id),
+      ),
+      snapshot: deniedSnapshot,
+      draft,
+    });
+
+    const applyButton = screen.getByRole("button", {
+      name: "translated:policy.apply",
+    });
+    expect(applyButton).toBeDisabled();
+    const describedBy = applyButton.getAttribute("aria-describedby");
+    expect(describedBy).toBeTruthy();
+    const reason = document.getElementById(describedBy ?? "");
+    expect(reason).toHaveTextContent(
+      "translated:settings.policy_access.read_only",
+    );
+    expect(reason).toHaveTextContent("translated:blocked.permission_denied");
+    expect(reason).toHaveTextContent(
+      "translated:settings.policy_access.required_permission",
+    );
+    expect(reason).toHaveTextContent(
+      "translated:settings.policy_access.request_path",
+    );
+    expect(reason).toHaveTextContent("translated:settings.policy_access.command");
   });
 
   it("blocks apply when the current revision advances after preview", async () => {
@@ -804,8 +904,19 @@ describe("explainable policy workflow", () => {
       within(dialog).getByText("translated:confirm.rollback_policy.title"),
     ).toBeInTheDocument();
     expect(
-      within(dialog).getByText("translated:policy.rollback.new_revision"),
+      Array.from(dialog.querySelectorAll("[data-confirm-fact]")).map((fact) =>
+        fact.getAttribute("data-confirm-fact"),
+      ),
+    ).toEqual(confirmFactOrder);
+    expect(
+      within(dialog).getByText("translated:confirm.policy.duration"),
     ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("translated:confirm.policy.undo"),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).queryByText("translated:policy.rollback.new_revision"),
+    ).not.toBeInTheDocument();
     await user.click(
       within(dialog).getByRole("button", {
         name: "translated:confirm.rollback_policy.action",

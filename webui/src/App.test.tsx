@@ -1391,7 +1391,8 @@ describe("React WebUI shell", () => {
     expect(groups[0]).toHaveTextContent(
       "translated:choice.permission.manage_networks",
     );
-    expect(groups[1]).toHaveTextContent(
+    expect(groups[1]).toHaveTextContent("translated:settings.value.not_exposed");
+    expect(groups[1]).not.toHaveTextContent(
       "translated:settings.webui_configuration.detail",
     );
     expect(groups[2]).toHaveTextContent("translated:capability.file");

@@ -660,6 +660,59 @@ function affectedObjectText(
     : objectLabel;
 }
 
+function PolicyDangerConfirmationFacts({
+  locale,
+  preview,
+  rollback,
+}: {
+  locale: Locale;
+  preview: PolicyPreview;
+  rollback: boolean;
+}): JSX.Element {
+  const separator = label(locale, "common.list_separator");
+  const networks = preview.network_ids.length
+    ? preview.network_ids.join(separator)
+    : label(locale, "common.none");
+  return (
+    <ol className="danger-confirm-facts">
+      <li data-confirm-fact="scope">
+        <strong>{label(locale, "confirm.policy.scope")}</strong>
+        <code>{networks}</code>
+        <span>
+          {label(locale, "policy.preview.includes_local")}:{" "}
+          {preview.includes_local_policy
+            ? label(locale, "policy.yes")
+            : label(locale, "policy.no")}
+        </span>
+        <span>
+          {tr(locale, "confirm.policy.affected_objects", {
+            count: preview.affected_objects.length,
+          })}
+        </span>
+      </li>
+      <li data-confirm-fact="revision">
+        {rollback
+          ? tr(locale, "confirm.policy.target_revision", {
+              revision: preview.rollback_target_revision ?? 0,
+            })
+          : tr(locale, "confirm.policy.expected_revision", {
+              revision: preview.expected_revision,
+            })}
+      </li>
+      <li data-confirm-fact="duration">
+        {label(locale, "confirm.policy.duration")}
+      </li>
+      <li data-confirm-fact="undo">{label(locale, "confirm.policy.undo")}</li>
+      <li data-confirm-fact="failure">
+        {label(locale, "confirm.policy.failure")}
+      </li>
+      <li data-confirm-fact="audit">
+        {label(locale, "confirm.policy.audit")}
+      </li>
+    </ol>
+  );
+}
+
 function policyJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
@@ -1237,6 +1290,13 @@ export function PolicyWorkflow({
   const titleId = useId();
   const editorId = useId();
   const importId = useId();
+  const previewReasonId = useId();
+  const runReasonId = useId();
+  const applyReasonId = useId();
+  const rollbackReasonId = useId();
+  const applyDialogId = useId();
+  const rollbackDialogId = useId();
+  const historyReasonId = useId();
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const initialLoadStarted = useRef(false);
@@ -1307,6 +1367,25 @@ export function PolicyWorkflow({
   const unavailableReason = label(locale, "blocked.backend_unavailable");
   const firstReason = (...reasons: Array<string | false | null>): string =>
     reasons.find((reason): reason is string => Boolean(reason)) ?? "";
+  const readOnlyPermissionReason = (
+    blocked: ReturnType<typeof executionBlockReason>,
+    available: boolean,
+  ): string => {
+    if (!available || blocked !== "permission_denied") return "";
+    return [
+      label(locale, "settings.policy_access.read_only"),
+      blockReasonText(blocked, locale),
+      tr(locale, "settings.policy_access.required_permission", {
+        permission: label(locale, "choice.permission.manage_networks"),
+      }),
+      label(locale, "settings.policy_access.request_path"),
+      tr(locale, "settings.policy_access.command", {
+        command: "apply_policy",
+      }),
+    ]
+      .filter(Boolean)
+      .join(label(locale, "common.list_separator"));
+  };
   const runReason = firstReason(
     pendingReason,
     pageReason,
@@ -1357,10 +1436,18 @@ export function PolicyWorkflow({
     !pageBlocked &&
     !pending,
   );
+  const applyAccessReason = readOnlyPermissionReason(
+    applyBlocked,
+    Boolean(applyAction),
+  );
+  const rollbackAccessReason = readOnlyPermissionReason(
+    rollbackBlocked,
+    Boolean(rollbackAction),
+  );
   const applyReason = firstReason(
     pendingReason,
     pageReason,
-    blockReasonText(applyBlocked, locale),
+    applyAccessReason || blockReasonText(applyBlocked, locale),
     !applyAction && unavailableReason,
     !preview && label(locale, "policy.transaction.preview_required"),
     Boolean(preview?.revision_conflict) &&
@@ -1376,7 +1463,7 @@ export function PolicyWorkflow({
   const rollbackReason = firstReason(
     pendingReason,
     pageReason,
-    blockReasonText(rollbackBlocked, locale),
+    rollbackAccessReason || blockReasonText(rollbackBlocked, locale),
     !rollbackAction && unavailableReason,
     !preview && label(locale, "policy.transaction.preview_required"),
     !rollbackPreview &&
@@ -1397,6 +1484,57 @@ export function PolicyWorkflow({
     blockReasonText(historyBlocked, locale),
     !historyAction && unavailableReason,
   );
+  const rollbackCompleted = Boolean(applied && "target_revision" in applied);
+  const activePolicyStates: Array<{
+    id: string;
+    label: string;
+    tone: "warning" | "active" | "danger" | "success";
+  }> = [];
+  if (preview?.revision_conflict) {
+    activePolicyStates.push({
+      id: "conflict",
+      label: label(locale, "policy.state.conflict"),
+      tone: "warning",
+    });
+  }
+  if (stalePreview) {
+    activePolicyStates.push({
+      id: "stale",
+      label: label(locale, "policy.state.stale"),
+      tone: "warning",
+    });
+  }
+  if (busy === "apply") {
+    activePolicyStates.push({
+      id: "applying",
+      label: label(locale, "policy.state.applying"),
+      tone: "active",
+    });
+  }
+  if (busy === "rollback") {
+    activePolicyStates.push({
+      id: "rolling_back",
+      label: label(locale, "policy.state.rolling_back"),
+      tone: "active",
+    });
+  }
+  if (transactionError) {
+    activePolicyStates.push({
+      id: "failed",
+      label: label(locale, "policy.state.failed"),
+      tone: "danger",
+    });
+  }
+  if (applied) {
+    activePolicyStates.push({
+      id: rollbackCompleted ? "rolled_back" : "applied",
+      label: label(
+        locale,
+        rollbackCompleted ? "policy.state.rolled_back" : "policy.state.applied",
+      ),
+      tone: "success",
+    });
+  }
 
   useEffect(() => {
     onDraftChange?.({
@@ -1924,6 +2062,32 @@ export function PolicyWorkflow({
           <span>{label(locale, "policy.transaction.complete_snapshot")}</span>
         </div>
 
+        <div
+          className="policy-state-track"
+          aria-label={label(locale, "policy.state.title")}
+          aria-live="polite"
+          aria-atomic="false"
+        >
+          {activePolicyStates.length ? (
+            activePolicyStates.map((state) => (
+              <span
+                className={`status-pill policy-state policy-state-${state.tone}`}
+                data-policy-state={state.id}
+                key={state.id}
+              >
+                {state.tone === "active" ? (
+                  <LoaderCircle className="spin" size={13} />
+                ) : null}
+                {state.label}
+              </span>
+            ))
+          ) : (
+            <span className="policy-state-idle">
+              {label(locale, "policy.state.idle")}
+            </span>
+          )}
+        </div>
+
         {transactionError ? (
           <div className="inline-notice danger" role="alert">
             <AlertTriangle size={16} />
@@ -2020,6 +2184,9 @@ export function PolicyWorkflow({
                 className="primary-button compact"
                 type="button"
                 disabled={Boolean(previewReason)}
+                aria-describedby={
+                  previewReason ? previewReasonId : undefined
+                }
                 onClick={() => void previewDraft()}
               >
                 {busy === "preview" ? (
@@ -2031,7 +2198,11 @@ export function PolicyWorkflow({
               </button>
             </div>
             {previewReason ? (
-              <small className="control-reason" role="status">
+              <small
+                id={previewReasonId}
+                className="control-reason"
+                role="status"
+              >
                 {previewReason}
               </small>
             ) : null}
@@ -2201,33 +2372,61 @@ export function PolicyWorkflow({
                 <div className="policy-transaction-actions">
                   {rollbackPreview ? (
                     <button
+                      id={`${titleId}-execute-rollback`}
                       className="danger-button"
                       type="button"
                       disabled={Boolean(rollbackReason)}
+                      aria-describedby={
+                        rollbackReason ? rollbackReasonId : undefined
+                      }
                       onClick={() => setConfirmingRollback(true)}
                     >
-                      <RotateCcw size={15} />
-                      {label(locale, "policy.rollback.execute")}
+                      {busy === "rollback" ? (
+                        <LoaderCircle className="spin" size={15} />
+                      ) : (
+                        <RotateCcw size={15} />
+                      )}
+                      {busy === "rollback"
+                        ? label(locale, "policy.state.rolling_back")
+                        : label(locale, "policy.rollback.execute")}
                     </button>
                   ) : (
                     <button
+                      id={`${titleId}-execute-apply`}
                       className="primary-button"
                       type="button"
                       disabled={Boolean(applyReason)}
+                      aria-describedby={
+                        applyReason ? applyReasonId : undefined
+                      }
                       onClick={() => setConfirmingApply(true)}
                     >
-                      <ShieldCheck size={15} />
-                      {label(locale, "policy.apply")}
+                      {busy === "apply" ? (
+                        <LoaderCircle className="spin" size={15} />
+                      ) : (
+                        <ShieldCheck size={15} />
+                      )}
+                      {busy === "apply"
+                        ? label(locale, "policy.state.applying")
+                        : label(locale, "policy.apply")}
                     </button>
                   )}
                   {rollbackPreview ? (
                     rollbackReason ? (
-                      <small className="control-reason" role="status">
+                      <small
+                        id={rollbackReasonId}
+                        className="control-reason"
+                        role="status"
+                      >
                         {rollbackReason}
                       </small>
                     ) : null
                   ) : applyReason ? (
-                    <small className="control-reason" role="status">
+                    <small
+                      id={applyReasonId}
+                      className="control-reason"
+                      role="status"
+                    >
                       {applyReason}
                     </small>
                   ) : null}
@@ -2276,11 +2475,15 @@ export function PolicyWorkflow({
               </div>
             ) : (
               <ol className="policy-history-list">
-                {history.entries.map((entry) => {
+                {history.entries.map((entry, index) => {
+                  const entryReasonId = `${historyReasonId}-${index}`;
                   const entryRollbackReason = firstReason(
                     pendingReason,
                     pageReason,
-                    blockReasonText(previewRollbackBlocked, locale),
+                    readOnlyPermissionReason(
+                      previewRollbackBlocked,
+                      Boolean(previewRollbackAction),
+                    ) || blockReasonText(previewRollbackBlocked, locale),
                     !previewRollbackAction && unavailableReason,
                     !current &&
                       label(locale, "policy.transaction.load_required"),
@@ -2324,16 +2527,24 @@ export function PolicyWorkflow({
                       </div>
                       <div className="policy-history-control">
                         <button
+                          id={`${historyReasonId}-${index}-button`}
                           className="secondary-button compact"
                           type="button"
                           disabled={Boolean(entryRollbackReason)}
+                          aria-describedby={
+                            entryRollbackReason ? entryReasonId : undefined
+                          }
                           onClick={() => void previewRollback(entry.revision)}
                         >
                           <RotateCcw size={14} />
                           {label(locale, "policy.rollback.action")}
                         </button>
                         {entryRollbackReason ? (
-                          <small className="control-reason" role="status">
+                          <small
+                            id={entryReasonId}
+                            className="control-reason"
+                            role="status"
+                          >
                             {entryRollbackReason}
                           </small>
                         ) : null}
@@ -2410,7 +2621,12 @@ export function PolicyWorkflow({
             <div className="policy-subsection-heading">
               <h4>
                 <CheckCircle2 size={16} />
-                {label(locale, "policy.applied.title")}
+                {label(
+                  locale,
+                  rollbackCompleted
+                    ? "policy.rolled_back.title"
+                    : "policy.applied.title",
+                )}
               </h4>
               <span className="status-pill success">
                 {tr(locale, "policy.applied.revision", {
@@ -3163,7 +3379,11 @@ export function PolicyWorkflow({
                 </span>
               ) : null}
               {runReason ? (
-                <small className="control-reason" role="status">
+                <small
+                  id={runReasonId}
+                  className="control-reason"
+                  role="status"
+                >
                   {runReason}
                 </small>
               ) : null}
@@ -3189,6 +3409,7 @@ export function PolicyWorkflow({
                 className="primary-button"
                 type="submit"
                 disabled={runDisabled}
+                aria-describedby={runReason ? runReasonId : undefined}
               >
                 {running ? (
                   <LoaderCircle className="spin" size={16} />
@@ -3478,7 +3699,7 @@ export function PolicyWorkflow({
       <Dialog.Root open={confirmingApply} onOpenChange={setConfirmingApply}>
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />
-          <Dialog.Content className="dialog-content confirm-dialog">
+          <Dialog.Content className="dialog-content confirm-dialog danger-confirm-dialog">
             <div className="dialog-heading">
               <div className="dialog-icon danger">
                 <ShieldCheck size={20} />
@@ -3493,35 +3714,11 @@ export function PolicyWorkflow({
               </div>
             </div>
             {preview ? (
-              <dl className="dialog-facts">
-                <div>
-                  <dt>{label(locale, "policy.current.title")}</dt>
-                  <dd>
-                    {tr(locale, "policy.current.revision", {
-                      revision: preview.expected_revision,
-                    })}
-                  </dd>
-                </div>
-                <div>
-                  <dt>{label(locale, "policy.preview.diffs")}</dt>
-                  <dd>{preview.diffs.length}</dd>
-                </div>
-                <div>
-                  <dt>{label(locale, "policy.preview.affected_objects")}</dt>
-                  <dd>{preview.affected_objects.length}</dd>
-                </div>
-                <div>
-                  <dt>{label(locale, "policy.risk.title")}</dt>
-                  <dd>
-                    {riskLevelText(locale, preview.risk)}
-                    {preview.risk.reasons.length
-                      ? ` · ${preview.risk.reasons
-                          .map((reason) => riskReasonText(locale, reason))
-                          .join(" · ")}`
-                      : ""}
-                  </dd>
-                </div>
-              </dl>
+              <PolicyDangerConfirmationFacts
+                locale={locale}
+                preview={preview}
+                rollback={false}
+              />
             ) : null}
             <div className="dialog-actions">
               <Dialog.Close asChild>
@@ -3531,15 +3728,23 @@ export function PolicyWorkflow({
               </Dialog.Close>
               <div className="configuration-control dialog-control">
                 <button
+                  id={`${applyDialogId}-confirm`}
                   className="danger-button"
                   type="button"
                   disabled={!canApply || Boolean(applyReason)}
+                  aria-describedby={
+                    applyReason ? `${applyDialogId}-reason` : undefined
+                  }
                   onClick={() => void applyPreview()}
                 >
                   {label(locale, "confirm.apply_policy.action")}
                 </button>
                 {applyReason ? (
-                  <small className="control-reason" role="status">
+                  <small
+                    id={`${applyDialogId}-reason`}
+                    className="control-reason"
+                    role="status"
+                  >
                     {applyReason}
                   </small>
                 ) : null}
@@ -3564,7 +3769,7 @@ export function PolicyWorkflow({
       >
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />
-          <Dialog.Content className="dialog-content confirm-dialog">
+          <Dialog.Content className="dialog-content confirm-dialog danger-confirm-dialog">
             <div className="dialog-heading">
               <div className="dialog-icon danger">
                 <RotateCcw size={20} />
@@ -3579,44 +3784,12 @@ export function PolicyWorkflow({
               </div>
             </div>
             {preview ? (
-              <dl className="dialog-facts">
-                <div>
-                  <dt>{label(locale, "policy.current.title")}</dt>
-                  <dd>
-                    {tr(locale, "policy.current.revision", {
-                      revision: preview.expected_revision,
-                    })}
-                  </dd>
-                </div>
-                <div>
-                  <dt>{label(locale, "policy.rollback.action")}</dt>
-                  <dd>
-                    {tr(locale, "policy.history.target", {
-                      revision: preview.rollback_target_revision ?? 0,
-                    })}
-                  </dd>
-                </div>
-                <div>
-                  <dt>{label(locale, "policy.preview.diffs")}</dt>
-                  <dd>{preview.diffs.length}</dd>
-                </div>
-                <div>
-                  <dt>{label(locale, "policy.risk.title")}</dt>
-                  <dd>
-                    {riskLevelText(locale, preview.risk)}
-                    {preview.risk.reasons.length
-                      ? ` · ${preview.risk.reasons
-                          .map((reason) => riskReasonText(locale, reason))
-                          .join(" · ")}`
-                      : ""}
-                  </dd>
-                </div>
-              </dl>
+              <PolicyDangerConfirmationFacts
+                locale={locale}
+                preview={preview}
+                rollback
+              />
             ) : null}
-            <div className="inline-notice warning" role="note">
-              <AlertTriangle size={16} />
-              <span>{label(locale, "policy.rollback.new_revision")}</span>
-            </div>
             <div className="dialog-actions">
               <Dialog.Close asChild>
                 <button className="secondary-button" type="button">
@@ -3625,15 +3798,23 @@ export function PolicyWorkflow({
               </Dialog.Close>
               <div className="configuration-control dialog-control">
                 <button
+                  id={`${rollbackDialogId}-confirm`}
                   className="danger-button"
                   type="button"
                   disabled={!canRollback || Boolean(rollbackReason)}
+                  aria-describedby={
+                    rollbackReason ? `${rollbackDialogId}-reason` : undefined
+                  }
                   onClick={() => void rollbackPreviewed()}
                 >
                   {label(locale, "confirm.rollback_policy.action")}
                 </button>
                 {rollbackReason ? (
-                  <small className="control-reason" role="status">
+                  <small
+                    id={`${rollbackDialogId}-reason`}
+                    className="control-reason"
+                    role="status"
+                  >
                     {rollbackReason}
                   </small>
                 ) : null}

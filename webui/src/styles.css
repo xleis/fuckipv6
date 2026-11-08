@@ -1955,6 +1955,28 @@ button:disabled {
 .settings-state.unsupported {
   color: var(--text-muted);
 }
+.security-facts {
+  gap: var(--space-3);
+}
+.security-facts > div {
+  grid-template-columns: minmax(150px, 0.38fr) minmax(0, 1fr);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+.security-facts > div:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+.security-facts > div[data-tone="warn"] dd {
+  color: var(--warning);
+}
+.security-fact-detail {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.55;
+}
 .identity-card {
   display: flex;
   gap: var(--space-4);
@@ -4418,6 +4440,61 @@ button:disabled {
   font-size: var(--font-size-sm);
   line-height: 1.5;
 }
+.danger-confirm-dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
+.danger-confirm-facts {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-4) 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: danger-confirm-fact;
+}
+.danger-confirm-facts li {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 4px var(--space-2);
+  align-items: start;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+}
+.danger-confirm-facts li::before {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  grid-row: 1 / span 4;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--danger-soft);
+  color: var(--danger);
+  content: counter(danger-confirm-fact);
+  counter-increment: danger-confirm-fact;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: var(--font-weight-semibold);
+}
+.danger-confirm-facts li > * {
+  grid-column: 2;
+}
+.danger-confirm-facts strong {
+  color: var(--text);
+}
+.danger-confirm-facts code {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--font-mono);
+}
+.danger-confirm-facts span {
+  color: var(--text-muted);
+}
 .dialog-actions {
   display: flex;
   justify-content: flex-end;
@@ -5990,6 +6067,47 @@ button:disabled {
   flex: 0 0 auto;
   color: var(--accent);
 }
+.policy-state-track {
+  display: flex;
+  min-height: 36px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-raised) 76%, transparent);
+}
+.policy-state {
+  border: 1px solid transparent;
+}
+.policy-state::before {
+  display: none;
+}
+.policy-state-warning {
+  border-color: color-mix(in srgb, var(--warning) 38%, var(--border));
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+.policy-state-active {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.policy-state-danger {
+  border-color: color-mix(in srgb, var(--danger) 38%, var(--border));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.policy-state-success {
+  border-color: color-mix(in srgb, var(--success) 38%, var(--border));
+  background: var(--success-soft);
+  color: var(--success);
+}
+.policy-state-idle {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
 
 .policy-transaction-grid {
   display: grid;
@@ -6848,6 +6966,38 @@ button:disabled {
   }
   .policy-diff-values > div + div {
     border-top: 1px solid var(--border);
+  }
+  .security-facts > div {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+  .danger-confirm-dialog {
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100dvh;
+    max-height: none;
+    padding:
+      max(var(--space-4), env(safe-area-inset-top))
+      max(var(--space-4), env(safe-area-inset-right))
+      max(var(--space-4), env(safe-area-inset-bottom))
+      max(var(--space-4), env(safe-area-inset-left));
+    border: 0;
+    border-radius: 0;
+    transform: none;
+    overscroll-behavior: contain;
+  }
+  .danger-confirm-dialog .dialog-actions {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+  .danger-confirm-dialog .dialog-actions > button,
+  .danger-confirm-dialog .dialog-control,
+  .danger-confirm-dialog .dialog-control > button {
+    width: 100%;
+  }
+  .danger-confirm-dialog .dialog-control > button {
+    min-height: 44px;
   }
 }
 

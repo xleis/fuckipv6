@@ -17,8 +17,8 @@ use fuckipv6_common::ui_layout::navigation_module_for_page;
 use fuckipv6_common::NetworkMode;
 
 use crate::node::{
-    NodeAcknowledgeMembershipPolicyCommand, NodeApplyConfigurationCommand, NodeApplyPolicyCommand,
-    NodeBatchReviewJoinRequestsCommand, NodeChangeMemberLifecycleCommand,
+    node_ui_manifest, NodeAcknowledgeMembershipPolicyCommand, NodeApplyConfigurationCommand,
+    NodeApplyPolicyCommand, NodeBatchReviewJoinRequestsCommand, NodeChangeMemberLifecycleCommand,
     NodeClientBlacklistCommand, NodeCommand, NodeCommandKind, NodeControlHealth,
     NodeCreateInvitationCommand, NodeCreateNetworkCommand, NodeEmbeddedServiceStatus,
     NodeGetInvitationStatusCommand, NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceStatus,
@@ -4933,9 +4933,9 @@ fn project_settings(
         .map(|permission| t(locale, permission_key(*permission)))
         .collect::<Vec<_>>()
         .join(t(locale, "common.list_separator"));
-    let owner_rows = vec![
+    let mut owner_rows = vec![
         row(
-            t(locale, "settings.row.local_identity"),
+            t(locale, "settings.row.owner_identity"),
             snapshot
                 .identity
                 .as_ref()
@@ -4972,6 +4972,233 @@ fn project_settings(
             },
         ),
     ];
+    let not_exposed = t(locale, "settings.value.not_exposed");
+    let none = t(locale, "common.none");
+    let not_available = t(locale, "common.not_available");
+    let separator = t(locale, "common.list_separator");
+    let access_control_exposed = !snapshot.access_control.is_empty();
+    let local_policy = snapshot.access_control.local_policy.as_ref();
+    let local_revision = if !access_control_exposed {
+        not_exposed.to_string()
+    } else {
+        local_policy
+            .map(|policy| {
+                tr(
+                    locale,
+                    "settings.security.revision",
+                    &[("revision", &policy.revision.to_string())],
+                )
+            })
+            .unwrap_or_else(|| none.to_string())
+    };
+    let local_validity = if !access_control_exposed {
+        not_exposed.to_string()
+    } else {
+        local_policy
+            .map(|policy| {
+                let issued = routing_timestamp_label(Some(policy.issued_at_unix_ms), locale);
+                let expires = routing_timestamp_label(Some(policy.expires_at_unix_ms), locale);
+                tr(
+                    locale,
+                    "settings.security.validity",
+                    &[("issued", &issued), ("expires", &expires)],
+                )
+            })
+            .unwrap_or_else(|| none.to_string())
+    };
+    let local_rule_count = if !access_control_exposed {
+        not_exposed.to_string()
+    } else {
+        local_policy
+            .map(|policy| {
+                tr(
+                    locale,
+                    "settings.security.rule_count",
+                    &[("count", &policy.rules.len().to_string())],
+                )
+            })
+            .unwrap_or_else(|| none.to_string())
+    };
+    let local_veto_count = if !access_control_exposed {
+        not_exposed.to_string()
+    } else {
+        local_policy
+            .map(|policy| {
+                tr(
+                    locale,
+                    "settings.security.veto_count",
+                    &[("count", &policy.contribution_vetoes.len().to_string())],
+                )
+            })
+            .unwrap_or_else(|| none.to_string())
+    };
+    let network_name = |network_id: &str| {
+        snapshot
+            .memberships
+            .iter()
+            .find(|membership| membership.network_id == network_id)
+            .map(|membership| membership.network_name.clone())
+            .unwrap_or_else(|| network_id.to_string())
+    };
+    let network_acls = if !access_control_exposed {
+        not_exposed.to_string()
+    } else if snapshot.access_control.network_acls.is_empty() {
+        none.to_string()
+    } else {
+        snapshot
+            .access_control
+            .network_acls
+            .iter()
+            .map(|acl| {
+                let network_id = acl.network_id.to_string();
+                let network = network_name(&network_id);
+                let issued = routing_timestamp_label(Some(acl.issued_at_unix_ms), locale);
+                let expires = routing_timestamp_label(Some(acl.expires_at_unix_ms), locale);
+                tr(
+                    locale,
+                    "settings.security.network_acl",
+                    &[
+                        ("network", &network),
+                        ("revision", &acl.revision.to_string()),
+                        ("rules", &acl.rules.len().to_string()),
+                        ("issued", &issued),
+                        ("expires", &expires),
+                    ],
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(separator)
+    };
+    let field_privacy_policies = if !access_control_exposed {
+        not_exposed.to_string()
+    } else if snapshot.access_control.field_privacy_policies.is_empty() {
+        none.to_string()
+    } else {
+        snapshot
+            .access_control
+            .field_privacy_policies
+            .iter()
+            .map(|policy| {
+                let network = policy
+                    .network_id
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .map(|network_id| network_name(&network_id))
+                    .unwrap_or_else(|| t(locale, "settings.security.node_wide").to_string());
+                let effective = routing_timestamp_label(Some(policy.effective_at_unix_ms), locale);
+                let expires = routing_timestamp_label(Some(policy.expires_at_unix_ms), locale);
+                tr(
+                    locale,
+                    "settings.security.field_privacy",
+                    &[
+                        ("network", &network),
+                        ("revision", &policy.revision.to_string()),
+                        ("rules", &policy.rules.len().to_string()),
+                        ("effective", &effective),
+                        ("expires", &expires),
+                    ],
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(separator)
+    };
+    let membership_policy_revisions = if snapshot.memberships.is_empty() {
+        none.to_string()
+    } else {
+        snapshot
+            .memberships
+            .iter()
+            .map(|membership| {
+                let network_policy = membership
+                    .network_policy_revision
+                    .map(|revision| revision.to_string())
+                    .unwrap_or_else(|| not_available.to_string());
+                let privacy = membership
+                    .privacy_policy_revision
+                    .map(|revision| revision.to_string())
+                    .unwrap_or_else(|| not_available.to_string());
+                tr(
+                    locale,
+                    "settings.security.membership_policy",
+                    &[
+                        ("network", &membership.network_name),
+                        ("local", &membership.local_policy_revision.to_string()),
+                        ("network_policy", &network_policy),
+                        ("privacy", &privacy),
+                    ],
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(separator)
+    };
+    let manifest = node_ui_manifest();
+    let apply_policy_action = manifest
+        .pages
+        .iter()
+        .flat_map(|page| page.actions.iter())
+        .find(|action| action.id == "apply_policy");
+    let policy_block_reason =
+        apply_policy_action.and_then(|action| action_block_reason(action, snapshot, None));
+    let policy_write_access = [
+        Some(
+            t(
+                locale,
+                if policy_block_reason.is_some() {
+                    "settings.policy_access.read_only"
+                } else {
+                    "settings.policy_access.writable"
+                },
+            )
+            .to_string(),
+        ),
+        policy_block_reason.map(|reason| t(locale, reason.message_key()).to_string()),
+        Some(tr(
+            locale,
+            "settings.policy_access.required_permission",
+            &[("permission", t(locale, "choice.permission.manage_networks"))],
+        )),
+        Some(t(locale, "settings.policy_access.request_path").to_string()),
+        Some(tr(
+            locale,
+            "settings.policy_access.command",
+            &[("command", "apply_policy")],
+        )),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(t(locale, "common.list_separator"));
+    owner_rows.extend([
+        row(
+            t(locale, "settings.row.local_policy_revision"),
+            local_revision,
+        ),
+        row(
+            t(locale, "settings.row.local_policy_validity"),
+            local_validity,
+        ),
+        row(
+            t(locale, "settings.row.local_policy_rules"),
+            local_rule_count,
+        ),
+        row(
+            t(locale, "settings.row.local_policy_vetoes"),
+            local_veto_count,
+        ),
+        row(t(locale, "settings.row.network_acls"), network_acls),
+        row(
+            t(locale, "settings.row.field_privacy_policies"),
+            field_privacy_policies,
+        ),
+        row(
+            t(locale, "settings.row.membership_policy_revisions"),
+            membership_policy_revisions,
+        ),
+        row(
+            t(locale, "settings.row.policy_write_access"),
+            policy_write_access,
+        ),
+    ]);
     let remote_rows = vec![
         row(
             t(locale, "settings.row.effective_ui"),
@@ -6129,6 +6356,29 @@ mod tests {
             .all(|section| !section.rows.is_empty()));
 
         let owner = &model.sections[0];
+        assert_eq!(
+            owner
+                .rows
+                .iter()
+                .map(|row| row.title.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                t(Locale::ZhCn, "settings.row.owner_identity"),
+                t(Locale::ZhCn, "settings.row.node_id"),
+                t(Locale::ZhCn, "settings.row.public_key_fingerprint"),
+                t(Locale::ZhCn, "settings.row.access_model"),
+                t(Locale::ZhCn, "settings.row.granted_permissions"),
+                t(Locale::ZhCn, "settings.row.local_policy_revision"),
+                t(Locale::ZhCn, "settings.row.local_policy_validity"),
+                t(Locale::ZhCn, "settings.row.local_policy_rules"),
+                t(Locale::ZhCn, "settings.row.local_policy_vetoes"),
+                t(Locale::ZhCn, "settings.row.network_acls"),
+                t(Locale::ZhCn, "settings.row.field_privacy_policies"),
+                t(Locale::ZhCn, "settings.row.membership_policy_revisions"),
+                t(Locale::ZhCn, "settings.row.policy_write_access"),
+            ]
+        );
+        assert_eq!(owner.rows[0].detail, "desktop");
         assert!(owner.rows.iter().any(|row| {
             row.title == t(Locale::ZhCn, "settings.row.node_id") && row.detail == "node-1"
         }));
@@ -6218,6 +6468,55 @@ mod tests {
                 "desktop settings must not expose WebUI-only authentication surface: {removed}"
             );
         }
+    }
+
+    #[test]
+    fn settings_policy_access_reports_typed_read_only_path() {
+        let manifest = node_ui_manifest();
+        let page = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "settings")
+            .expect("settings page");
+        let mut snapshot = populated_snapshot();
+        snapshot
+            .permissions
+            .permissions
+            .retain(|permission| *permission != crate::node::NodePermission::ManageNetworks);
+
+        let model =
+            build_page_model_for_page(page, &snapshot, Locale::ZhCn).expect("settings model");
+        let access = model.sections[0]
+            .rows
+            .iter()
+            .find(|row| row.title == t(Locale::ZhCn, "settings.row.policy_write_access"))
+            .expect("policy write access row");
+
+        assert!(access
+            .detail
+            .contains(t(Locale::ZhCn, "settings.policy_access.read_only")));
+        assert!(access
+            .detail
+            .contains(t(Locale::ZhCn, "blocked.permission_denied")));
+        assert!(access.detail.contains(&tr(
+            Locale::ZhCn,
+            "settings.policy_access.required_permission",
+            &[(
+                "permission",
+                t(Locale::ZhCn, "choice.permission.manage_networks"),
+            )],
+        )));
+        assert!(access
+            .detail
+            .contains(t(Locale::ZhCn, "settings.policy_access.request_path")));
+        assert!(access.detail.contains(&tr(
+            Locale::ZhCn,
+            "settings.policy_access.command",
+            &[("command", "apply_policy")],
+        )));
+        assert!(!access
+            .detail
+            .contains(t(Locale::ZhCn, "settings.policy_access.writable")));
     }
 
     #[test]

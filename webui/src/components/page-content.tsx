@@ -94,6 +94,7 @@ import {
 } from "../discovery";
 import { t, tr } from "../i18n";
 import { resolveNetworkMembershipId } from "../members";
+import { projectSecurityState } from "../security-state";
 import { advancedSettingsGroups } from "../settings";
 import type { TopologyActionSubmit } from "../topology-actions";
 import type { TopologyPresentationSignals } from "../topology-presentation";
@@ -3062,16 +3063,18 @@ function SettingsSection({
 function Settings({
   snapshot,
   locale,
+  selectedNetwork,
+  manifestActions = [],
 }: Omit<
   PageContentProps,
-  "page" | "selectedNetwork" | "onSelectNetwork" | "onNavigate"
+  "page" | "onSelectNetwork" | "onNavigate"
 >) {
-  const permissions = snapshot.permissions?.permissions ?? [];
-  const permissionText = permissions.length
-    ? permissions
-        .map((permission) => label(locale, `choice.permission.${permission}`))
-        .join(label(locale, "common.list_separator"))
-    : label(locale, "common.none");
+  const security = projectSecurityState(
+    snapshot,
+    locale,
+    manifestActions,
+    selectedNetwork,
+  );
   const capabilities = snapshot.capabilities?.capabilities ?? [];
   const embeddedServices = snapshot.embedded_services ?? [];
   const unsupportedCapabilities = capabilities
@@ -3124,53 +3127,24 @@ function Settings({
           title={label(locale, "settings.section.owner_security")}
           icon={ShieldCheck}
         >
-          <dl className="detail-list">
-            <div>
-              <dt>{label(locale, "settings.row.owner_identity")}</dt>
-              <dd>
-                {snapshot.identity?.display_name?.trim() ||
-                  label(locale, "common.unknown")}
-              </dd>
-            </div>
-            <div>
-              <dt>{label(locale, "settings.row.node_id")}</dt>
-              <dd>
-                <code>
-                  {snapshot.identity?.node_id ??
-                    label(locale, "common.not_available")}
-                </code>
-              </dd>
-            </div>
-            <div>
-              <dt>{label(locale, "settings.row.public_key_fingerprint")}</dt>
-              <dd>
-                <code>
-                  {snapshot.identity?.public_key_fingerprint ??
-                    label(locale, "common.not_available")}
-                </code>
-              </dd>
-            </div>
-            <div>
-              <dt>{label(locale, "settings.row.access_model")}</dt>
-              <dd>
-                {label(
-                  locale,
-                  `choice.access_model.${snapshot.permissions?.access_model ?? "trusted_control_plane"}`,
-                )}
-              </dd>
-            </div>
-            <div>
-              <dt>{label(locale, "settings.row.granted_permissions")}</dt>
-              <dd>{permissionText}</dd>
-            </div>
-            <div>
-              <dt>{label(locale, "settings.row.web_authentication")}</dt>
-              <dd>{label(locale, "settings.web_session.detail")}</dd>
-            </div>
-            <div>
-              <dt>{label(locale, "settings.row.owner_recovery")}</dt>
-              <dd>{label(locale, "settings.owner_recovery.detail")}</dd>
-            </div>
+          <dl className="detail-list security-facts">
+            {security.facts.map((fact) => (
+              <div
+                key={fact.id}
+                data-security-fact={fact.id}
+                data-tone={fact.tone ?? "neutral"}
+              >
+                <dt>{fact.label}</dt>
+                <dd>
+                  <span>{fact.value}</span>
+                  {fact.detail ? (
+                    <small className="security-fact-detail">
+                      {fact.detail}
+                    </small>
+                  ) : null}
+                </dd>
+              </div>
+            ))}
           </dl>
         </SettingsSection>
 
@@ -3204,11 +3178,11 @@ function Settings({
             </div>
             <div>
               <dt>{label(locale, "settings.row.webui_configuration")}</dt>
-              <dd>{label(locale, "settings.webui_configuration.detail")}</dd>
+              <dd>{label(locale, "settings.value.not_exposed")}</dd>
             </div>
             <div>
               <dt>{label(locale, "settings.row.session_security")}</dt>
-              <dd>{label(locale, "settings.web_session.detail")}</dd>
+              <dd>{label(locale, "settings.value.not_exposed")}</dd>
             </div>
           </dl>
         </SettingsSection>

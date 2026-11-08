@@ -388,6 +388,13 @@ impl From<NodeCommandBusError> for AppControllerError {
                 )
                 .retryable(true),
             ),
+            NodeCommandBusError::AuditUnavailable(_) => Self::from_problem(
+                NodeProblem::new(
+                    NodeProblemCode::Internal,
+                    "安全审计写入失败，命令结果不可用；请修复审计存储后重启控制面",
+                )
+                .retryable(false),
+            ),
         }
     }
 }

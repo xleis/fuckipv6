@@ -733,6 +733,12 @@ impl NodeHttpAdapter {
         }
     }
 
+    pub(crate) fn durable_audit(
+        &self,
+    ) -> Option<Arc<crate::owner_security::audit::OwnerSecurityAudit>> {
+        self.commands.durable_audit()
+    }
+
     #[cfg(test)]
     fn with_command_concurrency_limit(mut self, limit: usize) -> Self {
         self.command_concurrency_limit = limit.max(1);

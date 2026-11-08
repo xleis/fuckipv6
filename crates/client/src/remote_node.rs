@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use fuckipv6_common::domain::IdempotencyKey;
+use fuckipv6_common::domain::{IdempotencyKey, NodeId};
 use serde_json::Value;
 use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::sync::watch;
@@ -21,6 +21,7 @@ use crate::node::{
     NodeCommandResult, NodeControlHealth, NodeEventBus, NodeEventKind, NodeOperationSnapshot,
     NodeProblem, NodeProblemCode, NodeStateStore, OperationClient, OperationClientError,
 };
+use crate::owner_security::audit::OwnerSecurityAudit;
 use crate::runtime_process;
 
 const INITIAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -111,12 +112,17 @@ impl RemoteNodeSession {
         let state = NodeStateStore::new();
         state.replace_authoritative(snapshot).await;
 
+        let configs = crate::config_manager::ConfigManager::new()?;
+        let identity = configs.load_node_identity()?;
+        let node_id = NodeId::from_public_key(&identity.public_key_bytes());
+        let audit = Arc::new(OwnerSecurityAudit::new(configs.config_dir(), node_id)?);
+
         let events = NodeEventBus::default();
         let handler = Arc::new(RemoteNodeHandler {
             endpoint: endpoint.clone(),
             role: role.clone(),
         });
-        let commands = NodeCommandBus::spawn(handler, events.clone(), 32);
+        let commands = NodeCommandBus::spawn_with_durable_audit(handler, events.clone(), 32, audit);
         let (cancel, cancel_rx) = watch::channel(false);
         let sync = tokio::spawn(sync_node_state(
             endpoint.clone(),

@@ -471,6 +471,7 @@ impl OperationService {
                     }
                     NodeCommandBusError::Closed => (NodeProblemCode::Unavailable, true),
                     NodeCommandBusError::ResponseDropped(_) => (NodeProblemCode::Unavailable, true),
+                    NodeCommandBusError::AuditUnavailable(_) => (NodeProblemCode::Internal, false),
                 };
                 let message = format!("request_id={request_id} 的节点命令执行中断");
                 let problem = NodeProblem::new(code, message).retryable(retryable);

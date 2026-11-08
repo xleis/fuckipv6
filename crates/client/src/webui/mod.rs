@@ -271,12 +271,14 @@ pub(crate) async fn start_app_webui_with_node(
         None => (Some(listener), None),
     };
     let owner_config = ConfigManager::new().context("无法读取节点所有者配置目录")?;
-    let (owner_security, bootstrap_code) = OwnerSecurityService::from_config_with_public_origin(
-        &owner_config,
-        local_addr.port(),
-        public_claim.as_ref().map(|claim| claim.origin()),
-    )
-    .context("无法初始化节点所有者安全边界")?;
+    let (owner_security, bootstrap_code) =
+        OwnerSecurityService::from_config_with_public_origin_and_audit(
+            &owner_config,
+            local_addr.port(),
+            public_claim.as_ref().map(|claim| claim.origin()),
+            node_adapter.durable_audit(),
+        )
+        .context("无法初始化节点所有者安全边界")?;
     if let Some(bootstrap_code) = bootstrap_code {
         write_bootstrap_code_to_terminal(
             bootstrap_code.as_str(),
@@ -2633,6 +2635,10 @@ mod tests {
         (content, records)
     }
 
+    fn audit_details(record: &serde_json::Value) -> &serde_json::Value {
+        &record["entry"]["details"]
+    }
+
     fn assert_no_store(response: &axum::response::Response) {
         assert_eq!(
             response
@@ -3164,34 +3170,43 @@ mod tests {
         let verified = records
             .iter()
             .find(|record| {
-                record["path"] == "/api/v1/auth/bootstrap/verify" && record["status"] == 200
+                audit_details(record)["path"] == "/api/v1/auth/bootstrap/verify"
+                    && audit_details(record)["status"] == "200"
             })
             .expect("verified public claim audit");
-        assert_eq!(verified["channel"], "public");
-        assert_eq!(verified["source_ip"], "203.0.113.9");
-        assert_eq!(verified["outcome"], "success");
+        assert_eq!(audit_details(verified)["channel"], "public");
+        assert_eq!(audit_details(verified)["source_ip"], "203.0.113.9");
+        assert_eq!(audit_details(verified)["outcome"], "success");
 
         let permanently_closed = records
             .iter()
-            .find(|record| record["status"] == 410)
+            .find(|record| audit_details(record)["status"] == "410")
             .expect("closed public claim audit");
-        assert_eq!(permanently_closed["channel"], "public");
-        assert_eq!(permanently_closed["source_ip"], "203.0.113.9");
-        assert_eq!(permanently_closed["outcome"], "permanently_closed");
+        assert_eq!(audit_details(permanently_closed)["channel"], "public");
+        assert_eq!(
+            audit_details(permanently_closed)["source_ip"],
+            "203.0.113.9"
+        );
+        assert_eq!(
+            audit_details(permanently_closed)["outcome"],
+            "permanently_closed"
+        );
         assert_eq!(
             records
                 .iter()
-                .filter(|record| record["status"] == 200)
+                .filter(|record| audit_details(record)["status"] == "200")
                 .count(),
             2,
             "GET/status and POST/verify each produce exactly one audit record"
         );
         assert!(records.iter().all(|record| {
-            !record["path"]
+            !audit_details(record)["path"]
                 .as_str()
                 .is_some_and(|path| path.contains('?') || path.contains("code="))
         }));
-        assert!(records.iter().all(|record| record["outcome"] != "accepted"));
+        assert!(records
+            .iter()
+            .all(|record| audit_details(record)["outcome"] != "accepted"));
         assert!(!audit.contains(fixture.code.as_str()));
         assert!(!audit.contains(&recovery_code));
     }
@@ -3385,25 +3400,29 @@ mod tests {
 
         let (content, records) = read_audit_records(&fixture.service);
         assert_eq!(records.len(), 6);
-        assert!(records.iter().all(|record| record["channel"] == "local"));
         assert!(records
             .iter()
-            .all(|record| record["source_ip"] == "127.0.0.1"));
+            .all(|record| audit_details(record)["channel"] == "local"));
+        assert!(records
+            .iter()
+            .all(|record| audit_details(record)["source_ip"] == "127.0.0.1"));
         assert_eq!(
             records
                 .iter()
-                .filter(|record| record["outcome"] == "invalid_code")
+                .filter(|record| audit_details(record)["outcome"] == "invalid_code")
                 .count(),
             5
         );
         assert_eq!(
             records
                 .iter()
-                .filter(|record| record["outcome"] == "rate_limited")
+                .filter(|record| audit_details(record)["outcome"] == "rate_limited")
                 .count(),
             1
         );
-        assert!(records.iter().all(|record| record["outcome"] != "accepted"));
+        assert!(records
+            .iter()
+            .all(|record| audit_details(record)["outcome"] != "accepted"));
         assert!(!content.contains(supplied));
         assert!(!content.contains(fixture.code.as_str()));
     }

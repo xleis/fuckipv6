@@ -13,7 +13,7 @@ use fuckipv6_common::domain::{
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use webauthn_rs::prelude::{
@@ -190,7 +190,7 @@ pub(crate) struct IssuedPasskey {
 
 pub(crate) struct OwnerSecurityService {
     persistence: OwnerPersistence,
-    audit: OwnerSecurityAudit,
+    audit: Arc<OwnerSecurityAudit>,
     local_webauthn: OwnerWebauthn,
     public_webauthn: Option<OwnerWebauthn>,
     node_id: NodeId,
@@ -218,10 +218,20 @@ impl OwnerSecurityService {
     /// Initialize the owner bootstrap boundary with both local and verified
     /// public WebAuthn origins. A public origin is optional and is only supplied
     /// after the surrounding exposure policy has validated it.
+    #[cfg(test)]
     pub(crate) fn from_config_with_public_origin(
         config: &ConfigManager,
         port: u16,
         public_origin: Option<&Url>,
+    ) -> Result<(Self, Option<Zeroizing<String>>)> {
+        Self::from_config_with_public_origin_and_audit(config, port, public_origin, None)
+    }
+
+    pub(crate) fn from_config_with_public_origin_and_audit(
+        config: &ConfigManager,
+        port: u16,
+        public_origin: Option<&Url>,
+        audit: Option<Arc<OwnerSecurityAudit>>,
     ) -> Result<(Self, Option<Zeroizing<String>>)> {
         let identity = config.load_node_identity()?;
         let node_id = NodeId::from_public_key(&identity.public_key_bytes());
@@ -229,7 +239,13 @@ impl OwnerSecurityService {
             .node_display_name()?
             .unwrap_or_else(|| "本机所有者".to_string());
         let persistence = OwnerPersistence::new(config.config_dir().to_path_buf())?;
-        let audit = OwnerSecurityAudit::new(config.config_dir(), node_id.clone())?;
+        let audit = match audit {
+            Some(audit) => audit,
+            None => Arc::new(OwnerSecurityAudit::new(
+                config.config_dir(),
+                node_id.clone(),
+            )?),
+        };
         let (state, bootstrap_code) = match persistence.load()? {
             OwnerLoad::Uninitialized => {
                 let code = generate_secret()?;
@@ -1335,7 +1351,10 @@ mod tests {
         persistence.provision_bootstrap_code(&code)?;
         let service = OwnerSecurityService {
             persistence,
-            audit: OwnerSecurityAudit::new(&dir, NodeId::from_public_key(b"owner-service-test"))?,
+            audit: Arc::new(OwnerSecurityAudit::new(
+                &dir,
+                NodeId::from_public_key(b"owner-service-test"),
+            )?),
             local_webauthn: OwnerWebauthn::new(8080)?,
             public_webauthn: None,
             node_id: NodeId::from_public_key(b"owner-service-test"),
@@ -1361,7 +1380,10 @@ mod tests {
     fn reopen_service(dir: &std::path::Path) -> Result<OwnerSecurityService> {
         Ok(OwnerSecurityService {
             persistence: OwnerPersistence::new(dir.to_path_buf())?,
-            audit: OwnerSecurityAudit::new(dir, NodeId::from_public_key(b"owner-service-test"))?,
+            audit: Arc::new(OwnerSecurityAudit::new(
+                dir,
+                NodeId::from_public_key(b"owner-service-test"),
+            )?),
             local_webauthn: OwnerWebauthn::new(8080)?,
             public_webauthn: None,
             node_id: NodeId::from_public_key(b"owner-service-test"),

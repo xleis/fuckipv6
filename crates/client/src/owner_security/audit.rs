@@ -177,6 +177,15 @@ impl OwnerSecurityAudit {
         Self::new_with_policy(config_dir, node_id, policy, Box::new(SystemAuditClock))
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_with_retention_policy_for_test(
+        config_dir: &Path,
+        node_id: NodeId,
+        policy: AuditRetentionPolicy,
+    ) -> Result<Self> {
+        Self::new_with_policy(config_dir, node_id, policy, Box::new(SystemAuditClock))
+    }
+
     fn new_with_policy(
         config_dir: &Path,
         node_id: NodeId,
@@ -234,6 +243,36 @@ impl OwnerSecurityAudit {
         status: Option<u16>,
         outcome: &str,
     ) -> Result<()> {
+        self.append_chain_entry(|sequence, now_unix_ms| {
+            security_audit_entry(
+                &self.node_id,
+                sequence,
+                now_unix_ms,
+                channel,
+                source_ip,
+                method,
+                path,
+                status,
+                outcome,
+            )
+        })
+        .map(|_| ())
+    }
+
+    /// Append a pre-sanitized command/security entry to the same durable hash
+    /// chain. The ledger owns occurrence time and sequence so concurrent
+    /// adapters cannot manufacture out-of-order evidence.
+    pub(crate) fn append_entry(&self, mut entry: AuditEntry) -> Result<AuditChainRecord> {
+        self.append_chain_entry(|_, now_unix_ms| {
+            entry.occurred_at_unix_ms = now_unix_ms;
+            Ok(entry)
+        })
+    }
+
+    fn append_chain_entry<F>(&self, build_entry: F) -> Result<AuditChainRecord>
+    where
+        F: FnOnce(u64, u64) -> Result<AuditEntry>,
+    {
         let now_unix_ms = self
             .clock
             .now_unix_ms()
@@ -281,17 +320,7 @@ impl OwnerSecurityAudit {
         }
 
         let sequence = state.next_sequence;
-        let entry = security_audit_entry(
-            &self.node_id,
-            sequence,
-            now_unix_ms,
-            channel,
-            source_ip,
-            method,
-            path,
-            status,
-            outcome,
-        )?;
+        let entry = build_entry(sequence, now_unix_ms)?;
         let record = AuditChainRecord::seal(sequence, &state.previous_hash, entry)
             .map_err(|error| AuditLedgerError::Corrupt(error.to_string()))?;
         let mut line = serde_json::to_vec(&record).context("无法序列化安全审计记录")?;
@@ -327,7 +356,7 @@ impl OwnerSecurityAudit {
             state.poisoned = Some(error.to_string());
             return Err(error.into());
         }
-        Ok(())
+        Ok(record)
     }
 
     pub(crate) fn export(&self, filter: &AuditExportFilter) -> Result<AuditExportBundle> {
@@ -1301,6 +1330,54 @@ mod tests {
             .records
             .iter()
             .all(|record| !record.entry.details.contains_key("token")));
+
+        #[cfg(unix)]
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_request_and_command_entries_share_chain_and_verify_after_reopen() -> Result<()> {
+        let dir = temp_dir("mixed-chain");
+        let (ledger, clock) = test_ledger(&dir, AuditRetentionPolicy::default(), 5_500);
+        record(&ledger, "/owner-endpoint", "success")?;
+
+        let mut command_entry = security_audit_entry(
+            &ledger.node_id,
+            999,
+            1,
+            "command",
+            None,
+            "COMMAND",
+            "StartNode",
+            None,
+            "success",
+        )?;
+        command_entry.audit_id = AuditId::from_public_key(b"mixed-command-entry");
+        command_entry.action = "node.start".into();
+        command_entry.resource = "node_command:start_node".into();
+        let appended = ledger.append_entry(command_entry)?;
+        assert_eq!(appended.sequence, 2);
+        assert_eq!(appended.previous_hash, all_records(&ledger)[0].entry_hash);
+        assert_eq!(appended.entry.occurred_at_unix_ms, 5_500);
+
+        clock.store(5_501, Ordering::Relaxed);
+        record(&ledger, "/owner-endpoint-two", "success")?;
+        drop(ledger);
+
+        let (reopened, _) = test_ledger(&dir, AuditRetentionPolicy::default(), 5_600);
+        let bundle = reopened.export(&AuditExportFilter::default())?;
+        assert_eq!(
+            bundle
+                .records
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(bundle.records[1].entry.action, "node.start");
+        assert_eq!(bundle.manifest.verification.record_count, 3);
+        assert!(verify_audit_chain(&bundle.records).is_ok());
 
         #[cfg(unix)]
         std::fs::remove_dir_all(dir)?;

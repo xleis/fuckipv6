@@ -627,6 +627,10 @@ fn command_bus_error(error: NodeCommandBusError) -> LocalError {
             format!("节点命令 {request_id} 的结果通道已关闭"),
         )
         .retryable(true),
+        NodeCommandBusError::AuditUnavailable(_) => LocalError::new(
+            IpcErrorCode::Internal,
+            "安全审计写入失败，命令结果不可用；请修复审计存储后重启控制面",
+        ),
     }
 }
 

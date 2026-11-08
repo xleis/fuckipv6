@@ -37,6 +37,7 @@ use super::{
     NodeNetworkSelection, NodeProblem, NodeProblemCode, NodeRoutingMode, NodeSnapshot,
     NodeStateStore, NodeUiManifest, NodeValidationIssue,
 };
+use crate::owner_security::audit::OwnerSecurityAudit;
 use crate::policy_transaction::{
     PolicyApplyResult, PolicyCurrent, PolicyHistorySnapshot, PolicyPreview, PolicyRollbackResult,
     PolicySnapshot,
@@ -2517,14 +2518,23 @@ struct CommandEnvelope {
 
 const ACTIVITY_RETENTION_LIMIT: usize = 256;
 
-#[derive(Default)]
 struct CommandAuditTrail {
     entries: Arc<Mutex<Vec<AuditEntry>>>,
     recent_activity: Arc<Mutex<Vec<ActivityEntry>>>,
     next_sequence: Arc<AtomicU64>,
+    durable: Option<Arc<OwnerSecurityAudit>>,
 }
 
 impl CommandAuditTrail {
+    fn new(durable: Option<Arc<OwnerSecurityAudit>>) -> Self {
+        Self {
+            entries: Arc::new(Mutex::new(Vec::new())),
+            recent_activity: Arc::new(Mutex::new(Vec::new())),
+            next_sequence: Arc::new(AtomicU64::new(0)),
+            durable,
+        }
+    }
+
     fn record(
         &self,
         context: &NodeCommandContext,
@@ -2533,7 +2543,7 @@ impl CommandAuditTrail {
         snapshot: Option<&NodeSnapshot>,
         outcome: AuditOutcome,
         reason: (&str, Option<&str>),
-    ) -> Option<ActivityEntry> {
+    ) -> anyhow::Result<Option<ActivityEntry>> {
         let (reason, reason_detail) = reason;
         // A preview is a read-only disclosure. Keep it out of the durable
         // command audit and activity feed; the subsequent confirmed join is the
@@ -2542,7 +2552,7 @@ impl CommandAuditTrail {
             request.command.kind(),
             NodeCommandKind::PreviewJoinNetwork | NodeCommandKind::TestPolicy
         ) {
-            return None;
+            return Ok(None);
         }
         let occurred_at_unix_ms = unix_time_ms();
         let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
@@ -2600,11 +2610,25 @@ impl CommandAuditTrail {
             details,
             sensitive_keys: Default::default(),
         };
+        if let Some(ledger) = &self.durable {
+            let should_persist = outcome == AuditOutcome::Denied
+                || audit_for_command(request.command.kind()).action.is_some();
+            if should_persist {
+                // Free-form denial prose can contain adapter-provided values.
+                // The stable code is sufficient evidence; typed object and
+                // policy fields below are the only additional details kept.
+                let mut durable_entry = entry.clone();
+                durable_entry.details.remove("reason_detail");
+                ledger
+                    .append_entry(durable_entry)
+                    .map_err(|error| anyhow::anyhow!("安全审计写入失败: {error:#}"))?;
+            }
+        }
         if let Ok(mut entries) = self.entries.lock() {
             entries.push(entry.clone());
         }
         if !request.command.kind().is_write() && outcome != AuditOutcome::Denied {
-            return None;
+            return Ok(None);
         }
         let projected = entry.project_activity();
         if let Ok(mut activity) = self.recent_activity.lock() {
@@ -2627,7 +2651,7 @@ impl CommandAuditTrail {
             });
             activity.truncate(ACTIVITY_RETENTION_LIMIT);
         }
-        Some(projected)
+        Ok(Some(projected))
     }
 
     fn entries(&self) -> Vec<AuditEntry> {
@@ -3188,7 +3212,24 @@ impl NodeCommandBus {
     where
         H: NodeCommandHandler,
     {
-        Self::spawn_with_activity_state(handler, events, capacity, None)
+        Self::spawn_with_activity_state(handler, events, capacity, None, None)
+    }
+
+    /// Spawn a command bus whose security-relevant operations are committed to
+    /// the durable owner audit chain before a result is returned. Production
+    /// interactive sessions use this constructor; in-memory-only buses are
+    /// reserved for isolated tests and the internal data-plane executor whose
+    /// authenticated front-end bus records the same outcome.
+    pub(crate) fn spawn_with_durable_audit<H>(
+        handler: Arc<H>,
+        events: NodeEventBus,
+        capacity: usize,
+        audit: Arc<OwnerSecurityAudit>,
+    ) -> Self
+    where
+        H: NodeCommandHandler,
+    {
+        Self::spawn_with_activity_state(handler, events, capacity, None, Some(audit))
     }
 
     /// Spawn a command bus that publishes its sanitized activity feed into the
@@ -3203,7 +3244,7 @@ impl NodeCommandBus {
     where
         H: NodeCommandHandler,
     {
-        Self::spawn_with_activity_state(handler, events, capacity, Some(state))
+        Self::spawn_with_activity_state(handler, events, capacity, Some(state), None)
     }
 
     fn spawn_with_activity_state<H>(
@@ -3211,6 +3252,7 @@ impl NodeCommandBus {
         events: NodeEventBus,
         capacity: usize,
         activity_state: Option<NodeStateStore>,
+        durable_audit: Option<Arc<OwnerSecurityAudit>>,
     ) -> Self
     where
         H: NodeCommandHandler,
@@ -3252,7 +3294,7 @@ impl NodeCommandBus {
         Self {
             sender,
             events: bus_events,
-            audit: Arc::new(CommandAuditTrail::default()),
+            audit: Arc::new(CommandAuditTrail::new(durable_audit)),
             activity_state,
         }
     }
@@ -3294,7 +3336,7 @@ impl NodeCommandBus {
                 &denial.code,
                 Some(&denial.reason),
             )
-            .await;
+            .await?;
             return Ok(result);
         }
 
@@ -3327,7 +3369,7 @@ impl NodeCommandBus {
                     "failed",
                     None,
                 )
-                .await;
+                .await?;
                 Ok(result)
             }
             Err(_) => {
@@ -3339,7 +3381,7 @@ impl NodeCommandBus {
                     "response_dropped",
                     None,
                 )
-                .await;
+                .await?;
                 Err(NodeCommandBusError::ResponseDropped(request_id))
             }
         }
@@ -3353,38 +3395,48 @@ impl NodeCommandBus {
         outcome: AuditOutcome,
         reason: &str,
         reason_detail: Option<&str>,
-    ) {
+    ) -> Result<(), NodeCommandBusError> {
         // Policy tests are read-only simulations. Do not append audit/activity
         // state, and do not republish the snapshot merely because the test
         // command completed. Denials are simulated too: no candidate policy is
         // being applied, so there is no durable security transition to record.
         if request.command.kind() == NodeCommandKind::TestPolicy {
-            return;
+            return Ok(());
         }
         let snapshot = match &self.activity_state {
             Some(state) => Some(state.snapshot().await),
             None => None,
         };
         let reason = activity_reason_code(result, outcome, reason);
-        self.audit.record(
-            context,
-            request,
-            result,
-            snapshot.as_ref(),
-            outcome,
-            (&reason, reason_detail),
-        );
+        self.audit
+            .record(
+                context,
+                request,
+                result,
+                snapshot.as_ref(),
+                outcome,
+                (&reason, reason_detail),
+            )
+            .map_err(|error| NodeCommandBusError::AuditUnavailable(format!("{error:#}")))?;
         if let Some(state) = &self.activity_state {
             state
                 .set_recent_activity(self.audit.recent_activity())
                 .await;
         }
+        Ok(())
     }
 
     /// Read the sanitized authorization/execution audit trail. This is used by
     /// tests and by future owner-only audit projections.
     pub fn audit_entries(&self) -> Vec<AuditEntry> {
         self.audit.entries()
+    }
+
+    /// Shared durable ledger used by this command bus. Interactive transports
+    /// attach it here so owner-security request records and command records use
+    /// one global sequence and hash chain.
+    pub(crate) fn durable_audit(&self) -> Option<Arc<OwnerSecurityAudit>> {
+        self.audit.durable.clone()
     }
 
     #[cfg(test)]
@@ -3456,17 +3508,33 @@ pub enum NodeCommandBusError {
     Closed,
     #[error("节点命令 {0} 的结果通道已关闭")]
     ResponseDropped(u64),
+    #[error("安全审计写入失败，命令结果不可用: {0}")]
+    AuditUnavailable(String),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::node::NodePermission;
+    use crate::owner_security::audit::OwnerSecurityAudit;
     use fuckipv6_common::domain::{
-        PermissionCondition, PermissionEffect, PermissionRule, PolicyAction, ResourceKind,
-        SecurityRuleId, SubjectSelector,
+        AuditExportFilter, AuditRetentionPolicy, PermissionCondition, PermissionEffect,
+        PermissionRule, PolicyAction, ResourceKind, SecurityRuleId, SubjectSelector,
     };
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    static NEXT_DURABLE_AUDIT_DIR: AtomicU64 = AtomicU64::new(0);
+
+    fn durable_audit_dir(name: &str) -> std::path::PathBuf {
+        let sequence = NEXT_DURABLE_AUDIT_DIR.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "fuckipv6-command-audit-{name}-{}-{sequence}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("durable audit directory");
+        dir
+    }
 
     fn invitation_code() -> InvitationCode {
         InvitationCode::parse(format!("fkinv_{}", "A".repeat(43))).expect("valid test code")
@@ -5527,6 +5595,120 @@ mod tests {
         assert_eq!(audit[0].details["request_id"], "54");
         assert_eq!(audit[0].details["actor_source"], "test");
         assert_eq!(audit[0].outcome, AuditOutcome::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn security_commands_share_chain_skip_reads_and_redact_credentials() {
+        let dir = durable_audit_dir("shared-chain");
+        let node_id = NodeId::from_public_key(b"command-durable-audit-node");
+        let ledger = Arc::new(
+            OwnerSecurityAudit::new(&dir, node_id.clone()).expect("durable command audit"),
+        );
+        let bus = NodeCommandBus::spawn_with_durable_audit(
+            Arc::new(EchoHandler),
+            NodeEventBus::default(),
+            8,
+            ledger.clone(),
+        );
+
+        bus.execute_test(NodeCommandRequest::new(1, NodeCommand::StartNode))
+            .await
+            .expect("audited write");
+        bus.execute_test(NodeCommandRequest::new(2, NodeCommand::GetSnapshot))
+            .await
+            .expect("read command");
+        bus.execute_test(NodeCommandRequest::new(
+            3,
+            NodeCommand::RedeemInvitation(valid_redeem_command()),
+        ))
+        .await
+        .expect("invitation command");
+        bus.execute(
+            NodeCommandContext::untrusted("legacy_loopback_tcp"),
+            NodeCommandRequest::new(4, NodeCommand::StartNode),
+        )
+        .await
+        .expect("authorization denial result");
+
+        let bundle = ledger
+            .export(&AuditExportFilter::default())
+            .expect("export command audit");
+        assert_eq!(
+            bundle
+                .records
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(bundle.records[0].entry.action, "node.start");
+        assert_eq!(bundle.records[1].entry.action, "network.invitation.redeem");
+        assert_eq!(bundle.records[2].entry.action, "node.start");
+        assert_eq!(bundle.records[2].entry.outcome, AuditOutcome::Denied);
+        assert!(bundle
+            .records
+            .iter()
+            .all(|record| record.entry.details["command"] != "get_snapshot"));
+        assert!(bundle
+            .records
+            .iter()
+            .all(|record| !record.entry.details.contains_key("reason_detail")));
+        let serialized = serde_json::to_string(&bundle).expect("serialize audit export");
+        assert!(!serialized.contains(invitation_code().as_str()));
+        assert!(!serialized.contains("fkinv_"));
+        assert_eq!(bundle.manifest.verification.record_count, 3);
+
+        drop(bus);
+        drop(ledger);
+        #[cfg(unix)]
+        std::fs::remove_dir_all(dir).expect("remove audit directory");
+    }
+
+    #[tokio::test]
+    async fn durable_audit_failure_withholds_successful_command_result() {
+        let dir = durable_audit_dir("fail-closed");
+        let policy = AuditRetentionPolicy {
+            minimum_retention_days: 1,
+            segment_records: 1,
+            max_segments: 1,
+        };
+        let ledger = Arc::new(
+            OwnerSecurityAudit::new_with_retention_policy_for_test(
+                &dir,
+                NodeId::from_public_key(b"command-durable-audit-node"),
+                policy,
+            )
+            .expect("capacity-limited audit"),
+        );
+        let bus = NodeCommandBus::spawn_with_durable_audit(
+            Arc::new(EchoHandler),
+            NodeEventBus::default(),
+            8,
+            ledger.clone(),
+        );
+
+        bus.execute_test(NodeCommandRequest::new(10, NodeCommand::StartNode))
+            .await
+            .expect("first audited command");
+        let error = bus
+            .execute_test(NodeCommandRequest::new(11, NodeCommand::StartNode))
+            .await
+            .expect_err("audit failure must not return command success");
+        assert!(matches!(error, NodeCommandBusError::AuditUnavailable(_)));
+        assert_eq!(
+            ledger
+                .export(&AuditExportFilter::default())
+                .expect("existing audit remains verifiable")
+                .records
+                .len(),
+            1
+        );
+        assert!(!ledger.health().healthy);
+
+        drop(bus);
+        drop(ledger);
+        #[cfg(unix)]
+        std::fs::remove_dir_all(dir).expect("remove audit directory");
     }
 
     #[tokio::test]

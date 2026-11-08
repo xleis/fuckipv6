@@ -2,9 +2,9 @@
 // Regenerate with scripts/generate-contracts.sh.
 
 export const NODE_CONTRACT_SCHEMA_VERSION = 1 as const;
-export const NODE_COMMAND_KINDS = ["acknowledge_membership_policy", "apply_configuration", "apply_policy", "ban_client", "batch_review_join_requests", "change_member_lifecycle", "cleanup_node_residuals", "create_invitation", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_invitation_status", "get_network_allocation", "get_node_diagnostics", "get_policy", "get_policy_history", "get_snapshot", "get_ui_manifest", "join_network", "leave_network", "list_invitations", "list_join_requests", "list_network_members", "preview_configuration", "preview_invitation", "preview_join_network", "preview_member_removal", "preview_network_profile", "preview_policy", "preview_policy_rollback", "probe_peer", "publish_network_discovery", "rebuild_tun", "redeem_invitation", "refresh_discovery_index", "restart_networks", "restart_node", "resubmit_join_request", "retry_discovery_index", "review_join_request", "revoke_invitation", "rollback_configuration", "rollback_policy", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "submit_join_request", "test_policy", "unban_client", "unpublish_network_discovery", "update_network_allocation", "update_network_discovery", "update_network_profile", "update_routing", "withdraw_join_request"] as const;
+export const NODE_COMMAND_KINDS = ["acknowledge_membership_policy", "apply_configuration", "apply_policy", "apply_traffic_policy", "ban_client", "batch_review_join_requests", "change_member_lifecycle", "cleanup_node_residuals", "create_invitation", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_invitation_status", "get_network_allocation", "get_node_diagnostics", "get_policy", "get_policy_history", "get_snapshot", "get_traffic_policy", "get_traffic_policy_history", "get_ui_manifest", "join_network", "leave_network", "list_invitations", "list_join_requests", "list_network_members", "preview_configuration", "preview_invitation", "preview_join_network", "preview_member_removal", "preview_network_profile", "preview_policy", "preview_policy_rollback", "preview_traffic_policy", "preview_traffic_policy_rollback", "probe_peer", "publish_network_discovery", "rebuild_tun", "redeem_invitation", "refresh_discovery_index", "restart_networks", "restart_node", "resubmit_join_request", "retry_discovery_index", "review_join_request", "revoke_invitation", "rollback_configuration", "rollback_policy", "rollback_traffic_policy", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "submit_join_request", "test_policy", "test_traffic_policy", "unban_client", "unpublish_network_discovery", "update_network_allocation", "update_network_discovery", "update_network_profile", "update_routing", "withdraw_join_request"] as const;
 export type NodeCommandKindWire = (typeof NODE_COMMAND_KINDS)[number];
-export const NODE_MANIFEST_ACTION_COMMAND_KINDS = ["acknowledge_membership_policy", "apply_configuration", "apply_policy", "ban_client", "batch_review_join_requests", "change_member_lifecycle", "cleanup_node_residuals", "create_invitation", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_invitation_status", "get_network_allocation", "get_node_diagnostics", "get_policy", "get_policy_history", "get_snapshot", "join_network", "leave_network", "list_invitations", "list_join_requests", "list_network_members", "preview_configuration", "preview_invitation", "preview_join_network", "preview_member_removal", "preview_network_profile", "preview_policy", "preview_policy_rollback", "probe_peer", "publish_network_discovery", "rebuild_tun", "redeem_invitation", "refresh_discovery_index", "restart_networks", "restart_node", "resubmit_join_request", "retry_discovery_index", "review_join_request", "revoke_invitation", "rollback_configuration", "rollback_policy", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "submit_join_request", "test_policy", "unban_client", "unpublish_network_discovery", "update_network_allocation", "update_network_discovery", "update_network_profile", "update_routing", "withdraw_join_request"] as const;
+export const NODE_MANIFEST_ACTION_COMMAND_KINDS = ["acknowledge_membership_policy", "apply_configuration", "apply_policy", "apply_traffic_policy", "ban_client", "batch_review_join_requests", "change_member_lifecycle", "cleanup_node_residuals", "create_invitation", "create_network", "get_blacklist", "get_configuration", "get_configuration_history", "get_invitation_status", "get_network_allocation", "get_node_diagnostics", "get_policy", "get_policy_history", "get_snapshot", "get_traffic_policy", "get_traffic_policy_history", "join_network", "leave_network", "list_invitations", "list_join_requests", "list_network_members", "preview_configuration", "preview_invitation", "preview_join_network", "preview_member_removal", "preview_network_profile", "preview_policy", "preview_policy_rollback", "preview_traffic_policy", "preview_traffic_policy_rollback", "probe_peer", "publish_network_discovery", "rebuild_tun", "redeem_invitation", "refresh_discovery_index", "restart_networks", "restart_node", "resubmit_join_request", "retry_discovery_index", "review_join_request", "revoke_invitation", "rollback_configuration", "rollback_policy", "rollback_traffic_policy", "rotate_node_identity", "set_network_role", "set_node_display_name", "shutdown", "start_networks", "start_node", "stop_networks", "stop_node", "submit_join_request", "test_policy", "test_traffic_policy", "unban_client", "unpublish_network_discovery", "update_network_allocation", "update_network_discovery", "update_network_profile", "update_routing", "withdraw_join_request"] as const;
 export type NodeManifestActionCommandKind =
   (typeof NODE_MANIFEST_ACTION_COMMAND_KINDS)[number];
 
@@ -32,6 +32,16 @@ export type ActivityEntry = {
 };
 
 export type ActivitySeverity = "info" | "notice" | "warning" | "critical";
+
+export type ApplicationIdentity = {
+  "kind": "executable_path";
+  "value": string;
+} | {
+  "kind": "package_id";
+  "value": string;
+} | {
+  "kind": "unknown";
+};
 
 export type AuditId = string;
 
@@ -100,6 +110,12 @@ export type ConfigurationValidationIssue = {
   "path": string;
 };
 
+export type ConfirmedTrafficDirectFallback = {
+  "allowed_failures": Array<TrafficFailureKind>;
+  "confirmed_at_unix_ms": number;
+  "confirmed_by": TrafficDefaultConfirmedBy;
+};
+
 export type ContentHash = string;
 
 export type ContributionKind = "relay" | "exit" | "file";
@@ -113,10 +129,14 @@ export type DomainActorRef = {
   "node_id": NodeId;
 };
 
+export type DomainName = string;
+
 export type DomainObjectRef = {
   "id": string;
   "kind": ObjectKind;
 };
+
+export type DomainSuffix = string;
 
 export type EffectiveAccess = {
   "allowed": boolean;
@@ -250,6 +270,8 @@ export type InvitationStatusView = {
   "remaining_uses": number;
   "state": InvitationState;
 };
+
+export type IpCidr = string;
 
 export type IssuedInvitation = {
   "code": InvitationCode;
@@ -703,6 +725,12 @@ export type NodeApplyPolicyCommand = {
   "network_ids"?: Array<string>;
 };
 
+export type NodeApplyTrafficPolicyCommand = {
+  "confirm_risk"?: boolean;
+  "draft": TrafficPolicyDraft;
+  "expected_revision": number;
+};
+
 export type NodeBatchReviewJoinRequestsCommand = {
   "network_id": string;
   "reviews": Array<NodeJoinRequestReviewItem>;
@@ -943,6 +971,25 @@ export type NodeCommand = {
 } | {
   "command": "test_policy";
   "payload": PolicyTestInput;
+} | {
+  "command": "get_traffic_policy";
+} | {
+  "command": "preview_traffic_policy";
+  "payload": NodePreviewTrafficPolicyCommand;
+} | {
+  "command": "preview_traffic_policy_rollback";
+  "payload": NodePreviewTrafficPolicyRollbackCommand;
+} | {
+  "command": "apply_traffic_policy";
+  "payload": NodeApplyTrafficPolicyCommand;
+} | {
+  "command": "rollback_traffic_policy";
+  "payload": NodeRollbackTrafficPolicyCommand;
+} | {
+  "command": "get_traffic_policy_history";
+} | {
+  "command": "test_traffic_policy";
+  "payload": NodeTestTrafficPolicyCommand;
 };
 
 export type NodeCommandHttpRequest = {
@@ -1070,6 +1117,24 @@ export type NodeCommandOutcome = {
 } | {
   "data": PolicyTestResult;
   "status": "policy_test";
+} | {
+  "data": TrafficPolicyCurrent;
+  "status": "traffic_policy";
+} | {
+  "data": TrafficPolicyPreview;
+  "status": "traffic_policy_preview";
+} | {
+  "data": TrafficPolicyApplyResult;
+  "status": "traffic_policy_applied";
+} | {
+  "data": TrafficPolicyHistorySnapshot;
+  "status": "traffic_policy_history";
+} | {
+  "data": TrafficPolicyRollbackResult;
+  "status": "traffic_policy_rolled_back";
+} | {
+  "data": TrafficPolicyTestComparison;
+  "status": "traffic_policy_test";
 } | {
   "data": {
   "operation_id": string;
@@ -1718,6 +1783,16 @@ export type NodePreviewPolicyRollbackCommand = {
   "target_revision": number;
 };
 
+export type NodePreviewTrafficPolicyCommand = {
+  "draft": TrafficPolicyDraft;
+  "expected_revision": number;
+};
+
+export type NodePreviewTrafficPolicyRollbackCommand = {
+  "expected_revision": number;
+  "target_revision": number;
+};
+
 export type NodeProbePeerCommand = {
   "network_name": string;
   "target": string;
@@ -1783,6 +1858,12 @@ export type NodeRollbackPolicyCommand = {
   "expected_revision": number;
   "includes_local_policy"?: boolean;
   "network_ids"?: Array<string>;
+  "target_revision": number;
+};
+
+export type NodeRollbackTrafficPolicyCommand = {
+  "confirm_risk"?: boolean;
+  "expected_revision": number;
   "target_revision": number;
 };
 
@@ -1888,6 +1969,12 @@ export type NodeSubmitJoinRequestCommand = {
   "reason": string;
 };
 
+export type NodeTestTrafficPolicyCommand = {
+  "candidate": TrafficPolicy;
+  "current": TrafficPolicy;
+  "input": TrafficPolicyTestInput;
+};
+
 export type NodeTrafficSnapshot = {
   "error_count": number;
   "p2p_rx_bytes": number;
@@ -1904,7 +1991,7 @@ export type NodeUiAction = {
   "audit": NodeUiAudit;
   "availability": NodeUiAvailability;
   "backend_status": NodeUiBackendStatus;
-  "command": "get_snapshot" | "get_node_diagnostics" | "start_networks" | "stop_networks" | "restart_networks" | "rebuild_tun" | "create_network" | "preview_network_profile" | "update_network_profile" | "publish_network_discovery" | "update_network_discovery" | "unpublish_network_discovery" | "refresh_discovery_index" | "retry_discovery_index" | "preview_join_network" | "join_network" | "submit_join_request" | "list_join_requests" | "list_network_members" | "preview_member_removal" | "change_member_lifecycle" | "review_join_request" | "batch_review_join_requests" | "withdraw_join_request" | "resubmit_join_request" | "create_invitation" | "list_invitations" | "get_invitation_status" | "revoke_invitation" | "preview_invitation" | "redeem_invitation" | "leave_network" | "acknowledge_membership_policy" | "update_routing" | "set_network_role" | "set_node_display_name" | "rotate_node_identity" | "get_blacklist" | "ban_client" | "unban_client" | "get_network_allocation" | "update_network_allocation" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "cleanup_node_residuals" | "get_configuration" | "preview_configuration" | "apply_configuration" | "rollback_configuration" | "get_configuration_history" | "get_policy" | "preview_policy" | "preview_policy_rollback" | "apply_policy" | "rollback_policy" | "get_policy_history" | "test_policy" | "shutdown";
+  "command": "get_snapshot" | "get_node_diagnostics" | "start_networks" | "stop_networks" | "restart_networks" | "rebuild_tun" | "create_network" | "preview_network_profile" | "update_network_profile" | "publish_network_discovery" | "update_network_discovery" | "unpublish_network_discovery" | "refresh_discovery_index" | "retry_discovery_index" | "preview_join_network" | "join_network" | "submit_join_request" | "list_join_requests" | "list_network_members" | "preview_member_removal" | "change_member_lifecycle" | "review_join_request" | "batch_review_join_requests" | "withdraw_join_request" | "resubmit_join_request" | "create_invitation" | "list_invitations" | "get_invitation_status" | "revoke_invitation" | "preview_invitation" | "redeem_invitation" | "leave_network" | "acknowledge_membership_policy" | "update_routing" | "set_network_role" | "set_node_display_name" | "rotate_node_identity" | "get_blacklist" | "ban_client" | "unban_client" | "get_network_allocation" | "update_network_allocation" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "cleanup_node_residuals" | "get_configuration" | "preview_configuration" | "apply_configuration" | "rollback_configuration" | "get_configuration_history" | "get_policy" | "preview_policy" | "preview_policy_rollback" | "apply_policy" | "rollback_policy" | "get_policy_history" | "test_policy" | "get_traffic_policy" | "preview_traffic_policy" | "preview_traffic_policy_rollback" | "apply_traffic_policy" | "rollback_traffic_policy" | "get_traffic_policy_history" | "test_traffic_policy" | "shutdown";
   "confirmation"?: NodeUiConfirmation | null;
   "fields": Array<NodeUiField>;
   "id": string;
@@ -1940,7 +2027,7 @@ export type NodeUiField = {
   "validation": NodeUiValidation;
 };
 
-export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "policy_json" | "policy_snapshot_json" | "policy_network_ids" | "display_name" | "external_host" | "fingerprint" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "purpose" | "icon" | "language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution" | "exit_contribution_scope" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "node_id" | "member_lifecycle_action" | "member_lifecycle_reason" | "invitation_code" | "coordinator_url" | "port" | "revision" | "role" | "routing_mode" | "url_or_ticket" | "discovery_index_url" | "timeout_ms";
+export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "policy_json" | "policy_snapshot_json" | "traffic_policy_json" | "traffic_policy_test_json" | "policy_network_ids" | "display_name" | "external_host" | "fingerprint" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "purpose" | "icon" | "language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution" | "exit_contribution_scope" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "node_id" | "member_lifecycle_action" | "member_lifecycle_reason" | "invitation_code" | "coordinator_url" | "port" | "revision" | "role" | "routing_mode" | "url_or_ticket" | "discovery_index_url" | "timeout_ms";
 
 export type NodeUiManifest = {
   "action_block_reasons": Array<NodeUiActionBlockReason>;
@@ -1958,7 +2045,7 @@ export type NodeUiPage = {
 
 export type NodeUiPageState = "initial_loading" | "error" | "maintenance" | "permission_denied" | "unsupported" | "offline" | "control_unavailable" | "node_failed" | "degraded" | "stale" | "refreshing" | "empty" | "ready";
 
-export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_mode" | "network_selection" | "role" | "routing_mode" | "positive_timeout" | "revision" | "configuration_json" | "policy_json" | "policy_snapshot_json" | "policy_network_ids" | "display_name" | "fingerprint" | "network_purpose" | "network_icon" | "network_language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution" | "exit_contribution_scope" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "node_id" | "member_lifecycle_action" | "member_lifecycle_reason" | "invitation_code" | "coordinator_url";
+export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_mode" | "network_selection" | "role" | "routing_mode" | "positive_timeout" | "revision" | "configuration_json" | "policy_json" | "policy_snapshot_json" | "traffic_policy_json" | "traffic_policy_test_json" | "policy_network_ids" | "display_name" | "fingerprint" | "network_purpose" | "network_icon" | "network_language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution" | "exit_contribution_scope" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "node_id" | "member_lifecycle_action" | "member_lifecycle_reason" | "invitation_code" | "coordinator_url";
 
 export type NodeUpdateNetworkAllocationCommand = {
   "allocation": NodeNetworkAllocation;
@@ -2224,6 +2311,11 @@ export type PolicyValidationIssue = {
 
 export type PolicyValidationSource = "local_policy" | "network_acl" | "test_input";
 
+export type PortRange = {
+  "end": number;
+  "start": number;
+};
+
 export type PrivacyField = "member_node_id" | "member_display_name" | "member_identity_fingerprint" | "member_role" | "member_groups" | "member_capabilities" | "member_status" | "member_lifecycle_state" | "member_revision" | "member_access_epoch" | "member_available_actions" | "member_presence" | "member_joined_at" | "node_display_name" | "node_public_key" | "node_platform_and_version" | "node_online_state" | "node_endpoints" | "node_real_network_addresses" | "node_traffic_statistics" | "node_local_processes" | "node_local_paths" | "node_detailed_logs" | "topology_node_id" | "topology_display_name" | "topology_role" | "topology_status" | "topology_presence" | "topology_health" | "topology_capabilities" | "topology_network_membership" | "topology_connections" | "activity_actor" | "activity_action" | "activity_resource" | "activity_outcome" | "activity_occurred_at" | "activity_summary" | "activity_details" | "file_id" | "file_network_id" | "file_display_name" | "file_owner" | "file_mode" | "file_revision" | "file_network_acl" | "file_local_acl" | "file_quota" | "file_path_policy" | "file_timestamps" | "file_audit_settings";
 
 export type ProjectedActivityEntry = {
@@ -2361,6 +2453,24 @@ export type ProjectedNodeCommandOutcome = {
 } | {
   "data": PolicyTestResult;
   "status": "policy_test";
+} | {
+  "data": TrafficPolicyCurrent;
+  "status": "traffic_policy";
+} | {
+  "data": TrafficPolicyPreview;
+  "status": "traffic_policy_preview";
+} | {
+  "data": TrafficPolicyApplyResult;
+  "status": "traffic_policy_applied";
+} | {
+  "data": TrafficPolicyHistorySnapshot;
+  "status": "traffic_policy_history";
+} | {
+  "data": TrafficPolicyRollbackResult;
+  "status": "traffic_policy_rolled_back";
+} | {
+  "data": TrafficPolicyTestComparison;
+  "status": "traffic_policy_test";
 } | {
   "data": {
   "operation_id": string;
@@ -2612,6 +2722,251 @@ export type TopologySnapshot = {
   "revision": number;
   "truncated": boolean;
   "viewer": NodeId;
+};
+
+export type TrafficAction = {
+  "kind": "direct";
+} | {
+  "kind": "network";
+  "value": NetworkId;
+} | {
+  "kind": "exit";
+  "value": NodeId;
+} | {
+  "kind": "reject";
+};
+
+export type TrafficDecisionReason = "first_match" | "default";
+
+export type TrafficDefaultConfirmedBy = "owner" | "administrator";
+
+export type TrafficDefaultPolicy = {
+  "action": TrafficAction;
+  "confirmed_at_unix_ms": number;
+  "confirmed_by": TrafficDefaultConfirmedBy;
+};
+
+export type TrafficFailureDecision = {
+  "consequence_key": string;
+  "direct_fallback"?: ConfirmedTrafficDirectFallback | null;
+  "failure": TrafficFailureKind;
+  "outcome": TrafficFailureOutcome;
+  "reason": TrafficFailureDecisionReason;
+  "recovery_action": TrafficFailureRecoveryAction;
+};
+
+export type TrafficFailureDecisionReason = "default_fail_closed" | "not_allowed_by_policy" | "explicit_direct_fallback" | "unsafe_failure_class" | "reject_rule" | "fixed_exit" | "fixed_network" | "direct_action_has_no_alternate";
+
+export type TrafficFailureKind = "unknown_application" | "dns_resolution_timeout" | "dns_pollution_detected" | "exit_unavailable" | "network_selection_unavailable" | "connection_timeout" | "partial_connection_failure";
+
+export type TrafficFailureOutcome = "fail_closed" | "direct_fallback";
+
+export type TrafficFailurePolicy = {
+  "direct_fallback"?: ConfirmedTrafficDirectFallback | null;
+};
+
+export type TrafficFailureRecoveryAction = "retry_requested_route";
+
+export type TrafficFlow = {
+  "application": ApplicationIdentity;
+  "destination_ip": string;
+  "destination_port": number;
+  "domain"?: DomainName | null;
+  "protocol": TrafficProtocol;
+};
+
+export type TrafficMatch = {
+  "applications"?: Array<ApplicationIdentity>;
+  "destination_cidrs"?: Array<IpCidr>;
+  "destination_ports"?: Array<PortRange>;
+  "domain_suffixes"?: Array<DomainSuffix>;
+  "exact_domains"?: Array<DomainName>;
+  "protocols"?: Array<TrafficProtocol>;
+};
+
+export type TrafficMatchRisk = {
+  "kind": "always_matches";
+} | {
+  "kind": "any_destination";
+} | {
+  "kind": "any_port";
+} | {
+  "kind": "any_protocol";
+} | {
+  "kind": "any_application";
+} | {
+  "cidr": string;
+  "kind": "broad_cidr";
+  "prefix_len": number;
+} | {
+  "end": number;
+  "kind": "full_port_range";
+  "start": number;
+};
+
+export type TrafficPolicy = {
+  "default_policy": TrafficDefaultPolicy;
+  "failure_policy"?: TrafficFailurePolicy;
+  "node_id": NodeId;
+  "revision": number;
+  "rules"?: Array<TrafficRule>;
+};
+
+export type TrafficPolicyAffectedObject = {
+  "kind": TrafficPolicyObjectKind;
+  "object_id"?: string | null;
+};
+
+export type TrafficPolicyApplyResult = {
+  "affected_objects": Array<TrafficPolicyAffectedObject>;
+  "content_hash": ContentHash;
+  "diffs": Array<TrafficPolicyDiffEntry>;
+  "history"?: TrafficPolicyHistoryEntry | null;
+  "no_op": boolean;
+  "policy": TrafficPolicy;
+  "previous_revision": number;
+  "revision": number;
+};
+
+export type TrafficPolicyChangeAction = "apply" | "rollback";
+
+export type TrafficPolicyChangeKind = "rule_added" | "rule_removed" | "rule_updated" | "rules_reordered" | "default_policy_changed" | "failure_policy_changed";
+
+export type TrafficPolicyCurrent = {
+  "content_hash": ContentHash;
+  "policy": TrafficPolicy;
+  "revision": number;
+};
+
+export type TrafficPolicyDiffEntry = {
+  "after"?: unknown;
+  "before"?: unknown;
+  "change": TrafficPolicyChangeKind;
+  "path": string;
+};
+
+export type TrafficPolicyDraft = {
+  "default_policy": TrafficDefaultPolicy;
+  "failure_policy"?: TrafficFailurePolicy;
+  "node_id": NodeId;
+  "rules"?: Array<TrafficRule>;
+};
+
+export type TrafficPolicyHistoryEntry = {
+  "action": TrafficPolicyChangeAction;
+  "actor": string;
+  "affected_objects": Array<TrafficPolicyAffectedObject>;
+  "applied_revision"?: number | null;
+  "candidate_revision": number;
+  "content_hash": ContentHash;
+  "diffs": Array<TrafficPolicyDiffEntry>;
+  "occurred_at": string;
+  "outcome": TrafficPolicyHistoryOutcome;
+  "previous_revision": number;
+  "reason"?: string | null;
+  "reason_code"?: string | null;
+  "source": string;
+  "target_revision"?: number | null;
+  "transaction_id": string;
+};
+
+export type TrafficPolicyHistoryOutcome = "applied" | "rolled_back" | "failed" | "recovered";
+
+export type TrafficPolicyHistorySnapshot = {
+  "current_revision": number;
+  "entries": Array<TrafficPolicyHistoryEntry>;
+};
+
+export type TrafficPolicyObjectKind = "rule" | "default_policy" | "failure_policy" | "network" | "exit";
+
+export type TrafficPolicyPreview = {
+  "affected_objects": Array<TrafficPolicyAffectedObject>;
+  "can_apply": boolean;
+  "candidate": TrafficPolicy;
+  "candidate_revision": number;
+  "current": TrafficPolicy;
+  "current_revision": number;
+  "diffs": Array<TrafficPolicyDiffEntry>;
+  "expected_revision": number;
+  "has_changes": boolean;
+  "revision_conflict": boolean;
+  "risks": Array<TrafficRuleRisk>;
+  "rollback_target_revision"?: number | null;
+};
+
+export type TrafficPolicyRollbackResult = {
+  "affected_objects": Array<TrafficPolicyAffectedObject>;
+  "content_hash": ContentHash;
+  "diffs": Array<TrafficPolicyDiffEntry>;
+  "history": TrafficPolicyHistoryEntry;
+  "policy": TrafficPolicy;
+  "previous_revision": number;
+  "revision": number;
+  "target_revision": number;
+};
+
+export type TrafficPolicyTestComparison = {
+  "after": TrafficPolicyTestDecision;
+  "before": TrafficPolicyTestDecision;
+  "delta": TrafficPolicyTestDelta;
+  "network_id": NetworkId;
+  "source": TrafficPolicyTestContextSource;
+};
+
+export type TrafficPolicyTestContextSource = {
+  "kind": "manual";
+} | {
+  "activity_id": string;
+  "kind": "activity";
+} | {
+  "diagnostic_id": string;
+  "kind": "diagnostic";
+};
+
+export type TrafficPolicyTestDecision = {
+  "action": TrafficAction;
+  "failure_decisions": Array<TrafficFailureDecision>;
+  "matched_rule"?: TrafficRuleId | null;
+  "reason": TrafficDecisionReason;
+  "visibility": "full";
+} | {
+  "action": TrafficAction;
+  "visibility": "route_summary";
+};
+
+export type TrafficPolicyTestDelta = {
+  "changed": boolean;
+  "failure_outcomes_changed"?: boolean | null;
+  "matched_rule_changed"?: boolean | null;
+  "route_changed": boolean;
+};
+
+export type TrafficPolicyTestInput = {
+  "fixed_exit"?: NodeId | null;
+  "fixed_network"?: NetworkId | null;
+  "flow": TrafficFlow;
+  "network_id": NetworkId;
+  "source": TrafficPolicyTestContextSource;
+};
+
+export type TrafficProtocol = "tcp" | "udp" | "icmp";
+
+export type TrafficRule = {
+  "action": TrafficAction;
+  "description"?: string;
+  "enabled"?: boolean;
+  "matcher": TrafficMatch;
+  "priority": number;
+  "rule_id": TrafficRuleId;
+};
+
+export type TrafficRuleId = string;
+
+export type TrafficRuleRisk = {
+  "enabled": boolean;
+  "priority": number;
+  "risks": Array<TrafficMatchRisk>;
+  "rule_id": TrafficRuleId;
 };
 
 export type TunCapabilities = {

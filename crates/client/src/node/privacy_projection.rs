@@ -18,7 +18,7 @@ use fuckipv6_common::domain::{
     MemberRemovalPreview, MembershipState, NetworkId, NetworkMemberDirectory,
     NetworkProfileApplyResult, NetworkProfilePreview, NodeId, PolicyTestResult, PrivacyField,
     PrivacyObjectState, PrivacyViewer, ProjectedActivityEntry, TopologyConnection, TopologyNode,
-    TopologySnapshot,
+    TopologySnapshot, TrafficPolicyTestComparison,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -46,6 +46,10 @@ use crate::config_transaction::{
 use crate::discovery_index::NodeDiscoveryIndexSnapshot;
 use crate::policy_transaction::{
     PolicyApplyResult, PolicyCurrent, PolicyHistorySnapshot, PolicyPreview, PolicyRollbackResult,
+};
+use crate::traffic_policy_transaction::{
+    TrafficPolicyApplyResult, TrafficPolicyCurrent, TrafficPolicyHistorySnapshot,
+    TrafficPolicyPreview, TrafficPolicyRollbackResult,
 };
 use crate::tun::TunCapabilities;
 use crate::ui::UiModeResolution;
@@ -252,6 +256,12 @@ pub enum ProjectedNodeCommandOutcome {
     PolicyHistory(Box<PolicyHistorySnapshot>),
     PolicyRolledBack(Box<PolicyRollbackResult>),
     PolicyTest(Box<PolicyTestResult>),
+    TrafficPolicy(TrafficPolicyCurrent),
+    TrafficPolicyPreview(Box<TrafficPolicyPreview>),
+    TrafficPolicyApplied(Box<TrafficPolicyApplyResult>),
+    TrafficPolicyHistory(Box<TrafficPolicyHistorySnapshot>),
+    TrafficPolicyRolledBack(Box<TrafficPolicyRollbackResult>),
+    TrafficPolicyTest(Box<TrafficPolicyTestComparison>),
     Accepted { operation_id: String },
     Completed { message: String },
     Rejected(NodeProblem),
@@ -467,6 +477,24 @@ pub fn project_node_command_result(
         }
         NodeCommandOutcome::PolicyTest(result) => {
             ProjectedNodeCommandOutcome::PolicyTest(result.clone())
+        }
+        NodeCommandOutcome::TrafficPolicy(current) => {
+            ProjectedNodeCommandOutcome::TrafficPolicy(current.clone())
+        }
+        NodeCommandOutcome::TrafficPolicyPreview(preview) => {
+            ProjectedNodeCommandOutcome::TrafficPolicyPreview(preview.clone())
+        }
+        NodeCommandOutcome::TrafficPolicyApplied(applied) => {
+            ProjectedNodeCommandOutcome::TrafficPolicyApplied(applied.clone())
+        }
+        NodeCommandOutcome::TrafficPolicyHistory(history) => {
+            ProjectedNodeCommandOutcome::TrafficPolicyHistory(history.clone())
+        }
+        NodeCommandOutcome::TrafficPolicyRolledBack(rolled_back) => {
+            ProjectedNodeCommandOutcome::TrafficPolicyRolledBack(rolled_back.clone())
+        }
+        NodeCommandOutcome::TrafficPolicyTest(result) => {
+            ProjectedNodeCommandOutcome::TrafficPolicyTest(result.clone())
         }
         NodeCommandOutcome::Accepted { operation_id } => ProjectedNodeCommandOutcome::Accepted {
             operation_id: operation_id.clone(),

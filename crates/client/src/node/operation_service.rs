@@ -723,7 +723,14 @@ pub(crate) fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::GetPolicy
         | NodeCommand::PreviewPolicy(_)
         | NodeCommand::PreviewPolicyRollback(_)
-        | NodeCommand::GetPolicyHistory => OperationKind::PolicyTest,
+        | NodeCommand::GetPolicyHistory
+        | NodeCommand::GetTrafficPolicy
+        | NodeCommand::PreviewTrafficPolicy(_)
+        | NodeCommand::PreviewTrafficPolicyRollback(_)
+        | NodeCommand::GetTrafficPolicyHistory
+        | NodeCommand::TestTrafficPolicy(_) => OperationKind::PolicyTest,
+        NodeCommand::ApplyTrafficPolicy(_) => OperationKind::TrafficRulesApply,
+        NodeCommand::RollbackTrafficPolicy(_) => OperationKind::PolicyRollback,
         NodeCommand::GetSnapshot
         | NodeCommand::GetUiManifest
         | NodeCommand::GetBlacklist { .. }
@@ -817,6 +824,13 @@ pub(crate) fn operation_target(command: &NodeCommand, local_node_id: &NodeId) ->
         | NodeCommand::ApplyPolicy(_)
         | NodeCommand::RollbackPolicy(_)
         | NodeCommand::GetPolicyHistory
+        | NodeCommand::GetTrafficPolicy
+        | NodeCommand::PreviewTrafficPolicy(_)
+        | NodeCommand::PreviewTrafficPolicyRollback(_)
+        | NodeCommand::ApplyTrafficPolicy(_)
+        | NodeCommand::RollbackTrafficPolicy(_)
+        | NodeCommand::GetTrafficPolicyHistory
+        | NodeCommand::TestTrafficPolicy(_)
         | NodeCommand::RefreshDiscoveryIndex { .. }
         | NodeCommand::RetryDiscoveryIndex
         | NodeCommand::SetNodeDisplayName(_)

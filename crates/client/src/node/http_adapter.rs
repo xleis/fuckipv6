@@ -1363,6 +1363,12 @@ fn status_for_command_result(result: &NodeCommandResult) -> StatusCode {
         | NodeCommandOutcome::PolicyHistory(_)
         | NodeCommandOutcome::PolicyRolledBack(_)
         | NodeCommandOutcome::PolicyTest(_)
+        | NodeCommandOutcome::TrafficPolicy(_)
+        | NodeCommandOutcome::TrafficPolicyPreview(_)
+        | NodeCommandOutcome::TrafficPolicyApplied(_)
+        | NodeCommandOutcome::TrafficPolicyHistory(_)
+        | NodeCommandOutcome::TrafficPolicyRolledBack(_)
+        | NodeCommandOutcome::TrafficPolicyTest(_)
         | NodeCommandOutcome::MemberRemovalPreview(_)
         | NodeCommandOutcome::MemberLifecycleChanged(_)
         | NodeCommandOutcome::Completed { .. } => StatusCode::OK,
@@ -1482,7 +1488,14 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::PreviewPolicy(_)
         | NodeCommand::PreviewPolicyRollback(_)
         | NodeCommand::GetPolicyHistory
-        | NodeCommand::TestPolicy(_) => OperationKind::PolicyTest,
+        | NodeCommand::TestPolicy(_)
+        | NodeCommand::GetTrafficPolicy
+        | NodeCommand::PreviewTrafficPolicy(_)
+        | NodeCommand::PreviewTrafficPolicyRollback(_)
+        | NodeCommand::GetTrafficPolicyHistory
+        | NodeCommand::TestTrafficPolicy(_) => OperationKind::PolicyTest,
+        NodeCommand::ApplyTrafficPolicy(_) => OperationKind::TrafficRulesApply,
+        NodeCommand::RollbackTrafficPolicy(_) => OperationKind::PolicyRollback,
     }
 }
 
@@ -1560,6 +1573,13 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
         | NodeCommand::ApplyPolicy(_)
         | NodeCommand::RollbackPolicy(_)
         | NodeCommand::GetPolicyHistory
+        | NodeCommand::GetTrafficPolicy
+        | NodeCommand::PreviewTrafficPolicy(_)
+        | NodeCommand::PreviewTrafficPolicyRollback(_)
+        | NodeCommand::ApplyTrafficPolicy(_)
+        | NodeCommand::RollbackTrafficPolicy(_)
+        | NodeCommand::GetTrafficPolicyHistory
+        | NodeCommand::TestTrafficPolicy(_)
         | NodeCommand::RefreshDiscoveryIndex { .. }
         | NodeCommand::RetryDiscoveryIndex
         | NodeCommand::SetNodeDisplayName(_)

@@ -13,7 +13,8 @@ use fuckipv6_common::domain::{
     MemberLifecycleAction, MemberLifecycleChange, MemberRemovalPreview, MembershipRole,
     NetworkCreateProfile, NetworkDiscoveryRecord, NetworkEndpoint, NetworkId, NetworkJoinMode,
     NetworkMemberDirectory, NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate,
-    NetworkVisibility, PermissionDenialCode, PolicyTestInput, PolicyTestResult,
+    NetworkVisibility, PermissionDenialCode, PolicyTestInput, PolicyTestResult, TrafficPolicy,
+    TrafficPolicyTestComparison, TrafficPolicyTestInput, TrafficPolicyTestVisibility,
     JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS, JOIN_REQUEST_MAX_REASON_CHARS,
     NETWORK_PROFILE_MAX_TAG_CHARS,
 };
@@ -41,6 +42,10 @@ use crate::owner_security::audit::OwnerSecurityAudit;
 use crate::policy_transaction::{
     PolicyApplyResult, PolicyCurrent, PolicyHistorySnapshot, PolicyPreview, PolicyRollbackResult,
     PolicySnapshot,
+};
+use crate::traffic_policy_transaction::{
+    TrafficPolicyApplyResult, TrafficPolicyCurrent, TrafficPolicyDraft,
+    TrafficPolicyHistorySnapshot, TrafficPolicyPreview, TrafficPolicyRollbackResult,
 };
 
 #[cfg(test)]
@@ -134,11 +139,18 @@ pub enum NodeCommandKind {
     RollbackPolicy,
     GetPolicyHistory,
     TestPolicy,
+    GetTrafficPolicy,
+    PreviewTrafficPolicy,
+    PreviewTrafficPolicyRollback,
+    ApplyTrafficPolicy,
+    RollbackTrafficPolicy,
+    GetTrafficPolicyHistory,
+    TestTrafficPolicy,
     Shutdown,
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 61] = [
+    pub const ALL: [Self; 68] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -199,12 +211,19 @@ impl NodeCommandKind {
         Self::RollbackPolicy,
         Self::GetPolicyHistory,
         Self::TestPolicy,
+        Self::GetTrafficPolicy,
+        Self::PreviewTrafficPolicy,
+        Self::PreviewTrafficPolicyRollback,
+        Self::ApplyTrafficPolicy,
+        Self::RollbackTrafficPolicy,
+        Self::GetTrafficPolicyHistory,
+        Self::TestTrafficPolicy,
         Self::Shutdown,
     ];
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 60] = [
+    pub const ACTIONS: [Self; 67] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -264,6 +283,13 @@ impl NodeCommandKind {
         Self::RollbackPolicy,
         Self::GetPolicyHistory,
         Self::TestPolicy,
+        Self::GetTrafficPolicy,
+        Self::PreviewTrafficPolicy,
+        Self::PreviewTrafficPolicyRollback,
+        Self::ApplyTrafficPolicy,
+        Self::RollbackTrafficPolicy,
+        Self::GetTrafficPolicyHistory,
+        Self::TestTrafficPolicy,
         Self::Shutdown,
     ];
 
@@ -279,6 +305,8 @@ impl NodeCommandKind {
                 | Self::RollbackConfiguration
                 | Self::ApplyPolicy
                 | Self::RollbackPolicy
+                | Self::ApplyTrafficPolicy
+                | Self::RollbackTrafficPolicy
                 | Self::RestartNode
                 | Self::RebuildTun
                 | Self::SetNodeDisplayName
@@ -355,6 +383,13 @@ impl NodeCommandKind {
             Self::RollbackPolicy => "rollback_policy",
             Self::GetPolicyHistory => "get_policy_history",
             Self::TestPolicy => "test_policy",
+            Self::GetTrafficPolicy => "get_traffic_policy",
+            Self::PreviewTrafficPolicy => "preview_traffic_policy",
+            Self::PreviewTrafficPolicyRollback => "preview_traffic_policy_rollback",
+            Self::ApplyTrafficPolicy => "apply_traffic_policy",
+            Self::RollbackTrafficPolicy => "rollback_traffic_policy",
+            Self::GetTrafficPolicyHistory => "get_traffic_policy_history",
+            Self::TestTrafficPolicy => "test_traffic_policy",
         }
     }
 
@@ -404,6 +439,8 @@ impl NodeCommandKind {
                 | Self::RollbackConfiguration
                 | Self::ApplyPolicy
                 | Self::RollbackPolicy
+                | Self::ApplyTrafficPolicy
+                | Self::RollbackTrafficPolicy
         )
     }
 
@@ -557,6 +594,21 @@ pub enum NodeCommand {
     /// Evaluate candidate policy documents with the runtime authorization evaluator
     /// without storing them or emitting audit/activity side effects.
     TestPolicy(PolicyTestInput),
+    /// Current authoritative traffic-routing policy revision.
+    GetTrafficPolicy,
+    /// Compute a traffic-routing diff and risk summary without writing it.
+    PreviewTrafficPolicy(NodePreviewTrafficPolicyCommand),
+    /// Compute the diff for restoring a previous traffic policy revision.
+    PreviewTrafficPolicyRollback(NodePreviewTrafficPolicyRollbackCommand),
+    /// Atomically install and verify a complete traffic policy.
+    ApplyTrafficPolicy(NodeApplyTrafficPolicyCommand),
+    /// Restore a previous traffic policy generation as a new revision.
+    RollbackTrafficPolicy(NodeRollbackTrafficPolicyCommand),
+    /// Append-only traffic policy revision history, newest first.
+    GetTrafficPolicyHistory,
+    /// Compare a current and candidate traffic policy for one hypothetical flow
+    /// without touching host networking, persistence, audit or activity.
+    TestTrafficPolicy(NodeTestTrafficPolicyCommand),
 }
 
 impl NodeCommand {
@@ -623,6 +675,13 @@ impl NodeCommand {
             Self::RollbackPolicy(_) => NodeCommandKind::RollbackPolicy,
             Self::GetPolicyHistory => NodeCommandKind::GetPolicyHistory,
             Self::TestPolicy(_) => NodeCommandKind::TestPolicy,
+            Self::GetTrafficPolicy => NodeCommandKind::GetTrafficPolicy,
+            Self::PreviewTrafficPolicy(_) => NodeCommandKind::PreviewTrafficPolicy,
+            Self::PreviewTrafficPolicyRollback(_) => NodeCommandKind::PreviewTrafficPolicyRollback,
+            Self::ApplyTrafficPolicy(_) => NodeCommandKind::ApplyTrafficPolicy,
+            Self::RollbackTrafficPolicy(_) => NodeCommandKind::RollbackTrafficPolicy,
+            Self::GetTrafficPolicyHistory => NodeCommandKind::GetTrafficPolicyHistory,
+            Self::TestTrafficPolicy(_) => NodeCommandKind::TestTrafficPolicy,
         }
     }
 
@@ -639,7 +698,9 @@ impl NodeCommand {
             | Self::GetConfigurationHistory
             | Self::GetPolicy
             | Self::GetPolicyHistory
-            | Self::TestPolicy(_) => Ok(()),
+            | Self::TestPolicy(_)
+            | Self::GetTrafficPolicy
+            | Self::GetTrafficPolicyHistory => Ok(()),
             Self::StartNetworks { selection } => validate_selection(selection),
             Self::StopNetworks { networks, all } => {
                 if *all {
@@ -739,6 +800,11 @@ impl NodeCommand {
             Self::PreviewPolicyRollback(command) => command.validate(),
             Self::ApplyPolicy(command) => command.validate(),
             Self::RollbackPolicy(command) => command.validate(),
+            Self::PreviewTrafficPolicy(command) => command.validate(),
+            Self::PreviewTrafficPolicyRollback(command) => command.validate(),
+            Self::ApplyTrafficPolicy(command) => command.validate(),
+            Self::RollbackTrafficPolicy(command) => command.validate(),
+            Self::TestTrafficPolicy(command) => command.validate(),
         }
     }
 }
@@ -850,6 +916,105 @@ impl NodeRollbackPolicyCommand {
         }
         validate_policy_scope(&self.network_ids)
     }
+}
+
+/// Editable traffic-routing document. Runtime state, effect plans and
+/// authorization identity remain server-owned.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodePreviewTrafficPolicyCommand {
+    pub expected_revision: u64,
+    pub draft: TrafficPolicyDraft,
+}
+
+impl NodePreviewTrafficPolicyCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_traffic_policy_draft(&self.draft)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodePreviewTrafficPolicyRollbackCommand {
+    pub expected_revision: u64,
+    pub target_revision: u64,
+}
+
+impl NodePreviewTrafficPolicyRollbackCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_traffic_policy_rollback_target(self.target_revision)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeApplyTrafficPolicyCommand {
+    pub expected_revision: u64,
+    pub draft: TrafficPolicyDraft,
+    /// Explicit acknowledgement of any high-risk fixed Exit, broad matcher or
+    /// fail-open consequence shown in preview.
+    #[serde(default)]
+    pub confirm_risk: bool,
+}
+
+impl NodeApplyTrafficPolicyCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_traffic_policy_draft(&self.draft)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeRollbackTrafficPolicyCommand {
+    pub expected_revision: u64,
+    pub target_revision: u64,
+    #[serde(default)]
+    pub confirm_risk: bool,
+}
+
+impl NodeRollbackTrafficPolicyCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_traffic_policy_rollback_target(self.target_revision)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeTestTrafficPolicyCommand {
+    pub current: TrafficPolicy,
+    pub candidate: TrafficPolicy,
+    pub input: TrafficPolicyTestInput,
+}
+
+impl NodeTestTrafficPolicyCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        self.input
+            .validate()
+            .map_err(|error| invalid(format!("流量测试上下文无效: {error}")))?;
+        self.current
+            .validate_successor(&self.candidate)
+            .map_err(|error| invalid(format!("流量策略候选无效: {error}")))
+    }
+
+    pub(crate) fn compare(&self) -> Result<TrafficPolicyTestComparison, NodeProblem> {
+        self.validate()?;
+        self.input
+            .compare(
+                &self.current,
+                &self.candidate,
+                TrafficPolicyTestVisibility::Full,
+            )
+            .map_err(|error| invalid(format!("流量策略测试失败: {error}")))
+    }
+}
+
+fn validate_traffic_policy_draft(draft: &TrafficPolicyDraft) -> Result<(), NodeProblem> {
+    draft
+        .candidate(1)
+        .map(|_| ())
+        .map_err(|error| invalid(format!("流量策略草稿无效: {error}")))
+}
+
+fn validate_traffic_policy_rollback_target(target_revision: u64) -> Result<(), NodeProblem> {
+    if target_revision == 0 {
+        return Err(invalid("流量策略回滚目标 revision 必须大于 0"));
+    }
+    Ok(())
 }
 
 fn validate_policy_scope(network_ids: &[String]) -> Result<(), NodeProblem> {
@@ -2474,6 +2639,12 @@ pub enum NodeCommandOutcome {
     PolicyHistory(Box<PolicyHistorySnapshot>),
     PolicyRolledBack(Box<PolicyRollbackResult>),
     PolicyTest(Box<PolicyTestResult>),
+    TrafficPolicy(TrafficPolicyCurrent),
+    TrafficPolicyPreview(Box<TrafficPolicyPreview>),
+    TrafficPolicyApplied(Box<TrafficPolicyApplyResult>),
+    TrafficPolicyHistory(Box<TrafficPolicyHistorySnapshot>),
+    TrafficPolicyRolledBack(Box<TrafficPolicyRollbackResult>),
+    TrafficPolicyTest(Box<TrafficPolicyTestComparison>),
     Accepted { operation_id: String },
     Completed { message: String },
     Rejected(NodeProblem),
@@ -3568,6 +3739,60 @@ mod tests {
         }
     }
 
+    fn valid_traffic_policy(revision: u64) -> TrafficPolicy {
+        use fuckipv6_common::domain::{
+            DomainName, PortRange, TrafficAction, TrafficDefaultConfirmedBy, TrafficDefaultPolicy,
+            TrafficFailurePolicy, TrafficMatch, TrafficProtocol, TrafficRule, TrafficRuleId,
+        };
+
+        TrafficPolicy {
+            node_id: NodeId::from_public_key(b"traffic-command-node"),
+            revision,
+            default_policy: TrafficDefaultPolicy {
+                action: TrafficAction::Direct,
+                confirmed_by: TrafficDefaultConfirmedBy::Owner,
+                confirmed_at_unix_ms: 1_700_000_000_000,
+            },
+            failure_policy: TrafficFailurePolicy::fail_closed(),
+            rules: vec![TrafficRule {
+                rule_id: TrafficRuleId::from_public_key(b"traffic-command-rule"),
+                priority: 1,
+                enabled: true,
+                matcher: TrafficMatch {
+                    exact_domains: vec![DomainName::parse("example.com").unwrap()],
+                    domain_suffixes: Vec::new(),
+                    destination_cidrs: Vec::new(),
+                    destination_ports: vec![PortRange {
+                        start: 443,
+                        end: 443,
+                    }],
+                    protocols: vec![TrafficProtocol::Tcp],
+                    applications: Vec::new(),
+                },
+                action: TrafficAction::Reject,
+                description: "Reject example traffic".into(),
+            }],
+        }
+    }
+
+    fn valid_traffic_test_input() -> TrafficPolicyTestInput {
+        use fuckipv6_common::domain::{
+            ApplicationIdentity, DomainName, TrafficFlow, TrafficProtocol,
+        };
+        use std::net::{IpAddr, Ipv4Addr};
+
+        TrafficPolicyTestInput::manual(
+            NetworkId::from_public_key(b"traffic-command-network"),
+            TrafficFlow {
+                domain: Some(DomainName::parse("example.com").unwrap()),
+                destination_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+                destination_port: 443,
+                protocol: TrafficProtocol::Tcp,
+                application: ApplicationIdentity::ExecutablePath("/usr/bin/curl".into()),
+            },
+        )
+    }
+
     fn valid_commands() -> Vec<NodeCommand> {
         vec![
             NodeCommand::GetSnapshot,
@@ -3916,6 +4141,31 @@ mod tests {
                 network_acl: None,
                 now_unix_ms: 1_000,
             }),
+            NodeCommand::GetTrafficPolicy,
+            NodeCommand::PreviewTrafficPolicy(NodePreviewTrafficPolicyCommand {
+                expected_revision: 1,
+                draft: TrafficPolicyDraft::from_applied(&valid_traffic_policy(1)),
+            }),
+            NodeCommand::PreviewTrafficPolicyRollback(NodePreviewTrafficPolicyRollbackCommand {
+                expected_revision: 1,
+                target_revision: 1,
+            }),
+            NodeCommand::ApplyTrafficPolicy(NodeApplyTrafficPolicyCommand {
+                expected_revision: 1,
+                draft: TrafficPolicyDraft::from_applied(&valid_traffic_policy(1)),
+                confirm_risk: false,
+            }),
+            NodeCommand::RollbackTrafficPolicy(NodeRollbackTrafficPolicyCommand {
+                expected_revision: 1,
+                target_revision: 1,
+                confirm_risk: false,
+            }),
+            NodeCommand::GetTrafficPolicyHistory,
+            NodeCommand::TestTrafficPolicy(NodeTestTrafficPolicyCommand {
+                current: valid_traffic_policy(1),
+                candidate: valid_traffic_policy(2),
+                input: valid_traffic_test_input(),
+            }),
             NodeCommand::Shutdown,
         ]
     }
@@ -3962,14 +4212,16 @@ mod tests {
 
     #[test]
     fn command_kind_inventory_and_sensitive_reauth_contract_are_complete() {
-        assert_eq!(NodeCommandKind::ALL.len(), 61);
-        assert_eq!(NodeCommandKind::ACTIONS.len(), 60);
+        assert_eq!(NodeCommandKind::ALL.len(), 68);
+        assert_eq!(NodeCommandKind::ACTIONS.len(), 67);
         for kind in [
             NodeCommandKind::CreateInvitation,
             NodeCommandKind::RevokeInvitation,
             NodeCommandKind::PreviewInvitation,
             NodeCommandKind::RedeemInvitation,
             NodeCommandKind::ChangeMemberLifecycle,
+            NodeCommandKind::ApplyTrafficPolicy,
+            NodeCommandKind::RollbackTrafficPolicy,
         ] {
             assert!(kind.requires_recent_reauthentication(), "{kind:?}");
         }
@@ -4667,6 +4919,11 @@ mod tests {
             NodeCommandKind::PreviewPolicyRollback,
             NodeCommandKind::GetPolicyHistory,
             NodeCommandKind::TestPolicy,
+            NodeCommandKind::GetTrafficPolicy,
+            NodeCommandKind::PreviewTrafficPolicy,
+            NodeCommandKind::PreviewTrafficPolicyRollback,
+            NodeCommandKind::GetTrafficPolicyHistory,
+            NodeCommandKind::TestTrafficPolicy,
         ] {
             assert!(!kind.is_write(), "{kind:?}");
         }
@@ -4695,6 +4952,11 @@ mod tests {
                     | NodeCommandKind::PreviewPolicyRollback
                     | NodeCommandKind::GetPolicyHistory
                     | NodeCommandKind::TestPolicy
+                    | NodeCommandKind::GetTrafficPolicy
+                    | NodeCommandKind::PreviewTrafficPolicy
+                    | NodeCommandKind::PreviewTrafficPolicyRollback
+                    | NodeCommandKind::GetTrafficPolicyHistory
+                    | NodeCommandKind::TestTrafficPolicy
             ) {
                 assert!(kind.is_write(), "{kind:?}");
             }

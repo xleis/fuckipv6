@@ -10,7 +10,7 @@ use fuckipv6_common::domain::{
     MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode, NetworkMember,
     NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberStatus,
     NetworkProfileUpdate, NetworkVisibility, NodeId, TopologyNode, TopologyNodeHealth,
-    TopologySnapshot,
+    TopologySnapshot, TrafficPolicy, TrafficPolicyTestInput,
 };
 use fuckipv6_common::i18n::{t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
@@ -18,26 +18,30 @@ use fuckipv6_common::NetworkMode;
 
 use crate::node::{
     node_ui_manifest, NodeAcknowledgeMembershipPolicyCommand, NodeApplyConfigurationCommand,
-    NodeApplyPolicyCommand, NodeBatchReviewJoinRequestsCommand, NodeChangeMemberLifecycleCommand,
-    NodeClientBlacklistCommand, NodeCommand, NodeCommandKind, NodeControlHealth,
-    NodeCreateInvitationCommand, NodeCreateNetworkCommand, NodeEmbeddedServiceStatus,
-    NodeGetInvitationStatusCommand, NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceStatus,
-    NodeJoinNetworkCommand, NodeJoinRequestReviewItem, NodeLeaveNetworkCommand,
-    NodeListInvitationsCommand, NodeListJoinRequestsCommand, NodeMemberRemovalPreviewCommand,
-    NodeNetworkAllocation, NodeNetworkDiscoveryCommand, NodeNetworkMembersCommand,
-    NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus,
-    NodePermission, NodePhase, NodePreviewConfigurationCommand, NodePreviewInvitationCommand,
-    NodePreviewJoinNetworkCommand, NodePreviewPolicyCommand, NodePreviewPolicyRollbackCommand,
-    NodePrimaryStatus, NodeProbePeerCommand, NodeRedeemInvitationCommand,
-    NodeResubmitJoinRequestCommand, NodeReviewJoinRequestCommand, NodeRevokeInvitationCommand,
-    NodeRollbackConfigurationCommand, NodeRollbackPolicyCommand, NodeRotateNodeIdentityCommand,
-    NodeRoutingDefaultAction, NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
+    NodeApplyPolicyCommand, NodeApplyTrafficPolicyCommand, NodeBatchReviewJoinRequestsCommand,
+    NodeChangeMemberLifecycleCommand, NodeClientBlacklistCommand, NodeCommand, NodeCommandKind,
+    NodeControlHealth, NodeCreateInvitationCommand, NodeCreateNetworkCommand,
+    NodeEmbeddedServiceStatus, NodeGetInvitationStatusCommand, NodeInterfaceKind,
+    NodeInterfaceOwnership, NodeInterfaceStatus, NodeJoinNetworkCommand, NodeJoinRequestReviewItem,
+    NodeLeaveNetworkCommand, NodeListInvitationsCommand, NodeListJoinRequestsCommand,
+    NodeMemberRemovalPreviewCommand, NodeNetworkAllocation, NodeNetworkDiscoveryCommand,
+    NodeNetworkMembersCommand, NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection,
+    NodeNetworkStatus, NodePermission, NodePhase, NodePreviewConfigurationCommand,
+    NodePreviewInvitationCommand, NodePreviewJoinNetworkCommand, NodePreviewPolicyCommand,
+    NodePreviewPolicyRollbackCommand, NodePreviewTrafficPolicyCommand,
+    NodePreviewTrafficPolicyRollbackCommand, NodePrimaryStatus, NodeProbePeerCommand,
+    NodeRedeemInvitationCommand, NodeResubmitJoinRequestCommand, NodeReviewJoinRequestCommand,
+    NodeRevokeInvitationCommand, NodeRollbackConfigurationCommand, NodeRollbackPolicyCommand,
+    NodeRollbackTrafficPolicyCommand, NodeRotateNodeIdentityCommand, NodeRoutingDefaultAction,
+    NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
     NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeSnapshot,
-    NodeSubmitJoinRequestCommand, NodeUiAction, NodeUiActionBlockReason, NodeUiAvailability,
-    NodeUiBackendStatus, NodeUiManifest, NodeUiPage, NodeUiPermission,
-    NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand, NodeWithdrawJoinRequestCommand,
+    NodeSubmitJoinRequestCommand, NodeTestTrafficPolicyCommand, NodeUiAction,
+    NodeUiActionBlockReason, NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage,
+    NodeUiPermission, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
+    NodeWithdrawJoinRequestCommand,
 };
 use crate::policy_transaction::PolicySnapshot;
+use crate::traffic_policy_transaction::TrafficPolicyDraft;
 use crate::tun::{TunCapabilityReason, TunPlatform};
 use crate::ui::{DisplayEnvironment, UiMode};
 
@@ -424,11 +428,18 @@ pub enum ActionBinding {
     RollbackPolicy,
     GetPolicyHistory,
     TestPolicy,
+    GetTrafficPolicy,
+    PreviewTrafficPolicy,
+    PreviewTrafficPolicyRollback,
+    ApplyTrafficPolicy,
+    RollbackTrafficPolicy,
+    GetTrafficPolicyHistory,
+    TestTrafficPolicy,
     ShutdownNode,
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 61] = [
+    pub const ALL: [Self; 68] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
@@ -489,6 +500,13 @@ impl ActionBinding {
         Self::RollbackPolicy,
         Self::GetPolicyHistory,
         Self::TestPolicy,
+        Self::GetTrafficPolicy,
+        Self::PreviewTrafficPolicy,
+        Self::PreviewTrafficPolicyRollback,
+        Self::ApplyTrafficPolicy,
+        Self::RollbackTrafficPolicy,
+        Self::GetTrafficPolicyHistory,
+        Self::TestTrafficPolicy,
         Self::ShutdownNode,
     ];
 
@@ -554,6 +572,13 @@ impl ActionBinding {
             Self::RollbackPolicy => "rollback_policy",
             Self::GetPolicyHistory => "get_policy_history",
             Self::TestPolicy => "test_policy",
+            Self::GetTrafficPolicy => "get_traffic_policy",
+            Self::PreviewTrafficPolicy => "preview_traffic_policy",
+            Self::PreviewTrafficPolicyRollback => "preview_traffic_policy_rollback",
+            Self::ApplyTrafficPolicy => "apply_traffic_policy",
+            Self::RollbackTrafficPolicy => "rollback_traffic_policy",
+            Self::GetTrafficPolicyHistory => "get_traffic_policy_history",
+            Self::TestTrafficPolicy => "test_traffic_policy",
             Self::ShutdownNode => "shutdown_node",
         }
     }
@@ -1612,6 +1637,34 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             NodeCommandKind::GetPolicyHistory,
         ),
         "test_policy" => (ActionBinding::TestPolicy, NodeCommandKind::TestPolicy),
+        "get_traffic_policy" => (
+            ActionBinding::GetTrafficPolicy,
+            NodeCommandKind::GetTrafficPolicy,
+        ),
+        "preview_traffic_policy" => (
+            ActionBinding::PreviewTrafficPolicy,
+            NodeCommandKind::PreviewTrafficPolicy,
+        ),
+        "preview_traffic_policy_rollback" => (
+            ActionBinding::PreviewTrafficPolicyRollback,
+            NodeCommandKind::PreviewTrafficPolicyRollback,
+        ),
+        "apply_traffic_policy" => (
+            ActionBinding::ApplyTrafficPolicy,
+            NodeCommandKind::ApplyTrafficPolicy,
+        ),
+        "rollback_traffic_policy" => (
+            ActionBinding::RollbackTrafficPolicy,
+            NodeCommandKind::RollbackTrafficPolicy,
+        ),
+        "get_traffic_policy_history" => (
+            ActionBinding::GetTrafficPolicyHistory,
+            NodeCommandKind::GetTrafficPolicyHistory,
+        ),
+        "test_traffic_policy" => (
+            ActionBinding::TestTrafficPolicy,
+            NodeCommandKind::TestTrafficPolicy,
+        ),
         "shutdown_node" => (ActionBinding::ShutdownNode, NodeCommandKind::Shutdown),
         _ => {
             return Err(ModelError::UnknownAction {
@@ -2481,6 +2534,73 @@ pub fn build_command(
             })?;
             Ok(NodeCommand::TestPolicy(input))
         }
+        Ok(ActionBinding::GetTrafficPolicy) => Ok(NodeCommand::GetTrafficPolicy),
+        Ok(ActionBinding::PreviewTrafficPolicy) => Ok(NodeCommand::PreviewTrafficPolicy(
+            NodePreviewTrafficPolicyCommand {
+                expected_revision: parse_number(
+                    action,
+                    "expected_revision",
+                    &required("expected_revision")?,
+                )?,
+                draft: parse_traffic_policy_draft(action, "draft_json", &required("draft_json")?)?,
+            },
+        )),
+        Ok(ActionBinding::PreviewTrafficPolicyRollback) => Ok(
+            NodeCommand::PreviewTrafficPolicyRollback(NodePreviewTrafficPolicyRollbackCommand {
+                expected_revision: parse_number(
+                    action,
+                    "expected_revision",
+                    &required("expected_revision")?,
+                )?,
+                target_revision: parse_number(
+                    action,
+                    "target_revision",
+                    &required("target_revision")?,
+                )?,
+            }),
+        ),
+        Ok(ActionBinding::ApplyTrafficPolicy) => Ok(NodeCommand::ApplyTrafficPolicy(
+            NodeApplyTrafficPolicyCommand {
+                expected_revision: parse_number(
+                    action,
+                    "expected_revision",
+                    &required("expected_revision")?,
+                )?,
+                draft: parse_traffic_policy_draft(action, "draft_json", &required("draft_json")?)?,
+                confirm_risk: parse_bool(action, "confirm_risk", &required("confirm_risk")?)?,
+            },
+        )),
+        Ok(ActionBinding::RollbackTrafficPolicy) => Ok(NodeCommand::RollbackTrafficPolicy(
+            NodeRollbackTrafficPolicyCommand {
+                expected_revision: parse_number(
+                    action,
+                    "expected_revision",
+                    &required("expected_revision")?,
+                )?,
+                target_revision: parse_number(
+                    action,
+                    "target_revision",
+                    &required("target_revision")?,
+                )?,
+                confirm_risk: parse_bool(action, "confirm_risk", &required("confirm_risk")?)?,
+            },
+        )),
+        Ok(ActionBinding::GetTrafficPolicyHistory) => Ok(NodeCommand::GetTrafficPolicyHistory),
+        Ok(ActionBinding::TestTrafficPolicy) => Ok(NodeCommand::TestTrafficPolicy(
+            NodeTestTrafficPolicyCommand {
+                current: parse_traffic_policy(action, "current_json", &required("current_json")?)?,
+                candidate: parse_traffic_policy(
+                    action,
+                    "candidate_json",
+                    &required("candidate_json")?,
+                )?,
+                input: parse_traffic_policy_test_input(
+                    action,
+                    "input_json",
+                    &required("input_json")?,
+                )?,
+            },
+        )),
         Ok(ActionBinding::ShutdownNode) => Ok(NodeCommand::Shutdown),
         Err(ModelError::UnknownAction { action_id, .. }) => {
             Err(CommandBuildError::UnknownAction { action_id })
@@ -2630,6 +2750,18 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
             "confirm_privilege_expansion",
         ]),
         "test_policy" => HashSet::from(["policy_json"]),
+        "get_traffic_policy" | "get_traffic_policy_history" => HashSet::from([]),
+        "preview_traffic_policy" => HashSet::from(["expected_revision", "draft_json"]),
+        "preview_traffic_policy_rollback" => {
+            HashSet::from(["expected_revision", "target_revision"])
+        }
+        "apply_traffic_policy" => {
+            HashSet::from(["expected_revision", "draft_json", "confirm_risk"])
+        }
+        "rollback_traffic_policy" => {
+            HashSet::from(["expected_revision", "target_revision", "confirm_risk"])
+        }
+        "test_traffic_policy" => HashSet::from(["current_json", "candidate_json", "input_json"]),
         "start_node" | "stop_node" | "restart_node" | "shutdown_node" => HashSet::from([]),
         _ => return Err(format!("unknown action {}", action.id)),
     };
@@ -2840,6 +2972,42 @@ fn parse_policy_network_ids(
         });
     }
     Ok(ids)
+}
+
+fn parse_traffic_policy_draft(
+    action: &NodeUiAction,
+    field_id: &str,
+    value: &str,
+) -> Result<TrafficPolicyDraft, CommandBuildError> {
+    serde_json::from_str(value).map_err(|_| CommandBuildError::InvalidField {
+        action_id: action.id.clone(),
+        field_id: field_id.into(),
+        value: value.into(),
+    })
+}
+
+fn parse_traffic_policy(
+    action: &NodeUiAction,
+    field_id: &str,
+    value: &str,
+) -> Result<TrafficPolicy, CommandBuildError> {
+    serde_json::from_str(value).map_err(|_| CommandBuildError::InvalidField {
+        action_id: action.id.clone(),
+        field_id: field_id.into(),
+        value: value.into(),
+    })
+}
+
+fn parse_traffic_policy_test_input(
+    action: &NodeUiAction,
+    field_id: &str,
+    value: &str,
+) -> Result<TrafficPolicyTestInput, CommandBuildError> {
+    serde_json::from_str(value).map_err(|_| CommandBuildError::InvalidField {
+        action_id: action.id.clone(),
+        field_id: field_id.into(),
+        value: value.into(),
+    })
 }
 
 fn parse_selection(
@@ -7147,7 +7315,7 @@ mod tests {
 
     #[test]
     fn every_manifest_action_has_an_explicit_binding() {
-        assert_eq!(ActionBinding::ALL.len(), 61);
+        assert_eq!(ActionBinding::ALL.len(), 68);
         let manifest = node_ui_manifest();
         let actual = manifest
             .pages
@@ -7186,6 +7354,66 @@ mod tests {
             bind_action(&action),
             Err(ModelError::ActionCommandMismatch { .. })
         ));
+    }
+
+    fn traffic_policy_command_fixtures() -> (String, String, String, String) {
+        use fuckipv6_common::domain::{
+            ApplicationIdentity, DomainName, PortRange, TrafficAction, TrafficDefaultConfirmedBy,
+            TrafficDefaultPolicy, TrafficFailurePolicy, TrafficFlow, TrafficMatch, TrafficProtocol,
+            TrafficRule, TrafficRuleId,
+        };
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let node_id = NodeId::from_public_key(b"gpui-traffic-command-node");
+        let current = TrafficPolicy {
+            node_id: node_id.clone(),
+            revision: 1,
+            default_policy: TrafficDefaultPolicy {
+                action: TrafficAction::Direct,
+                confirmed_by: TrafficDefaultConfirmedBy::Owner,
+                confirmed_at_unix_ms: 1_700_000_000_000,
+            },
+            failure_policy: TrafficFailurePolicy::fail_closed(),
+            rules: vec![TrafficRule {
+                rule_id: TrafficRuleId::from_public_key(b"gpui-traffic-command-rule"),
+                priority: 1,
+                enabled: true,
+                matcher: TrafficMatch {
+                    exact_domains: vec![DomainName::parse("example.com").unwrap()],
+                    domain_suffixes: Vec::new(),
+                    destination_cidrs: Vec::new(),
+                    destination_ports: vec![PortRange {
+                        start: 443,
+                        end: 443,
+                    }],
+                    protocols: vec![TrafficProtocol::Tcp],
+                    applications: Vec::new(),
+                },
+                action: TrafficAction::Reject,
+                description: "Reject example traffic".into(),
+            }],
+        };
+        let candidate = TrafficPolicy {
+            revision: 2,
+            ..current.clone()
+        };
+        let input = TrafficPolicyTestInput::manual(
+            NetworkId::from_public_key(b"gpui-traffic-command-network"),
+            TrafficFlow {
+                domain: Some(DomainName::parse("example.com").unwrap()),
+                destination_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+                destination_port: 443,
+                protocol: TrafficProtocol::Tcp,
+                application: ApplicationIdentity::ExecutablePath("/usr/bin/curl".into()),
+            },
+        );
+        (
+            serde_json::to_string(&TrafficPolicyDraft::from_applied(&current))
+                .expect("traffic policy draft"),
+            serde_json::to_string(&current).expect("current traffic policy"),
+            serde_json::to_string(&candidate).expect("candidate traffic policy"),
+            serde_json::to_string(&input).expect("traffic policy test input"),
+        )
     }
 
     fn policy_test_fixture_json() -> String {
@@ -7268,6 +7496,40 @@ mod tests {
                     );
                     values.insert("includes_local_policy".into(), "false".into());
                     values.insert("confirm_privilege_expansion".into(), "true".into());
+                }
+                if matches!(
+                    action.id.as_str(),
+                    "preview_traffic_policy"
+                        | "preview_traffic_policy_rollback"
+                        | "apply_traffic_policy"
+                        | "rollback_traffic_policy"
+                ) {
+                    values.insert("expected_revision".into(), "1".into());
+                }
+                if matches!(
+                    action.id.as_str(),
+                    "preview_traffic_policy_rollback" | "rollback_traffic_policy"
+                ) {
+                    values.insert("target_revision".into(), "1".into());
+                }
+                if matches!(
+                    action.id.as_str(),
+                    "preview_traffic_policy" | "apply_traffic_policy"
+                ) {
+                    let (draft, _, _, _) = traffic_policy_command_fixtures();
+                    values.insert("draft_json".into(), draft);
+                }
+                if matches!(
+                    action.id.as_str(),
+                    "apply_traffic_policy" | "rollback_traffic_policy"
+                ) {
+                    values.insert("confirm_risk".into(), "true".into());
+                }
+                if action.id == "test_traffic_policy" {
+                    let (_, current, candidate, input) = traffic_policy_command_fixtures();
+                    values.insert("current_json".into(), current);
+                    values.insert("candidate_json".into(), candidate);
+                    values.insert("input_json".into(), input);
                 }
                 if matches!(
                     action.id.as_str(),

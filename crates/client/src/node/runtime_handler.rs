@@ -292,6 +292,37 @@ impl NodeRuntimeHandler {
                     Some(policy_store) => policy_history(&state, &policy_store, request_id).await,
                     None => unavailable(request_id, "读取策略历史需要节点配置管理器"),
                 },
+                super::NodeCommand::GetTrafficPolicy => unavailable(
+                    request_id,
+                    "读取流量策略需要已接入的生产 TUN/路由/DNS 事务适配器",
+                ),
+                super::NodeCommand::PreviewTrafficPolicy(_) => unavailable(
+                    request_id,
+                    "流量策略预览需要已接入的生产 TUN/路由/DNS 事务适配器",
+                ),
+                super::NodeCommand::PreviewTrafficPolicyRollback(_) => unavailable(
+                    request_id,
+                    "流量策略回滚预览需要已接入的生产 TUN/路由/DNS 事务适配器",
+                ),
+                super::NodeCommand::ApplyTrafficPolicy(_) => unavailable(
+                    request_id,
+                    "流量策略应用需要已接入的生产 TUN/路由/DNS 事务适配器",
+                ),
+                super::NodeCommand::RollbackTrafficPolicy(_) => unavailable(
+                    request_id,
+                    "流量策略回滚需要已接入的生产 TUN/路由/DNS 事务适配器",
+                ),
+                super::NodeCommand::GetTrafficPolicyHistory => unavailable(
+                    request_id,
+                    "读取流量策略历史需要已接入的生产 TUN/路由/DNS 事务适配器",
+                ),
+                super::NodeCommand::TestTrafficPolicy(command) => match command.compare() {
+                    Ok(comparison) => NodeCommandResult::completed(
+                        request_id,
+                        NodeCommandOutcome::TrafficPolicyTest(Box::new(comparison)),
+                    ),
+                    Err(problem) => NodeCommandResult::rejected(request_id, problem),
+                },
                 super::NodeCommand::GetDiagnostics => match runtime {
                     Some(runtime) => diagnostics_runtime(&runtime, request_id, cancel).await,
                     None => {

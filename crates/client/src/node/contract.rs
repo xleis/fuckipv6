@@ -221,19 +221,72 @@ mod tests {
         NodeGetInvitationStatusCommand, NodeJoinNetworkCommand, NodeListInvitationsCommand,
         NodeMemberRemovalPreviewCommand, NodeNetworkAllocation, NodeNetworkDiscoveryCommand,
         NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection,
-        NodePreviewConfigurationCommand, NodePreviewInvitationCommand, NodeProbePeerCommand,
-        NodeRedeemInvitationCommand, NodeRevokeInvitationCommand, NodeRollbackConfigurationCommand,
+        NodePreviewConfigurationCommand, NodePreviewInvitationCommand,
+        NodePreviewTrafficPolicyCommand, NodePreviewTrafficPolicyRollbackCommand,
+        NodeProbePeerCommand, NodeRedeemInvitationCommand, NodeRevokeInvitationCommand,
+        NodeRollbackConfigurationCommand, NodeRollbackTrafficPolicyCommand,
         NodeRotateNodeIdentityCommand, NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand,
         NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
     };
     use fuckipv6_common::{
         domain::{
-            ContentHash, InvitationCode, InvitationId, InvitationRedeemRequest,
-            MemberLifecycleAction, MembershipRole, NetworkId, NetworkProfileUpdate, NodeId,
+            ApplicationIdentity, ContentHash, DomainName, InvitationCode, InvitationId,
+            InvitationRedeemRequest, MemberLifecycleAction, MembershipRole, NetworkId,
+            NetworkProfileUpdate, NodeId, PortRange, TrafficAction, TrafficDefaultConfirmedBy,
+            TrafficDefaultPolicy, TrafficFailurePolicy, TrafficFlow, TrafficMatch, TrafficPolicy,
+            TrafficPolicyTestInput, TrafficProtocol, TrafficRule, TrafficRuleId,
         },
         NetworkMode,
     };
+    use std::net::{IpAddr, Ipv4Addr};
     use std::path::PathBuf;
+
+    use crate::node::{NodeApplyTrafficPolicyCommand, NodeTestTrafficPolicyCommand};
+    use crate::traffic_policy_transaction::TrafficPolicyDraft;
+
+    fn sample_traffic_policy(revision: u64) -> TrafficPolicy {
+        TrafficPolicy {
+            node_id: NodeId::from_public_key(b"traffic-policy-node"),
+            revision,
+            default_policy: TrafficDefaultPolicy {
+                action: TrafficAction::Direct,
+                confirmed_by: TrafficDefaultConfirmedBy::Owner,
+                confirmed_at_unix_ms: 1_700_000_000_000,
+            },
+            failure_policy: TrafficFailurePolicy::fail_closed(),
+            rules: vec![TrafficRule {
+                rule_id: TrafficRuleId::from_public_key(b"traffic-policy-rule"),
+                priority: 1,
+                enabled: true,
+                matcher: TrafficMatch {
+                    exact_domains: vec![DomainName::parse("example.com").unwrap()],
+                    domain_suffixes: Vec::new(),
+                    destination_cidrs: Vec::new(),
+                    destination_ports: vec![PortRange {
+                        start: 443,
+                        end: 443,
+                    }],
+                    protocols: vec![TrafficProtocol::Tcp],
+                    applications: Vec::new(),
+                },
+                action: TrafficAction::Reject,
+                description: "Reject example traffic".into(),
+            }],
+        }
+    }
+
+    fn sample_traffic_test_input() -> TrafficPolicyTestInput {
+        TrafficPolicyTestInput::manual(
+            NetworkId::from_public_key(b"traffic-policy-network"),
+            TrafficFlow {
+                domain: Some(DomainName::parse("example.com").unwrap()),
+                destination_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+                destination_port: 443,
+                protocol: TrafficProtocol::Tcp,
+                application: ApplicationIdentity::ExecutablePath("/usr/bin/curl".into()),
+            },
+        )
+    }
 
     fn sample_commands() -> Vec<NodeCommand> {
         vec![
@@ -584,6 +637,31 @@ mod tests {
                 local_policy: None,
                 network_acl: None,
                 now_unix_ms: 1_000,
+            }),
+            NodeCommand::GetTrafficPolicy,
+            NodeCommand::PreviewTrafficPolicy(NodePreviewTrafficPolicyCommand {
+                expected_revision: 1,
+                draft: TrafficPolicyDraft::from_applied(&sample_traffic_policy(1)),
+            }),
+            NodeCommand::PreviewTrafficPolicyRollback(NodePreviewTrafficPolicyRollbackCommand {
+                expected_revision: 1,
+                target_revision: 1,
+            }),
+            NodeCommand::ApplyTrafficPolicy(NodeApplyTrafficPolicyCommand {
+                expected_revision: 1,
+                draft: TrafficPolicyDraft::from_applied(&sample_traffic_policy(1)),
+                confirm_risk: false,
+            }),
+            NodeCommand::RollbackTrafficPolicy(NodeRollbackTrafficPolicyCommand {
+                expected_revision: 1,
+                target_revision: 1,
+                confirm_risk: false,
+            }),
+            NodeCommand::GetTrafficPolicyHistory,
+            NodeCommand::TestTrafficPolicy(NodeTestTrafficPolicyCommand {
+                current: sample_traffic_policy(1),
+                candidate: sample_traffic_policy(2),
+                input: sample_traffic_test_input(),
             }),
             NodeCommand::Shutdown,
         ]

@@ -423,7 +423,12 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         | NodeCommandKind::PreviewPolicy
         | NodeCommandKind::PreviewPolicyRollback
         | NodeCommandKind::GetPolicyHistory
-        | NodeCommandKind::TestPolicy => NodeUiAudit::none(),
+        | NodeCommandKind::TestPolicy
+        | NodeCommandKind::GetTrafficPolicy
+        | NodeCommandKind::PreviewTrafficPolicy
+        | NodeCommandKind::PreviewTrafficPolicyRollback
+        | NodeCommandKind::GetTrafficPolicyHistory
+        | NodeCommandKind::TestTrafficPolicy => NodeUiAudit::none(),
         NodeCommandKind::CreateNetwork => NodeUiAudit::record("network.create"),
         NodeCommandKind::UpdateNetworkProfile => NodeUiAudit::record("network.profile.update"),
         NodeCommandKind::PublishNetworkDiscovery => {
@@ -480,6 +485,8 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         NodeCommandKind::RollbackConfiguration => NodeUiAudit::record("configuration.rollback"),
         NodeCommandKind::ApplyPolicy => NodeUiAudit::record("policy.apply"),
         NodeCommandKind::RollbackPolicy => NodeUiAudit::record("policy.rollback"),
+        NodeCommandKind::ApplyTrafficPolicy => NodeUiAudit::record("traffic_policy.apply"),
+        NodeCommandKind::RollbackTrafficPolicy => NodeUiAudit::record("traffic_policy.rollback"),
         NodeCommandKind::Shutdown => NodeUiAudit::record("node.shutdown"),
     }
 }
@@ -510,6 +517,8 @@ pub enum NodeUiInputKind {
     ConfigurationJson,
     PolicyJson,
     PolicySnapshotJson,
+    TrafficPolicyJson,
+    TrafficPolicyTestJson,
     PolicyNetworkIds,
     DisplayName,
     ExternalHost,
@@ -564,6 +573,8 @@ pub enum NodeUiValidation {
     ConfigurationJson,
     PolicyJson,
     PolicySnapshotJson,
+    TrafficPolicyJson,
+    TrafficPolicyTestJson,
     PolicyNetworkIds,
     DisplayName,
     Fingerprint,
@@ -2522,6 +2533,182 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         None,
                     ),
                     action(
+                        "get_traffic_policy",
+                        "action.get_traffic_policy",
+                        NodeCommandKind::GetTrafficPolicy,
+                        NodeUiBackendStatus::Unavailable,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::Always,
+                        vec![],
+                        None,
+                    ),
+                    action(
+                        "preview_traffic_policy",
+                        "action.preview_traffic_policy",
+                        NodeCommandKind::PreviewTrafficPolicy,
+                        NodeUiBackendStatus::Unavailable,
+                        NodePermission::ChangeRouting,
+                        NodeUiAvailability::Always,
+                        vec![
+                            field(
+                                "expected_revision",
+                                "field.expected_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "draft_json",
+                                "field.traffic_policy_json",
+                                NodeUiInputKind::TrafficPolicyJson,
+                                true,
+                                NodeUiValidation::TrafficPolicyJson,
+                            ),
+                        ],
+                        None,
+                    ),
+                    action(
+                        "preview_traffic_policy_rollback",
+                        "action.preview_traffic_policy_rollback",
+                        NodeCommandKind::PreviewTrafficPolicyRollback,
+                        NodeUiBackendStatus::Unavailable,
+                        NodePermission::ChangeRouting,
+                        NodeUiAvailability::Always,
+                        vec![
+                            field(
+                                "expected_revision",
+                                "field.expected_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "target_revision",
+                                "field.target_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                        ],
+                        None,
+                    ),
+                    action(
+                        "apply_traffic_policy",
+                        "action.apply_traffic_policy",
+                        NodeCommandKind::ApplyTrafficPolicy,
+                        NodeUiBackendStatus::Unavailable,
+                        NodePermission::ChangeRouting,
+                        NodeUiAvailability::Always,
+                        vec![
+                            field(
+                                "expected_revision",
+                                "field.expected_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "draft_json",
+                                "field.traffic_policy_json",
+                                NodeUiInputKind::TrafficPolicyJson,
+                                true,
+                                NodeUiValidation::TrafficPolicyJson,
+                            ),
+                            field(
+                                "confirm_risk",
+                                "field.confirm_risk",
+                                NodeUiInputKind::Boolean,
+                                true,
+                                NodeUiValidation::None,
+                            ),
+                        ],
+                        Some(confirmation(
+                            NodeCommandKind::ApplyTrafficPolicy,
+                            "confirm.apply_traffic_policy.title",
+                            "confirm.apply_traffic_policy.consequence",
+                            true,
+                        )),
+                    ),
+                    action(
+                        "rollback_traffic_policy",
+                        "action.rollback_traffic_policy",
+                        NodeCommandKind::RollbackTrafficPolicy,
+                        NodeUiBackendStatus::Unavailable,
+                        NodePermission::ChangeRouting,
+                        NodeUiAvailability::Always,
+                        vec![
+                            field(
+                                "expected_revision",
+                                "field.expected_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "target_revision",
+                                "field.target_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "confirm_risk",
+                                "field.confirm_risk",
+                                NodeUiInputKind::Boolean,
+                                true,
+                                NodeUiValidation::None,
+                            ),
+                        ],
+                        Some(confirmation(
+                            NodeCommandKind::RollbackTrafficPolicy,
+                            "confirm.rollback_traffic_policy.title",
+                            "confirm.rollback_traffic_policy.consequence",
+                            true,
+                        )),
+                    ),
+                    action(
+                        "get_traffic_policy_history",
+                        "action.get_traffic_policy_history",
+                        NodeCommandKind::GetTrafficPolicyHistory,
+                        NodeUiBackendStatus::Unavailable,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::Always,
+                        vec![],
+                        None,
+                    ),
+                    action(
+                        "test_traffic_policy",
+                        "action.test_traffic_policy",
+                        NodeCommandKind::TestTrafficPolicy,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ChangeRouting,
+                        NodeUiAvailability::Always,
+                        vec![
+                            field(
+                                "current_json",
+                                "field.traffic_policy_json",
+                                NodeUiInputKind::TrafficPolicyJson,
+                                true,
+                                NodeUiValidation::TrafficPolicyJson,
+                            ),
+                            field(
+                                "candidate_json",
+                                "field.traffic_policy_json",
+                                NodeUiInputKind::TrafficPolicyJson,
+                                true,
+                                NodeUiValidation::TrafficPolicyJson,
+                            ),
+                            field(
+                                "input_json",
+                                "field.traffic_policy_test_json",
+                                NodeUiInputKind::TrafficPolicyTestJson,
+                                true,
+                                NodeUiValidation::TrafficPolicyTestJson,
+                            ),
+                        ],
+                        None,
+                    ),
+                    action(
                         "shutdown_node",
                         "action.shutdown_node",
                         NodeCommandKind::Shutdown,
@@ -2875,7 +3062,9 @@ mod tests {
                         field.id
                     );
                 }
-                if action.backend_status == NodeUiBackendStatus::Unavailable {
+                if action.backend_status == NodeUiBackendStatus::Unavailable
+                    && action.command.is_write()
+                {
                     assert!(!action.fields.is_empty());
                 }
             }

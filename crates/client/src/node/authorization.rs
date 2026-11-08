@@ -668,7 +668,14 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::GetPolicy
         | NodeCommandKind::PreviewPolicy
         | NodeCommandKind::PreviewPolicyRollback
-        | NodeCommandKind::GetPolicyHistory => NodePermission::ViewState,
+        | NodeCommandKind::GetPolicyHistory
+        | NodeCommandKind::GetTrafficPolicy
+        | NodeCommandKind::GetTrafficPolicyHistory => NodePermission::ViewState,
+        NodeCommandKind::PreviewTrafficPolicy
+        | NodeCommandKind::PreviewTrafficPolicyRollback
+        | NodeCommandKind::ApplyTrafficPolicy
+        | NodeCommandKind::RollbackTrafficPolicy
+        | NodeCommandKind::TestTrafficPolicy => NodePermission::ChangeRouting,
         NodeCommandKind::UpdateRouting => NodePermission::ChangeRouting,
         NodeCommandKind::SetNetworkRole => NodePermission::ManageRoles,
         NodeCommandKind::ProbePeer => NodePermission::ProbePeers,
@@ -753,6 +760,13 @@ fn is_local_owner_only(kind: NodeCommandKind) -> bool {
             | NodeCommandKind::ApplyPolicy
             | NodeCommandKind::RollbackPolicy
             | NodeCommandKind::GetPolicyHistory
+            | NodeCommandKind::GetTrafficPolicy
+            | NodeCommandKind::PreviewTrafficPolicy
+            | NodeCommandKind::PreviewTrafficPolicyRollback
+            | NodeCommandKind::ApplyTrafficPolicy
+            | NodeCommandKind::RollbackTrafficPolicy
+            | NodeCommandKind::GetTrafficPolicyHistory
+            | NodeCommandKind::TestTrafficPolicy
     )
 }
 
@@ -777,6 +791,17 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         | NodeCommandKind::PreviewPolicy
         | NodeCommandKind::PreviewPolicyRollback
         | NodeCommandKind::GetPolicyHistory => (PolicyAction::Read, ResourceKind::SecurityPolicy),
+        NodeCommandKind::GetTrafficPolicy | NodeCommandKind::GetTrafficPolicyHistory => {
+            (PolicyAction::Read, ResourceKind::TrafficPolicy)
+        }
+        NodeCommandKind::PreviewTrafficPolicy | NodeCommandKind::PreviewTrafficPolicyRollback => {
+            (PolicyAction::Read, ResourceKind::TrafficPolicy)
+        }
+        NodeCommandKind::ApplyTrafficPolicy => (PolicyAction::Update, ResourceKind::TrafficPolicy),
+        NodeCommandKind::RollbackTrafficPolicy => {
+            (PolicyAction::Recover, ResourceKind::TrafficPolicy)
+        }
+        NodeCommandKind::TestTrafficPolicy => (PolicyAction::Test, ResourceKind::TrafficPolicy),
         NodeCommandKind::ApplyConfiguration
         | NodeCommandKind::SetNodeDisplayName
         | NodeCommandKind::RotateNodeIdentity => (PolicyAction::Update, ResourceKind::Keys),
@@ -860,7 +885,14 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
         | NodeCommand::PreviewPolicyRollback(_)
         | NodeCommand::ApplyPolicy(_)
         | NodeCommand::RollbackPolicy(_)
-        | NodeCommand::GetPolicyHistory => NetworkTargets::None,
+        | NodeCommand::GetPolicyHistory
+        | NodeCommand::GetTrafficPolicy
+        | NodeCommand::PreviewTrafficPolicy(_)
+        | NodeCommand::PreviewTrafficPolicyRollback(_)
+        | NodeCommand::ApplyTrafficPolicy(_)
+        | NodeCommand::RollbackTrafficPolicy(_)
+        | NodeCommand::GetTrafficPolicyHistory
+        | NodeCommand::TestTrafficPolicy(_) => NetworkTargets::None,
         NodeCommand::StartNetworks { selection } => match selection {
             super::NodeNetworkSelection::Named(names) => NetworkTargets::Named(names.clone()),
             super::NodeNetworkSelection::None => NetworkTargets::None,

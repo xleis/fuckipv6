@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitNodeCapabilities", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeApplyPolicyCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodePreviewPolicyCommand", "NodePreviewPolicyRollbackCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRollbackPolicyCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyAffectedObject", "PolicyApplyResult", "PolicyCurrent", "PolicyDiffEntry", "PolicyHistoryEntry", "PolicyHistorySnapshot", "PolicyPrecedenceExplanation", "PolicyPreview", "PolicyRiskSummary", "PolicyRollbackResult", "PolicyRuleExplanation", "PolicySnapshot", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TunCapabilities", "UiModeResolution", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "ConfirmedTrafficDirectFallback", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitNodeCapabilities", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeApplyPolicyCommand", "NodeApplyTrafficPolicyCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodePreviewPolicyCommand", "NodePreviewPolicyRollbackCommand", "NodePreviewTrafficPolicyCommand", "NodePreviewTrafficPolicyRollbackCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRollbackPolicyCommand", "NodeRollbackTrafficPolicyCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTestTrafficPolicyCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyAffectedObject", "PolicyApplyResult", "PolicyCurrent", "PolicyDiffEntry", "PolicyHistoryEntry", "PolicyHistorySnapshot", "PolicyPrecedenceExplanation", "PolicyPreview", "PolicyRiskSummary", "PolicyRollbackResult", "PolicyRuleExplanation", "PolicySnapshot", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "PortRange", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TrafficDefaultPolicy", "TrafficFailureDecision", "TrafficFailurePolicy", "TrafficFlow", "TrafficMatch", "TrafficPolicy", "TrafficPolicyAffectedObject", "TrafficPolicyApplyResult", "TrafficPolicyCurrent", "TrafficPolicyDiffEntry", "TrafficPolicyDraft", "TrafficPolicyHistoryEntry", "TrafficPolicyHistorySnapshot", "TrafficPolicyPreview", "TrafficPolicyRollbackResult", "TrafficPolicyTestComparison", "TrafficPolicyTestDelta", "TrafficPolicyTestInput", "TrafficRule", "TrafficRuleRisk", "TunCapabilities", "UiModeResolution", "ApplicationIdentity", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector", "TrafficAction", "TrafficMatchRisk", "TrafficPolicyTestContextSource", "TrafficPolicyTestDecision"
     };
 
     public enum AclAction {
@@ -1047,6 +1047,7 @@ public final class NodeContractV1 {
         ACKNOWLEDGE_MEMBERSHIP_POLICY("acknowledge_membership_policy"),
         APPLY_CONFIGURATION("apply_configuration"),
         APPLY_POLICY("apply_policy"),
+        APPLY_TRAFFIC_POLICY("apply_traffic_policy"),
         BAN_CLIENT("ban_client"),
         BATCH_REVIEW_JOIN_REQUESTS("batch_review_join_requests"),
         CHANGE_MEMBER_LIFECYCLE("change_member_lifecycle"),
@@ -1062,6 +1063,8 @@ public final class NodeContractV1 {
         GET_POLICY("get_policy"),
         GET_POLICY_HISTORY("get_policy_history"),
         GET_SNAPSHOT("get_snapshot"),
+        GET_TRAFFIC_POLICY("get_traffic_policy"),
+        GET_TRAFFIC_POLICY_HISTORY("get_traffic_policy_history"),
         GET_UI_MANIFEST("get_ui_manifest"),
         JOIN_NETWORK("join_network"),
         LEAVE_NETWORK("leave_network"),
@@ -1075,6 +1078,8 @@ public final class NodeContractV1 {
         PREVIEW_NETWORK_PROFILE("preview_network_profile"),
         PREVIEW_POLICY("preview_policy"),
         PREVIEW_POLICY_ROLLBACK("preview_policy_rollback"),
+        PREVIEW_TRAFFIC_POLICY("preview_traffic_policy"),
+        PREVIEW_TRAFFIC_POLICY_ROLLBACK("preview_traffic_policy_rollback"),
         PROBE_PEER("probe_peer"),
         PUBLISH_NETWORK_DISCOVERY("publish_network_discovery"),
         REBUILD_TUN("rebuild_tun"),
@@ -1088,6 +1093,7 @@ public final class NodeContractV1 {
         REVOKE_INVITATION("revoke_invitation"),
         ROLLBACK_CONFIGURATION("rollback_configuration"),
         ROLLBACK_POLICY("rollback_policy"),
+        ROLLBACK_TRAFFIC_POLICY("rollback_traffic_policy"),
         ROTATE_NODE_IDENTITY("rotate_node_identity"),
         SET_NETWORK_ROLE("set_network_role"),
         SET_NODE_DISPLAY_NAME("set_node_display_name"),
@@ -1098,6 +1104,7 @@ public final class NodeContractV1 {
         STOP_NODE("stop_node"),
         SUBMIT_JOIN_REQUEST("submit_join_request"),
         TEST_POLICY("test_policy"),
+        TEST_TRAFFIC_POLICY("test_traffic_policy"),
         UNBAN_CLIENT("unban_client"),
         UNPUBLISH_NETWORK_DISCOVERY("unpublish_network_discovery"),
         UPDATE_NETWORK_ALLOCATION("update_network_allocation"),
@@ -1852,6 +1859,8 @@ public final class NodeContractV1 {
         CONFIGURATION_JSON("configuration_json"),
         POLICY_JSON("policy_json"),
         POLICY_SNAPSHOT_JSON("policy_snapshot_json"),
+        TRAFFIC_POLICY_JSON("traffic_policy_json"),
+        TRAFFIC_POLICY_TEST_JSON("traffic_policy_test_json"),
         POLICY_NETWORK_IDS("policy_network_ids"),
         DISPLAY_NAME("display_name"),
         EXTERNAL_HOST("external_host"),
@@ -1958,6 +1967,8 @@ public final class NodeContractV1 {
         CONFIGURATION_JSON("configuration_json"),
         POLICY_JSON("policy_json"),
         POLICY_SNAPSHOT_JSON("policy_snapshot_json"),
+        TRAFFIC_POLICY_JSON("traffic_policy_json"),
+        TRAFFIC_POLICY_TEST_JSON("traffic_policy_test_json"),
         POLICY_NETWORK_IDS("policy_network_ids"),
         DISPLAY_NAME("display_name"),
         FINGERPRINT("fingerprint"),
@@ -2631,6 +2642,290 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum TrafficDecisionReason {
+        FIRST_MATCH("first_match"),
+        DEFAULT("default");
+
+        private final String wireName;
+
+        TrafficDecisionReason(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static TrafficDecisionReason fromWireName(String value) {
+            for (TrafficDecisionReason candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown TrafficDecisionReason wire value: " + value);
+        }
+    }
+
+    public enum TrafficDefaultConfirmedBy {
+        OWNER("owner"),
+        ADMINISTRATOR("administrator");
+
+        private final String wireName;
+
+        TrafficDefaultConfirmedBy(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static TrafficDefaultConfirmedBy fromWireName(String value) {
+            for (TrafficDefaultConfirmedBy candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown TrafficDefaultConfirmedBy wire value: " + value);
+        }
+    }
+
+    public enum TrafficFailureDecisionReason {
+        DEFAULT_FAIL_CLOSED("default_fail_closed"),
+        NOT_ALLOWED_BY_POLICY("not_allowed_by_policy"),
+        EXPLICIT_DIRECT_FALLBACK("explicit_direct_fallback"),
+        UNSAFE_FAILURE_CLASS("unsafe_failure_class"),
+        REJECT_RULE("reject_rule"),
+        FIXED_EXIT("fixed_exit"),
+        FIXED_NETWORK("fixed_network"),
+        DIRECT_ACTION_HAS_NO_ALTERNATE("direct_action_has_no_alternate");
+
+        private final String wireName;
+
+        TrafficFailureDecisionReason(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static TrafficFailureDecisionReason fromWireName(String value) {
+            for (TrafficFailureDecisionReason candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown TrafficFailureDecisionReason wire value: " + value);
+        }
+    }
+
+    public enum TrafficFailureKind {
+        UNKNOWN_APPLICATION("unknown_application"),
+        DNS_RESOLUTION_TIMEOUT("dns_resolution_timeout"),
+        DNS_POLLUTION_DETECTED("dns_pollution_detected"),
+        EXIT_UNAVAILABLE("exit_unavailable"),
+        NETWORK_SELECTION_UNAVAILABLE("network_selection_unavailable"),
+        CONNECTION_TIMEOUT("connection_timeout"),
+        PARTIAL_CONNECTION_FAILURE("partial_connection_failure");
+
+        private final String wireName;
+
+        TrafficFailureKind(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static TrafficFailureKind fromWireName(String value) {
+            for (TrafficFailureKind candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown TrafficFailureKind wire value: " + value);
+        }
+    }
+
+    public enum TrafficFailureOutcome {
+        FAIL_CLOSED("fail_closed"),
+        DIRECT_FALLBACK("direct_fallback");
+
+        private final String wireName;
+
+        TrafficFailureOutcome(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static TrafficFailureOutcome fromWireName(String value) {
+            for (TrafficFailureOutcome candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown TrafficFailureOutcome wire value: " + value);
+        }
+    }
+
+    public enum TrafficFailureRecoveryAction {
+        RETRY_REQUESTED_ROUTE("retry_requested_route");
+
+        private final String wireName;
+
+        TrafficFailureRecoveryAction(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static TrafficFailureRecoveryAction fromWireName(String value) {
+            for (TrafficFailureRecoveryAction candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown TrafficFailureRecoveryAction wire value: " + value);
+        }
+    }
+
+    public enum TrafficPolicyChangeAction {
+        APPLY("apply"),
+        ROLLBACK("rollback");
+
+        private final String wireName;
+
+        TrafficPolicyChangeAction(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static TrafficPolicyChangeAction fromWireName(String value) {
+            for (TrafficPolicyChangeAction candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown TrafficPolicyChangeAction wire value: " + value);
+        }
+    }
+
+    public enum TrafficPolicyChangeKind {
+        RULE_ADDED("rule_added"),
+        RULE_REMOVED("rule_removed"),
+        RULE_UPDATED("rule_updated"),
+        RULES_REORDERED("rules_reordered"),
+        DEFAULT_POLICY_CHANGED("default_policy_changed"),
+        FAILURE_POLICY_CHANGED("failure_policy_changed");
+
+        private final String wireName;
+
+        TrafficPolicyChangeKind(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static TrafficPolicyChangeKind fromWireName(String value) {
+            for (TrafficPolicyChangeKind candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown TrafficPolicyChangeKind wire value: " + value);
+        }
+    }
+
+    public enum TrafficPolicyHistoryOutcome {
+        APPLIED("applied"),
+        ROLLED_BACK("rolled_back"),
+        FAILED("failed"),
+        RECOVERED("recovered");
+
+        private final String wireName;
+
+        TrafficPolicyHistoryOutcome(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static TrafficPolicyHistoryOutcome fromWireName(String value) {
+            for (TrafficPolicyHistoryOutcome candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown TrafficPolicyHistoryOutcome wire value: " + value);
+        }
+    }
+
+    public enum TrafficPolicyObjectKind {
+        RULE("rule"),
+        DEFAULT_POLICY("default_policy"),
+        FAILURE_POLICY("failure_policy"),
+        NETWORK("network"),
+        EXIT("exit");
+
+        private final String wireName;
+
+        TrafficPolicyObjectKind(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static TrafficPolicyObjectKind fromWireName(String value) {
+            for (TrafficPolicyObjectKind candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown TrafficPolicyObjectKind wire value: " + value);
+        }
+    }
+
+    public enum TrafficProtocol {
+        TCP("tcp"),
+        UDP("udp"),
+        ICMP("icmp");
+
+        private final String wireName;
+
+        TrafficProtocol(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static TrafficProtocol fromWireName(String value) {
+            for (TrafficProtocol candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown TrafficProtocol wire value: " + value);
+        }
+    }
+
     public enum TunCapabilityReason {
         PLATFORM_UNSUPPORTED("platform_unsupported"),
         PERMISSION_DENIED("permission_denied"),
@@ -2883,6 +3178,19 @@ public final class NodeContractV1 {
             this.code = code;
             this.message = message;
             this.path = path;
+        }
+    }
+
+    /** DTO for ConfirmedTrafficDirectFallback. */
+    public static final class ConfirmedTrafficDirectFallback {
+        public final List<String> allowed_failures;
+        public final Long confirmed_at_unix_ms;
+        public final TrafficDefaultConfirmedBy confirmed_by;
+
+        public ConfirmedTrafficDirectFallback(List<String> allowed_failures, Long confirmed_at_unix_ms, TrafficDefaultConfirmedBy confirmed_by) {
+            this.allowed_failures = allowed_failures;
+            this.confirmed_at_unix_ms = confirmed_at_unix_ms;
+            this.confirmed_by = confirmed_by;
         }
     }
 
@@ -3907,6 +4215,19 @@ public final class NodeContractV1 {
             this.expected_revision = expected_revision;
             this.includes_local_policy = includes_local_policy;
             this.network_ids = network_ids;
+        }
+    }
+
+    /** DTO for NodeApplyTrafficPolicyCommand. */
+    public static final class NodeApplyTrafficPolicyCommand {
+        public final Boolean confirm_risk;
+        public final TrafficPolicyDraft draft;
+        public final Long expected_revision;
+
+        public NodeApplyTrafficPolicyCommand(Boolean confirm_risk, TrafficPolicyDraft draft, Long expected_revision) {
+            this.confirm_risk = confirm_risk;
+            this.draft = draft;
+            this.expected_revision = expected_revision;
         }
     }
 
@@ -5148,6 +5469,28 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodePreviewTrafficPolicyCommand. */
+    public static final class NodePreviewTrafficPolicyCommand {
+        public final TrafficPolicyDraft draft;
+        public final Long expected_revision;
+
+        public NodePreviewTrafficPolicyCommand(TrafficPolicyDraft draft, Long expected_revision) {
+            this.draft = draft;
+            this.expected_revision = expected_revision;
+        }
+    }
+
+    /** DTO for NodePreviewTrafficPolicyRollbackCommand. */
+    public static final class NodePreviewTrafficPolicyRollbackCommand {
+        public final Long expected_revision;
+        public final Long target_revision;
+
+        public NodePreviewTrafficPolicyRollbackCommand(Long expected_revision, Long target_revision) {
+            this.expected_revision = expected_revision;
+            this.target_revision = target_revision;
+        }
+    }
+
     /** DTO for NodeProbePeerCommand. */
     public static final class NodeProbePeerCommand {
         public final String network_name;
@@ -5286,6 +5629,19 @@ public final class NodeContractV1 {
             this.expected_revision = expected_revision;
             this.includes_local_policy = includes_local_policy;
             this.network_ids = network_ids;
+            this.target_revision = target_revision;
+        }
+    }
+
+    /** DTO for NodeRollbackTrafficPolicyCommand. */
+    public static final class NodeRollbackTrafficPolicyCommand {
+        public final Boolean confirm_risk;
+        public final Long expected_revision;
+        public final Long target_revision;
+
+        public NodeRollbackTrafficPolicyCommand(Boolean confirm_risk, Long expected_revision, Long target_revision) {
+            this.confirm_risk = confirm_risk;
+            this.expected_revision = expected_revision;
             this.target_revision = target_revision;
         }
     }
@@ -5454,6 +5810,19 @@ public final class NodeContractV1 {
         public NodeSubmitJoinRequestCommand(String network_id, String reason) {
             this.network_id = network_id;
             this.reason = reason;
+        }
+    }
+
+    /** DTO for NodeTestTrafficPolicyCommand. */
+    public static final class NodeTestTrafficPolicyCommand {
+        public final TrafficPolicy candidate;
+        public final TrafficPolicy current;
+        public final TrafficPolicyTestInput input;
+
+        public NodeTestTrafficPolicyCommand(TrafficPolicy candidate, TrafficPolicy current, TrafficPolicyTestInput input) {
+            this.candidate = candidate;
+            this.current = current;
+            this.input = input;
         }
     }
 
@@ -5993,6 +6362,17 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for PortRange. */
+    public static final class PortRange {
+        public final Integer end;
+        public final Integer start;
+
+        public PortRange(Integer end, Integer start) {
+            this.end = end;
+            this.start = start;
+        }
+    }
+
     /** DTO for ProjectedActivityEntry. */
     public static final class ProjectedActivityEntry {
         public final String action;
@@ -6366,6 +6746,362 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for TrafficDefaultPolicy. */
+    public static final class TrafficDefaultPolicy {
+        public final TrafficAction action;
+        public final Long confirmed_at_unix_ms;
+        public final TrafficDefaultConfirmedBy confirmed_by;
+
+        public TrafficDefaultPolicy(TrafficAction action, Long confirmed_at_unix_ms, TrafficDefaultConfirmedBy confirmed_by) {
+            this.action = action;
+            this.confirmed_at_unix_ms = confirmed_at_unix_ms;
+            this.confirmed_by = confirmed_by;
+        }
+    }
+
+    /** DTO for TrafficFailureDecision. */
+    public static final class TrafficFailureDecision {
+        public final String consequence_key;
+        public final ConfirmedTrafficDirectFallback direct_fallback;
+        public final String failure;
+        public final TrafficFailureOutcome outcome;
+        public final TrafficFailureDecisionReason reason;
+        public final TrafficFailureRecoveryAction recovery_action;
+
+        public TrafficFailureDecision(String consequence_key, ConfirmedTrafficDirectFallback direct_fallback, String failure, TrafficFailureOutcome outcome, TrafficFailureDecisionReason reason, TrafficFailureRecoveryAction recovery_action) {
+            this.consequence_key = consequence_key;
+            this.direct_fallback = direct_fallback;
+            this.failure = failure;
+            this.outcome = outcome;
+            this.reason = reason;
+            this.recovery_action = recovery_action;
+        }
+    }
+
+    /** DTO for TrafficFailurePolicy. */
+    public static final class TrafficFailurePolicy {
+        public final ConfirmedTrafficDirectFallback direct_fallback;
+
+        public TrafficFailurePolicy(ConfirmedTrafficDirectFallback direct_fallback) {
+            this.direct_fallback = direct_fallback;
+        }
+    }
+
+    /** DTO for TrafficFlow. */
+    public static final class TrafficFlow {
+        public final ApplicationIdentity application;
+        public final String destination_ip;
+        public final Integer destination_port;
+        public final String domain;
+        public final TrafficProtocol protocol;
+
+        public TrafficFlow(ApplicationIdentity application, String destination_ip, Integer destination_port, String domain, TrafficProtocol protocol) {
+            this.application = application;
+            this.destination_ip = destination_ip;
+            this.destination_port = destination_port;
+            this.domain = domain;
+            this.protocol = protocol;
+        }
+    }
+
+    /** DTO for TrafficMatch. */
+    public static final class TrafficMatch {
+        public final List<ApplicationIdentity> applications;
+        public final List<String> destination_cidrs;
+        public final List<PortRange> destination_ports;
+        public final List<String> domain_suffixes;
+        public final List<String> exact_domains;
+        public final List<TrafficProtocol> protocols;
+
+        public TrafficMatch(List<ApplicationIdentity> applications, List<String> destination_cidrs, List<PortRange> destination_ports, List<String> domain_suffixes, List<String> exact_domains, List<TrafficProtocol> protocols) {
+            this.applications = applications;
+            this.destination_cidrs = destination_cidrs;
+            this.destination_ports = destination_ports;
+            this.domain_suffixes = domain_suffixes;
+            this.exact_domains = exact_domains;
+            this.protocols = protocols;
+        }
+    }
+
+    /** DTO for TrafficPolicy. */
+    public static final class TrafficPolicy {
+        public final TrafficDefaultPolicy default_policy;
+        public final TrafficFailurePolicy failure_policy;
+        public final String node_id;
+        public final Long revision;
+        public final List<TrafficRule> rules;
+
+        public TrafficPolicy(TrafficDefaultPolicy default_policy, TrafficFailurePolicy failure_policy, String node_id, Long revision, List<TrafficRule> rules) {
+            this.default_policy = default_policy;
+            this.failure_policy = failure_policy;
+            this.node_id = node_id;
+            this.revision = revision;
+            this.rules = rules;
+        }
+    }
+
+    /** DTO for TrafficPolicyAffectedObject. */
+    public static final class TrafficPolicyAffectedObject {
+        public final TrafficPolicyObjectKind kind;
+        public final String object_id;
+
+        public TrafficPolicyAffectedObject(TrafficPolicyObjectKind kind, String object_id) {
+            this.kind = kind;
+            this.object_id = object_id;
+        }
+    }
+
+    /** DTO for TrafficPolicyApplyResult. */
+    public static final class TrafficPolicyApplyResult {
+        public final List<TrafficPolicyAffectedObject> affected_objects;
+        public final String content_hash;
+        public final List<TrafficPolicyDiffEntry> diffs;
+        public final TrafficPolicyHistoryEntry history;
+        public final Boolean no_op;
+        public final TrafficPolicy policy;
+        public final Long previous_revision;
+        public final Long revision;
+
+        public TrafficPolicyApplyResult(List<TrafficPolicyAffectedObject> affected_objects, String content_hash, List<TrafficPolicyDiffEntry> diffs, TrafficPolicyHistoryEntry history, Boolean no_op, TrafficPolicy policy, Long previous_revision, Long revision) {
+            this.affected_objects = affected_objects;
+            this.content_hash = content_hash;
+            this.diffs = diffs;
+            this.history = history;
+            this.no_op = no_op;
+            this.policy = policy;
+            this.previous_revision = previous_revision;
+            this.revision = revision;
+        }
+    }
+
+    /** DTO for TrafficPolicyCurrent. */
+    public static final class TrafficPolicyCurrent {
+        public final String content_hash;
+        public final TrafficPolicy policy;
+        public final Long revision;
+
+        public TrafficPolicyCurrent(String content_hash, TrafficPolicy policy, Long revision) {
+            this.content_hash = content_hash;
+            this.policy = policy;
+            this.revision = revision;
+        }
+    }
+
+    /** DTO for TrafficPolicyDiffEntry. */
+    public static final class TrafficPolicyDiffEntry {
+        public final Object after;
+        public final Object before;
+        public final TrafficPolicyChangeKind change;
+        public final String path;
+
+        public TrafficPolicyDiffEntry(Object after, Object before, TrafficPolicyChangeKind change, String path) {
+            this.after = after;
+            this.before = before;
+            this.change = change;
+            this.path = path;
+        }
+    }
+
+    /** DTO for TrafficPolicyDraft. */
+    public static final class TrafficPolicyDraft {
+        public final TrafficDefaultPolicy default_policy;
+        public final TrafficFailurePolicy failure_policy;
+        public final String node_id;
+        public final List<TrafficRule> rules;
+
+        public TrafficPolicyDraft(TrafficDefaultPolicy default_policy, TrafficFailurePolicy failure_policy, String node_id, List<TrafficRule> rules) {
+            this.default_policy = default_policy;
+            this.failure_policy = failure_policy;
+            this.node_id = node_id;
+            this.rules = rules;
+        }
+    }
+
+    /** DTO for TrafficPolicyHistoryEntry. */
+    public static final class TrafficPolicyHistoryEntry {
+        public final TrafficPolicyChangeAction action;
+        public final String actor;
+        public final List<TrafficPolicyAffectedObject> affected_objects;
+        public final Long applied_revision;
+        public final Long candidate_revision;
+        public final String content_hash;
+        public final List<TrafficPolicyDiffEntry> diffs;
+        public final String occurred_at;
+        public final TrafficPolicyHistoryOutcome outcome;
+        public final Long previous_revision;
+        public final String reason;
+        public final String reason_code;
+        public final String source;
+        public final Long target_revision;
+        public final String transaction_id;
+
+        public TrafficPolicyHistoryEntry(TrafficPolicyChangeAction action, String actor, List<TrafficPolicyAffectedObject> affected_objects, Long applied_revision, Long candidate_revision, String content_hash, List<TrafficPolicyDiffEntry> diffs, String occurred_at, TrafficPolicyHistoryOutcome outcome, Long previous_revision, String reason, String reason_code, String source, Long target_revision, String transaction_id) {
+            this.action = action;
+            this.actor = actor;
+            this.affected_objects = affected_objects;
+            this.applied_revision = applied_revision;
+            this.candidate_revision = candidate_revision;
+            this.content_hash = content_hash;
+            this.diffs = diffs;
+            this.occurred_at = occurred_at;
+            this.outcome = outcome;
+            this.previous_revision = previous_revision;
+            this.reason = reason;
+            this.reason_code = reason_code;
+            this.source = source;
+            this.target_revision = target_revision;
+            this.transaction_id = transaction_id;
+        }
+    }
+
+    /** DTO for TrafficPolicyHistorySnapshot. */
+    public static final class TrafficPolicyHistorySnapshot {
+        public final Long current_revision;
+        public final List<TrafficPolicyHistoryEntry> entries;
+
+        public TrafficPolicyHistorySnapshot(Long current_revision, List<TrafficPolicyHistoryEntry> entries) {
+            this.current_revision = current_revision;
+            this.entries = entries;
+        }
+    }
+
+    /** DTO for TrafficPolicyPreview. */
+    public static final class TrafficPolicyPreview {
+        public final List<TrafficPolicyAffectedObject> affected_objects;
+        public final Boolean can_apply;
+        public final TrafficPolicy candidate;
+        public final Long candidate_revision;
+        public final TrafficPolicy current;
+        public final Long current_revision;
+        public final List<TrafficPolicyDiffEntry> diffs;
+        public final Long expected_revision;
+        public final Boolean has_changes;
+        public final Boolean revision_conflict;
+        public final List<TrafficRuleRisk> risks;
+        public final Long rollback_target_revision;
+
+        public TrafficPolicyPreview(List<TrafficPolicyAffectedObject> affected_objects, Boolean can_apply, TrafficPolicy candidate, Long candidate_revision, TrafficPolicy current, Long current_revision, List<TrafficPolicyDiffEntry> diffs, Long expected_revision, Boolean has_changes, Boolean revision_conflict, List<TrafficRuleRisk> risks, Long rollback_target_revision) {
+            this.affected_objects = affected_objects;
+            this.can_apply = can_apply;
+            this.candidate = candidate;
+            this.candidate_revision = candidate_revision;
+            this.current = current;
+            this.current_revision = current_revision;
+            this.diffs = diffs;
+            this.expected_revision = expected_revision;
+            this.has_changes = has_changes;
+            this.revision_conflict = revision_conflict;
+            this.risks = risks;
+            this.rollback_target_revision = rollback_target_revision;
+        }
+    }
+
+    /** DTO for TrafficPolicyRollbackResult. */
+    public static final class TrafficPolicyRollbackResult {
+        public final List<TrafficPolicyAffectedObject> affected_objects;
+        public final String content_hash;
+        public final List<TrafficPolicyDiffEntry> diffs;
+        public final TrafficPolicyHistoryEntry history;
+        public final TrafficPolicy policy;
+        public final Long previous_revision;
+        public final Long revision;
+        public final Long target_revision;
+
+        public TrafficPolicyRollbackResult(List<TrafficPolicyAffectedObject> affected_objects, String content_hash, List<TrafficPolicyDiffEntry> diffs, TrafficPolicyHistoryEntry history, TrafficPolicy policy, Long previous_revision, Long revision, Long target_revision) {
+            this.affected_objects = affected_objects;
+            this.content_hash = content_hash;
+            this.diffs = diffs;
+            this.history = history;
+            this.policy = policy;
+            this.previous_revision = previous_revision;
+            this.revision = revision;
+            this.target_revision = target_revision;
+        }
+    }
+
+    /** DTO for TrafficPolicyTestComparison. */
+    public static final class TrafficPolicyTestComparison {
+        public final TrafficPolicyTestDecision after;
+        public final TrafficPolicyTestDecision before;
+        public final TrafficPolicyTestDelta delta;
+        public final String network_id;
+        public final TrafficPolicyTestContextSource source;
+
+        public TrafficPolicyTestComparison(TrafficPolicyTestDecision after, TrafficPolicyTestDecision before, TrafficPolicyTestDelta delta, String network_id, TrafficPolicyTestContextSource source) {
+            this.after = after;
+            this.before = before;
+            this.delta = delta;
+            this.network_id = network_id;
+            this.source = source;
+        }
+    }
+
+    /** DTO for TrafficPolicyTestDelta. */
+    public static final class TrafficPolicyTestDelta {
+        public final Boolean changed;
+        public final Boolean failure_outcomes_changed;
+        public final Boolean matched_rule_changed;
+        public final Boolean route_changed;
+
+        public TrafficPolicyTestDelta(Boolean changed, Boolean failure_outcomes_changed, Boolean matched_rule_changed, Boolean route_changed) {
+            this.changed = changed;
+            this.failure_outcomes_changed = failure_outcomes_changed;
+            this.matched_rule_changed = matched_rule_changed;
+            this.route_changed = route_changed;
+        }
+    }
+
+    /** DTO for TrafficPolicyTestInput. */
+    public static final class TrafficPolicyTestInput {
+        public final String fixed_exit;
+        public final String fixed_network;
+        public final TrafficFlow flow;
+        public final String network_id;
+        public final TrafficPolicyTestContextSource source;
+
+        public TrafficPolicyTestInput(String fixed_exit, String fixed_network, TrafficFlow flow, String network_id, TrafficPolicyTestContextSource source) {
+            this.fixed_exit = fixed_exit;
+            this.fixed_network = fixed_network;
+            this.flow = flow;
+            this.network_id = network_id;
+            this.source = source;
+        }
+    }
+
+    /** DTO for TrafficRule. */
+    public static final class TrafficRule {
+        public final TrafficAction action;
+        public final String description;
+        public final Boolean enabled;
+        public final TrafficMatch matcher;
+        public final Long priority;
+        public final String rule_id;
+
+        public TrafficRule(TrafficAction action, String description, Boolean enabled, TrafficMatch matcher, Long priority, String rule_id) {
+            this.action = action;
+            this.description = description;
+            this.enabled = enabled;
+            this.matcher = matcher;
+            this.priority = priority;
+            this.rule_id = rule_id;
+        }
+    }
+
+    /** DTO for TrafficRuleRisk. */
+    public static final class TrafficRuleRisk {
+        public final Boolean enabled;
+        public final Long priority;
+        public final List<TrafficMatchRisk> risks;
+        public final String rule_id;
+
+        public TrafficRuleRisk(Boolean enabled, Long priority, List<TrafficMatchRisk> risks, String rule_id) {
+            this.enabled = enabled;
+            this.priority = priority;
+            this.risks = risks;
+            this.rule_id = rule_id;
+        }
+    }
+
     /** DTO for TunCapabilities. */
     public static final class TunCapabilities {
         public final Boolean can_rebuild;
@@ -6395,6 +7131,39 @@ public final class NodeContractV1 {
             this.effective = effective;
             this.gpui_available = gpui_available;
             this.requested = requested;
+        }
+    }
+
+    /** Tagged union DTO for ApplicationIdentity. */
+    public abstract static class ApplicationIdentity {
+        public final String kind;
+
+        private ApplicationIdentity(String kind) {
+            this.kind = kind;
+        }
+
+        public static final class ExecutablePath extends ApplicationIdentity {
+            public final String value;
+
+            public ExecutablePath(String value) {
+                super("executable_path");
+                this.value = value;
+            }
+        }
+
+        public static final class PackageId extends ApplicationIdentity {
+            public final String value;
+
+            public PackageId(String value) {
+                super("package_id");
+                this.value = value;
+            }
+        }
+
+        public static final class Unknown extends ApplicationIdentity {
+            public Unknown() {
+                super("unknown");
+            }
         }
     }
 
@@ -7112,6 +7881,63 @@ public final class NodeContractV1 {
                 this.payload = payload;
             }
         }
+
+        public static final class GetTrafficPolicy extends NodeCommand {
+            public GetTrafficPolicy() {
+                super(NodeCommandKind.GET_TRAFFIC_POLICY);
+            }
+        }
+
+        public static final class PreviewTrafficPolicy extends NodeCommand {
+            public final NodePreviewTrafficPolicyCommand payload;
+
+            public PreviewTrafficPolicy(NodePreviewTrafficPolicyCommand payload) {
+                super(NodeCommandKind.PREVIEW_TRAFFIC_POLICY);
+                this.payload = payload;
+            }
+        }
+
+        public static final class PreviewTrafficPolicyRollback extends NodeCommand {
+            public final NodePreviewTrafficPolicyRollbackCommand payload;
+
+            public PreviewTrafficPolicyRollback(NodePreviewTrafficPolicyRollbackCommand payload) {
+                super(NodeCommandKind.PREVIEW_TRAFFIC_POLICY_ROLLBACK);
+                this.payload = payload;
+            }
+        }
+
+        public static final class ApplyTrafficPolicy extends NodeCommand {
+            public final NodeApplyTrafficPolicyCommand payload;
+
+            public ApplyTrafficPolicy(NodeApplyTrafficPolicyCommand payload) {
+                super(NodeCommandKind.APPLY_TRAFFIC_POLICY);
+                this.payload = payload;
+            }
+        }
+
+        public static final class RollbackTrafficPolicy extends NodeCommand {
+            public final NodeRollbackTrafficPolicyCommand payload;
+
+            public RollbackTrafficPolicy(NodeRollbackTrafficPolicyCommand payload) {
+                super(NodeCommandKind.ROLLBACK_TRAFFIC_POLICY);
+                this.payload = payload;
+            }
+        }
+
+        public static final class GetTrafficPolicyHistory extends NodeCommand {
+            public GetTrafficPolicyHistory() {
+                super(NodeCommandKind.GET_TRAFFIC_POLICY_HISTORY);
+            }
+        }
+
+        public static final class TestTrafficPolicy extends NodeCommand {
+            public final NodeTestTrafficPolicyCommand payload;
+
+            public TestTrafficPolicy(NodeTestTrafficPolicyCommand payload) {
+                super(NodeCommandKind.TEST_TRAFFIC_POLICY);
+                this.payload = payload;
+            }
+        }
     }
 
     /** Tagged union DTO for NodeCommandOutcome. */
@@ -7460,6 +8286,60 @@ public final class NodeContractV1 {
 
             public PolicyTest(PolicyTestResult data) {
                 super("policy_test");
+                this.data = data;
+            }
+        }
+
+        public static final class TrafficPolicy extends NodeCommandOutcome {
+            public final TrafficPolicyCurrent data;
+
+            public TrafficPolicy(TrafficPolicyCurrent data) {
+                super("traffic_policy");
+                this.data = data;
+            }
+        }
+
+        public static final class TrafficPolicyPreview extends NodeCommandOutcome {
+            public final TrafficPolicyPreview data;
+
+            public TrafficPolicyPreview(TrafficPolicyPreview data) {
+                super("traffic_policy_preview");
+                this.data = data;
+            }
+        }
+
+        public static final class TrafficPolicyApplied extends NodeCommandOutcome {
+            public final TrafficPolicyApplyResult data;
+
+            public TrafficPolicyApplied(TrafficPolicyApplyResult data) {
+                super("traffic_policy_applied");
+                this.data = data;
+            }
+        }
+
+        public static final class TrafficPolicyHistory extends NodeCommandOutcome {
+            public final TrafficPolicyHistorySnapshot data;
+
+            public TrafficPolicyHistory(TrafficPolicyHistorySnapshot data) {
+                super("traffic_policy_history");
+                this.data = data;
+            }
+        }
+
+        public static final class TrafficPolicyRolledBack extends NodeCommandOutcome {
+            public final TrafficPolicyRollbackResult data;
+
+            public TrafficPolicyRolledBack(TrafficPolicyRollbackResult data) {
+                super("traffic_policy_rolled_back");
+                this.data = data;
+            }
+        }
+
+        public static final class TrafficPolicyTest extends NodeCommandOutcome {
+            public final TrafficPolicyTestComparison data;
+
+            public TrafficPolicyTest(TrafficPolicyTestComparison data) {
+                super("traffic_policy_test");
                 this.data = data;
             }
         }
@@ -8255,6 +9135,60 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class TrafficPolicy extends ProjectedNodeCommandOutcome {
+            public final TrafficPolicyCurrent data;
+
+            public TrafficPolicy(TrafficPolicyCurrent data) {
+                super("traffic_policy");
+                this.data = data;
+            }
+        }
+
+        public static final class TrafficPolicyPreview extends ProjectedNodeCommandOutcome {
+            public final TrafficPolicyPreview data;
+
+            public TrafficPolicyPreview(TrafficPolicyPreview data) {
+                super("traffic_policy_preview");
+                this.data = data;
+            }
+        }
+
+        public static final class TrafficPolicyApplied extends ProjectedNodeCommandOutcome {
+            public final TrafficPolicyApplyResult data;
+
+            public TrafficPolicyApplied(TrafficPolicyApplyResult data) {
+                super("traffic_policy_applied");
+                this.data = data;
+            }
+        }
+
+        public static final class TrafficPolicyHistory extends ProjectedNodeCommandOutcome {
+            public final TrafficPolicyHistorySnapshot data;
+
+            public TrafficPolicyHistory(TrafficPolicyHistorySnapshot data) {
+                super("traffic_policy_history");
+                this.data = data;
+            }
+        }
+
+        public static final class TrafficPolicyRolledBack extends ProjectedNodeCommandOutcome {
+            public final TrafficPolicyRollbackResult data;
+
+            public TrafficPolicyRolledBack(TrafficPolicyRollbackResult data) {
+                super("traffic_policy_rolled_back");
+                this.data = data;
+            }
+        }
+
+        public static final class TrafficPolicyTest extends ProjectedNodeCommandOutcome {
+            public final TrafficPolicyTestComparison data;
+
+            public TrafficPolicyTest(TrafficPolicyTestComparison data) {
+                super("traffic_policy_test");
+                this.data = data;
+            }
+        }
+
         public static final class Accepted extends ProjectedNodeCommandOutcome {
             public final AcceptedData data;
 
@@ -8510,6 +9444,172 @@ public final class NodeContractV1 {
         }
     }
 
+    /** Tagged union DTO for TrafficAction. */
+    public abstract static class TrafficAction {
+        public final String kind;
+
+        private TrafficAction(String kind) {
+            this.kind = kind;
+        }
+
+        public static final class Direct extends TrafficAction {
+            public Direct() {
+                super("direct");
+            }
+        }
+
+        public static final class Network extends TrafficAction {
+            public final String value;
+
+            public Network(String value) {
+                super("network");
+                this.value = value;
+            }
+        }
+
+        public static final class Exit extends TrafficAction {
+            public final String value;
+
+            public Exit(String value) {
+                super("exit");
+                this.value = value;
+            }
+        }
+
+        public static final class Reject extends TrafficAction {
+            public Reject() {
+                super("reject");
+            }
+        }
+    }
+
+    /** Tagged union DTO for TrafficMatchRisk. */
+    public abstract static class TrafficMatchRisk {
+        public final String kind;
+
+        private TrafficMatchRisk(String kind) {
+            this.kind = kind;
+        }
+
+        public static final class AlwaysMatches extends TrafficMatchRisk {
+            public AlwaysMatches() {
+                super("always_matches");
+            }
+        }
+
+        public static final class AnyDestination extends TrafficMatchRisk {
+            public AnyDestination() {
+                super("any_destination");
+            }
+        }
+
+        public static final class AnyPort extends TrafficMatchRisk {
+            public AnyPort() {
+                super("any_port");
+            }
+        }
+
+        public static final class AnyProtocol extends TrafficMatchRisk {
+            public AnyProtocol() {
+                super("any_protocol");
+            }
+        }
+
+        public static final class AnyApplication extends TrafficMatchRisk {
+            public AnyApplication() {
+                super("any_application");
+            }
+        }
+
+        public static final class BroadCidr extends TrafficMatchRisk {
+            public final String cidr;
+            public final Integer prefix_len;
+
+            public BroadCidr(String cidr, Integer prefix_len) {
+                super("broad_cidr");
+                this.cidr = cidr;
+                this.prefix_len = prefix_len;
+            }
+        }
+
+        public static final class FullPortRange extends TrafficMatchRisk {
+            public final Integer end;
+            public final Integer start;
+
+            public FullPortRange(Integer end, Integer start) {
+                super("full_port_range");
+                this.end = end;
+                this.start = start;
+            }
+        }
+    }
+
+    /** Tagged union DTO for TrafficPolicyTestContextSource. */
+    public abstract static class TrafficPolicyTestContextSource {
+        public final String kind;
+
+        private TrafficPolicyTestContextSource(String kind) {
+            this.kind = kind;
+        }
+
+        public static final class Manual extends TrafficPolicyTestContextSource {
+            public Manual() {
+                super("manual");
+            }
+        }
+
+        public static final class Activity extends TrafficPolicyTestContextSource {
+            public final String activity_id;
+
+            public Activity(String activity_id) {
+                super("activity");
+                this.activity_id = activity_id;
+            }
+        }
+
+        public static final class Diagnostic extends TrafficPolicyTestContextSource {
+            public final String diagnostic_id;
+
+            public Diagnostic(String diagnostic_id) {
+                super("diagnostic");
+                this.diagnostic_id = diagnostic_id;
+            }
+        }
+    }
+
+    /** Tagged union DTO for TrafficPolicyTestDecision. */
+    public abstract static class TrafficPolicyTestDecision {
+        public final String visibility;
+
+        private TrafficPolicyTestDecision(String visibility) {
+            this.visibility = visibility;
+        }
+
+        public static final class Full extends TrafficPolicyTestDecision {
+            public final TrafficAction action;
+            public final List<TrafficFailureDecision> failure_decisions;
+            public final String matched_rule;
+            public final TrafficDecisionReason reason;
+
+            public Full(TrafficAction action, List<TrafficFailureDecision> failure_decisions, String matched_rule, TrafficDecisionReason reason) {
+                super("full");
+                this.action = action;
+                this.failure_decisions = failure_decisions;
+                this.matched_rule = matched_rule;
+                this.reason = reason;
+            }
+        }
+
+        public static final class RouteSummary extends TrafficPolicyTestDecision {
+            public final TrafficAction action;
+
+            public RouteSummary(TrafficAction action) {
+                super("route_summary");
+                this.action = action;
+            }
+        }
+    }
+
     /** Parsed command identity; payload JSON remains owned by the platform JSON parser. */
     public static final class CommandEnvelope {
         public final long requestId;
@@ -8543,6 +9643,7 @@ public final class NodeContractV1 {
         return             command == NodeCommandKind.ACKNOWLEDGE_MEMBERSHIP_POLICY ||
             command == NodeCommandKind.APPLY_CONFIGURATION ||
             command == NodeCommandKind.APPLY_POLICY ||
+            command == NodeCommandKind.APPLY_TRAFFIC_POLICY ||
             command == NodeCommandKind.BAN_CLIENT ||
             command == NodeCommandKind.BATCH_REVIEW_JOIN_REQUESTS ||
             command == NodeCommandKind.CHANGE_MEMBER_LIFECYCLE ||
@@ -8558,6 +9659,8 @@ public final class NodeContractV1 {
             command == NodeCommandKind.GET_POLICY ||
             command == NodeCommandKind.GET_POLICY_HISTORY ||
             command == NodeCommandKind.GET_SNAPSHOT ||
+            command == NodeCommandKind.GET_TRAFFIC_POLICY ||
+            command == NodeCommandKind.GET_TRAFFIC_POLICY_HISTORY ||
             command == NodeCommandKind.JOIN_NETWORK ||
             command == NodeCommandKind.LEAVE_NETWORK ||
             command == NodeCommandKind.LIST_INVITATIONS ||
@@ -8570,6 +9673,8 @@ public final class NodeContractV1 {
             command == NodeCommandKind.PREVIEW_NETWORK_PROFILE ||
             command == NodeCommandKind.PREVIEW_POLICY ||
             command == NodeCommandKind.PREVIEW_POLICY_ROLLBACK ||
+            command == NodeCommandKind.PREVIEW_TRAFFIC_POLICY ||
+            command == NodeCommandKind.PREVIEW_TRAFFIC_POLICY_ROLLBACK ||
             command == NodeCommandKind.PROBE_PEER ||
             command == NodeCommandKind.PUBLISH_NETWORK_DISCOVERY ||
             command == NodeCommandKind.REBUILD_TUN ||
@@ -8583,6 +9688,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.REVOKE_INVITATION ||
             command == NodeCommandKind.ROLLBACK_CONFIGURATION ||
             command == NodeCommandKind.ROLLBACK_POLICY ||
+            command == NodeCommandKind.ROLLBACK_TRAFFIC_POLICY ||
             command == NodeCommandKind.ROTATE_NODE_IDENTITY ||
             command == NodeCommandKind.SET_NETWORK_ROLE ||
             command == NodeCommandKind.SET_NODE_DISPLAY_NAME ||
@@ -8593,6 +9699,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.STOP_NODE ||
             command == NodeCommandKind.SUBMIT_JOIN_REQUEST ||
             command == NodeCommandKind.TEST_POLICY ||
+            command == NodeCommandKind.TEST_TRAFFIC_POLICY ||
             command == NodeCommandKind.UNBAN_CLIENT ||
             command == NodeCommandKind.UNPUBLISH_NETWORK_DISCOVERY ||
             command == NodeCommandKind.UPDATE_NETWORK_ALLOCATION ||

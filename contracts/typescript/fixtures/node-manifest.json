@@ -2254,6 +2254,210 @@
           "confirmation": null
         },
         {
+          "id": "get_traffic_policy",
+          "label_key": "action.get_traffic_policy",
+          "command": "get_traffic_policy",
+          "backend_status": "unavailable",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [],
+          "confirmation": null
+        },
+        {
+          "id": "preview_traffic_policy",
+          "label_key": "action.preview_traffic_policy",
+          "command": "preview_traffic_policy",
+          "backend_status": "unavailable",
+          "permission": "change_routing",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "draft_json",
+              "label_key": "field.traffic_policy_json",
+              "input": "traffic_policy_json",
+              "required": true,
+              "validation": "traffic_policy_json"
+            }
+          ],
+          "confirmation": null
+        },
+        {
+          "id": "preview_traffic_policy_rollback",
+          "label_key": "action.preview_traffic_policy_rollback",
+          "command": "preview_traffic_policy_rollback",
+          "backend_status": "unavailable",
+          "permission": "change_routing",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "target_revision",
+              "label_key": "field.target_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            }
+          ],
+          "confirmation": null
+        },
+        {
+          "id": "apply_traffic_policy",
+          "label_key": "action.apply_traffic_policy",
+          "command": "apply_traffic_policy",
+          "backend_status": "unavailable",
+          "permission": "change_routing",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "traffic_policy.apply"
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "draft_json",
+              "label_key": "field.traffic_policy_json",
+              "input": "traffic_policy_json",
+              "required": true,
+              "validation": "traffic_policy_json"
+            },
+            {
+              "id": "confirm_risk",
+              "label_key": "field.confirm_risk",
+              "input": "boolean",
+              "required": true,
+              "validation": "none"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.apply_traffic_policy.title",
+            "consequence_key": "confirm.apply_traffic_policy.consequence",
+            "destructive": true,
+            "recent_authentication_required": true
+          }
+        },
+        {
+          "id": "rollback_traffic_policy",
+          "label_key": "action.rollback_traffic_policy",
+          "command": "rollback_traffic_policy",
+          "backend_status": "unavailable",
+          "permission": "change_routing",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "traffic_policy.rollback"
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "target_revision",
+              "label_key": "field.target_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "confirm_risk",
+              "label_key": "field.confirm_risk",
+              "input": "boolean",
+              "required": true,
+              "validation": "none"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.rollback_traffic_policy.title",
+            "consequence_key": "confirm.rollback_traffic_policy.consequence",
+            "destructive": true,
+            "recent_authentication_required": true
+          }
+        },
+        {
+          "id": "get_traffic_policy_history",
+          "label_key": "action.get_traffic_policy_history",
+          "command": "get_traffic_policy_history",
+          "backend_status": "unavailable",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [],
+          "confirmation": null
+        },
+        {
+          "id": "test_traffic_policy",
+          "label_key": "action.test_traffic_policy",
+          "command": "test_traffic_policy",
+          "backend_status": "implemented",
+          "permission": "change_routing",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "current_json",
+              "label_key": "field.traffic_policy_json",
+              "input": "traffic_policy_json",
+              "required": true,
+              "validation": "traffic_policy_json"
+            },
+            {
+              "id": "candidate_json",
+              "label_key": "field.traffic_policy_json",
+              "input": "traffic_policy_json",
+              "required": true,
+              "validation": "traffic_policy_json"
+            },
+            {
+              "id": "input_json",
+              "label_key": "field.traffic_policy_test_json",
+              "input": "traffic_policy_test_json",
+              "required": true,
+              "validation": "traffic_policy_test_json"
+            }
+          ],
+          "confirmation": null
+        },
+        {
           "id": "shutdown_node",
           "label_key": "action.shutdown_node",
           "command": "shutdown",

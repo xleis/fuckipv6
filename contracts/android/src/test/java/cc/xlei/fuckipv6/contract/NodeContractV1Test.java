@@ -46,7 +46,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 205,
+                NodeContractV1.DTO_CLASS_NAMES.length == 237,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -170,6 +170,64 @@ public final class NodeContractV1Test {
         }) {
             outcome.getDeclaredField("data");
         }
+        for (String field : new String[] {"confirm_risk", "draft", "expected_revision"}) {
+            NodeContractV1.NodeApplyTrafficPolicyCommand.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {"draft", "expected_revision"}) {
+            NodeContractV1.NodePreviewTrafficPolicyCommand.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {"expected_revision", "target_revision"}) {
+            NodeContractV1.NodePreviewTrafficPolicyRollbackCommand.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {"confirm_risk", "expected_revision", "target_revision"}) {
+            NodeContractV1.NodeRollbackTrafficPolicyCommand.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {"candidate", "current", "input"}) {
+            NodeContractV1.NodeTestTrafficPolicyCommand.class.getDeclaredField(field);
+        }
+        NodeContractV1.NodeCommand.PreviewTrafficPolicy.class.getDeclaredField("payload");
+        NodeContractV1.NodeCommand.PreviewTrafficPolicyRollback.class.getDeclaredField("payload");
+        NodeContractV1.NodeCommand.ApplyTrafficPolicy.class.getDeclaredField("payload");
+        NodeContractV1.NodeCommand.RollbackTrafficPolicy.class.getDeclaredField("payload");
+        NodeContractV1.NodeCommand.TestTrafficPolicy.class.getDeclaredField("payload");
+        for (Class<?> outcome : new Class<?>[] {
+            NodeContractV1.NodeCommandOutcome.TrafficPolicy.class,
+            NodeContractV1.NodeCommandOutcome.TrafficPolicyPreview.class,
+            NodeContractV1.NodeCommandOutcome.TrafficPolicyApplied.class,
+            NodeContractV1.NodeCommandOutcome.TrafficPolicyHistory.class,
+            NodeContractV1.NodeCommandOutcome.TrafficPolicyRolledBack.class,
+            NodeContractV1.NodeCommandOutcome.TrafficPolicyTest.class
+        }) {
+            outcome.getDeclaredField("data");
+        }
+        for (String field : new String[] {"content_hash", "policy", "revision"}) {
+            NodeContractV1.TrafficPolicyCurrent.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "affected_objects", "can_apply", "candidate", "candidate_revision", "current",
+            "current_revision", "diffs", "expected_revision", "has_changes",
+            "revision_conflict", "risks", "rollback_target_revision"
+        }) {
+            NodeContractV1.TrafficPolicyPreview.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "affected_objects", "content_hash", "diffs", "history", "no_op", "policy",
+            "previous_revision", "revision"
+        }) {
+            NodeContractV1.TrafficPolicyApplyResult.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "affected_objects", "content_hash", "diffs", "history", "policy",
+            "previous_revision", "revision", "target_revision"
+        }) {
+            NodeContractV1.TrafficPolicyRollbackResult.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {"current_revision", "entries"}) {
+            NodeContractV1.TrafficPolicyHistorySnapshot.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {"after", "before", "delta", "network_id", "source"}) {
+            NodeContractV1.TrafficPolicyTestComparison.class.getDeclaredField(field);
+        }
         for (String field : new String[] {
             "affected_objects", "audit", "diffs", "no_op", "previous_revision",
             "revision", "risk", "snapshot"
@@ -275,6 +333,18 @@ public final class NodeContractV1Test {
                 NodeCommandKind.GET_CONFIGURATION_HISTORY,
                 NodeCommandKind.fromWireName("get_configuration_history"),
                 "configuration history command");
+        assertSame(
+                NodeCommandKind.GET_TRAFFIC_POLICY,
+                NodeCommandKind.fromWireName("get_traffic_policy"),
+                "traffic policy read command");
+        assertSame(
+                NodeCommandKind.APPLY_TRAFFIC_POLICY,
+                NodeCommandKind.fromWireName("apply_traffic_policy"),
+                "traffic policy apply command");
+        assertSame(
+                NodeCommandKind.TEST_TRAFFIC_POLICY,
+                NodeCommandKind.fromWireName("test_traffic_policy"),
+                "traffic policy test command");
         assertSame(
                 NodeCommandKind.REBUILD_TUN,
                 NodeCommandKind.fromWireName("rebuild_tun"),

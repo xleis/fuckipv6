@@ -27,6 +27,55 @@
       ],
       "type": "string"
     },
+    "ApplicationIdentity": {
+      "description": "A concrete application identity used by traffic rules. A display name is\ndeliberately not part of the identity: it is presentation-only and cannot\nauthorize or select a route.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "executable_path",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "package_id",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "AuditId": {
       "type": "string"
     },
@@ -323,6 +372,33 @@
       ],
       "type": "object"
     },
+    "ConfirmedTrafficDirectFallback": {
+      "additionalProperties": false,
+      "description": "Explicit, acknowledged permission to fall back to the operating-system\nroute for a bounded set of failure classes. The policy is fail-closed unless\nthis value is present and valid.",
+      "properties": {
+        "allowed_failures": {
+          "items": {
+            "$ref": "#/$defs/TrafficFailureKind"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "confirmed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "confirmed_by": {
+          "$ref": "#/$defs/TrafficDefaultConfirmedBy"
+        }
+      },
+      "required": [
+        "allowed_failures",
+        "confirmed_by",
+        "confirmed_at_unix_ms"
+      ],
+      "type": "object"
+    },
     "ContentHash": {
       "description": "SHA-256/Blake3-style content digest represented without exposing secret input.",
       "type": "string"
@@ -370,6 +446,10 @@
       ],
       "type": "object"
     },
+    "DomainName": {
+      "description": "Canonical, case-insensitive DNS name used for exact host matching. IDNs are\nnormalized to their ASCII A-label form and a single trailing root dot is\naccepted but not retained.",
+      "type": "string"
+    },
     "DomainObjectRef": {
       "properties": {
         "id": {
@@ -384,6 +464,10 @@
         "id"
       ],
       "type": "object"
+    },
+    "DomainSuffix": {
+      "description": "Canonical DNS suffix. A bare domain matches itself and descendant labels;\na leading `*.` is accepted only as an explicit spelling of that same\ncomplete-label boundary rule. It never performs substring matching.",
+      "type": "string"
     },
     "EffectiveAccess": {
       "properties": {
@@ -1006,6 +1090,10 @@
         "remaining_uses"
       ],
       "type": "object"
+    },
+    "IpCidr": {
+      "description": "IP/CIDR matcher stored as text at the contract edge for cross-language\nportability and parsed before policy activation.",
+      "type": "string"
     },
     "IssuedInvitation": {
       "description": "Safe response from creation. The plaintext code may be displayed/copied once\nand is deliberately excluded from list/status responses.",
@@ -3124,6 +3212,28 @@
       ],
       "type": "object"
     },
+    "NodeApplyTrafficPolicyCommand": {
+      "properties": {
+        "confirm_risk": {
+          "default": false,
+          "description": "Explicit acknowledgement of any high-risk fixed Exit, broad matcher or\nfail-open consequence shown in preview.",
+          "type": "boolean"
+        },
+        "draft": {
+          "$ref": "#/$defs/TrafficPolicyDraft"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "draft"
+      ],
+      "type": "object"
+    },
     "NodeBatchReviewJoinRequestsCommand": {
       "properties": {
         "network_id": {
@@ -4359,6 +4469,117 @@
             },
             "payload": {
               "$ref": "#/$defs/PolicyTestInput"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Current authoritative traffic-routing policy revision.",
+          "properties": {
+            "command": {
+              "const": "get_traffic_policy",
+              "type": "string"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Compute a traffic-routing diff and risk summary without writing it.",
+          "properties": {
+            "command": {
+              "const": "preview_traffic_policy",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodePreviewTrafficPolicyCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Compute the diff for restoring a previous traffic policy revision.",
+          "properties": {
+            "command": {
+              "const": "preview_traffic_policy_rollback",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodePreviewTrafficPolicyRollbackCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Atomically install and verify a complete traffic policy.",
+          "properties": {
+            "command": {
+              "const": "apply_traffic_policy",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeApplyTrafficPolicyCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Restore a previous traffic policy generation as a new revision.",
+          "properties": {
+            "command": {
+              "const": "rollback_traffic_policy",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeRollbackTrafficPolicyCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Append-only traffic policy revision history, newest first.",
+          "properties": {
+            "command": {
+              "const": "get_traffic_policy_history",
+              "type": "string"
+            }
+          },
+          "required": [
+            "command"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Compare a current and candidate traffic policy for one hypothetical flow\nwithout touching host networking, persistence, audit or activity.",
+          "properties": {
+            "command": {
+              "const": "test_traffic_policy",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeTestTrafficPolicyCommand"
             }
           },
           "required": [
@@ -6639,6 +6860,43 @@
       ],
       "type": "object"
     },
+    "NodePreviewTrafficPolicyCommand": {
+      "description": "Editable traffic-routing document. Runtime state, effect plans and\nauthorization identity remain server-owned.",
+      "properties": {
+        "draft": {
+          "$ref": "#/$defs/TrafficPolicyDraft"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "draft"
+      ],
+      "type": "object"
+    },
+    "NodePreviewTrafficPolicyRollbackCommand": {
+      "properties": {
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "target_revision"
+      ],
+      "type": "object"
+    },
     "NodeProbePeerCommand": {
       "properties": {
         "network_name": {
@@ -6914,6 +7172,29 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "target_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "target_revision"
+      ],
+      "type": "object"
+    },
+    "NodeRollbackTrafficPolicyCommand": {
+      "properties": {
+        "confirm_risk": {
+          "default": false,
+          "type": "boolean"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "target_revision": {
           "format": "uint64",
@@ -7274,6 +7555,25 @@
       ],
       "type": "object"
     },
+    "NodeTestTrafficPolicyCommand": {
+      "properties": {
+        "candidate": {
+          "$ref": "#/$defs/TrafficPolicy"
+        },
+        "current": {
+          "$ref": "#/$defs/TrafficPolicy"
+        },
+        "input": {
+          "$ref": "#/$defs/TrafficPolicyTestInput"
+        }
+      },
+      "required": [
+        "current",
+        "candidate",
+        "input"
+      ],
+      "type": "object"
+    },
     "NodeTrafficSnapshot": {
       "properties": {
         "error_count": {
@@ -7408,6 +7708,13 @@
             "rollback_policy",
             "get_policy_history",
             "test_policy",
+            "get_traffic_policy",
+            "preview_traffic_policy",
+            "preview_traffic_policy_rollback",
+            "apply_traffic_policy",
+            "rollback_traffic_policy",
+            "get_traffic_policy_history",
+            "test_traffic_policy",
             "shutdown"
           ],
           "type": "string"
@@ -7574,6 +7881,8 @@
         "configuration_json",
         "policy_json",
         "policy_snapshot_json",
+        "traffic_policy_json",
+        "traffic_policy_test_json",
         "policy_network_ids",
         "display_name",
         "external_host",
@@ -7709,6 +8018,8 @@
         "configuration_json",
         "policy_json",
         "policy_snapshot_json",
+        "traffic_policy_json",
+        "traffic_policy_test_json",
         "policy_network_ids",
         "display_name",
         "fingerprint",
@@ -9027,6 +9338,27 @@
       ],
       "type": "string"
     },
+    "PortRange": {
+      "properties": {
+        "end": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
     "PrivacyField": {
       "description": "Stable field identifiers. Serialized policies and public previews use these\nnames verbatim; hidden values are never represented by a masked placeholder.",
       "enum": [
@@ -9814,6 +10146,102 @@
             },
             "status": {
               "const": "policy_test",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/TrafficPolicyCurrent"
+            },
+            "status": {
+              "const": "traffic_policy",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/TrafficPolicyPreview"
+            },
+            "status": {
+              "const": "traffic_policy_preview",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/TrafficPolicyApplyResult"
+            },
+            "status": {
+              "const": "traffic_policy_applied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/TrafficPolicyHistorySnapshot"
+            },
+            "status": {
+              "const": "traffic_policy_history",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/TrafficPolicyRollbackResult"
+            },
+            "status": {
+              "const": "traffic_policy_rolled_back",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/TrafficPolicyTestComparison"
+            },
+            "status": {
+              "const": "traffic_policy_test",
               "type": "string"
             }
           },
@@ -11069,6 +11497,1149 @@
         "boundaries",
         "nodes",
         "connections"
+      ],
+      "type": "object"
+    },
+    "TrafficAction": {
+      "description": "Exactly one traffic decision. Network and Exit decisions carry the concrete\ntarget in the variant, so a rule can never return an ambiguous set of exits.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "direct",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "network",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/NetworkId"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "exit",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/NodeId"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "reject",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TrafficDecisionReason": {
+      "enum": [
+        "first_match",
+        "default"
+      ],
+      "type": "string"
+    },
+    "TrafficDefaultConfirmedBy": {
+      "description": "Who explicitly confirmed the fallback decision for traffic that matches no\nrule. There is intentionally no default confirmation value.",
+      "enum": [
+        "owner",
+        "administrator"
+      ],
+      "type": "string"
+    },
+    "TrafficDefaultPolicy": {
+      "description": "A visible, acknowledged fallback. Runtime evaluation must never infer a\nfallback from a mode, recommendation, or absent rule.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/TrafficAction"
+        },
+        "confirmed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "confirmed_by": {
+          "$ref": "#/$defs/TrafficDefaultConfirmedBy"
+        }
+      },
+      "required": [
+        "action",
+        "confirmed_by",
+        "confirmed_at_unix_ms"
+      ],
+      "type": "object"
+    },
+    "TrafficFailureDecision": {
+      "description": "A complete, serializable failure decision. `consequence_key` is a stable\nlocalization key that both GPUI and WebUI must display before policy apply;\nno localized prose is duplicated in the domain layer.",
+      "properties": {
+        "consequence_key": {
+          "type": "string"
+        },
+        "direct_fallback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConfirmedTrafficDirectFallback"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present only for an explicitly confirmed direct fallback."
+        },
+        "failure": {
+          "$ref": "#/$defs/TrafficFailureKind"
+        },
+        "outcome": {
+          "$ref": "#/$defs/TrafficFailureOutcome"
+        },
+        "reason": {
+          "$ref": "#/$defs/TrafficFailureDecisionReason"
+        },
+        "recovery_action": {
+          "$ref": "#/$defs/TrafficFailureRecoveryAction"
+        }
+      },
+      "required": [
+        "failure",
+        "outcome",
+        "reason",
+        "consequence_key",
+        "recovery_action"
+      ],
+      "type": "object"
+    },
+    "TrafficFailureDecisionReason": {
+      "enum": [
+        "default_fail_closed",
+        "not_allowed_by_policy",
+        "explicit_direct_fallback",
+        "unsafe_failure_class",
+        "reject_rule",
+        "fixed_exit",
+        "fixed_network",
+        "direct_action_has_no_alternate"
+      ],
+      "type": "string"
+    },
+    "TrafficFailureKind": {
+      "description": "A condition that prevents the selected route from being used.",
+      "oneOf": [
+        {
+          "const": "unknown_application",
+          "description": "Process identity could not be established for an application condition.",
+          "type": "string"
+        },
+        {
+          "const": "dns_resolution_timeout",
+          "description": "DNS resolution did not produce an answer before the deadline.",
+          "type": "string"
+        },
+        {
+          "const": "dns_pollution_detected",
+          "description": "DNS answers failed authenticity/consistency checks and may be poisoned.",
+          "type": "string"
+        },
+        {
+          "const": "exit_unavailable",
+          "description": "The selected network or concrete Exit is no longer available.",
+          "type": "string"
+        },
+        {
+          "const": "network_selection_unavailable",
+          "description": "No authorized network path could be selected.",
+          "type": "string"
+        },
+        {
+          "const": "connection_timeout",
+          "description": "A connection did not establish before the policy deadline.",
+          "type": "string"
+        },
+        {
+          "const": "partial_connection_failure",
+          "description": "Some attempts completed and others failed, so switching routes would be\nambiguous or could leak an already-established flow.",
+          "type": "string"
+        }
+      ]
+    },
+    "TrafficFailureOutcome": {
+      "enum": [
+        "fail_closed",
+        "direct_fallback"
+      ],
+      "type": "string"
+    },
+    "TrafficFailurePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "direct_fallback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConfirmedTrafficDirectFallback"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absence is the fail-closed default and is not shown as confirmation."
+        }
+      },
+      "type": "object"
+    },
+    "TrafficFailureRecoveryAction": {
+      "enum": [
+        "retry_requested_route"
+      ],
+      "type": "string"
+    },
+    "TrafficFlow": {
+      "properties": {
+        "application": {
+          "$ref": "#/$defs/ApplicationIdentity"
+        },
+        "destination_ip": {
+          "format": "ip",
+          "type": "string"
+        },
+        "destination_port": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "domain": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DomainName"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "protocol": {
+          "$ref": "#/$defs/TrafficProtocol"
+        }
+      },
+      "required": [
+        "destination_ip",
+        "destination_port",
+        "protocol",
+        "application"
+      ],
+      "type": "object"
+    },
+    "TrafficMatch": {
+      "properties": {
+        "applications": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ApplicationIdentity"
+          },
+          "type": "array"
+        },
+        "destination_cidrs": {
+          "default": [],
+          "description": "Exact IP values are canonicalized as `/32` or `/128`; CIDRs are matched\nonly against the observed destination IP.",
+          "items": {
+            "$ref": "#/$defs/IpCidr"
+          },
+          "type": "array"
+        },
+        "destination_ports": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PortRange"
+          },
+          "type": "array"
+        },
+        "domain_suffixes": {
+          "default": [],
+          "description": "Complete-label DNS suffix match, for example `example.com` also matches\n`www.example.com` but never `notexample.com` or `example.com.evil`.",
+          "items": {
+            "$ref": "#/$defs/DomainSuffix"
+          },
+          "type": "array"
+        },
+        "exact_domains": {
+          "default": [],
+          "description": "Exact, normalized DNS names. This condition never parses or compares IP\nliterals and never matches a subdomain.",
+          "items": {
+            "$ref": "#/$defs/DomainName"
+          },
+          "type": "array"
+        },
+        "protocols": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TrafficProtocol"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "TrafficMatchRisk": {
+      "description": "A non-blocking warning attached to a matcher. Invalid or ambiguous values\nare rejected by `validate`; these codes describe valid rules whose scope is\nintentionally or accidentally broad and must be shown before activation.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "always_matches",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "any_destination",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "any_port",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "any_protocol",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "any_application",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "cidr": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "broad_cidr",
+              "type": "string"
+            },
+            "prefix_len": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "cidr",
+            "prefix_len"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "end": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "full_port_range",
+              "type": "string"
+            },
+            "start": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TrafficPolicy": {
+      "properties": {
+        "default_policy": {
+          "$ref": "#/$defs/TrafficDefaultPolicy"
+        },
+        "failure_policy": {
+          "$ref": "#/$defs/TrafficFailurePolicy",
+          "default": {},
+          "description": "Failure handling is part of the policy revision, not an ambient mode.\nMissing values deserialize to the fail-closed default."
+        },
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rules": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TrafficRule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "node_id",
+        "revision",
+        "default_policy"
+      ],
+      "type": "object"
+    },
+    "TrafficPolicyAffectedObject": {
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/TrafficPolicyObjectKind"
+        },
+        "object_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "type": "object"
+    },
+    "TrafficPolicyApplyResult": {
+      "properties": {
+        "affected_objects": {
+          "items": {
+            "$ref": "#/$defs/TrafficPolicyAffectedObject"
+          },
+          "type": "array"
+        },
+        "content_hash": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "diffs": {
+          "items": {
+            "$ref": "#/$defs/TrafficPolicyDiffEntry"
+          },
+          "type": "array"
+        },
+        "history": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrafficPolicyHistoryEntry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "no_op": {
+          "type": "boolean"
+        },
+        "policy": {
+          "$ref": "#/$defs/TrafficPolicy"
+        },
+        "previous_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "previous_revision",
+        "revision",
+        "no_op",
+        "policy",
+        "content_hash",
+        "diffs",
+        "affected_objects"
+      ],
+      "type": "object"
+    },
+    "TrafficPolicyChangeAction": {
+      "enum": [
+        "apply",
+        "rollback"
+      ],
+      "type": "string"
+    },
+    "TrafficPolicyChangeKind": {
+      "enum": [
+        "rule_added",
+        "rule_removed",
+        "rule_updated",
+        "rules_reordered",
+        "default_policy_changed",
+        "failure_policy_changed"
+      ],
+      "type": "string"
+    },
+    "TrafficPolicyCurrent": {
+      "properties": {
+        "content_hash": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "policy": {
+          "$ref": "#/$defs/TrafficPolicy"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "policy",
+        "content_hash"
+      ],
+      "type": "object"
+    },
+    "TrafficPolicyDiffEntry": {
+      "properties": {
+        "after": true,
+        "before": true,
+        "change": {
+          "$ref": "#/$defs/TrafficPolicyChangeKind"
+        },
+        "path": {
+          "description": "Stable JSON Pointer rooted at the applied policy content.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "change"
+      ],
+      "type": "object"
+    },
+    "TrafficPolicyDraft": {
+      "additionalProperties": false,
+      "description": "Editable traffic policy content. A draft deliberately has no revision:\npreview computes the successor and apply records the revision only after\nall runtime effects have been verified.",
+      "properties": {
+        "default_policy": {
+          "$ref": "#/$defs/TrafficDefaultPolicy"
+        },
+        "failure_policy": {
+          "$ref": "#/$defs/TrafficFailurePolicy",
+          "default": {}
+        },
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "rules": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TrafficRule"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "node_id",
+        "default_policy"
+      ],
+      "type": "object"
+    },
+    "TrafficPolicyHistoryEntry": {
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/TrafficPolicyChangeAction"
+        },
+        "actor": {
+          "type": "string"
+        },
+        "affected_objects": {
+          "items": {
+            "$ref": "#/$defs/TrafficPolicyAffectedObject"
+          },
+          "type": "array"
+        },
+        "applied_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "candidate_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "content_hash": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "diffs": {
+          "items": {
+            "$ref": "#/$defs/TrafficPolicyDiffEntry"
+          },
+          "type": "array"
+        },
+        "occurred_at": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/TrafficPolicyHistoryOutcome"
+        },
+        "previous_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "target_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "transaction_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "transaction_id",
+        "previous_revision",
+        "candidate_revision",
+        "action",
+        "outcome",
+        "actor",
+        "source",
+        "occurred_at",
+        "content_hash",
+        "diffs",
+        "affected_objects"
+      ],
+      "type": "object"
+    },
+    "TrafficPolicyHistoryOutcome": {
+      "enum": [
+        "applied",
+        "rolled_back",
+        "failed",
+        "recovered"
+      ],
+      "type": "string"
+    },
+    "TrafficPolicyHistorySnapshot": {
+      "properties": {
+        "current_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/TrafficPolicyHistoryEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "current_revision",
+        "entries"
+      ],
+      "type": "object"
+    },
+    "TrafficPolicyObjectKind": {
+      "enum": [
+        "rule",
+        "default_policy",
+        "failure_policy",
+        "network",
+        "exit"
+      ],
+      "type": "string"
+    },
+    "TrafficPolicyPreview": {
+      "properties": {
+        "affected_objects": {
+          "items": {
+            "$ref": "#/$defs/TrafficPolicyAffectedObject"
+          },
+          "type": "array"
+        },
+        "can_apply": {
+          "type": "boolean"
+        },
+        "candidate": {
+          "$ref": "#/$defs/TrafficPolicy"
+        },
+        "candidate_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "current": {
+          "$ref": "#/$defs/TrafficPolicy"
+        },
+        "current_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "diffs": {
+          "items": {
+            "$ref": "#/$defs/TrafficPolicyDiffEntry"
+          },
+          "type": "array"
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "has_changes": {
+          "type": "boolean"
+        },
+        "revision_conflict": {
+          "type": "boolean"
+        },
+        "risks": {
+          "items": {
+            "$ref": "#/$defs/TrafficRuleRisk"
+          },
+          "type": "array"
+        },
+        "rollback_target_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expected_revision",
+        "current_revision",
+        "candidate_revision",
+        "revision_conflict",
+        "current",
+        "candidate",
+        "has_changes",
+        "can_apply",
+        "diffs",
+        "affected_objects",
+        "risks"
+      ],
+      "type": "object"
+    },
+    "TrafficPolicyRollbackResult": {
+      "properties": {
+        "affected_objects": {
+          "items": {
+            "$ref": "#/$defs/TrafficPolicyAffectedObject"
+          },
+          "type": "array"
+        },
+        "content_hash": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "diffs": {
+          "items": {
+            "$ref": "#/$defs/TrafficPolicyDiffEntry"
+          },
+          "type": "array"
+        },
+        "history": {
+          "$ref": "#/$defs/TrafficPolicyHistoryEntry"
+        },
+        "policy": {
+          "$ref": "#/$defs/TrafficPolicy"
+        },
+        "previous_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "previous_revision",
+        "revision",
+        "target_revision",
+        "policy",
+        "content_hash",
+        "diffs",
+        "affected_objects",
+        "history"
+      ],
+      "type": "object"
+    },
+    "TrafficPolicyTestComparison": {
+      "properties": {
+        "after": {
+          "$ref": "#/$defs/TrafficPolicyTestDecision"
+        },
+        "before": {
+          "$ref": "#/$defs/TrafficPolicyTestDecision"
+        },
+        "delta": {
+          "$ref": "#/$defs/TrafficPolicyTestDelta"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "source": {
+          "$ref": "#/$defs/TrafficPolicyTestContextSource"
+        }
+      },
+      "required": [
+        "network_id",
+        "source",
+        "before",
+        "after",
+        "delta"
+      ],
+      "type": "object"
+    },
+    "TrafficPolicyTestContextSource": {
+      "description": "Where the prefilled test context came from. Activity and diagnostic\nidentifiers are stable object references, allowing the UI to implement\none-click prefill without copying localized display text into the contract.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "manual",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "activity_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "activity",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "activity_id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "diagnostic_id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "diagnostic",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "diagnostic_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TrafficPolicyTestDecision": {
+      "description": "A serialization-safe result projection. The route-summary variant physically\nomits hidden details instead of relying on frontend masking.",
+      "oneOf": [
+        {
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/TrafficAction"
+            },
+            "failure_decisions": {
+              "items": {
+                "$ref": "#/$defs/TrafficFailureDecision"
+              },
+              "type": "array"
+            },
+            "matched_rule": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TrafficRuleId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reason": {
+              "$ref": "#/$defs/TrafficDecisionReason"
+            },
+            "visibility": {
+              "const": "full",
+              "type": "string"
+            }
+          },
+          "required": [
+            "visibility",
+            "action",
+            "reason",
+            "failure_decisions"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "action": {
+              "$ref": "#/$defs/TrafficAction"
+            },
+            "visibility": {
+              "const": "route_summary",
+              "type": "string"
+            }
+          },
+          "required": [
+            "visibility",
+            "action"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TrafficPolicyTestDelta": {
+      "properties": {
+        "changed": {
+          "type": "boolean"
+        },
+        "failure_outcomes_changed": {
+          "description": "Hidden in the route-summary projection for the same reason.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "matched_rule_changed": {
+          "description": "Hidden in the route-summary projection because it would reveal whether\nthe same private rule matched before and after the edit.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "route_changed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "changed",
+        "route_changed"
+      ],
+      "type": "object"
+    },
+    "TrafficPolicyTestInput": {
+      "additionalProperties": false,
+      "description": "Complete input for a side-effect-free traffic policy test. `network_id` is\nthe network membership context in which the hypothetical flow occurs;\n`fixed_exit` and `fixed_network` model administrator-visible hard routing\nconstraints that direct fallback must never bypass.",
+      "properties": {
+        "fixed_exit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fixed_network": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "flow": {
+          "$ref": "#/$defs/TrafficFlow"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "source": {
+          "$ref": "#/$defs/TrafficPolicyTestContextSource"
+        }
+      },
+      "required": [
+        "network_id",
+        "flow",
+        "source"
+      ],
+      "type": "object"
+    },
+    "TrafficProtocol": {
+      "enum": [
+        "tcp",
+        "udp",
+        "icmp"
+      ],
+      "type": "string"
+    },
+    "TrafficRule": {
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/TrafficAction"
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "matcher": {
+          "$ref": "#/$defs/TrafficMatch"
+        },
+        "priority": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rule_id": {
+          "$ref": "#/$defs/TrafficRuleId"
+        }
+      },
+      "required": [
+        "rule_id",
+        "priority",
+        "matcher",
+        "action"
+      ],
+      "type": "object"
+    },
+    "TrafficRuleId": {
+      "type": "string"
+    },
+    "TrafficRuleRisk": {
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "priority": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "risks": {
+          "items": {
+            "$ref": "#/$defs/TrafficMatchRisk"
+          },
+          "type": "array"
+        },
+        "rule_id": {
+          "$ref": "#/$defs/TrafficRuleId"
+        }
+      },
+      "required": [
+        "rule_id",
+        "priority",
+        "enabled",
+        "risks"
       ],
       "type": "object"
     },

@@ -2328,6 +2328,47 @@ impl GpuiShell {
                     )
                 ));
             }
+            NodeCommandOutcome::TrafficPolicy(current) => {
+                self.notice = Some(format!(
+                    "traffic policy · revision {} · {} rules",
+                    current.revision,
+                    current.policy.rules.len()
+                ));
+            }
+            NodeCommandOutcome::TrafficPolicyPreview(preview) => {
+                self.notice = Some(format!(
+                    "traffic policy preview · revision {} → {} · {} diffs · apply={}",
+                    preview.current_revision,
+                    preview.candidate_revision,
+                    preview.diffs.len(),
+                    preview.can_apply
+                ));
+            }
+            NodeCommandOutcome::TrafficPolicyApplied(result) => {
+                self.notice = Some(format!(
+                    "traffic policy applied · revision {} → {} · no_op={}",
+                    result.previous_revision, result.revision, result.no_op
+                ));
+            }
+            NodeCommandOutcome::TrafficPolicyHistory(history) => {
+                self.notice = Some(format!(
+                    "traffic policy history · {} entries · current revision {}",
+                    history.entries.len(),
+                    history.current_revision
+                ));
+            }
+            NodeCommandOutcome::TrafficPolicyRolledBack(result) => {
+                self.notice = Some(format!(
+                    "traffic policy rolled back · target {} · revision {} → {}",
+                    result.target_revision, result.previous_revision, result.revision
+                ));
+            }
+            NodeCommandOutcome::TrafficPolicyTest(comparison) => {
+                self.notice = Some(format!(
+                    "traffic policy test · changed={} · route_changed={}",
+                    comparison.delta.changed, comparison.delta.route_changed
+                ));
+            }
             NodeCommandOutcome::Accepted { operation_id } => {
                 self.notice = Some(tr(
                     self.locale,
@@ -13032,6 +13073,13 @@ fn action_label(locale: Locale, id: &str) -> String {
         "rollback_policy" => "action.rollback_policy",
         "get_policy_history" => "action.get_policy_history",
         "test_policy" => "action.test_policy",
+        "get_traffic_policy" => "action.get_traffic_policy",
+        "preview_traffic_policy" => "action.preview_traffic_policy",
+        "preview_traffic_policy_rollback" => "action.preview_traffic_policy_rollback",
+        "apply_traffic_policy" => "action.apply_traffic_policy",
+        "rollback_traffic_policy" => "action.rollback_traffic_policy",
+        "get_traffic_policy_history" => "action.get_traffic_policy_history",
+        "test_traffic_policy" => "action.test_traffic_policy",
         "shutdown_node" => "action.shutdown_node",
         _ => "common.unknown_action",
     };
@@ -13063,6 +13111,8 @@ fn placeholder_for(
         NodeUiInputKind::Revision => t(locale, "placeholder.revision").into(),
         NodeUiInputKind::ConfigurationJson => t(locale, "placeholder.configuration_json").into(),
         NodeUiInputKind::PolicyJson => t(locale, "placeholder.policy_json").into(),
+        NodeUiInputKind::TrafficPolicyJson => t(locale, "placeholder.policy_json").into(),
+        NodeUiInputKind::TrafficPolicyTestJson => t(locale, "placeholder.policy_json").into(),
         NodeUiInputKind::Fingerprint => t(locale, "placeholder.fingerprint").into(),
         NodeUiInputKind::Purpose => t(locale, "placeholder.network_purpose").into(),
         NodeUiInputKind::Icon => "network".into(),

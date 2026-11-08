@@ -46,7 +46,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 237,
+                NodeContractV1.DTO_CLASS_NAMES.length == 246,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -107,6 +107,7 @@ public final class NodeContractV1Test {
             "peers",
             "recent_activity",
             "routing_summaries",
+            "traffic_routing_page",
             "logs",
             "last_error",
             "access_control"
@@ -202,6 +203,26 @@ public final class NodeContractV1Test {
         }
         for (String field : new String[] {"content_hash", "policy", "revision"}) {
             NodeContractV1.TrafficPolicyCurrent.class.getDeclaredField(field);
+        }
+        NodeContractV1.NodeSnapshot.class.getDeclaredField("traffic_routing_page");
+        NodeContractV1.ProjectedNodeSnapshot.class.getDeclaredField("traffic_routing_page");
+        for (String field : new String[] {
+            "authority_revision", "can_edit", "default_policy", "failure_policy",
+            "hard_constraint_target", "hard_constraints", "node_id", "rules", "targets",
+            "workflow"
+        }) {
+            NodeContractV1.TrafficRoutingPageModel.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "action", "description", "enabled", "matcher", "move_down", "move_up",
+            "priority", "risks", "rule_id", "target"
+        }) {
+            NodeContractV1.TrafficRoutingRuleView.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "id", "kind", "label", "navigation", "search_terms"
+        }) {
+            NodeContractV1.TrafficRoutingTarget.class.getDeclaredField(field);
         }
         for (String field : new String[] {
             "affected_objects", "can_apply", "candidate", "candidate_revision", "current",

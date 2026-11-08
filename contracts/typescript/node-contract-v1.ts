@@ -1955,6 +1955,7 @@ export type NodeSnapshot = {
   "revision": number;
   "routing_summaries"?: Array<NodeRoutingSummarySnapshot>;
   "topology"?: TopologySnapshot | null;
+  "traffic_routing_page"?: TrafficRoutingPageModel | null;
   "tun_capabilities"?: TunCapabilities;
   "ui_mode"?: UiModeResolution | null;
 };
@@ -2641,6 +2642,7 @@ export type ProjectedNodeSnapshot = {
   "revision": number;
   "routing_summaries"?: Array<NodeRoutingSummarySnapshot>;
   "topology"?: TopologySnapshot | null;
+  "traffic_routing_page"?: TrafficRoutingPageModel | null;
   "tun_capabilities"?: TunCapabilities | null;
   "ui_mode"?: UiModeResolution | null;
 };
@@ -2950,6 +2952,103 @@ export type TrafficPolicyTestInput = {
 };
 
 export type TrafficProtocol = "tcp" | "udp" | "icmp";
+
+export type TrafficRoutingDefaultPolicyView = {
+  "action": TrafficAction;
+  "confirmed_at_unix_ms": number;
+  "confirmed_by": TrafficDefaultConfirmedBy;
+  "target": TrafficRoutingTargetRef;
+};
+
+export type TrafficRoutingHardConstraints = {
+  "fixed_exit"?: NodeId | null;
+  "fixed_network"?: NetworkId | null;
+};
+
+export type TrafficRoutingMoveAction = {
+  "action_id": string;
+  "direction": TrafficRoutingRuleDirection;
+  "from_index": number;
+  "keyboard_shortcut": string;
+  "rule_id": TrafficRuleId;
+  "target_index": number;
+};
+
+export type TrafficRoutingNavigation = {
+  "network_name"?: string | null;
+  "object_id": string;
+  "page_id": string;
+};
+
+export type TrafficRoutingPageModel = {
+  "authority_revision": number;
+  "can_edit": boolean;
+  "default_policy": TrafficRoutingDefaultPolicyView;
+  "failure_policy": TrafficFailurePolicy;
+  "hard_constraint_target"?: TrafficRoutingTargetRef | null;
+  "hard_constraints"?: TrafficRoutingHardConstraints;
+  "node_id": NodeId;
+  "rules": Array<TrafficRoutingRuleView>;
+  "targets": Array<TrafficRoutingTarget>;
+  "workflow": TrafficRoutingWorkflowState;
+};
+
+export type TrafficRoutingRuleDirection = "up" | "down";
+
+export type TrafficRoutingRuleView = {
+  "action": TrafficAction;
+  "description": string;
+  "enabled": boolean;
+  "matcher": TrafficMatch;
+  "move_down"?: TrafficRoutingMoveAction | null;
+  "move_up"?: TrafficRoutingMoveAction | null;
+  "priority": number;
+  "risks": Array<TrafficMatchRisk>;
+  "rule_id": TrafficRuleId;
+  "target": TrafficRoutingTargetRef;
+};
+
+export type TrafficRoutingTarget = {
+  "id": string;
+  "kind": TrafficRoutingTargetKind;
+  "label": string;
+  "navigation"?: TrafficRoutingNavigation | null;
+  "search_terms"?: Array<string>;
+};
+
+export type TrafficRoutingTargetKind = "direct" | "network" | "exit" | "reject";
+
+export type TrafficRoutingTargetRef = {
+  "id": string;
+  "kind": TrafficRoutingTargetKind;
+  "resolved": boolean;
+};
+
+export type TrafficRoutingWorkflowState = {
+  "reason_code": string;
+  "status": "unconfigured";
+} | {
+  "base_revision": number;
+  "status": "draft";
+} | {
+  "base_revision": number;
+  "candidate_revision": number;
+  "operation_id": string;
+  "status": "applying";
+} | {
+  "revision": number;
+  "status": "applied";
+} | {
+  "base_revision": number;
+  "candidate_revision": number;
+  "reason_code": string;
+  "stage": string;
+  "status": "failed";
+} | {
+  "reason_code": string;
+  "revision": number;
+  "status": "stale";
+};
 
 export type TrafficRule = {
   "action": TrafficAction;

@@ -11,7 +11,7 @@ use fuckipv6_common::domain::{
     NetworkAcl, NetworkId, NetworkJoinMode, NetworkMemberDirectory, NetworkMemberPresence,
     NetworkMemberStatus, NetworkVisibility, NodeId, NodeLocalAccessPolicy, OperationRecovery,
     TopologyBuilder, TopologyLinkObservation, TopologyMemberInput, TopologyNetworkInput,
-    TopologySnapshot, TopologyViewer,
+    TopologySnapshot, TopologyViewer, TrafficRoutingPageModel,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -72,6 +72,13 @@ pub struct NodeSnapshot {
     /// configuration. Missing data from older peers deserializes as empty.
     #[serde(default)]
     pub routing_summaries: Vec<NodeRoutingSummarySnapshot>,
+    /// The single authoritative traffic-routing editor projection. The node
+    /// runtime builds this from the applied policy, hard constraints and
+    /// current caller permissions; adapters never reconstruct it from legacy
+    /// network configuration. Missing data means the production policy/TUN
+    /// adapter is unavailable, not that an empty policy was applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic_routing_page: Option<TrafficRoutingPageModel>,
     /// Owner-authored public network-profile projections. This field is an
     /// allowlisted public snapshot: it never contains member identities,
     /// addresses, topology, activity, invitation tickets or secret material.

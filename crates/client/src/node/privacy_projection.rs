@@ -18,7 +18,7 @@ use fuckipv6_common::domain::{
     MemberRemovalPreview, MembershipState, NetworkId, NetworkMemberDirectory,
     NetworkProfileApplyResult, NetworkProfilePreview, NodeId, PolicyTestResult, PrivacyField,
     PrivacyObjectState, PrivacyViewer, ProjectedActivityEntry, TopologyConnection, TopologyNode,
-    TopologySnapshot, TrafficPolicyTestComparison,
+    TopologySnapshot, TrafficPolicyTestComparison, TrafficRoutingPageModel,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -92,6 +92,8 @@ pub struct ProjectedNodeSnapshot {
     pub interface_problems: Vec<NodeProblem>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routing_summaries: Vec<NodeRoutingSummarySnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic_routing_page: Option<TrafficRoutingPageModel>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub network_profiles: Vec<super::state::NodeNetworkProfileSnapshot>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1082,6 +1084,9 @@ pub fn project_node_snapshot(
         } else {
             Vec::new()
         },
+        traffic_routing_page: owner
+            .then(|| snapshot.traffic_routing_page.clone())
+            .flatten(),
         network_profiles: snapshot.network_profiles.clone(),
         memberships: if owner {
             snapshot.memberships.clone()
@@ -1167,6 +1172,9 @@ mod tests {
         NetworkMemberObservationSource, NetworkMemberOnlineState, NetworkMemberPresence,
         NetworkMemberStatus, NetworkRole, TopologyBoundary, TopologyConnection,
         TopologyConnectionState, TopologyNode, TopologyNodeHealth, TopologyNodeNetwork,
+        TrafficAction, TrafficDefaultConfirmedBy, TrafficDefaultPolicy, TrafficPolicy,
+        TrafficRoutingHardConstraints, TrafficRoutingPageModel, TrafficRoutingTarget,
+        TrafficRoutingWorkflowState,
     };
 
     use super::*;
@@ -1347,6 +1355,29 @@ mod tests {
         }
     }
 
+    fn routing_page() -> TrafficRoutingPageModel {
+        let node_id = actor();
+        let policy = TrafficPolicy {
+            node_id: node_id.clone(),
+            revision: 7,
+            default_policy: TrafficDefaultPolicy {
+                action: TrafficAction::Direct,
+                confirmed_by: TrafficDefaultConfirmedBy::Owner,
+                confirmed_at_unix_ms: 1_500,
+            },
+            failure_policy: Default::default(),
+            rules: Vec::new(),
+        };
+        TrafficRoutingPageModel::from_policy(
+            &policy,
+            TrafficRoutingWorkflowState::Applied { revision: 7 },
+            TrafficRoutingHardConstraints::default(),
+            vec![TrafficRoutingTarget::direct()],
+            true,
+        )
+        .expect("routing page")
+    }
+
     fn full_snapshot() -> NodeSnapshot {
         let home = network("home");
         let field_policy = policy(
@@ -1420,6 +1451,7 @@ mod tests {
             }],
             interface_problems: Vec::new(),
             routing_summaries: Vec::new(),
+            traffic_routing_page: None,
             network_profiles: Vec::new(),
             memberships: vec![membership(
                 "home",
@@ -1557,7 +1589,8 @@ mod tests {
 
     #[test]
     fn local_owner_keeps_complete_control_plane_snapshot() {
-        let snapshot = full_snapshot();
+        let mut snapshot = full_snapshot();
+        snapshot.traffic_routing_page = Some(routing_page());
         let context = NodeCommandContext::local_owner_for_snapshot(&snapshot, "owner-test");
         let projected = project_node_snapshot(&snapshot, &context, 1_500).unwrap();
 
@@ -1570,7 +1603,30 @@ mod tests {
         assert_eq!(projected.logs, snapshot.logs);
         assert_eq!(projected.topology, snapshot.topology);
         assert_eq!(projected.interfaces.len(), snapshot.interfaces.len());
+        assert_eq!(
+            projected.traffic_routing_page,
+            snapshot.traffic_routing_page
+        );
         assert!(projected.tun_capabilities.is_some());
+    }
+
+    #[test]
+    fn traffic_routing_editor_projection_is_omitted_for_remote_members() {
+        let home = network("home");
+        let mut snapshot = full_snapshot();
+        snapshot.traffic_routing_page = Some(routing_page());
+        snapshot.access_control.field_privacy_policies = vec![policy(home.clone(), [])];
+        let context = network_context(
+            home,
+            NetworkRole::Administrator,
+            MembershipState::Active,
+            snapshot.access_control.field_privacy_policies.clone(),
+        );
+
+        let projected = project_node_snapshot(&snapshot, &context, 1_500).unwrap();
+        assert!(projected.traffic_routing_page.is_none());
+        let json = serde_json::to_value(projected).unwrap();
+        assert!(json.get("traffic_routing_page").is_none());
     }
 
     #[test]

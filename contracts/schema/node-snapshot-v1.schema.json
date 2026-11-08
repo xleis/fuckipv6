@@ -126,6 +126,55 @@
       ],
       "type": "string"
     },
+    "ApplicationIdentity": {
+      "description": "A concrete application identity used by traffic rules. A display name is\ndeliberately not part of the identity: it is presentation-only and cannot\nauthorize or select a route.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "executable_path",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "package_id",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "AuditId": {
       "type": "string"
     },
@@ -167,6 +216,33 @@
         }
       ]
     },
+    "ConfirmedTrafficDirectFallback": {
+      "additionalProperties": false,
+      "description": "Explicit, acknowledged permission to fall back to the operating-system\nroute for a bounded set of failure classes. The policy is fail-closed unless\nthis value is present and valid.",
+      "properties": {
+        "allowed_failures": {
+          "items": {
+            "$ref": "#/$defs/TrafficFailureKind"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "confirmed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "confirmed_by": {
+          "$ref": "#/$defs/TrafficDefaultConfirmedBy"
+        }
+      },
+      "required": [
+        "allowed_failures",
+        "confirmed_by",
+        "confirmed_at_unix_ms"
+      ],
+      "type": "object"
+    },
     "ContentHash": {
       "description": "SHA-256/Blake3-style content digest represented without exposing secret input.",
       "type": "string"
@@ -197,6 +273,14 @@
         "macos_desktop",
         "headless"
       ],
+      "type": "string"
+    },
+    "DomainName": {
+      "description": "Canonical, case-insensitive DNS name used for exact host matching. IDNs are\nnormalized to their ASCII A-label form and a single trailing root dot is\naccepted but not retained.",
+      "type": "string"
+    },
+    "DomainSuffix": {
+      "description": "Canonical DNS suffix. A bare domain matches itself and descendant labels;\na leading `*.` is accepted only as an explicit spelling of that same\ncomplete-label boundary rule. It never performs substring matching.",
       "type": "string"
     },
     "ExitContributionObligation": {
@@ -371,6 +455,10 @@
       "type": "object"
     },
     "GroupId": {
+      "type": "string"
+    },
+    "IpCidr": {
+      "description": "IP/CIDR matcher stored as text at the contract edge for cross-language\nportability and parsed before policy activation.",
       "type": "string"
     },
     "MembershipRole": {
@@ -2625,6 +2713,27 @@
       ],
       "type": "string"
     },
+    "PortRange": {
+      "properties": {
+        "end": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "type": "object"
+    },
     "PrivacyField": {
       "description": "Stable field identifiers. Serialized policies and public previews use these\nnames verbatim; hidden values are never represented by a masked placeholder.",
       "enum": [
@@ -3038,6 +3147,754 @@
       ],
       "type": "object"
     },
+    "TrafficAction": {
+      "description": "Exactly one traffic decision. Network and Exit decisions carry the concrete\ntarget in the variant, so a rule can never return an ambiguous set of exits.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "direct",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "network",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/NetworkId"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "exit",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/NodeId"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "reject",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TrafficDefaultConfirmedBy": {
+      "description": "Who explicitly confirmed the fallback decision for traffic that matches no\nrule. There is intentionally no default confirmation value.",
+      "enum": [
+        "owner",
+        "administrator"
+      ],
+      "type": "string"
+    },
+    "TrafficFailureKind": {
+      "description": "A condition that prevents the selected route from being used.",
+      "oneOf": [
+        {
+          "const": "unknown_application",
+          "description": "Process identity could not be established for an application condition.",
+          "type": "string"
+        },
+        {
+          "const": "dns_resolution_timeout",
+          "description": "DNS resolution did not produce an answer before the deadline.",
+          "type": "string"
+        },
+        {
+          "const": "dns_pollution_detected",
+          "description": "DNS answers failed authenticity/consistency checks and may be poisoned.",
+          "type": "string"
+        },
+        {
+          "const": "exit_unavailable",
+          "description": "The selected network or concrete Exit is no longer available.",
+          "type": "string"
+        },
+        {
+          "const": "network_selection_unavailable",
+          "description": "No authorized network path could be selected.",
+          "type": "string"
+        },
+        {
+          "const": "connection_timeout",
+          "description": "A connection did not establish before the policy deadline.",
+          "type": "string"
+        },
+        {
+          "const": "partial_connection_failure",
+          "description": "Some attempts completed and others failed, so switching routes would be\nambiguous or could leak an already-established flow.",
+          "type": "string"
+        }
+      ]
+    },
+    "TrafficFailurePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "direct_fallback": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConfirmedTrafficDirectFallback"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Absence is the fail-closed default and is not shown as confirmation."
+        }
+      },
+      "type": "object"
+    },
+    "TrafficMatch": {
+      "properties": {
+        "applications": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ApplicationIdentity"
+          },
+          "type": "array"
+        },
+        "destination_cidrs": {
+          "default": [],
+          "description": "Exact IP values are canonicalized as `/32` or `/128`; CIDRs are matched\nonly against the observed destination IP.",
+          "items": {
+            "$ref": "#/$defs/IpCidr"
+          },
+          "type": "array"
+        },
+        "destination_ports": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PortRange"
+          },
+          "type": "array"
+        },
+        "domain_suffixes": {
+          "default": [],
+          "description": "Complete-label DNS suffix match, for example `example.com` also matches\n`www.example.com` but never `notexample.com` or `example.com.evil`.",
+          "items": {
+            "$ref": "#/$defs/DomainSuffix"
+          },
+          "type": "array"
+        },
+        "exact_domains": {
+          "default": [],
+          "description": "Exact, normalized DNS names. This condition never parses or compares IP\nliterals and never matches a subdomain.",
+          "items": {
+            "$ref": "#/$defs/DomainName"
+          },
+          "type": "array"
+        },
+        "protocols": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TrafficProtocol"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "TrafficMatchRisk": {
+      "description": "A non-blocking warning attached to a matcher. Invalid or ambiguous values\nare rejected by `validate`; these codes describe valid rules whose scope is\nintentionally or accidentally broad and must be shown before activation.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "always_matches",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "any_destination",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "any_port",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "any_protocol",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "any_application",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "cidr": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "broad_cidr",
+              "type": "string"
+            },
+            "prefix_len": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "cidr",
+            "prefix_len"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "end": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "full_port_range",
+              "type": "string"
+            },
+            "start": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "start",
+            "end"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TrafficProtocol": {
+      "enum": [
+        "tcp",
+        "udp",
+        "icmp"
+      ],
+      "type": "string"
+    },
+    "TrafficRoutingDefaultPolicyView": {
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/TrafficAction"
+        },
+        "confirmed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "confirmed_by": {
+          "$ref": "#/$defs/TrafficDefaultConfirmedBy"
+        },
+        "target": {
+          "$ref": "#/$defs/TrafficRoutingTargetRef"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "confirmed_by",
+        "confirmed_at_unix_ms"
+      ],
+      "type": "object"
+    },
+    "TrafficRoutingHardConstraints": {
+      "description": "Hard routing constraints shown alongside the policy. They are not editable\npolicy rules and must never be bypassed by direct fallback.",
+      "properties": {
+        "fixed_exit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fixed_network": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TrafficRoutingMoveAction": {
+      "description": "One equivalent pointer/keyboard/button action. Adapters bind drag-and-drop\nand keyboard gestures to the same action ID rather than implementing a\nsecond ordering path.",
+      "properties": {
+        "action_id": {
+          "type": "string"
+        },
+        "direction": {
+          "$ref": "#/$defs/TrafficRoutingRuleDirection"
+        },
+        "from_index": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "keyboard_shortcut": {
+          "type": "string"
+        },
+        "rule_id": {
+          "$ref": "#/$defs/TrafficRuleId"
+        },
+        "target_index": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "action_id",
+        "rule_id",
+        "direction",
+        "from_index",
+        "target_index",
+        "keyboard_shortcut"
+      ],
+      "type": "object"
+    },
+    "TrafficRoutingNavigation": {
+      "properties": {
+        "network_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "object_id": {
+          "type": "string"
+        },
+        "page_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "page_id",
+        "object_id"
+      ],
+      "type": "object"
+    },
+    "TrafficRoutingPageModel": {
+      "properties": {
+        "authority_revision": {
+          "description": "Applied authority revision, not a local form counter.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "can_edit": {
+          "description": "Whether the current caller may create a draft or apply it. Read-only\ncallers still receive the authoritative page and target navigation.",
+          "type": "boolean"
+        },
+        "default_policy": {
+          "$ref": "#/$defs/TrafficRoutingDefaultPolicyView"
+        },
+        "failure_policy": {
+          "$ref": "#/$defs/TrafficFailurePolicy"
+        },
+        "hard_constraint_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrafficRoutingTargetRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hard_constraints": {
+          "$ref": "#/$defs/TrafficRoutingHardConstraints",
+          "default": {}
+        },
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/TrafficRoutingRuleView"
+          },
+          "type": "array"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/TrafficRoutingTarget"
+          },
+          "type": "array"
+        },
+        "workflow": {
+          "$ref": "#/$defs/TrafficRoutingWorkflowState"
+        }
+      },
+      "required": [
+        "node_id",
+        "authority_revision",
+        "workflow",
+        "default_policy",
+        "failure_policy",
+        "rules",
+        "targets",
+        "can_edit"
+      ],
+      "type": "object"
+    },
+    "TrafficRoutingRuleDirection": {
+      "enum": [
+        "up",
+        "down"
+      ],
+      "type": "string"
+    },
+    "TrafficRoutingRuleView": {
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/TrafficAction"
+        },
+        "description": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "matcher": {
+          "$ref": "#/$defs/TrafficMatch"
+        },
+        "move_down": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrafficRoutingMoveAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "move_up": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrafficRoutingMoveAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "priority": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "risks": {
+          "items": {
+            "$ref": "#/$defs/TrafficMatchRisk"
+          },
+          "type": "array"
+        },
+        "rule_id": {
+          "$ref": "#/$defs/TrafficRuleId"
+        },
+        "target": {
+          "$ref": "#/$defs/TrafficRoutingTargetRef"
+        }
+      },
+      "required": [
+        "rule_id",
+        "priority",
+        "enabled",
+        "description",
+        "matcher",
+        "action",
+        "target",
+        "risks"
+      ],
+      "type": "object"
+    },
+    "TrafficRoutingTarget": {
+      "description": "A navigable reference to a routing target. Labels are display hints; stable\nIDs and `navigation` are the authority used by every adapter.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/TrafficRoutingTargetKind"
+        },
+        "label": {
+          "type": "string"
+        },
+        "navigation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrafficRoutingNavigation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "search_terms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "label"
+      ],
+      "type": "object"
+    },
+    "TrafficRoutingTargetKind": {
+      "enum": [
+        "direct",
+        "network",
+        "exit",
+        "reject"
+      ],
+      "type": "string"
+    },
+    "TrafficRoutingTargetRef": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/TrafficRoutingTargetKind"
+        },
+        "resolved": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "resolved"
+      ],
+      "type": "object"
+    },
+    "TrafficRoutingWorkflowState": {
+      "description": "The editor workflow state. `Draft`, `Applying`, `Applied`, `Failed` and\n`Stale` are intentionally separate so an adapter cannot infer success from\nan editable document or from the mere presence of a revision.",
+      "oneOf": [
+        {
+          "description": "No authoritative traffic policy has been loaded yet.",
+          "properties": {
+            "reason_code": {
+              "type": "string"
+            },
+            "status": {
+              "const": "unconfigured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason_code"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "base_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "const": "draft",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "base_revision"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "base_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "candidate_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "status": {
+              "const": "applying",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "base_revision",
+            "candidate_revision",
+            "operation_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "const": "applied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "revision"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "base_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "candidate_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "reason_code": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            },
+            "status": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "base_revision",
+            "candidate_revision",
+            "stage",
+            "reason_code"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason_code": {
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "const": "stale",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "revision",
+            "reason_code"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TrafficRuleId": {
+      "type": "string"
+    },
     "TunCapabilities": {
       "description": "Redacted TUN readiness for the current node process. This is deliberately\nderived from capability metadata rather than a real TUN creation probe.",
       "properties": {
@@ -3331,6 +4188,17 @@
         }
       ],
       "description": "Privacy-filtered topology derived from the cached roster plus live peer\nsessions. `None` means the node has no identity yet, so no graph can be\ndrawn at all; a present but empty snapshot means nothing is joined.\nAdapters never project membership themselves."
+    },
+    "traffic_routing_page": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TrafficRoutingPageModel"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The single authoritative traffic-routing editor projection. The node\nruntime builds this from the applied policy, hard constraints and\ncurrent caller permissions; adapters never reconstruct it from legacy\nnetwork configuration. Missing data means the production policy/TUN\nadapter is unavailable, not that an empty policy was applied."
     },
     "tun_capabilities": {
       "$ref": "#/$defs/TunCapabilities",

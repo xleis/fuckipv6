@@ -5850,6 +5850,17 @@
           ],
           "description": "Privacy-filtered topology derived from the cached roster plus live peer\nsessions. `None` means the node has no identity yet, so no graph can be\ndrawn at all; a present but empty snapshot means nothing is joined.\nAdapters never project membership themselves."
         },
+        "traffic_routing_page": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrafficRoutingPageModel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The single authoritative traffic-routing editor projection. The node\nruntime builds this from the applied policy, hard constraints and\ncurrent caller permissions; adapters never reconstruct it from legacy\nnetwork configuration. Missing data means the production policy/TUN\nadapter is unavailable, not that an empty policy was applied."
+        },
         "tun_capabilities": {
           "$ref": "#/$defs/TunCapabilities",
           "default": {
@@ -8603,6 +8614,453 @@
         "icmp"
       ],
       "type": "string"
+    },
+    "TrafficRoutingDefaultPolicyView": {
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/TrafficAction"
+        },
+        "confirmed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "confirmed_by": {
+          "$ref": "#/$defs/TrafficDefaultConfirmedBy"
+        },
+        "target": {
+          "$ref": "#/$defs/TrafficRoutingTargetRef"
+        }
+      },
+      "required": [
+        "action",
+        "target",
+        "confirmed_by",
+        "confirmed_at_unix_ms"
+      ],
+      "type": "object"
+    },
+    "TrafficRoutingHardConstraints": {
+      "description": "Hard routing constraints shown alongside the policy. They are not editable\npolicy rules and must never be bypassed by direct fallback.",
+      "properties": {
+        "fixed_exit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fixed_network": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TrafficRoutingMoveAction": {
+      "description": "One equivalent pointer/keyboard/button action. Adapters bind drag-and-drop\nand keyboard gestures to the same action ID rather than implementing a\nsecond ordering path.",
+      "properties": {
+        "action_id": {
+          "type": "string"
+        },
+        "direction": {
+          "$ref": "#/$defs/TrafficRoutingRuleDirection"
+        },
+        "from_index": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "keyboard_shortcut": {
+          "type": "string"
+        },
+        "rule_id": {
+          "$ref": "#/$defs/TrafficRuleId"
+        },
+        "target_index": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "action_id",
+        "rule_id",
+        "direction",
+        "from_index",
+        "target_index",
+        "keyboard_shortcut"
+      ],
+      "type": "object"
+    },
+    "TrafficRoutingNavigation": {
+      "properties": {
+        "network_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "object_id": {
+          "type": "string"
+        },
+        "page_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "page_id",
+        "object_id"
+      ],
+      "type": "object"
+    },
+    "TrafficRoutingPageModel": {
+      "properties": {
+        "authority_revision": {
+          "description": "Applied authority revision, not a local form counter.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "can_edit": {
+          "description": "Whether the current caller may create a draft or apply it. Read-only\ncallers still receive the authoritative page and target navigation.",
+          "type": "boolean"
+        },
+        "default_policy": {
+          "$ref": "#/$defs/TrafficRoutingDefaultPolicyView"
+        },
+        "failure_policy": {
+          "$ref": "#/$defs/TrafficFailurePolicy"
+        },
+        "hard_constraint_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrafficRoutingTargetRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hard_constraints": {
+          "$ref": "#/$defs/TrafficRoutingHardConstraints",
+          "default": {}
+        },
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/TrafficRoutingRuleView"
+          },
+          "type": "array"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/TrafficRoutingTarget"
+          },
+          "type": "array"
+        },
+        "workflow": {
+          "$ref": "#/$defs/TrafficRoutingWorkflowState"
+        }
+      },
+      "required": [
+        "node_id",
+        "authority_revision",
+        "workflow",
+        "default_policy",
+        "failure_policy",
+        "rules",
+        "targets",
+        "can_edit"
+      ],
+      "type": "object"
+    },
+    "TrafficRoutingRuleDirection": {
+      "enum": [
+        "up",
+        "down"
+      ],
+      "type": "string"
+    },
+    "TrafficRoutingRuleView": {
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/TrafficAction"
+        },
+        "description": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "matcher": {
+          "$ref": "#/$defs/TrafficMatch"
+        },
+        "move_down": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrafficRoutingMoveAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "move_up": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrafficRoutingMoveAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "priority": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "risks": {
+          "items": {
+            "$ref": "#/$defs/TrafficMatchRisk"
+          },
+          "type": "array"
+        },
+        "rule_id": {
+          "$ref": "#/$defs/TrafficRuleId"
+        },
+        "target": {
+          "$ref": "#/$defs/TrafficRoutingTargetRef"
+        }
+      },
+      "required": [
+        "rule_id",
+        "priority",
+        "enabled",
+        "description",
+        "matcher",
+        "action",
+        "target",
+        "risks"
+      ],
+      "type": "object"
+    },
+    "TrafficRoutingTarget": {
+      "description": "A navigable reference to a routing target. Labels are display hints; stable\nIDs and `navigation` are the authority used by every adapter.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/TrafficRoutingTargetKind"
+        },
+        "label": {
+          "type": "string"
+        },
+        "navigation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrafficRoutingNavigation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "search_terms": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "label"
+      ],
+      "type": "object"
+    },
+    "TrafficRoutingTargetKind": {
+      "enum": [
+        "direct",
+        "network",
+        "exit",
+        "reject"
+      ],
+      "type": "string"
+    },
+    "TrafficRoutingTargetRef": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/TrafficRoutingTargetKind"
+        },
+        "resolved": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "resolved"
+      ],
+      "type": "object"
+    },
+    "TrafficRoutingWorkflowState": {
+      "description": "The editor workflow state. `Draft`, `Applying`, `Applied`, `Failed` and\n`Stale` are intentionally separate so an adapter cannot infer success from\nan editable document or from the mere presence of a revision.",
+      "oneOf": [
+        {
+          "description": "No authoritative traffic policy has been loaded yet.",
+          "properties": {
+            "reason_code": {
+              "type": "string"
+            },
+            "status": {
+              "const": "unconfigured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason_code"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "base_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "const": "draft",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "base_revision"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "base_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "candidate_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "operation_id": {
+              "type": "string"
+            },
+            "status": {
+              "const": "applying",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "base_revision",
+            "candidate_revision",
+            "operation_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "const": "applied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "revision"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "base_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "candidate_revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "reason_code": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            },
+            "status": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "base_revision",
+            "candidate_revision",
+            "stage",
+            "reason_code"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason_code": {
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "const": "stale",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "revision",
+            "reason_code"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "TrafficRule": {
       "properties": {

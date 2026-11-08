@@ -46,6 +46,12 @@ import {
   validatePolicySnapshot,
   validatePolicyTestResult,
 } from "./policy-test";
+import {
+  parseTrafficPolicyDraftJson,
+  parseTrafficPolicyJson,
+  parseTrafficPolicyTestInputJson,
+  TrafficPolicyJsonError,
+} from "./traffic-policy";
 
 export const HTTP_SCHEMA_VERSION = 1;
 export const MANIFEST_SCHEMA_VERSION = 1;
@@ -158,6 +164,13 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   apply_policy: "apply_policy",
   rollback_policy: "rollback_policy",
   get_policy_history: "get_policy_history",
+  get_traffic_policy: "get_traffic_policy",
+  preview_traffic_policy: "preview_traffic_policy",
+  preview_traffic_policy_rollback: "preview_traffic_policy_rollback",
+  apply_traffic_policy: "apply_traffic_policy",
+  rollback_traffic_policy: "rollback_traffic_policy",
+  get_traffic_policy_history: "get_traffic_policy_history",
+  test_traffic_policy: "test_traffic_policy",
   shutdown_node: "shutdown",
 };
 
@@ -229,6 +242,8 @@ const INPUT_KINDS = new Set([
   "configuration_json",
   "policy_json",
   "policy_snapshot_json",
+  "traffic_policy_json",
+  "traffic_policy_test_json",
   "policy_network_ids",
   "display_name",
   "fingerprint",
@@ -249,6 +264,8 @@ const VALIDATIONS = new Set([
   "configuration_json",
   "policy_json",
   "policy_snapshot_json",
+  "traffic_policy_json",
+  "traffic_policy_test_json",
   "policy_network_ids",
   "display_name",
   "fingerprint",
@@ -311,6 +328,12 @@ const OUTCOME_STATUSES = new Set([
   "policy_history",
   "policy_rolled_back",
   "policy_test",
+  "traffic_policy",
+  "traffic_policy_preview",
+  "traffic_policy_applied",
+  "traffic_policy_history",
+  "traffic_policy_rolled_back",
+  "traffic_policy_test",
   "identity_rotated",
   "accepted",
   "completed",
@@ -2012,6 +2035,16 @@ function policyJsonErrorText(error: unknown, locale: Locale): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function trafficPolicyJsonErrorText(error: unknown, locale: Locale): string {
+  if (error instanceof TrafficPolicyJsonError) {
+    return i18n().tr(locale, "validation.traffic_policy_json_path", {
+      path: error.path,
+      message: error.message,
+    });
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function buildCommand(
   action: NodeUiAction,
   values: ActionValues,
@@ -2610,6 +2643,89 @@ export function buildCommand(
       };
     case "get_policy_history":
       return { command: "get_policy_history" };
+    case "get_traffic_policy":
+      return { command: "get_traffic_policy" };
+    case "preview_traffic_policy":
+      try {
+        return {
+          command: "preview_traffic_policy",
+          payload: {
+            expected_revision: revisionValue(
+              requireValue("expected_revision"),
+              label(locale, "field.expected_revision"),
+              locale,
+            ),
+            draft: parseTrafficPolicyDraftJson(requiredString("draft_json")),
+          },
+        };
+      } catch (error) {
+        throw new Error(trafficPolicyJsonErrorText(error, locale));
+      }
+    case "preview_traffic_policy_rollback":
+      return {
+        command: "preview_traffic_policy_rollback",
+        payload: {
+          expected_revision: revisionValue(
+            requireValue("expected_revision"),
+            label(locale, "field.expected_revision"),
+            locale,
+          ),
+          target_revision: revisionValue(
+            requireValue("target_revision"),
+            label(locale, "field.target_revision"),
+            locale,
+          ),
+        },
+      };
+    case "apply_traffic_policy":
+      try {
+        return {
+          command: "apply_traffic_policy",
+          payload: {
+            expected_revision: revisionValue(
+              requireValue("expected_revision"),
+              label(locale, "field.expected_revision"),
+              locale,
+            ),
+            draft: parseTrafficPolicyDraftJson(requiredString("draft_json")),
+            confirm_risk: booleanValue(requireValue("confirm_risk"), locale),
+          },
+        };
+      } catch (error) {
+        throw new Error(trafficPolicyJsonErrorText(error, locale));
+      }
+    case "rollback_traffic_policy":
+      return {
+        command: "rollback_traffic_policy",
+        payload: {
+          expected_revision: revisionValue(
+            requireValue("expected_revision"),
+            label(locale, "field.expected_revision"),
+            locale,
+          ),
+          target_revision: revisionValue(
+            requireValue("target_revision"),
+            label(locale, "field.target_revision"),
+            locale,
+          ),
+          confirm_risk: booleanValue(requireValue("confirm_risk"), locale),
+        },
+      };
+    case "get_traffic_policy_history":
+      return { command: "get_traffic_policy_history" };
+    case "test_traffic_policy":
+      try {
+        return {
+          command: "test_traffic_policy",
+          payload: {
+            current: parseTrafficPolicyJson(requiredString("current_json")),
+            candidate: parseTrafficPolicyJson(requiredString("candidate_json")),
+            input: parseTrafficPolicyTestInputJson(requiredString("input_json")),
+          },
+        };
+      } catch (error) {
+        throw new Error(trafficPolicyJsonErrorText(error, locale));
+      }
     case "start_node":
       return { command: "start_node" };
     case "stop_node":

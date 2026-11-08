@@ -953,7 +953,7 @@ function validationIssueAt(
   return value as PolicyValidationIssue;
 }
 
-function duplicateObjectKeyPath(source: string): string | null {
+export function duplicateObjectKeyPath(source: string): string | null {
   let position = 0;
 
   const skipWhitespace = (): void => {

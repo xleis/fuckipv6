@@ -21,6 +21,9 @@ import type {
   PolicySnapshot,
   PolicyTestInput,
   PolicyTestResult,
+  TrafficPolicy,
+  TrafficPolicyDraft,
+  TrafficPolicyTestInput,
 } from "../../../contracts/typescript/node-contract-v1";
 import {
   buildCommand,
@@ -46,6 +49,12 @@ import {
   validatePolicySnapshot,
   validatePolicyTestResult,
 } from "./policy-test";
+import {
+  parseTrafficPolicyDraftJson,
+  parseTrafficPolicyJson,
+  parseTrafficPolicyTestInputJson,
+  TrafficPolicyJsonError,
+} from "./traffic-policy";
 
 const manifest = manifestFixture as NodeUiManifest;
 
@@ -1812,6 +1821,204 @@ describe("node UI contract invariants", () => {
     expect(buildCommand(actions.get("get_policy_history")!, {}, "en")).toEqual({
       command: "get_policy_history",
     });
+  });
+
+  it("builds strict traffic policy preview, apply, rollback, read, and test commands", () => {
+    const actions = new Map(
+      manifest.pages
+        .flatMap((page) => page.actions)
+        .map((action) => [action.id, action]),
+    );
+    const nodeId = `node_${"T".repeat(43)}`;
+    const exitId = `node_${"E".repeat(43)}`;
+    const networkId = `net_${"R".repeat(43)}`;
+    const ruleId = `rule_${"I".repeat(43)}`;
+    const draft: TrafficPolicyDraft = {
+      node_id: nodeId,
+      default_policy: {
+        action: { kind: "reject" },
+        confirmed_by: "owner",
+        confirmed_at_unix_ms: 1_700_000_000_000,
+      },
+      failure_policy: { direct_fallback: null },
+      rules: [
+        {
+          rule_id: ruleId,
+          priority: 1,
+          enabled: true,
+          description: "Work traffic",
+          matcher: {
+            domain_suffixes: ["example.com"],
+            destination_ports: [{ start: 443, end: 443 }],
+            protocols: ["tcp"],
+            applications: [{ kind: "package_id", value: "com.example.work" }],
+          },
+          action: { kind: "exit", value: exitId },
+        },
+      ],
+    };
+    const current: TrafficPolicy = { ...draft, revision: 7 };
+    const candidate: TrafficPolicy = { ...draft, revision: 8 };
+    const testInput: TrafficPolicyTestInput = {
+      network_id: networkId,
+      flow: {
+        domain: "api.example.com",
+        destination_ip: "203.0.113.10",
+        destination_port: 443,
+        protocol: "tcp",
+        application: { kind: "package_id", value: "com.example.work" },
+      },
+      source: { kind: "manual" },
+    };
+
+    expect(buildCommand(actions.get("get_traffic_policy")!, {}, "en")).toEqual({
+      command: "get_traffic_policy",
+    });
+    expect(
+      buildCommand(
+        actions.get("preview_traffic_policy")!,
+        { expected_revision: "7", draft_json: JSON.stringify(draft) },
+        "en",
+      ),
+    ).toEqual({
+      command: "preview_traffic_policy",
+      payload: { expected_revision: 7, draft },
+    });
+    expect(
+      buildCommand(
+        actions.get("preview_traffic_policy_rollback")!,
+        { expected_revision: "8", target_revision: "6" },
+        "en",
+      ),
+    ).toEqual({
+      command: "preview_traffic_policy_rollback",
+      payload: { expected_revision: 8, target_revision: 6 },
+    });
+    expect(
+      buildCommand(
+        actions.get("apply_traffic_policy")!,
+        {
+          expected_revision: "7",
+          draft_json: JSON.stringify(draft),
+          confirm_risk: "true",
+        },
+        "en",
+      ),
+    ).toEqual({
+      command: "apply_traffic_policy",
+      payload: { expected_revision: 7, draft, confirm_risk: true },
+    });
+    expect(
+      buildCommand(
+        actions.get("rollback_traffic_policy")!,
+        { expected_revision: "8", target_revision: "6", confirm_risk: "true" },
+        "en",
+      ),
+    ).toEqual({
+      command: "rollback_traffic_policy",
+      payload: { expected_revision: 8, target_revision: 6, confirm_risk: true },
+    });
+    expect(
+      buildCommand(actions.get("get_traffic_policy_history")!, {}, "en"),
+    ).toEqual({ command: "get_traffic_policy_history" });
+    expect(
+      buildCommand(
+        actions.get("test_traffic_policy")!,
+        {
+          current_json: JSON.stringify(current),
+          candidate_json: JSON.stringify(candidate),
+          input_json: JSON.stringify(testInput),
+        },
+        "en",
+      ),
+    ).toEqual({
+      command: "test_traffic_policy",
+      payload: { current, candidate, input: testInput },
+    });
+  });
+
+  it("rejects malformed traffic policy JSON with exact paths", () => {
+    const nodeId = `node_${"T".repeat(43)}`;
+    const draft = {
+      node_id: nodeId,
+      default_policy: {
+        action: { kind: "reject" },
+        confirmed_by: "owner",
+        confirmed_at_unix_ms: 1,
+      },
+      rules: [
+        {
+          rule_id: `rule_${"I".repeat(43)}`,
+          priority: 1,
+          matcher: { protocols: ["tcp"] },
+          action: { kind: "direct" },
+        },
+      ],
+    };
+    expect(parseTrafficPolicyDraftJson(JSON.stringify(draft))).toEqual({
+      ...draft,
+      rules: [{ ...draft.rules[0], enabled: true, description: "" }],
+    });
+
+    function draftError(value: unknown): TrafficPolicyJsonError {
+      try {
+        parseTrafficPolicyDraftJson(JSON.stringify(value));
+      } catch (error) {
+        expect(error).toBeInstanceOf(TrafficPolicyJsonError);
+        return error as TrafficPolicyJsonError;
+      }
+      throw new Error("expected traffic policy JSON to be rejected");
+    }
+
+    expect(draftError({ ...draft, revision: 2 }).path).toBe("/revision");
+    const duplicate = JSON.stringify(draft).replace(
+      `"node_id":${JSON.stringify(nodeId)}`,
+      `"node_id":${JSON.stringify(nodeId)},"node_id":${JSON.stringify(nodeId)}`,
+    );
+    try {
+      parseTrafficPolicyDraftJson(duplicate);
+      throw new Error("expected duplicate traffic policy fields to be rejected");
+    } catch (error) {
+      expect(error).toBeInstanceOf(TrafficPolicyJsonError);
+      expect((error as TrafficPolicyJsonError).path).toBe("/node_id");
+    }
+    expect(
+      draftError({
+        ...draft,
+        rules: [{ ...draft.rules[0], priority: 2 }],
+      }).path,
+    ).toBe("/rules/0/priority");
+    expect(
+      draftError({
+        ...draft,
+        failure_policy: {
+          direct_fallback: {
+            allowed_failures: ["dns_pollution_detected"],
+            confirmed_by: "owner",
+            confirmed_at_unix_ms: 1,
+          },
+        },
+      }).path,
+    ).toBe("/failure_policy/direct_fallback/allowed_failures/0");
+
+    const testInput: TrafficPolicyTestInput = {
+      network_id: `net_${"R".repeat(43)}`,
+      flow: {
+        domain: null,
+        destination_ip: "203.0.113.10",
+        destination_port: 443,
+        protocol: "tcp",
+        application: { kind: "unknown" },
+      },
+      source: { kind: "manual" },
+    };
+    expect(parseTrafficPolicyTestInputJson(JSON.stringify(testInput))).toEqual(
+      testInput,
+    );
+    const parsedPolicy = parseTrafficPolicyJson(
+      JSON.stringify({ ...draft, revision: 9 }),
+    );
+    expect(parsedPolicy.revision).toBe(9);
   });
 
   it("validates policy, preview, apply, history, and rollback outcomes", () => {

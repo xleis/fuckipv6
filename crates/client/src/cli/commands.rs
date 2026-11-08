@@ -1121,18 +1121,13 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                         .await;
                     }
                     (generation, None) => {
-                        if let Some(relay) = runtime.outbound.clear_relay(generation).await {
+                        if let Some(relay) = runtime
+                            .outbound
+                            .clear_relay_with_recovery(generation)
+                            .await
+                        {
                             tracing::warn!("QUIC 中继接收流已断开，重置中继等待自愈重连");
                             relay.client.close().await;
-                            if !runtime
-                                .outbound
-                                .try_trigger_recovery(RecoveryTrigger::RelayDisconnected)
-                            {
-                                tracing::warn!(
-                                    diagnostic_id = "recovery.trigger_queue_unavailable",
-                                    "QUIC 中继断流已清理，但恢复触发队列不可用"
-                                );
-                            }
                         }
                     }
                 }
@@ -2442,13 +2437,21 @@ impl FallbackTransport for RuntimeFallbackTransport {
             match result {
                 Ok(Ok(())) => RelayForwardOutcome::Sent,
                 Ok(Err(error)) => {
-                    if let Some(failed) = self.relay_state.clear_relay(relay.generation).await {
+                    if let Some(failed) = self
+                        .relay_state
+                        .clear_relay_with_recovery(relay.generation)
+                        .await
+                    {
                         failed.client.close().await;
                     }
                     RelayForwardOutcome::Failed(error)
                 }
                 Err(_) => {
-                    if let Some(failed) = self.relay_state.clear_relay(relay.generation).await {
+                    if let Some(failed) = self
+                        .relay_state
+                        .clear_relay_with_recovery(relay.generation)
+                        .await
+                    {
                         failed.client.close().await;
                     }
                     RelayForwardOutcome::Failed(anyhow::anyhow!(
@@ -2520,6 +2523,30 @@ impl RelayState {
             slot.take()
         } else {
             None
+        }
+    }
+
+    async fn clear_relay_with_recovery(&self, generation: u64) -> Option<RelayHandle> {
+        let relay = self.clear_relay(generation).await?;
+        self.notify_recovery_trigger(RecoveryTrigger::RelayDisconnected);
+        Some(relay)
+    }
+
+    fn notify_recovery_trigger(&self, trigger: RecoveryTrigger) {
+        let Some(sender) = self.recovery_trigger_tx.as_ref() else {
+            tracing::warn!(
+                trigger = ?trigger,
+                diagnostic_id = "recovery.trigger_queue_unavailable",
+                "恢复触发队列未配置"
+            );
+            return;
+        };
+        if !sender.try_trigger(trigger) {
+            tracing::warn!(
+                trigger = ?trigger,
+                diagnostic_id = "recovery.trigger_queue_unavailable",
+                "恢复触发队列已满或已关闭"
+            );
         }
     }
 
@@ -2706,15 +2733,8 @@ impl OutboundDispatcher {
         self.relay_state.install_relay(relay).await
     }
 
-    async fn clear_relay(&self, generation: u64) -> Option<RelayHandle> {
-        self.relay_state.clear_relay(generation).await
-    }
-
-    fn try_trigger_recovery(&self, trigger: RecoveryTrigger) -> bool {
-        self.relay_state
-            .recovery_trigger_tx
-            .as_ref()
-            .is_some_and(|sender| sender.try_trigger(trigger))
+    async fn clear_relay_with_recovery(&self, generation: u64) -> Option<RelayHandle> {
+        self.relay_state.clear_relay_with_recovery(generation).await
     }
 
     async fn close_relay(&self, total_timeout: Duration) -> CleanupStatus {
@@ -5564,6 +5584,23 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
         assert_eq!(
             events.next_trigger().await,
             Some(RecoveryTrigger::RelayDisconnected)
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_relay_generation_does_not_request_recovery() {
+        let (mut events, sender) = RuntimeRecoveryEvents::without_os_watcher_for_test();
+        let relay_state = RelayState::with_recovery_trigger_sender(sender);
+
+        assert!(
+            relay_state.clear_relay_with_recovery(17).await.is_none(),
+            "an absent or stale generation must not be cleared"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), events.next_trigger())
+                .await
+                .is_err(),
+            "failing to clear the current generation must not enqueue recovery"
         );
     }
 

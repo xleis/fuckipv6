@@ -2460,9 +2460,9 @@ current/candidate revision、应用与回滚 payload。但当前生产 manifest 
 
 **验收**：用户能完成从规则设计、测试、应用、观察到回滚的完整闭环。
 
-### W11-09 路由测试与发布证据 `[ ]`
+### W11-09 路由测试与发布证据 `[~]`
 
-- [ ] 单元测试覆盖顺序、AND/OR、边界和未知应用；
+- [x] 单元测试覆盖顺序、AND/OR、边界和未知应用；
 - [ ] 集成测试覆盖 TUN/路由/DNS 应用与补偿；
 - [ ] 失败注入覆盖休眠、切网、Exit 断开和 DNS 超时；
 - [ ] E2E 覆盖域名和应用分流及回滚；
@@ -2470,6 +2470,10 @@ current/candidate revision、应用与回滚 payload。但当前生产 manifest 
 - [ ] 验证固定 Exit 不可被 fallback 绕过；
 - [ ] 网络报告包含规则、目标、结果和清理情况；
 - [ ] 未通过前不宣称翻墙、分流或抗干扰可用。
+
+**验证通过（2026-11-09）**：`cargo test -p fuckipv6-common --lib domain::traffic_policy`（26 passed）和
+`cargo test -p fuckipv6-common --lib domain::traffic_policy_test`（7 passed）。测试直接调用生产领域求值器，覆盖首条命中顺序、
+字段内 AND/值列表 OR、IPv4/IPv6 CIDR 与域名标签边界、未知应用不猜测，以及顺序 API 往返后仍产生相同运行时决策。
 
 **验收**：路由声明由可复核测试支撑；任何静态规则示例都不能代替运行时证据。
 

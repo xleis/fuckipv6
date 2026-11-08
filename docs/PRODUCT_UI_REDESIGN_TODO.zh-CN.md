@@ -57,7 +57,7 @@
 | W8 网络创建与发现 | `[~]` | P1 | W3,W4,W5 | 创建、发现、开放/审批/私有邀请和强制 Exit 知情已完成；索引故障隔离与发现全链路测试待完成 |
 | W9 成员、组与拓扑 | `[~]` | P1 | W8 | 成员列表、邀请审批、组目录和拓扑聚合已完成；多网络视觉、交互、性能与 E2E 进行中 |
 | W10 安全与隐私 | `[x]` | P1 | W9 | 权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计、安全页面状态和可重复治理证据闭环均已完成 |
-| W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，真实命中观测、GPUI/Android 一致性、生产后端接线及真实平台监听/适配待完成 |
+| W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约和 W11-09 隔离路由 E2E/失败关闭/网络报告已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，真实命中观测、GPUI/Android 一致性、生产后端接线及真实平台监听/适配待完成 |
 | W12 Exit | `[ ]` | P1 | W10,W11 | 治理、Google、DNS、网速报告 |
 | W13 Relay | `[ ]` | P1 | W10 | 授权、配额、健康、回退 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
@@ -2460,16 +2460,16 @@ current/candidate revision、应用与回滚 payload。但当前生产 manifest 
 
 **验收**：用户能完成从规则设计、测试、应用、观察到回滚的完整闭环。
 
-### W11-09 路由测试与发布证据 `[~]`
+### W11-09 路由测试与发布证据 `[x]`
 
 - [x] 单元测试覆盖顺序、AND/OR、边界和未知应用；
 - [x] 集成测试覆盖 TUN/路由/DNS 应用与补偿；
 - [x] 失败注入覆盖休眠、切网、Exit 断开和 DNS 超时；
-- [ ] E2E 覆盖域名和应用分流及回滚；
-- [ ] 验证拒绝/失败关闭时无真实源 IP 泄漏；
+- [x] E2E 覆盖域名和应用分流及回滚；
+- [x] 验证拒绝/失败关闭时无真实源 IP 泄漏；
 - [x] 验证固定 Exit 不可被 fallback 绕过；
-- [ ] 网络报告包含规则、目标、结果和清理情况；
-- [ ] 未通过前不宣称翻墙、分流或抗干扰可用。
+- [x] 网络报告包含规则、目标、结果和清理情况；
+- [x] 未通过前不宣称翻墙、分流或抗干扰可用。
 
 **验证通过（2026-11-09）**：`cargo test -p fuckipv6-common --lib domain::traffic_policy`（26 passed）和
 `cargo test -p fuckipv6-common --lib domain::traffic_policy_test`（7 passed）。测试直接调用生产领域求值器，覆盖首条命中顺序、
@@ -2486,6 +2486,22 @@ current/candidate revision、应用与回滚 payload。但当前生产 manifest 
 TUN、policy rule、路由表和隔离 `/etc/resolv.conf`，分别注入休眠唤醒后的 TUN/路由丢失、切网后的路由与 DNS 丢失、Exit
 监听断开，以及真实 UDP DNS 查询超时。测试直接调用生产 `RecoveryCoordinator` 与 Linux TUN/路由适配器，验证恢复/失败关闭状态、
 分阶段探测、脱敏失败决策审计和清理；不访问或修改宿主网络。
+
+`./scripts/test-traffic-routing-netns.sh`（1 passed）在私有 user/network/mount namespace 中建立四条真实 veth 路径和合成 DNS：
+`domain.test`、`app.test`、`fail.test`、`blocked.test` 分别解析到稳定测试地址。测试直接调用生产 `TrafficPolicy::evaluate`
+与 `decide_failure`，再由目标策略路由和 UID 策略路由执行域名/应用分流；nftables 拒绝未批准输出。上游 peer 记录实际到达的
+TCP 源地址，得到域名路径 `10.10.0.2`、应用 UID 路径 `10.20.0.2`，策略回滚后同一域名切换为 direct 路径 `10.30.0.2`。
+Reject 与 blackhole 两类失败关闭连接均未到达上游，报告记录 `attempted_connections=2`、`blocked_connections=2`、
+`leaked_connections=0`；不存在真实源地址泄漏记录。
+
+同一 E2E 生成脱敏 `report.json`：每个 flow 含 kind、可选命中的 `rule_id`、域名、目标 IP/端口、具体 action、原因、结果与
+观测源地址；默认 Reject 以 `rule_id: null` 明确表示没有猜测规则。报告还包含回滚前后源地址、失败关闭统计和清理状态。
+测试只在清理完成后通过，当前记录 `nft_table_removed=true`、`policy_rule_removed=true`、`namespaces_removed=true`、
+`residual_resources=0`。`cargo test -p fuckipv6-client --no-default-features --lib routing::traffic_report`（1 passed）
+验证报告序列化/反序列化及字段约束。
+
+以上证据仅证明 Linux 隔离测试拓扑中的策略语义、分包路径、失败关闭和清理，不代表生产 Exit/Relay 后端已经接线，也不代表
+GPUI、Android、常见受限网络或一般抗干扰能力已验收；在相应平台与生产适配证据完成前不宣称这些能力可用。
 
 **验收**：路由声明由可复核测试支撑；任何静态规则示例都不能代替运行时证据。
 

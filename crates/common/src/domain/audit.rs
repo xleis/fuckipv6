@@ -292,6 +292,45 @@ impl std::error::Error for AuditAppendError {}
 pub const AUDIT_CHAIN_SCHEMA_VERSION: u32 = 1;
 pub const AUDIT_GENESIS_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
+pub const DEFAULT_AUDIT_RETENTION_DAYS: u32 = 365;
+pub const DEFAULT_AUDIT_SEGMENT_RECORDS: u64 = 10_000;
+pub const DEFAULT_AUDIT_MAX_SEGMENTS: u32 = 64;
+
+/// Storage policy for the durable audit ledger. Retention is a minimum: a
+/// capacity or rotation failure must stop appends rather than silently deleting
+/// evidence. Segment counts and sequence numbers remain global across files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct AuditRetentionPolicy {
+    pub minimum_retention_days: u32,
+    pub segment_records: u64,
+    pub max_segments: u32,
+}
+
+impl Default for AuditRetentionPolicy {
+    fn default() -> Self {
+        Self {
+            minimum_retention_days: DEFAULT_AUDIT_RETENTION_DAYS,
+            segment_records: DEFAULT_AUDIT_SEGMENT_RECORDS,
+            max_segments: DEFAULT_AUDIT_MAX_SEGMENTS,
+        }
+    }
+}
+
+impl AuditRetentionPolicy {
+    pub fn validate(&self) -> DomainResult<()> {
+        if self.minimum_retention_days == 0 || self.segment_records == 0 || self.max_segments == 0 {
+            return Err(DomainError::invalid_value(
+                "audit retention limits must be positive",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn max_records(&self) -> u64 {
+        self.segment_records
+            .saturating_mul(u64::from(self.max_segments))
+    }
+}
 
 /// One immutable link in the security-audit hash chain. The sequence is
 /// global across rotated segments, and every exported record carries enough
@@ -407,11 +446,30 @@ impl AuditChainRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuditChainError {
-    UnsupportedSchema { sequence: u64, schema_version: u32 },
-    SequenceMismatch { expected: u64, actual: u64 },
-    PreviousHashMismatch { sequence: u64 },
-    HashMismatch { sequence: u64 },
-    InvalidEntry { sequence: u64 },
+    UnsupportedSchema {
+        sequence: u64,
+        schema_version: u32,
+    },
+    UnsupportedCheckpointSchema {
+        schema_version: u32,
+    },
+    SequenceMismatch {
+        expected: u64,
+        actual: u64,
+    },
+    PreviousHashMismatch {
+        sequence: u64,
+    },
+    HashMismatch {
+        sequence: u64,
+    },
+    InvalidEntry {
+        sequence: u64,
+    },
+    CheckpointMismatch {
+        expected_sequence: u64,
+        actual_sequence: u64,
+    },
 }
 
 impl fmt::Display for AuditChainError {
@@ -423,6 +481,10 @@ impl fmt::Display for AuditChainError {
             } => write!(
                 formatter,
                 "audit record {sequence} uses unsupported schema {schema_version}"
+            ),
+            Self::UnsupportedCheckpointSchema { schema_version } => write!(
+                formatter,
+                "audit checkpoint uses unsupported schema {schema_version}"
             ),
             Self::SequenceMismatch { expected, actual } => write!(
                 formatter,
@@ -443,6 +505,13 @@ impl fmt::Display for AuditChainError {
                     "audit record {sequence} contains an invalid entry"
                 )
             }
+            Self::CheckpointMismatch {
+                expected_sequence,
+                actual_sequence,
+            } => write!(
+                formatter,
+                "audit checkpoint mismatch: expected sequence {expected_sequence}, got {actual_sequence}"
+            ),
         }
     }
 }
@@ -457,24 +526,214 @@ pub struct AuditChainVerification {
     pub record_count: u64,
 }
 
+/// Persisted head anchor. Reopening the ledger must match this checkpoint so
+/// deleting or replacing the newest records cannot pass ordinary chain checks.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct AuditChainCheckpoint {
+    pub schema_version: u32,
+    pub sequence: u64,
+    pub entry_hash: String,
+    pub record_count: u64,
+}
+
+impl Default for AuditChainCheckpoint {
+    fn default() -> Self {
+        Self {
+            schema_version: AUDIT_CHAIN_SCHEMA_VERSION,
+            sequence: 0,
+            entry_hash: AUDIT_GENESIS_HASH.to_owned(),
+            record_count: 0,
+        }
+    }
+}
+
+impl AuditChainCheckpoint {
+    pub fn from_verification(verification: &AuditChainVerification) -> Self {
+        Self {
+            schema_version: AUDIT_CHAIN_SCHEMA_VERSION,
+            sequence: verification.last_sequence.unwrap_or(0),
+            entry_hash: verification.last_hash.clone(),
+            record_count: verification.record_count,
+        }
+    }
+
+    pub fn verify(
+        &self,
+        records: &[AuditChainRecord],
+    ) -> Result<AuditChainVerification, AuditChainError> {
+        if self.schema_version != AUDIT_CHAIN_SCHEMA_VERSION {
+            return Err(AuditChainError::UnsupportedCheckpointSchema {
+                schema_version: self.schema_version,
+            });
+        }
+        if !is_sha256_hex(&self.entry_hash) {
+            return Err(AuditChainError::CheckpointMismatch {
+                expected_sequence: self.sequence,
+                actual_sequence: records.last().map(|record| record.sequence).unwrap_or(0),
+            });
+        }
+        let verification = verify_audit_chain(records)?;
+        if verification.record_count != self.record_count
+            || verification.last_sequence.unwrap_or(0) != self.sequence
+            || verification.last_hash != self.entry_hash
+        {
+            return Err(AuditChainError::CheckpointMismatch {
+                expected_sequence: self.sequence,
+                actual_sequence: verification.last_sequence.unwrap_or(0),
+            });
+        }
+        Ok(verification)
+    }
+}
+
 /// Verify one uninterrupted append-only chain. Rotation is a storage detail:
 /// callers must verify all segment records together.
 pub fn verify_audit_chain(
     records: &[AuditChainRecord],
 ) -> Result<AuditChainVerification, AuditChainError> {
-    let mut expected_sequence = 1;
-    let mut previous_hash = AUDIT_GENESIS_HASH.to_owned();
+    verify_audit_chain_from(records, 1, AUDIT_GENESIS_HASH)
+}
+
+/// Verify a contiguous chain slice. This is used for a single rotated segment
+/// while still preserving the global sequence and predecessor hash.
+pub fn verify_audit_chain_from(
+    records: &[AuditChainRecord],
+    expected_first_sequence: u64,
+    expected_previous_hash: &str,
+) -> Result<AuditChainVerification, AuditChainError> {
+    let mut expected_sequence = expected_first_sequence;
+    let mut previous_hash = expected_previous_hash.to_owned();
     for record in records {
         record.verify(expected_sequence, &previous_hash)?;
         expected_sequence = expected_sequence.saturating_add(1);
         previous_hash = record.entry_hash.clone();
     }
     Ok(AuditChainVerification {
-        first_sequence: (!records.is_empty()).then_some(1),
+        first_sequence: (!records.is_empty()).then_some(expected_first_sequence),
         last_sequence: records.last().map(|record| record.sequence),
         last_hash: previous_hash,
         record_count: records.len() as u64,
     })
+}
+
+/// Typed, serializable scope used by both the API and offline export verification.
+#[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct AuditExportFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_id: Option<NetworkId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<NodeId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_prefix: Option<String>,
+}
+
+impl AuditExportFilter {
+    pub fn validate(&self) -> DomainResult<()> {
+        if matches!((self.from_unix_ms, self.to_unix_ms), (Some(from), Some(to)) if from > to) {
+            return Err(DomainError::invalid_value(
+                "audit export start time must not exceed end time",
+            ));
+        }
+        if self.object_id.is_some() && self.object_kind.is_none() {
+            return Err(DomainError::invalid_value(
+                "audit export object id requires an object kind",
+            ));
+        }
+        if self
+            .object_kind
+            .as_ref()
+            .is_some_and(|value| value.is_empty() || value.len() > 128)
+        {
+            return Err(DomainError::invalid_value(
+                "audit export object kind is invalid",
+            ));
+        }
+        if self
+            .object_id
+            .as_ref()
+            .is_some_and(|value| value.is_empty() || value.len() > 512)
+        {
+            return Err(DomainError::invalid_value(
+                "audit export object id is invalid",
+            ));
+        }
+        if self
+            .resource_prefix
+            .as_ref()
+            .is_some_and(|value| value.is_empty() || value.len() > 512)
+        {
+            return Err(DomainError::invalid_value(
+                "audit export resource prefix is invalid",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn matches(&self, entry: &AuditEntry) -> bool {
+        if self
+            .from_unix_ms
+            .is_some_and(|from| entry.occurred_at_unix_ms < from)
+            || self
+                .to_unix_ms
+                .is_some_and(|to| entry.occurred_at_unix_ms > to)
+        {
+            return false;
+        }
+        if self
+            .network_id
+            .as_ref()
+            .is_some_and(|network_id| entry.network_id.as_ref() != Some(network_id))
+        {
+            return false;
+        }
+        if self
+            .actor
+            .as_ref()
+            .is_some_and(|actor| &entry.actor != actor)
+        {
+            return false;
+        }
+        let object_kind = entry
+            .details
+            .get("object_kind")
+            .map(String::as_str)
+            .unwrap_or_default();
+        if self
+            .object_kind
+            .as_ref()
+            .is_some_and(|expected| expected != object_kind)
+        {
+            return false;
+        }
+        let object_id = entry
+            .details
+            .get("object_id")
+            .map(String::as_str)
+            .unwrap_or(entry.resource.as_str());
+        if self
+            .object_id
+            .as_ref()
+            .is_some_and(|expected| expected != object_id)
+        {
+            return false;
+        }
+        if self
+            .resource_prefix
+            .as_ref()
+            .is_some_and(|prefix| !entry.resource.starts_with(prefix))
+        {
+            return false;
+        }
+        true
+    }
 }
 
 fn is_sha256_hex(value: &str) -> bool {
@@ -718,6 +977,88 @@ mod tests {
         assert_eq!(record.entry.details["accessToken"], "[REDACTED]");
         assert_eq!(record.entry.details["custom-hidden"], "[REDACTED]");
         assert!(verify_audit_chain(&[record]).is_ok());
+    }
+
+    #[test]
+    fn rotated_segment_keeps_global_sequence_and_previous_hash() {
+        let records = chain();
+        let verification =
+            verify_audit_chain_from(&records[1..], 2, &records[0].entry_hash).unwrap();
+        assert_eq!(verification.first_sequence, Some(2));
+        assert_eq!(verification.last_sequence, Some(3));
+        assert_eq!(verification.record_count, 2);
+        assert_eq!(verification.last_hash, records[2].entry_hash);
+    }
+
+    #[test]
+    fn checkpoint_detects_a_deleted_tail_after_reopen() {
+        let records = chain();
+        let checkpoint =
+            AuditChainCheckpoint::from_verification(&verify_audit_chain(&records).unwrap());
+        assert_eq!(checkpoint.sequence, 3);
+        assert!(checkpoint.verify(&records).is_ok());
+
+        assert_eq!(
+            checkpoint.verify(&records[..2]),
+            Err(AuditChainError::CheckpointMismatch {
+                expected_sequence: 3,
+                actual_sequence: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn export_filter_validates_and_matches_time_network_and_object_scope() {
+        let mut item = entry();
+        item.details
+            .insert("object_kind".into(), "security_policy".into());
+        item.details.insert("object_id".into(), "policy-2".into());
+        let filter = AuditExportFilter {
+            from_unix_ms: Some(100),
+            to_unix_ms: Some(100),
+            network_id: item.network_id.clone(),
+            actor: Some(item.actor.clone()),
+            object_kind: Some("security_policy".into()),
+            object_id: Some("policy-2".into()),
+            resource_prefix: Some("network/home".into()),
+        };
+        assert!(filter.validate().is_ok());
+        assert!(filter.matches(&item));
+
+        let mut outside = item.clone();
+        outside.occurred_at_unix_ms = 101;
+        assert!(!filter.matches(&outside));
+
+        assert!(AuditExportFilter {
+            from_unix_ms: Some(2),
+            to_unix_ms: Some(1),
+            ..AuditExportFilter::default()
+        }
+        .validate()
+        .is_err());
+        assert!(AuditExportFilter {
+            object_id: Some("policy-2".into()),
+            ..AuditExportFilter::default()
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn retention_policy_requires_positive_limits_and_bounds_capacity() {
+        let policy = AuditRetentionPolicy {
+            minimum_retention_days: 30,
+            segment_records: 100,
+            max_segments: 4,
+        };
+        assert!(policy.validate().is_ok());
+        assert_eq!(policy.max_records(), 400);
+        assert!(AuditRetentionPolicy {
+            segment_records: 0,
+            ..policy
+        }
+        .validate()
+        .is_err());
     }
 
     #[test]

@@ -3866,9 +3866,9 @@ mod tests {
     use super::*;
     use crate::node::{
         NodeClientBlacklistCommand, NodeCommand, NodeCommandBus, NodeCreateNetworkCommand,
-        NodeEventBus, NodeJoinNetworkCommand, NodeNetworkAllocation, NodeNetworkRole,
-        NodeProbePeerCommand, NodeRoutingMode, NodeSetNetworkRoleCommand,
-        NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
+        NodeEventBus, NodeEventKind, NodeEventReplay, NodeJoinNetworkCommand,
+        NodeNetworkAllocation, NodeNetworkRole, NodeProbePeerCommand, NodeRoutingMode,
+        NodeSetNetworkRoleCommand, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
     };
     use crate::policy_transaction::PolicyChangeAction;
     use crate::symmetric::EmbeddedServiceStartRequest;
@@ -3928,7 +3928,8 @@ mod tests {
     }
 
     fn policy_transaction_snapshot() -> PolicySnapshot {
-        let now = unix_time_ms();
+        static NOW: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let now = *NOW.get_or_init(unix_time_ms);
         let network_id = policy_transaction_network_id();
         PolicySnapshot {
             local_policy: Some(NodeLocalAccessPolicy {
@@ -4015,10 +4016,11 @@ mod tests {
         let configs = ConfigManager::new_for_dir(dir.clone()).expect("config manager");
         let events = NodeEventBus::default();
         let state = NodeStateStore::with_events(events.clone());
+        let policy = policy_transaction_snapshot();
         state
             .update(|snapshot| {
-                snapshot.access_control.local_policy = policy_transaction_snapshot().local_policy;
-                snapshot.access_control.network_acls = policy_transaction_snapshot().network_acls;
+                snapshot.access_control.local_policy = policy.local_policy;
+                snapshot.access_control.network_acls = policy.network_acls;
             })
             .await;
         let mut handler = NodeRuntimeHandler::with_services(
@@ -4693,6 +4695,92 @@ mod tests {
             rollback_published |= local.revision == 3;
         }
         assert!(rollback_published);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn policy_apply_and_rollback_resume_after_disconnect_without_losing_revisions() {
+        let (bus, state, events, store, dir) = policy_runtime_bus("disconnect").await;
+        let base = policy_transaction_snapshot();
+        let network_ids = vec![policy_transaction_network_id().to_string()];
+
+        let (disconnected_receiver, acknowledged) = events.subscribe_with_cursor();
+        drop(disconnected_receiver);
+
+        let applied = bus
+            .execute_test(NodeCommandRequest::new(
+                90,
+                NodeCommand::ApplyPolicy(super::super::NodeApplyPolicyCommand {
+                    expected_revision: 0,
+                    candidate: policy_transaction_candidate(2),
+                    network_ids: network_ids.clone(),
+                    includes_local_policy: true,
+                    confirm_privilege_expansion: true,
+                }),
+            ))
+            .await
+            .expect("apply result");
+        assert!(matches!(
+            applied.outcome,
+            NodeCommandOutcome::PolicyApplied(result) if result.revision == 1
+        ));
+
+        let rolled_back = bus
+            .execute_test(NodeCommandRequest::new(
+                91,
+                NodeCommand::RollbackPolicy(super::super::NodeRollbackPolicyCommand {
+                    expected_revision: 1,
+                    target_revision: 1,
+                    network_ids,
+                    includes_local_policy: true,
+                    confirm_privilege_expansion: true,
+                }),
+            ))
+            .await
+            .expect("rollback result");
+        assert!(matches!(
+            rolled_back.outcome,
+            NodeCommandOutcome::PolicyRolledBack(result) if result.revision == 2
+        ));
+
+        let (_reconnected_receiver, boundary) = events.subscribe_with_cursor();
+        let NodeEventReplay::Events(replayed) = events.replay_after(acknowledged, boundary) else {
+            panic!("retained policy events must replay after reconnect");
+        };
+        assert!(!replayed.is_empty());
+        assert_eq!(
+            replayed.first().map(|event| event.sequence),
+            Some(acknowledged.sequence + 1)
+        );
+        assert!(replayed
+            .windows(2)
+            .all(|pair| pair[0].sequence + 1 == pair[1].sequence));
+
+        let mut published_revisions = Vec::new();
+        for event in replayed {
+            if let NodeEventKind::StateChanged { revision } = event.kind {
+                assert!(published_revisions
+                    .last()
+                    .is_none_or(|previous| previous < &revision));
+                published_revisions.push(revision);
+            }
+        }
+        let current = state.snapshot().await;
+        assert_eq!(published_revisions.last().copied(), Some(current.revision));
+        assert_eq!(
+            store.current_snapshot(&base).expect("store current"),
+            PolicySnapshot {
+                local_policy: current.access_control.local_policy,
+                network_acls: current.access_control.network_acls,
+            }
+        );
+        assert_eq!(
+            store
+                .history_snapshot(&base)
+                .expect("store history")
+                .current_revision,
+            2
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

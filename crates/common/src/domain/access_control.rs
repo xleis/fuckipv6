@@ -1251,13 +1251,15 @@ mod tests {
             PolicyAction::Update,
             ResourceKind::SecurityPolicy,
         );
-        let baseline = vec![allow_rule(
+        let role_allow = allow_rule(
             b"role-allow",
             SubjectSelector::Role(NetworkRole::Administrator),
             PolicyAction::Update,
             ResourceKind::SecurityPolicy,
             network_id.clone(),
-        )];
+        );
+        let baseline = vec![role_allow.clone()];
+        let direct_grant = grant(b"direct-grant", 5_000);
         let deny = deny_rule(
             b"explicit-deny",
             SubjectSelector::AnyMember,
@@ -1270,7 +1272,7 @@ mod tests {
             Some(&acl(
                 network_id.clone(),
                 vec![deny.clone()],
-                vec![grant(b"direct-grant", 5_000)],
+                vec![direct_grant.clone()],
             )),
             Some(&local_policy(network_id)),
             &request,
@@ -1284,7 +1286,12 @@ mod tests {
         assert!(decision.matched_deny_rule_ids.contains(&deny.rule_id));
         assert!(decision
             .matched_allow_rule_ids
-            .contains(&grant(b"direct-grant", 5_000).grant_id));
+            .contains(&role_allow.rule_id));
+        assert!(decision
+            .matched_allow_rule_ids
+            .contains(&direct_grant.grant_id));
+        assert_eq!(decision.network_acl_revision, 1);
+        assert_eq!(decision.local_policy_revision, 1);
     }
 
     #[test]
@@ -1312,7 +1319,11 @@ mod tests {
         )];
         let direct = NetworkAclGrant {
             grant_id: SecurityRuleId::from_public_key(b"admin-exit-grant"),
-            subjects: vec![SubjectSelector::Role(NetworkRole::Administrator)],
+            subjects: vec![
+                SubjectSelector::Role(NetworkRole::Administrator),
+                SubjectSelector::Group(group()),
+                SubjectSelector::Node(actor()),
+            ],
             resources: vec![ResourceKind::ExitGrant],
             actions: vec![PolicyAction::Use],
             issued_at_unix_ms: 10,
@@ -1336,6 +1347,9 @@ mod tests {
             EffectiveAccessReason::LocalContributionVeto
         );
         assert_eq!(decision.rule_id.as_ref(), Some(&veto_id));
+        assert_eq!(decision.layer, Some(EffectivePolicyLayer::Local));
+        assert_eq!(decision.local_policy_revision, 1);
+        assert_eq!(decision.network_acl_revision, 1);
     }
 
     #[test]

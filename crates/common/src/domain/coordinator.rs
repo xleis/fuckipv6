@@ -279,6 +279,45 @@ mod tests {
     }
 
     #[test]
+    fn emergency_handoff_keeps_governance_frozen_until_full_successor_recovers() {
+        let leader = NodeId::from_public_key(b"candidate-1");
+        let mut emergency = term(4, 40, leader.clone());
+        emergency.authority = CoordinatorAuthority::Emergency;
+        emergency.phase = CoordinatorPhase::EmergencyLeader;
+
+        emergency
+            .transition_phase(CoordinatorPhase::Handoff, 100)
+            .unwrap();
+        emergency
+            .transition_phase(CoordinatorPhase::Stable, 100)
+            .unwrap();
+        assert_eq!(emergency.phase, CoordinatorPhase::Stable);
+        assert_eq!(emergency.authority, CoordinatorAuthority::Emergency);
+        for forbidden in [
+            CoordinatorWriteKind::Membership,
+            CoordinatorWriteKind::SecurityPolicy,
+            CoordinatorWriteKind::Keys,
+            CoordinatorWriteKind::AuditDeletion,
+            CoordinatorWriteKind::SelfPromotion,
+        ] {
+            assert!(!emergency.allows_write(forbidden));
+        }
+
+        let successor = term(emergency.term + 1, emergency.fencing_token.0 + 1, leader);
+        emergency.validate_successor(&successor, 100).unwrap();
+        assert_eq!(successor.authority, CoordinatorAuthority::Full);
+        assert_eq!(successor.phase, CoordinatorPhase::Stable);
+        for recovered in [
+            CoordinatorWriteKind::Membership,
+            CoordinatorWriteKind::SecurityPolicy,
+            CoordinatorWriteKind::Keys,
+            CoordinatorWriteKind::AuditDeletion,
+        ] {
+            assert!(successor.allows_write(recovered));
+        }
+    }
+
+    #[test]
     fn illegal_phase_transitions_fail_closed() {
         let leader = NodeId::from_public_key(b"candidate-1");
         let mut coordinator = term(1, 1, leader);

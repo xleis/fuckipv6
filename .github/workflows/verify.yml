@@ -76,6 +76,55 @@ jobs:
       - name: Reject generated drift
         run: git diff --exit-code -- contracts
 
+  governance:
+    name: Governance evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            webui/package-lock.json
+            contracts/typescript/package-lock.json
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install WebUI dependencies
+        run: npm ci --prefix webui
+
+      - name: Install TypeScript dependencies
+        run: npm ci --ignore-scripts --prefix contracts/typescript
+
+      - name: Test governance evidence collector
+        run: python3 -m unittest scripts/test_governance_evidence.py -v
+
+      - name: Collect governance evidence
+        run: python3 scripts/governance-evidence.py --require-clean
+
+      - name: Upload governance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: governance-evidence
+          path: target/governance-evidence
+          if-no-files-found: warn
+
   supply-chain:
     name: Supply-chain audit
     runs-on: ubuntu-latest

@@ -56,7 +56,7 @@
 | W7 节点页 | `[~]` | P1 | W2,W4,W5 | W7-01 启停、W7-03 权威路由摘要、W7-04 身份和密钥、W7-05 诊断恢复与 W7-06 状态权限矩阵已完成；W7-02 接口/TUN 的实机平台验收进行中 |
 | W8 网络创建与发现 | `[~]` | P1 | W3,W4,W5 | 创建、发现、开放/审批/私有邀请和强制 Exit 知情已完成；索引故障隔离与发现全链路测试待完成 |
 | W9 成员、组与拓扑 | `[~]` | P1 | W8 | 成员列表、邀请审批、组目录和拓扑聚合已完成；多网络视觉、交互、性能与 E2E 进行中 |
-| W10 安全与隐私 | `[~]` | P1 | W9 | W10-01 至 W10-08 已完成，覆盖权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计和安全页面状态；W10-09 待完成 |
+| W10 安全与隐私 | `[x]` | P1 | W9 | 权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计、安全页面状态和可重复治理证据闭环均已完成 |
 | W11 流量路由 | `[ ]` | P1 | W7,W10 | 规则、测试、原子应用、失败关闭 |
 | W12 Exit | `[ ]` | P1 | W10,W11 | 治理、Google、DNS、网速报告 |
 | W13 Relay | `[ ]` | P1 | W10 | 授权、配额、健康、回退 |
@@ -2173,16 +2173,35 @@ ARIA 关联和旧宣传文案移除。
 
 **验收**：安全能力用可验证状态表达，不用营销标签代替实际配置。
 
-### W10-09 权限、隐私与审计测试 `[ ]`
+### W10-09 权限、隐私与审计测试 `[x]`
 
-- [ ] 覆盖角色/组/本地否决/拒绝优先组合；
-- [ ] 覆盖临时 Coordinator 冻结和恢复；
-- [ ] 覆盖字段级读取、搜索、导出和活动侧漏；
-- [ ] 覆盖并发策略应用、回滚和断线；
-- [ ] 覆盖审计篡改、磁盘满、轮转和导出；
-- [ ] 覆盖对象删除后链接和权限检查；
-- [ ] 完成后端、GPUI、WebUI 和 Android 契约对齐；
-- [ ] 测试证据绑定策略版本和 commit。
+- [x] 覆盖角色/组/本地否决/拒绝优先组合；
+- [x] 覆盖临时 Coordinator 冻结和恢复；
+- [x] 覆盖字段级读取、搜索、导出和活动侧漏；
+- [x] 覆盖并发策略应用、回滚和断线；
+- [x] 覆盖审计篡改、磁盘满、轮转和导出；
+- [x] 覆盖对象删除后链接和权限检查；
+- [x] 完成后端、GPUI、WebUI 和 Android 契约对齐；
+- [x] 测试证据绑定策略版本和 commit。
+
+新增 `scripts/governance-evidence.py` 作为 W10-09 的可重复证据采集器：每次运行记录 Git commit、工作区洁净状态、平台信息、
+策略事务/审计链版本，以及 Rust、TypeScript、WebUI、Android 与 7 个 JSON Schema 的契约版本；逐项执行 12 组检查并生成
+`target/governance-evidence/report.json` 与独立日志。报告只有在该 commit 前后不变、工作区在 `--require-clean` 下保持洁净、
+契约版本对齐且 8 项 coverage 全部通过时才标记为 `passed`。
+
+定向测试补充角色 allow、直接 grant 与显式 deny 的组合记录，以及 role/group/node grant 不得绕过本地否决；Coordinator 从
+Emergency 经 Handoff 回到 Stable 后仍保持治理冻结，只有更高 term/token 的 Full + Stable successor 才恢复治理写；策略
+应用与回滚在事件订阅断开后可从旧 cursor 续接，事件序号不跳号、状态 revision 不回退，最终 store snapshot 与运行时一致。
+
+**验证通过（2026-11-08）**：`cargo fmt --all -- --check`、`cargo check --workspace`、
+`cargo test -p fuckipv6-common --lib`（275 passed）、
+`cargo test -p fuckipv6-client --all-features --lib -- --test-threads=1`（941 passed，3 ignored）、
+`cargo clippy -p fuckipv6-client --all-targets --all-features -- -D warnings`、
+`python3 -m unittest scripts/test_governance_evidence.py -v`（6 passed）、
+`python3 scripts/governance-evidence.py --require-clean`（12/12 checks，8/8 coverage）、
+WebUI `npm test -- --run`（254 passed）、`npm run lint`、`npm run typecheck`、`npm run build`、
+`./scripts/check-contracts.sh`、`python3 scripts/check-docs.py` 和 `git diff --check`。
+CI 新增独立 `governance` job，执行采集器单测和洁净工作区证据采集并上传报告与日志。
 
 **验收**：安全、隐私与活动形成完整治理闭环，并有可重复证据支撑发布声明。
 

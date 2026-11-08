@@ -30,6 +30,7 @@ pub mod security_policy;
 pub mod topology;
 pub mod traffic_failure;
 pub mod traffic_policy;
+pub mod traffic_policy_test;
 
 pub use access_control::*;
 pub use application_identity::*;
@@ -53,6 +54,7 @@ pub use security_policy::*;
 pub use topology::*;
 pub use traffic_failure::*;
 pub use traffic_policy::*;
+pub use traffic_policy_test::*;
 
 /// Stable, machine-readable domain violation.
 #[derive(Debug, Clone, PartialEq, Eq)]

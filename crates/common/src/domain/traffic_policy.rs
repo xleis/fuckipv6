@@ -5,6 +5,10 @@ use ipnet::IpNet;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::application_identity::{
+    ApplicationIdentity, ApplicationIdentityCapability, ApplicationIdentityCapabilityState,
+    ApplicationIdentityFormat,
+};
 use super::ids::{ContentHash, NetworkId, NodeId, TrafficRuleId};
 use super::{DomainError, DomainResult};
 
@@ -218,19 +222,6 @@ pub struct TrafficDefaultPolicy {
     pub confirmed_at_unix_ms: u64,
 }
 
-/// Unknown is a first-class observation. It never matches a positive matcher
-/// for a concrete application and therefore cannot silently inherit that
-/// application's route.
-#[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema, Serialize, Deserialize,
-)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-pub enum ApplicationIdentity {
-    ExecutablePath(String),
-    PackageId(String),
-    Unknown,
-}
-
 /// A non-blocking warning attached to a matcher. Invalid or ambiguous values
 /// are rejected by `validate`; these codes describe valid rules whose scope is
 /// intentionally or accidentally broad and must be shown before activation.
@@ -303,6 +294,63 @@ impl TrafficMatch {
         }
         for application in &self.applications {
             application.validate()?;
+            if application.is_unknown() {
+                return Err(DomainError::new(
+                    "domain.application_identity_unknown_matcher",
+                    "unknown application identity cannot be used as a positive rule condition",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check the same platform capability used to enable the UI selector.
+    /// Disabled capabilities and formats not supported by that platform reject
+    /// an application condition instead of silently compiling it into a rule
+    /// that can never match.
+    pub fn validate_for_application_capability(
+        &self,
+        capability: &ApplicationIdentityCapability,
+    ) -> DomainResult<()> {
+        self.validate()?;
+        capability.validate()?;
+        if self.applications.is_empty() {
+            return Ok(());
+        }
+        if !capability.is_enabled() {
+            let explanation = capability
+                .disabled_explanation()
+                .unwrap_or("application identity capability is unavailable");
+            let code = match &capability.state {
+                ApplicationIdentityCapabilityState::Unavailable(_) => {
+                    "domain.application_identity_unavailable"
+                }
+                ApplicationIdentityCapabilityState::Unsupported(_) => {
+                    "domain.application_identity_unsupported"
+                }
+                ApplicationIdentityCapabilityState::Available => {
+                    unreachable!("enabled capability returned no formats")
+                }
+            };
+            return Err(DomainError::new(code, explanation));
+        }
+        for application in &self.applications {
+            let format = application.format().ok_or_else(|| {
+                DomainError::new(
+                    "domain.application_identity_unknown_matcher",
+                    "unknown application identity cannot be used as a positive rule condition",
+                )
+            })?;
+            if !capability.formats.contains(&format) {
+                return Err(DomainError::new(
+                    "domain.application_identity_format_unsupported",
+                    format!(
+                        "{} is not available as an application identity on {:?}",
+                        format_name(format),
+                        capability.platform
+                    ),
+                ));
+            }
         }
         Ok(())
     }
@@ -385,43 +433,6 @@ impl TrafficMatch {
             }
         }
         risks
-    }
-}
-
-impl ApplicationIdentity {
-    fn validate(&self) -> DomainResult<()> {
-        match self {
-            Self::ExecutablePath(path) => {
-                if path.is_empty() || path.len() > 4096 || path.contains('\0') {
-                    return Err(DomainError::invalid_value(
-                        "application executable path is invalid",
-                    ));
-                }
-            }
-            Self::PackageId(package) => {
-                if package.is_empty()
-                    || package.len() > 255
-                    || !package.bytes().all(|byte| {
-                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
-                    })
-                {
-                    return Err(DomainError::invalid_value(
-                        "application package id is invalid",
-                    ));
-                }
-            }
-            Self::Unknown => {}
-        }
-        Ok(())
-    }
-
-    fn matches(&self, observed: &Self) -> bool {
-        match (self, observed) {
-            (Self::ExecutablePath(expected), Self::ExecutablePath(actual)) => expected == actual,
-            (Self::PackageId(expected), Self::PackageId(actual)) => expected == actual,
-            (Self::Unknown, Self::Unknown) => true,
-            _ => false,
-        }
     }
 }
 
@@ -659,6 +670,13 @@ pub struct TrafficDecision {
     pub reason: TrafficDecisionReason,
 }
 
+fn format_name(format: ApplicationIdentityFormat) -> &'static str {
+    match format {
+        ApplicationIdentityFormat::ExecutablePath => "executable_path",
+        ApplicationIdentityFormat::PackageId => "package_id",
+    }
+}
+
 fn canonical_domain(value: String, allow_wildcard_suffix: bool) -> DomainResult<String> {
     if value.is_empty() || value.trim() != value || value.contains('\0') {
         return Err(DomainError::invalid_value("traffic domain is invalid"));
@@ -749,6 +767,62 @@ mod tests {
             2 => TrafficAction::Exit(NodeId::from_public_key(&(index as u64).to_le_bytes())),
             _ => TrafficAction::Reject,
         }
+    }
+
+    #[test]
+    fn unknown_application_is_not_a_positive_matcher_or_a_match() {
+        let matcher = TrafficMatch {
+            applications: vec![ApplicationIdentity::Unknown],
+            ..TrafficMatch::default()
+        };
+        assert_eq!(
+            matcher.validate().unwrap_err().code(),
+            "domain.application_identity_unknown_matcher"
+        );
+        assert!(!matcher.matches(&flow(ApplicationIdentity::Unknown)));
+    }
+
+    #[test]
+    fn platform_capability_disables_unsupported_application_conditions() {
+        let executable_matcher = TrafficMatch {
+            applications: vec![ApplicationIdentity::ExecutablePath(
+                "/usr/bin/browser".into(),
+            )],
+            ..TrafficMatch::default()
+        };
+        let linux = ApplicationIdentityCapability::available(
+            super::super::application_identity::ApplicationIdentityPlatform::Linux,
+            [ApplicationIdentityFormat::ExecutablePath],
+        )
+        .unwrap();
+        executable_matcher
+            .validate_for_application_capability(&linux)
+            .unwrap();
+
+        let disabled = ApplicationIdentityCapability::unsupported(
+            super::super::application_identity::ApplicationIdentityPlatform::Linux,
+            "process metadata permission was denied",
+        )
+        .unwrap();
+        assert_eq!(
+            executable_matcher
+                .validate_for_application_capability(&disabled)
+                .unwrap_err()
+                .code(),
+            "domain.application_identity_unsupported"
+        );
+
+        let package_matcher = TrafficMatch {
+            applications: vec![ApplicationIdentity::PackageId("com.example.app".into())],
+            ..TrafficMatch::default()
+        };
+        assert_eq!(
+            package_matcher
+                .validate_for_application_capability(&linux)
+                .unwrap_err()
+                .code(),
+            "domain.application_identity_format_unsupported"
+        );
     }
 
     #[test]

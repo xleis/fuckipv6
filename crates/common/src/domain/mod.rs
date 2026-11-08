@@ -9,6 +9,7 @@ use std::error::Error;
 use std::fmt;
 
 pub mod access_control;
+pub mod application_identity;
 pub mod audit;
 pub mod capability;
 pub mod coordinator;
@@ -30,6 +31,7 @@ pub mod topology;
 pub mod traffic_policy;
 
 pub use access_control::*;
+pub use application_identity::*;
 pub use audit::*;
 pub use capability::*;
 pub use coordinator::*;

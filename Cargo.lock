@@ -2821,6 +2821,7 @@ dependencies = [
  "windows-sys 0.59.0",
  "wintun 0.5.1",
  "x509-parser 0.16.0",
+ "zbus",
  "zeroize",
 ]
 
@@ -8338,6 +8339,7 @@ dependencies = [
  "signal-hook-registry",
  "socket2",
  "tokio-macros",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 
@@ -10284,6 +10286,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_repr",
+ "tokio",
  "tracing",
  "uds_windows",
  "uuid",

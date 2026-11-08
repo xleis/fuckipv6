@@ -85,6 +85,7 @@ gpui-base = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = { workspace = true }
+zbus = { version = "5.19", default-features = false, features = ["tokio"] }
 
 # Windows TUN support
 [target.'cfg(windows)'.dependencies]

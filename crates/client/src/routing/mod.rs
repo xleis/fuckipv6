@@ -3,6 +3,8 @@ pub mod doh_dns;
 #[cfg(target_os = "linux")]
 pub mod linux_exit;
 #[cfg(target_os = "linux")]
+pub mod linux_recovery_events;
+#[cfg(target_os = "linux")]
 pub mod linux_route;
 
 pub mod exit_node;

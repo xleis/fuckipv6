@@ -6,6 +6,7 @@ pub mod linux_exit;
 pub mod linux_route;
 
 pub mod exit_node;
+pub mod recovery;
 pub mod table;
 
 pub use exit_node::*;

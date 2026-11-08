@@ -2463,7 +2463,7 @@ current/candidate revision、应用与回滚 payload。但当前生产 manifest 
 ### W11-09 路由测试与发布证据 `[~]`
 
 - [x] 单元测试覆盖顺序、AND/OR、边界和未知应用；
-- [ ] 集成测试覆盖 TUN/路由/DNS 应用与补偿；
+- [x] 集成测试覆盖 TUN/路由/DNS 应用与补偿；
 - [ ] 失败注入覆盖休眠、切网、Exit 断开和 DNS 超时；
 - [ ] E2E 覆盖域名和应用分流及回滚；
 - [ ] 验证拒绝/失败关闭时无真实源 IP 泄漏；
@@ -2477,6 +2477,10 @@ current/candidate revision、应用与回滚 payload。但当前生产 manifest 
 
 `cargo test -p fuckipv6-common --lib domain::traffic_failure`（8 passed）还验证了显式 direct fallback 配置下，固定 Exit、
 固定网络和 Reject 规则仍分别以 `FixedExit`、`FixedNetwork`、`RejectRule` 失败关闭，且不会产生 fallback 记录。
+
+`unshare -Urnm --propagation private -- ./scripts/test-lifecycle-cleanup-netns.sh`（1 passed）在私有 network/mount namespace
+中创建真实 TUN，安装 policy rule、路由表和隔离 `/etc/resolv.conf`，注入首次路由规则删除与 TUN 删除失败，验证 DNS 恢复、
+保留资源的补偿重试、成功清理及幂等清理。该测试同时发现并修复了 TUN 在 link up 前添加设备路由会失败的真实初始化顺序问题。
 
 **验收**：路由声明由可复核测试支撑；任何静态规则示例都不能代替运行时证据。
 

@@ -155,14 +155,19 @@ impl LinuxTun {
             configure_link(name, mtu).await?;
             if let Some(ipv4) = ips.ipv4 {
                 configure_ipv4_address(name, ipv4, ipv4_prefix).await?;
-                configure_ipv4_route(name, ipv4, ipv4_prefix).await?;
             }
             if let Some(ipv6) = ips.ipv6 {
                 configure_ipv6_address(name, ipv6).await?;
-                bring_link_up(name).await?;
+            }
+            // Linux refuses a device route while the TUN is still down. Addresses
+            // must be configured first so the connected prefixes exist, then the
+            // link can be raised before adding explicit routes.
+            bring_link_up(name).await?;
+            if let Some(ipv4) = ips.ipv4 {
+                configure_ipv4_route(name, ipv4, ipv4_prefix).await?;
+            }
+            if let Some(ipv6) = ips.ipv6 {
                 configure_ipv6_route(name, ipv6, ipv6_prefix).await?;
-            } else {
-                bring_link_up(name).await?;
             }
 
             let device = open_tun_device(name).await?;

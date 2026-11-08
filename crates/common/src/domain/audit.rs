@@ -289,6 +289,198 @@ impl fmt::Display for AuditAppendError {
 
 impl std::error::Error for AuditAppendError {}
 
+pub const AUDIT_CHAIN_SCHEMA_VERSION: u32 = 1;
+pub const AUDIT_GENESIS_HASH: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// One immutable link in the security-audit hash chain. The sequence is
+/// global across rotated segments, and every exported record carries enough
+/// evidence for an offline verifier to check ordering and content integrity.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct AuditChainRecord {
+    pub schema_version: u32,
+    pub sequence: u64,
+    pub previous_hash: String,
+    pub entry: AuditEntry,
+    pub entry_hash: String,
+}
+
+impl AuditChainRecord {
+    pub fn seal(
+        sequence: u64,
+        previous_hash: impl Into<String>,
+        mut entry: AuditEntry,
+    ) -> Result<Self, AuditAppendError> {
+        if sequence == 0 {
+            return Err(AuditAppendError::Invalid(DomainError::invalid_value(
+                "audit sequence must be positive",
+            )));
+        }
+        entry.validate().map_err(AuditAppendError::Invalid)?;
+        entry.redact_sensitive_fields();
+        entry.validate().map_err(AuditAppendError::Invalid)?;
+        let previous_hash = previous_hash.into();
+        if !is_sha256_hex(&previous_hash) {
+            return Err(AuditAppendError::Invalid(DomainError::invalid_value(
+                "audit previous hash is invalid",
+            )));
+        }
+        let mut record = Self {
+            schema_version: AUDIT_CHAIN_SCHEMA_VERSION,
+            sequence,
+            previous_hash,
+            entry,
+            entry_hash: String::new(),
+        };
+        record.entry_hash = record
+            .compute_entry_hash()
+            .map_err(AuditAppendError::Invalid)?;
+        Ok(record)
+    }
+
+    /// Recompute the hash from the canonical JSON payload. `entry_hash` itself
+    /// is deliberately excluded so verification detects changes to the entry,
+    /// sequence or predecessor link.
+    pub fn compute_entry_hash(&self) -> DomainResult<String> {
+        #[derive(Serialize)]
+        struct CanonicalAuditPayload<'a> {
+            schema_version: u32,
+            sequence: u64,
+            previous_hash: &'a str,
+            entry: &'a AuditEntry,
+        }
+        let payload = serde_json::to_vec(&CanonicalAuditPayload {
+            schema_version: self.schema_version,
+            sequence: self.sequence,
+            previous_hash: &self.previous_hash,
+            entry: &self.entry,
+        })
+        .map_err(|_| DomainError::invalid_value("audit record could not be canonicalized"))?;
+        Ok(blake3::hash(&payload).to_hex().to_string())
+    }
+
+    pub fn verify(
+        &self,
+        expected_sequence: u64,
+        expected_previous_hash: &str,
+    ) -> Result<(), AuditChainError> {
+        if self.schema_version != AUDIT_CHAIN_SCHEMA_VERSION {
+            return Err(AuditChainError::UnsupportedSchema {
+                sequence: self.sequence,
+                schema_version: self.schema_version,
+            });
+        }
+        if self.sequence != expected_sequence {
+            return Err(AuditChainError::SequenceMismatch {
+                expected: expected_sequence,
+                actual: self.sequence,
+            });
+        }
+        if self.previous_hash != expected_previous_hash {
+            return Err(AuditChainError::PreviousHashMismatch {
+                sequence: self.sequence,
+            });
+        }
+        self.entry
+            .validate()
+            .map_err(|_| AuditChainError::InvalidEntry {
+                sequence: self.sequence,
+            })?;
+        if !is_sha256_hex(&self.entry_hash) {
+            return Err(AuditChainError::HashMismatch {
+                sequence: self.sequence,
+            });
+        }
+        let actual = self
+            .compute_entry_hash()
+            .map_err(|_| AuditChainError::InvalidEntry {
+                sequence: self.sequence,
+            })?;
+        if actual != self.entry_hash {
+            return Err(AuditChainError::HashMismatch {
+                sequence: self.sequence,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuditChainError {
+    UnsupportedSchema { sequence: u64, schema_version: u32 },
+    SequenceMismatch { expected: u64, actual: u64 },
+    PreviousHashMismatch { sequence: u64 },
+    HashMismatch { sequence: u64 },
+    InvalidEntry { sequence: u64 },
+}
+
+impl fmt::Display for AuditChainError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedSchema {
+                sequence,
+                schema_version,
+            } => write!(
+                formatter,
+                "audit record {sequence} uses unsupported schema {schema_version}"
+            ),
+            Self::SequenceMismatch { expected, actual } => write!(
+                formatter,
+                "audit sequence discontinuity: expected {expected}, got {actual}"
+            ),
+            Self::PreviousHashMismatch { sequence } => {
+                write!(
+                    formatter,
+                    "audit record {sequence} has a broken predecessor link"
+                )
+            }
+            Self::HashMismatch { sequence } => {
+                write!(formatter, "audit record {sequence} failed its content hash")
+            }
+            Self::InvalidEntry { sequence } => {
+                write!(
+                    formatter,
+                    "audit record {sequence} contains an invalid entry"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for AuditChainError {}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct AuditChainVerification {
+    pub first_sequence: Option<u64>,
+    pub last_sequence: Option<u64>,
+    pub last_hash: String,
+    pub record_count: u64,
+}
+
+/// Verify one uninterrupted append-only chain. Rotation is a storage detail:
+/// callers must verify all segment records together.
+pub fn verify_audit_chain(
+    records: &[AuditChainRecord],
+) -> Result<AuditChainVerification, AuditChainError> {
+    let mut expected_sequence = 1;
+    let mut previous_hash = AUDIT_GENESIS_HASH.to_owned();
+    for record in records {
+        record.verify(expected_sequence, &previous_hash)?;
+        expected_sequence = expected_sequence.saturating_add(1);
+        previous_hash = record.entry_hash.clone();
+    }
+    Ok(AuditChainVerification {
+        first_sequence: (!records.is_empty()).then_some(1),
+        last_sequence: records.last().map(|record| record.sequence),
+        last_hash: previous_hash,
+        record_count: records.len() as u64,
+    })
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct AuditLog {
     entries: Vec<AuditEntry>,
@@ -458,6 +650,74 @@ mod tests {
             AuditAppendOutcome::DuplicateIgnored
         );
         assert_eq!(log.entries().len(), 1);
+    }
+
+    fn chain() -> Vec<AuditChainRecord> {
+        let mut records = Vec::new();
+        for index in 0..3 {
+            let mut item = entry();
+            item.audit_id = AuditId::from_public_key(format!("audit-{index}").as_bytes());
+            item.summary = format!("Audit {index}");
+            item.occurred_at_unix_ms += index;
+            let sequence = records.len() as u64 + 1;
+            let previous_hash = records
+                .last()
+                .map(|record: &AuditChainRecord| record.entry_hash.clone())
+                .unwrap_or_else(|| AUDIT_GENESIS_HASH.to_owned());
+            records.push(AuditChainRecord::seal(sequence, previous_hash, item).unwrap());
+        }
+        records
+    }
+
+    #[test]
+    fn hash_chain_verifies_and_detects_content_tampering() {
+        let mut records = chain();
+        let verified = verify_audit_chain(&records).unwrap();
+        assert_eq!(verified.first_sequence, Some(1));
+        assert_eq!(verified.last_sequence, Some(3));
+        assert_eq!(verified.record_count, 3);
+        assert_eq!(verified.last_hash, records[2].entry_hash);
+
+        records[1].entry.summary = "tampered".into();
+        assert_eq!(
+            verify_audit_chain(&records),
+            Err(AuditChainError::HashMismatch { sequence: 2 })
+        );
+
+        let mut records = chain();
+        records[2].entry_hash = "f".repeat(64);
+        assert_eq!(
+            verify_audit_chain(&records),
+            Err(AuditChainError::HashMismatch { sequence: 3 })
+        );
+    }
+
+    #[test]
+    fn hash_chain_detects_sequence_gaps_and_broken_links() {
+        let mut records = chain();
+        records.remove(1);
+        assert_eq!(
+            verify_audit_chain(&records),
+            Err(AuditChainError::SequenceMismatch {
+                expected: 2,
+                actual: 3,
+            })
+        );
+
+        let mut records = chain();
+        records[1].previous_hash = "0".repeat(64);
+        assert_eq!(
+            verify_audit_chain(&records),
+            Err(AuditChainError::PreviousHashMismatch { sequence: 2 })
+        );
+    }
+
+    #[test]
+    fn sealing_redacts_sensitive_values_before_hashing() {
+        let record = AuditChainRecord::seal(1, AUDIT_GENESIS_HASH, entry()).unwrap();
+        assert_eq!(record.entry.details["accessToken"], "[REDACTED]");
+        assert_eq!(record.entry.details["custom-hidden"], "[REDACTED]");
+        assert!(verify_audit_chain(&[record]).is_ok());
     }
 
     #[test]

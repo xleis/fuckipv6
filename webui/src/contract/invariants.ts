@@ -27,6 +27,17 @@ import type {
   PolicyRiskSummary,
   PolicyRollbackResult,
   PolicySnapshot,
+  TrafficPolicyAffectedObject,
+  TrafficPolicyApplyResult,
+  TrafficPolicyChangeKind,
+  TrafficPolicyCurrent,
+  TrafficPolicyDiffEntry,
+  TrafficPolicyHistoryEntry,
+  TrafficPolicyHistorySnapshot,
+  TrafficPolicyObjectKind,
+  TrafficPolicyPreview,
+  TrafficPolicyRollbackResult,
+  TrafficPolicyTestComparison,
   NodeProblem,
   NodeSnapshot,
   NodeUiAction,
@@ -1462,6 +1473,437 @@ function policyRolledBack(value: unknown): PolicyRollbackResult {
   if (audit.action !== "rollback")
     fail("policy rollback audit action mismatch");
   return value as PolicyRollbackResult;
+}
+
+const TRAFFIC_POLICY_CHANGE_KINDS = new Set<TrafficPolicyChangeKind>([
+  "rule_added",
+  "rule_removed",
+  "rule_updated",
+  "rules_reordered",
+  "default_policy_changed",
+  "failure_policy_changed",
+]);
+const TRAFFIC_POLICY_OBJECT_KINDS = new Set<TrafficPolicyObjectKind>([
+  "rule",
+  "default_policy",
+  "failure_policy",
+  "network",
+  "exit",
+]);
+const TRAFFIC_POLICY_CHANGE_ACTIONS = new Set(["apply", "rollback"]);
+const TRAFFIC_POLICY_HISTORY_OUTCOMES = new Set([
+  "applied",
+  "rolled_back",
+  "failed",
+  "recovered",
+]);
+const TRAFFIC_FAILURE_KINDS = new Set([
+  "unknown_application",
+  "dns_resolution_timeout",
+  "dns_pollution_detected",
+  "exit_unavailable",
+  "network_selection_unavailable",
+  "connection_timeout",
+  "partial_connection_failure",
+]);
+const TRAFFIC_FAILURE_OUTCOMES = new Set(["fail_closed", "direct_fallback"]);
+const TRAFFIC_FAILURE_REASONS = new Set([
+  "default_fail_closed",
+  "not_allowed_by_policy",
+  "explicit_direct_fallback",
+  "unsafe_failure_class",
+  "reject_rule",
+  "fixed_exit",
+  "fixed_network",
+  "direct_action_has_no_alternate",
+]);
+const TRAFFIC_MATCH_RISK_KINDS = new Set([
+  "always_matches",
+  "any_destination",
+  "any_port",
+  "any_protocol",
+  "any_application",
+  "broad_cidr",
+  "full_port_range",
+]);
+const NODE_ID_PATTERN = /^node_[A-Za-z0-9_-]{43}$/;
+const NETWORK_ID_PATTERN = /^net_[A-Za-z0-9_-]{43}$/;
+
+function trafficPolicyValue(value: unknown, message: string): void {
+  try {
+    parseTrafficPolicyJson(JSON.stringify(value));
+  } catch {
+    fail(message);
+  }
+}
+
+function trafficPolicyAffectedObjects(
+  value: unknown,
+): TrafficPolicyAffectedObject[] {
+  for (const entry of arrayValue(
+    value,
+    "traffic policy affected objects invalid",
+  )) {
+    if (
+      !record(entry) ||
+      !TRAFFIC_POLICY_OBJECT_KINDS.has(
+        entry.kind as TrafficPolicyObjectKind,
+      )
+    ) {
+      fail("traffic policy affected object invalid");
+    }
+    if (entry.object_id !== undefined && entry.object_id !== null)
+      stringValue(entry.object_id, "traffic policy affected object id invalid");
+  }
+  return value as TrafficPolicyAffectedObject[];
+}
+
+function trafficPolicyDiffs(value: unknown): TrafficPolicyDiffEntry[] {
+  for (const entry of arrayValue(
+    value,
+    "traffic policy diff entries invalid",
+  )) {
+    if (!record(entry)) fail("traffic policy diff entry invalid");
+    stringValue(entry.path, "traffic policy diff path invalid", true);
+    if (!TRAFFIC_POLICY_CHANGE_KINDS.has(entry.change as TrafficPolicyChangeKind))
+      fail("traffic policy diff change invalid");
+  }
+  return value as TrafficPolicyDiffEntry[];
+}
+
+function trafficPolicyRuleRisks(value: unknown): void {
+  const seenRuleIds = new Set<string>();
+  for (const entry of arrayValue(value, "traffic policy rule risks invalid")) {
+    if (!record(entry)) fail("traffic policy rule risk invalid");
+    const ruleId = stringValue(
+      entry.rule_id,
+      "traffic policy risk rule id invalid",
+      true,
+    );
+    if (seenRuleIds.has(ruleId)) fail("duplicate traffic policy risk rule id");
+    seenRuleIds.add(ruleId);
+    nonNegativeInteger(entry.priority, "traffic policy risk priority invalid");
+    booleanValueRaw(entry.enabled, "traffic policy risk enabled flag invalid");
+    for (const risk of arrayValue(
+      entry.risks,
+      "traffic policy match risks invalid",
+    )) {
+      if (
+        !record(risk) ||
+        !TRAFFIC_MATCH_RISK_KINDS.has(String(risk.kind))
+      ) {
+        fail("traffic policy match risk invalid");
+      }
+      if (risk.kind === "broad_cidr") {
+        stringValue(risk.cidr, "traffic policy broad CIDR invalid", true);
+        nonNegativeInteger(
+          risk.prefix_len,
+          "traffic policy broad CIDR prefix invalid",
+        );
+      }
+      if (risk.kind === "full_port_range") {
+        nonNegativeInteger(
+          risk.start,
+          "traffic policy full port range start invalid",
+        );
+        nonNegativeInteger(
+          risk.end,
+          "traffic policy full port range end invalid",
+        );
+      }
+    }
+  }
+}
+
+function trafficPolicyHistoryEntry(
+  value: unknown,
+): TrafficPolicyHistoryEntry {
+  if (!record(value)) fail("traffic policy history entry invalid");
+  if (!TRAFFIC_POLICY_CHANGE_ACTIONS.has(String(value.action)))
+    fail("traffic policy history action invalid");
+  if (!TRAFFIC_POLICY_HISTORY_OUTCOMES.has(String(value.outcome)))
+    fail("traffic policy history outcome invalid");
+  stringValue(value.actor, "traffic policy history actor invalid", true);
+  stringValue(value.source, "traffic policy history source invalid", true);
+  stringValue(
+    value.transaction_id,
+    "traffic policy transaction id invalid",
+    true,
+  );
+  stringValue(value.occurred_at, "traffic policy history timestamp invalid", true);
+  stringValue(
+    value.content_hash,
+    "traffic policy history content hash invalid",
+    true,
+  );
+  nonNegativeInteger(
+    value.candidate_revision,
+    "traffic policy candidate revision invalid",
+  );
+  nonNegativeInteger(
+    value.previous_revision,
+    "traffic policy previous revision invalid",
+  );
+  for (const field of ["applied_revision", "target_revision"] as const) {
+    if (value[field] !== undefined && value[field] !== null)
+      nonNegativeInteger(value[field], `traffic policy ${field} invalid`);
+  }
+  for (const field of ["reason", "reason_code"] as const) {
+    if (value[field] !== undefined && value[field] !== null)
+      stringValue(value[field], `traffic policy history ${field} invalid`);
+  }
+  trafficPolicyDiffs(value.diffs);
+  trafficPolicyAffectedObjects(value.affected_objects);
+  return value as TrafficPolicyHistoryEntry;
+}
+
+function trafficPolicyCurrent(value: unknown): TrafficPolicyCurrent {
+  if (!record(value)) fail("current traffic policy invalid");
+  const revision = nonNegativeInteger(
+    value.revision,
+    "current traffic policy revision invalid",
+  );
+  stringValue(value.content_hash, "traffic policy content hash invalid", true);
+  trafficPolicyValue(value.policy, "current traffic policy invalid");
+  if (record(value.policy) && value.policy.revision !== revision)
+    fail("traffic policy revision mismatch");
+  return value as TrafficPolicyCurrent;
+}
+
+function trafficPolicyPreview(value: unknown): TrafficPolicyPreview {
+  if (!record(value)) fail("traffic policy preview invalid");
+  nonNegativeInteger(
+    value.expected_revision,
+    "traffic policy expected revision invalid",
+  );
+  const currentRevision = nonNegativeInteger(
+    value.current_revision,
+    "traffic policy current revision invalid",
+  );
+  const candidateRevision = nonNegativeInteger(
+    value.candidate_revision,
+    "traffic policy candidate revision invalid",
+  );
+  trafficPolicyValue(value.current, "traffic policy preview current invalid");
+  trafficPolicyValue(value.candidate, "traffic policy preview candidate invalid");
+  if (
+    record(value.current) &&
+    value.current.revision !== currentRevision
+  )
+    fail("traffic policy current revision mismatch");
+  if (
+    record(value.candidate) &&
+    value.candidate.revision !== candidateRevision
+  )
+    fail("traffic policy candidate revision mismatch");
+  trafficPolicyDiffs(value.diffs);
+  trafficPolicyAffectedObjects(value.affected_objects);
+  trafficPolicyRuleRisks(value.risks);
+  for (const field of [
+    "can_apply",
+    "has_changes",
+    "revision_conflict",
+  ] as const)
+    booleanValueRaw(value[field], `traffic policy ${field} flag invalid`);
+  if (
+    value.rollback_target_revision !== undefined &&
+    value.rollback_target_revision !== null
+  )
+    nonNegativeInteger(
+      value.rollback_target_revision,
+      "traffic policy rollback target invalid",
+    );
+  return value as TrafficPolicyPreview;
+}
+
+function trafficPolicyApplied(value: unknown): TrafficPolicyApplyResult {
+  if (!record(value)) fail("traffic policy apply result invalid");
+  const previousRevision = nonNegativeInteger(
+    value.previous_revision,
+    "traffic policy previous revision invalid",
+  );
+  const revision = nonNegativeInteger(
+    value.revision,
+    "traffic policy applied revision invalid",
+  );
+  stringValue(value.content_hash, "traffic policy content hash invalid", true);
+  trafficPolicyValue(value.policy, "traffic policy apply policy invalid");
+  if (record(value.policy) && value.policy.revision !== revision)
+    fail("traffic policy applied revision mismatch");
+  trafficPolicyDiffs(value.diffs);
+  trafficPolicyAffectedObjects(value.affected_objects);
+  const noOp = booleanValueRaw(value.no_op, "traffic policy no-op flag invalid");
+  if (noOp && revision !== previousRevision)
+    fail("traffic policy no-op moved revision");
+  if (noOp && value.history !== undefined && value.history !== null)
+    fail("traffic policy no-op unexpectedly has history");
+  if (!noOp && (!record(value.history) || value.history === null))
+    fail("traffic policy apply is missing history");
+  if (record(value.history)) {
+    const history = trafficPolicyHistoryEntry(value.history);
+    if (history.action !== "apply")
+      fail("traffic policy apply history action mismatch");
+  }
+  return value as TrafficPolicyApplyResult;
+}
+
+function trafficPolicyHistory(
+  value: unknown,
+): TrafficPolicyHistorySnapshot {
+  if (!record(value)) fail("traffic policy history invalid");
+  nonNegativeInteger(
+    value.current_revision,
+    "traffic policy history revision invalid",
+  );
+  for (const entry of arrayValue(
+    value.entries,
+    "traffic policy history entries invalid",
+  ))
+    trafficPolicyHistoryEntry(entry);
+  return value as TrafficPolicyHistorySnapshot;
+}
+
+function trafficPolicyRolledBack(
+  value: unknown,
+): TrafficPolicyRollbackResult {
+  if (!record(value)) fail("traffic policy rollback result invalid");
+  nonNegativeInteger(
+    value.previous_revision,
+    "traffic policy previous revision invalid",
+  );
+  const revision = nonNegativeInteger(
+    value.revision,
+    "traffic policy rolled back revision invalid",
+  );
+  nonNegativeInteger(
+    value.target_revision,
+    "traffic policy rollback target invalid",
+  );
+  stringValue(value.content_hash, "traffic policy content hash invalid", true);
+  trafficPolicyValue(value.policy, "traffic policy rollback policy invalid");
+  if (record(value.policy) && value.policy.revision !== revision)
+    fail("traffic policy rollback revision mismatch");
+  trafficPolicyDiffs(value.diffs);
+  trafficPolicyAffectedObjects(value.affected_objects);
+  if (!record(value.history)) fail("traffic policy rollback is missing history");
+  const history = trafficPolicyHistoryEntry(value.history);
+  if (history.action !== "rollback")
+    fail("traffic policy rollback history action mismatch");
+  return value as TrafficPolicyRollbackResult;
+}
+
+function trafficAction(value: unknown): void {
+  if (!record(value)) fail("traffic policy test action invalid");
+  if (value.kind === "direct" || value.kind === "reject") return;
+  if (value.kind === "network") {
+    const networkId = stringValue(
+      value.value,
+      "traffic policy test network target invalid",
+    );
+    if (!NETWORK_ID_PATTERN.test(networkId))
+      fail("traffic policy test network target invalid");
+    return;
+  }
+  if (value.kind === "exit") {
+    const exitId = stringValue(
+      value.value,
+      "traffic policy test exit target invalid",
+    );
+    if (!NODE_ID_PATTERN.test(exitId))
+      fail("traffic policy test exit target invalid");
+    return;
+  }
+  fail("traffic policy test action invalid");
+}
+
+function trafficPolicyTestDecision(
+  value: unknown,
+  message: string,
+): void {
+  if (!record(value)) fail(message);
+  trafficAction(value.action);
+  if (value.visibility === "route_summary") return;
+  if (value.visibility !== "full") fail(message);
+  if (value.reason !== "first_match" && value.reason !== "default")
+    fail(message);
+  if (value.matched_rule !== undefined && value.matched_rule !== null)
+    stringValue(value.matched_rule, message, true);
+  for (const decision of arrayValue(value.failure_decisions, message)) {
+    if (!record(decision)) fail(message);
+    stringValue(decision.consequence_key, message, true);
+    if (!TRAFFIC_FAILURE_KINDS.has(String(decision.failure))) fail(message);
+    if (!TRAFFIC_FAILURE_OUTCOMES.has(String(decision.outcome))) fail(message);
+    if (!TRAFFIC_FAILURE_REASONS.has(String(decision.reason))) fail(message);
+    if (decision.recovery_action !== "retry_requested_route") fail(message);
+    if (decision.direct_fallback !== undefined && decision.direct_fallback !== null) {
+      if (!record(decision.direct_fallback)) fail(message);
+      for (const failure of arrayValue(
+        decision.direct_fallback.allowed_failures,
+        message,
+      )) {
+        if (!TRAFFIC_FAILURE_KINDS.has(String(failure))) fail(message);
+      }
+      if (
+        decision.direct_fallback.confirmed_by !== "owner" &&
+        decision.direct_fallback.confirmed_by !== "administrator"
+      ) {
+        fail(message);
+      }
+      nonNegativeInteger(
+        decision.direct_fallback.confirmed_at_unix_ms,
+        message,
+      );
+    }
+  }
+}
+
+function trafficPolicyTestComparison(
+  value: unknown,
+): TrafficPolicyTestComparison {
+  if (!record(value)) fail("traffic policy test result invalid");
+  const networkId = stringValue(
+    value.network_id,
+    "traffic policy test network id invalid",
+  );
+  if (!NETWORK_ID_PATTERN.test(networkId))
+    fail("traffic policy test network id invalid");
+  if (!record(value.source)) fail("traffic policy test source invalid");
+  if (value.source.kind === "manual") {
+    // Manual probes do not carry an activity or diagnostic reference.
+  } else if (value.source.kind === "activity") {
+    stringValue(
+      value.source.activity_id,
+      "traffic policy test activity id invalid",
+      true,
+    );
+  } else if (value.source.kind === "diagnostic") {
+    stringValue(
+      value.source.diagnostic_id,
+      "traffic policy test diagnostic id invalid",
+      true,
+    );
+  } else {
+    fail("traffic policy test source invalid");
+  }
+  trafficPolicyTestDecision(value.before, "traffic policy before decision invalid");
+  trafficPolicyTestDecision(value.after, "traffic policy after decision invalid");
+  if (!record(value.delta)) fail("traffic policy test delta invalid");
+  for (const field of ["changed", "route_changed"] as const)
+    booleanValueRaw(
+      value.delta[field],
+      "traffic policy test delta flag invalid",
+    );
+  for (const field of [
+    "failure_outcomes_changed",
+    "matched_rule_changed",
+  ] as const) {
+    if (value.delta[field] !== undefined && value.delta[field] !== null)
+      booleanValueRaw(
+        value.delta[field],
+        "traffic policy test delta flag invalid",
+      );
+  }
+  return value as TrafficPolicyTestComparison;
 }
 
 function stringArray(value: unknown, message: string): string[] {
@@ -3119,6 +3561,17 @@ export function validateCommandOutcome(value: unknown): NodeCommandOutcome {
   if (outcome.status === "policy_applied") policyApplied(outcome.data);
   if (outcome.status === "policy_history") policyHistory(outcome.data);
   if (outcome.status === "policy_rolled_back") policyRolledBack(outcome.data);
+  if (outcome.status === "traffic_policy") trafficPolicyCurrent(outcome.data);
+  if (outcome.status === "traffic_policy_preview")
+    trafficPolicyPreview(outcome.data);
+  if (outcome.status === "traffic_policy_applied")
+    trafficPolicyApplied(outcome.data);
+  if (outcome.status === "traffic_policy_history")
+    trafficPolicyHistory(outcome.data);
+  if (outcome.status === "traffic_policy_rolled_back")
+    trafficPolicyRolledBack(outcome.data);
+  if (outcome.status === "traffic_policy_test")
+    trafficPolicyTestComparison(outcome.data);
   if (outcome.status === "network_profile_preview")
     networkProfilePreview(outcome.data);
   if (outcome.status === "network_profile_updated")
@@ -3320,6 +3773,65 @@ export function outcomeSummary(
       reason: label(
         locale,
         `policy.choice.reason.${outcome.data.decision.reason}`,
+      ),
+    });
+  }
+  if (outcome.status === "traffic_policy") {
+    return i18n().tr(locale, "outcome.traffic_policy_loaded", {
+      revision: i18n().formatInteger(locale, outcome.data.revision),
+    });
+  }
+  if (outcome.status === "traffic_policy_preview") {
+    return i18n().tr(
+      locale,
+      outcome.data.revision_conflict
+        ? "outcome.traffic_policy_preview_conflict"
+        : "outcome.traffic_policy_previewed",
+      {
+        revision: i18n().formatInteger(locale, outcome.data.current_revision),
+        changes: i18n().formatInteger(locale, outcome.data.diffs.length),
+        objects: i18n().formatInteger(
+          locale,
+          outcome.data.affected_objects.length,
+        ),
+      },
+    );
+  }
+  if (outcome.status === "traffic_policy_applied") {
+    return i18n().tr(
+      locale,
+      outcome.data.no_op
+        ? "outcome.traffic_policy_unchanged"
+        : "outcome.traffic_policy_applied",
+      {
+        previous: i18n().formatInteger(locale, outcome.data.previous_revision),
+        revision: i18n().formatInteger(locale, outcome.data.revision),
+      },
+    );
+  }
+  if (outcome.status === "traffic_policy_history") {
+    return i18n().tr(locale, "outcome.traffic_policy_history", {
+      count: i18n().formatInteger(locale, outcome.data.entries.length),
+      revision: i18n().formatInteger(locale, outcome.data.current_revision),
+    });
+  }
+  if (outcome.status === "traffic_policy_rolled_back") {
+    return i18n().tr(locale, "outcome.traffic_policy_rolled_back", {
+      target: i18n().formatInteger(locale, outcome.data.target_revision),
+      revision: i18n().formatInteger(locale, outcome.data.revision),
+    });
+  }
+  if (outcome.status === "traffic_policy_test") {
+    const actionText = (decision: typeof outcome.data.before): string =>
+      label(locale, `routing.action.${decision.action.kind}`);
+    return i18n().tr(locale, "outcome.traffic_policy_test", {
+      before: actionText(outcome.data.before),
+      after: actionText(outcome.data.after),
+      change: label(
+        locale,
+        outcome.data.delta.changed
+          ? "outcome.changed"
+          : "outcome.unchanged",
       ),
     });
   }

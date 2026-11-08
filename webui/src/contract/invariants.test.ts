@@ -2205,4 +2205,182 @@ describe("node UI contract invariants", () => {
       }),
     ).toThrow("policy rollback audit action mismatch");
   });
+
+  it("strictly validates traffic policy outcomes and summarizes them", () => {
+    const nodeId = `node_${"T".repeat(43)}`;
+    const exitId = `node_${"E".repeat(43)}`;
+    const networkId = `net_${"R".repeat(43)}`;
+    const ruleId = `rule_${"I".repeat(43)}`;
+    const defaultPolicy = {
+      action: { kind: "reject" as const },
+      confirmed_by: "owner" as const,
+      confirmed_at_unix_ms: 1_700_000_000_000,
+    };
+    const currentPolicy: TrafficPolicy = {
+      node_id: nodeId,
+      revision: 7,
+      default_policy: defaultPolicy,
+      rules: [],
+    };
+    const candidatePolicy: TrafficPolicy = {
+      ...currentPolicy,
+      revision: 8,
+      rules: [
+        {
+          rule_id: ruleId,
+          priority: 1,
+          enabled: true,
+          description: "Send work traffic through Exit",
+          matcher: {
+            domain_suffixes: ["example.com"],
+            protocols: ["tcp"],
+          },
+          action: { kind: "exit", value: exitId },
+        },
+      ],
+    };
+    const historyEntry = {
+      action: "apply" as const,
+      actor: "node-owner",
+      affected_objects: [{ kind: "rule" as const, object_id: ruleId }],
+      applied_revision: 8,
+      candidate_revision: 8,
+      content_hash: "hash-8",
+      diffs: [
+        {
+          path: "/rules/0",
+          change: "rule_added" as const,
+          after: candidatePolicy.rules?.[0],
+        },
+      ],
+      occurred_at: "2026-11-08T00:00:00Z",
+      outcome: "applied" as const,
+      previous_revision: 7,
+      source: "webui",
+      transaction_id: "txn-traffic-8",
+    };
+    const preview = {
+      expected_revision: 7,
+      current_revision: 7,
+      candidate_revision: 8,
+      revision_conflict: false,
+      current: currentPolicy,
+      candidate: candidatePolicy,
+      has_changes: true,
+      can_apply: true,
+      diffs: historyEntry.diffs,
+      affected_objects: historyEntry.affected_objects,
+      risks: [
+        {
+          rule_id: ruleId,
+          priority: 1,
+          enabled: true,
+          risks: [{ kind: "any_port" as const }],
+        },
+      ],
+      rollback_target_revision: null,
+    };
+    const applied = {
+      previous_revision: 7,
+      revision: 8,
+      no_op: false,
+      policy: candidatePolicy,
+      content_hash: "hash-8",
+      diffs: historyEntry.diffs,
+      affected_objects: historyEntry.affected_objects,
+      history: historyEntry,
+    };
+    const rolledBackHistory = {
+      ...historyEntry,
+      action: "rollback" as const,
+      outcome: "rolled_back" as const,
+      target_revision: 7,
+      transaction_id: "txn-traffic-9",
+    };
+    const rolledBack = {
+      previous_revision: 8,
+      revision: 9,
+      target_revision: 7,
+      policy: { ...currentPolicy, revision: 9 },
+      content_hash: "hash-9",
+      diffs: [],
+      affected_objects: [],
+      history: rolledBackHistory,
+    };
+    const comparison = {
+      network_id: networkId,
+      source: { kind: "manual" as const },
+      before: {
+        visibility: "full" as const,
+        action: { kind: "direct" as const },
+        reason: "default" as const,
+        matched_rule: null,
+        failure_decisions: [],
+      },
+      after: {
+        visibility: "full" as const,
+        action: { kind: "exit" as const, value: exitId },
+        reason: "first_match" as const,
+        matched_rule: ruleId,
+        failure_decisions: [],
+      },
+      delta: {
+        changed: true,
+        route_changed: true,
+        matched_rule_changed: true,
+        failure_outcomes_changed: false,
+      },
+    };
+    const outcomes: NodeCommandOutcome[] = [
+      {
+        status: "traffic_policy",
+        data: { revision: 7, policy: currentPolicy, content_hash: "hash-7" },
+      },
+      { status: "traffic_policy_preview", data: preview },
+      { status: "traffic_policy_applied", data: applied },
+      {
+        status: "traffic_policy_history",
+        data: { current_revision: 8, entries: [historyEntry] },
+      },
+      { status: "traffic_policy_rolled_back", data: rolledBack },
+      { status: "traffic_policy_test", data: comparison },
+    ];
+
+    for (const outcome of outcomes)
+      expect(validateCommandOutcome(outcome)).toEqual(outcome);
+    expect(outcomeSummary(outcomes[0], "zh-CN")).toBe(
+      "translated:outcome.traffic_policy_loaded",
+    );
+    expect(outcomeSummary(outcomes[1], "zh-CN")).toBe(
+      "translated:outcome.traffic_policy_previewed",
+    );
+    expect(outcomeSummary(outcomes[2], "zh-CN")).toBe(
+      "translated:outcome.traffic_policy_applied",
+    );
+    expect(outcomeSummary(outcomes[3], "zh-CN")).toBe(
+      "translated:outcome.traffic_policy_history",
+    );
+    expect(outcomeSummary(outcomes[4], "zh-CN")).toBe(
+      "translated:outcome.traffic_policy_rolled_back",
+    );
+    expect(outcomeSummary(outcomes[5], "zh-CN")).toBe(
+      "translated:outcome.traffic_policy_test",
+    );
+
+    expect(() =>
+      validateCommandOutcome({
+        status: "traffic_policy_applied",
+        data: { ...applied, history: undefined },
+      }),
+    ).toThrow("traffic policy apply is missing history");
+    expect(() =>
+      validateCommandOutcome({
+        status: "traffic_policy_preview",
+        data: {
+          ...preview,
+          candidate: { ...candidatePolicy, priority: 0 },
+        },
+      }),
+    ).toThrow("traffic policy preview candidate invalid");
+  });
 });

@@ -60,6 +60,7 @@ const OUTBOUND_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const TASK_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const RUNTIME_CLEANUP_TIMEOUT: Duration = Duration::from_secs(12);
 const OUTBOUND_QUEUE_CAPACITY: usize = 256;
+const RECOVERY_TRIGGER_QUEUE_CAPACITY: usize = 8;
 
 /// Owns a fixed-size TUN read buffer while carrying the number of valid bytes.
 ///
@@ -418,17 +419,53 @@ impl RuntimeCleanupOutcome {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct RuntimeRecoveryTriggerSender {
+    sender: mpsc::Sender<RecoveryTrigger>,
+}
+
+impl RuntimeRecoveryTriggerSender {
+    /// Enqueue a recovery request without blocking the caller.
+    ///
+    /// Recovery requests are coalescible operational hints, so a bounded
+    /// channel is used to keep a failed subsystem from turning into unbounded
+    /// memory growth. The caller remains responsible for the actual failure
+    /// handling when this returns false.
+    fn try_trigger(&self, trigger: RecoveryTrigger) -> bool {
+        self.sender.try_send(trigger).is_ok()
+    }
+}
+
 pub(crate) struct RuntimeRecoveryEvents {
     #[cfg(target_os = "linux")]
     watcher: Option<LinuxRecoveryEventWatcher>,
+    trigger_rx: mpsc::Receiver<RecoveryTrigger>,
 }
 
 impl RuntimeRecoveryEvents {
-    fn spawn() -> Self {
-        Self {
-            #[cfg(target_os = "linux")]
-            watcher: Some(LinuxRecoveryEventWatcher::spawn()),
-        }
+    fn spawn() -> (Self, RuntimeRecoveryTriggerSender) {
+        let (trigger_tx, trigger_rx) = mpsc::channel(RECOVERY_TRIGGER_QUEUE_CAPACITY);
+        (
+            Self {
+                #[cfg(target_os = "linux")]
+                watcher: Some(LinuxRecoveryEventWatcher::spawn()),
+                trigger_rx,
+            },
+            RuntimeRecoveryTriggerSender { sender: trigger_tx },
+        )
+    }
+
+    #[cfg(test)]
+    fn without_os_watcher_for_test() -> (Self, RuntimeRecoveryTriggerSender) {
+        let (trigger_tx, trigger_rx) = mpsc::channel(RECOVERY_TRIGGER_QUEUE_CAPACITY);
+        (
+            Self {
+                #[cfg(target_os = "linux")]
+                watcher: None,
+                trigger_rx,
+            },
+            RuntimeRecoveryTriggerSender { sender: trigger_tx },
+        )
     }
 
     fn shutdown(&self) {
@@ -440,12 +477,12 @@ impl RuntimeRecoveryEvents {
 
     async fn next_trigger(&mut self) -> Option<RecoveryTrigger> {
         #[cfg(target_os = "linux")]
-        {
+        loop {
             let Some(watcher) = self.watcher.as_mut() else {
-                return std::future::pending().await;
+                return self.trigger_rx.recv().await;
             };
-            loop {
-                match watcher.recv().await {
+            tokio::select! {
+                event = watcher.recv() => match event {
                     Some(LinuxRecoveryEvent::Trigger(trigger)) => return Some(trigger),
                     Some(LinuxRecoveryEvent::SourceAvailable(source)) => tracing::info!(
                         source = ?source,
@@ -457,17 +494,15 @@ impl RuntimeRecoveryEvents {
                         diagnostic_id = "recovery.linux.event_source_unavailable",
                         "Linux 恢复事件源不可用，将自动重试"
                     ),
-                    None => {
-                        self.watcher = None;
-                        return None;
-                    }
-                }
+                    None => self.watcher = None,
+                },
+                trigger = self.trigger_rx.recv() => return trigger,
             }
         }
 
         #[cfg(not(target_os = "linux"))]
         {
-            std::future::pending().await
+            self.trigger_rx.recv().await
         }
     }
 }
@@ -649,7 +684,8 @@ pub(crate) async fn prepare_client_runtime_ext(
 
     // 创建性能统计收集器
     let stats = StatsCollector::new();
-    let relay_state = RelayState::default();
+    let (recovery_events, recovery_trigger_tx) = RuntimeRecoveryEvents::spawn();
+    let relay_state = RelayState::with_recovery_trigger_sender(recovery_trigger_tx);
     let outbound = OutboundDispatcher::new(
         Arc::new(P2pOutboundTransport::new(
             p2p.clone(),
@@ -700,7 +736,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         route_manager,
         #[cfg(target_os = "linux")]
         exit_forwarder,
-        recovery_events: RuntimeRecoveryEvents::spawn(),
+        recovery_events,
         tun_io,
         assigned_ip,
         assigned_ips,
@@ -1088,6 +1124,15 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                         if let Some(relay) = runtime.outbound.clear_relay(generation).await {
                             tracing::warn!("QUIC 中继接收流已断开，重置中继等待自愈重连");
                             relay.client.close().await;
+                            if !runtime
+                                .outbound
+                                .try_trigger_recovery(RecoveryTrigger::RelayDisconnected)
+                            {
+                                tracing::warn!(
+                                    diagnostic_id = "recovery.trigger_queue_unavailable",
+                                    "QUIC 中继断流已清理，但恢复触发队列不可用"
+                                );
+                            }
                         }
                     }
                 }
@@ -2436,9 +2481,17 @@ struct RelayState {
     next_generation: Arc<AtomicU64>,
     reconnecting: Arc<AtomicBool>,
     closing: Arc<AtomicBool>,
+    recovery_trigger_tx: Option<RuntimeRecoveryTriggerSender>,
 }
 
 impl RelayState {
+    fn with_recovery_trigger_sender(sender: RuntimeRecoveryTriggerSender) -> Self {
+        Self {
+            recovery_trigger_tx: Some(sender),
+            ..Self::default()
+        }
+    }
+
     async fn relay_handle(&self) -> Option<RelayHandle> {
         self.slot.read().await.clone()
     }
@@ -2655,6 +2708,13 @@ impl OutboundDispatcher {
 
     async fn clear_relay(&self, generation: u64) -> Option<RelayHandle> {
         self.relay_state.clear_relay(generation).await
+    }
+
+    fn try_trigger_recovery(&self, trigger: RecoveryTrigger) -> bool {
+        self.relay_state
+            .recovery_trigger_tx
+            .as_ref()
+            .is_some_and(|sender| sender.try_trigger(trigger))
     }
 
     async fn close_relay(&self, total_timeout: Duration) -> CleanupStatus {
@@ -5493,6 +5553,30 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
                 tx_packets: 8,
                 tx_bytes: 1024,
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_recovery_events_deliver_programmatic_trigger() {
+        let (mut events, sender) = RuntimeRecoveryEvents::without_os_watcher_for_test();
+
+        assert!(sender.try_trigger(RecoveryTrigger::RelayDisconnected));
+        assert_eq!(
+            events.next_trigger().await,
+            Some(RecoveryTrigger::RelayDisconnected)
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_recovery_events_use_a_bounded_queue() {
+        let (_events, sender) = RuntimeRecoveryEvents::without_os_watcher_for_test();
+
+        for _ in 0..RECOVERY_TRIGGER_QUEUE_CAPACITY {
+            assert!(sender.try_trigger(RecoveryTrigger::NetworkChanged));
+        }
+        assert!(
+            !sender.try_trigger(RecoveryTrigger::NetworkChanged),
+            "a blocked recovery consumer must not permit unbounded queue growth"
         );
     }
 

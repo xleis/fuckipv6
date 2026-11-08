@@ -35,8 +35,11 @@ use crate::remote_node::RemoteNodeSession;
 #[cfg(target_os = "linux")]
 use crate::routing::linux_exit::LinuxExitForwarder;
 #[cfg(target_os = "linux")]
+use crate::routing::linux_recovery_events::{LinuxRecoveryEvent, LinuxRecoveryEventWatcher};
+#[cfg(target_os = "linux")]
 use crate::routing::linux_route::LinuxRouteManager;
 #[cfg(target_os = "linux")]
+use crate::routing::recovery::RecoveryTrigger;
 use crate::routing::table::{parse_linux_ip_routes, RouteEntry};
 use crate::routing::ExitNodeManager;
 use crate::signaling::client::{SignalingClient, SignalingEvent};
@@ -383,6 +386,60 @@ impl RuntimeCleanupOutcome {
     }
 }
 
+pub(crate) struct RuntimeRecoveryEvents {
+    #[cfg(target_os = "linux")]
+    watcher: Option<LinuxRecoveryEventWatcher>,
+}
+
+impl RuntimeRecoveryEvents {
+    fn spawn() -> Self {
+        Self {
+            #[cfg(target_os = "linux")]
+            watcher: Some(LinuxRecoveryEventWatcher::spawn()),
+        }
+    }
+
+    fn shutdown(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some(watcher) = self.watcher.as_ref() {
+            watcher.shutdown();
+        }
+    }
+
+    async fn next_trigger(&mut self) -> Option<RecoveryTrigger> {
+        #[cfg(target_os = "linux")]
+        {
+            let Some(watcher) = self.watcher.as_mut() else {
+                return std::future::pending().await;
+            };
+            loop {
+                match watcher.recv().await {
+                    Some(LinuxRecoveryEvent::Trigger(trigger)) => return Some(trigger),
+                    Some(LinuxRecoveryEvent::SourceAvailable(source)) => tracing::info!(
+                        source = ?source,
+                        diagnostic_id = "recovery.linux.event_source_available",
+                        "Linux 恢复事件源已连接"
+                    ),
+                    Some(LinuxRecoveryEvent::SourceUnavailable(source)) => tracing::warn!(
+                        source = ?source,
+                        diagnostic_id = "recovery.linux.event_source_unavailable",
+                        "Linux 恢复事件源不可用，将自动重试"
+                    ),
+                    None => {
+                        self.watcher = None;
+                        return None;
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            std::future::pending().await
+        }
+    }
+}
+
 pub(crate) struct ClientRuntime {
     pub(crate) signaling: Arc<SignalingClient>,
     pub(crate) p2p: P2pEngine,
@@ -392,6 +449,7 @@ pub(crate) struct ClientRuntime {
     pub(crate) route_manager: LinuxRouteManager,
     #[cfg(target_os = "linux")]
     pub(crate) exit_forwarder: Option<LinuxExitForwarder>,
+    pub(crate) recovery_events: RuntimeRecoveryEvents,
     pub(crate) tun_io: RuntimeTunIo,
     pub(crate) assigned_ip: Ipv6Addr,
     pub(crate) assigned_ips: VirtualIps,
@@ -433,6 +491,7 @@ impl Drop for ClientRuntime {
         abort_task(&self.config_reload_task);
         self.tun_io.abort_reader();
         abort_task(&self.relay_reconnect_task);
+        self.recovery_events.shutdown();
     }
 }
 
@@ -606,6 +665,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         route_manager,
         #[cfg(target_os = "linux")]
         exit_forwarder,
+        recovery_events: RuntimeRecoveryEvents::spawn(),
         tun_io,
         assigned_ip,
         assigned_ips,
@@ -951,6 +1011,23 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                     );
                     tracing::error!("{error:#}");
                     return Err(error);
+                }
+            }
+
+            // Linux suspend/resume and stable network changes are consumed by
+            // the main loop so recovery requests cannot accumulate in an
+            // unobserved background channel.
+            trigger = runtime.recovery_events.next_trigger() => {
+                match trigger {
+                    Some(trigger) => tracing::warn!(
+                        trigger = ?trigger,
+                        diagnostic_id = "recovery.linux.event_received",
+                        "收到 Linux 系统恢复触发事件"
+                    ),
+                    None => tracing::warn!(
+                        diagnostic_id = "recovery.linux.event_channel_closed",
+                        "Linux 恢复事件通道已关闭；本次运行不再接收系统休眠或网络变化事件"
+                    ),
                 }
             }
 
@@ -1679,6 +1756,8 @@ async fn shutdown_runtime(runtime: &mut ClientRuntime) -> RuntimeCleanupOutcome 
     let mut outcome = RuntimeCleanupOutcome::default();
     let deadline = Instant::now() + RUNTIME_CLEANUP_TIMEOUT;
     let task_deadline = deadline.min(Instant::now() + TASK_STOP_TIMEOUT);
+
+    runtime.recovery_events.shutdown();
 
     // TUN reader owns a device handle and must be joined before delete(). The
     // config watcher, private IPC listener and relay reconnect are stopped

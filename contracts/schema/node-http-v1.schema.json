@@ -8,6 +8,25 @@
       ],
       "type": "string"
     },
+    "ActivityCategory": {
+      "description": "Activity is an intentionally separate projection. Adding a field to the\nsecurity audit does not automatically expose that field in product feeds.",
+      "enum": [
+        "user_activity",
+        "system_event",
+        "security_event",
+        "operation_failure"
+      ],
+      "type": "string"
+    },
+    "ActivitySeverity": {
+      "enum": [
+        "info",
+        "notice",
+        "warning",
+        "critical"
+      ],
+      "type": "string"
+    },
     "AuditId": {
       "type": "string"
     },
@@ -9084,8 +9103,17 @@
             }
           ]
         },
+        "actor_role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "audit_id": {
           "$ref": "#/$defs/AuditId"
+        },
+        "category": {
+          "$ref": "#/$defs/ActivityCategory"
         },
         "details": {
           "additionalProperties": {
@@ -9104,6 +9132,18 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "object_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "object_kind": {
+          "type": [
+            "string",
+            "null"
           ]
         },
         "occurred_at_unix_ms": {
@@ -9134,11 +9174,20 @@
             }
           ]
         },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "resource": {
           "type": [
             "string",
             "null"
           ]
+        },
+        "severity": {
+          "$ref": "#/$defs/ActivitySeverity"
         },
         "summary": {
           "type": [
@@ -9148,7 +9197,9 @@
         }
       },
       "required": [
-        "audit_id"
+        "audit_id",
+        "category",
+        "severity"
       ],
       "type": "object"
     },

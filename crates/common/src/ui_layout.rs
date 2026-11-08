@@ -235,8 +235,8 @@ static NAVIGATION_CONTRACT: LazyLock<NavigationContract> = LazyLock::new(|| {
     }
     assert_eq!(
         page_ids.len(),
-        12,
-        "the first product release exposes exactly twelve manifest pages"
+        13,
+        "the first product release exposes exactly thirteen manifest pages"
     );
     contract
 });
@@ -356,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn primary_navigation_is_exactly_five_modules_and_twelve_pages() {
+    fn primary_navigation_is_exactly_five_modules_and_thirteen_pages() {
         let modules = navigation_modules();
         assert_eq!(
             modules
@@ -381,6 +381,7 @@ mod tests {
                 "exit_node",
                 "relay",
                 "traffic",
+                "activity",
                 "logs",
                 "settings",
             ]
@@ -389,7 +390,7 @@ mod tests {
             .iter()
             .flat_map(|module| module.page_ids.iter())
             .collect::<HashSet<_>>();
-        assert_eq!(unique.len(), 12);
+        assert_eq!(unique.len(), 13);
     }
 
     #[test]

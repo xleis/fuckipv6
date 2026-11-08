@@ -88,6 +88,7 @@ export const REQUIRED_PAGES = [
   "node_runtime",
   "topology",
   "traffic",
+  "activity",
   "routing",
   "exit_node",
   "relay",

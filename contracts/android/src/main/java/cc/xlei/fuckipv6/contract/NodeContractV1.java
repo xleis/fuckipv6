@@ -36,6 +36,58 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum ActivityCategory {
+        USER_ACTIVITY("user_activity"),
+        SYSTEM_EVENT("system_event"),
+        SECURITY_EVENT("security_event"),
+        OPERATION_FAILURE("operation_failure");
+
+        private final String wireName;
+
+        ActivityCategory(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static ActivityCategory fromWireName(String value) {
+            for (ActivityCategory candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown ActivityCategory wire value: " + value);
+        }
+    }
+
+    public enum ActivitySeverity {
+        INFO("info"),
+        NOTICE("notice"),
+        WARNING("warning"),
+        CRITICAL("critical");
+
+        private final String wireName;
+
+        ActivitySeverity(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static ActivitySeverity fromWireName(String value) {
+            for (ActivitySeverity candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown ActivitySeverity wire value: " + value);
+        }
+    }
+
     public enum AuditOutcome {
         SUCCEEDED("succeeded"),
         FAILED("failed"),
@@ -2687,25 +2739,37 @@ public final class NodeContractV1 {
     public static final class ActivityEntry {
         public final String action;
         public final String actor;
+        public final String actor_role;
         public final String audit_id;
+        public final ActivityCategory category;
         public final Map<String, Object> details;
         public final String network_id;
+        public final String object_id;
+        public final String object_kind;
         public final Long occurred_at_unix_ms;
         public final String operation_id;
         public final AuditOutcome outcome;
+        public final String reason;
         public final String resource;
+        public final ActivitySeverity severity;
         public final String summary;
 
-        public ActivityEntry(String action, String actor, String audit_id, Map<String, Object> details, String network_id, Long occurred_at_unix_ms, String operation_id, AuditOutcome outcome, String resource, String summary) {
+        public ActivityEntry(String action, String actor, String actor_role, String audit_id, ActivityCategory category, Map<String, Object> details, String network_id, String object_id, String object_kind, Long occurred_at_unix_ms, String operation_id, AuditOutcome outcome, String reason, String resource, ActivitySeverity severity, String summary) {
             this.action = action;
             this.actor = actor;
+            this.actor_role = actor_role;
             this.audit_id = audit_id;
+            this.category = category;
             this.details = details;
             this.network_id = network_id;
+            this.object_id = object_id;
+            this.object_kind = object_kind;
             this.occurred_at_unix_ms = occurred_at_unix_ms;
             this.operation_id = operation_id;
             this.outcome = outcome;
+            this.reason = reason;
             this.resource = resource;
+            this.severity = severity;
             this.summary = summary;
         }
     }
@@ -5933,25 +5997,37 @@ public final class NodeContractV1 {
     public static final class ProjectedActivityEntry {
         public final String action;
         public final String actor;
+        public final String actor_role;
         public final String audit_id;
+        public final ActivityCategory category;
         public final Map<String, Object> details;
         public final String network_id;
+        public final String object_id;
+        public final String object_kind;
         public final Long occurred_at_unix_ms;
         public final String operation_id;
         public final AuditOutcome outcome;
+        public final String reason;
         public final String resource;
+        public final ActivitySeverity severity;
         public final String summary;
 
-        public ProjectedActivityEntry(String action, String actor, String audit_id, Map<String, Object> details, String network_id, Long occurred_at_unix_ms, String operation_id, AuditOutcome outcome, String resource, String summary) {
+        public ProjectedActivityEntry(String action, String actor, String actor_role, String audit_id, ActivityCategory category, Map<String, Object> details, String network_id, String object_id, String object_kind, Long occurred_at_unix_ms, String operation_id, AuditOutcome outcome, String reason, String resource, ActivitySeverity severity, String summary) {
             this.action = action;
             this.actor = actor;
+            this.actor_role = actor_role;
             this.audit_id = audit_id;
+            this.category = category;
             this.details = details;
             this.network_id = network_id;
+            this.object_id = object_id;
+            this.object_kind = object_kind;
             this.occurred_at_unix_ms = occurred_at_unix_ms;
             this.operation_id = operation_id;
             this.outcome = outcome;
+            this.reason = reason;
             this.resource = resource;
+            this.severity = severity;
             this.summary = summary;
         }
     }

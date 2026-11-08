@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::audit::{ActivityEntry, AuditOutcome};
+use super::audit::{ActivityCategory, ActivityEntry, ActivitySeverity, AuditOutcome};
 use super::file_share::{
     ConcurrentNamePolicy, FileAcl, FileDeletePolicy, FileQuota, FileShare, FileShareMode,
     SymlinkPolicy,
@@ -1357,16 +1357,26 @@ pub struct ProjectedActivityEntry {
     pub network_id: Option<NetworkId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<NodeId>,
+    pub category: ActivityCategory,
+    pub severity: ActivitySeverity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<AuditOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub occurred_at_unix_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<BTreeMap<String, String>>,
 }
@@ -1414,11 +1424,23 @@ pub fn project_activity_entry(
         operation_id: activity.operation_id.clone(),
         network_id: activity.network_id.clone(),
         actor: Some(activity.actor.clone()),
+        category: activity.category,
+        severity: activity.severity,
+        actor_role: visible(PrivacyField::ActivityActor)
+            .then(|| activity.actor_role.clone())
+            .flatten(),
         action: Some(activity.action.clone()),
         resource: Some(activity.resource.clone()),
+        object_kind: visible(PrivacyField::ActivityResource).then(|| activity.object_kind.clone()),
+        object_id: visible(PrivacyField::ActivityResource)
+            .then(|| activity.object_id.clone())
+            .flatten(),
         outcome: Some(activity.outcome),
         occurred_at_unix_ms: Some(activity.occurred_at_unix_ms),
         summary: visible(PrivacyField::ActivitySummary).then(|| activity.summary.clone()),
+        reason: visible(PrivacyField::ActivityDetails)
+            .then(|| activity.reason.clone())
+            .flatten(),
         details: visible(PrivacyField::ActivityDetails).then(|| activity.details.clone()),
     })
 }
@@ -1616,6 +1638,12 @@ mod tests {
             outcome: AuditOutcome::Succeeded,
             occurred_at_unix_ms: 1_100,
             summary: "private activity summary".into(),
+            category: ActivityCategory::UserActivity,
+            severity: ActivitySeverity::Info,
+            actor_role: Some("owner".into()),
+            object_kind: "share".into(),
+            object_id: Some("share-1".into()),
+            reason: Some("succeeded".into()),
             details: BTreeMap::from([("secret_detail".into(), "private details".into())]),
         }
     }

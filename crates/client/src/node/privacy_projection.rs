@@ -876,11 +876,17 @@ impl<'a> SnapshotProjector<'a> {
                 operation_id: activity.operation_id.clone(),
                 network_id: activity.network_id.clone(),
                 actor: Some(activity.actor.clone()),
+                category: activity.category,
+                severity: activity.severity,
+                actor_role: activity.actor_role.clone(),
                 action: Some(activity.action.clone()),
                 resource: Some(activity.resource.clone()),
+                object_kind: Some(activity.object_kind.clone()),
+                object_id: activity.object_id.clone(),
                 outcome: Some(activity.outcome),
                 occurred_at_unix_ms: Some(activity.occurred_at_unix_ms),
                 summary: Some(activity.summary.clone()),
+                reason: activity.reason.clone(),
                 details: Some(activity.details.clone()),
             }));
         }
@@ -1243,6 +1249,12 @@ mod tests {
             outcome: AuditOutcome::Succeeded,
             occurred_at_unix_ms: 1_500,
             summary: "visible activity summary".into(),
+            category: fuckipv6_common::domain::ActivityCategory::UserActivity,
+            severity: fuckipv6_common::domain::ActivitySeverity::Info,
+            actor_role: Some("member".into()),
+            object_kind: "member".into(),
+            object_id: Some("remote-peer".into()),
+            reason: Some("succeeded".into()),
             details: BTreeMap::from([("private_detail".into(), "hidden-detail".into())]),
         }
     }

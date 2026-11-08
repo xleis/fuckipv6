@@ -1363,6 +1363,14 @@ function AppShell({
                     permissionDenied:
                       !snapshot.permissions?.permissions.includes("view_state"),
                   }}
+                  activitySignals={{
+                    refreshing: controlRefreshing,
+                    stale: eventState.stale,
+                    offline: !browserOnline,
+                    error: maintenance ? null : pageErrorMessage,
+                    permissionDenied:
+                      !snapshot.permissions?.permissions.includes("view_state"),
+                  }}
                   footer={
                     <>
                       {activePage.actions.some((action) =>

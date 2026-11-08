@@ -441,7 +441,7 @@ describe("React WebUI shell", () => {
     expect(loadSnapshot).not.toHaveBeenCalled();
   });
 
-  it("renders five modules and all twelve manifest-backed secondary pages", async () => {
+  it("renders five modules and all thirteen manifest-backed secondary pages", async () => {
     authenticate();
     renderApp();
 
@@ -467,7 +467,7 @@ describe("React WebUI shell", () => {
       "exit_node",
       "relay",
     ]);
-    await expectModuleTabs("activity", ["traffic", "logs"]);
+    await expectModuleTabs("activity", ["traffic", "activity", "logs"]);
     await expectModuleTabs("settings", ["settings"]);
   });
 

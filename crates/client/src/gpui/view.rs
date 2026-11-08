@@ -4,14 +4,14 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Result};
 use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
 use fuckipv6_common::domain::{
-    CapabilityKind, ExitContributionObligation, IdempotencyKey, InvitationPreview, InvitationState,
-    InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
-    MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode, NetworkMember,
-    NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberObservationSource,
-    NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileApplyResult,
-    NetworkProfilePreview, NetworkProfileProjections, NetworkProfileWarningCode,
-    NetworkPublicProfileDocument, NetworkVisibility, OperationError, OperationState,
-    TopologyConnectionState, TopologySnapshot, JOIN_REQUEST_MAX_REASON_CHARS,
+    ActivityCategory, ActivitySeverity, AuditOutcome, CapabilityKind, ExitContributionObligation,
+    IdempotencyKey, InvitationPreview, InvitationState, InvitationStatusView, IssuedInvitation,
+    JoinRequest, JoinRequestReviewAction, JoinRequestState, MemberLifecycleAction, MembershipRole,
+    NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
+    NetworkMemberObservationSource, NetworkMemberOnlineState, NetworkMemberStatus,
+    NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileProjections,
+    NetworkProfileWarningCode, NetworkPublicProfileDocument, NetworkVisibility, OperationError,
+    OperationState, TopologyConnectionState, TopologySnapshot, JOIN_REQUEST_MAX_REASON_CHARS,
 };
 use fuckipv6_common::i18n::{
     detect_system_locale, format_decimal, format_integer, format_timestamp, resolve_language, t,
@@ -39,12 +39,15 @@ use super::configuration_workflow::{
 };
 use super::path_picker::{pick_paths, PathPickerMode};
 use super::text_input::{NativeTextInput, TextInputEvent};
+#[cfg(test)]
+use super::view_model::build_page_model;
 use super::view_model::{
-    action_block_reason, build_command, build_page_model, default_form_values,
-    filter_network_members, member_lifecycle_action_key, member_lifecycle_action_value,
-    membership_role_value, network_membership_id, network_status_key, retain_member_selection,
-    search_node_snapshot, sort_network_members, topology_member_actions, topology_node_detail,
-    topology_presentation, validate_manifest_bindings, ActionBinding, MemberCapabilityFilter,
+    action_block_reason, activity_filter_options, build_command,
+    build_page_model_with_activity_filters, default_form_values, filter_network_members,
+    member_lifecycle_action_key, member_lifecycle_action_value, membership_role_value,
+    network_membership_id, network_status_key, retain_member_selection, search_node_snapshot,
+    sort_network_members, topology_member_actions, topology_node_detail, topology_presentation,
+    validate_manifest_bindings, ActionBinding, ActivityFilters, MemberCapabilityFilter,
     MemberDirectoryFilters, MemberHealthFilter, OverviewModel, PageKind, RowModel, RowNavigation,
     SearchResult, SectionModel, TopologyPresentationCondition, TopologyPresentationSignals,
 };
@@ -172,6 +175,7 @@ fn page_icon_data(id: &str) -> &'static [u8] {
         Some(PageKind::NodeRuntime) => include_bytes!("../../assets/icons/server-cog.svg"),
         Some(PageKind::Topology) => include_bytes!("../../assets/icons/globe-2.svg"),
         Some(PageKind::Traffic) => include_bytes!("../../assets/icons/activity.svg"),
+        Some(PageKind::Activity) => include_bytes!("../../assets/icons/workflow.svg"),
         Some(PageKind::Routing) => include_bytes!("../../assets/icons/database.svg"),
         Some(PageKind::ExitNode) => include_bytes!("../../assets/icons/door-open.svg"),
         Some(PageKind::Relay) => include_bytes!("../../assets/icons/radio-tower.svg"),
@@ -252,6 +256,26 @@ fn visible_overview_primary_page<'a>(
         .then_some(page_id)
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ActivityTimeWindow {
+    #[default]
+    All,
+    LastHour,
+    Last24Hours,
+    Last7Days,
+}
+
+impl ActivityTimeWindow {
+    const fn duration_ms(self) -> Option<u64> {
+        match self {
+            Self::All => None,
+            Self::LastHour => Some(60 * 60 * 1_000),
+            Self::Last24Hours => Some(24 * 60 * 60 * 1_000),
+            Self::Last7Days => Some(7 * 24 * 60 * 60 * 1_000),
+        }
+    }
+}
+
 struct GpuiShell {
     commands: NodeCommandBus,
     operations: Option<RemoteOperationClient>,
@@ -273,6 +297,8 @@ struct GpuiShell {
     discovery_debounced_query: String,
     discovery_search_generation: u64,
     discovery_filters: DiscoveryFilters,
+    activity_filters: ActivityFilters,
+    activity_time_window: ActivityTimeWindow,
     expanded_discovery: HashMap<String, bool>,
     configuration: GpuiConfigurationWorkflow,
     configuration_editor: Option<Entity<TextareaState>>,
@@ -362,6 +388,8 @@ impl GpuiShell {
             discovery_debounced_query: String::new(),
             discovery_search_generation: 0,
             discovery_filters: DiscoveryFilters::default(),
+            activity_filters: ActivityFilters::default(),
+            activity_time_window: ActivityTimeWindow::default(),
             expanded_discovery: HashMap::new(),
             configuration: GpuiConfigurationWorkflow::default(),
             configuration_editor: None,
@@ -7986,23 +8014,29 @@ impl GpuiShell {
                 .child(loading_skeleton())
                 .into_any_element();
         };
-        let model =
-            match build_page_model(manifest, &self.snapshot, &self.selected_page, self.locale) {
-                Ok(model) => model,
-                Err(error) => {
-                    return div()
-                        .id(app_region_id(AppRegion::Content))
-                        .track_focus(&self.content_focus_handle)
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .child(component_error_state(
-                            "page-mapping-error",
-                            t(self.locale, "common.page_mapping_failed"),
-                            error.to_string(),
-                        ))
-                        .into_any_element();
-                }
-            };
+        let activity_filters = self.effective_activity_filters();
+        let model = match build_page_model_with_activity_filters(
+            manifest,
+            &self.snapshot,
+            &self.selected_page,
+            self.locale,
+            &activity_filters,
+        ) {
+            Ok(model) => model,
+            Err(error) => {
+                return div()
+                    .id(app_region_id(AppRegion::Content))
+                    .track_focus(&self.content_focus_handle)
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(component_error_state(
+                        "page-mapping-error",
+                        t(self.locale, "common.page_mapping_failed"),
+                        error.to_string(),
+                    ))
+                    .into_any_element();
+            }
+        };
         let selected_page = manifest
             .pages
             .iter()
@@ -8115,6 +8149,16 @@ impl GpuiShell {
                 ),
             );
         }
+        if self.selected_page == "activity" {
+            content = content.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .children(self.activity_sync_notices()),
+            );
+            content = content.child(self.activity_filters_card(cx));
+        }
         let section_cards = model
             .sections
             .iter()
@@ -8126,6 +8170,370 @@ impl GpuiShell {
         }
 
         content.into_any_element()
+    }
+
+    fn effective_activity_filters(&self) -> ActivityFilters {
+        let mut filters = self.activity_filters.clone();
+        if let Some(duration) = self.activity_time_window.duration_ms() {
+            let now = unix_time_ms();
+            filters.from_unix_ms = Some(now.saturating_sub(duration));
+            filters.to_unix_ms = Some(now);
+        } else {
+            filters.from_unix_ms = None;
+            filters.to_unix_ms = None;
+        }
+        filters
+    }
+
+    fn has_activity_filters(&self) -> bool {
+        self.activity_time_window != ActivityTimeWindow::All
+            || self.activity_filters.network_id.is_some()
+            || self.activity_filters.object_kind.is_some()
+            || self.activity_filters.object_id.is_some()
+            || self.activity_filters.actor_role.is_some()
+            || self.activity_filters.category.is_some()
+            || self.activity_filters.severity.is_some()
+            || self.activity_filters.outcome.is_some()
+    }
+
+    fn activity_sync_notices(&self) -> Vec<gpui::AnyElement> {
+        let mut notices = Vec::new();
+        if !self
+            .snapshot
+            .permissions
+            .permissions
+            .contains(&NodePermission::ViewState)
+        {
+            notices.push(activity_sync_notice(
+                "visual-activity-sync-permission-denied",
+                t(self.locale, "activity.sync.permission_denied.title").to_string(),
+                t(self.locale, "activity.sync.permission_denied.detail").to_string(),
+                SemanticState::Danger,
+            ));
+        }
+        if self.snapshot.control_health == NodeControlHealth::Unavailable {
+            notices.push(activity_sync_notice(
+                "visual-activity-sync-stale",
+                t(self.locale, "activity.sync.stale.title").to_string(),
+                t(self.locale, "activity.sync.stale.detail").to_string(),
+                SemanticState::Warning,
+            ));
+        }
+        if self.pending_commands > 0 {
+            notices.push(activity_sync_notice(
+                "visual-activity-sync-refreshing",
+                t(self.locale, "activity.sync.refreshing.title").to_string(),
+                t(self.locale, "activity.sync.refreshing.detail").to_string(),
+                SemanticState::Info,
+            ));
+        }
+        notices
+    }
+
+    fn activity_filters_card(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let options = activity_filter_options(&self.snapshot.recent_activity);
+        let filter_group = |title: SharedString, controls: Vec<gpui::AnyElement>| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .min_w(px(150.0))
+                .flex_1()
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui::FontWeight(600.0))
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(title),
+                )
+                .child(div().flex().flex_wrap().gap_2().children(controls))
+        };
+        let all_label = t(self.locale, "activity.filter.all").to_string();
+
+        let mut network_controls = Vec::new();
+        for network_id in std::iter::once(None).chain(options.networks.into_iter().map(Some)) {
+            let selected = self.activity_filters.network_id == network_id;
+            let value = network_id.clone().unwrap_or_else(|| "all".into());
+            let label = network_id
+                .as_deref()
+                .map(|network_id| activity_filter_network_label(&self.snapshot, network_id))
+                .unwrap_or_else(|| all_label.clone());
+            network_controls.push(
+                choice_control(
+                    SharedString::from(format!("activity-filter-network-{value}")),
+                    label,
+                    selected,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.activity_filters.network_id = network_id.clone();
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
+
+        let mut object_kind_controls = Vec::new();
+        for object_kind in std::iter::once(None).chain(options.object_kinds.into_iter().map(Some)) {
+            let selected = self.activity_filters.object_kind == object_kind;
+            let value = object_kind.clone().unwrap_or_else(|| "all".into());
+            let label = object_kind
+                .as_deref()
+                .map(|kind| activity_filter_object_kind_label(self.locale, kind))
+                .unwrap_or_else(|| all_label.clone());
+            object_kind_controls.push(
+                choice_control(
+                    SharedString::from(format!("activity-filter-object-kind-{value}")),
+                    label,
+                    selected,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.activity_filters.object_kind = object_kind.clone();
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
+
+        let mut object_id_controls = Vec::new();
+        for object_id in std::iter::once(None).chain(options.object_ids.into_iter().map(Some)) {
+            let selected = self.activity_filters.object_id == object_id;
+            let value = object_id.clone().unwrap_or_else(|| "all".into());
+            let label = object_id.clone().unwrap_or_else(|| all_label.clone());
+            object_id_controls.push(
+                choice_control(
+                    SharedString::from(format!("activity-filter-object-id-{value}")),
+                    label,
+                    selected,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.activity_filters.object_id = object_id.clone();
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
+
+        let mut actor_role_controls = Vec::new();
+        for actor_role in std::iter::once(None).chain(options.actor_roles.into_iter().map(Some)) {
+            let selected = self.activity_filters.actor_role == actor_role;
+            let value = actor_role.clone().unwrap_or_else(|| "all".into());
+            let label = actor_role
+                .as_deref()
+                .map(|role| activity_filter_role_label(self.locale, role))
+                .unwrap_or_else(|| all_label.clone());
+            actor_role_controls.push(
+                choice_control(
+                    SharedString::from(format!("activity-filter-actor-role-{value}")),
+                    label,
+                    selected,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.activity_filters.actor_role = actor_role.clone();
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
+
+        let mut category_controls = Vec::new();
+        for category in [
+            None,
+            Some(ActivityCategory::UserActivity),
+            Some(ActivityCategory::SystemEvent),
+            Some(ActivityCategory::SecurityEvent),
+            Some(ActivityCategory::OperationFailure),
+        ] {
+            let selected = self.activity_filters.category == category;
+            let value = category.map(activity_category_value).unwrap_or("all");
+            let label = category
+                .map(|category| t(self.locale, activity_category_key(category)).to_string())
+                .unwrap_or_else(|| all_label.clone());
+            category_controls.push(
+                choice_control(
+                    SharedString::from(format!("activity-filter-category-{value}")),
+                    label,
+                    selected,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.activity_filters.category = category;
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
+
+        let mut severity_controls = Vec::new();
+        for severity in [
+            None,
+            Some(ActivitySeverity::Info),
+            Some(ActivitySeverity::Notice),
+            Some(ActivitySeverity::Warning),
+            Some(ActivitySeverity::Critical),
+        ] {
+            let selected = self.activity_filters.severity == severity;
+            let value = severity.map(activity_severity_value).unwrap_or("all");
+            let label = severity
+                .map(|severity| t(self.locale, activity_severity_key(severity)).to_string())
+                .unwrap_or_else(|| all_label.clone());
+            severity_controls.push(
+                choice_control(
+                    SharedString::from(format!("activity-filter-severity-{value}")),
+                    label,
+                    selected,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.activity_filters.severity = severity;
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
+
+        let mut outcome_controls = Vec::new();
+        for outcome in [
+            None,
+            Some(AuditOutcome::Succeeded),
+            Some(AuditOutcome::Failed),
+            Some(AuditOutcome::Denied),
+        ] {
+            let selected = self.activity_filters.outcome == outcome;
+            let value = outcome.map(activity_outcome_value).unwrap_or("all");
+            let label = outcome
+                .map(|outcome| t(self.locale, activity_outcome_key(outcome)).to_string())
+                .unwrap_or_else(|| all_label.clone());
+            outcome_controls.push(
+                choice_control(
+                    SharedString::from(format!("activity-filter-outcome-{value}")),
+                    label,
+                    selected,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.activity_filters.outcome = outcome;
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
+
+        let mut time_controls = Vec::new();
+        for window in [
+            ActivityTimeWindow::All,
+            ActivityTimeWindow::LastHour,
+            ActivityTimeWindow::Last24Hours,
+            ActivityTimeWindow::Last7Days,
+        ] {
+            let value = activity_time_window_value(window);
+            time_controls.push(
+                choice_control(
+                    SharedString::from(format!("activity-filter-time-{value}")),
+                    t(self.locale, activity_time_window_key(window)).to_string(),
+                    self.activity_time_window == window,
+                )
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.activity_time_window = window;
+                    cx.notify();
+                }))
+                .into_any_element(),
+            );
+        }
+
+        let has_filters = self.has_activity_filters();
+        surface_card()
+            .id("activity-filters")
+            .debug_selector(|| "visual-activity-filters".into())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .child(
+                div()
+                    .flex()
+                    .items_start()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_base()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(t(self.locale, "activity.filters").to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(t(self.locale, "activity.description").to_string()),
+                            ),
+                    )
+                    .child(
+                        button(
+                            "activity-filter-clear".into(),
+                            t(self.locale, "activity.filter.clear"),
+                            ButtonVariant::Secondary,
+                            !has_filters,
+                        )
+                        .debug_selector(|| "visual-activity-filter-clear".into())
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.activity_filters = ActivityFilters::default();
+                            shell.activity_time_window = ActivityTimeWindow::All;
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_3()
+                    .child(filter_group(
+                        t(self.locale, "activity.filter.network").to_string().into(),
+                        network_controls,
+                    ))
+                    .child(filter_group(
+                        t(self.locale, "activity.filter.object_kind")
+                            .to_string()
+                            .into(),
+                        object_kind_controls,
+                    ))
+                    .child(filter_group(
+                        t(self.locale, "activity.filter.object_id")
+                            .to_string()
+                            .into(),
+                        object_id_controls,
+                    ))
+                    .child(filter_group(
+                        t(self.locale, "activity.filter.actor_role")
+                            .to_string()
+                            .into(),
+                        actor_role_controls,
+                    ))
+                    .child(filter_group(
+                        t(self.locale, "activity.filter.category")
+                            .to_string()
+                            .into(),
+                        category_controls,
+                    ))
+                    .child(filter_group(
+                        t(self.locale, "activity.filter.severity")
+                            .to_string()
+                            .into(),
+                        severity_controls,
+                    ))
+                    .child(filter_group(
+                        t(self.locale, "activity.filter.outcome").to_string().into(),
+                        outcome_controls,
+                    ))
+                    .child(filter_group(
+                        t(self.locale, "activity.filter.time").to_string().into(),
+                        time_controls,
+                    )),
+            )
+            .into_any_element()
     }
 
     fn action_card(&self, action: NodeUiAction, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -12332,11 +12740,143 @@ fn discovery_notice(
         .into_any_element()
 }
 
+fn activity_sync_notice(
+    selector: &'static str,
+    title: String,
+    detail: String,
+    semantic: SemanticState,
+) -> gpui::AnyElement {
+    let palette = semantic_palette(semantic);
+    div()
+        .debug_selector(move || selector.into())
+        .flex()
+        .flex_col()
+        .gap_1()
+        .rounded_md()
+        .border_1()
+        .border_color(rgba(palette.border.rgba_hex()))
+        .bg(rgba(palette.background.rgba_hex()))
+        .px_3()
+        .py_2()
+        .text_xs()
+        .line_height(px(18.0))
+        .text_color(rgba(palette.foreground.rgba_hex()))
+        .child(div().font_weight(gpui::FontWeight(600.0)).child(title))
+        .child(div().text_color(rgba(COLOR_MUTED)).child(detail))
+        .into_any_element()
+}
+
 fn unix_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or_default()
+}
+
+fn activity_filter_network_label(snapshot: &NodeSnapshot, network_id: &str) -> String {
+    snapshot
+        .memberships
+        .iter()
+        .find(|membership| membership.network_id == network_id)
+        .map(|membership| membership.network_name.clone())
+        .or_else(|| {
+            snapshot
+                .network_profiles
+                .iter()
+                .find(|profile| profile.network_id == network_id)
+                .map(|profile| profile.name.clone())
+        })
+        .unwrap_or_else(|| network_id.to_string())
+}
+
+fn activity_filter_object_kind_label(locale: Locale, kind: &str) -> String {
+    let key = format!("activity.object_kind.{kind}");
+    let localized = t(locale, &key);
+    if localized == key {
+        kind.to_string()
+    } else {
+        localized.to_string()
+    }
+}
+
+fn activity_filter_role_label(locale: Locale, role: &str) -> String {
+    let key = format!("activity.role.{role}");
+    let localized = t(locale, &key);
+    if localized == key {
+        role.to_string()
+    } else {
+        localized.to_string()
+    }
+}
+
+const fn activity_category_key(category: ActivityCategory) -> &'static str {
+    match category {
+        ActivityCategory::UserActivity => "activity.category.user_activity",
+        ActivityCategory::SystemEvent => "activity.category.system_event",
+        ActivityCategory::SecurityEvent => "activity.category.security_event",
+        ActivityCategory::OperationFailure => "activity.category.operation_failure",
+    }
+}
+
+const fn activity_category_value(category: ActivityCategory) -> &'static str {
+    match category {
+        ActivityCategory::UserActivity => "user_activity",
+        ActivityCategory::SystemEvent => "system_event",
+        ActivityCategory::SecurityEvent => "security_event",
+        ActivityCategory::OperationFailure => "operation_failure",
+    }
+}
+
+const fn activity_severity_key(severity: ActivitySeverity) -> &'static str {
+    match severity {
+        ActivitySeverity::Info => "activity.severity.info",
+        ActivitySeverity::Notice => "activity.severity.notice",
+        ActivitySeverity::Warning => "activity.severity.warning",
+        ActivitySeverity::Critical => "activity.severity.critical",
+    }
+}
+
+const fn activity_severity_value(severity: ActivitySeverity) -> &'static str {
+    match severity {
+        ActivitySeverity::Info => "info",
+        ActivitySeverity::Notice => "notice",
+        ActivitySeverity::Warning => "warning",
+        ActivitySeverity::Critical => "critical",
+    }
+}
+
+const fn activity_outcome_key(outcome: AuditOutcome) -> &'static str {
+    match outcome {
+        AuditOutcome::Succeeded => "activity.outcome.succeeded",
+        AuditOutcome::Failed => "activity.outcome.failed",
+        AuditOutcome::Denied => "activity.outcome.denied",
+    }
+}
+
+const fn activity_outcome_value(outcome: AuditOutcome) -> &'static str {
+    match outcome {
+        AuditOutcome::Succeeded => "succeeded",
+        AuditOutcome::Failed => "failed",
+        AuditOutcome::Denied => "denied",
+    }
+}
+
+const fn activity_time_window_key(window: ActivityTimeWindow) -> &'static str {
+    match window {
+        ActivityTimeWindow::All => "activity.filter.time_all",
+        ActivityTimeWindow::LastHour => "activity.filter.last_hour",
+        ActivityTimeWindow::Last24Hours => "activity.filter.last_24_hours",
+        ActivityTimeWindow::Last7Days => "activity.filter.last_7_days",
+    }
+}
+
+const fn activity_time_window_value(window: ActivityTimeWindow) -> &'static str {
+    match window {
+        ActivityTimeWindow::All => "all",
+        ActivityTimeWindow::LastHour => "hour",
+        ActivityTimeWindow::Last24Hours => "day",
+        ActivityTimeWindow::Last7Days => "week",
+    }
 }
 
 fn primary_status_semantic(status: NodePrimaryStatus) -> SemanticState {

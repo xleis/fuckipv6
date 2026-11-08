@@ -3265,6 +3265,12 @@ mod tests {
                 outcome: AuditOutcome::Succeeded,
                 occurred_at_unix_ms: 1_500,
                 summary: HIDDEN_ACTIVITY_SUMMARY.into(),
+                category: fuckipv6_common::domain::ActivityCategory::UserActivity,
+                severity: fuckipv6_common::domain::ActivitySeverity::Info,
+                actor_role: Some("owner".into()),
+                object_kind: "member".into(),
+                object_id: Some("privacy-hidden".into()),
+                reason: Some("succeeded".into()),
                 details: BTreeMap::from([("secret".into(), "hidden".into())]),
             }],
             logs: vec![NodeLogEntry {
@@ -3608,7 +3614,7 @@ mod tests {
             manifest.manifest.schema_version,
             NODE_UI_MANIFEST_SCHEMA_VERSION
         );
-        assert_eq!(manifest.manifest.pages.len(), 12);
+        assert_eq!(manifest.manifest.pages.len(), 13);
     }
 
     #[tokio::test]
@@ -3653,7 +3659,7 @@ mod tests {
         let manifest: NodeApiManifestResponse = json_body(manifest_response).await;
         assert_eq!(manifest.meta.schema_version, NODE_HTTP_SCHEMA_VERSION);
         assert!(manifest.meta.request_id > snapshot.meta.request_id);
-        assert_eq!(manifest.manifest.pages.len(), 12);
+        assert_eq!(manifest.manifest.pages.len(), 13);
     }
 
     #[tokio::test]
@@ -4200,7 +4206,7 @@ mod tests {
         );
         assert_eq!(audit[0].details["request_id"], "77");
         assert_eq!(audit[0].details["actor_source"], "test");
-        assert_eq!(audit[0].details["role"], "owner");
+        assert_eq!(audit[0].details["actor_role"], "owner");
         assert_eq!(audit[0].details["command"], "join_network");
         assert!(!format!("{:?}", audit[0]).contains("owner-secret-invitation"));
         assert_eq!(writes.load(Ordering::SeqCst), 1);

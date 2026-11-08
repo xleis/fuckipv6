@@ -10,18 +10,28 @@ export type NodeManifestActionCommandKind =
 
 export type AclAction = "allow" | "deny";
 
+export type ActivityCategory = "user_activity" | "system_event" | "security_event" | "operation_failure";
+
 export type ActivityEntry = {
   "action": string;
   "actor": NodeId;
+  "actor_role"?: string | null;
   "audit_id": AuditId;
+  "category"?: ActivityCategory;
   "details": Record<string, string>;
   "network_id"?: NetworkId | null;
+  "object_id"?: string | null;
+  "object_kind"?: string;
   "occurred_at_unix_ms": number;
   "operation_id"?: OperationId | null;
   "outcome": AuditOutcome;
+  "reason"?: string | null;
   "resource": string;
+  "severity"?: ActivitySeverity;
   "summary": string;
 };
+
+export type ActivitySeverity = "info" | "notice" | "warning" | "critical";
 
 export type AuditId = string;
 
@@ -2219,13 +2229,19 @@ export type PrivacyField = "member_node_id" | "member_display_name" | "member_id
 export type ProjectedActivityEntry = {
   "action"?: string | null;
   "actor"?: NodeId | null;
+  "actor_role"?: string | null;
   "audit_id": AuditId;
+  "category": ActivityCategory;
   "details"?: Record<string, string> | null;
   "network_id"?: NetworkId | null;
+  "object_id"?: string | null;
+  "object_kind"?: string | null;
   "occurred_at_unix_ms"?: number | null;
   "operation_id"?: OperationId | null;
   "outcome"?: AuditOutcome | null;
+  "reason"?: string | null;
   "resource"?: string | null;
+  "severity": ActivitySeverity;
   "summary"?: string | null;
 };
 

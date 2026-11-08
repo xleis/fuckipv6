@@ -1612,6 +1612,12 @@
       "actions": []
     },
     {
+      "id": "activity",
+      "nav_label_key": "nav.activity",
+      "title_key": "page.activity",
+      "actions": []
+    },
+    {
       "id": "routing",
       "nav_label_key": "nav.routing",
       "title_key": "page.routing",

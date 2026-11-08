@@ -4,12 +4,13 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use fuckipv6_common::domain::JoinRequestReviewAction;
 use fuckipv6_common::domain::{
-    parse_policy_test_input, CapabilityKind, CapabilityState, ContentHash,
-    ExitContributionObligation, ExitContributionScope, InvitationCode, InvitationId,
-    InvitationRedeemRequest, MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode,
-    NetworkMember, NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberOnlineState,
-    NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId, TopologyNode,
-    TopologyNodeHealth, TopologySnapshot,
+    parse_policy_test_input, ActivityCategory, ActivityEntry, ActivitySeverity, AuditOutcome,
+    CapabilityKind, CapabilityState, ContentHash, ExitContributionObligation,
+    ExitContributionScope, InvitationCode, InvitationId, InvitationRedeemRequest,
+    MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode, NetworkMember,
+    NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberStatus,
+    NetworkProfileUpdate, NetworkVisibility, NodeId, TopologyNode, TopologyNodeHealth,
+    TopologySnapshot,
 };
 use fuckipv6_common::i18n::{t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
@@ -51,6 +52,7 @@ pub enum PageKind {
     NodeRuntime,
     Topology,
     Traffic,
+    Activity,
     Routing,
     ExitNode,
     Relay,
@@ -145,6 +147,152 @@ pub fn retain_member_selection(
         .then(|| selected_node_id.to_owned())
 }
 
+/// Filters the authoritative activity projection without interpreting toast
+/// copy or raw audit details. Time bounds are inclusive.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActivityFilters {
+    pub network_id: Option<String>,
+    pub object_kind: Option<String>,
+    pub object_id: Option<String>,
+    pub actor_role: Option<String>,
+    pub category: Option<ActivityCategory>,
+    pub severity: Option<ActivitySeverity>,
+    pub outcome: Option<AuditOutcome>,
+    pub from_unix_ms: Option<u64>,
+    pub to_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActivityFilterOptions {
+    pub networks: Vec<String>,
+    pub object_kinds: Vec<String>,
+    pub object_ids: Vec<String>,
+    pub actor_roles: Vec<String>,
+}
+
+/// Deduplicate replayed snapshot/event history by stable audit ID, with the
+/// latest copy of an identity winning, then apply the one product ordering.
+pub fn ordered_activity_entries(entries: &[ActivityEntry]) -> Vec<&ActivityEntry> {
+    let mut by_id = HashMap::new();
+    for entry in entries {
+        by_id.insert(entry.audit_id.as_str(), entry);
+    }
+    let mut ordered = by_id.into_values().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        right
+            .occurred_at_unix_ms
+            .cmp(&left.occurred_at_unix_ms)
+            .then_with(|| right.audit_id.cmp(&left.audit_id))
+    });
+    ordered
+}
+
+pub fn filter_activity<'a>(
+    entries: &'a [ActivityEntry],
+    filters: &ActivityFilters,
+) -> Vec<&'a ActivityEntry> {
+    ordered_activity_entries(entries)
+        .into_iter()
+        .filter(|entry| {
+            if filters.network_id.as_deref().is_some_and(|network_id| {
+                entry.network_id.as_ref().map(NetworkId::as_str) != Some(network_id)
+            }) {
+                return false;
+            }
+            if filters
+                .object_kind
+                .as_deref()
+                .is_some_and(|kind| entry.object_kind != kind)
+            {
+                return false;
+            }
+            if filters
+                .object_id
+                .as_deref()
+                .is_some_and(|id| entry.object_id.as_deref() != Some(id))
+            {
+                return false;
+            }
+            if filters
+                .actor_role
+                .as_deref()
+                .is_some_and(|role| entry.actor_role.as_deref() != Some(role))
+            {
+                return false;
+            }
+            if filters
+                .category
+                .is_some_and(|category| entry.category != category)
+            {
+                return false;
+            }
+            if filters
+                .severity
+                .is_some_and(|severity| entry.severity != severity)
+            {
+                return false;
+            }
+            if filters
+                .outcome
+                .is_some_and(|outcome| entry.outcome != outcome)
+            {
+                return false;
+            }
+            if filters
+                .from_unix_ms
+                .is_some_and(|from| entry.occurred_at_unix_ms < from)
+            {
+                return false;
+            }
+            if filters
+                .to_unix_ms
+                .is_some_and(|to| entry.occurred_at_unix_ms > to)
+            {
+                return false;
+            }
+            true
+        })
+        .collect()
+}
+
+/// Build stable selector values from the same authoritative projection used by
+/// the timeline. Unknown/empty values are omitted so the UI never invents a
+/// filter option that cannot match an activity row.
+pub fn activity_filter_options(entries: &[ActivityEntry]) -> ActivityFilterOptions {
+    fn sorted_unique(values: impl IntoIterator<Item = String>) -> Vec<String> {
+        let mut values = values
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        values.sort();
+        values
+    }
+
+    let ordered = ordered_activity_entries(entries);
+    ActivityFilterOptions {
+        networks: sorted_unique(
+            ordered
+                .iter()
+                .filter_map(|entry| entry.network_id.as_ref().map(NetworkId::to_string)),
+        ),
+        object_kinds: sorted_unique(
+            ordered
+                .iter()
+                .map(|entry| entry.object_kind.clone())
+                .collect::<Vec<_>>(),
+        ),
+        object_ids: sorted_unique(ordered.iter().filter_map(|entry| entry.object_id.clone())),
+        actor_roles: sorted_unique(
+            ordered
+                .iter()
+                .filter_map(|entry| entry.actor_role.clone())
+                .collect::<Vec<_>>(),
+        ),
+    }
+}
+
 pub fn network_membership_id<'a>(
     snapshot: &'a NodeSnapshot,
     network_name: &str,
@@ -157,13 +305,14 @@ pub fn network_membership_id<'a>(
 }
 
 impl PageKind {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Overview,
         Self::Networks,
         Self::Peers,
         Self::NodeRuntime,
         Self::Topology,
         Self::Traffic,
+        Self::Activity,
         Self::Routing,
         Self::ExitNode,
         Self::Relay,
@@ -180,6 +329,7 @@ impl PageKind {
             "node_runtime" => Some(Self::NodeRuntime),
             "topology" => Some(Self::Topology),
             "traffic" => Some(Self::Traffic),
+            "activity" => Some(Self::Activity),
             "routing" => Some(Self::Routing),
             "exit_node" => Some(Self::ExitNode),
             "relay" => Some(Self::Relay),
@@ -198,6 +348,7 @@ impl PageKind {
             Self::NodeRuntime => "node_runtime",
             Self::Topology => "topology",
             Self::Traffic => "traffic",
+            Self::Activity => "activity",
             Self::Routing => "routing",
             Self::ExitNode => "exit_node",
             Self::Relay => "relay",
@@ -1206,6 +1357,22 @@ pub fn build_page_model(
     page_id: &str,
     locale: Locale,
 ) -> Result<PageModel, ModelError> {
+    build_page_model_with_activity_filters(
+        manifest,
+        snapshot,
+        page_id,
+        locale,
+        &ActivityFilters::default(),
+    )
+}
+
+pub fn build_page_model_with_activity_filters(
+    manifest: &NodeUiManifest,
+    snapshot: &NodeSnapshot,
+    page_id: &str,
+    locale: Locale,
+    activity_filters: &ActivityFilters,
+) -> Result<PageModel, ModelError> {
     let page = manifest
         .pages
         .iter()
@@ -1213,13 +1380,27 @@ pub fn build_page_model(
         .ok_or_else(|| ModelError::UnknownPage {
             page_id: page_id.into(),
         })?;
-    build_page_model_for_page(page, snapshot, locale)
+    build_page_model_for_page_with_activity_filters(page, snapshot, locale, activity_filters)
 }
 
 pub fn build_page_model_for_page(
     page: &NodeUiPage,
     snapshot: &NodeSnapshot,
     locale: Locale,
+) -> Result<PageModel, ModelError> {
+    build_page_model_for_page_with_activity_filters(
+        page,
+        snapshot,
+        locale,
+        &ActivityFilters::default(),
+    )
+}
+
+pub fn build_page_model_for_page_with_activity_filters(
+    page: &NodeUiPage,
+    snapshot: &NodeSnapshot,
+    locale: Locale,
+    activity_filters: &ActivityFilters,
 ) -> Result<PageModel, ModelError> {
     let kind = PageKind::from_id(&page.id).ok_or_else(|| ModelError::UnknownPage {
         page_id: page.id.clone(),
@@ -1238,7 +1419,7 @@ pub fn build_page_model_for_page(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let (metrics, sections, overview) = project_page(kind, snapshot, locale);
+    let (metrics, sections, overview) = project_page(kind, snapshot, locale, activity_filters);
     Ok(PageModel {
         page_id: page.id.clone(),
         kind,
@@ -2890,6 +3071,7 @@ fn project_page(
     kind: PageKind,
     snapshot: &NodeSnapshot,
     locale: Locale,
+    activity_filters: &ActivityFilters,
 ) -> (Vec<MetricModel>, Vec<SectionModel>, Option<OverviewModel>) {
     match kind {
         PageKind::Overview => (
@@ -2915,6 +3097,10 @@ fn project_page(
         }
         PageKind::Traffic => {
             let (metrics, sections) = project_traffic(snapshot, locale);
+            (metrics, sections, None)
+        }
+        PageKind::Activity => {
+            let (metrics, sections) = project_activity(snapshot, locale, activity_filters);
             (metrics, sections, None)
         }
         PageKind::Routing => {
@@ -3134,14 +3320,7 @@ fn project_overview(snapshot: &NodeSnapshot, locale: Locale) -> OverviewModel {
         })
         .collect();
 
-    let mut ordered_activity = snapshot.recent_activity.iter().collect::<Vec<_>>();
-    ordered_activity.sort_by(|left, right| {
-        right
-            .occurred_at_unix_ms
-            .cmp(&left.occurred_at_unix_ms)
-            .then_with(|| right.audit_id.cmp(&left.audit_id))
-    });
-    let activity = ordered_activity
+    let activity = ordered_activity_entries(&snapshot.recent_activity)
         .into_iter()
         .take(5)
         .map(|entry| {
@@ -3868,6 +4047,271 @@ fn project_traffic(
             t(locale, "gpui.section.by_network"),
             t(locale, "gpui.empty.traffic"),
             network_rows,
+        )],
+    )
+}
+
+fn activity_outcome_key(outcome: AuditOutcome) -> &'static str {
+    match outcome {
+        AuditOutcome::Succeeded => "activity.outcome.succeeded",
+        AuditOutcome::Failed => "activity.outcome.failed",
+        AuditOutcome::Denied => "activity.outcome.denied",
+    }
+}
+
+fn activity_category_key(category: ActivityCategory) -> &'static str {
+    match category {
+        ActivityCategory::UserActivity => "activity.category.user_activity",
+        ActivityCategory::SystemEvent => "activity.category.system_event",
+        ActivityCategory::SecurityEvent => "activity.category.security_event",
+        ActivityCategory::OperationFailure => "activity.category.operation_failure",
+    }
+}
+
+fn activity_severity_key(severity: ActivitySeverity) -> &'static str {
+    match severity {
+        ActivitySeverity::Info => "activity.severity.info",
+        ActivitySeverity::Notice => "activity.severity.notice",
+        ActivitySeverity::Warning => "activity.severity.warning",
+        ActivitySeverity::Critical => "activity.severity.critical",
+    }
+}
+
+fn activity_object_kind_label(locale: Locale, kind: &str) -> String {
+    let key = format!("activity.object_kind.{kind}");
+    let localized = t(locale, &key);
+    if localized == key {
+        kind.to_string()
+    } else {
+        localized.to_string()
+    }
+}
+
+fn activity_role_label(locale: Locale, role: &str) -> String {
+    let key = format!("activity.role.{role}");
+    let localized = t(locale, &key);
+    if localized == key {
+        role.to_string()
+    } else {
+        localized.to_string()
+    }
+}
+
+fn activity_reason_label(locale: Locale, reason: &str) -> String {
+    let key = format!("activity.reason.{reason}");
+    let localized = t(locale, &key);
+    if localized == key {
+        reason.to_string()
+    } else {
+        localized.to_string()
+    }
+}
+
+fn activity_network_name(snapshot: &NodeSnapshot, network_id: &str) -> Option<String> {
+    snapshot
+        .memberships
+        .iter()
+        .find(|membership| membership.network_id == network_id)
+        .map(|membership| membership.network_name.clone())
+        .or_else(|| {
+            snapshot
+                .network_profiles
+                .iter()
+                .find(|profile| profile.network_id == network_id)
+                .map(|profile| profile.name.clone())
+        })
+}
+
+/// Object links are generated only from the current authoritative snapshot.
+/// Historical records never grant access to an object that has disappeared or
+/// is no longer visible under the viewer's current permissions.
+fn activity_object_navigation(
+    snapshot: &NodeSnapshot,
+    entry: &ActivityEntry,
+    locale: Locale,
+) -> Option<RowNavigation> {
+    if !snapshot
+        .permissions
+        .permissions
+        .contains(&NodePermission::ViewState)
+    {
+        return None;
+    }
+    let object_id = entry.object_id.as_deref()?;
+    let label = t(locale, "activity.link.open_object").to_string();
+    match entry.object_kind.as_str() {
+        "network" => {
+            let network_name = activity_network_name(snapshot, object_id)?;
+            Some(RowNavigation {
+                page_id: "topology".into(),
+                network_name: Some(network_name),
+                label,
+            })
+        }
+        "member" | "topology_node" => {
+            let node = snapshot
+                .topology
+                .as_ref()?
+                .nodes
+                .iter()
+                .find(|node| node.node_id.as_str() == object_id)?;
+            if let Some(network_id) = entry.network_id.as_ref().map(NetworkId::as_str) {
+                if !node
+                    .networks
+                    .iter()
+                    .any(|membership| membership.network_id.as_str() == network_id)
+                {
+                    return None;
+                }
+            }
+            let network_name = entry
+                .network_id
+                .as_ref()
+                .map(NetworkId::as_str)
+                .and_then(|network_id| activity_network_name(snapshot, network_id))
+                .or_else(|| {
+                    node.networks.iter().find_map(|membership| {
+                        activity_network_name(snapshot, membership.network_id.as_str())
+                    })
+                });
+            Some(RowNavigation {
+                page_id: "topology".into(),
+                network_name,
+                label,
+            })
+        }
+        "node" => {
+            let identity = snapshot.identity.as_ref()?;
+            (identity.node_id == object_id).then(|| RowNavigation {
+                page_id: "identity".into(),
+                network_name: None,
+                label,
+            })
+        }
+        // Invitations, join requests, configuration and deleted objects do not
+        // have stable inspectable destinations in the first activity surface.
+        _ => None,
+    }
+}
+
+fn project_activity(
+    snapshot: &NodeSnapshot,
+    locale: Locale,
+    filters: &ActivityFilters,
+) -> (Vec<MetricModel>, Vec<SectionModel>) {
+    let all = ordered_activity_entries(&snapshot.recent_activity);
+    let security = all
+        .iter()
+        .filter(|entry| entry.category == ActivityCategory::SecurityEvent)
+        .count();
+    let failures = all
+        .iter()
+        .filter(|entry| entry.category == ActivityCategory::OperationFailure)
+        .count();
+    let system = all
+        .iter()
+        .filter(|entry| entry.category == ActivityCategory::SystemEvent)
+        .count();
+    let rows = filter_activity(&snapshot.recent_activity, filters)
+        .into_iter()
+        .map(|entry| {
+            let action_key = format!("activity.action.{}", entry.action);
+            let action = t(locale, &action_key);
+            let action = if action == action_key {
+                t(locale, "activity.action.node.command").to_string()
+            } else {
+                action.to_string()
+            };
+            let object_kind = activity_object_kind_label(locale, &entry.object_kind);
+            let object = match entry.object_id.as_deref() {
+                Some(object_id) => tr(
+                    locale,
+                    "activity.object_value",
+                    &[("kind", &object_kind), ("id", object_id)],
+                ),
+                None => object_kind,
+            };
+            let mut details = vec![
+                t(locale, activity_category_key(entry.category)).to_string(),
+                t(locale, activity_severity_key(entry.severity)).to_string(),
+                t(locale, activity_outcome_key(entry.outcome)).to_string(),
+            ];
+            if let Some(role) = entry.actor_role.as_deref() {
+                details.push(tr(
+                    locale,
+                    "activity.actor_role_value",
+                    &[("role", &activity_role_label(locale, role))],
+                ));
+            }
+            details.push(object);
+            if let Some(reason) = entry.reason.as_deref() {
+                details.push(tr(
+                    locale,
+                    "activity.reason_value",
+                    &[("reason", &activity_reason_label(locale, reason))],
+                ));
+            }
+            details.push(routing_timestamp_label(
+                Some(entry.occurred_at_unix_ms),
+                locale,
+            ));
+            details.push(tr(
+                locale,
+                "activity.audit_id_value",
+                &[("audit", entry.audit_id.as_str())],
+            ));
+            RowModel {
+                title: format!("{} · {action}", entry.actor),
+                detail: details.join(" · "),
+                navigation: activity_object_navigation(snapshot, entry, locale),
+            }
+        })
+        .collect::<Vec<_>>();
+    let result_count = tr(
+        locale,
+        "activity.result_count",
+        &[
+            ("filtered", &rows.len().to_string()),
+            ("total", &all.len().to_string()),
+        ],
+    );
+    let empty_text = if all.is_empty() {
+        t(locale, "gpui.empty.activity")
+    } else if rows.is_empty() {
+        t(locale, "activity.empty.no_matches")
+    } else {
+        t(locale, "gpui.empty.activity")
+    };
+    (
+        vec![
+            metric(
+                t(locale, "gpui.metric.activity_total"),
+                all.len(),
+                "NodeSnapshot.recent_activity",
+            ),
+            metric(
+                t(locale, "gpui.metric.activity_security"),
+                security,
+                "ActivityCategory",
+            ),
+            metric(
+                t(locale, "gpui.metric.activity_failures"),
+                failures,
+                "ActivityCategory",
+            ),
+            metric(
+                t(locale, "gpui.metric.activity_system"),
+                system,
+                "ActivityCategory",
+            ),
+        ],
+        vec![section(
+            format!(
+                "{} · {result_count}",
+                t(locale, "gpui.section.activity_timeline")
+            ),
+            empty_text,
+            rows,
         )],
     )
 }
@@ -5414,6 +5858,27 @@ mod tests {
         snapshot
     }
 
+    fn activity_entry(audit_key: &[u8], occurred_at_unix_ms: u64) -> ActivityEntry {
+        ActivityEntry {
+            audit_id: AuditId::from_public_key(audit_key),
+            operation_id: None,
+            actor: NodeId::from_public_key(b"activity-actor"),
+            network_id: None,
+            action: "network.create".into(),
+            resource: "network:created".into(),
+            outcome: AuditOutcome::Succeeded,
+            occurred_at_unix_ms,
+            summary: "private activity summary".into(),
+            category: fuckipv6_common::domain::ActivityCategory::UserActivity,
+            severity: fuckipv6_common::domain::ActivitySeverity::Info,
+            actor_role: Some("owner".into()),
+            object_kind: "network".into(),
+            object_id: None,
+            reason: Some("succeeded".into()),
+            details: BTreeMap::from([("secret".into(), "private activity details".into())]),
+        }
+    }
+
     #[test]
     fn node_runtime_projects_authoritative_routing_summaries_and_navigation() {
         let mut snapshot = NodeSnapshot::default();
@@ -5976,7 +6441,7 @@ mod tests {
     #[test]
     fn overview_activity_is_sorted_truncated_and_sanitized() {
         let mut snapshot = populated_snapshot();
-        snapshot.recent_activity = [3_u8, 6, 1, 5, 2, 4]
+        let mut activity = [3_u8, 6, 1, 5, 2, 4]
             .into_iter()
             .map(|index| ActivityEntry {
                 audit_id: AuditId::from_public_key(&[index]),
@@ -5988,19 +6453,35 @@ mod tests {
                 outcome: AuditOutcome::Succeeded,
                 occurred_at_unix_ms: u64::from(index) * 1_000,
                 summary: format!("raw-summary-{index}"),
+                category: fuckipv6_common::domain::ActivityCategory::UserActivity,
+                severity: fuckipv6_common::domain::ActivitySeverity::Info,
+                actor_role: Some("owner".into()),
+                object_kind: "network".into(),
+                object_id: None,
+                reason: Some("succeeded".into()),
                 details: BTreeMap::from([
                     ("command".into(), format!("command-{index}")),
                     ("token".into(), format!("secret-{index}")),
                 ]),
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let mut latest_six = activity[1].clone();
+        latest_six.occurred_at_unix_ms = 6_500;
+        latest_six
+            .details
+            .insert("command".into(), "command-6-latest".into());
+        activity.push(latest_six);
+        snapshot.recent_activity = activity;
 
         let overview = project_overview(&snapshot, Locale::En);
 
         assert_eq!(overview.activity.len(), 5);
-        assert_eq!(overview.activity[0].occurred_at_unix_ms, 6_000);
+        assert_eq!(overview.activity[0].occurred_at_unix_ms, 6_500);
         assert_eq!(overview.activity[4].occurred_at_unix_ms, 2_000);
-        assert_eq!(overview.activity[0].command.as_deref(), Some("command-6"));
+        assert_eq!(
+            overview.activity[0].command.as_deref(),
+            Some("command-6-latest")
+        );
         assert!(overview.activity.iter().all(|activity| {
             !activity.detail.contains("raw-summary")
                 && !activity.detail.contains("secret-")
@@ -6009,6 +6490,182 @@ mod tests {
                     .as_deref()
                     .is_none_or(|command| !command.contains("secret-"))
         }));
+    }
+
+    #[test]
+    fn activity_projection_deduplicates_and_filters_every_field_with_closed_bounds() {
+        let alpha = NetworkId::from_public_key(b"activity-alpha");
+        let beta = NetworkId::from_public_key(b"activity-beta");
+        let mut home = activity_entry(b"activity-home", 2_000);
+        home.network_id = Some(alpha.clone());
+        home.object_kind = "member".into();
+        home.object_id = Some("node-relay".into());
+        home.category = ActivityCategory::SecurityEvent;
+        home.severity = ActivitySeverity::Warning;
+        home.outcome = AuditOutcome::Denied;
+        home.actor_role = Some("owner".into());
+        let mut latest_home = home.clone();
+        latest_home.summary = "latest replay".into();
+        let mut failure = activity_entry(b"activity-failure", 3_000);
+        failure.network_id = Some(beta);
+        failure.object_kind = "network".into();
+        failure.object_id = Some("network-office".into());
+        failure.category = ActivityCategory::OperationFailure;
+        failure.severity = ActivitySeverity::Critical;
+        failure.outcome = AuditOutcome::Failed;
+        failure.actor_role = Some("member".into());
+        let home_id = home.audit_id.clone();
+        let failure_id = failure.audit_id.clone();
+        let entries = vec![home, failure, latest_home];
+
+        let ordered = ordered_activity_entries(&entries);
+        assert_eq!(ordered.len(), 2);
+        assert_eq!(ordered[0].audit_id, failure_id);
+        assert_eq!(ordered[1].summary, "latest replay");
+
+        let filters = [
+            ActivityFilters {
+                network_id: Some(alpha.to_string()),
+                ..ActivityFilters::default()
+            },
+            ActivityFilters {
+                object_kind: Some("member".into()),
+                ..ActivityFilters::default()
+            },
+            ActivityFilters {
+                object_id: Some("node-relay".into()),
+                ..ActivityFilters::default()
+            },
+            ActivityFilters {
+                actor_role: Some("owner".into()),
+                ..ActivityFilters::default()
+            },
+            ActivityFilters {
+                category: Some(ActivityCategory::SecurityEvent),
+                ..ActivityFilters::default()
+            },
+            ActivityFilters {
+                severity: Some(ActivitySeverity::Warning),
+                ..ActivityFilters::default()
+            },
+            ActivityFilters {
+                outcome: Some(AuditOutcome::Denied),
+                ..ActivityFilters::default()
+            },
+            ActivityFilters {
+                from_unix_ms: Some(2_000),
+                to_unix_ms: Some(2_000),
+                ..ActivityFilters::default()
+            },
+        ];
+        for filter in filters {
+            let rows = filter_activity(&entries, &filter);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].audit_id, home_id);
+        }
+
+        let combined = filter_activity(
+            &entries,
+            &ActivityFilters {
+                network_id: Some(alpha.to_string()),
+                object_kind: Some("member".into()),
+                object_id: Some("node-relay".into()),
+                actor_role: Some("owner".into()),
+                category: Some(ActivityCategory::SecurityEvent),
+                severity: Some(ActivitySeverity::Warning),
+                outcome: Some(AuditOutcome::Denied),
+                from_unix_ms: Some(2_000),
+                to_unix_ms: Some(2_000),
+            },
+        );
+        assert_eq!(combined.len(), 1);
+        assert_eq!(combined[0].audit_id, home_id);
+    }
+
+    #[test]
+    fn activity_page_model_applies_filters_and_never_renders_private_audit_copy() {
+        let mut snapshot = populated_snapshot();
+        let mut succeeded = activity_entry(b"activity-succeeded", 1_000);
+        succeeded.object_kind = "network".into();
+        let mut failed = activity_entry(b"activity-failed", 2_000);
+        failed.category = ActivityCategory::OperationFailure;
+        failed.severity = ActivitySeverity::Critical;
+        failed.outcome = AuditOutcome::Failed;
+        failed.object_kind = "member".into();
+        failed.object_id = Some("node-missing".into());
+        let failed_id = failed.audit_id.clone();
+        snapshot.recent_activity = vec![failed, succeeded];
+
+        let model = build_page_model_with_activity_filters(
+            &node_ui_manifest(),
+            &snapshot,
+            "activity",
+            Locale::En,
+            &ActivityFilters {
+                category: Some(ActivityCategory::OperationFailure),
+                severity: Some(ActivitySeverity::Critical),
+                outcome: Some(AuditOutcome::Failed),
+                ..ActivityFilters::default()
+            },
+        )
+        .expect("activity model");
+
+        let rows = model
+            .sections
+            .iter()
+            .flat_map(|section| section.rows.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].detail.contains(failed_id.as_str()));
+        let rendered = rows
+            .iter()
+            .flat_map(|row| [row.title.as_str(), row.detail.as_str()])
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!rendered.contains("private activity summary"));
+        assert!(!rendered.contains("private activity details"));
+    }
+
+    #[test]
+    fn activity_object_links_require_current_permission_existence_and_network_ownership() {
+        let (topology, alpha, beta, relay) = topology_snapshot_fixture();
+        let viewer = topology.viewer.clone();
+        let mut snapshot = populated_snapshot();
+        snapshot.topology = Some(topology);
+        snapshot
+            .memberships
+            .push(membership_snapshot("alpha", alpha.as_str()));
+        snapshot
+            .memberships
+            .push(membership_snapshot("beta", beta.as_str()));
+
+        let mut member_activity = activity_entry(b"activity-member", 1_000);
+        member_activity.network_id = Some(alpha.clone());
+        member_activity.object_kind = "member".into();
+        member_activity.object_id = Some(relay.to_string());
+        let navigation = activity_object_navigation(&snapshot, &member_activity, Locale::En)
+            .expect("visible member link");
+        assert_eq!(navigation.page_id, "topology");
+        assert_eq!(navigation.network_name.as_deref(), Some("alpha"));
+
+        let mut denied = snapshot.clone();
+        denied.permissions.permissions.clear();
+        assert!(activity_object_navigation(&denied, &member_activity, Locale::En).is_none());
+
+        let mut deleted = snapshot.clone();
+        deleted
+            .topology
+            .as_mut()
+            .expect("topology")
+            .nodes
+            .retain(|node| node.node_id != relay);
+        assert!(activity_object_navigation(&deleted, &member_activity, Locale::En).is_none());
+
+        let mut mismatched_network = activity_entry(b"activity-mismatch", 1_000);
+        mismatched_network.network_id = Some(beta);
+        mismatched_network.object_kind = "member".into();
+        mismatched_network.object_id = Some(viewer.to_string());
+        assert!(activity_object_navigation(&snapshot, &mismatched_network, Locale::En).is_none());
     }
 
     #[test]

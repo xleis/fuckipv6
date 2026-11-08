@@ -39,6 +39,7 @@ import {
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -63,6 +64,18 @@ import type {
   NodeUiAction,
   NodeUiPage,
 } from "../../../contracts/typescript/node-contract-v1";
+import {
+  EMPTY_ACTIVITY_FILTERS,
+  activityCategory,
+  activityFilterOptions,
+  activityObjectTarget,
+  activitySeverity,
+  activityTimeBound,
+  filterActivityEntries,
+  orderedActivityEntries,
+  type ActivityFilters,
+  type ActivityPresentationSignals,
+} from "../activity";
 import {
   executionBlockReason,
   i18n,
@@ -109,6 +122,7 @@ type PageContentProps = {
   manifestActions?: NodeUiAction[];
   onSubmitAction?: TopologyActionSubmit;
   topologySignals?: TopologyPresentationSignals;
+  activitySignals?: ActivityPresentationSignals;
 };
 
 function empty(text: string): JSX.Element {
@@ -744,12 +758,7 @@ function recentOverviewActivity(
   command?: string;
   auditId: string;
 }> {
-  return [...(snapshot.recent_activity ?? [])]
-    .sort(
-      (left, right) =>
-        right.occurred_at_unix_ms - left.occurred_at_unix_ms ||
-        right.audit_id.localeCompare(left.audit_id),
-    )
+  return orderedActivityEntries(snapshot.recent_activity)
     .slice(0, 5)
     .map((entry) => ({
       id: entry.audit_id,
@@ -2208,6 +2217,525 @@ function Peers({
   );
 }
 
+function activityLocalizedValue(
+  locale: Locale,
+  key: string,
+  fallback: string,
+): string {
+  const text = label(locale, key);
+  return text === key ? fallback : text;
+}
+
+function activityActionLabel(entry: ActivityEntry, locale: Locale): string {
+  return activityLocalizedValue(
+    locale,
+    `activity.action.${entry.action}`,
+    entry.action,
+  );
+}
+
+function activityObjectKindLabel(kind: string, locale: Locale): string {
+  return activityLocalizedValue(
+    locale,
+    `activity.object_kind.${kind}`,
+    kind,
+  );
+}
+
+function activityActorRoleLabel(role: string, locale: Locale): string {
+  return activityLocalizedValue(locale, `activity.role.${role}`, role);
+}
+
+function activityReasonLabel(reason: string, locale: Locale): string {
+  return activityLocalizedValue(
+    locale,
+    `activity.reason.${reason}`,
+    reason,
+  );
+}
+
+function activityNetworkName(snapshot: NodeSnapshot, networkId: string): string {
+  return (
+    snapshot.memberships?.find(
+      (membership) => membership.network_id === networkId,
+    )?.network_name ??
+    snapshot.network_profiles?.find(
+      (profile) => profile.network_id === networkId,
+    )?.name ??
+    snapshot.networks.find((network) => network.name === networkId)?.name ??
+    networkId
+  );
+}
+
+function ActivityPage({
+  snapshot,
+  locale,
+  onSelectNetwork,
+  onNavigate,
+  activitySignals,
+}: Pick<
+  PageContentProps,
+  "snapshot" | "locale" | "onSelectNetwork" | "onNavigate" | "activitySignals"
+>) {
+  const [filters, setFilters] = useState<ActivityFilters>({
+    ...EMPTY_ACTIVITY_FILTERS,
+  });
+  const [fromValue, setFromValue] = useState("");
+  const [toValue, setToValue] = useState("");
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const scrollTopRef = useRef(0);
+  const entries = useMemo(
+    () => orderedActivityEntries(snapshot.recent_activity),
+    [snapshot.recent_activity],
+  );
+  const options = useMemo(() => activityFilterOptions(entries), [entries]);
+  const filteredEntries = useMemo(
+    () =>
+      filterActivityEntries(entries, {
+        ...filters,
+        fromUnixMs: activityTimeBound(fromValue),
+        toUnixMs: activityTimeBound(toValue),
+      }),
+    [entries, filters, fromValue, toValue],
+  );
+  const counts = useMemo(
+    () => ({
+      security: entries.filter(
+        (entry) => activityCategory(entry) === "security_event",
+      ).length,
+      failures: entries.filter(
+        (entry) => activityCategory(entry) === "operation_failure",
+      ).length,
+      system: entries.filter(
+        (entry) => activityCategory(entry) === "system_event",
+      ).length,
+    }),
+    [entries],
+  );
+  const signals = activitySignals ?? {};
+  const hasFilters =
+    Boolean(filters.networkId) ||
+    Boolean(filters.objectKind) ||
+    Boolean(filters.objectId) ||
+    Boolean(filters.actorRole) ||
+    Boolean(filters.category) ||
+    Boolean(filters.severity) ||
+    Boolean(filters.outcome) ||
+    Boolean(fromValue) ||
+    Boolean(toValue);
+  const notices: Array<{
+    kind: "permission_denied" | "offline" | "stale" | "refreshing" | "error";
+    tone: "danger" | "warn" | "info";
+    title: string;
+    detail: string;
+  }> = [];
+  if (signals.permissionDenied) {
+    notices.push({
+      kind: "permission_denied",
+      tone: "danger",
+      title: label(locale, "activity.sync.permission_denied.title"),
+      detail: label(locale, "activity.sync.permission_denied.detail"),
+    });
+  }
+  if (signals.offline) {
+    notices.push({
+      kind: "offline",
+      tone: "danger",
+      title: label(locale, "activity.sync.offline.title"),
+      detail: label(locale, "activity.sync.offline.detail"),
+    });
+  }
+  if (signals.stale) {
+    notices.push({
+      kind: "stale",
+      tone: "warn",
+      title: label(locale, "activity.sync.stale.title"),
+      detail: label(locale, "activity.sync.stale.detail"),
+    });
+  }
+  if (signals.refreshing) {
+    notices.push({
+      kind: "refreshing",
+      tone: "info",
+      title: label(locale, "activity.sync.refreshing.title"),
+      detail: label(locale, "activity.sync.refreshing.detail"),
+    });
+  }
+  if (signals.error) {
+    notices.push({
+      kind: "error",
+      tone: "danger",
+      title: label(locale, "activity.sync.error.title"),
+      detail: tr(locale, "activity.sync.error.detail", {
+        error: signals.error,
+      }),
+    });
+  }
+
+  useLayoutEffect(() => {
+    const timeline = timelineRef.current;
+    if (timeline) timeline.scrollTop = scrollTopRef.current;
+  }, [snapshot.revision]);
+
+  const clearFilters = () => {
+    setFilters({ ...EMPTY_ACTIVITY_FILTERS });
+    setFromValue("");
+    setToValue("");
+  };
+
+  return (
+    <div className="page-stack activity-page" data-testid="activity-page">
+      <section className="activity-intro" aria-label={label(locale, "activity.filters")}>
+        <div>
+          <h2>{label(locale, "activity.filters")}</h2>
+          <p>{label(locale, "activity.description")}</p>
+        </div>
+        <button
+          className="secondary-button"
+          type="button"
+          disabled={!hasFilters}
+          onClick={clearFilters}
+        >
+          {label(locale, "activity.filter.clear")}
+        </button>
+      </section>
+
+      <div className="metric-grid activity-metrics">
+        <div className="metric-card">
+          <Activity size={20} />
+          <span>{label(locale, "gpui.metric.activity_total")}</span>
+          <strong>{formatInteger(locale, entries.length)}</strong>
+        </div>
+        <div className="metric-card">
+          <ShieldCheck size={20} />
+          <span>{label(locale, "gpui.metric.activity_security")}</span>
+          <strong>{formatInteger(locale, counts.security)}</strong>
+        </div>
+        <div className="metric-card">
+          <AlertTriangle size={20} />
+          <span>{label(locale, "gpui.metric.activity_failures")}</span>
+          <strong>{formatInteger(locale, counts.failures)}</strong>
+        </div>
+        <div className="metric-card">
+          <Server size={20} />
+          <span>{label(locale, "gpui.metric.activity_system")}</span>
+          <strong>{formatInteger(locale, counts.system)}</strong>
+        </div>
+      </div>
+
+      <section className="surface-card activity-filter-card">
+        <div className="activity-filter-grid">
+          <label>
+            <span>{label(locale, "activity.filter.network")}</span>
+            <select
+              aria-label={label(locale, "activity.filter.network")}
+              value={filters.networkId}
+              onChange={(event) =>
+                setFilters((current) => ({
+                  ...current,
+                  networkId: event.target.value,
+                }))
+              }
+            >
+              <option value="">{label(locale, "activity.filter.all")}</option>
+              {options.networks.map((networkId) => (
+                <option key={networkId} value={networkId}>
+                  {activityNetworkName(snapshot, networkId)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>{label(locale, "activity.filter.object_kind")}</span>
+            <select
+              aria-label={label(locale, "activity.filter.object_kind")}
+              value={filters.objectKind}
+              onChange={(event) =>
+                setFilters((current) => ({
+                  ...current,
+                  objectKind: event.target.value,
+                }))
+              }
+            >
+              <option value="">{label(locale, "activity.filter.all")}</option>
+              {options.objectKinds.map((kind) => (
+                <option key={kind} value={kind}>
+                  {activityObjectKindLabel(kind, locale)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>{label(locale, "activity.filter.object_id")}</span>
+            <select
+              aria-label={label(locale, "activity.filter.object_id")}
+              value={filters.objectId}
+              onChange={(event) =>
+                setFilters((current) => ({
+                  ...current,
+                  objectId: event.target.value,
+                }))
+              }
+            >
+              <option value="">{label(locale, "activity.filter.all")}</option>
+              {options.objectIds.map((objectId) => (
+                <option key={objectId} value={objectId}>
+                  {objectId}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>{label(locale, "activity.filter.actor_role")}</span>
+            <select
+              aria-label={label(locale, "activity.filter.actor_role")}
+              value={filters.actorRole}
+              onChange={(event) =>
+                setFilters((current) => ({
+                  ...current,
+                  actorRole: event.target.value,
+                }))
+              }
+            >
+              <option value="">{label(locale, "activity.filter.all")}</option>
+              {options.actorRoles.map((role) => (
+                <option key={role} value={role}>
+                  {activityActorRoleLabel(role, locale)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>{label(locale, "activity.filter.category")}</span>
+            <select
+              aria-label={label(locale, "activity.filter.category")}
+              value={filters.category}
+              onChange={(event) =>
+                setFilters((current) => ({
+                  ...current,
+                  category: event.target.value as ActivityFilters["category"],
+                }))
+              }
+            >
+              <option value="">{label(locale, "activity.filter.all")}</option>
+              {(
+                [
+                  "user_activity",
+                  "system_event",
+                  "security_event",
+                  "operation_failure",
+                ] as const
+              ).map((category) => (
+                <option key={category} value={category}>
+                  {label(locale, `activity.category.${category}`)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>{label(locale, "activity.filter.severity")}</span>
+            <select
+              aria-label={label(locale, "activity.filter.severity")}
+              value={filters.severity}
+              onChange={(event) =>
+                setFilters((current) => ({
+                  ...current,
+                  severity: event.target.value as ActivityFilters["severity"],
+                }))
+              }
+            >
+              <option value="">{label(locale, "activity.filter.all")}</option>
+              {(["info", "notice", "warning", "critical"] as const).map(
+                (severity) => (
+                  <option key={severity} value={severity}>
+                    {label(locale, `activity.severity.${severity}`)}
+                  </option>
+                ),
+              )}
+            </select>
+          </label>
+          <label>
+            <span>{label(locale, "activity.filter.outcome")}</span>
+            <select
+              aria-label={label(locale, "activity.filter.outcome")}
+              value={filters.outcome}
+              onChange={(event) =>
+                setFilters((current) => ({
+                  ...current,
+                  outcome: event.target.value as ActivityFilters["outcome"],
+                }))
+              }
+            >
+              <option value="">{label(locale, "activity.filter.all")}</option>
+              {(["succeeded", "failed", "denied"] as const).map((outcome) => (
+                <option key={outcome} value={outcome}>
+                  {label(locale, `activity.outcome.${outcome}`)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>{label(locale, "activity.filter.from")}</span>
+            <input
+              aria-label={label(locale, "activity.filter.from")}
+              type="datetime-local"
+              value={fromValue}
+              onChange={(event) => setFromValue(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>{label(locale, "activity.filter.to")}</span>
+            <input
+              aria-label={label(locale, "activity.filter.to")}
+              type="datetime-local"
+              value={toValue}
+              onChange={(event) => setToValue(event.target.value)}
+            />
+          </label>
+        </div>
+      </section>
+
+      {notices.map((notice) => (
+        <div
+          className={`activity-sync-notice ${notice.tone}`}
+          data-testid={`activity-sync-${notice.kind}`}
+          key={notice.kind}
+          role={notice.tone === "danger" ? "alert" : "status"}
+        >
+          <strong>{notice.title}</strong>
+          <span>{notice.detail}</span>
+        </div>
+      ))}
+
+      <section className="surface-card activity-timeline-card">
+        <div className="card-heading">
+          <div>
+            <h3>{label(locale, "gpui.section.activity_timeline")}</h3>
+            <span>
+              {tr(locale, "activity.result_count", {
+                filtered: formatInteger(locale, filteredEntries.length),
+                total: formatInteger(locale, entries.length),
+              })}
+            </span>
+          </div>
+          <Activity size={18} />
+        </div>
+        <div
+          className="activity-timeline"
+          data-testid="activity-timeline"
+          ref={timelineRef}
+          onScroll={(event) => {
+            scrollTopRef.current = event.currentTarget.scrollTop;
+          }}
+        >
+          {entries.length === 0 ? (
+            <div className="empty-state" data-testid="activity-empty">
+              {label(locale, "gpui.empty.activity")}
+            </div>
+          ) : filteredEntries.length === 0 ? (
+            <div className="empty-state" data-testid="activity-no-matches">
+              {label(locale, "activity.empty.no_matches")}
+            </div>
+          ) : (
+            filteredEntries.map((entry) => {
+              const category = activityCategory(entry);
+              const severity = activitySeverity(entry);
+              const objectKind = activityObjectKindLabel(
+                entry.object_kind ?? "",
+                locale,
+              );
+              const object = entry.object_id
+                ? tr(locale, "activity.object_value", {
+                    kind: objectKind,
+                    id: entry.object_id,
+                  })
+                : objectKind || label(locale, "common.none");
+              const target = activityObjectTarget(snapshot, entry);
+              return (
+                <article
+                  className={`activity-entry severity-${severity}`}
+                  data-audit-id={entry.audit_id}
+                  data-testid={`activity-entry-${entry.audit_id}`}
+                  key={entry.audit_id}
+                >
+                  <div className="activity-entry-heading">
+                    <div>
+                      <strong>{activityActionLabel(entry, locale)}</strong>
+                      <span>
+                        {entry.actor}
+                        {entry.actor_role
+                          ? ` · ${activityActorRoleLabel(entry.actor_role, locale)}`
+                          : ""}
+                      </span>
+                    </div>
+                    <div className="activity-entry-badges">
+                      <span className={`status-pill category-${category}`}>
+                        {label(locale, `activity.category.${category}`)}
+                      </span>
+                      <span className={`status-pill severity-${severity}`}>
+                        {label(locale, `activity.severity.${severity}`)}
+                      </span>
+                    </div>
+                  </div>
+                  <p className="activity-entry-summary">{entry.summary}</p>
+                  <dl className="activity-entry-fields">
+                    <div>
+                      <dt>{label(locale, "activity.field.object")}</dt>
+                      <dd>{object}</dd>
+                    </div>
+                    <div>
+                      <dt>{label(locale, "activity.filter.outcome")}</dt>
+                      <dd>{label(locale, `activity.outcome.${entry.outcome}`)}</dd>
+                    </div>
+                    <div>
+                      <dt>{label(locale, "activity.field.reason")}</dt>
+                      <dd>
+                        {entry.reason
+                          ? activityReasonLabel(entry.reason, locale)
+                          : label(locale, "common.none")}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{label(locale, "activity.field.time")}</dt>
+                      <dd>
+                        <time dateTime={new Date(entry.occurred_at_unix_ms).toISOString()}>
+                          {formatTimestamp(locale, entry.occurred_at_unix_ms)}
+                        </time>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{label(locale, "activity.field.audit_id")}</dt>
+                      <dd>
+                        <code>{entry.audit_id}</code>
+                      </dd>
+                    </div>
+                  </dl>
+                  {target ? (
+                    <button
+                      className="activity-object-link secondary-button"
+                      type="button"
+                      data-testid={`activity-object-link-${entry.audit_id}`}
+                      aria-label={`${label(locale, "activity.link.open_object")}: ${object}`}
+                      onClick={() => {
+                        if (target.networkName) {
+                          onSelectNetwork(target.networkName);
+                        }
+                        onNavigate(target.pageId);
+                      }}
+                    >
+                      {label(locale, "activity.link.open_object")}
+                    </button>
+                  ) : null}
+                </article>
+              );
+            })
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function Traffic({
   snapshot,
   locale,
@@ -2859,6 +3387,7 @@ const PAGE_ICONS: Record<string, LucideIcon> = {
   node_runtime: Server,
   topology: Globe2,
   traffic: Activity,
+  activity: Activity,
   routing: Database,
   exit_node: DoorOpen,
   relay: RadioTower,
@@ -2902,6 +3431,9 @@ export function PageContent(props: PageContentProps) {
       break;
     case "traffic":
       content = <Traffic {...props} />;
+      break;
+    case "activity":
+      content = <ActivityPage {...props} />;
       break;
     case "routing":
       content = <Routing {...props} />;

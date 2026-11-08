@@ -2515,6 +2515,8 @@ struct CommandEnvelope {
     response: oneshot::Sender<NodeCommandResult>,
 }
 
+const ACTIVITY_RETENTION_LIMIT: usize = 256;
+
 #[derive(Default)]
 struct CommandAuditTrail {
     entries: Arc<Mutex<Vec<AuditEntry>>>,
@@ -2530,8 +2532,9 @@ impl CommandAuditTrail {
         result: Option<&NodeCommandResult>,
         snapshot: Option<&NodeSnapshot>,
         outcome: AuditOutcome,
-        reason: &str,
-    ) {
+        reason: (&str, Option<&str>),
+    ) -> Option<ActivityEntry> {
+        let (reason, reason_detail) = reason;
         // A preview is a read-only disclosure. Keep it out of the durable
         // command audit and activity feed; the subsequent confirmed join is the
         // auditable mutation.
@@ -2539,8 +2542,9 @@ impl CommandAuditTrail {
             request.command.kind(),
             NodeCommandKind::PreviewJoinNetwork | NodeCommandKind::TestPolicy
         ) {
-            return;
+            return None;
         }
+        let occurred_at_unix_ms = unix_time_ms();
         let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
         let audit_id = fuckipv6_common::domain::AuditId::from_public_key(
             format!(
@@ -2549,7 +2553,7 @@ impl CommandAuditTrail {
                 request.request_id,
                 request.command.kind().as_str(),
                 sequence,
-                unix_time_ms()
+                occurred_at_unix_ms
             )
             .as_bytes(),
         );
@@ -2558,10 +2562,22 @@ impl CommandAuditTrail {
         let mut details = BTreeMap::new();
         details.insert("command".into(), request.command.kind().as_str().into());
         details.insert("request_id".into(), request.request_id.to_string());
-        details.insert("authorization_reason".into(), reason.into());
+        details.insert("reason_code".into(), reason.into());
+        if let Some(reason_detail) = reason_detail {
+            details.insert("reason_detail".into(), reason_detail.into());
+        }
         details.insert("actor_source".into(), context.source().into());
-        details.insert("role".into(), context.roles_for_command(&request.command));
-        let network_id = context.network_id_for_command(&request.command);
+        details.insert(
+            "actor_role".into(),
+            context.roles_for_command(&request.command),
+        );
+        let network_id = activity_network_id(&request.command, context, result, snapshot);
+        let (object_kind, object_id) =
+            activity_object_identity(&request.command, context, result, snapshot);
+        details.insert("object_kind".into(), object_kind);
+        if let Some(object_id) = object_id {
+            details.insert("object_id".into(), object_id);
+        }
         if let Some(network_id) = &network_id {
             details.insert("network_id".into(), network_id.to_string());
         }
@@ -2579,7 +2595,7 @@ impl CommandAuditTrail {
             action: action.into(),
             resource: format!("node_command:{}", request.command.kind().as_str()),
             outcome,
-            occurred_at_unix_ms: unix_time_ms(),
+            occurred_at_unix_ms,
             summary: summary.into(),
             details,
             sensitive_keys: Default::default(),
@@ -2587,12 +2603,31 @@ impl CommandAuditTrail {
         if let Ok(mut entries) = self.entries.lock() {
             entries.push(entry.clone());
         }
-        if request.command.kind().is_write() || outcome == AuditOutcome::Denied {
-            if let Ok(mut activity) = self.recent_activity.lock() {
-                activity.insert(0, entry.project_activity());
-                activity.truncate(5);
-            }
+        if !request.command.kind().is_write() && outcome != AuditOutcome::Denied {
+            return None;
         }
+        let projected = entry.project_activity();
+        if let Ok(mut activity) = self.recent_activity.lock() {
+            // A replayed snapshot or event must not duplicate an activity row.
+            // Replace by stable audit identity, then keep the feed deterministic
+            // and newest-first before applying the short-term retention bound.
+            if let Some(index) = activity
+                .iter()
+                .position(|existing| existing.audit_id == projected.audit_id)
+            {
+                activity[index] = projected.clone();
+            } else {
+                activity.push(projected.clone());
+            }
+            activity.sort_by(|left, right| {
+                right
+                    .occurred_at_unix_ms
+                    .cmp(&left.occurred_at_unix_ms)
+                    .then_with(|| right.audit_id.cmp(&left.audit_id))
+            });
+            activity.truncate(ACTIVITY_RETENTION_LIMIT);
+        }
+        Some(projected)
     }
 
     fn entries(&self) -> Vec<AuditEntry> {
@@ -2607,6 +2642,242 @@ impl CommandAuditTrail {
             .lock()
             .map(|activity| activity.clone())
             .unwrap_or_default()
+    }
+}
+
+fn activity_network_id(
+    command: &NodeCommand,
+    context: &NodeCommandContext,
+    result: Option<&NodeCommandResult>,
+    snapshot: Option<&NodeSnapshot>,
+) -> Option<NetworkId> {
+    let parse = |id: &str| NetworkId::parse(id.to_owned()).ok();
+    let from_snapshot = |name: &str| {
+        let snapshot = snapshot?;
+        let network_id = snapshot
+            .memberships
+            .iter()
+            .find(|membership| membership.network_name == name)
+            .map(|membership| membership.network_id.as_str())
+            .or_else(|| {
+                snapshot
+                    .network_profiles
+                    .iter()
+                    .find(|profile| profile.name == name)
+                    .map(|profile| profile.network_id.as_str())
+            })?;
+        parse(network_id)
+    };
+
+    let command_network_id = match command {
+        NodeCommand::PreviewJoinNetwork(command) => Some(command.network_id.as_str()),
+        NodeCommand::JoinNetwork(command) => command.network_id.as_deref(),
+        NodeCommand::SubmitJoinRequest(command) => Some(command.network_id.as_str()),
+        NodeCommand::ListJoinRequests(command) => Some(command.network_id.as_str()),
+        NodeCommand::ListNetworkMembers(command) => Some(command.network_id.as_str()),
+        NodeCommand::PreviewMemberRemoval(command) => Some(command.network_id.as_str()),
+        NodeCommand::ChangeMemberLifecycle(command) => Some(command.network_id.as_str()),
+        NodeCommand::ReviewJoinRequest(command) => Some(command.network_id.as_str()),
+        NodeCommand::BatchReviewJoinRequests(command) => Some(command.network_id.as_str()),
+        NodeCommand::WithdrawJoinRequest(command) => Some(command.network_id.as_str()),
+        NodeCommand::ResubmitJoinRequest(command) => Some(command.network_id.as_str()),
+        NodeCommand::AcknowledgeMembershipPolicy(command) => Some(command.network_id.as_str()),
+        NodeCommand::CreateInvitation(command) => Some(command.network_id.as_str()),
+        NodeCommand::ListInvitations(command) => Some(command.network_id.as_str()),
+        NodeCommand::GetInvitationStatus(command) => Some(command.network_id.as_str()),
+        NodeCommand::RevokeInvitation(command) => Some(command.network_id.as_str()),
+        NodeCommand::PreviewInvitation(command) => Some(command.network_id.as_str()),
+        NodeCommand::RedeemInvitation(command) => Some(command.request.network_id.as_str()),
+        _ => None,
+    };
+    if let Some(network_id) = command_network_id.and_then(parse) {
+        return Some(network_id);
+    }
+
+    let command_network_name = match command {
+        NodeCommand::RebuildTun { network_name } => Some(network_name.as_str()),
+        NodeCommand::PreviewNetworkProfile(command)
+        | NodeCommand::UpdateNetworkProfile(command) => Some(command.network_name.as_str()),
+        NodeCommand::PublishNetworkDiscovery(command)
+        | NodeCommand::UpdateNetworkDiscovery(command)
+        | NodeCommand::UnpublishNetworkDiscovery(command) => Some(command.network_name.as_str()),
+        NodeCommand::UpdateRouting(command) => Some(command.network_name.as_str()),
+        NodeCommand::SetNetworkRole(command) => Some(command.network_name.as_str()),
+        NodeCommand::JoinNetwork(command) => command.network_name.as_deref(),
+        NodeCommand::LeaveNetwork(command) => Some(command.network_name.as_str()),
+        NodeCommand::GetBlacklist { network_name } => Some(network_name.as_str()),
+        NodeCommand::GetNetworkAllocation { network_name } => Some(network_name.as_str()),
+        NodeCommand::BanClient(command) | NodeCommand::UnbanClient(command) => {
+            Some(command.network_name.as_str())
+        }
+        NodeCommand::UpdateNetworkAllocation(command) => Some(command.network_name.as_str()),
+        NodeCommand::ProbePeer(command) => Some(command.network_name.as_str()),
+        _ => None,
+    };
+    if let Some(network_id) = command_network_name.and_then(from_snapshot) {
+        return Some(network_id);
+    }
+
+    if let Some(NodeCommandResult {
+        outcome: NodeCommandOutcome::NetworkCreated(created),
+        ..
+    }) = result
+    {
+        if let Some(network_id) = parse(&created.network_id) {
+            return Some(network_id);
+        }
+    }
+    if let Some(NodeCommandResult {
+        outcome: NodeCommandOutcome::NetworkJoined(joined),
+        ..
+    }) = result
+    {
+        if let Some(network_id) = parse(&joined.membership.network_id) {
+            return Some(network_id);
+        }
+    }
+    if let Some(NodeCommandResult {
+        outcome: NodeCommandOutcome::MemberLifecycleChanged(change),
+        ..
+    }) = result
+    {
+        return Some(change.network_id.clone());
+    }
+    if let Some(NodeCommandResult {
+        outcome: NodeCommandOutcome::JoinRequestsReviewed(review),
+        ..
+    }) = result
+    {
+        return parse(&review.network_id);
+    }
+    if let Some(NodeCommandResult {
+        outcome: NodeCommandOutcome::InvitationCreated(issued),
+        ..
+    }) = result
+    {
+        return Some(issued.status.invitation.network_id.clone());
+    }
+    if let Some(NodeCommandResult {
+        outcome:
+            NodeCommandOutcome::InvitationStatus(status) | NodeCommandOutcome::InvitationRevoked(status),
+        ..
+    }) = result
+    {
+        return Some(status.invitation.network_id.clone());
+    }
+    if let Some(NodeCommandResult {
+        outcome: NodeCommandOutcome::InvitationRedeemed(redemption),
+        ..
+    }) = result
+    {
+        return Some(redemption.network_id.clone());
+    }
+
+    context.network_id_for_command(command)
+}
+
+fn activity_object_identity(
+    command: &NodeCommand,
+    context: &NodeCommandContext,
+    result: Option<&NodeCommandResult>,
+    snapshot: Option<&NodeSnapshot>,
+) -> (String, Option<String>) {
+    let node = || ("node".into(), Some(context.actor().to_string()));
+    let network = || {
+        (
+            "network".into(),
+            activity_network_id(command, context, result, snapshot).map(|id| id.to_string()),
+        )
+    };
+    match command {
+        NodeCommand::PreviewMemberRemoval(command) => {
+            ("member".into(), Some(command.target_node_id.clone()))
+        }
+        NodeCommand::ChangeMemberLifecycle(command) => {
+            ("member".into(), Some(command.target_node_id.clone()))
+        }
+        NodeCommand::SubmitJoinRequest(_) => match result {
+            Some(NodeCommandResult {
+                outcome: NodeCommandOutcome::JoinRequestSubmitted(request),
+                ..
+            }) => ("join_request".into(), Some(request.request_id.to_string())),
+            _ => ("join_request".into(), None),
+        },
+        NodeCommand::ReviewJoinRequest(command) => (
+            "join_request".into(),
+            Some(command.review.request_id.clone()),
+        ),
+        NodeCommand::BatchReviewJoinRequests(_) => ("join_request".into(), None),
+        NodeCommand::WithdrawJoinRequest(command) => (
+            "join_request".into(),
+            Some(match result {
+                Some(NodeCommandResult {
+                    outcome: NodeCommandOutcome::JoinRequestUpdated(request),
+                    ..
+                }) => request.request_id.to_string(),
+                _ => command.request_id.clone(),
+            }),
+        ),
+        NodeCommand::ResubmitJoinRequest(command) => (
+            "join_request".into(),
+            Some(match result {
+                Some(NodeCommandResult {
+                    outcome: NodeCommandOutcome::JoinRequestUpdated(request),
+                    ..
+                }) => request.request_id.to_string(),
+                _ => command.request_id.clone(),
+            }),
+        ),
+        NodeCommand::CreateInvitation(_) => match result {
+            Some(NodeCommandResult {
+                outcome: NodeCommandOutcome::InvitationCreated(issued),
+                ..
+            }) => (
+                "invitation".into(),
+                Some(issued.status.invitation.invitation_id.to_string()),
+            ),
+            _ => ("invitation".into(), None),
+        },
+        NodeCommand::GetInvitationStatus(command) => {
+            ("invitation".into(), Some(command.invitation_id.to_string()))
+        }
+        NodeCommand::RevokeInvitation(command) => {
+            ("invitation".into(), Some(command.invitation_id.to_string()))
+        }
+        NodeCommand::PreviewInvitation(_) => ("invitation".into(), None),
+        NodeCommand::RedeemInvitation(command) => (
+            "invitation".into(),
+            Some(command.request.invitation_id.to_string()),
+        ),
+        // Client identifiers may be user-supplied payload and are not needed
+        // to make the activity entry meaningful. Keep the object family only so
+        // denials cannot copy payload secrets into the audit trail.
+        NodeCommand::BanClient(_) | NodeCommand::UnbanClient(_) => ("client".into(), None),
+        NodeCommand::SetNodeDisplayName(_)
+        | NodeCommand::RotateNodeIdentity(_)
+        | NodeCommand::StartNode
+        | NodeCommand::StopNode
+        | NodeCommand::RestartNode
+        | NodeCommand::CleanupResiduals { .. }
+        | NodeCommand::Shutdown
+        | NodeCommand::GetSnapshot
+        | NodeCommand::GetUiManifest
+        | NodeCommand::GetDiagnostics
+        | NodeCommand::RefreshDiscoveryIndex { .. }
+        | NodeCommand::RetryDiscoveryIndex
+        | NodeCommand::GetConfiguration
+        | NodeCommand::PreviewConfiguration(_)
+        | NodeCommand::GetConfigurationHistory
+        | NodeCommand::GetPolicy
+        | NodeCommand::PreviewPolicy(_)
+        | NodeCommand::PreviewPolicyRollback(_)
+        | NodeCommand::GetPolicyHistory
+        | NodeCommand::TestPolicy(_) => node(),
+        NodeCommand::ApplyConfiguration(_) | NodeCommand::RollbackConfiguration(_) => {
+            ("configuration".into(), None)
+        }
+        NodeCommand::ApplyPolicy(_) | NodeCommand::RollbackPolicy(_) => ("policy".into(), None),
+        _ => network(),
     }
 }
 
@@ -3020,7 +3291,8 @@ impl NodeCommandBus {
                 &request,
                 Some(&result),
                 AuditOutcome::Denied,
-                &denial.reason,
+                &denial.code,
+                Some(&denial.reason),
             )
             .await;
             return Ok(result);
@@ -3052,7 +3324,8 @@ impl NodeCommandBus {
                     } else {
                         AuditOutcome::Failed
                     },
-                    "command authorized; handler outcome recorded",
+                    "failed",
+                    None,
                 )
                 .await;
                 Ok(result)
@@ -3063,7 +3336,8 @@ impl NodeCommandBus {
                     &audit_request,
                     None,
                     AuditOutcome::Failed,
-                    "handler response channel closed",
+                    "response_dropped",
+                    None,
                 )
                 .await;
                 Err(NodeCommandBusError::ResponseDropped(request_id))
@@ -3078,6 +3352,7 @@ impl NodeCommandBus {
         result: Option<&NodeCommandResult>,
         outcome: AuditOutcome,
         reason: &str,
+        reason_detail: Option<&str>,
     ) {
         // Policy tests are read-only simulations. Do not append audit/activity
         // state, and do not republish the snapshot merely because the test
@@ -3090,8 +3365,15 @@ impl NodeCommandBus {
             Some(state) => Some(state.snapshot().await),
             None => None,
         };
-        self.audit
-            .record(context, request, result, snapshot.as_ref(), outcome, reason);
+        let reason = activity_reason_code(result, outcome, reason);
+        self.audit.record(
+            context,
+            request,
+            result,
+            snapshot.as_ref(),
+            outcome,
+            (&reason, reason_detail),
+        );
         if let Some(state) = &self.activity_state {
             state
                 .set_recent_activity(self.audit.recent_activity())
@@ -3113,6 +3395,31 @@ impl NodeCommandBus {
         let context = test_owner_context().with_test_network_authority_for(&request.command);
         self.execute(context, request).await
     }
+}
+
+fn activity_reason_code(
+    result: Option<&NodeCommandResult>,
+    outcome: AuditOutcome,
+    fallback: &str,
+) -> String {
+    if outcome == AuditOutcome::Succeeded {
+        return "succeeded".into();
+    }
+    if let Some(NodeCommandResult {
+        outcome: NodeCommandOutcome::Rejected(problem),
+        ..
+    }) = result
+    {
+        return problem
+            .params
+            .get("authorization_code")
+            .or_else(|| problem.params.get("reason"))
+            .filter(|code| !code.is_empty())
+            .cloned()
+            .or_else(|| (!problem.message_key.is_empty()).then(|| problem.message_key.clone()))
+            .unwrap_or_else(|| fallback.into());
+    }
+    fallback.into()
 }
 
 pub(crate) fn denied(request_id: u64, denial: &CommandDenial) -> NodeCommandResult {
@@ -4482,13 +4789,17 @@ mod tests {
         assert_eq!(audit.len(), 1);
         assert_eq!(audit[0].actor, actor());
         assert_eq!(audit[0].network_id.as_ref(), Some(&network_id));
-        assert_eq!(audit[0].details["role"], "administrator");
+        assert_eq!(audit[0].details["actor_role"], "administrator");
         assert_eq!(audit[0].details["network_id"], network_id.to_string());
         assert_eq!(
             audit[0].details["actor_source"],
             "control-api:member-session"
         );
-        assert!(audit[0].details["authorization_reason"].contains("capability"));
+        assert_eq!(
+            audit[0].details["reason_code"],
+            "permission.capability_denied"
+        );
+        assert!(audit[0].details["reason_detail"].contains("capability"));
         let activity = state.snapshot().await.recent_activity;
         assert_eq!(activity.len(), 1);
         assert_eq!(activity[0].outcome, AuditOutcome::Denied);
@@ -4548,7 +4859,8 @@ mod tests {
         let audit = bus.audit_entries();
         assert_eq!(audit.len(), 1);
         assert_eq!(audit[0].outcome, AuditOutcome::Denied);
-        let reason = &audit[0].details["authorization_reason"];
+        assert_eq!(audit[0].details["reason_code"], "permission.denied");
+        let reason = &audit[0].details["reason_detail"];
         assert!(reason.contains(&deny_rule_id), "reason: {reason}");
         assert!(reason.contains("local layer"), "reason: {reason}");
     }
@@ -4621,7 +4933,9 @@ mod tests {
         assert_eq!(audit.len(), 1);
         assert_eq!(audit[0].outcome, AuditOutcome::Denied);
         assert_eq!(audit[0].action, "network.blacklist.ban");
-        assert!(audit[0].details["authorization_reason"].contains(&deny_rule_id));
+        assert_eq!(audit[0].details["reason_code"], "permission.denied");
+        assert!(audit[0].details["reason_detail"].contains(&deny_rule_id));
+        assert!(audit[0].details["reason_detail"].contains("network layer"));
         assert!(!format!("{audit:?}").contains(client_id));
     }
 
@@ -4687,7 +5001,11 @@ mod tests {
         assert_eq!(audit.len(), 1);
         assert_eq!(audit[0].outcome, AuditOutcome::Denied);
         assert_eq!(audit[0].action, "network.create");
-        assert!(audit[0].details["authorization_reason"].contains("local node owner"));
+        assert_eq!(
+            audit[0].details["reason_code"],
+            "permission.local_owner_required"
+        );
+        assert!(audit[0].details["reason_detail"].contains("local node owner"));
     }
 
     #[tokio::test]
@@ -4823,7 +5141,7 @@ mod tests {
             assert_eq!(entry.operation_id.as_ref(), Some(&operation_ids[index]));
             assert_eq!(entry.outcome, AuditOutcome::Succeeded);
             assert_eq!(entry.details["actor_source"], "control-api:owner-session");
-            assert_eq!(entry.details["role"], "owner");
+            assert_eq!(entry.details["actor_role"], "owner");
             assert_eq!(entry.details["request_id"], (80 + index as u64).to_string());
         }
 
@@ -4932,20 +5250,25 @@ mod tests {
             .all(|entry| entry.outcome == AuditOutcome::Succeeded));
 
         let activity = state.snapshot().await.recent_activity;
-        assert_eq!(activity.len(), 5);
-        assert_eq!(
-            activity
-                .iter()
-                .map(|entry| entry.action.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                "network.join_request.resubmit",
-                "network.join_request.withdraw",
-                "network.join_request.batch_review",
-                "network.join_request.review",
-                "network.join_request.review",
-            ]
-        );
+        assert_eq!(activity.len(), 7);
+        let mut activity_actions = activity
+            .iter()
+            .map(|entry| entry.action.as_str())
+            .collect::<Vec<_>>();
+        let mut expected_actions = vec![
+            "network.join_request.submit",
+            "network.join_request.review",
+            "network.join_request.review",
+            "network.join_request.review",
+            "network.join_request.batch_review",
+            "network.join_request.withdraw",
+            "network.join_request.resubmit",
+        ];
+        // Commands recorded in the same millisecond are ordered by stable audit
+        // ID, not execution order. This test verifies complete coverage.
+        activity_actions.sort_unstable();
+        expected_actions.sort_unstable();
+        assert_eq!(activity_actions, expected_actions);
         for secret in [
             "SECRET-AUDIT-REASON",
             "SECRET-AUDIT-REJECTION",
@@ -5207,7 +5530,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_activity_is_newest_first_limited_to_five_and_excludes_reads() {
+    async fn snapshot_activity_is_stably_ordered_retained_to_256_and_excludes_reads() {
         let state = NodeStateStore::new();
         let bus = NodeCommandBus::spawn_with_state(
             Arc::new(EchoHandler),
@@ -5216,22 +5539,38 @@ mod tests {
             state.clone(),
         );
 
-        for request_id in 60..67 {
+        for request_id in 60..360 {
             bus.execute_test(NodeCommandRequest::new(request_id, NodeCommand::StartNode))
                 .await
                 .expect("authorized command");
         }
-        bus.execute_test(NodeCommandRequest::new(70, NodeCommand::GetSnapshot))
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        bus.execute_test(NodeCommandRequest::new(500, NodeCommand::StartNode))
+            .await
+            .expect("authorized command");
+        bus.execute_test(NodeCommandRequest::new(400, NodeCommand::GetSnapshot))
             .await
             .expect("snapshot query");
 
         let activity = state.snapshot().await.recent_activity;
-        assert_eq!(activity.len(), 5);
+        assert_eq!(activity.len(), ACTIVITY_RETENTION_LIMIT);
         assert!(activity
             .iter()
             .all(|entry| entry.details["command"] == "start_node"));
-        assert_eq!(activity[0].details["request_id"], "66");
-        assert_eq!(activity[4].details["request_id"], "62");
+        assert_eq!(activity[0].details["request_id"], "500");
+        assert!(activity.windows(2).all(|pair| {
+            pair[0].occurred_at_unix_ms > pair[1].occurred_at_unix_ms
+                || (pair[0].occurred_at_unix_ms == pair[1].occurred_at_unix_ms
+                    && pair[0].audit_id > pair[1].audit_id)
+        }));
+        let audit_ids = activity
+            .iter()
+            .map(|entry| entry.audit_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(audit_ids.len(), ACTIVITY_RETENTION_LIMIT);
+        assert!(!activity
+            .iter()
+            .any(|entry| entry.details["command"] == "get_snapshot"));
     }
 
     fn actor() -> NodeId {

@@ -108,6 +108,22 @@ impl AuditEntry {
             })
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
+        let actor_role = self
+            .details
+            .get("actor_role")
+            .or_else(|| self.details.get("role"))
+            .cloned();
+        let object_kind = self
+            .details
+            .get("object_kind")
+            .cloned()
+            .unwrap_or_else(|| infer_activity_object_kind(&self.resource));
+        let object_id = self.details.get("object_id").cloned();
+        let reason = self
+            .details
+            .get("reason_code")
+            .or_else(|| self.details.get("authorization_code"))
+            .cloned();
         ActivityEntry {
             audit_id: self.audit_id.clone(),
             operation_id: self.operation_id.clone(),
@@ -118,6 +134,12 @@ impl AuditEntry {
             outcome: self.outcome,
             occurred_at_unix_ms: self.occurred_at_unix_ms,
             summary: self.summary.clone(),
+            category: classify_activity_category(&self.action, self.outcome),
+            severity: classify_activity_severity(&self.action, self.outcome),
+            actor_role,
+            object_kind,
+            object_id,
+            reason,
             details,
         }
     }
@@ -125,8 +147,34 @@ impl AuditEntry {
 
 /// Activity is an intentionally separate projection. Adding a field to the
 /// security audit does not automatically expose that field in product feeds.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, JsonSchema, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityCategory {
+    #[default]
+    UserActivity,
+    SystemEvent,
+    SecurityEvent,
+    OperationFailure,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, JsonSchema, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivitySeverity {
+    #[default]
+    Info,
+    Notice,
+    Warning,
+    Critical,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct ActivityEntry {
+    /// Stable audit identity. Replayed snapshots/events use this same value so
+    /// consumers can merge by identity instead of by UI presentation.
     pub audit_id: AuditId,
     pub operation_id: Option<OperationId>,
     pub actor: NodeId,
@@ -136,7 +184,83 @@ pub struct ActivityEntry {
     pub outcome: AuditOutcome,
     pub occurred_at_unix_ms: u64,
     pub summary: String,
+    /// Server-classified activity kind. UI clients must not infer this from
+    /// localized copy.
+    #[serde(default)]
+    pub category: ActivityCategory,
+    #[serde(default)]
+    pub severity: ActivitySeverity,
+    /// Stable role label captured at audit time. It is not re-derived from the
+    /// viewer's current role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_role: Option<String>,
+    /// Stable typed object identity used for filtering and permission-checked
+    /// links. `resource` remains the immutable audit resource string.
+    #[serde(default)]
+    pub object_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object_id: Option<String>,
+    /// Stable reason/denial code, never arbitrary localized prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     pub details: BTreeMap<String, String>,
+}
+
+fn infer_activity_object_kind(resource: &str) -> String {
+    resource
+        .split_once(':')
+        .map(|(kind, _)| kind)
+        .filter(|kind| !kind.is_empty())
+        .unwrap_or("resource")
+        .to_owned()
+}
+
+fn classify_activity_category(action: &str, outcome: AuditOutcome) -> ActivityCategory {
+    if outcome == AuditOutcome::Denied {
+        return ActivityCategory::SecurityEvent;
+    }
+    if outcome == AuditOutcome::Failed {
+        return ActivityCategory::OperationFailure;
+    }
+    if action.starts_with("node.")
+        || matches!(
+            action,
+            "network.start" | "network.stop" | "network.restart" | "routing.update"
+        )
+    {
+        return ActivityCategory::SystemEvent;
+    }
+    if action.starts_with("network.blacklist.")
+        || action.starts_with("network.invitation.")
+        || action.starts_with("network.join_request.review")
+        || action.starts_with("membership.")
+        || action.starts_with("node.identity.")
+        || action.starts_with("policy.")
+    {
+        return ActivityCategory::SecurityEvent;
+    }
+    ActivityCategory::UserActivity
+}
+
+fn classify_activity_severity(action: &str, outcome: AuditOutcome) -> ActivitySeverity {
+    if outcome == AuditOutcome::Denied {
+        return ActivitySeverity::Warning;
+    }
+    if outcome == AuditOutcome::Failed {
+        return ActivitySeverity::Warning;
+    }
+    if matches!(
+        action,
+        "node.identity.rotate"
+            | "network.blacklist.ban"
+            | "network.invitation.revoke"
+            | "membership.remove"
+            | "policy.apply"
+            | "policy.rollback"
+    ) {
+        return ActivitySeverity::Notice;
+    }
+    ActivitySeverity::Info
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]

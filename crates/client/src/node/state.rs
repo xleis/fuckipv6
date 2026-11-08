@@ -87,9 +87,9 @@ pub struct NodeSnapshot {
     pub discovery_index: NodeDiscoveryIndexSnapshot,
     pub networks: Vec<NodeNetworkSnapshot>,
     pub peers: Vec<NodePeerSnapshot>,
-    /// The five most recent user-meaningful command outcomes. Entries are
-    /// already redacted by the domain audit projection and ordered newest
-    /// first, so every UI adapter consumes the same activity feed.
+    /// Up to 256 recent user-meaningful command outcomes. Entries are already
+    /// redacted by the domain audit projection and ordered newest first, so
+    /// every UI adapter consumes the same short-term activity feed.
     #[serde(default)]
     pub recent_activity: Vec<ActivityEntry>,
     pub logs: Vec<NodeLogEntry>,

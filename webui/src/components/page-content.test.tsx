@@ -1,18 +1,21 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import manifestFixture from "../../../contracts/typescript/fixtures/node-manifest.json";
 import productFixture from "../../../contracts/typescript/fixtures/product-visual-snapshot.json";
 import type {
+  ActivityEntry,
   NodeSnapshot,
   NodeUiManifest,
   NodeUiPage,
 } from "../../../contracts/typescript/node-contract-v1";
+import type { ActivityPresentationSignals } from "../activity";
 import { PageContent } from "./page-content";
 import { installTestI18nRuntime } from "../test/runtime";
 
 const manifest = manifestFixture as NodeUiManifest;
 const networksPage = manifest.pages.find((page) => page.id === "networks") as NodeUiPage;
+const activityPage = manifest.pages.find((page) => page.id === "activity") as NodeUiPage;
 const baseSnapshot = productFixture.snapshot as NodeSnapshot;
 const oldTermsHash = "hash_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const currentTermsHash = "hash_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
@@ -77,6 +80,49 @@ function renderNetworks(snapshot: NodeSnapshot, onRequestAction = vi.fn()) {
     />,
   );
   return onRequestAction;
+}
+
+function activity(overrides: Partial<ActivityEntry> = {}): ActivityEntry {
+  return {
+    audit_id: "audit-default",
+    actor: "node-visual-01",
+    action: "network.create",
+    resource: "node_command:create_network",
+    outcome: "succeeded",
+    occurred_at_unix_ms: Date.UTC(2026, 0, 1, 12, 0, 0),
+    summary: "authoritative activity",
+    category: "user_activity",
+    severity: "info",
+    details: {},
+    object_kind: "network",
+    ...overrides,
+  };
+}
+
+function activityElement(
+  snapshot: NodeSnapshot,
+  activitySignals?: ActivityPresentationSignals,
+) {
+  return (
+    <PageContent
+      page={activityPage}
+      snapshot={snapshot}
+      locale="zh-CN"
+      selectedNetwork="home"
+      recentDiagnostics={null}
+      onSelectNetwork={() => {}}
+      onNavigate={() => {}}
+      onRequestAction={() => {}}
+      onRunAction={async () => {}}
+      activitySignals={activitySignals}
+    />
+  );
+}
+
+function datetimeLocal(unixMs: number): string {
+  const date = new Date(unixMs);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
 beforeEach(() => {
@@ -179,5 +225,165 @@ describe("membership policy reconfirmation", () => {
       }),
     ).not.toBeInTheDocument();
     expect(onRequestAction).not.toHaveBeenCalled();
+  });
+});
+
+describe("authoritative activity timeline", () => {
+  it("renders one latest row per audit ID and applies field and inclusive time filters", async () => {
+    const user = userEvent.setup();
+    const start = Date.UTC(2026, 0, 1, 12, 0, 0);
+    const end = start + 60 * 60 * 1_000;
+    const outside = end + 60 * 60 * 1_000;
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      recent_activity: [
+        activity({
+          audit_id: "audit-security",
+          occurred_at_unix_ms: start,
+          summary: "stale duplicate",
+          network_id: "net_home",
+          object_kind: "member",
+          object_id: "node-peer",
+          actor_role: "owner",
+          category: "security_event",
+          severity: "warning",
+          outcome: "denied",
+        }),
+        activity({
+          audit_id: "audit-failure",
+          occurred_at_unix_ms: end,
+          summary: "operation failed",
+          category: "operation_failure",
+          severity: "critical",
+          outcome: "failed",
+        }),
+        activity({
+          audit_id: "audit-outside",
+          occurred_at_unix_ms: outside,
+          summary: "outside range",
+        }),
+        activity({
+          audit_id: "audit-security",
+          occurred_at_unix_ms: start,
+          summary: "latest duplicate",
+          network_id: "net_home",
+          object_kind: "member",
+          object_id: "node-peer",
+          actor_role: "owner",
+          category: "security_event",
+          severity: "warning",
+          outcome: "denied",
+        }),
+      ],
+    };
+
+    render(activityElement(snapshot));
+
+    expect(screen.getByTestId("activity-entry-audit-security")).toHaveTextContent(
+      "latest duplicate",
+    );
+    expect(screen.queryByText("stale duplicate")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId(/^activity-entry-/)).toHaveLength(3);
+
+    fireEvent.change(
+      screen.getByLabelText("translated:activity.filter.from"),
+      { target: { value: datetimeLocal(start) } },
+    );
+    fireEvent.change(screen.getByLabelText("translated:activity.filter.to"), {
+      target: { value: datetimeLocal(end) },
+    });
+
+    expect(screen.getByTestId("activity-entry-audit-security")).toBeInTheDocument();
+    expect(screen.getByTestId("activity-entry-audit-failure")).toBeInTheDocument();
+    expect(screen.queryByTestId("activity-entry-audit-outside")).not.toBeInTheDocument();
+
+    await user.selectOptions(
+      screen.getByLabelText("translated:activity.filter.category"),
+      "operation_failure",
+    );
+    expect(screen.queryByTestId("activity-entry-audit-security")).not.toBeInTheDocument();
+    expect(screen.getByTestId("activity-entry-audit-failure")).toBeInTheDocument();
+  });
+
+  it("preserves the reader scroll position when a live snapshot revision arrives", () => {
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      revision: 20,
+      recent_activity: [
+        activity({ audit_id: "audit-a", occurred_at_unix_ms: Date.UTC(2026, 0, 1, 12, 0, 1) }),
+        activity({ audit_id: "audit-b", occurred_at_unix_ms: Date.UTC(2026, 0, 1, 12, 0, 0) }),
+      ],
+    };
+    const { rerender } = render(activityElement(snapshot));
+    const timeline = screen.getByTestId("activity-timeline");
+    timeline.scrollTop = 180;
+    fireEvent.scroll(timeline);
+
+    rerender(
+      activityElement({
+        ...snapshot,
+        revision: 21,
+        recent_activity: [
+          activity({
+            audit_id: "audit-live",
+            occurred_at_unix_ms: Date.UTC(2026, 0, 1, 12, 0, 2),
+          }),
+          ...snapshot.recent_activity!,
+        ],
+      }),
+    );
+
+    expect(screen.getByTestId("activity-entry-audit-live")).toBeInTheDocument();
+    expect(screen.getByTestId("activity-timeline").scrollTop).toBe(180);
+  });
+
+  it("marks stale and reconnecting snapshots without replacing the current rows", () => {
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      recent_activity: [activity({ audit_id: "audit-preserved" })],
+    };
+    const { rerender } = render(
+      activityElement(snapshot, { stale: true, refreshing: false }),
+    );
+
+    expect(screen.getByTestId("activity-sync-stale")).toHaveTextContent(
+      "translated:activity.sync.stale.title",
+    );
+    expect(screen.getByTestId("activity-entry-audit-preserved")).toBeInTheDocument();
+
+    rerender(activityElement(snapshot, { stale: false, refreshing: true }));
+    expect(screen.queryByTestId("activity-sync-stale")).not.toBeInTheDocument();
+    expect(screen.getByTestId("activity-sync-refreshing")).toHaveTextContent(
+      "translated:activity.sync.refreshing.title",
+    );
+    expect(screen.getByTestId("activity-entry-audit-preserved")).toBeInTheDocument();
+  });
+
+  it("removes object links when current permission or the object disappears", () => {
+    const nodeId = baseSnapshot.identity?.node_id;
+    if (!nodeId) throw new Error("fixture identity missing");
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      recent_activity: [
+        activity({
+          audit_id: "audit-node-link",
+          object_kind: "node",
+          object_id: nodeId,
+        }),
+      ],
+    };
+    const { rerender } = render(activityElement(snapshot));
+    expect(screen.getByTestId("activity-object-link-audit-node-link")).toBeInTheDocument();
+
+    rerender(
+      activityElement({
+        ...snapshot,
+        permissions: { ...snapshot.permissions!, permissions: [] },
+      }),
+    );
+    expect(screen.queryByTestId("activity-object-link-audit-node-link")).not.toBeInTheDocument();
+
+    rerender(activityElement({ ...snapshot, identity: null }));
+    expect(screen.queryByTestId("activity-object-link-audit-node-link")).not.toBeInTheDocument();
   });
 });

@@ -32,6 +32,7 @@ rcgen = { workspace = true }
 rustls = { workspace = true }
 x509-parser = { workspace = true }
 ipnet = { workspace = true }
+idna = "1"
 quinn = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }

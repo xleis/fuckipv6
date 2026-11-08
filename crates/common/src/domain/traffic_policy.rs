@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::net::IpAddr;
 
 use ipnet::IpNet;
 use schemars::JsonSchema;
@@ -38,6 +39,93 @@ impl PortRange {
     }
 }
 
+/// Canonical, case-insensitive DNS name used for exact host matching. IDNs are
+/// normalized to their ASCII A-label form and a single trailing root dot is
+/// accepted but not retained.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema, Serialize, Deserialize,
+)]
+#[serde(try_from = "String")]
+pub struct DomainName(
+    #[schemars(regex(
+        pattern = "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"
+    ))]
+    String,
+);
+
+impl DomainName {
+    pub fn parse(value: impl Into<String>) -> DomainResult<Self> {
+        canonical_domain(value.into(), false).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn matches_exact(&self, observed: &str) -> bool {
+        self.0 == observed
+    }
+}
+
+impl TryFrom<String> for DomainName {
+    type Error = DomainError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<DomainName> for String {
+    fn from(value: DomainName) -> Self {
+        value.0
+    }
+}
+
+/// Canonical DNS suffix. A bare domain matches itself and descendant labels;
+/// a leading `*.` is accepted only as an explicit spelling of that same
+/// complete-label boundary rule. It never performs substring matching.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema, Serialize, Deserialize,
+)]
+#[serde(try_from = "String")]
+pub struct DomainSuffix(
+    #[schemars(regex(
+        pattern = "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$"
+    ))]
+    String,
+);
+
+impl DomainSuffix {
+    pub fn parse(value: impl Into<String>) -> DomainResult<Self> {
+        canonical_domain(value.into(), true).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn matches(&self, observed: &str) -> bool {
+        observed == self.0
+            || observed
+                .strip_suffix(&self.0)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    }
+}
+
+impl TryFrom<String> for DomainSuffix {
+    type Error = DomainError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<DomainSuffix> for String {
+    fn from(value: DomainSuffix) -> Self {
+        value.0
+    }
+}
+
 /// IP/CIDR matcher stored as text at the contract edge for cross-language
 /// portability and parsed before policy activation.
 #[derive(
@@ -51,24 +139,37 @@ pub struct IpCidr(
 impl IpCidr {
     pub fn parse(value: impl Into<String>) -> DomainResult<Self> {
         let value = value.into();
-        value
-            .parse::<IpNet>()
-            .map_err(|_| DomainError::invalid_value("IP/CIDR matcher is invalid"))?;
-        Ok(Self(value))
+        let network = if let Ok(address) = value.parse::<IpAddr>() {
+            IpNet::from(address)
+        } else {
+            value
+                .parse::<IpNet>()
+                .map_err(|_| DomainError::invalid_value("IP/CIDR matcher is invalid"))?
+        };
+        Ok(Self(network.to_string()))
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
-    fn matches(&self, destination: &str) -> bool {
-        let Ok(destination) = destination.parse::<std::net::IpAddr>() else {
-            return false;
-        };
+    fn matches(&self, destination: IpAddr) -> bool {
         let Ok(network) = self.0.parse::<IpNet>() else {
             return false;
         };
         network.contains(&destination)
+    }
+
+    fn prefix_len(&self) -> u8 {
+        self.0
+            .parse::<IpNet>()
+            .map_or(0, |network| network.prefix_len())
+    }
+
+    fn is_ipv4(&self) -> bool {
+        self.0
+            .parse::<IpNet>()
+            .is_ok_and(|network| network.addr().is_ipv4())
     }
 }
 
@@ -130,11 +231,41 @@ pub enum ApplicationIdentity {
     Unknown,
 }
 
+/// A non-blocking warning attached to a matcher. Invalid or ambiguous values
+/// are rejected by `validate`; these codes describe valid rules whose scope is
+/// intentionally or accidentally broad and must be shown before activation.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TrafficMatchRisk {
+    AlwaysMatches,
+    AnyDestination,
+    AnyPort,
+    AnyProtocol,
+    AnyApplication,
+    BroadCidr { cidr: String, prefix_len: u8 },
+    FullPortRange { start: u16, end: u16 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct TrafficRuleRisk {
+    pub rule_id: TrafficRuleId,
+    pub priority: u32,
+    pub enabled: bool,
+    pub risks: Vec<TrafficMatchRisk>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct TrafficMatch {
-    /// Domain suffix match, for example `example.com` also matches `www.example.com`.
+    /// Exact, normalized DNS names. This condition never parses or compares IP
+    /// literals and never matches a subdomain.
     #[serde(default)]
-    pub domain_suffixes: Vec<String>,
+    pub exact_domains: Vec<DomainName>,
+    /// Complete-label DNS suffix match, for example `example.com` also matches
+    /// `www.example.com` but never `notexample.com` or `example.com.evil`.
+    #[serde(default)]
+    pub domain_suffixes: Vec<DomainSuffix>,
+    /// Exact IP values are canonicalized as `/32` or `/128`; CIDRs are matched
+    /// only against the observed destination IP.
     #[serde(default)]
     pub destination_cidrs: Vec<IpCidr>,
     #[serde(default)]
@@ -147,7 +278,8 @@ pub struct TrafficMatch {
 
 impl TrafficMatch {
     pub fn validate(&self) -> DomainResult<()> {
-        if self.domain_suffixes.len() > 256
+        if self.exact_domains.len() > 256
+            || self.domain_suffixes.len() > 256
             || self.destination_cidrs.len() > 256
             || self.destination_ports.len() > 256
             || self.protocols.len() > 8
@@ -155,7 +287,8 @@ impl TrafficMatch {
         {
             return Err(DomainError::invariant("traffic matcher is too large"));
         }
-        if has_duplicates(&self.domain_suffixes)
+        if has_duplicates(&self.exact_domains)
+            || has_duplicates(&self.domain_suffixes)
             || has_duplicates(&self.destination_cidrs)
             || has_duplicates(&self.destination_ports)
             || has_duplicates(&self.protocols)
@@ -164,9 +297,6 @@ impl TrafficMatch {
             return Err(DomainError::invariant(
                 "traffic matcher contains duplicate values",
             ));
-        }
-        for domain in &self.domain_suffixes {
-            validate_domain_suffix(domain)?;
         }
         for port in &self.destination_ports {
             port.validate()?;
@@ -178,17 +308,21 @@ impl TrafficMatch {
     }
 
     pub fn matches(&self, flow: &TrafficFlow) -> bool {
-        let domain_matches = self.domain_suffixes.is_empty()
+        let domain_matches = (self.exact_domains.is_empty() && self.domain_suffixes.is_empty())
             || flow.domain.as_ref().is_some_and(|domain| {
-                self.domain_suffixes
+                self.exact_domains
                     .iter()
-                    .any(|suffix| domain_matches_suffix(domain, suffix))
+                    .any(|exact| exact.matches_exact(domain.as_str()))
+                    || self
+                        .domain_suffixes
+                        .iter()
+                        .any(|suffix| suffix.matches(domain.as_str()))
             });
         let cidr_matches = self.destination_cidrs.is_empty()
             || self
                 .destination_cidrs
                 .iter()
-                .any(|cidr| cidr.matches(&flow.destination_ip));
+                .any(|cidr| cidr.matches(flow.destination_ip));
         let port_matches = self.destination_ports.is_empty()
             || self
                 .destination_ports
@@ -201,6 +335,56 @@ impl TrafficMatch {
                 .iter()
                 .any(|application| application.matches(&flow.application));
         domain_matches && cidr_matches && port_matches && protocol_matches && application_matches
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.exact_domains.is_empty()
+            && self.domain_suffixes.is_empty()
+            && self.destination_cidrs.is_empty()
+            && self.destination_ports.is_empty()
+            && self.protocols.is_empty()
+            && self.applications.is_empty()
+    }
+
+    pub fn risks(&self) -> Vec<TrafficMatchRisk> {
+        if self.is_empty() {
+            return vec![TrafficMatchRisk::AlwaysMatches];
+        }
+
+        let mut risks = Vec::new();
+        if self.exact_domains.is_empty()
+            && self.domain_suffixes.is_empty()
+            && self.destination_cidrs.is_empty()
+        {
+            risks.push(TrafficMatchRisk::AnyDestination);
+        }
+        if self.destination_ports.is_empty() {
+            risks.push(TrafficMatchRisk::AnyPort);
+        }
+        if self.protocols.is_empty() {
+            risks.push(TrafficMatchRisk::AnyProtocol);
+        }
+        if self.applications.is_empty() {
+            risks.push(TrafficMatchRisk::AnyApplication);
+        }
+        for cidr in &self.destination_cidrs {
+            let prefix_len = cidr.prefix_len();
+            if (cidr.is_ipv4() && prefix_len <= 8) || (!cidr.is_ipv4() && prefix_len <= 32) {
+                risks.push(TrafficMatchRisk::BroadCidr {
+                    cidr: cidr.as_str().to_string(),
+                    prefix_len,
+                });
+            }
+        }
+        for port in &self.destination_ports {
+            if port.start == 1 && port.end == u16::MAX {
+                risks.push(TrafficMatchRisk::FullPortRange {
+                    start: port.start,
+                    end: port.end,
+                });
+            }
+        }
+        risks
     }
 }
 
@@ -259,8 +443,8 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct TrafficFlow {
-    pub domain: Option<String>,
-    pub destination_ip: String,
+    pub domain: Option<DomainName>,
+    pub destination_ip: IpAddr,
     pub destination_port: u16,
     pub protocol: TrafficProtocol,
     pub application: ApplicationIdentity,
@@ -268,12 +452,6 @@ pub struct TrafficFlow {
 
 impl TrafficFlow {
     fn validate(&self) -> DomainResult<()> {
-        if let Some(domain) = &self.domain {
-            validate_domain_suffix(domain)?;
-        }
-        self.destination_ip
-            .parse::<std::net::IpAddr>()
-            .map_err(|_| DomainError::invalid_value("traffic destination IP is invalid"))?;
         if self.destination_port == 0 {
             return Err(DomainError::invalid_value(
                 "traffic destination port must be positive",
@@ -344,6 +522,24 @@ impl TrafficPolicy {
             ));
         }
         Ok(())
+    }
+
+    /// Return structured, non-blocking scope warnings after validating every
+    /// rule. The policy remains applicable, but UI and API callers must surface
+    /// these warnings before activation rather than silently accepting an
+    /// unconditional or very broad rule.
+    pub fn risk_report(&self) -> DomainResult<Vec<TrafficRuleRisk>> {
+        self.validate()?;
+        Ok(self
+            .rules
+            .iter()
+            .map(|rule| TrafficRuleRisk {
+                rule_id: rule.rule_id.clone(),
+                priority: rule.priority,
+                enabled: rule.enabled,
+                risks: rule.matcher.risks(),
+            })
+            .collect())
     }
 
     pub fn evaluate(&self, flow: &TrafficFlow) -> DomainResult<TrafficDecision> {
@@ -463,34 +659,40 @@ pub struct TrafficDecision {
     pub reason: TrafficDecisionReason,
 }
 
-fn validate_domain_suffix(value: &str) -> DomainResult<()> {
-    let value = value.trim_start_matches('.');
-    if value.is_empty()
-        || value.len() > 253
-        || value.starts_with('.')
-        || value.ends_with('.')
-        || value.contains(['/', ':', '\\', '\0'])
-        || value
-            .split('.')
-            .any(|label| label.is_empty() || label.len() > 63)
-    {
-        return Err(DomainError::invalid_value(
-            "traffic domain suffix is invalid",
-        ));
+fn canonical_domain(value: String, allow_wildcard_suffix: bool) -> DomainResult<String> {
+    if value.is_empty() || value.trim() != value || value.contains('\0') {
+        return Err(DomainError::invalid_value("traffic domain is invalid"));
     }
-    Ok(())
-}
-
-fn domain_matches_suffix(domain: &str, suffix: &str) -> bool {
-    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
-    let suffix = suffix
-        .trim_start_matches('.')
-        .trim_end_matches('.')
+    let value = if allow_wildcard_suffix {
+        value.strip_prefix("*.").unwrap_or(&value)
+    } else {
+        &value
+    };
+    if value.is_empty() || value.contains('*') {
+        return Err(DomainError::invalid_value("traffic domain is invalid"));
+    }
+    let value = value.strip_suffix('.').unwrap_or(value);
+    if value.is_empty() || value.ends_with('.') || value.parse::<IpAddr>().is_ok() {
+        return Err(DomainError::invalid_value("traffic domain is invalid"));
+    }
+    let ascii = idna::domain_to_ascii(value)
+        .map_err(|_| DomainError::invalid_value("traffic domain is invalid"))?
         .to_ascii_lowercase();
-    domain == suffix
-        || domain
-            .strip_suffix(&suffix)
-            .is_some_and(|prefix| prefix.ends_with('.'))
+    if ascii.len() > 253
+        || ascii.is_empty()
+        || ascii.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+    {
+        return Err(DomainError::invalid_value("traffic domain is invalid"));
+    }
+    Ok(ascii)
 }
 
 fn has_duplicates<T: Ord>(values: &[T]) -> bool {
@@ -532,8 +734,8 @@ mod tests {
 
     fn flow(application: ApplicationIdentity) -> TrafficFlow {
         TrafficFlow {
-            domain: Some("api.example.com".into()),
-            destination_ip: "203.0.113.9".into(),
+            domain: Some(DomainName::parse("api.example.com").unwrap()),
+            destination_ip: "203.0.113.9".parse().unwrap(),
             destination_port: 443,
             protocol: TrafficProtocol::Tcp,
             application,
@@ -552,7 +754,11 @@ mod tests {
     #[test]
     fn rule_fields_are_and_and_multiple_values_are_or() {
         let matcher = TrafficMatch {
-            domain_suffixes: vec!["example.com".into(), "example.net".into()],
+            exact_domains: Vec::new(),
+            domain_suffixes: vec![
+                DomainSuffix::parse("example.com").unwrap(),
+                DomainSuffix::parse("example.net").unwrap(),
+            ],
             destination_cidrs: vec![IpCidr::parse("203.0.113.0/24").unwrap()],
             destination_ports: vec![PortRange {
                 start: 443,
@@ -568,7 +774,7 @@ mod tests {
             "org.example.browser".into()
         ))));
         let mut wrong_cidr = flow(ApplicationIdentity::PackageId("org.example.browser".into()));
-        wrong_cidr.destination_ip = "198.51.100.1".into();
+        wrong_cidr.destination_ip = "198.51.100.1".parse().unwrap();
         assert!(!matcher.matches(&wrong_cidr));
         assert!(!matcher.matches(&flow(ApplicationIdentity::Unknown)));
     }
@@ -599,7 +805,7 @@ mod tests {
                     priority: 2,
                     enabled: true,
                     matcher: TrafficMatch {
-                        domain_suffixes: vec!["example.com".into()],
+                        domain_suffixes: vec![DomainSuffix::parse("example.com").unwrap()],
                         ..TrafficMatch::default()
                     },
                     action: TrafficAction::Network(network()),
@@ -712,6 +918,210 @@ mod tests {
     }
 
     #[test]
+    fn domain_exact_and_suffix_matching_is_normalized_and_label_bounded() {
+        let exact = DomainName::parse("BÜCHER.Example.").unwrap();
+        assert_eq!(exact.as_str(), "xn--bcher-kva.example");
+        assert_eq!(
+            DomainName::parse("bücher.example").unwrap().as_str(),
+            exact.as_str()
+        );
+
+        let exact_matcher = TrafficMatch {
+            exact_domains: vec![exact.clone()],
+            ..TrafficMatch::default()
+        };
+        let mut observed = flow(ApplicationIdentity::Unknown);
+        observed.domain = Some(exact);
+        assert!(exact_matcher.matches(&observed));
+        observed.domain = Some(DomainName::parse("www.bücher.example").unwrap());
+        assert!(!exact_matcher.matches(&observed));
+
+        let suffix = DomainSuffix::parse("*.Example.COM.").unwrap();
+        assert_eq!(suffix.as_str(), "example.com");
+        let suffix_matcher = TrafficMatch {
+            domain_suffixes: vec![suffix],
+            ..TrafficMatch::default()
+        };
+        for matching in ["example.com", "WWW.Example.Com."] {
+            observed.domain = Some(DomainName::parse(matching).unwrap());
+            assert!(suffix_matcher.matches(&observed), "{matching}");
+        }
+        for non_matching in ["notexample.com", "example.com.evil", "example.net"] {
+            observed.domain = Some(DomainName::parse(non_matching).unwrap());
+            assert!(!suffix_matcher.matches(&observed), "{non_matching}");
+        }
+    }
+
+    #[test]
+    fn exact_ip_and_cidr_matching_supports_v4_v6_and_rejects_invalid_input() {
+        assert_eq!(IpCidr::parse("192.0.2.1").unwrap().as_str(), "192.0.2.1/32");
+        assert_eq!(
+            IpCidr::parse("2001:db8::1").unwrap().as_str(),
+            "2001:db8::1/128"
+        );
+
+        let exact_v4 = TrafficMatch {
+            destination_cidrs: vec![IpCidr::parse("192.0.2.1").unwrap()],
+            ..TrafficMatch::default()
+        };
+        let mut observed = flow(ApplicationIdentity::Unknown);
+        observed.destination_ip = "192.0.2.1".parse().unwrap();
+        assert!(exact_v4.matches(&observed));
+        observed.destination_ip = "192.0.2.2".parse().unwrap();
+        assert!(!exact_v4.matches(&observed));
+
+        let cidr_v6 = TrafficMatch {
+            destination_cidrs: vec![IpCidr::parse("2001:db8:1234::/48").unwrap()],
+            ..TrafficMatch::default()
+        };
+        observed.destination_ip = "2001:db8:1234:5678::1".parse().unwrap();
+        assert!(cidr_v6.matches(&observed));
+        observed.destination_ip = "2001:db8:1235::1".parse().unwrap();
+        assert!(!cidr_v6.matches(&observed));
+
+        for invalid in [
+            "999.1.1.1",
+            "192.0.2.1/33",
+            "2001:db8::1/129",
+            "example.com/24",
+            "192.0.2.1/not-a-prefix",
+        ] {
+            assert_eq!(
+                IpCidr::parse(invalid).unwrap_err().code(),
+                "domain.invalid_value",
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn domain_and_ip_conditions_remain_separate_and_compose_with_and() {
+        let matcher = TrafficMatch {
+            exact_domains: vec![DomainName::parse("api.example.com").unwrap()],
+            destination_cidrs: vec![IpCidr::parse("203.0.113.9").unwrap()],
+            ..TrafficMatch::default()
+        };
+        assert!(matcher.matches(&flow(ApplicationIdentity::Unknown)));
+
+        let mut wrong_domain = flow(ApplicationIdentity::Unknown);
+        wrong_domain.domain = Some(DomainName::parse("cdn.example.com").unwrap());
+        assert!(!matcher.matches(&wrong_domain));
+
+        let mut wrong_ip = flow(ApplicationIdentity::Unknown);
+        wrong_ip.destination_ip = "198.51.100.9".parse().unwrap();
+        assert!(!matcher.matches(&wrong_ip));
+
+        let ip_only = TrafficMatch {
+            destination_cidrs: vec![IpCidr::parse("203.0.113.9").unwrap()],
+            ..TrafficMatch::default()
+        };
+        let mut no_domain = flow(ApplicationIdentity::Unknown);
+        no_domain.domain = None;
+        assert!(ip_only.matches(&no_domain));
+    }
+
+    #[test]
+    fn invalid_domains_and_wildcard_boundaries_are_rejected() {
+        for invalid in [
+            "",
+            "example..com",
+            "example.com..",
+            "-example.com",
+            "example-.com",
+            "bad_label.example",
+            "192.0.2.1",
+            "*example.com",
+            "*.*.example.com",
+        ] {
+            assert_eq!(
+                DomainName::parse(invalid).unwrap_err().code(),
+                "domain.invalid_value",
+                "{invalid}"
+            );
+        }
+        assert_eq!(
+            DomainSuffix::parse("*.*.example.com").unwrap_err().code(),
+            "domain.invalid_value"
+        );
+    }
+
+    #[test]
+    fn unconditional_broad_and_wildcard_fields_have_structured_risks() {
+        assert_eq!(
+            TrafficMatch::default().risks(),
+            vec![TrafficMatchRisk::AlwaysMatches]
+        );
+
+        let broad = TrafficMatch {
+            destination_cidrs: vec![IpCidr::parse("0.0.0.0/0").unwrap()],
+            destination_ports: vec![PortRange {
+                start: 1,
+                end: u16::MAX,
+            }],
+            ..TrafficMatch::default()
+        };
+        broad.validate().unwrap();
+        let risks = broad.risks();
+        assert!(risks.contains(&TrafficMatchRisk::AnyProtocol));
+        assert!(risks.contains(&TrafficMatchRisk::AnyApplication));
+        assert!(risks.contains(&TrafficMatchRisk::BroadCidr {
+            cidr: "0.0.0.0/0".into(),
+            prefix_len: 0,
+        }));
+        assert!(risks.contains(&TrafficMatchRisk::FullPortRange {
+            start: 1,
+            end: u16::MAX,
+        }));
+
+        let policy = TrafficPolicy {
+            node_id: node(),
+            revision: 3,
+            default_policy: default_policy(TrafficAction::Reject),
+            rules: vec![TrafficRule {
+                matcher: broad,
+                ..rule(0, TrafficAction::Direct)
+            }],
+        };
+        let report = policy.risk_report().unwrap();
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].rule_id, policy.rules[0].rule_id);
+        assert!(!report[0].risks.is_empty());
+    }
+
+    #[test]
+    fn overlapping_visible_rules_keep_first_match_as_the_conflict_winner() {
+        let policy = TrafficPolicy {
+            node_id: node(),
+            revision: 1,
+            default_policy: default_policy(TrafficAction::Reject),
+            rules: vec![
+                TrafficRule {
+                    matcher: TrafficMatch {
+                        domain_suffixes: vec![DomainSuffix::parse("example.com").unwrap()],
+                        ..TrafficMatch::default()
+                    },
+                    ..rule(0, TrafficAction::Direct)
+                },
+                TrafficRule {
+                    matcher: TrafficMatch {
+                        exact_domains: vec![DomainName::parse("api.example.com").unwrap()],
+                        ..TrafficMatch::default()
+                    },
+                    ..rule(1, TrafficAction::Reject)
+                },
+            ],
+        };
+        let decision = policy
+            .evaluate(&flow(ApplicationIdentity::Unknown))
+            .unwrap();
+        assert_eq!(decision.action, TrafficAction::Direct);
+        assert_eq!(
+            decision.matched_rule.as_ref(),
+            Some(&policy.rules[0].rule_id)
+        );
+    }
+
+    #[test]
     fn every_action_serializes_as_one_explicit_decision() {
         let network = network();
         let exit = NodeId::from_public_key(b"exit");
@@ -799,6 +1209,20 @@ mod tests {
             } else {
                 prop_assert_eq!(first.reason, TrafficDecisionReason::Default);
             }
+        }
+
+        #[test]
+        fn domain_normalization_is_case_insensitive_and_idempotent(
+            label in "[a-z][a-z0-9-]{0,20}[a-z0-9]",
+        ) {
+            let lower = format!("{label}.Example.");
+            let upper = format!("{}.EXAMPLE.", label.to_ascii_uppercase());
+            let normalized = DomainName::parse(lower).unwrap();
+            prop_assert_eq!(&normalized, &DomainName::parse(upper).unwrap());
+            prop_assert_eq!(
+                &normalized,
+                &DomainName::parse(format!("{}.", normalized.as_str())).unwrap(),
+            );
         }
     }
 }

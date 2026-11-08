@@ -2508,8 +2508,8 @@ DNS：<授权 resolver>
 | `RoleGrant` | network_id, subject, role | owner/admin/member 等 |
 | `Group` | network_id, id, kind, selector | 自定义组/动态组 |
 | `Capability` | network_id, node_id, kind, state, limits | Coordinator/Relay/Exit/File |
-| `TrafficPolicy` | node_id, revision, default_action | 节点级有序规则集 |
-| `TrafficRule` | id, priority, matchers, action | 首条命中 |
+| `TrafficPolicy` | node_id, revision, default_policy, rules | 节点级有序规则集；默认动作必须显式确认 |
+| `TrafficRule` | id, priority, matcher, action, enabled | 按可见顺序首条命中；同字段 OR、不同字段 AND |
 | `SecurityPolicy` | network_id, revision, subjects, resources, effect | 网络 ACL |
 | `ExitGrant` | network_id, exit_node, groups, limits | Exit 使用授权 |
 | `CoordinatorTerm` | network_id, term, leader, state, capabilities | 防止任期倒退 |

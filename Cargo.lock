@@ -2839,6 +2839,7 @@ dependencies = [
  "ed25519-dalek",
  "fuckipv6-secure-session",
  "getrandom 0.3.4",
+ "idna",
  "ipnet",
  "postcard",
  "proptest",

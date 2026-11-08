@@ -41,6 +41,7 @@ pub mod service;
 pub mod signaling;
 pub mod stats;
 pub mod symmetric;
+pub mod traffic_policy_transaction;
 pub mod tun;
 pub mod ui;
 #[cfg(feature = "userspace-nat-prototype")]

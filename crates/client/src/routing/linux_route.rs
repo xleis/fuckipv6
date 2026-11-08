@@ -16,6 +16,7 @@ use tokio::process::Command;
 use tokio::time::{timeout, Instant};
 
 use super::doh_dns::DohDnsGuard;
+use super::recovery::RouteRecoverySnapshot;
 use crate::network_setup::{self, ensure_stage, NetworkSetupError, NetworkSetupStage};
 
 const ROUTE_PROTOCOL: &str = "99";
@@ -674,6 +675,67 @@ impl LinuxRouteManager {
             }
         }
     }
+
+    /// Re-apply the manager's last complete plan after an OS suspend/resume or
+    /// network change. Rollback removes any residue or stale-interface routing
+    /// before the plan is installed again, and peer bypasses are preserved.
+    pub async fn refresh_plan(&mut self) -> Result<()> {
+        let plan = self
+            .plan
+            .clone()
+            .context("当前 Linux 路由管理器缺少原始策略，无法执行自动恢复")?;
+        self.reconfigure(
+            plan.mode,
+            plan.tun_name,
+            &plan.assigned_ips,
+            &plan.virtual_cidrs,
+            &plan.direct_cidrs,
+            &plan.control_endpoints,
+        )
+        .await
+    }
+
+    /// Read the kernel's current policy-routing state for this manager. The
+    /// snapshot contains counts only so it can be persisted without leaking
+    /// interface names or addresses.
+    pub async fn recovery_snapshot(&self) -> RouteRecoverySnapshot {
+        let mut snapshot = RouteRecoverySnapshot {
+            expected_routes: 0,
+            installed_routes: 0,
+            missing_routes: 0,
+            duplicate_routes: 0,
+            residual_routes: 0,
+            stale_interface_routes: 0,
+        };
+        for family in [Family::V4, Family::V6] {
+            if !self.active_families.contains(&family) {
+                continue;
+            }
+            snapshot.expected_routes += 1;
+            let table = self.table_id.to_string();
+            let rules = run_ip_query(family, &["rule", "show"])
+                .await
+                .unwrap_or_default();
+            let rule_counts = parse_policy_rule_snapshot(&rules, self.table_id);
+            snapshot.residual_routes += rule_counts.residual;
+
+            let routes = run_ip_query(family, &["route", "show", "table", &table])
+                .await
+                .unwrap_or_default();
+            let route_counts = parse_table_route_snapshot(&routes, self.table_id, &self.tun_name);
+            snapshot.residual_routes += route_counts.residual;
+            snapshot.stale_interface_routes += route_counts.stale_interface;
+
+            snapshot.duplicate_routes += rule_counts.catch_all.saturating_sub(1);
+            snapshot.duplicate_routes += route_counts.matching.saturating_sub(1);
+            if rule_counts.catch_all == 0 || route_counts.matching == 0 {
+                snapshot.missing_routes += 1;
+            } else {
+                snapshot.installed_routes += 1;
+            }
+        }
+        snapshot
+    }
 }
 
 impl Drop for LinuxRouteManager {
@@ -903,6 +965,128 @@ fn run_ip_rule_sync(action: &str, rule: &RuleSpec) -> Result<()> {
         ROUTE_PROTOCOL,
     ]);
     run_sync_command(command, "回滚策略路由规则", action == "del")
+}
+
+async fn run_ip_query(family: Family, args: &[&str]) -> Option<String> {
+    let mut command = family_command(family);
+    command.args(args);
+    command.kill_on_drop(true);
+    let output = timeout(SYNC_COMMAND_TIMEOUT, command.output())
+        .await
+        .ok()?
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PolicyRuleRecoveryCounts {
+    catch_all: usize,
+    residual: usize,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct TableRouteRecoveryCounts {
+    matching: usize,
+    residual: usize,
+    stale_interface: usize,
+}
+
+fn parse_policy_rule_snapshot(output: &str, table_id: u32) -> PolicyRuleRecoveryCounts {
+    let table = table_id.to_string();
+    let mut counts = PolicyRuleRecoveryCounts::default();
+    for tokens in output
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+    {
+        if !rule_has_recovery_protocol(&tokens) || !rule_uses_lookup_table(&tokens, &table) {
+            continue;
+        }
+        if rule_has_preference(&tokens, CATCH_ALL_PREFERENCE) {
+            counts.catch_all += 1;
+        } else {
+            counts.residual += 1;
+        }
+    }
+    counts
+}
+
+fn parse_table_route_snapshot(
+    output: &str,
+    table_id: u32,
+    tun_name: &str,
+) -> TableRouteRecoveryCounts {
+    let table = table_id.to_string();
+    let mut counts = TableRouteRecoveryCounts::default();
+    for tokens in output
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+    {
+        if !route_has_recovery_protocol(&tokens) || !route_uses_table(&tokens, &table) {
+            continue;
+        }
+        match route_device(&tokens) {
+            Some(device) if device == tun_name => counts.matching += 1,
+            Some(_) => counts.stale_interface += 1,
+            None => counts.residual += 1,
+        }
+    }
+    counts
+}
+
+fn rule_has_preference(tokens: &[&str], expected: u32) -> bool {
+    tokens
+        .first()
+        .and_then(|token| token.trim_end_matches(':').parse::<u32>().ok())
+        == Some(expected)
+}
+
+fn rule_has_recovery_protocol(tokens: &[&str]) -> bool {
+    tokens
+        .windows(2)
+        .any(|pair| matches_protocol_field(pair[0]) && recovery_protocol_matches(pair[1]))
+}
+
+fn rule_uses_lookup_table(tokens: &[&str], table: &str) -> bool {
+    tokens
+        .windows(2)
+        .any(|pair| pair[0].eq_ignore_ascii_case("lookup") && pair[1] == table)
+}
+
+fn route_has_recovery_protocol(tokens: &[&str]) -> bool {
+    tokens
+        .windows(2)
+        .any(|pair| matches_protocol_field(pair[0]) && recovery_protocol_matches(pair[1]))
+}
+
+fn route_uses_table(tokens: &[&str], expected: &str) -> bool {
+    let explicit = tokens
+        .windows(2)
+        .filter(|pair| pair[0].eq_ignore_ascii_case("table"))
+        .map(|pair| pair[1])
+        .collect::<Vec<_>>();
+    explicit.is_empty() || explicit.iter().all(|table| *table == expected)
+}
+
+fn route_device<'a>(tokens: &[&'a str]) -> Option<&'a str> {
+    tokens
+        .windows(2)
+        .find(|pair| pair[0].eq_ignore_ascii_case("dev"))
+        .map(|pair| pair[1])
+}
+
+fn matches_protocol_field(field: &str) -> bool {
+    field.eq_ignore_ascii_case("proto")
+        || field.eq_ignore_ascii_case("protocol")
+        || field.eq_ignore_ascii_case("prot")
+}
+
+fn recovery_protocol_matches(value: &str) -> bool {
+    value
+        .split('/')
+        .any(|part| part.eq_ignore_ascii_case(ROUTE_PROTOCOL) || part.eq_ignore_ascii_case("openr"))
 }
 
 async fn remove_table_route(family: Family, table_id: u32, tun_name: &str) -> Result<()> {
@@ -1351,6 +1535,58 @@ mod tests {
         assert_eq!(manager.installed_rules.len(), 1);
         assert_eq!(manager.installed_table_routes.len(), 2);
         assert!(manager.plan.is_some());
+    }
+
+    #[test]
+    fn recovery_rule_parser_owns_only_matching_protocol_and_table() {
+        let output = "0: from all lookup local
+32000: from all lookup 10000 proto openr
+32001: from all lookup 10000 protocol 99
+32002: from all lookup 10000 prot 99/openr
+32003: from all lookup 10000 proto 98
+32004: from all lookup main proto openr
+32005: from all lookup 10000 proto 99
+";
+        assert_eq!(
+            parse_policy_rule_snapshot(output, 10_000),
+            PolicyRuleRecoveryCounts {
+                catch_all: 1,
+                residual: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn recovery_rule_parser_accepts_preference_without_colon() {
+        let output = "32000 from all lookup 10000 protocol 99/openr\n";
+        assert_eq!(
+            parse_policy_rule_snapshot(output, 10_000),
+            PolicyRuleRecoveryCounts {
+                catch_all: 1,
+                residual: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn recovery_route_parser_requires_owned_protocol_table_and_interface() {
+        let output = "default dev fuckipv6 proto openr scope link src 10.8.0.2
+default dev fuckipv6 proto 99 scope link src 10.8.0.2
+default dev stale0 proto openr scope link
+unreachable default proto openr
+default dev fuckipv6 proto 98 scope link
+default dev fuckipv6 scope link
+default dev fuckipv6 proto openr table 20000
+default dev fuckipv6 proto openr table 10000
+";
+        assert_eq!(
+            parse_table_route_snapshot(output, 10_000, "fuckipv6"),
+            TableRouteRecoveryCounts {
+                matching: 3,
+                residual: 1,
+                stale_interface: 1,
+            }
+        );
     }
 
     #[test]

@@ -355,20 +355,24 @@ pub struct FailureApplication {
 /// coordinator deadline can cancel a pending future and a later pass must be
 /// able to finish cleanup.
 pub trait RecoveryBackend: Send + Sync {
-    fn snapshot(&self) -> RecoveryFuture<'_, RecoveryResourceSnapshot>;
+    fn snapshot(&mut self) -> RecoveryFuture<'_, RecoveryResourceSnapshot>;
 
     /// Re-evaluate current policy and DNS for this trigger, then reconcile owned
     /// resources. It must remove residue/duplicates/stale-interface routes and
     /// recreate TUN/routes/DNS as needed.
-    fn reconcile(&self, trigger: RecoveryTrigger) -> RecoveryFuture<'_, RecoveryRepairReport>;
+    fn reconcile(&mut self, trigger: RecoveryTrigger) -> RecoveryFuture<'_, RecoveryRepairReport>;
 
-    fn revoke_path(&self, path: InvalidatedPath) -> RecoveryFuture<'_, ()>;
+    fn revoke_path(&mut self, path: InvalidatedPath) -> RecoveryFuture<'_, ()>;
 
     /// The adapter must persist an audit record tied to `diagnostic_id` before
     /// treating the degraded state as complete.
-    fn apply_failure_decision(&self, application: FailureApplication) -> RecoveryFuture<'_, ()>;
+    fn apply_failure_decision(&mut self, application: FailureApplication)
+        -> RecoveryFuture<'_, ()>;
 
-    fn probe(&self, target: RecoveryProbeTarget) -> RecoveryFuture<'_, RecoveryProbeObservation>;
+    fn probe(
+        &mut self,
+        target: RecoveryProbeTarget,
+    ) -> RecoveryFuture<'_, RecoveryProbeObservation>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -468,7 +472,7 @@ pub struct RecoveryCoordinator;
 impl RecoveryCoordinator {
     pub async fn recover(
         &self,
-        backend: &dyn RecoveryBackend,
+        backend: &mut dyn RecoveryBackend,
         request: RecoveryRequest,
     ) -> RecoveryReport {
         let started_at = unix_time_ms();
@@ -691,7 +695,7 @@ fn resource_validation_error(
 }
 
 async fn apply_fail_closed(
-    backend: &dyn RecoveryBackend,
+    backend: &mut dyn RecoveryBackend,
     deadline: Instant,
     request: &RecoveryRequest,
     report: &mut RecoveryReport,
@@ -814,7 +818,7 @@ mod tests {
     }
 
     impl RecoveryBackend for FakeBackend {
-        fn snapshot(&self) -> RecoveryFuture<'_, RecoveryResourceSnapshot> {
+        fn snapshot(&mut self) -> RecoveryFuture<'_, RecoveryResourceSnapshot> {
             Box::pin(async move {
                 let (hang, result) = {
                     let mut state = self.state.lock().unwrap();
@@ -833,7 +837,10 @@ mod tests {
             })
         }
 
-        fn reconcile(&self, trigger: RecoveryTrigger) -> RecoveryFuture<'_, RecoveryRepairReport> {
+        fn reconcile(
+            &mut self,
+            trigger: RecoveryTrigger,
+        ) -> RecoveryFuture<'_, RecoveryRepairReport> {
             Box::pin(async move {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(format!("reconcile:{trigger:?}"));
@@ -841,7 +848,7 @@ mod tests {
             })
         }
 
-        fn revoke_path(&self, path: InvalidatedPath) -> RecoveryFuture<'_, ()> {
+        fn revoke_path(&mut self, path: InvalidatedPath) -> RecoveryFuture<'_, ()> {
             Box::pin(async move {
                 let mut state = self.state.lock().unwrap();
                 state.calls.push(format!("revoke:{path:?}"));
@@ -850,7 +857,7 @@ mod tests {
         }
 
         fn apply_failure_decision(
-            &self,
+            &mut self,
             application: FailureApplication,
         ) -> RecoveryFuture<'_, ()> {
             Box::pin(async move {
@@ -864,7 +871,7 @@ mod tests {
         }
 
         fn probe(
-            &self,
+            &mut self,
             target: RecoveryProbeTarget,
         ) -> RecoveryFuture<'_, RecoveryProbeObservation> {
             Box::pin(async move {
@@ -933,10 +940,10 @@ mod tests {
 
     #[tokio::test]
     async fn sleep_wake_verifies_tun_routes_dns_and_reachability() {
-        let backend = FakeBackend::new(healthy_snapshot(), healthy_snapshot());
+        let mut backend = FakeBackend::new(healthy_snapshot(), healthy_snapshot());
         let request = request(RecoveryTrigger::SleepWake).with_probes(default_recovery_probes());
 
-        let report = RecoveryCoordinator.recover(&backend, request).await;
+        let report = RecoveryCoordinator.recover(&mut backend, request).await;
 
         assert_eq!(report.status, RecoveryStatus::Recovered);
         assert!(report.is_success());
@@ -972,11 +979,11 @@ mod tests {
         before.dns.mode = DnsRecoveryMode::SystemResolver;
         let mut after = healthy_snapshot();
         after.dns.mode = DnsRecoveryMode::Doh;
-        let backend = FakeBackend::new(before, after);
+        let mut backend = FakeBackend::new(before, after);
         let mut request = request(RecoveryTrigger::NetworkChanged);
         request.probes = vec![RecoveryProbeTarget::Controlled("switch-target".into())];
 
-        let report = RecoveryCoordinator.recover(&backend, request).await;
+        let report = RecoveryCoordinator.recover(&mut backend, request).await;
 
         assert_eq!(report.status, RecoveryStatus::Recovered);
         assert_eq!(
@@ -995,7 +1002,7 @@ mod tests {
     async fn exit_disconnect_revokes_stale_path_and_applies_direct_fallback_policy() {
         let mut before = healthy_snapshot();
         before.exit_path = PathRecoveryState::Disconnected;
-        let backend = FakeBackend::new(before, healthy_snapshot());
+        let mut backend = FakeBackend::new(before, healthy_snapshot());
         let request = RecoveryRequest::new(
             RecoveryTrigger::ExitDisconnected,
             route_context(),
@@ -1004,7 +1011,7 @@ mod tests {
         .with_probes(vec![RecoveryProbeTarget::Google])
         .with_hard_timeout_ms(1_000);
 
-        let report = RecoveryCoordinator.recover(&backend, request).await;
+        let report = RecoveryCoordinator.recover(&mut backend, request).await;
 
         assert_eq!(report.status, RecoveryStatus::DegradedDirectFallback);
         assert_eq!(report.revoked_paths, vec![InvalidatedPath::Exit]);
@@ -1026,9 +1033,9 @@ mod tests {
     async fn relay_disconnect_uses_network_failure_and_fail_closed_policy() {
         let mut before = healthy_snapshot();
         before.relay_path = PathRecoveryState::Disconnected;
-        let backend = FakeBackend::new(before, healthy_snapshot());
+        let mut backend = FakeBackend::new(before, healthy_snapshot());
         let report = RecoveryCoordinator
-            .recover(&backend, request(RecoveryTrigger::RelayDisconnected))
+            .recover(&mut backend, request(RecoveryTrigger::RelayDisconnected))
             .await;
 
         assert_eq!(report.status, RecoveryStatus::DegradedFailClosed);
@@ -1052,7 +1059,7 @@ mod tests {
         before.routes.stale_interface_routes = 1;
         let mut after = healthy_snapshot();
         after.routes.installed_routes = 7;
-        let backend = FakeBackend::new(before, after);
+        let mut backend = FakeBackend::new(before, after);
         let repair = RecoveryRepairReport {
             routes_restored: 2,
             residual_routes_removed: 3,
@@ -1064,7 +1071,7 @@ mod tests {
         backend.state.lock().unwrap().repair = Ok(repair.clone());
 
         let report = RecoveryCoordinator
-            .recover(&backend, request(RecoveryTrigger::NetworkChanged))
+            .recover(&mut backend, request(RecoveryTrigger::NetworkChanged))
             .await;
 
         assert_eq!(report.status, RecoveryStatus::Recovered);
@@ -1075,7 +1082,7 @@ mod tests {
     async fn insecure_dns_fallback_is_never_silent_and_forces_fail_closed() {
         let mut before = healthy_snapshot();
         before.dns.state = RecoveryResourceState::Failed;
-        let backend = FakeBackend::new(before, healthy_snapshot());
+        let mut backend = FakeBackend::new(before, healthy_snapshot());
         backend.state.lock().unwrap().repair = Ok(RecoveryRepairReport {
             dns_reconfigured: true,
             used_insecure_dns_fallback: true,
@@ -1091,7 +1098,7 @@ mod tests {
                 .with_probes(vec![RecoveryProbeTarget::Google])
                 .with_hard_timeout_ms(1_000);
 
-        let report = RecoveryCoordinator.recover(&backend, request).await;
+        let report = RecoveryCoordinator.recover(&mut backend, request).await;
 
         assert_eq!(report.status, RecoveryStatus::Failed);
         assert_eq!(
@@ -1110,13 +1117,13 @@ mod tests {
 
     #[tokio::test]
     async fn exhausted_hard_deadline_returns_timeout_without_unbounded_blocking() {
-        let backend = FakeBackend::new(healthy_snapshot(), healthy_snapshot());
+        let mut backend = FakeBackend::new(healthy_snapshot(), healthy_snapshot());
         backend.state.lock().unwrap().hang_snapshot = true;
         let started = Instant::now();
 
         let report = RecoveryCoordinator
             .recover(
-                &backend,
+                &mut backend,
                 request(RecoveryTrigger::SleepWake).with_hard_timeout_ms(20),
             )
             .await;
@@ -1132,7 +1139,7 @@ mod tests {
     async fn failed_path_revocation_overrides_direct_fallback_with_fail_closed_decision() {
         let mut before = healthy_snapshot();
         before.exit_path = PathRecoveryState::Disconnected;
-        let backend = FakeBackend::new(before, healthy_snapshot());
+        let mut backend = FakeBackend::new(before, healthy_snapshot());
         backend.state.lock().unwrap().revoke = Err(RecoveryOperationError::new("revoke.failed"));
         let request = RecoveryRequest::new(
             RecoveryTrigger::ExitDisconnected,
@@ -1142,7 +1149,7 @@ mod tests {
         .with_probes(vec![RecoveryProbeTarget::Google])
         .with_hard_timeout_ms(1_000);
 
-        let report = RecoveryCoordinator.recover(&backend, request).await;
+        let report = RecoveryCoordinator.recover(&mut backend, request).await;
 
         assert_eq!(report.status, RecoveryStatus::Failed);
         assert_eq!(
@@ -1157,7 +1164,7 @@ mod tests {
 
     #[tokio::test]
     async fn reachability_probe_failure_is_reported_without_claiming_recovery() {
-        let backend = FakeBackend::new(healthy_snapshot(), healthy_snapshot());
+        let mut backend = FakeBackend::new(healthy_snapshot(), healthy_snapshot());
         backend.state.lock().unwrap().probe = Ok(RecoveryProbeObservation {
             state: RecoveryProbeState::Failed,
             failed_stage: Some(RecoveryProbeStage::Tls),
@@ -1166,7 +1173,7 @@ mod tests {
         let request =
             request(RecoveryTrigger::Manual).with_probes(vec![RecoveryProbeTarget::YouTube]);
 
-        let report = RecoveryCoordinator.recover(&backend, request).await;
+        let report = RecoveryCoordinator.recover(&mut backend, request).await;
 
         assert_eq!(report.status, RecoveryStatus::Failed);
         assert_eq!(
@@ -1182,10 +1189,10 @@ mod tests {
     async fn unhealthy_post_snapshot_applies_fail_closed_safety_decision() {
         let mut after = healthy_snapshot();
         after.routes.residual_routes = 1;
-        let backend = FakeBackend::new(healthy_snapshot(), after);
+        let mut backend = FakeBackend::new(healthy_snapshot(), after);
 
         let report = RecoveryCoordinator
-            .recover(&backend, request(RecoveryTrigger::SleepWake))
+            .recover(&mut backend, request(RecoveryTrigger::SleepWake))
             .await;
 
         assert_eq!(report.status, RecoveryStatus::Failed);

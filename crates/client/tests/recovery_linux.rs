@@ -87,33 +87,8 @@ fn ip(args: &[&str]) -> Output {
         .unwrap_or_else(|error| panic!("failed to execute ip {args:?}: {error}"))
 }
 
-fn ip_stdout(args: &[&str]) -> String {
-    let output = ip(args);
-    assert!(
-        output.status.success(),
-        "ip {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
 fn link_exists(name: &str) -> bool {
     ip(&["link", "show", "dev", name]).status.success()
-}
-
-fn has_catch_all_proxy_rule() -> bool {
-    ip_stdout(&["-4", "rule", "show"]).lines().any(|line| {
-        line.split_whitespace().next() == Some("32000:")
-            && line
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .windows(2)
-                .any(|pair| matches!(pair, ["proto" | "protocol" | "prot", "99" | "openr"]))
-    })
-}
-
-fn has_table_route(table_id: u32) -> bool {
-    ip_stdout(&["-4", "route", "show", "table", &table_id.to_string()]).contains(TUN_NAME)
 }
 
 fn dns_is_managed(path: &Path) -> bool {
@@ -150,9 +125,19 @@ async fn shutdown_tun(state: &mut BackendState) {
     }
 }
 
-fn snapshot_state(state: &BackendState, resolv_conf: &Path) -> RecoveryResourceSnapshot {
+async fn snapshot_state(state: &BackendState, resolv_conf: &Path) -> RecoveryResourceSnapshot {
     let tun_present = link_exists(TUN_NAME) && state.tun.is_some();
-    let route_present = has_catch_all_proxy_rule() && has_table_route(state.table_id);
+    let routes = match state.routes.as_ref() {
+        Some(routes) => routes.recovery_snapshot().await,
+        None => RouteRecoverySnapshot {
+            expected_routes: 1,
+            installed_routes: 0,
+            missing_routes: 1,
+            duplicate_routes: 0,
+            residual_routes: 0,
+            stale_interface_routes: 0,
+        },
+    };
     let dns_present = dns_is_managed(resolv_conf);
     RecoveryResourceSnapshot {
         tun: TunRecoverySnapshot {
@@ -164,14 +149,7 @@ fn snapshot_state(state: &BackendState, resolv_conf: &Path) -> RecoveryResourceS
             duplicate_interfaces: 0,
             residual_interfaces: 0,
         },
-        routes: RouteRecoverySnapshot {
-            expected_routes: 1,
-            installed_routes: usize::from(route_present),
-            missing_routes: usize::from(!route_present),
-            duplicate_routes: 0,
-            residual_routes: 0,
-            stale_interface_routes: 0,
-        },
+        routes,
         dns: fuckipv6_client::routing::recovery::DnsRecoverySnapshot {
             mode: if dns_present {
                 DnsRecoveryMode::Doh
@@ -248,7 +226,7 @@ impl RealNetnsBackend {
 
     async fn snapshot_value(&self) -> RecoveryResourceSnapshot {
         let state = self.state.lock().await;
-        snapshot_state(&state, &self.resolv_conf)
+        snapshot_state(&state, &self.resolv_conf).await
     }
 
     async fn simulate_sleep_wake(&self) {
@@ -296,17 +274,21 @@ impl RealNetnsBackend {
 }
 
 impl RecoveryBackend for RealNetnsBackend {
-    fn snapshot(&self) -> BackendFuture<'_, RecoveryResourceSnapshot> {
+    fn snapshot(&mut self) -> BackendFuture<'_, RecoveryResourceSnapshot> {
         Box::pin(async move { Ok(self.snapshot_value().await) })
     }
 
-    fn reconcile(&self, _trigger: RecoveryTrigger) -> BackendFuture<'_, RecoveryRepairReport> {
+    fn reconcile(&mut self, _trigger: RecoveryTrigger) -> BackendFuture<'_, RecoveryRepairReport> {
         Box::pin(async move {
             let mut state = self.state.lock().await;
             let mut repair = RecoveryRepairReport::default();
-            let tun_present = link_exists(TUN_NAME) && state.tun.is_some();
-            let route_present = has_catch_all_proxy_rule() && has_table_route(state.table_id);
-            let dns_present = dns_is_managed(&self.resolv_conf);
+            let before = snapshot_state(&state, &self.resolv_conf).await;
+            let tun_present = before.tun.state == RecoveryResourceState::Healthy;
+            let route_present = before.routes.missing_routes == 0
+                && before.routes.duplicate_routes == 0
+                && before.routes.residual_routes == 0
+                && before.routes.stale_interface_routes == 0;
+            let dns_present = before.dns.state == RecoveryResourceState::Healthy;
 
             if !tun_present {
                 shutdown_routes(&mut state).await;
@@ -320,19 +302,24 @@ impl RecoveryBackend for RealNetnsBackend {
             }
 
             if !route_present || !dns_present || repair.tun_recreated {
-                shutdown_routes(&mut state).await;
-                let routes = LinuxRouteManager::install(
-                    RoutingMode::GlobalProxy,
-                    TUN_NAME,
-                    &assigned_ips(),
-                    &virtual_cidrs(),
-                    &[],
-                    &[],
-                )
-                .await
-                .map_err(|_| RecoveryOperationError::new("recovery.route_install_failed"))?;
-                state.table_id = routes.table_id();
-                state.routes = Some(routes);
+                if let Some(routes) = state.routes.as_mut() {
+                    routes.refresh_plan().await.map_err(|_| {
+                        RecoveryOperationError::new("recovery.route_install_failed")
+                    })?;
+                } else {
+                    let routes = LinuxRouteManager::install(
+                        RoutingMode::GlobalProxy,
+                        TUN_NAME,
+                        &assigned_ips(),
+                        &virtual_cidrs(),
+                        &[],
+                        &[],
+                    )
+                    .await
+                    .map_err(|_| RecoveryOperationError::new("recovery.route_install_failed"))?;
+                    state.table_id = routes.table_id();
+                    state.routes = Some(routes);
+                }
                 repair.routes_restored = 1;
                 repair.dns_reconfigured = true;
             }
@@ -342,7 +329,7 @@ impl RecoveryBackend for RealNetnsBackend {
         })
     }
 
-    fn revoke_path(&self, path: InvalidatedPath) -> BackendFuture<'_, ()> {
+    fn revoke_path(&mut self, path: InvalidatedPath) -> BackendFuture<'_, ()> {
         Box::pin(async move {
             let mut state = self.state.lock().await;
             match path {
@@ -361,7 +348,7 @@ impl RecoveryBackend for RealNetnsBackend {
         })
     }
 
-    fn apply_failure_decision(&self, application: FailureApplication) -> BackendFuture<'_, ()> {
+    fn apply_failure_decision(&mut self, application: FailureApplication) -> BackendFuture<'_, ()> {
         Box::pin(async move {
             let mut state = self.state.lock().await;
             let line = format!(
@@ -384,7 +371,10 @@ impl RecoveryBackend for RealNetnsBackend {
         })
     }
 
-    fn probe(&self, _target: RecoveryProbeTarget) -> BackendFuture<'_, RecoveryProbeObservation> {
+    fn probe(
+        &mut self,
+        _target: RecoveryProbeTarget,
+    ) -> BackendFuture<'_, RecoveryProbeObservation> {
         Box::pin(async move {
             let (mode, address) = {
                 let state = self.state.lock().await;
@@ -477,14 +467,14 @@ fn request(trigger: RecoveryTrigger) -> RecoveryRequest {
 #[ignore = "requires the isolated privileged topology from scripts/test-recovery-netns.sh"]
 async fn native_sleep_wake_recreates_real_tun_routes_and_dns() {
     require_isolated_topology();
-    let backend = RealNetnsBackend::start().await;
+    let mut backend = RealNetnsBackend::start().await;
     backend.simulate_sleep_wake().await;
     let before = backend.snapshot_value().await;
     assert_eq!(before.tun.state, RecoveryResourceState::Missing);
     assert_eq!(before.routes.missing_routes, 1);
 
     let report = RecoveryCoordinator
-        .recover(&backend, request(RecoveryTrigger::SleepWake))
+        .recover(&mut backend, request(RecoveryTrigger::SleepWake))
         .await;
 
     assert_eq!(
@@ -503,14 +493,14 @@ async fn native_sleep_wake_recreates_real_tun_routes_and_dns() {
 #[ignore = "requires the isolated privileged topology from scripts/test-recovery-netns.sh"]
 async fn native_network_change_restores_real_policy_routes_and_dns() {
     require_isolated_topology();
-    let backend = RealNetnsBackend::start().await;
+    let mut backend = RealNetnsBackend::start().await;
     backend.simulate_network_changed().await;
     let before = backend.snapshot_value().await;
     assert_eq!(before.routes.missing_routes, 1);
     assert_eq!(before.dns.state, RecoveryResourceState::Degraded);
 
     let report = RecoveryCoordinator
-        .recover(&backend, request(RecoveryTrigger::NetworkChanged))
+        .recover(&mut backend, request(RecoveryTrigger::NetworkChanged))
         .await;
 
     assert_eq!(
@@ -530,11 +520,11 @@ async fn native_network_change_restores_real_policy_routes_and_dns() {
 #[ignore = "requires the isolated privileged topology from scripts/test-recovery-netns.sh"]
 async fn native_exit_disconnect_revokes_real_path_and_fails_closed() {
     require_isolated_topology();
-    let backend = RealNetnsBackend::start().await;
+    let mut backend = RealNetnsBackend::start().await;
     backend.disconnect_exit().await;
 
     let report = RecoveryCoordinator
-        .recover(&backend, request(RecoveryTrigger::ExitDisconnected))
+        .recover(&mut backend, request(RecoveryTrigger::ExitDisconnected))
         .await;
 
     assert_eq!(
@@ -557,11 +547,11 @@ async fn native_exit_disconnect_revokes_real_path_and_fails_closed() {
 #[ignore = "requires the isolated privileged topology from scripts/test-recovery-netns.sh"]
 async fn native_dns_timeout_is_distinguished_from_success() {
     require_isolated_topology();
-    let backend = RealNetnsBackend::start().await;
+    let mut backend = RealNetnsBackend::start().await;
     backend.use_dns_timeout_probe().await;
 
     let report = RecoveryCoordinator
-        .recover(&backend, request(RecoveryTrigger::NetworkChanged))
+        .recover(&mut backend, request(RecoveryTrigger::NetworkChanged))
         .await;
 
     assert_eq!(

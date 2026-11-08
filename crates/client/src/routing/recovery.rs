@@ -128,15 +128,12 @@ impl RecoveryProbeTarget {
     }
 }
 
-/// The default product check includes both required consumer targets and one
-/// deployment-controlled target. The caller may replace the list, but must
-/// provide at least one explicit target.
+/// The default product check includes both required consumer targets. A
+/// deployment-controlled target is only used when the caller supplies one
+/// explicitly; an unconfigured placeholder must never become a production
+/// probe or a false reachability claim.
 pub fn default_recovery_probes() -> Vec<RecoveryProbeTarget> {
-    vec![
-        RecoveryProbeTarget::Google,
-        RecoveryProbeTarget::YouTube,
-        RecoveryProbeTarget::Controlled("product-control-target".into()),
-    ]
+    vec![RecoveryProbeTarget::Google, RecoveryProbeTarget::YouTube]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -964,14 +961,14 @@ mod tests {
         assert!(report.is_success());
         assert!(report.before.is_some());
         assert!(report.after.is_some());
-        assert_eq!(report.probes.len(), 3);
+        assert_eq!(report.probes.len(), 2);
         assert_eq!(
             report
                 .probes
                 .iter()
                 .map(|probe| probe.target.key())
                 .collect::<Vec<_>>(),
-            vec!["google", "youtube", "controlled:product-control-target"]
+            vec!["google", "youtube"]
         );
         assert!(report.diagnostic_id.starts_with("diag-recovery-"));
         assert!(report.completed_at_unix_ms >= report.started_at_unix_ms);
@@ -983,8 +980,15 @@ mod tests {
                 "snapshot",
                 "probe:google",
                 "probe:youtube",
-                "probe:controlled:product-control-target",
             ]
+        );
+    }
+
+    #[test]
+    fn default_probes_never_include_an_unconfigured_controlled_target() {
+        assert_eq!(
+            default_recovery_probes(),
+            vec![RecoveryProbeTarget::Google, RecoveryProbeTarget::YouTube]
         );
     }
 

@@ -33,10 +33,11 @@ use super::event::{NodeEvent, NodeEventKind};
 use super::state::{
     LocalExitCapabilitySnapshot, NodeAccessControlSnapshot, NodeCapabilityRegistrySnapshot,
     NodeConfigurationSnapshot, NodeControlHealth, NodeEmbeddedServiceSnapshot,
-    NodeEmbeddedServiceStatus, NodeInterfaceAddress, NodeInterfaceKind, NodeInterfaceOwnership,
-    NodeInterfaceStatus, NodeLogEntry, NodeNetworkMembershipSnapshot, NodeNetworkRole,
-    NodeNetworkSnapshot, NodeNetworkStatus, NodePeerSnapshot, NodePermissionSnapshot, NodeProblem,
-    NodeRoutingSummarySnapshot, NodeSnapshot, NodeTrafficSnapshot,
+    NodeEmbeddedServiceStatus, NodeExitSelectionSnapshot, NodeInterfaceAddress, NodeInterfaceKind,
+    NodeInterfaceOwnership, NodeInterfaceStatus, NodeLogEntry, NodeNetworkMembershipSnapshot,
+    NodeNetworkRole, NodeNetworkSnapshot, NodeNetworkStatus, NodePeerSnapshot,
+    NodePermissionSnapshot, NodeProblem, NodeRoutingSummarySnapshot, NodeSnapshot,
+    NodeTrafficSnapshot,
 };
 use super::{NodeLifecycleSnapshot, NodeLogLevel, NodeRoutingMode, NodeUiManifest};
 use crate::config_transaction::{
@@ -98,6 +99,8 @@ pub struct ProjectedNodeSnapshot {
     pub traffic_routing_page: Option<TrafficRoutingPageModel>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub network_profiles: Vec<super::state::NodeNetworkProfileSnapshot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exit_selections: Vec<NodeExitSelectionSnapshot>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub memberships: Vec<NodeNetworkMembershipSnapshot>,
     #[serde(default)]
@@ -1011,6 +1014,37 @@ impl<'a> SnapshotProjector<'a> {
         }
         Ok(Some(projected))
     }
+
+    fn project_exit_selection(
+        &self,
+        selection: &NodeExitSelectionSnapshot,
+    ) -> Option<NodeExitSelectionSnapshot> {
+        let viewer = self.viewer(Some(&selection.network_id));
+        if viewer.local_owner
+            || (viewer.principal.is_network_manager()
+                && viewer.can_view_network(&selection.network_id))
+        {
+            return Some(selection.clone());
+        }
+        if !viewer.can_view_network(&selection.network_id) || !viewer.has_active_network_role() {
+            return None;
+        }
+
+        // Ordinary members get only their own final decision. Group and member
+        // policy rows remain hidden, and no member can inspect another node's
+        // candidate explanation.
+        if selection
+            .resolution
+            .as_ref()
+            .is_some_and(|resolution| resolution.subject != viewer.node_id)
+        {
+            return None;
+        }
+        Some(NodeExitSelectionSnapshot {
+            policy: None,
+            ..selection.clone()
+        })
+    }
 }
 
 /// Project one canonical snapshot for a specific authenticated command context.
@@ -1061,6 +1095,11 @@ pub fn project_node_snapshot(
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
+    let exit_selections = snapshot
+        .exit_selections
+        .iter()
+        .filter_map(|selection| projector.project_exit_selection(selection))
+        .collect::<Vec<_>>();
 
     Ok(ProjectedNodeSnapshot {
         revision: snapshot.revision,
@@ -1095,6 +1134,7 @@ pub fn project_node_snapshot(
             .then(|| snapshot.traffic_routing_page.clone())
             .flatten(),
         network_profiles: snapshot.network_profiles.clone(),
+        exit_selections,
         memberships: if owner {
             snapshot.memberships.clone()
         } else {
@@ -1173,9 +1213,9 @@ mod tests {
     use std::net::IpAddr;
 
     use fuckipv6_common::domain::{
-        ActivityEntry, AuditId, AuditOutcome, CapabilityKind, ContentHash, FieldPrivacyPolicy,
-        FieldVisibility, FieldVisibilityRule, MemberLifecycleStatus, MembershipRole,
-        MembershipState, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
+        ActivityEntry, AuditId, AuditOutcome, CapabilityKind, ContentHash, ExitSelectionPolicy,
+        FieldPrivacyPolicy, FieldVisibility, FieldVisibilityRule, MemberLifecycleStatus,
+        MembershipRole, MembershipState, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
         NetworkMemberObservationSource, NetworkMemberOnlineState, NetworkMemberPresence,
         NetworkMemberStatus, NetworkRole, TopologyBoundary, TopologyConnection,
         TopologyConnectionState, TopologyNode, TopologyNodeHealth, TopologyNodeNetwork,
@@ -1462,6 +1502,7 @@ mod tests {
             routing_summaries: Vec::new(),
             traffic_routing_page: None,
             network_profiles: Vec::new(),
+            exit_selections: vec![exit_selection(home.clone())],
             memberships: vec![membership(
                 "home",
                 &home,
@@ -1509,6 +1550,23 @@ mod tests {
             network_acls: Vec::new(),
             field_privacy_policies: policies,
         })
+    }
+
+    fn exit_selection(network_id: NetworkId) -> NodeExitSelectionSnapshot {
+        let policy = ExitSelectionPolicy::default();
+        let resolution = policy
+            .resolve(9, &actor(), &std::collections::BTreeMap::new())
+            .expect("empty deny-first resolution");
+        NodeExitSelectionSnapshot {
+            network_id,
+            policy_revision: 9,
+            policy: Some(policy),
+            resolution: Some(resolution),
+            directory_generated_at_unix_ms: Some(1_400),
+            directory_received_at_unix_ms: Some(1_450),
+            evaluated_at_unix_ms: 1_500,
+            reason_code: None,
+        }
     }
 
     #[test]
@@ -1594,6 +1652,73 @@ mod tests {
                 "hidden value leaked: {secret}"
             );
         }
+    }
+
+    #[test]
+    fn exit_selection_projection_hides_policy_rules_from_ordinary_members() {
+        let snapshot = full_snapshot();
+        let home = network("home");
+        let member = network_context(
+            home.clone(),
+            NetworkRole::Member,
+            MembershipState::Active,
+            snapshot.access_control.field_privacy_policies.clone(),
+        );
+        let projected = project_node_snapshot(&snapshot, &member, 1_500).unwrap();
+        assert_eq!(projected.exit_selections.len(), 1);
+        assert!(projected.exit_selections[0].policy.is_none());
+        assert_eq!(
+            projected.exit_selections[0]
+                .resolution
+                .as_ref()
+                .expect("member keeps own resolution")
+                .subject,
+            actor()
+        );
+
+        let administrator = network_context(
+            home.clone(),
+            NetworkRole::Administrator,
+            MembershipState::Active,
+            snapshot.access_control.field_privacy_policies.clone(),
+        );
+        let projected = project_node_snapshot(&snapshot, &administrator, 1_500).unwrap();
+        assert_eq!(projected.exit_selections[0], snapshot.exit_selections[0]);
+
+        let local_owner = NodeCommandContext::local_owner_for_snapshot(&snapshot, "owner-test");
+        let projected = project_node_snapshot(&snapshot, &local_owner, 1_500).unwrap();
+        assert_eq!(projected.exit_selections[0], snapshot.exit_selections[0]);
+
+        let other_network = network("other");
+        let outsider = network_context(
+            other_network,
+            NetworkRole::Member,
+            MembershipState::Active,
+            Vec::new(),
+        );
+        let projected = project_node_snapshot(&snapshot, &outsider, 1_500).unwrap();
+        assert!(projected.exit_selections.is_empty());
+    }
+
+    #[test]
+    fn exit_selection_projection_never_exposes_another_subjects_resolution() {
+        let mut snapshot = full_snapshot();
+        snapshot.exit_selections[0]
+            .resolution
+            .as_mut()
+            .expect("resolution")
+            .subject = NodeId::from_public_key(b"another-member");
+        let home = network("home");
+        let member = network_context(
+            home,
+            NetworkRole::Member,
+            MembershipState::Active,
+            snapshot.access_control.field_privacy_policies.clone(),
+        );
+
+        let projected = project_node_snapshot(&snapshot, &member, 1_500).unwrap();
+
+        assert!(projected.exit_selections.is_empty());
     }
 
     #[test]

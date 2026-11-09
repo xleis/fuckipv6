@@ -341,6 +341,14 @@ describe("node UI contract invariants", () => {
         exit_contribution_mode: "disabled",
         exit_contribution: "not_required",
         exit_contribution_scope: "not_applicable",
+        exit_selection_policy: {
+          mode: { mode: "member_choice" },
+          available_exits: [],
+          denied_exits: [],
+          groups: [],
+          members: [],
+          session_transition: "fail_closed",
+        },
         signaling_port: 6666,
         relay_port: 6667,
         external_host: null,
@@ -533,6 +541,138 @@ describe("node UI contract invariants", () => {
         "8a4229b8-4088-4b4f-b1fe-adcbed27ac59",
       ).request.command,
     ).toEqual({ command: "update_network_profile", payload });
+  });
+
+  it("round-trips Exit selection policy only when the operator edits it", () => {
+    const snapshot = structuredClone(
+      productVisualFixture.snapshot as NodeSnapshot,
+    );
+    const policy = {
+      mode: { mode: "fixed" as const, exit: "node_exit_primary" },
+      default_exit: "node_exit_primary",
+      available_exits: ["node_exit_primary", "node_exit_backup"],
+      session_transition: "fail_closed" as const,
+    };
+    snapshot.network_profiles = [
+      {
+        name: "home",
+        network_id: "net_stable_home",
+        purpose: publicProfile.purpose,
+        icon: publicProfile.icon,
+        language: publicProfile.language,
+        region: publicProfile.region,
+        tags: publicProfile.tags,
+        capability_declarations: publicProfile.capability_declarations,
+        visibility: publicProfile.visibility,
+        join_mode: publicProfile.join_mode,
+        exit_contribution: "not_required",
+        exit_contribution_scope: "not_applicable",
+        exit_contribution_mode: "disabled",
+        revision: publicProfile.revision,
+        policy_revision: 2,
+        signed_profile: {
+          schema_version: 1,
+          issued_at_unix_ms: publicProfile.issued_at_unix_ms,
+          expires_at_unix_ms: publicProfile.expires_at_unix_ms,
+        },
+      },
+    ];
+    snapshot.exit_selections = [
+      {
+        network_id: "net_stable_home",
+        policy_revision: 2,
+        policy,
+        evaluated_at_unix_ms: 1_700_000_100_000,
+      },
+    ];
+    const create = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((action) => action.id === "create_network")!;
+    const preview = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((action) => action.id === "preview_network_profile")!;
+    const update = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((action) => action.id === "update_network_profile")!;
+    const createValues = {
+      name: "home",
+      purpose: publicProfile.purpose,
+      icon: publicProfile.icon,
+      language: publicProfile.language,
+      region: publicProfile.region,
+      tags: "",
+      capability_declarations: "",
+      visibility: "unlisted",
+      join_mode: "invite_only",
+      exit_contribution_mode: "disabled",
+      exit_contribution: "not_required",
+      exit_contribution_scope: "not_applicable",
+      signaling_port: "6666",
+      relay_port: "6667",
+      external_host: "",
+      auto_connect: true,
+    };
+    expect(
+      initialActionValues(create, snapshot, "home")
+        .exit_selection_policy_json,
+    ).toBe("{}");
+    expect(
+      buildCommand(create, createValues, "en"),
+    ).toMatchObject({
+      payload: {
+        exit_selection_policy: {
+          mode: { mode: "member_choice" },
+          available_exits: [],
+          denied_exits: [],
+          groups: [],
+          members: [],
+          session_transition: "fail_closed",
+        },
+      },
+    });
+
+    const values = initialActionValues(preview, snapshot, "home");
+    expect(values.exit_selection_policy_json).toBe(JSON.stringify(policy));
+    expect(validateActionValues(update, values, "en")).toEqual([]);
+
+    const unchanged = buildCommand(
+      update,
+      { ...values, exit_selection_policy_json: "" },
+      "en",
+    ) as { payload: { update: Record<string, unknown> } };
+    expect(unchanged.payload.update).not.toHaveProperty(
+      "exit_selection_policy",
+    );
+
+    const edited = buildCommand(
+      update,
+      { ...values, exit_selection_policy_json: JSON.stringify(policy) },
+      "en",
+    ) as { payload: { update: { exit_selection_policy: unknown } } };
+    expect(edited.payload.update.exit_selection_policy).toEqual({
+      ...policy,
+      denied_exits: [],
+      groups: [],
+      members: [],
+    });
+
+    expect(
+      validateActionValues(
+        update,
+        { ...values, exit_selection_policy_json: "{" },
+        "en",
+      ),
+    ).toEqual(["translated:validation.exit_selection_policy_json_invalid"]);
+    expect(
+      validateActionValues(
+        update,
+        {
+          ...values,
+          exit_selection_policy_json: '{"mode":{"mode":"fixed"}}',
+        },
+        "en",
+      ),
+    ).toEqual(["translated:validation.exit_selection_policy_json_invalid"]);
   });
 
   it("validates region, tag and capability profile constraints", () => {

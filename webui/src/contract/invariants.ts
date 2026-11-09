@@ -11,6 +11,7 @@ import type {
   ConfigurationHistoryEntry,
   ConfigurationPreview,
   NodeNetworkSelection,
+  ExitSelectionPolicy,
   NetworkProfileApplyResult,
   NetworkProfilePreview,
   NodeOperationSnapshot,
@@ -236,6 +237,7 @@ const INPUT_KINDS = new Set([
   "exit_contribution_mode",
   "exit_contribution",
   "exit_contribution_scope",
+  "exit_selection_policy_json",
   "join_request_id",
   "join_request_note",
   "join_request_reason",
@@ -293,6 +295,7 @@ const VALIDATIONS = new Set([
   "exit_contribution_mode",
   "exit_contribution",
   "exit_contribution_scope",
+  "exit_selection_policy_json",
   "join_request_id",
   "join_request_note",
   "join_request_reason",
@@ -1005,6 +1008,12 @@ export function defaultFieldValue(
     if (field.id === "exit_contribution") return profile.exit_contribution;
     if (field.id === "exit_contribution_scope")
       return profile.exit_contribution_scope;
+    if (field.id === "exit_selection_policy_json") {
+      const selection = (snapshot.exit_selections ?? []).find(
+        (entry) => entry.network_id === profile.network_id,
+      );
+      return selection?.policy ? JSON.stringify(selection.policy) : "";
+    }
   }
   if (field.id === "purpose") return "Owner-created network";
   if (field.id === "icon") return "network";
@@ -1019,6 +1028,8 @@ export function defaultFieldValue(
   if (field.id === "exit_contribution_mode") return "disabled";
   if (field.id === "exit_contribution") return "not_required";
   if (field.id === "exit_contribution_scope") return "not_applicable";
+  if (field.id === "exit_selection_policy_json")
+    return action.id === "create_network" ? "{}" : "";
   if (field.id === "signaling_port") return "6666";
   if (field.id === "relay_port") return "6667";
   if (field.id === "timeout_ms") return "1500";
@@ -2139,6 +2150,117 @@ function networkProfileApplyResult(value: unknown): NetworkProfileApplyResult {
   return value as NetworkProfileApplyResult;
 }
 
+function isNodeIdValue(value: unknown): boolean {
+  return typeof value === "string" && value.trim() !== "";
+}
+
+function isNodeIdArray(value: unknown): boolean {
+  return Array.isArray(value) && value.every(isNodeIdValue);
+}
+
+function isExitSelectionPolicyShape(
+  value: unknown,
+): value is ExitSelectionPolicy {
+  if (!record(value)) return false;
+  for (const key of ["available_exits", "denied_exits"] as const) {
+    if (value[key] !== undefined && !isNodeIdArray(value[key])) return false;
+  }
+  if (
+    value.default_exit !== undefined &&
+    value.default_exit !== null &&
+    !isNodeIdValue(value.default_exit)
+  )
+    return false;
+  if (value.mode !== undefined) {
+    if (!record(value.mode)) return false;
+    if (value.mode.mode === "member_choice") {
+      // Structural only: policy validity, deny-first ordering and Exit
+      // availability remain backend authority and are never re-resolved here.
+    } else if (value.mode.mode === "fixed") {
+      if (!isNodeIdValue(value.mode.exit)) return false;
+    } else {
+      return false;
+    }
+  }
+  if (value.groups !== undefined) {
+    if (!Array.isArray(value.groups)) return false;
+    for (const group of value.groups) {
+      if (!record(group) || !isNodeIdValue(group.group_id)) return false;
+      for (const key of ["allow", "deny", "members"] as const) {
+        if (group[key] !== undefined && !isNodeIdArray(group[key]))
+          return false;
+      }
+    }
+  }
+  if (value.members !== undefined) {
+    if (!Array.isArray(value.members)) return false;
+    for (const member of value.members) {
+      if (!record(member) || !isNodeIdValue(member.node_id)) return false;
+      for (const key of ["allow", "deny"] as const) {
+        if (member[key] !== undefined && !isNodeIdArray(member[key]))
+          return false;
+      }
+    }
+  }
+  if (
+    value.session_transition !== undefined &&
+    !["migrate", "terminate", "fail_closed"].includes(
+      String(value.session_transition),
+    )
+  )
+    return false;
+  return true;
+}
+
+function parseExitSelectionPolicyJson(
+  value: string | boolean | undefined,
+  locale: Locale,
+): ExitSelectionPolicy | undefined {
+  const text = String(value ?? "").trim();
+  if (!text) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(
+      label(locale, "validation.exit_selection_policy_json_invalid"),
+    );
+  }
+  if (!isExitSelectionPolicyShape(parsed)) {
+    throw new Error(
+      label(locale, "validation.exit_selection_policy_json_invalid"),
+    );
+  }
+  return parsed;
+}
+
+function canonicalExitSelectionPolicy(
+  policy: ExitSelectionPolicy,
+): ExitSelectionPolicy {
+  return {
+    mode: policy.mode ?? { mode: "member_choice" },
+    ...(policy.default_exit != null
+      ? { default_exit: policy.default_exit }
+      : {}),
+    available_exits: policy.available_exits ?? [],
+    denied_exits: policy.denied_exits ?? [],
+    groups:
+      policy.groups?.map((group) => ({
+        group_id: group.group_id,
+        members: group.members ?? [],
+        allow: group.allow ?? [],
+        deny: group.deny ?? [],
+      })) ?? [],
+    members:
+      policy.members?.map((member) => ({
+        node_id: member.node_id,
+        allow: member.allow ?? [],
+        deny: member.deny ?? [],
+      })) ?? [],
+    session_transition: policy.session_transition ?? "fail_closed",
+  };
+}
+
 export function validateActionValues(
   action: NodeUiAction,
   values: ActionValues,
@@ -2255,6 +2377,12 @@ export function validateActionValues(
       !EXIT_CONTRIBUTION_SCOPES.has(String(value))
     ) {
       errors.push(label(locale, "validation.exit_contribution_scope_invalid"));
+    } else if (field.validation === "exit_selection_policy_json") {
+      try {
+        parseExitSelectionPolicyJson(value, locale);
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : String(error));
+      }
     } else if (
       field.validation === "join_request_id" &&
       !validJoinRequestId(String(value))
@@ -2600,7 +2728,13 @@ export function buildCommand(
           },
         },
       };
-    case "create_network":
+    case "create_network": {
+      const exitSelectionPolicy = canonicalExitSelectionPolicy(
+        parseExitSelectionPolicyJson(
+          values.exit_selection_policy_json,
+          locale,
+        ) ?? {},
+      );
       return {
         command: "create_network",
         payload: {
@@ -2623,14 +2757,23 @@ export function buildCommand(
             requiredString("exit_contribution_mode") as ExitContributionMode,
             requiredString("exit_contribution_scope") as ExitContributionScope,
           ),
+          exit_selection_policy: exitSelectionPolicy,
           signaling_port: Number(requireValue("signaling_port")),
           relay_port: Number(requireValue("relay_port")),
           external_host: optional(values, "external_host"),
           auto_connect: booleanValue(values.auto_connect, locale),
         },
       };
+    }
     case "preview_network_profile":
     case "update_network_profile": {
+      const parsedExitSelectionPolicy = parseExitSelectionPolicyJson(
+        values.exit_selection_policy_json,
+        locale,
+      );
+      const exitSelectionPolicy = parsedExitSelectionPolicy
+        ? canonicalExitSelectionPolicy(parsedExitSelectionPolicy)
+        : undefined;
       const command = {
         network_name: requiredString("network_name"),
         expected_revision: revisionValue(
@@ -2657,6 +2800,9 @@ export function buildCommand(
             requiredString("exit_contribution_mode") as ExitContributionMode,
             requiredString("exit_contribution_scope") as ExitContributionScope,
           ),
+          ...(exitSelectionPolicy
+            ? { exit_selection_policy: exitSelectionPolicy }
+            : {}),
         },
       };
       return action.id === "preview_network_profile"

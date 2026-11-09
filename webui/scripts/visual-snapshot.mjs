@@ -130,6 +130,31 @@ async function startFixtureServer(manifest, fixture, sharedAssets) {
         });
         return;
       default:
+        if (url.pathname.startsWith("/assets/")) {
+          const assetName = url.pathname.slice("/assets/".length);
+          if (
+            assetName.length > 0 &&
+            !assetName.includes("/") &&
+            !assetName.includes("\\") &&
+            assetName !== "." &&
+            assetName !== ".."
+          ) {
+            readFile(join(DIST_ROOT, "assets", assetName))
+              .then((body) => {
+                const contentType = assetName.endsWith(".js")
+                  ? "text/javascript; charset=utf-8"
+                  : "application/octet-stream";
+                fileResponse(response, body, contentType);
+              })
+              .catch(() => {
+                response.writeHead(404, {
+                  "content-type": "text/plain; charset=utf-8",
+                });
+                response.end("not found");
+              });
+            return;
+          }
+        }
         response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
         response.end("not found");
     }

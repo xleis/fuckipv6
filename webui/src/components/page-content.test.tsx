@@ -5,6 +5,7 @@ import manifestFixture from "../../../contracts/typescript/fixtures/node-manifes
 import productFixture from "../../../contracts/typescript/fixtures/product-visual-snapshot.json";
 import type {
   ActivityEntry,
+  NodeExitSelectionSnapshot,
   NodeProblem,
   NodeSnapshot,
   NodeUiManifest,
@@ -171,6 +172,116 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+});
+
+describe("administrator Exit governance", () => {
+  it("renders the authoritative effective set, candidate reasons, and evidence source", () => {
+    const selection: NodeExitSelectionSnapshot = {
+      network_id: "net_governance",
+      policy_revision: 12,
+      policy: null,
+      resolution: {
+        policy_revision: 12,
+        subject: "node-visual-01",
+        mode: { mode: "fixed", exit: "exit-a" },
+        default_exit: "exit-a",
+        fixed_exit: "exit-a",
+        candidates: [
+          {
+            exit: "exit-a",
+            selectable: true,
+            reason_code: "exit.selection.available",
+            source: { scope: "member" },
+            availability: {
+              state: "available",
+              source: "coordinator_health",
+              observed_at_unix_ms: Date.UTC(2026, 0, 2, 3, 4, 5),
+              declared_available: true,
+              reason_code: null,
+            },
+            is_default: true,
+          },
+          {
+            exit: "exit-b",
+            selectable: false,
+            reason_code: "exit.selection.fixed_exit_required",
+            source: { scope: "selection_mode" },
+            availability: {
+              state: "available",
+              source: "coordinator_health",
+              observed_at_unix_ms: Date.UTC(2026, 0, 2, 3, 4, 5),
+              declared_available: true,
+              reason_code: null,
+            },
+            is_default: false,
+          },
+        ],
+        selectable_exits: ["exit-a"],
+        selected_default: "exit-a",
+      },
+      directory_generated_at_unix_ms: Date.UTC(2026, 0, 2, 3, 4, 0),
+      directory_received_at_unix_ms: Date.UTC(2026, 0, 2, 3, 4, 1),
+      evaluated_at_unix_ms: Date.UTC(2026, 0, 2, 3, 4, 2),
+      reason_code: null,
+    };
+    const { rerender } = render(
+      exitElement({ ...baseSnapshot, exit_selections: [selection] }),
+    );
+
+    const governance = screen.getByTestId("exit-governance");
+    expect(governance).toHaveTextContent(
+      translated("exit_governance.title"),
+    );
+    expect(governance).toHaveTextContent("net_governance");
+    expect(governance).toHaveTextContent(translated("exit_governance.mode.fixed"));
+    const selected = within(governance).getByTestId(
+      "exit-candidate-net_governance-exit-a",
+    );
+    expect(selected).toHaveTextContent(translated("exit_governance.selectable"));
+    expect(selected).toHaveTextContent(
+      translated("exit_governance.reason.available"),
+    );
+    expect(selected).toHaveTextContent(
+      translated("exit_governance.source.member"),
+    );
+    const blocked = within(governance).getByTestId(
+      "exit-candidate-net_governance-exit-b",
+    );
+    expect(blocked).toHaveTextContent(translated("exit_governance.blocked"));
+    expect(blocked).toHaveTextContent(
+      translated("exit_governance.reason.fixed_exit_required"),
+    );
+    expect(blocked).toHaveTextContent(
+      translated("exit_governance.source.selection_mode"),
+    );
+    expect(blocked).toHaveTextContent("exit.selection.fixed_exit_required");
+    expect(governance).toHaveTextContent(
+      translated("exit_governance.policy_hidden"),
+    );
+
+    rerender(
+      exitElement({
+        ...baseSnapshot,
+        exit_selections: [
+          {
+            ...selection,
+            resolution: null,
+            reason_code: "exit.selection.stale_directory",
+          },
+        ],
+      }),
+    );
+    const unavailable = screen.getByTestId("exit-governance");
+    expect(unavailable).toHaveTextContent(
+      translated("exit_governance.unavailable"),
+    );
+    expect(unavailable).toHaveTextContent(
+      translated("exit_governance.reason.stale_directory"),
+    );
+    expect(within(unavailable).getByTestId("exit-governance-reason")).toHaveTextContent(
+      "exit.selection.stale_directory",
+    );
+  });
 });
 
 describe("local Exit lifecycle", () => {

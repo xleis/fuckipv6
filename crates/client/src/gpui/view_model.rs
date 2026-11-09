@@ -7,9 +7,10 @@ use fuckipv6_common::domain::{
     parse_policy_test_input, ActivityCategory, ActivityEntry, ActivitySeverity,
     ApplicationIdentity, AuditOutcome, CapabilityKind, CapabilityState, ContentHash,
     ExitAvailabilitySource, ExitAvailabilityState, ExitContributionAvailability,
-    ExitContributionMode, ExitContributionObligation, ExitContributionScope, InvitationCode,
-    InvitationId, InvitationRedeemRequest, MemberLifecycleAction, MembershipRole, NetworkId,
-    NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
+    ExitContributionMode, ExitContributionObligation, ExitContributionScope,
+    ExitSelectionCandidate, ExitSelectionMode, ExitSelectionPolicy, ExitSelectionSource,
+    InvitationCode, InvitationId, InvitationRedeemRequest, MemberLifecycleAction, MembershipRole,
+    NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
     NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId,
     TopologyNode, TopologyNodeHealth, TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy,
     TrafficFlow, TrafficMatch, TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput,
@@ -2007,6 +2008,15 @@ pub fn default_form_values(
             .iter()
             .find(|profile| profile.name == selected)
     });
+    let exit_selection_policy = profile
+        .and_then(|profile| {
+            snapshot
+                .exit_selections
+                .iter()
+                .find(|selection| selection.network_id.as_str() == profile.network_id.as_str())
+        })
+        .and_then(|selection| selection.policy.as_ref())
+        .and_then(|policy| serde_json::to_string(policy).ok());
     action
         .fields
         .iter()
@@ -2033,6 +2043,7 @@ pub fn default_form_values(
                 ("create_network", "exit_contribution_mode") => "disabled".into(),
                 ("create_network", "exit_contribution") => "not_required".into(),
                 ("create_network", "exit_contribution_scope") => "not_applicable".into(),
+                ("create_network", "exit_selection_policy_json") => "{}".into(),
                 ("create_network", "auto_connect") => "true".into(),
                 ("preview_network_profile" | "update_network_profile", "purpose") => profile
                     .map(|profile| profile.purpose.clone())
@@ -2091,6 +2102,10 @@ pub fn default_form_values(
                         format!("{:?}", profile.exit_contribution_scope).to_ascii_lowercase()
                     })
                     .unwrap_or_else(|| "not_applicable".into()),
+                (
+                    "preview_network_profile" | "update_network_profile",
+                    "exit_selection_policy_json",
+                ) => exit_selection_policy.clone().unwrap_or_default(),
                 ("preview_network_profile" | "update_network_profile", "expected_revision") => {
                     profile
                         .map(|profile| profile.revision.to_string())
@@ -2209,6 +2224,13 @@ pub fn build_command(
                 exit_contribution,
                 exit_contribution_scope,
                 exit_contribution_mode,
+                exit_selection_policy: parse_exit_selection_policy(
+                    action,
+                    "exit_selection_policy_json",
+                    &field("exit_selection_policy_json"),
+                    true,
+                )?
+                .unwrap_or_default(),
                 signaling_port: parse_number(
                     action,
                     "signaling_port",
@@ -2243,7 +2265,12 @@ pub fn build_command(
                 exit_contribution,
                 exit_contribution_scope,
                 exit_contribution_mode,
-                exit_selection_policy: None,
+                exit_selection_policy: parse_exit_selection_policy(
+                    action,
+                    "exit_selection_policy_json",
+                    &field("exit_selection_policy_json"),
+                    false,
+                )?,
             };
             let command = NodeNetworkProfileCommand {
                 network_name: field("network_name"),
@@ -2910,6 +2937,7 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
             "exit_contribution_mode",
             "exit_contribution",
             "exit_contribution_scope",
+            "exit_selection_policy_json",
             "signaling_port",
             "relay_port",
             "external_host",
@@ -2929,6 +2957,7 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
             "exit_contribution_mode",
             "exit_contribution",
             "exit_contribution_scope",
+            "exit_selection_policy_json",
         ]),
         "publish_network_discovery"
         | "update_network_discovery"
@@ -3214,6 +3243,33 @@ fn parse_exit_contribution_scope(
             value: value.into(),
         }),
     }
+}
+
+fn parse_exit_selection_policy(
+    action: &NodeUiAction,
+    field_id: &str,
+    value: &str,
+    empty_is_default: bool,
+) -> Result<Option<ExitSelectionPolicy>, CommandBuildError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(empty_is_default.then(ExitSelectionPolicy::default));
+    }
+    let policy = serde_json::from_str::<ExitSelectionPolicy>(trimmed).map_err(|_| {
+        CommandBuildError::InvalidField {
+            action_id: action.id.clone(),
+            field_id: field_id.into(),
+            value: value.into(),
+        }
+    })?;
+    policy
+        .validate()
+        .map_err(|_| CommandBuildError::InvalidField {
+            action_id: action.id.clone(),
+            field_id: field_id.into(),
+            value: value.into(),
+        })?;
+    Ok(Some(policy))
 }
 
 fn parse_number<T>(
@@ -5435,6 +5491,189 @@ fn project_routing(
     )
 }
 
+fn exit_selection_mode_label(locale: Locale, mode: &ExitSelectionMode) -> &'static str {
+    match mode {
+        ExitSelectionMode::MemberChoice => t(locale, "exit_governance.mode.member_choice"),
+        ExitSelectionMode::Fixed { .. } => t(locale, "exit_governance.mode.fixed"),
+    }
+}
+
+fn exit_selection_source_label(locale: Locale, source: &ExitSelectionSource) -> String {
+    match source {
+        ExitSelectionSource::Network => t(locale, "exit_governance.source.network").into(),
+        ExitSelectionSource::Group { group_id } => tr(
+            locale,
+            "exit_governance.source.group",
+            &[("group_id", group_id.as_str())],
+        ),
+        ExitSelectionSource::Member => t(locale, "exit_governance.source.member").into(),
+        ExitSelectionSource::SelectionMode => {
+            t(locale, "exit_governance.source.selection_mode").into()
+        }
+        ExitSelectionSource::Availability => {
+            t(locale, "exit_governance.source.availability").into()
+        }
+    }
+}
+
+fn exit_selection_reason_label(locale: Locale, code: &str) -> String {
+    let suffix = code
+        .strip_prefix("domain.exit_selection_")
+        .or_else(|| code.strip_prefix("exit.selection."))
+        .or_else(|| code.strip_prefix("exit.availability."))
+        .unwrap_or(code);
+    let key = format!("exit_governance.reason.{suffix}");
+    let localized = t(locale, &key);
+    if localized == key.as_str() {
+        code.into()
+    } else {
+        localized.into()
+    }
+}
+
+fn exit_selection_candidate_rows(
+    network_id: &str,
+    candidate: &ExitSelectionCandidate,
+    locale: Locale,
+) -> Vec<RowModel> {
+    let source = exit_selection_source_label(locale, &candidate.source);
+    let reason = exit_selection_reason_label(locale, &candidate.reason_code);
+    let availability = t(
+        locale,
+        match candidate.availability.state {
+            ExitAvailabilityState::Unknown => "member_directory.exit.state.unknown",
+            ExitAvailabilityState::Available => "member_directory.exit.state.available",
+            ExitAvailabilityState::Degraded => "member_directory.exit.state.degraded",
+            ExitAvailabilityState::Unavailable => "member_directory.exit.state.unavailable",
+        },
+    );
+    let availability_source = t(
+        locale,
+        match candidate.availability.source {
+            ExitAvailabilitySource::NotObserved => "member_directory.exit.source.not_observed",
+            ExitAvailabilitySource::LocalRuntime => "member_directory.exit.source.local_runtime",
+            ExitAvailabilitySource::CoordinatorHealth => {
+                "member_directory.exit.source.coordinator_health"
+            }
+            ExitAvailabilitySource::RemotePeerReport => {
+                "member_directory.exit.source.remote_peer_report"
+            }
+        },
+    );
+    let availability_reason = candidate
+        .availability
+        .reason_code
+        .as_deref()
+        .map(|code| format!("{} ({code})", exit_selection_reason_label(locale, code)))
+        .unwrap_or_else(|| t(locale, "common.not_available").into());
+    let status = t(
+        locale,
+        if candidate.selectable {
+            "exit_governance.selectable"
+        } else {
+            "exit_governance.blocked"
+        },
+    );
+    vec![row(
+        tr(
+            locale,
+            "exit_governance.candidate_title",
+            &[("network", network_id), ("exit", candidate.exit.as_str())],
+        ),
+        tr(
+            locale,
+            "exit_governance.candidate_detail",
+            &[
+                ("status", status),
+                ("source", &source),
+                ("reason", &reason),
+                ("reason_code", &candidate.reason_code),
+                ("availability", availability),
+                ("availability_source", availability_source),
+                ("availability_reason", &availability_reason),
+            ],
+        ),
+    )]
+}
+
+fn exit_selection_rows(
+    selections: &[crate::node::NodeExitSelectionSnapshot],
+    locale: Locale,
+) -> Vec<RowModel> {
+    let mut rows = Vec::new();
+    for selection in selections {
+        let resolution = selection.resolution.as_ref();
+        let effective = resolution
+            .map(|resolution| {
+                resolution
+                    .selectable_exits
+                    .iter()
+                    .map(NodeId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(t(locale, "common.list_separator"))
+            })
+            .unwrap_or_else(|| t(locale, "exit_governance.no_effective").into());
+        let default_exit = resolution
+            .and_then(|resolution| resolution.default_exit.as_ref())
+            .map_or_else(|| t(locale, "common.none").to_string(), ToString::to_string);
+        let fixed_exit = resolution
+            .and_then(|resolution| resolution.fixed_exit.as_ref())
+            .map_or_else(|| t(locale, "common.none").to_string(), ToString::to_string);
+        let mode = resolution.map_or_else(
+            || t(locale, "common.not_available").to_string(),
+            |resolution| exit_selection_mode_label(locale, &resolution.mode).to_string(),
+        );
+        let generated_at =
+            routing_timestamp_label(selection.directory_generated_at_unix_ms, locale);
+        let received_at = routing_timestamp_label(selection.directory_received_at_unix_ms, locale);
+        let evaluated_at = routing_timestamp_label(Some(selection.evaluated_at_unix_ms), locale);
+        rows.push(row(
+            selection.network_id.to_string(),
+            tr(
+                locale,
+                "exit_governance.summary_detail",
+                &[
+                    ("mode", &mode),
+                    ("policy_revision", &selection.policy_revision.to_string()),
+                    ("selectable", &effective),
+                    ("default_exit", &default_exit),
+                    ("fixed_exit", &fixed_exit),
+                    ("generated_at", &generated_at),
+                    ("received_at", &received_at),
+                    ("evaluated_at", &evaluated_at),
+                ],
+            ),
+        ));
+        if let Some(reason_code) = selection.reason_code.as_deref() {
+            let reason = exit_selection_reason_label(locale, reason_code);
+            rows.push(row(
+                t(locale, "exit_governance.top_reason"),
+                tr(
+                    locale,
+                    "exit_governance.top_reason_detail",
+                    &[("reason", &reason), ("reason_code", reason_code)],
+                ),
+            ));
+        }
+        if let Some(resolution) = resolution {
+            for candidate in &resolution.candidates {
+                rows.extend(exit_selection_candidate_rows(
+                    selection.network_id.as_str(),
+                    candidate,
+                    locale,
+                ));
+            }
+            if selection.policy.is_none() {
+                rows.push(row(
+                    t(locale, "exit_governance.policy_rules"),
+                    t(locale, "exit_governance.policy_hidden"),
+                ));
+            }
+        }
+    }
+    rows
+}
+
 fn project_exit_node(
     snapshot: &NodeSnapshot,
     locale: Locale,
@@ -5575,6 +5814,7 @@ fn project_exit_node(
             )
         })
         .collect::<Vec<_>>();
+    let governance_rows = exit_selection_rows(&snapshot.exit_selections, locale);
     let role_rows = snapshot
         .networks
         .iter()
@@ -5604,6 +5844,11 @@ fn project_exit_node(
                 t(locale, "gpui.section.local_exit_status"),
                 t(locale, "gpui.empty.local_exit_status"),
                 local_exit_rows,
+            ),
+            section(
+                t(locale, "gpui.section.exit_governance"),
+                t(locale, "gpui.empty.exit_governance"),
+                governance_rows,
             ),
             section(
                 t(locale, "gpui.section.platform_capabilities"),
@@ -6818,11 +7063,12 @@ mod tests {
 
     use super::*;
     use crate::node::{
-        node_ui_manifest, NodeEmbeddedServiceSnapshot, NodeIdentitySnapshot, NodeInterfaceAddress,
-        NodeInterfaceSnapshot, NodeNetworkMembershipSnapshot, NodeNetworkSnapshot,
-        NodeNetworkStatus, NodePeerSnapshot, NodeProblem, NodeProblemCode,
-        NodeRoutingDefaultAction, NodeRoutingSummarySnapshot, NodeRoutingSummaryStatus,
-        NodeRoutingTargetSnapshot, NodeTrafficSnapshot, NodeUiField, NodeUiValidation,
+        node_ui_manifest, NodeEmbeddedServiceSnapshot, NodeExitSelectionSnapshot,
+        NodeIdentitySnapshot, NodeInterfaceAddress, NodeInterfaceSnapshot,
+        NodeNetworkMembershipSnapshot, NodeNetworkSnapshot, NodeNetworkStatus, NodePeerSnapshot,
+        NodeProblem, NodeProblemCode, NodeRoutingDefaultAction, NodeRoutingSummarySnapshot,
+        NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot, NodeTrafficSnapshot, NodeUiField,
+        NodeUiValidation,
     };
     use fuckipv6_common::domain::{
         ActivityEntry, AuditId, AuditOutcome, DomainSuffix, MembershipState, NetworkMemberPresence,
@@ -9517,6 +9763,130 @@ mod tests {
             .contains("exit.local.problem.resource_insufficient"));
         assert!(problem.detail.contains("raw forwarding resource failure"));
         assert!(problem.detail.contains(t(Locale::ZhCn, "common.enabled")));
+    }
+
+    #[test]
+    fn exit_node_page_projects_authoritative_selection_set_and_evidence() {
+        let manifest = node_ui_manifest();
+        let page = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "exit_node")
+            .expect("exit node page");
+        let mut snapshot = populated_snapshot();
+        let subject = NodeId::from_public_key(b"gpui-selection-subject");
+        let exit_a = NodeId::from_public_key(b"gpui-selection-exit-a");
+        let exit_b = NodeId::from_public_key(b"gpui-selection-exit-b");
+        let policy = ExitSelectionPolicy {
+            mode: ExitSelectionMode::Fixed {
+                exit: exit_a.clone(),
+            },
+            default_exit: Some(exit_a.clone()),
+            available_exits: vec![exit_a.clone(), exit_b.clone()],
+            ..ExitSelectionPolicy::default()
+        };
+        let observed_at = 1_700_000_000_000;
+        let resolution = policy
+            .resolve(
+                12,
+                &subject,
+                &BTreeMap::from([
+                    (
+                        exit_a.clone(),
+                        ExitContributionAvailability::observed(
+                            true,
+                            true,
+                            ExitAvailabilitySource::CoordinatorHealth,
+                            observed_at,
+                        ),
+                    ),
+                    (
+                        exit_b.clone(),
+                        ExitContributionAvailability::observed(
+                            true,
+                            true,
+                            ExitAvailabilitySource::CoordinatorHealth,
+                            observed_at,
+                        ),
+                    ),
+                ]),
+            )
+            .expect("selection resolution");
+        snapshot.exit_selections = vec![NodeExitSelectionSnapshot {
+            network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                b"gpui-selection-network",
+            ),
+            policy_revision: 12,
+            policy: Some(policy),
+            resolution: Some(resolution),
+            directory_generated_at_unix_ms: Some(observed_at),
+            directory_received_at_unix_ms: Some(observed_at + 1),
+            evaluated_at_unix_ms: observed_at + 2,
+            reason_code: None,
+        }];
+
+        let model =
+            build_page_model_for_page(page, &snapshot, Locale::ZhCn).expect("exit node model");
+        let governance = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "gpui.section.exit_governance"))
+            .expect("Exit governance section");
+        let summary = governance.rows.first().expect("governance summary");
+        assert!(summary
+            .detail
+            .contains(t(Locale::ZhCn, "exit_governance.mode.fixed")));
+        assert!(summary.detail.contains(exit_a.as_str()));
+        assert!(!summary.detail.contains(exit_b.as_str()));
+        assert!(summary.detail.contains("12"));
+
+        let blocked_title = tr(
+            Locale::ZhCn,
+            "exit_governance.candidate_title",
+            &[
+                ("network", snapshot.exit_selections[0].network_id.as_str()),
+                ("exit", exit_b.as_str()),
+            ],
+        );
+        let blocked = governance
+            .rows
+            .iter()
+            .find(|row| row.title == blocked_title)
+            .expect("blocked candidate row");
+        assert!(blocked
+            .detail
+            .contains(t(Locale::ZhCn, "exit_governance.blocked")));
+        assert!(blocked.detail.contains(t(
+            Locale::ZhCn,
+            "exit_governance.reason.fixed_exit_required"
+        )));
+        assert!(blocked
+            .detail
+            .contains(t(Locale::ZhCn, "exit_governance.source.selection_mode")));
+        assert!(blocked
+            .detail
+            .contains("exit.selection.fixed_exit_required"));
+
+        snapshot.exit_selections[0].resolution = None;
+        snapshot.exit_selections[0].reason_code = Some("exit.selection.stale_directory".into());
+        let model =
+            build_page_model_for_page(page, &snapshot, Locale::ZhCn).expect("exit node model");
+        let governance = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "gpui.section.exit_governance"))
+            .expect("Exit governance section");
+        let unavailable = governance
+            .rows
+            .iter()
+            .find(|row| row.title == t(Locale::ZhCn, "exit_governance.top_reason"))
+            .expect("unavailable reason row");
+        assert!(unavailable
+            .detail
+            .contains(t(Locale::ZhCn, "exit_governance.reason.stale_directory")));
+        assert!(unavailable
+            .detail
+            .contains("exit.selection.stale_directory"));
     }
 
     #[test]

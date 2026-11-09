@@ -1607,6 +1607,62 @@ button:disabled {
   color: var(--text-muted);
   font-size: 10px;
 }
+.exit-governance-networks {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+.exit-governance-network {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.exit-governance-network .card-heading {
+  margin-bottom: 0;
+}
+.exit-governance-network h4,
+.exit-governance-candidates h5 {
+  margin: 0;
+}
+.exit-governance-effective {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.exit-governance-effective code,
+.exit-governance-candidate-heading code {
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-raised);
+}
+.exit-governance-candidates {
+  display: grid;
+  gap: var(--space-2);
+}
+.exit-governance-candidate {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--text-faint);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+}
+.exit-governance-candidate.good {
+  border-left-color: var(--success);
+}
+.exit-governance-candidate.bad {
+  border-left-color: var(--danger);
+}
+.exit-governance-candidate-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
 .capability-feature {
   display: flex;
   gap: var(--space-3);

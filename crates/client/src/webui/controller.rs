@@ -737,6 +737,7 @@ impl AppController {
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
                 exit_contribution_mode: Default::default(),
+                exit_selection_policy: Default::default(),
                 signaling_port: port,
                 relay_port,
                 external_host,

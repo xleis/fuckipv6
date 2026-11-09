@@ -138,6 +138,13 @@
               "validation": "exit_contribution_scope"
             },
             {
+              "id": "exit_selection_policy_json",
+              "label_key": "field.exit_selection_policy_json",
+              "input": "exit_selection_policy_json",
+              "required": false,
+              "validation": "exit_selection_policy_json"
+            },
+            {
               "id": "signaling_port",
               "label_key": "field.signaling_port",
               "input": "port",
@@ -270,6 +277,13 @@
               "input": "exit_contribution_scope",
               "required": true,
               "validation": "exit_contribution_scope"
+            },
+            {
+              "id": "exit_selection_policy_json",
+              "label_key": "field.exit_selection_policy_json",
+              "input": "exit_selection_policy_json",
+              "required": false,
+              "validation": "exit_selection_policy_json"
             }
           ],
           "confirmation": null
@@ -376,6 +390,13 @@
               "input": "exit_contribution_scope",
               "required": true,
               "validation": "exit_contribution_scope"
+            },
+            {
+              "id": "exit_selection_policy_json",
+              "label_key": "field.exit_selection_policy_json",
+              "input": "exit_selection_policy_json",
+              "required": false,
+              "validation": "exit_selection_policy_json"
             }
           ],
           "confirmation": {

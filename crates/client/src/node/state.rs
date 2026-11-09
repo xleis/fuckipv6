@@ -2,17 +2,18 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 
 use fuckipv6_common::domain::{
     ActivityEntry, CapabilityKind, CapabilityState, ExitContributionMode,
-    ExitContributionObligation, ExitContributionScope, FieldPrivacyPolicy, MembershipRole,
-    MembershipState, MembershipTerms, NetworkAcl, NetworkId, NetworkJoinMode,
-    NetworkMemberDirectory, NetworkMemberPresence, NetworkMemberStatus, NetworkVisibility, NodeId,
-    NodeLocalAccessPolicy, OperationRecovery, TopologyBuilder, TopologyLinkObservation,
-    TopologyMemberInput, TopologyNetworkInput, TopologySnapshot, TopologyViewer,
-    TrafficRoutingPageModel,
+    ExitContributionObligation, ExitContributionScope, ExitSelectionPolicy,
+    ExitSelectionResolution, FieldPrivacyPolicy, MembershipRole, MembershipState, MembershipTerms,
+    NetworkAcl, NetworkId, NetworkJoinMode, NetworkMemberDirectory, NetworkMemberPresence,
+    NetworkMemberStatus, NetworkVisibility, NodeId, NodeLocalAccessPolicy, OperationRecovery,
+    TopologyBuilder, TopologyLinkObservation, TopologyMemberInput, TopologyNetworkInput,
+    TopologySnapshot, TopologyViewer, TrafficRoutingPageModel,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -90,6 +91,12 @@ pub struct NodeSnapshot {
     /// addresses, topology, activity, invitation tickets or secret material.
     #[serde(default)]
     pub network_profiles: Vec<NodeNetworkProfileSnapshot>,
+    /// Authoritative administrator Exit-selection evidence for each cached
+    /// roster. The resolution is computed by the same deny-first engine used by
+    /// runtime admission; adapters must render it rather than re-resolving the
+    /// policy locally. Missing entries from older nodes deserialize as empty.
+    #[serde(default)]
+    pub exit_selections: Vec<NodeExitSelectionSnapshot>,
     /// Durable local membership acknowledgements, one per stable network ID.
     /// This projection contains no private keys, peer addresses or topology.
     #[serde(default)]
@@ -132,6 +139,95 @@ impl NodeSnapshot {
         now_ms: u64,
     ) {
         self.topology = project_topology(self, directories, now_ms);
+    }
+
+    /// Recompute the administrator Exit-selection explanation for every cached
+    /// roster. A cleared or expired directory keeps its last policy revision for
+    /// auditability but loses its resolution, so the UI cannot keep presenting a
+    /// stale Exit as selectable.
+    pub fn refresh_exit_selections(
+        &mut self,
+        directories: &BTreeMap<NetworkId, NetworkMemberDirectory>,
+        directory_received_at: &BTreeMap<NetworkId, u64>,
+        now_ms: u64,
+    ) {
+        let previous = std::mem::take(&mut self.exit_selections);
+        let local_node_id = self
+            .identity
+            .as_ref()
+            .and_then(|identity| NodeId::parse(identity.node_id.as_str()).ok());
+        let mut projected = Vec::with_capacity(directories.len().max(previous.len()));
+
+        for (network_id, directory) in directories {
+            let prior = previous
+                .iter()
+                .find(|entry| &entry.network_id == network_id);
+            let policy_revision = prior
+                .map(|entry| entry.policy_revision)
+                .unwrap_or_default()
+                .max(directory.exit_selection_policy_revision);
+            let stale_evidence = prior.is_some_and(|entry| {
+                directory.exit_selection_policy_revision < entry.policy_revision
+                    || (directory.exit_selection_policy_revision == entry.policy_revision
+                        && directory.generated_at_unix_ms
+                            < entry.directory_generated_at_unix_ms.unwrap_or_default())
+            });
+            let policy = if stale_evidence {
+                prior.and_then(|entry| entry.policy.clone())
+            } else {
+                Some(directory.exit_selection_policy.clone())
+            };
+            let received_at = directory_received_at.get(network_id).copied();
+            let (resolution, reason_code) = if stale_evidence {
+                (None, Some("exit.selection.stale_directory".into()))
+            } else if let Some(local_node_id) = local_node_id.as_ref() {
+                match crate::routing::trusted_directory(
+                    Some(network_id),
+                    Some(directory),
+                    received_at,
+                    now_ms,
+                )
+                .and_then(|trusted| {
+                    crate::routing::resolve_directory_exit_selection(local_node_id, trusted, now_ms)
+                }) {
+                    Ok(resolution) => (Some(resolution), None),
+                    Err(denial) => (None, Some(denial.reason_code().to_owned())),
+                }
+            } else {
+                (None, Some("exit.selection.missing_network_context".into()))
+            };
+
+            projected.push(NodeExitSelectionSnapshot {
+                network_id: network_id.clone(),
+                policy_revision,
+                policy,
+                resolution,
+                directory_generated_at_unix_ms: Some(directory.generated_at_unix_ms),
+                directory_received_at_unix_ms: received_at,
+                evaluated_at_unix_ms: now_ms,
+                reason_code,
+            });
+        }
+
+        for prior in previous {
+            if directories.contains_key(&prior.network_id) {
+                continue;
+            }
+            projected.push(NodeExitSelectionSnapshot {
+                resolution: None,
+                directory_received_at_unix_ms: prior.directory_received_at_unix_ms,
+                evaluated_at_unix_ms: now_ms,
+                reason_code: Some("exit.selection.directory_unavailable".into()),
+                ..prior
+            });
+        }
+
+        projected.sort_by(|left, right| {
+            left.network_id
+                .to_string()
+                .cmp(&right.network_id.to_string())
+        });
+        self.exit_selections = projected;
     }
 
     /// Return the single user-facing status for this snapshot. Transitions win
@@ -1091,6 +1187,26 @@ pub struct NodeNetworkProfileSnapshot {
     pub signed_profile: Option<NodeSignedNetworkProfileSnapshot>,
 }
 
+/// One network's administrator-owned Exit selection policy plus the exact
+/// deny-first resolution produced by the trusted runtime. Older snapshots omit
+/// this field and therefore must not infer an authorized Exit.
+#[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeExitSelectionSnapshot {
+    pub network_id: NetworkId,
+    pub policy_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<ExitSelectionPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<ExitSelectionResolution>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_generated_at_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_received_at_unix_ms: Option<u64>,
+    pub evaluated_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeSignedNetworkProfileSnapshot {
     pub schema_version: u16,
@@ -1436,6 +1552,11 @@ pub struct NodeStateStore {
     /// substitute: policy enforcement needs to know how long this process has
     /// trusted the cached evidence.
     directory_received_at: Arc<RwLock<BTreeMap<NetworkId, u64>>>,
+    /// Remote adapters receive an authoritative snapshot but never populate the
+    /// local roster caches. Once this store has owned local directory evidence,
+    /// clearing or expiring those caches must clear Exit resolutions; before
+    /// then, an empty cache must not overwrite the authoritative projection.
+    local_directory_evidence_seen: Arc<AtomicBool>,
 }
 
 impl NodeStateStore {
@@ -1449,6 +1570,7 @@ impl NodeStateStore {
             events: None,
             directories: Arc::new(RwLock::new(BTreeMap::new())),
             directory_received_at: Arc::new(RwLock::new(BTreeMap::new())),
+            local_directory_evidence_seen: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1479,11 +1601,23 @@ impl NodeStateStore {
             events: Some(events),
             directories: Arc::new(RwLock::new(BTreeMap::new())),
             directory_received_at: Arc::new(RwLock::new(BTreeMap::new())),
+            local_directory_evidence_seen: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub async fn snapshot(&self) -> NodeSnapshot {
-        self.snapshot.read().await.clone()
+        // Expiration is dynamic: every snapshot read must fail closed once the
+        // trusted roster evidence ages out, even if no state mutation occurred.
+        let evidence = self.directory_evidence().await;
+        let mut snapshot = self.snapshot.read().await.clone();
+        if self.local_directory_evidence_seen.load(Ordering::Acquire) {
+            snapshot.refresh_exit_selections(
+                &evidence.directories,
+                &evidence.received_at,
+                unix_time_ms(),
+            );
+        }
+        snapshot
     }
 
     /// Cache one authoritative member directory and republish the derived
@@ -1492,6 +1626,8 @@ impl NodeStateStore {
     /// from observed peer sessions.
     pub async fn set_member_directory(&self, directory: NetworkMemberDirectory) -> bool {
         let network_id = directory.network_id.clone();
+        self.local_directory_evidence_seen
+            .store(true, Ordering::Release);
         {
             let mut directories = self.directories.write().await;
             if let Some(current) = directories.get(&network_id) {
@@ -1530,6 +1666,8 @@ impl NodeStateStore {
     /// longer authoritative. This republishes topology immediately so stale
     /// members never remain visible as live peers.
     pub async fn clear_member_directory(&self, network_id: &NetworkId) -> bool {
+        self.local_directory_evidence_seen
+            .store(true, Ordering::Release);
         self.directory_received_at.write().await.remove(network_id);
         let removed = self.directories.write().await.remove(network_id).is_some();
         if removed {
@@ -1547,11 +1685,16 @@ impl NodeStateStore {
     where
         F: FnOnce(&mut NodeSnapshot),
     {
+        let evidence = self.directory_evidence().await;
+        let now_ms = unix_time_ms();
         let mut snapshot = self.snapshot.write().await;
         update(&mut snapshot);
         snapshot.refresh_capability_states();
         snapshot.revision = snapshot.revision.saturating_add(1);
-        snapshot.refresh_topology(&*self.directories.read().await, unix_time_ms());
+        snapshot.refresh_topology(&evidence.directories, now_ms);
+        if self.local_directory_evidence_seen.load(Ordering::Acquire) {
+            snapshot.refresh_exit_selections(&evidence.directories, &evidence.received_at, now_ms);
+        }
         let published = snapshot.clone();
         self.updates.send_replace(published.clone());
         if let Some(events) = &self.events {
@@ -1585,6 +1728,8 @@ impl NodeStateStore {
         mut capture: super::network_interfaces::InterfaceCapture,
         live_tun_names: Option<&BTreeMap<String, String>>,
     ) -> NodeSnapshot {
+        let evidence = self.directory_evidence().await;
+        let now_ms = unix_time_ms();
         let mut snapshot = self.snapshot.write().await;
         if let Some(live_tun_names) = live_tun_names {
             for network in &mut snapshot.networks {
@@ -1616,16 +1761,23 @@ impl NodeStateStore {
             }
         }
 
+        let previous_exit_selections = snapshot.exit_selections.clone();
+        if self.local_directory_evidence_seen.load(Ordering::Acquire) {
+            snapshot.refresh_exit_selections(&evidence.directories, &evidence.received_at, now_ms);
+        }
         if snapshot.interfaces == capture.interfaces
             && snapshot.interface_problems == capture.problems
         {
+            if snapshot.exit_selections != previous_exit_selections {
+                self.updates.send_replace(snapshot.clone());
+            }
             return snapshot.clone();
         }
         snapshot.interfaces = capture.interfaces;
         snapshot.interface_problems = capture.problems;
         snapshot.refresh_capability_states();
         snapshot.revision = snapshot.revision.saturating_add(1);
-        snapshot.refresh_topology(&*self.directories.read().await, unix_time_ms());
+        snapshot.refresh_topology(&evidence.directories, now_ms);
         let published = snapshot.clone();
         self.updates.send_replace(published.clone());
         if let Some(events) = &self.events {
@@ -1666,7 +1818,12 @@ impl NodeStateStore {
         &self,
         profiles: Vec<NodeNetworkProfileSnapshot>,
     ) -> NodeSnapshot {
+        let evidence = self.directory_evidence().await;
+        let now_ms = unix_time_ms();
         let mut snapshot = self.snapshot.write().await;
+        if self.local_directory_evidence_seen.load(Ordering::Acquire) {
+            snapshot.refresh_exit_selections(&evidence.directories, &evidence.received_at, now_ms);
+        }
         if snapshot.network_profiles == profiles {
             return snapshot.clone();
         }
@@ -1735,6 +1892,24 @@ impl NodeStateStore {
         *current = snapshot.clone();
         self.updates.send_replace(snapshot);
     }
+
+    /// Clone both roster documents before taking the snapshot lock. State
+    /// mutators acquire the directory locks first and then `snapshot`; keeping
+    /// the same order here prevents a derived-state refresh from deadlocking
+    /// against `set_member_directory`.
+    async fn directory_evidence(&self) -> DirectoryEvidence {
+        let directories = self.directories.read().await.clone();
+        let received_at = self.directory_received_at.read().await.clone();
+        DirectoryEvidence {
+            directories,
+            received_at,
+        }
+    }
+}
+
+struct DirectoryEvidence {
+    directories: BTreeMap<NetworkId, NetworkMemberDirectory>,
+    received_at: BTreeMap<NetworkId, u64>,
 }
 
 impl Default for NodeStateStore {

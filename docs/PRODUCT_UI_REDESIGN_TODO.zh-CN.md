@@ -2592,16 +2592,41 @@ Exit 申请的提交、审核、撤回、过期和策略 supersede 均写入持�
 
 **验收**：不存在隐式 Exit 贡献；治理策略与节点实际状态可核对。
 
-### W12-03 管理员出口治理 `[ ]`
+### W12-03 管理员出口治理 `[x]`
 
-- [ ] 管理员可定义默认 Exit 和可用 Exit 集合；
-- [ ] 管理员可指定固定 Exit 或允许成员自行选择；
-- [ ] 管理员可控制普通成员可选择哪些 Exit；
-- [ ] 策略支持网络级、组级和成员级范围，但拒绝优先；
-- [ ] 被撤权 Exit 立即退出新会话候选；
-- [ ] 已建立会话按策略迁移、终止或失败关闭；
-- [ ] UI 显示最终生效集合及来源；
-- [ ] 覆盖管理员撤权、节点离线、策略竞争测试。
+- [x] 管理员可定义默认 Exit 和可用 Exit 集合；
+- [x] 管理员可指定固定 Exit 或允许成员自行选择；
+- [x] 管理员可控制普通成员可选择哪些 Exit；
+- [x] 策略支持网络级、组级和成员级范围，但拒绝优先；
+- [x] 被撤权 Exit 立即退出新会话候选；
+- [x] 已建立会话按策略迁移、终止或失败关闭；
+- [x] UI 显示最终生效集合及来源；
+- [x] 覆盖管理员撤权、节点离线、策略竞争测试。
+
+网络创建、预览和更新统一携带版本化的 `exit_selection_policy`，支持 `member_choice`/`fixed`、默认 Exit、网络可用/拒绝集合，
+以及组级和成员级 allow/deny 收窄。所有作用域按 deny-first 求值，固定 Exit 同时投影为路由硬约束；旧客户端创建时默认空策略，
+旧版更新未提供策略时保留现有治理，不把兼容载荷解释为撤权。网络策略 revision 随治理变更递增，持久快照、成员目录和审计记录
+引用同一 revision；普通成员收到的成员目录不包含组/成员规则，只允许查看自己的最终 resolution，管理员和本地 owner 才能查看完整策略。
+
+运行时 `ExitSelectionGate` 只接受网络 ID 匹配、revision 非零、策略有效且目录生成/接收时间在 90 秒内的成员目录；低 revision 或同
+revision 的旧 generation 不覆盖新权威。候选同时要求成员仍在 roster、生命周期允许访问、在线且可用性证据新鲜；未知、陈旧、
+离线、降级、撤权或不在 roster 的 Exit 均不可选。请求固定 Exit 之外的本地选择会返回 `domain.exit_selection_fixed_exit`，不能在
+fallback 或 recovery 中静默绕过；既有会话按策略生成 `migrate`、`terminate` 或 `fail_closed` 转换，迁移没有合法目标时失败关闭。
+节点快照复用同一运行时解析函数，目录缺失或过期时保留最后 revision 供审计但清空 resolution；WebUI 和 GPUI Exit 页面展示模式、
+默认/固定 Exit、最终可选集合、候选状态、稳定 reason/source、可用性证据以及目录时间，不在客户端重新计算治理结果。
+
+**验证通过（2026-11-10）**：`cargo fmt --all -- --check`、`cargo check --workspace`、
+`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test -p fuckipv6-common exit_selection --lib`（11 passed）、
+`cargo test -p fuckipv6-client exit_selection --lib`（13 passed）、
+`cargo test -p fuckipv6-client exit_node_page_projects_authoritative_selection_set_and_evidence --lib`（1 passed）、
+`./scripts/generate-contracts.sh`、`./scripts/check-contracts.sh`（含 TypeScript/Java 绑定与 Android 契约测试）、
+`node scripts/test_i18n_runtime.mjs`、WebUI `npm run typecheck`、`npm run lint`、`npm test -- --run`（278 passed）、
+`npm run build`（仅保留现有 i18n 非 module 与 >500 kB chunk 警告）和 `npm run visual:regression`（semantics、84 项 geometry、
+pixels 全部通过，geometry max delta 2.1875px；未放宽阈值）。测试覆盖 deny-first、固定 Exit 绕过拒绝、撤权成员即时退出、
+节点离线/未知/陈旧证据、revision 与 generation 竞争、三种已建立会话转换、普通成员隐私投影，以及 WebUI/GPUI 的最终集合、
+候选来源和过期目录展示。
+相关提交：`2c10552`、`3653622`、`78da35a`、`1388a7d`、`349abdb`。本项证据来自领域/运行时/协议与 UI 自动化测试，不代表已完成
+真实多节点 Coordinator 治理竞争演练、真实数据面 Exit 切换、DNS/IPv4/IPv6 泄漏、Google/YouTube 或性能稳定性验收。
 
 **验收**：用户可解释为何某 Exit 可选/不可选；固定 Exit 不可被本地或 fallback 静默绕过。
 

@@ -320,6 +320,7 @@ mod tests {
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
                 exit_contribution_mode: Default::default(),
+                exit_selection_policy: Default::default(),
                 signaling_port: 41000,
                 relay_port: 42000,
                 external_host: None,

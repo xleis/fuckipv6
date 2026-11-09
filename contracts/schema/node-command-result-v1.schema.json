@@ -980,6 +980,329 @@
       ],
       "type": "string"
     },
+    "ExitSelectionCandidate": {
+      "description": "Stable reason code and scope for one Exit. Unknown and stale availability is\nnever reported as selectable.",
+      "properties": {
+        "availability": {
+          "$ref": "#/$defs/ExitContributionAvailability"
+        },
+        "exit": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "is_default": {
+          "type": "boolean"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "selectable": {
+          "type": "boolean"
+        },
+        "source": {
+          "$ref": "#/$defs/ExitSelectionSource"
+        }
+      },
+      "required": [
+        "exit",
+        "selectable",
+        "reason_code",
+        "source",
+        "availability",
+        "is_default"
+      ],
+      "type": "object"
+    },
+    "ExitSelectionGroupRule": {
+      "description": "An administrator-defined group scope. Membership is part of this policy so\nan Exit decision never depends on a client-supplied or stale role label.",
+      "properties": {
+        "allow": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "deny": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "group_id": {
+          "$ref": "#/$defs/GroupId"
+        },
+        "members": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "group_id"
+      ],
+      "type": "object"
+    },
+    "ExitSelectionMemberRule": {
+      "description": "A member-specific narrowing or deny. A deny always wins over every allow.",
+      "properties": {
+        "allow": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "deny": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        }
+      },
+      "required": [
+        "node_id"
+      ],
+      "type": "object"
+    },
+    "ExitSelectionMode": {
+      "description": "Whether administrators pin one Exit or let members select from the final\nadministrator-authorized set.",
+      "oneOf": [
+        {
+          "properties": {
+            "mode": {
+              "const": "member_choice",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "exit": {
+              "$ref": "#/$defs/NodeId"
+            },
+            "mode": {
+              "const": "fixed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "exit"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ExitSelectionPolicy": {
+      "additionalProperties": false,
+      "description": "Versioned administrator policy. `available_exits` is the network-level\nallow set and therefore the universe of all other scopes. Group `allow`\nlists narrow that universe when the subject belongs to a matching group;\nmember `allow` lists narrow it further. Any matching deny removes an Exit\nregardless of allow rules at any scope.",
+      "properties": {
+        "available_exits": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "default_exit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "denied_exits": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "groups": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ExitSelectionGroupRule"
+          },
+          "type": "array"
+        },
+        "members": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ExitSelectionMemberRule"
+          },
+          "type": "array"
+        },
+        "mode": {
+          "$ref": "#/$defs/ExitSelectionMode",
+          "default": {
+            "mode": "member_choice"
+          }
+        },
+        "session_transition": {
+          "$ref": "#/$defs/ExitSessionTransitionPolicy",
+          "default": "fail_closed"
+        }
+      },
+      "type": "object"
+    },
+    "ExitSelectionResolution": {
+      "description": "Complete administrator-authorized set for one subject. Candidate ordering is\nstable to make UI and audit output reproducible.",
+      "properties": {
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/ExitSelectionCandidate"
+          },
+          "type": "array"
+        },
+        "default_exit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fixed_exit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "$ref": "#/$defs/ExitSelectionMode"
+        },
+        "policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "selectable_exits": {
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "selected_default": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "subject": {
+          "$ref": "#/$defs/NodeId"
+        }
+      },
+      "required": [
+        "policy_revision",
+        "subject",
+        "mode",
+        "candidates",
+        "selectable_exits"
+      ],
+      "type": "object"
+    },
+    "ExitSelectionSource": {
+      "description": "Where the final decision came from.",
+      "oneOf": [
+        {
+          "properties": {
+            "scope": {
+              "const": "network",
+              "type": "string"
+            }
+          },
+          "required": [
+            "scope"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "group_id": {
+              "$ref": "#/$defs/GroupId"
+            },
+            "scope": {
+              "const": "group",
+              "type": "string"
+            }
+          },
+          "required": [
+            "scope",
+            "group_id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "scope": {
+              "const": "member",
+              "type": "string"
+            }
+          },
+          "required": [
+            "scope"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "scope": {
+              "const": "selection_mode",
+              "type": "string"
+            }
+          },
+          "required": [
+            "scope"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "scope": {
+              "const": "availability",
+              "type": "string"
+            }
+          },
+          "required": [
+            "scope"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ExitSessionTransitionPolicy": {
+      "description": "What to do with an already established session when its Exit is no longer\nselectable. `Migrate` may still fail closed if no replacement is available.",
+      "enum": [
+        "migrate",
+        "terminate",
+        "fail_closed"
+      ],
+      "type": "string"
+    },
     "FieldPrivacyPolicy": {
       "description": "Immutable network-authored field policy. Revisions are monotonic and carry\nboth issuance and effective time. A malformed, duplicate, expired or\nnot-yet-effective policy fails closed.",
       "properties": {
@@ -2368,6 +2691,27 @@
       "properties": {
         "can_manage_members": {
           "type": "boolean"
+        },
+        "exit_selection_policy": {
+          "$ref": "#/$defs/ExitSelectionPolicy",
+          "default": {
+            "available_exits": [],
+            "denied_exits": [],
+            "groups": [],
+            "members": [],
+            "mode": {
+              "mode": "member_choice"
+            },
+            "session_transition": "fail_closed"
+          },
+          "description": "Administrator Exit selection policy for this network. This is part of\nthe authenticated member projection rather than the public discovery\ndocument so member and group rules are only exposed to network members."
+        },
+        "exit_selection_policy_revision": {
+          "default": 0,
+          "description": "Revision of the network policy carried with the directory. Consumers\nmust reject older revisions instead of replacing fresher governance.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "generated_at_unix_ms": {
           "format": "uint64",
@@ -4315,6 +4659,72 @@
       ],
       "type": "string"
     },
+    "NodeExitSelectionSnapshot": {
+      "description": "One network's administrator-owned Exit selection policy plus the exact\ndeny-first resolution produced by the trusted runtime. Older snapshots omit\nthis field and therefore must not infer an authorized Exit.",
+      "properties": {
+        "directory_generated_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "directory_received_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "evaluated_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitSelectionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitSelectionResolution"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "network_id",
+        "policy_revision",
+        "evaluated_at_unix_ms"
+      ],
+      "type": "object"
+    },
     "NodeId": {
       "type": "string"
     },
@@ -6103,6 +6513,14 @@
           },
           "description": "Runtime capability truth for this host. Adapters must disable Exit Node\nactions when `supported` is false and render the typed reasons instead\nof inferring success from configuration alone."
         },
+        "exit_selections": {
+          "default": [],
+          "description": "Authoritative administrator Exit-selection evidence for each cached\nroster. The resolution is computed by the same deny-first engine used by\nruntime admission; adapters must render it rather than re-resolving the\npolicy locally. Missing entries from older nodes deserialize as empty.",
+          "items": {
+            "$ref": "#/$defs/NodeExitSelectionSnapshot"
+          },
+          "type": "array"
+        },
         "identity": {
           "anyOf": [
             {
@@ -6602,6 +7020,7 @@
         "exit_contribution_mode",
         "exit_contribution",
         "exit_contribution_scope",
+        "exit_selection_policy_json",
         "join_request_id",
         "join_request_note",
         "join_request_reason",
@@ -6735,6 +7154,7 @@
         "exit_contribution_mode",
         "exit_contribution",
         "exit_contribution_scope",
+        "exit_selection_policy_json",
         "join_request_id",
         "join_request_note",
         "join_request_reason",

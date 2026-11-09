@@ -1081,12 +1081,21 @@ pub fn project_member_directory(
             .cmp(right.display_name.as_deref().unwrap_or(""))
             .then_with(|| left.node_id.cmp(&right.node_id))
     });
+    // Group and member allow/deny rules are administrator governance data,
+    // not ordinary member directory metadata. The local runtime still obtains
+    // the authoritative directory internally; remote member responses receive
+    // only the revision and a non-sensitive default policy.
+    let exit_selection_policy = if viewer.local_owner || viewer.principal.is_network_manager() {
+        directory.exit_selection_policy.clone()
+    } else {
+        Default::default()
+    };
     NetworkMemberDirectory {
         network_id: directory.network_id.clone(),
         generated_at_unix_ms: directory.generated_at_unix_ms,
         viewer_role: directory.viewer_role,
         can_manage_members: directory.can_manage_members && viewer.principal.is_network_manager(),
-        exit_selection_policy: directory.exit_selection_policy.clone(),
+        exit_selection_policy,
         exit_selection_policy_revision: directory.exit_selection_policy_revision,
         members,
     }
@@ -1571,8 +1580,8 @@ pub fn member_status_visible(status: NetworkMemberStatus, viewer: &PrivacyViewer
 mod tests {
     use super::*;
     use crate::domain::{
-        CapabilityKind, MemberLifecycleAction, NetworkMemberGroup, NetworkMemberOnlineState,
-        NetworkMemberPresence, TopologyNode,
+        CapabilityKind, ExitSelectionPolicy, MemberLifecycleAction, NetworkMemberGroup,
+        NetworkMemberOnlineState, NetworkMemberPresence, TopologyNode,
     };
 
     fn network_id() -> NetworkId {
@@ -1817,6 +1826,33 @@ mod tests {
         assert!(json["members"][0].get("capabilities").is_none());
         assert!(json["members"][0].get("joined_at_unix_ms").is_none());
         assert!(!json.to_string().contains("alice-secret"));
+    }
+
+    #[test]
+    fn member_projection_hides_exit_selection_rules_from_non_managers() {
+        let secret_exit = node_id(b"secret-exit");
+        let mut source = directory(vec![member(MemberLifecycleStatus::Active, "alice")]);
+        source.exit_selection_policy_revision = 9;
+        source.exit_selection_policy = ExitSelectionPolicy {
+            available_exits: vec![secret_exit.clone()],
+            denied_exits: vec![secret_exit.clone()],
+            ..ExitSelectionPolicy::default()
+        };
+
+        let member_view =
+            project_member_directory(&source, &viewer(MembershipRole::Member), None, 1_500);
+        assert_eq!(member_view.exit_selection_policy_revision, 9);
+        assert_eq!(
+            member_view.exit_selection_policy,
+            ExitSelectionPolicy::default()
+        );
+
+        let administrator_view =
+            project_member_directory(&source, &viewer(MembershipRole::Administrator), None, 1_500);
+        assert_eq!(
+            administrator_view.exit_selection_policy,
+            source.exit_selection_policy
+        );
     }
 
     #[test]

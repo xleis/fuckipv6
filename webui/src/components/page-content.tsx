@@ -50,6 +50,7 @@ import {
 } from "react";
 import type {
   ActivityEntry,
+  ExitSelectionSource,
   NodeDiagnosticLayer,
   NodeDiagnosticState,
   NodeDiagnosticsSnapshot,
@@ -137,6 +138,27 @@ function localExitTone(stage: LocalExitCapabilityStage): string {
   if (["listening", "health_checking", "draining", "cleaning"].includes(stage))
     return "warn";
   return "neutral";
+}
+
+function exitSelectionSourceLabel(
+  locale: Locale,
+  source: ExitSelectionSource,
+): string {
+  if (source.scope === "group")
+    return tr(locale, "exit_governance.source.group", {
+      group_id: source.group_id,
+    });
+  return label(locale, `exit_governance.source.${source.scope}`);
+}
+
+function exitSelectionReasonLabel(locale: Locale, code: string): string {
+  const suffix = code
+    .replace(/^domain\.exit_selection_/, "")
+    .replace(/^exit\.selection\./, "")
+    .replace(/^exit\.availability\./, "");
+  const key = `exit_governance.reason.${suffix}`;
+  const localized = label(locale, key);
+  return localized === key ? code : localized;
 }
 
 function statusTone(value: string): string {
@@ -2871,6 +2893,263 @@ function Routing({
   );
 }
 
+function ExitGovernanceCard({
+  snapshot,
+  locale,
+}: {
+  snapshot: NodeSnapshot;
+  locale: Locale;
+}) {
+  const selections = snapshot.exit_selections ?? [];
+  return (
+    <section
+      className="surface-card"
+      data-testid="exit-governance"
+      aria-labelledby="exit-governance-title"
+    >
+      <div className="card-heading">
+        <h3 id="exit-governance-title">
+          {label(locale, "exit_governance.title")}
+        </h3>
+        <span className="status-pill neutral">{selections.length}</span>
+      </div>
+      <p className="muted-copy">{label(locale, "exit_governance.hint")}</p>
+      {selections.length === 0 ? (
+        <p className="empty-copy">{label(locale, "exit_governance.empty")}</p>
+      ) : (
+        <div className="exit-governance-networks">
+          {selections.map((selection) => {
+            const resolution = selection.resolution;
+            const effective = resolution?.selectable_exits ?? [];
+            const tone = !resolution
+              ? "bad"
+              : effective.length > 0
+                ? "good"
+                : "warn";
+            const mode = resolution?.mode.mode;
+            return (
+              <article
+                className="exit-governance-network"
+                data-testid={`exit-governance-${selection.network_id}`}
+                key={selection.network_id}
+              >
+                <div className="card-heading">
+                  <h4>{selection.network_id}</h4>
+                  <span className={`status-pill ${tone}`}>
+                    {label(
+                      locale,
+                      resolution
+                        ? "exit_governance.effective"
+                        : "exit_governance.unavailable",
+                    )}
+                  </span>
+                </div>
+                <dl className="detail-list">
+                  <div>
+                    <dt>{label(locale, "exit_governance.policy_revision")}</dt>
+                    <dd>{selection.policy_revision}</dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "exit_governance.mode")}</dt>
+                    <dd>
+                      {mode
+                        ? label(locale, `exit_governance.mode.${mode}`)
+                        : label(locale, "common.not_available")}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "exit_governance.default_exit")}</dt>
+                    <dd>
+                      <code>
+                        {resolution?.default_exit ??
+                          label(locale, "common.none")}
+                      </code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "exit_governance.fixed_exit")}</dt>
+                    <dd>
+                      <code>
+                        {resolution?.fixed_exit ??
+                          label(locale, "common.none")}
+                      </code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "exit_governance.effective_set")}</dt>
+                    <dd className="exit-governance-effective">
+                      {effective.length > 0 ? (
+                        effective.map((exit) => (
+                          <code key={exit}>{exit}</code>
+                        ))
+                      ) : (
+                        <span>{label(locale, "exit_governance.no_effective")}</span>
+                      )}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "exit_governance.selected_default")}</dt>
+                    <dd>
+                      <code>
+                        {resolution?.selected_default ??
+                          label(locale, "common.none")}
+                      </code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "exit_governance.directory_generated")}</dt>
+                    <dd>
+                      {selection.directory_generated_at_unix_ms
+                        ? formatTimestamp(
+                            locale,
+                            selection.directory_generated_at_unix_ms,
+                          )
+                        : label(locale, "common.not_available")}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "exit_governance.directory_received")}</dt>
+                    <dd>
+                      {selection.directory_received_at_unix_ms
+                        ? formatTimestamp(
+                            locale,
+                            selection.directory_received_at_unix_ms,
+                          )
+                        : label(locale, "common.not_available")}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "exit_governance.evaluated_at")}</dt>
+                    <dd>{formatTimestamp(locale, selection.evaluated_at_unix_ms)}</dd>
+                  </div>
+                </dl>
+                {selection.reason_code ? (
+                  <div
+                    className="state-notice warn"
+                    data-testid="exit-governance-reason"
+                    role="status"
+                  >
+                    <AlertTriangle size={17} aria-hidden="true" />
+                    <div>
+                      <strong>{label(locale, "exit_governance.top_reason")}</strong>
+                      <p>
+                        {exitSelectionReasonLabel(
+                          locale,
+                          selection.reason_code,
+                        )}
+                      </p>
+                      <small>
+                        <code>{selection.reason_code}</code>
+                      </small>
+                    </div>
+                  </div>
+                ) : null}
+                {resolution ? (
+                  <div className="exit-governance-candidates">
+                    <h5>{label(locale, "exit_governance.candidates")}</h5>
+                    {resolution.candidates.length === 0 ? (
+                      <p className="empty-copy">
+                        {label(locale, "exit_governance.no_candidates")}
+                      </p>
+                    ) : (
+                      resolution.candidates.map((candidate) => {
+                        const availabilityReason =
+                          candidate.availability.reason_code;
+                        return (
+                          <div
+                            className={`exit-governance-candidate ${
+                              candidate.selectable ? "good" : "bad"
+                            }`}
+                            data-testid={`exit-candidate-${selection.network_id}-${candidate.exit}`}
+                            key={candidate.exit}
+                          >
+                            <div className="exit-governance-candidate-heading">
+                              <code>{candidate.exit}</code>
+                              <span
+                                className={`status-pill ${
+                                  candidate.selectable ? "good" : "bad"
+                                }`}
+                              >
+                                {label(
+                                  locale,
+                                  candidate.selectable
+                                    ? "exit_governance.selectable"
+                                    : "exit_governance.blocked",
+                                )}
+                              </span>
+                            </div>
+                            <dl className="detail-list">
+                              <div>
+                                <dt>{label(locale, "exit_governance.source")}</dt>
+                                <dd>
+                                  {exitSelectionSourceLabel(
+                                    locale,
+                                    candidate.source,
+                                  )}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>{label(locale, "exit_governance.reason")}</dt>
+                                <dd>
+                                  {exitSelectionReasonLabel(
+                                    locale,
+                                    candidate.reason_code,
+                                  )}{" "}
+                                  <code>{candidate.reason_code}</code>
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>{label(locale, "exit_governance.availability")}</dt>
+                                <dd>
+                                  {label(
+                                    locale,
+                                    `member_directory.exit.state.${candidate.availability.state}`,
+                                  )}
+                                  {" · "}
+                                  {label(
+                                    locale,
+                                    `member_directory.exit.source.${candidate.availability.source}`,
+                                  )}
+                                </dd>
+                              </div>
+                              {availabilityReason ? (
+                                <div>
+                                  <dt>
+                                    {label(
+                                      locale,
+                                      "exit_governance.availability_reason",
+                                    )}
+                                  </dt>
+                                  <dd>
+                                    {exitSelectionReasonLabel(
+                                      locale,
+                                      availabilityReason,
+                                    )}{" "}
+                                    <code>{availabilityReason}</code>
+                                  </dd>
+                                </div>
+                              ) : null}
+                            </dl>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                ) : null}
+                {resolution && !selection.policy ? (
+                  <p className="empty-copy">
+                    {label(locale, "exit_governance.policy_hidden")}
+                  </p>
+                ) : null}
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function CapabilityPage({
   snapshot,
   locale,
@@ -3002,6 +3281,9 @@ function CapabilityPage({
             </div>
           ) : null}
         </section>
+      ) : null}
+      {kind === "exit" ? (
+        <ExitGovernanceCard snapshot={snapshot} locale={locale} />
       ) : null}
       {kind === "exit" && snapshot.exit_node_capabilities ? (
         <section className="surface-card">

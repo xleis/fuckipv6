@@ -3346,6 +3346,7 @@ impl GpuiShell {
             .flex()
             .flex_col()
             .w(px(DIMENSIONS.sidebar_px as f32))
+            .flex_shrink_0()
             .h_full()
             .bg(rgba(COLOR_SIDEBAR))
             .border_r_1()
@@ -4293,7 +4294,7 @@ impl GpuiShell {
                     .justify_center()
                     .gap(px(2.0))
                     .min_w(px(0.0))
-                    .h(px(51.0))
+                    .min_h(px(48.0))
                     .px_3()
                     .py_2()
                     .rounded(px(9.0))
@@ -8255,6 +8256,7 @@ impl GpuiShell {
             .gap_5()
             .min_w(px(0.0))
             .flex_1()
+            .self_stretch()
             .overflow_y_scroll()
             .child(
                 div()
@@ -12393,8 +12395,11 @@ impl GpuiShell {
                     body.child(
                         div()
                             .id("no-shared-actions")
-                            .p_4()
-                            .text_sm()
+                            .pt_2()
+                            .px_4()
+                            .pb_4()
+                            .text_size(px(11.0))
+                            .line_height(px(16.0))
                             .text_color(rgba(COLOR_MUTED))
                             .child(t(self.locale, "common.page_actions_empty").to_string()),
                     )
@@ -12506,6 +12511,7 @@ impl Render for GpuiShell {
             .flex()
             .flex_col()
             .flex_1()
+            .min_w(px(0.0))
             .h_full()
             .bg(rgba(COLOR_BG))
             .child(self.header(cx));
@@ -13693,6 +13699,9 @@ fn placeholder_for(
         NodeUiInputKind::PolicyJson => t(locale, "placeholder.policy_json").into(),
         NodeUiInputKind::TrafficPolicyJson => t(locale, "placeholder.policy_json").into(),
         NodeUiInputKind::TrafficPolicyTestJson => t(locale, "placeholder.policy_json").into(),
+        NodeUiInputKind::ExitSelectionPolicyJson => {
+            t(locale, "placeholder.exit_selection_policy_json").into()
+        }
         NodeUiInputKind::Fingerprint => t(locale, "placeholder.fingerprint").into(),
         NodeUiInputKind::Purpose => t(locale, "placeholder.network_purpose").into(),
         NodeUiInputKind::Icon => "network".into(),

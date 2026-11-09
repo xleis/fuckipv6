@@ -313,6 +313,162 @@
       ],
       "type": "object"
     },
+    "ExitSelectionGroupRule": {
+      "description": "An administrator-defined group scope. Membership is part of this policy so\nan Exit decision never depends on a client-supplied or stale role label.",
+      "properties": {
+        "allow": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "deny": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "group_id": {
+          "$ref": "#/$defs/GroupId"
+        },
+        "members": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "group_id"
+      ],
+      "type": "object"
+    },
+    "ExitSelectionMemberRule": {
+      "description": "A member-specific narrowing or deny. A deny always wins over every allow.",
+      "properties": {
+        "allow": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "deny": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        }
+      },
+      "required": [
+        "node_id"
+      ],
+      "type": "object"
+    },
+    "ExitSelectionMode": {
+      "description": "Whether administrators pin one Exit or let members select from the final\nadministrator-authorized set.",
+      "oneOf": [
+        {
+          "properties": {
+            "mode": {
+              "const": "member_choice",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "exit": {
+              "$ref": "#/$defs/NodeId"
+            },
+            "mode": {
+              "const": "fixed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "exit"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ExitSelectionPolicy": {
+      "additionalProperties": false,
+      "description": "Versioned administrator policy. `available_exits` is the network-level\nallow set and therefore the universe of all other scopes. Group `allow`\nlists narrow that universe when the subject belongs to a matching group;\nmember `allow` lists narrow it further. Any matching deny removes an Exit\nregardless of allow rules at any scope.",
+      "properties": {
+        "available_exits": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "default_exit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "denied_exits": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "groups": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ExitSelectionGroupRule"
+          },
+          "type": "array"
+        },
+        "members": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ExitSelectionMemberRule"
+          },
+          "type": "array"
+        },
+        "mode": {
+          "$ref": "#/$defs/ExitSelectionMode",
+          "default": {
+            "mode": "member_choice"
+          }
+        },
+        "session_transition": {
+          "$ref": "#/$defs/ExitSessionTransitionPolicy",
+          "default": "fail_closed"
+        }
+      },
+      "type": "object"
+    },
+    "ExitSessionTransitionPolicy": {
+      "description": "What to do with an already established session when its Exit is no longer\nselectable. `Migrate` may still fail closed if no replacement is available.",
+      "enum": [
+        "migrate",
+        "terminate",
+        "fail_closed"
+      ],
+      "type": "string"
+    },
     "GroupId": {
       "type": "string"
     },
@@ -777,6 +933,16 @@
           "$ref": "#/$defs/ExitContributionScope",
           "default": "not_applicable"
         },
+        "exit_selection_policy": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitSelectionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "icon": {
           "type": "string"
         },
@@ -1082,6 +1248,20 @@
         "exit_contribution_scope": {
           "$ref": "#/$defs/ExitContributionScope",
           "default": "not_applicable"
+        },
+        "exit_selection_policy": {
+          "$ref": "#/$defs/ExitSelectionPolicy",
+          "default": {
+            "available_exits": [],
+            "denied_exits": [],
+            "groups": [],
+            "members": [],
+            "mode": {
+              "mode": "member_choice"
+            },
+            "session_transition": "fail_closed"
+          },
+          "description": "Administrator-owned Exit selection governance. Legacy payloads default\nto member choice with no additional network/group/member narrowing."
         },
         "external_host": {
           "type": [

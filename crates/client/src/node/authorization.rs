@@ -1252,6 +1252,7 @@ mod tests {
             exit_contribution: Default::default(),
             exit_contribution_scope: Default::default(),
             exit_contribution_mode: Default::default(),
+            exit_selection_policy: Default::default(),
             signaling_port: 6666,
             relay_port: 6667,
             external_host: None,

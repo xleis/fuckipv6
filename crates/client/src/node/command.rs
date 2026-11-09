@@ -7,15 +7,15 @@ use base64::Engine;
 use fuckipv6_common::domain::{
     default_network_icon, default_network_language, default_network_purpose,
     default_network_region, ActivityEntry, AuditEntry, AuditOutcome, CapabilityKind, ContentHash,
-    ExitContributionMode, ExitContributionObligation, ExitContributionScope, InvitationCode,
-    InvitationCreateRequest, InvitationId, InvitationPreview, InvitationRedeemRequest,
-    InvitationRedemption, InvitationStatusView, IssuedInvitation, JoinRequest,
-    JoinRequestReviewAction, JoinRequestState, MemberLifecycleAction, MemberLifecycleChange,
-    MemberRemovalPreview, MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord,
-    NetworkEndpoint, NetworkId, NetworkJoinMode, NetworkMemberDirectory, NetworkProfileApplyResult,
-    NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility, PermissionDenialCode,
-    PolicyTestInput, PolicyTestResult, TrafficPolicy, TrafficPolicyTestComparison,
-    TrafficPolicyTestInput, TrafficPolicyTestVisibility,
+    ExitContributionMode, ExitContributionObligation, ExitContributionScope, ExitSelectionPolicy,
+    InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
+    InvitationRedeemRequest, InvitationRedemption, InvitationStatusView, IssuedInvitation,
+    JoinRequest, JoinRequestReviewAction, JoinRequestState, MemberLifecycleAction,
+    MemberLifecycleChange, MemberRemovalPreview, MembershipRole, NetworkCreateProfile,
+    NetworkDiscoveryRecord, NetworkEndpoint, NetworkId, NetworkJoinMode, NetworkMemberDirectory,
+    NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility,
+    PermissionDenialCode, PolicyTestInput, PolicyTestResult, TrafficPolicy,
+    TrafficPolicyTestComparison, TrafficPolicyTestInput, TrafficPolicyTestVisibility,
     JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS, JOIN_REQUEST_MAX_REASON_CHARS,
     NETWORK_PROFILE_MAX_TAG_CHARS,
 };
@@ -1072,6 +1072,10 @@ pub struct NodeCreateNetworkCommand {
     pub exit_contribution_scope: ExitContributionScope,
     #[serde(default)]
     pub exit_contribution_mode: ExitContributionMode,
+    /// Administrator-owned Exit selection governance. Legacy payloads default
+    /// to member choice with no additional network/group/member narrowing.
+    #[serde(default)]
+    pub exit_selection_policy: ExitSelectionPolicy,
     pub signaling_port: u16,
     pub relay_port: u16,
     pub external_host: Option<String>,
@@ -1146,6 +1150,13 @@ impl NodeCreateNetworkCommand {
                 message: "Exit 贡献义务与生效范围必须一致".into(),
             });
         }
+        if let Err(error) = self.exit_selection_policy.validate() {
+            issues.push(NodeValidationIssue {
+                path: "exit_selection_policy".into(),
+                code: "invalid_exit_selection_policy".into(),
+                message: format!("Exit 选择治理策略无效: {error}"),
+            });
+        }
         if self.signaling_port == 0 {
             issues.push(NodeValidationIssue {
                 path: "signaling_port".into(),
@@ -1202,7 +1213,7 @@ impl NodeCreateNetworkCommand {
             exit_contribution: self.exit_contribution,
             exit_contribution_scope: self.exit_contribution_scope,
             exit_contribution_mode: self.exit_contribution_mode,
-            exit_selection_policy: Default::default(),
+            exit_selection_policy: self.exit_selection_policy.clone(),
         }
     }
 }
@@ -1342,6 +1353,15 @@ impl NodeNetworkProfileCommand {
         }
         validate_profile_tags(&self.update.tags, &mut issues);
         validate_profile_capabilities(&self.update.capability_declarations, &mut issues);
+        if let Some(policy) = &self.update.exit_selection_policy {
+            if let Err(error) = policy.validate() {
+                issues.push(NodeValidationIssue {
+                    path: "update.exit_selection_policy".into(),
+                    code: "invalid_exit_selection_policy".into(),
+                    message: format!("Exit 选择治理策略无效: {error}"),
+                });
+            }
+        }
         if issues.is_empty() {
             Ok(())
         } else {
@@ -3753,8 +3773,9 @@ mod tests {
     use crate::node::NodePermission;
     use crate::owner_security::audit::OwnerSecurityAudit;
     use fuckipv6_common::domain::{
-        AuditExportFilter, AuditRetentionPolicy, PermissionCondition, PermissionEffect,
-        PermissionRule, PolicyAction, ResourceKind, SecurityRuleId, SubjectSelector,
+        AuditExportFilter, AuditRetentionPolicy, ExitSelectionMode, ExitSelectionPolicy,
+        PermissionCondition, PermissionEffect, PermissionRule, PolicyAction, ResourceKind,
+        SecurityRuleId, SubjectSelector,
     };
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -3889,6 +3910,7 @@ mod tests {
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
                 exit_contribution_mode: Default::default(),
+                exit_selection_policy: Default::default(),
                 signaling_port: 6666,
                 relay_port: 6667,
                 external_host: Some("vpn.example.com".into()),
@@ -4389,6 +4411,7 @@ mod tests {
             exit_contribution: Default::default(),
             exit_contribution_scope: Default::default(),
             exit_contribution_mode: Default::default(),
+            exit_selection_policy: Default::default(),
             signaling_port: 6666,
             relay_port: 6667,
             external_host: None,
@@ -4421,6 +4444,7 @@ mod tests {
             exit_contribution: Default::default(),
             exit_contribution_scope: Default::default(),
             exit_contribution_mode: Default::default(),
+            exit_selection_policy: Default::default(),
             signaling_port: 6666,
             relay_port: 6667,
             external_host: None,
@@ -4442,6 +4466,7 @@ mod tests {
             exit_contribution: Default::default(),
             exit_contribution_scope: Default::default(),
             exit_contribution_mode: Default::default(),
+            exit_selection_policy: Default::default(),
             signaling_port: 6666,
             relay_port: 6667,
             external_host: Some("vpn.example.com".into()),
@@ -4451,7 +4476,15 @@ mod tests {
 
     #[test]
     fn network_create_profile_round_trips_new_public_fields() {
-        let command = NodeCommand::CreateNetwork(valid_create_network_command());
+        let exit = NodeId::from_public_key(b"create-profile-exit");
+        let mut create = valid_create_network_command();
+        create.exit_selection_policy = ExitSelectionPolicy {
+            mode: ExitSelectionMode::Fixed { exit: exit.clone() },
+            default_exit: Some(exit.clone()),
+            available_exits: vec![exit.clone()],
+            ..ExitSelectionPolicy::default()
+        };
+        let command = NodeCommand::CreateNetwork(create);
         let encoded = serde_json::to_value(&command).expect("serialize create command");
         let decoded: NodeCommand =
             serde_json::from_value(encoded.clone()).expect("deserialize create command");
@@ -4465,6 +4498,17 @@ mod tests {
         assert_eq!(encoded["payload"]["language"], "zh-CN");
         assert_eq!(encoded["payload"]["visibility"], "private");
         assert_eq!(encoded["payload"]["join_mode"], "invite_only");
+        assert_eq!(
+            encoded["payload"]["exit_selection_policy"]["mode"]["exit"],
+            exit.to_string()
+        );
+        let NodeCommand::CreateNetwork(command) = &command else {
+            panic!("expected create command");
+        };
+        assert_eq!(
+            command.create_profile().exit_selection_policy,
+            command.exit_selection_policy
+        );
     }
 
     #[test]
@@ -4489,7 +4533,95 @@ mod tests {
         assert_eq!(command.language, DEFAULT_NETWORK_LANGUAGE);
         assert_eq!(command.visibility, NetworkVisibility::Unlisted);
         assert_eq!(command.join_mode, NetworkJoinMode::InviteOnly);
+        assert_eq!(
+            command.exit_selection_policy,
+            ExitSelectionPolicy::default()
+        );
         command.validate().expect("legacy payload remains valid");
+    }
+
+    #[test]
+    fn create_network_rejects_invalid_exit_selection_policy() {
+        let allowed = NodeId::from_public_key(b"create-policy-allowed-exit");
+        let outside = NodeId::from_public_key(b"create-policy-outside-exit");
+        let policies = [
+            ExitSelectionPolicy {
+                mode: ExitSelectionMode::Fixed {
+                    exit: outside.clone(),
+                },
+                available_exits: vec![allowed.clone()],
+                ..ExitSelectionPolicy::default()
+            },
+            ExitSelectionPolicy {
+                default_exit: Some(outside.clone()),
+                available_exits: vec![allowed.clone()],
+                ..ExitSelectionPolicy::default()
+            },
+            ExitSelectionPolicy {
+                available_exits: vec![allowed.clone(), allowed],
+                ..ExitSelectionPolicy::default()
+            },
+        ];
+
+        for policy in policies {
+            let mut create = valid_create_network_command();
+            create.exit_selection_policy = policy;
+            let problem = NodeCommand::CreateNetwork(create)
+                .validate()
+                .expect_err("invalid selection policy must fail");
+            assert_eq!(problem.code, NodeProblemCode::InvalidRequest);
+            assert!(problem
+                .details
+                .as_ref()
+                .expect("validation details")
+                .validation_issues
+                .iter()
+                .any(|issue| {
+                    issue.path == "exit_selection_policy"
+                        && issue.code == "invalid_exit_selection_policy"
+                }));
+        }
+    }
+
+    #[test]
+    fn network_profile_update_rejects_invalid_exit_selection_policy() {
+        let allowed = NodeId::from_public_key(b"profile-policy-allowed-exit");
+        let outside = NodeId::from_public_key(b"profile-policy-outside-exit");
+        let command = NodeNetworkProfileCommand {
+            network_name: "home".into(),
+            expected_revision: 1,
+            update: NetworkProfileUpdate {
+                purpose: "Family devices".into(),
+                icon: "home".into(),
+                language: "en".into(),
+                region: "ZZ".into(),
+                tags: Vec::new(),
+                capability_declarations: Vec::new(),
+                visibility: NetworkVisibility::Private,
+                join_mode: NetworkJoinMode::InviteOnly,
+                exit_contribution: Default::default(),
+                exit_contribution_scope: Default::default(),
+                exit_contribution_mode: Default::default(),
+                exit_selection_policy: Some(ExitSelectionPolicy {
+                    default_exit: Some(outside),
+                    available_exits: vec![allowed],
+                    ..ExitSelectionPolicy::default()
+                }),
+            },
+        };
+        let problem = NodeCommand::UpdateNetworkProfile(command)
+            .validate()
+            .expect_err("invalid update policy must fail");
+        assert!(problem
+            .details
+            .as_ref()
+            .expect("validation details")
+            .validation_issues
+            .iter()
+            .any(|issue| {
+                issue.path == "update.exit_selection_policy"
+                    && issue.code == "invalid_exit_selection_policy"
+            }));
     }
 
     #[test]
@@ -4623,6 +4755,7 @@ mod tests {
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
                 exit_contribution_mode: Default::default(),
+                exit_selection_policy: Default::default(),
                 signaling_port: 0,
                 relay_port: 6667,
                 external_host: None,
@@ -4641,6 +4774,7 @@ mod tests {
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
                 exit_contribution_mode: Default::default(),
+                exit_selection_policy: Default::default(),
                 signaling_port: 6666,
                 relay_port: 6666,
                 external_host: None,
@@ -4659,6 +4793,7 @@ mod tests {
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
                 exit_contribution_mode: Default::default(),
+                exit_selection_policy: Default::default(),
                 signaling_port: 6666,
                 relay_port: 6667,
                 external_host: Some("  ".into()),
@@ -5386,6 +5521,7 @@ mod tests {
             exit_contribution: Default::default(),
             exit_contribution_scope: Default::default(),
             exit_contribution_mode: Default::default(),
+            exit_selection_policy: Default::default(),
             signaling_port: 6666,
             relay_port: 6667,
             external_host: None,

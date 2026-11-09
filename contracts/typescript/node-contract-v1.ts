@@ -221,6 +221,71 @@ export type ExitNodePlatform = "linux" | "windows" | "macos" | "other";
 
 export type ExitNodeUnsupportedReason = "platform_not_linux" | "privileges_required" | "routing_tool_unavailable" | "iptables_unavailable" | "ipv4_forwarding_unavailable";
 
+export type ExitSelectionCandidate = {
+  "availability": ExitContributionAvailability;
+  "exit": NodeId;
+  "is_default": boolean;
+  "reason_code": string;
+  "selectable": boolean;
+  "source": ExitSelectionSource;
+};
+
+export type ExitSelectionGroupRule = {
+  "allow"?: Array<NodeId>;
+  "deny"?: Array<NodeId>;
+  "group_id": GroupId;
+  "members"?: Array<NodeId>;
+};
+
+export type ExitSelectionMemberRule = {
+  "allow"?: Array<NodeId>;
+  "deny"?: Array<NodeId>;
+  "node_id": NodeId;
+};
+
+export type ExitSelectionMode = {
+  "mode": "member_choice";
+} | {
+  "exit": NodeId;
+  "mode": "fixed";
+};
+
+export type ExitSelectionPolicy = {
+  "available_exits"?: Array<NodeId>;
+  "default_exit"?: NodeId | null;
+  "denied_exits"?: Array<NodeId>;
+  "groups"?: Array<ExitSelectionGroupRule>;
+  "members"?: Array<ExitSelectionMemberRule>;
+  "mode"?: ExitSelectionMode;
+  "session_transition"?: ExitSessionTransitionPolicy;
+};
+
+export type ExitSelectionResolution = {
+  "candidates": Array<ExitSelectionCandidate>;
+  "default_exit"?: NodeId | null;
+  "fixed_exit"?: NodeId | null;
+  "mode": ExitSelectionMode;
+  "policy_revision": number;
+  "selectable_exits": Array<NodeId>;
+  "selected_default"?: NodeId | null;
+  "subject": NodeId;
+};
+
+export type ExitSelectionSource = {
+  "scope": "network";
+} | {
+  "group_id": GroupId;
+  "scope": "group";
+} | {
+  "scope": "member";
+} | {
+  "scope": "selection_mode";
+} | {
+  "scope": "availability";
+};
+
+export type ExitSessionTransitionPolicy = "migrate" | "terminate" | "fail_closed";
+
 export type FieldPrivacyPolicy = {
   "effective_at_unix_ms": number;
   "expires_at_unix_ms": number;
@@ -535,6 +600,8 @@ export type NetworkMember = {
 
 export type NetworkMemberDirectory = {
   "can_manage_members": boolean;
+  "exit_selection_policy"?: ExitSelectionPolicy;
+  "exit_selection_policy_revision"?: number;
   "generated_at_unix_ms": number;
   "members": Array<NetworkMember>;
   "network_id": NetworkId;
@@ -605,6 +672,7 @@ export type NetworkProfileUpdate = {
   "exit_contribution"?: ExitContributionObligation;
   "exit_contribution_mode"?: ExitContributionMode;
   "exit_contribution_scope"?: ExitContributionScope;
+  "exit_selection_policy"?: ExitSelectionPolicy | null;
   "icon": string;
   "join_mode": NetworkJoinMode;
   "language": string;
@@ -1253,6 +1321,7 @@ export type NodeCreateNetworkCommand = {
   "exit_contribution"?: ExitContributionObligation;
   "exit_contribution_mode"?: ExitContributionMode;
   "exit_contribution_scope"?: ExitContributionScope;
+  "exit_selection_policy"?: ExitSelectionPolicy;
   "external_host"?: string | null;
   "icon"?: string;
   "join_mode"?: NetworkJoinMode;
@@ -1433,6 +1502,17 @@ export type NodeEventKind = {
 };
 
 export type NodeEventReplayReason = "cursor_ahead" | "history_gap" | "snapshot_rolled_back" | "lagged" | "revision_gap";
+
+export type NodeExitSelectionSnapshot = {
+  "directory_generated_at_unix_ms"?: number | null;
+  "directory_received_at_unix_ms"?: number | null;
+  "evaluated_at_unix_ms": number;
+  "network_id": NetworkId;
+  "policy"?: ExitSelectionPolicy | null;
+  "policy_revision": number;
+  "reason_code"?: string | null;
+  "resolution"?: ExitSelectionResolution | null;
+};
 
 export type NodeGetInvitationStatusCommand = {
   "invitation_id": InvitationId;
@@ -2018,6 +2098,7 @@ export type NodeSnapshot = {
   "discovery_index"?: NodeDiscoveryIndexSnapshot;
   "embedded_services"?: Array<NodeEmbeddedServiceSnapshot>;
   "exit_node_capabilities"?: ExitNodeCapabilities;
+  "exit_selections"?: Array<NodeExitSelectionSnapshot>;
   "identity"?: NodeIdentitySnapshot | null;
   "interface_problems"?: Array<NodeProblem>;
   "interfaces"?: Array<NodeInterfaceSnapshot>;
@@ -2107,7 +2188,7 @@ export type NodeUiField = {
   "validation": NodeUiValidation;
 };
 
-export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "policy_json" | "policy_snapshot_json" | "traffic_policy_json" | "traffic_policy_test_json" | "policy_network_ids" | "display_name" | "external_host" | "fingerprint" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "purpose" | "icon" | "language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution_mode" | "exit_contribution" | "exit_contribution_scope" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "node_id" | "member_lifecycle_action" | "member_lifecycle_reason" | "invitation_code" | "coordinator_url" | "port" | "revision" | "role" | "routing_mode" | "url_or_ticket" | "discovery_index_url" | "timeout_ms";
+export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "policy_json" | "policy_snapshot_json" | "traffic_policy_json" | "traffic_policy_test_json" | "policy_network_ids" | "display_name" | "external_host" | "fingerprint" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "purpose" | "icon" | "language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution_mode" | "exit_contribution" | "exit_contribution_scope" | "exit_selection_policy_json" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "node_id" | "member_lifecycle_action" | "member_lifecycle_reason" | "invitation_code" | "coordinator_url" | "port" | "revision" | "role" | "routing_mode" | "url_or_ticket" | "discovery_index_url" | "timeout_ms";
 
 export type NodeUiManifest = {
   "action_block_reasons": Array<NodeUiActionBlockReason>;
@@ -2125,7 +2206,7 @@ export type NodeUiPage = {
 
 export type NodeUiPageState = "initial_loading" | "error" | "maintenance" | "permission_denied" | "unsupported" | "offline" | "control_unavailable" | "node_failed" | "degraded" | "stale" | "refreshing" | "empty" | "ready";
 
-export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_mode" | "network_selection" | "role" | "routing_mode" | "positive_timeout" | "revision" | "configuration_json" | "policy_json" | "policy_snapshot_json" | "traffic_policy_json" | "traffic_policy_test_json" | "policy_network_ids" | "display_name" | "fingerprint" | "network_purpose" | "network_icon" | "network_language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution_mode" | "exit_contribution" | "exit_contribution_scope" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "node_id" | "member_lifecycle_action" | "member_lifecycle_reason" | "invitation_code" | "coordinator_url";
+export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_mode" | "network_selection" | "role" | "routing_mode" | "positive_timeout" | "revision" | "configuration_json" | "policy_json" | "policy_snapshot_json" | "traffic_policy_json" | "traffic_policy_test_json" | "policy_network_ids" | "display_name" | "fingerprint" | "network_purpose" | "network_icon" | "network_language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution_mode" | "exit_contribution" | "exit_contribution_scope" | "exit_selection_policy_json" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "node_id" | "member_lifecycle_action" | "member_lifecycle_reason" | "invitation_code" | "coordinator_url";
 
 export type NodeUpdateNetworkAllocationCommand = {
   "allocation": NodeNetworkAllocation;
@@ -2709,6 +2790,7 @@ export type ProjectedNodeSnapshot = {
   "discovery_index"?: NodeDiscoveryIndexSnapshot;
   "embedded_services"?: Array<ProjectedNodeEmbeddedServiceSnapshot>;
   "exit_node_capabilities"?: ExitNodeCapabilities;
+  "exit_selections"?: Array<NodeExitSelectionSnapshot>;
   "identity"?: ProjectedNodeIdentitySnapshot | null;
   "interface_problems"?: Array<NodeProblem>;
   "interfaces"?: Array<ProjectedNodeInterfaceSnapshot>;

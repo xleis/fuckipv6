@@ -135,25 +135,13 @@ impl ExitSelectionGate {
         &self,
         now_unix_ms: u64,
     ) -> Result<ExitSelectionResolution, ExitSelectionRuntimeDenial> {
-        let directory = self.fresh_directory(now_unix_ms)?;
-        let subject = directory
-            .members
-            .iter()
-            .find(|member| member.node_id == self.local_node_id)
-            .ok_or(ExitSelectionRuntimeDenial::RequesterNotInRoster)?;
-        if !subject.lifecycle_state.grants_network_access() {
-            return Err(ExitSelectionRuntimeDenial::RequesterNotActive);
-        }
-
-        let availability = self.availability_map(directory, now_unix_ms);
-        directory
-            .exit_selection_policy
-            .resolve(
-                directory.exit_selection_policy_revision,
-                &self.local_node_id,
-                &availability,
-            )
-            .map_err(ExitSelectionRuntimeDenial::Selection)
+        let directory = trusted_directory(
+            self.network_id.as_ref(),
+            self.member_directory.as_ref(),
+            self.member_directory_received_at_unix_ms,
+            now_unix_ms,
+        )?;
+        resolve_directory_exit_selection(&self.local_node_id, directory, now_unix_ms)
     }
 
     /// Select the Exit for a new or reopened session. `requested` is the local
@@ -185,60 +173,100 @@ impl ExitSelectionGate {
         &self,
         now_unix_ms: u64,
     ) -> Result<&NetworkMemberDirectory, ExitSelectionRuntimeDenial> {
-        let network_id = self
-            .network_id
-            .as_ref()
-            .ok_or(ExitSelectionRuntimeDenial::MissingNetworkContext)?;
-        let directory = self
-            .member_directory
-            .as_ref()
-            .ok_or(ExitSelectionRuntimeDenial::DirectoryUnavailable)?;
-        if directory.network_id != *network_id || directory.exit_selection_policy_revision == 0 {
-            return Err(ExitSelectionRuntimeDenial::DirectoryUnavailable);
-        }
-        let received_at = self
-            .member_directory_received_at_unix_ms
-            .ok_or(ExitSelectionRuntimeDenial::DirectoryUnavailable)?;
-        let received_is_fresh =
-            now_unix_ms.saturating_sub(received_at) <= EXIT_SELECTION_DIRECTORY_MAX_AGE_MS;
-        let generated_is_fresh = now_unix_ms.saturating_sub(directory.generated_at_unix_ms)
-            <= EXIT_SELECTION_DIRECTORY_MAX_AGE_MS;
-        if !received_is_fresh || !generated_is_fresh {
-            return Err(ExitSelectionRuntimeDenial::DirectoryUnavailable);
-        }
-        directory
-            .exit_selection_policy
-            .validate()
-            .map_err(ExitSelectionRuntimeDenial::InvalidPolicy)?;
-        Ok(directory)
+        trusted_directory(
+            self.network_id.as_ref(),
+            self.member_directory.as_ref(),
+            self.member_directory_received_at_unix_ms,
+            now_unix_ms,
+        )
+    }
+}
+
+/// Validate the one directory snapshot that both runtime admission and the UI
+/// authority projection are allowed to trust. Keeping freshness and identity
+/// checks here prevents the state store from growing a second, weaker gate.
+pub(crate) fn trusted_directory<'a>(
+    expected_network_id: Option<&NetworkId>,
+    directory: Option<&'a NetworkMemberDirectory>,
+    received_at_unix_ms: Option<u64>,
+    now_unix_ms: u64,
+) -> Result<&'a NetworkMemberDirectory, ExitSelectionRuntimeDenial> {
+    let network_id =
+        expected_network_id.ok_or(ExitSelectionRuntimeDenial::MissingNetworkContext)?;
+    let directory = directory.ok_or(ExitSelectionRuntimeDenial::DirectoryUnavailable)?;
+    if directory.network_id != *network_id || directory.exit_selection_policy_revision == 0 {
+        return Err(ExitSelectionRuntimeDenial::DirectoryUnavailable);
+    }
+    let received_at =
+        received_at_unix_ms.ok_or(ExitSelectionRuntimeDenial::DirectoryUnavailable)?;
+    let received_is_fresh =
+        now_unix_ms.saturating_sub(received_at) <= EXIT_SELECTION_DIRECTORY_MAX_AGE_MS;
+    let generated_is_fresh = now_unix_ms.saturating_sub(directory.generated_at_unix_ms)
+        <= EXIT_SELECTION_DIRECTORY_MAX_AGE_MS;
+    if !received_is_fresh || !generated_is_fresh {
+        return Err(ExitSelectionRuntimeDenial::DirectoryUnavailable);
+    }
+    directory
+        .exit_selection_policy
+        .validate()
+        .map_err(ExitSelectionRuntimeDenial::InvalidPolicy)?;
+    Ok(directory)
+}
+
+/// Resolve one subject against a directory already validated by
+/// [`trusted_directory`]. This is the shared implementation consumed by both
+/// data-plane admission and the node snapshot projection.
+pub(crate) fn resolve_directory_exit_selection(
+    subject_node_id: &NodeId,
+    directory: &NetworkMemberDirectory,
+    now_unix_ms: u64,
+) -> Result<ExitSelectionResolution, ExitSelectionRuntimeDenial> {
+    let subject = directory
+        .members
+        .iter()
+        .find(|member| &member.node_id == subject_node_id)
+        .ok_or(ExitSelectionRuntimeDenial::RequesterNotInRoster)?;
+    if !subject.lifecycle_state.grants_network_access() {
+        return Err(ExitSelectionRuntimeDenial::RequesterNotActive);
     }
 
-    fn availability_map(
-        &self,
-        directory: &NetworkMemberDirectory,
-        now_unix_ms: u64,
-    ) -> BTreeMap<NodeId, ExitContributionAvailability> {
-        directory
-            .exit_selection_policy
-            .available_exits
-            .iter()
-            .map(|exit| {
-                let observed = directory
-                    .members
-                    .iter()
-                    .find(|member| &member.node_id == exit)
-                    .map(|member| exit_member_availability(member, now_unix_ms))
-                    .unwrap_or_else(|| ExitContributionAvailability {
-                        state: ExitAvailabilityState::Unavailable,
-                        source: ExitAvailabilitySource::NotObserved,
-                        observed_at_unix_ms: None,
-                        declared_available: None,
-                        reason_code: Some("exit.selection.exit_not_in_roster".into()),
-                    });
-                (exit.clone(), observed)
-            })
-            .collect()
-    }
+    let availability = exit_selection_availability_map(directory, now_unix_ms);
+    directory
+        .exit_selection_policy
+        .resolve(
+            directory.exit_selection_policy_revision,
+            subject_node_id,
+            &availability,
+        )
+        .map_err(ExitSelectionRuntimeDenial::Selection)
+}
+
+/// Build the health evidence used by deny-first resolution. Missing, stale,
+/// inactive and offline members are never treated as selectable.
+pub(crate) fn exit_selection_availability_map(
+    directory: &NetworkMemberDirectory,
+    now_unix_ms: u64,
+) -> BTreeMap<NodeId, ExitContributionAvailability> {
+    directory
+        .exit_selection_policy
+        .available_exits
+        .iter()
+        .map(|exit| {
+            let observed = directory
+                .members
+                .iter()
+                .find(|member| &member.node_id == exit)
+                .map(|member| exit_member_availability(member, now_unix_ms))
+                .unwrap_or_else(|| ExitContributionAvailability {
+                    state: ExitAvailabilityState::Unavailable,
+                    source: ExitAvailabilitySource::NotObserved,
+                    observed_at_unix_ms: None,
+                    declared_available: None,
+                    reason_code: Some("exit.selection.exit_not_in_roster".into()),
+                });
+            (exit.clone(), observed)
+        })
+        .collect()
 }
 
 fn exit_member_availability(

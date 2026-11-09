@@ -20,7 +20,8 @@
         "signaling_port": "6666",
         "relay_port": "6667",
         "external_host": "vpn.example.test",
-        "auto_connect": "true"
+        "auto_connect": "true",
+        "exit_selection_policy_json": "{}"
       },
       "wire": {
         "command": "create_network",
@@ -30,8 +31,13 @@
           "icon": "home",
           "language": "zh-CN",
           "region": "CN",
-          "tags": ["family", "smart-home"],
-          "capability_declarations": ["relay"],
+          "tags": [
+            "family",
+            "smart-home"
+          ],
+          "capability_declarations": [
+            "relay"
+          ],
           "visibility": "public",
           "join_mode": "approval_required",
           "exit_contribution_mode": "disabled",
@@ -40,7 +46,17 @@
           "signaling_port": 6666,
           "relay_port": 6667,
           "external_host": "vpn.example.test",
-          "auto_connect": true
+          "auto_connect": true,
+          "exit_selection_policy": {
+            "mode": {
+              "mode": "member_choice"
+            },
+            "available_exits": [],
+            "denied_exits": [],
+            "groups": [],
+            "members": [],
+            "session_transition": "fail_closed"
+          }
         }
       }
     },
@@ -134,7 +150,9 @@
         "payload": {
           "network_id": "net_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
           "role": "administrator",
-          "capabilities": ["file"],
+          "capabilities": [
+            "file"
+          ],
           "max_uses": 2,
           "expires_in_ms": 3600000
         }

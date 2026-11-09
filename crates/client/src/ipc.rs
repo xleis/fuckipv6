@@ -94,6 +94,9 @@ pub(crate) enum RuntimeCommand {
         enabled: bool,
         reply: oneshot::Sender<Result<LocalExitRuntimeStatus, RuntimeControlError>>,
     },
+    LocalExitStatus {
+        reply: oneshot::Sender<Result<LocalExitRuntimeStatus, RuntimeControlError>>,
+    },
     Disconnect {
         reply: oneshot::Sender<Result<(), String>>,
     },

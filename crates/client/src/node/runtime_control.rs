@@ -2662,6 +2662,28 @@ impl NetworkRuntimeActor {
         join_all(requests).await
     }
 
+    async fn request_all_local_exit_statuses(
+        &self,
+    ) -> Vec<(
+        String,
+        Result<ipc::LocalExitRuntimeStatus, RuntimeRoutingRequestError>,
+    )> {
+        let wait = self.timeouts.local_exit_update;
+        let requests = self
+            .sessions
+            .iter()
+            .map(|(network_name, session)| {
+                let network_name = network_name.clone();
+                let routing_control = session.routing_control.clone();
+                async move {
+                    let result = request_runtime_local_exit_status(&routing_control, wait).await;
+                    (network_name, result)
+                }
+            })
+            .collect::<Vec<_>>();
+        join_all(requests).await
+    }
+
     async fn wait_for_local_exit_cleanup(
         &self,
         mut results: Vec<(
@@ -2678,7 +2700,7 @@ impl NetworkRuntimeActor {
                 return results;
             }
             sleep(LOCAL_EXIT_DRAIN_POLL_INTERVAL).await;
-            results = self.request_all_local_exit_capabilities(false).await;
+            results = self.request_all_local_exit_statuses().await;
         }
     }
 
@@ -5955,6 +5977,23 @@ async fn request_runtime_local_exit(
     }
 }
 
+async fn request_runtime_local_exit_status(
+    routing_control: &mpsc::UnboundedSender<ipc::RuntimeCommand>,
+    wait: Duration,
+) -> Result<ipc::LocalExitRuntimeStatus, RuntimeRoutingRequestError> {
+    let (reply, response) = oneshot::channel();
+    routing_control
+        .send(ipc::RuntimeCommand::LocalExitStatus { reply })
+        .map_err(|_| RuntimeRoutingRequestError::ControlClosed)?;
+
+    match timeout(wait, response).await {
+        Err(_) => Err(RuntimeRoutingRequestError::TimedOut(wait)),
+        Ok(Err(_)) => Err(RuntimeRoutingRequestError::ResponseClosed),
+        Ok(Ok(Ok(result))) => Ok(result),
+        Ok(Ok(Err(error))) => Err(RuntimeRoutingRequestError::LocalExitRejected(error)),
+    }
+}
+
 pub(crate) fn local_exit_unsupported_error(
     capabilities: &ExitNodeCapabilities,
 ) -> Option<RuntimeControlError> {
@@ -6278,6 +6317,7 @@ mod tests {
         runtime_local_exit_owners: Arc<Mutex<HashMap<String, bool>>>,
         local_exit_health: Arc<Mutex<HashMap<String, bool>>>,
         local_exit_clients: Arc<Mutex<HashMap<String, (u32, u64)>>>,
+        local_exit_drain_responses: Arc<Mutex<HashMap<String, usize>>>,
         routing_delay_ms: Arc<AtomicU64>,
         routing_in_flight: Arc<AtomicUsize>,
         routing_max_in_flight: Arc<AtomicUsize>,
@@ -6453,6 +6493,13 @@ mod tests {
                 .insert(network_name.into(), (active, total));
         }
 
+        fn set_local_exit_drain_responses(&self, network_name: &str, responses: usize) {
+            self.local_exit_drain_responses
+                .lock()
+                .expect("local exit drain response lock poisoned")
+                .insert(network_name.into(), responses);
+        }
+
         fn set_launch_delay(&self, delay: Duration) {
             self.launch_delay_ms
                 .store(delay.as_millis() as u64, Ordering::SeqCst);
@@ -6532,6 +6579,7 @@ mod tests {
             let runtime_local_exit_owners = self.runtime_local_exit_owners.clone();
             let local_exit_health = self.local_exit_health.clone();
             let local_exit_clients = self.local_exit_clients.clone();
+            let local_exit_drain_responses = self.local_exit_drain_responses.clone();
             let routing_delay_ms = self.routing_delay_ms.clone();
             let routing_in_flight = self.routing_in_flight.clone();
             let routing_max_in_flight = self.routing_max_in_flight.clone();
@@ -6720,6 +6768,51 @@ mod tests {
                                         routing_in_flight.fetch_sub(1, Ordering::SeqCst);
                                         let _ = reply.send(result);
                                     }
+                                    ipc::RuntimeCommand::LocalExitStatus { reply } => {
+                                        let enabled = runtime_local_exit_owners
+                                            .lock()
+                                            .expect("runtime local exit owner lock poisoned")
+                                            .get(&routing_network_name)
+                                            .copied()
+                                            .unwrap_or(false);
+                                        let network_allowed = current_config.exit_node.enabled;
+                                        let effective = enabled && network_allowed;
+                                        let health_override = local_exit_health
+                                            .lock()
+                                            .expect("local exit health lock poisoned")
+                                            .get(&routing_network_name)
+                                            .copied()
+                                            .unwrap_or(true);
+                                        let (active_clients, total_clients) = local_exit_clients
+                                            .lock()
+                                            .expect("local exit clients lock poisoned")
+                                            .get(&routing_network_name)
+                                            .copied()
+                                            .unwrap_or((0, 0));
+                                        let draining = if enabled {
+                                            false
+                                        } else {
+                                            let mut responses = local_exit_drain_responses
+                                                .lock()
+                                                .expect("local exit drain response lock poisoned");
+                                            match responses.get_mut(&routing_network_name) {
+                                                Some(remaining) if *remaining > 0 => {
+                                                    *remaining -= 1;
+                                                    true
+                                                }
+                                                _ => false,
+                                            }
+                                        };
+                                        let _ = reply.send(Ok(ipc::LocalExitRuntimeStatus {
+                                            owner_exit_enabled: enabled,
+                                            network_allowed,
+                                            effective,
+                                            healthy: effective && health_override && !draining,
+                                            draining,
+                                            active_clients,
+                                            total_clients,
+                                        }));
+                                    }
                                     ipc::RuntimeCommand::SetLocalExitCapability { enabled, reply } => {
                                         local_exit_calls
                                             .lock()
@@ -6752,6 +6845,20 @@ mod tests {
                                             .get(&routing_network_name)
                                             .copied()
                                             .unwrap_or((0, 0));
+                                        let draining = if enabled {
+                                            false
+                                        } else {
+                                            let mut responses = local_exit_drain_responses
+                                                .lock()
+                                                .expect("local exit drain response lock poisoned");
+                                            match responses.get_mut(&routing_network_name) {
+                                                Some(remaining) if *remaining > 0 => {
+                                                    *remaining -= 1;
+                                                    true
+                                                }
+                                                _ => false,
+                                            }
+                                        };
                                         runtime_local_exit_owners
                                             .lock()
                                             .expect("runtime local exit owner lock poisoned")
@@ -6760,8 +6867,8 @@ mod tests {
                                             owner_exit_enabled: enabled,
                                             network_allowed,
                                             effective,
-                                            healthy: effective && health_override,
-                                            draining: false,
+                                            healthy: effective && health_override && !draining,
+                                            draining,
                                             active_clients,
                                             total_clients,
                                         }));
@@ -7154,6 +7261,81 @@ mod tests {
         assert!(calls
             .iter()
             .any(|(network, enabled)| { network == "local-exit-toggle" && !*enabled }));
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn local_exit_disable_observes_cleaning_until_runtime_confirms_cleanup() {
+        let harness = TestHarness::new("local-exit-drain").await;
+        start_fake_network(&harness, "local-exit-drain").await;
+        set_supported_exit_capabilities(&harness).await;
+        harness
+            .runtime
+            .update_routing(routing_command(
+                "local-exit-drain",
+                NodeRoutingMode::GlobalProxy,
+                Some("office"),
+                true,
+            ))
+            .await
+            .expect("enable network exit role");
+        harness
+            .runtime
+            .set_local_exit_capability(true)
+            .await
+            .expect("enable local exit");
+        harness
+            .fake
+            .set_local_exit_drain_responses("local-exit-drain", 3);
+        let disable_calls_before = harness
+            .fake
+            .local_exit_calls()
+            .into_iter()
+            .filter(|(network, enabled)| network == "local-exit-drain" && !enabled)
+            .count();
+
+        let runtime = harness.runtime.clone();
+        let disable = tokio::spawn(async move { runtime.set_local_exit_capability(false).await });
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if harness.state.snapshot().await.local_exit.stage
+                    == LocalExitCapabilityStage::Cleaning
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("draining runtime must remain visible as Cleaning");
+
+        let snapshot = disable
+            .await
+            .expect("disable task must not panic")
+            .expect("disable local exit after cleanup");
+        assert!(!snapshot.owner_exit_enabled);
+        assert!(!snapshot.healthy);
+        assert_eq!(snapshot.stage, LocalExitCapabilityStage::Disabled);
+        assert_eq!(
+            harness.state.snapshot().await.local_exit.stage,
+            LocalExitCapabilityStage::Disabled
+        );
+        assert_eq!(
+            harness.fake.runtime_local_exit_owner("local-exit-drain"),
+            Some(false)
+        );
+        assert_eq!(
+            harness
+                .fake
+                .local_exit_calls()
+                .into_iter()
+                .filter(|(network, enabled)| network == "local-exit-drain" && !enabled)
+                .count()
+                - disable_calls_before,
+            1,
+            "cleanup polling must query status without repeating disable"
+        );
 
         harness.shutdown().await;
     }

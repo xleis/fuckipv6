@@ -1513,6 +1513,10 @@ async fn handle_runtime_command(
             let _ = reply.send(result);
             RuntimeCommandOutcome::Continue
         }
+        ipc::RuntimeCommand::LocalExitStatus { reply } => {
+            let _ = reply.send(Ok(local_exit_runtime_status(runtime)));
+            RuntimeCommandOutcome::Continue
+        }
         ipc::RuntimeCommand::Disconnect { reply } => {
             tracing::info!("收到本地控制接口的断开请求，等待 launcher 完成资源清理");
             RuntimeCommandOutcome::Disconnect(reply)

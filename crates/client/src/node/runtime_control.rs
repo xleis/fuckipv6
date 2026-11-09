@@ -19,7 +19,7 @@ use fuckipv6_common::{
 use futures::future::join_all;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{timeout, Instant};
+use tokio::time::{sleep, timeout, Instant};
 
 use super::{
     LocalExitCapabilitySnapshot, LocalExitCapabilityStage, NodeCleanupFailureReason,
@@ -54,6 +54,8 @@ pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const RESTART_TIMEOUT: Duration = Duration::from_secs(60);
 const ROUTING_UPDATE_TIMEOUT: Duration = Duration::from_secs(20);
 const LOCAL_EXIT_UPDATE_TIMEOUT: Duration = Duration::from_secs(20);
+const LOCAL_EXIT_DRAIN_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(12);
+const LOCAL_EXIT_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2660,6 +2662,26 @@ impl NetworkRuntimeActor {
         join_all(requests).await
     }
 
+    async fn wait_for_local_exit_cleanup(
+        &self,
+        mut results: Vec<(
+            String,
+            Result<ipc::LocalExitRuntimeStatus, RuntimeRoutingRequestError>,
+        )>,
+    ) -> Vec<(
+        String,
+        Result<ipc::LocalExitRuntimeStatus, RuntimeRoutingRequestError>,
+    )> {
+        let deadline = Instant::now() + LOCAL_EXIT_DRAIN_OBSERVATION_TIMEOUT;
+        loop {
+            if !local_exit_results_are_draining(&results) || Instant::now() >= deadline {
+                return results;
+            }
+            sleep(LOCAL_EXIT_DRAIN_POLL_INTERVAL).await;
+            results = self.request_all_local_exit_capabilities(false).await;
+        }
+    }
+
     async fn refresh_local_exit_capability_state(&self) {
         let owner_exit_enabled = match self.local_exit_owner_intent().await {
             Ok(enabled) => enabled,
@@ -2797,13 +2819,17 @@ impl NetworkRuntimeActor {
             return Err(persistence_error);
         }
 
-        let statuses = results
-            .into_iter()
-            .filter_map(|(_, result)| result.ok())
-            .collect::<Vec<_>>();
+        let results = if !enabled && local_exit_results_are_draining(&results) {
+            self.wait_for_local_exit_cleanup(results).await
+        } else {
+            results
+        };
+        let (statuses, cleanup_problem) = local_exit_request_results(results);
         Ok(self
             .publish_local_exit_capability(local_exit_capability_from_statuses(
-                enabled, &statuses, None,
+                enabled,
+                &statuses,
+                cleanup_problem,
             ))
             .await)
     }
@@ -6074,6 +6100,17 @@ fn local_exit_request_results(
     (statuses, problem)
 }
 
+fn local_exit_results_are_draining(
+    results: &[(
+        String,
+        Result<ipc::LocalExitRuntimeStatus, RuntimeRoutingRequestError>,
+    )],
+) -> bool {
+    results
+        .iter()
+        .any(|(_, result)| result.as_ref().is_ok_and(|status| status.draining))
+}
+
 fn local_exit_capability_from_statuses(
     owner_exit_enabled: bool,
     statuses: &[ipc::LocalExitRuntimeStatus],
@@ -6093,6 +6130,7 @@ fn local_exit_capability_from_statuses(
     });
 
     let effective_unhealthy = owner_exit_enabled && !effective.is_empty() && !healthy;
+    let draining = statuses.iter().any(|status| status.draining);
     let problem = problem.or_else(|| {
         effective_unhealthy.then(|| {
             NodeProblem::new(
@@ -6102,7 +6140,9 @@ fn local_exit_capability_from_statuses(
             .retryable(true)
         })
     });
-    let stage = if problem.is_some() || effective_unhealthy {
+    let stage = if draining {
+        LocalExitCapabilityStage::Cleaning
+    } else if problem.is_some() || effective_unhealthy {
         LocalExitCapabilityStage::Failed
     } else if !owner_exit_enabled {
         LocalExitCapabilityStage::Disabled
@@ -6721,6 +6761,7 @@ mod tests {
                                             network_allowed,
                                             effective,
                                             healthy: effective && health_override,
+                                            draining: false,
                                             active_clients,
                                             total_clients,
                                         }));

@@ -73,6 +73,10 @@ const TASK_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const RUNTIME_CLEANUP_TIMEOUT: Duration = Duration::from_secs(12);
 const OUTBOUND_QUEUE_CAPACITY: usize = 256;
 const RECOVERY_TRIGGER_QUEUE_CAPACITY: usize = 8;
+#[cfg(target_os = "linux")]
+const LOCAL_EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(target_os = "linux")]
+const LOCAL_EXIT_DRAIN_RETRY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Owns a fixed-size TUN read buffer while carrying the number of valid bytes.
 ///
@@ -529,6 +533,8 @@ pub(crate) struct ClientRuntime {
     pub(crate) route_manager: LinuxRouteManager,
     #[cfg(target_os = "linux")]
     pub(crate) exit_forwarder: Option<LinuxExitForwarder>,
+    #[cfg(target_os = "linux")]
+    pub(crate) exit_drain_deadline: Option<Instant>,
     pub(crate) recovery_events: RuntimeRecoveryEvents,
     recovery_trigger_tx: RuntimeRecoveryTriggerSender,
     #[cfg(target_os = "linux")]
@@ -780,6 +786,8 @@ pub(crate) async fn prepare_client_runtime_ext(
         route_manager,
         #[cfg(target_os = "linux")]
         exit_forwarder,
+        #[cfg(target_os = "linux")]
+        exit_drain_deadline: None,
         recovery_events,
         recovery_trigger_tx,
         #[cfg(target_os = "linux")]
@@ -1307,6 +1315,8 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<Option<DisconnectReply>> {
     loop {
+        let exit_drain_deadline = local_exit_drain_deadline(runtime);
+        let exit_drain = wait_for_local_exit_drain(exit_drain_deadline);
         tokio::select! {
             // 从TUN设备读取数据包
             Some(packets) = runtime.tun_io.packet_rx().recv() => {
@@ -1396,6 +1406,13 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                 }
             }
 
+            // Local Exit disable is a two-phase operation: ingress is fenced
+            // immediately, then this timer gives established conntrack flows a
+            // bounded grace period before all owned kernel resources are
+            // removed. Keeping the wait in the event loop means packet and
+            // signalling processing continue while the grace period elapses.
+            _ = exit_drain => complete_local_exit_drain(runtime).await,
+
             // 定期心跳与 QUIC 中继自愈检测
             _ = runtime.heartbeat_interval.tick() => {
                 if runtime
@@ -1432,6 +1449,34 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
     }
 
     Ok(None)
+}
+
+fn local_exit_drain_deadline(runtime: &ClientRuntime) -> Option<Instant> {
+    #[cfg(target_os = "linux")]
+    {
+        runtime.exit_drain_deadline
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = runtime;
+        None
+    }
+}
+
+async fn wait_for_local_exit_drain(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => sleep(deadline.saturating_duration_since(Instant::now())).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+async fn complete_local_exit_drain(runtime: &mut ClientRuntime) {
+    #[cfg(target_os = "linux")]
+    finish_runtime_local_exit_drain(runtime).await;
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = runtime;
+    }
 }
 
 async fn handle_runtime_command(
@@ -1547,19 +1592,25 @@ fn local_exit_runtime_status(runtime: &ClientRuntime) -> ipc::LocalExitRuntimeSt
     let network_allowed = runtime.config.exit_node.enabled;
     let effective = local_exit_effective(runtime.local_exit_enabled, network_allowed);
     #[cfg(target_os = "linux")]
-    let (healthy, active_clients, total_clients) = runtime
+    let (healthy, draining, active_clients, total_clients) = runtime
         .exit_forwarder
         .as_ref()
-        .map_or((false, 0, 0), |forwarder| {
-            (true, forwarder.active_clients(), forwarder.total_clients())
+        .map_or((false, false, 0, 0), |forwarder| {
+            (
+                !forwarder.is_draining(),
+                forwarder.is_draining(),
+                forwarder.active_clients(),
+                forwarder.total_clients(),
+            )
         });
     #[cfg(not(target_os = "linux"))]
-    let (healthy, active_clients, total_clients) = (false, 0, 0);
+    let (healthy, draining, active_clients, total_clients) = (false, false, 0, 0);
     ipc::LocalExitRuntimeStatus {
         owner_exit_enabled: runtime.local_exit_enabled,
         network_allowed,
         effective,
-        healthy: effective && healthy,
+        healthy: effective && healthy && !draining,
+        draining,
         active_clients,
         total_clients,
     }
@@ -1578,7 +1629,64 @@ async fn apply_runtime_local_exit_capability(
     let effective = local_exit_effective(enabled, network_allowed);
 
     #[cfg(target_os = "linux")]
-    if effective {
+    if !enabled {
+        let drain_error = match runtime.exit_forwarder.as_mut() {
+            Some(forwarder) => forwarder.begin_drain().await.err(),
+            None => None,
+        };
+        if let Some(error) = drain_error {
+            let rollback_error = match runtime.exit_forwarder.take() {
+                Some(mut forwarder) => {
+                    match forwarder.rollback_within(Duration::from_secs(4)).await {
+                        Ok(()) => None,
+                        Err(rollback_error) => {
+                            runtime.exit_forwarder = Some(forwarder);
+                            Some(rollback_error)
+                        }
+                    }
+                }
+                None => None,
+            };
+            runtime.exit_drain_deadline = runtime
+                .exit_forwarder
+                .is_some()
+                .then(|| Instant::now() + LOCAL_EXIT_DRAIN_RETRY_TIMEOUT);
+            runtime
+                .exit_node_manager
+                .set_enabled(runtime.exit_forwarder.is_some());
+            return match rollback_error {
+                None => Err(RuntimeControlError::Unavailable(format!(
+                    "进入 Exit Node 排空失败，已失败关闭并清理资源: {error:#}"
+                ))),
+                Some(rollback_error) => Err(RuntimeControlError::Unavailable(format!(
+                    "进入 Exit Node 排空失败且清理失败，可重试: {error:#}; {rollback_error:#}"
+                ))),
+            };
+        }
+
+        if runtime.exit_forwarder.is_some() {
+            runtime
+                .exit_drain_deadline
+                .get_or_insert_with(|| Instant::now() + LOCAL_EXIT_DRAIN_TIMEOUT);
+        } else {
+            runtime.exit_drain_deadline = None;
+        }
+        // Keep authorization and the forwarding data plane alive during drain so
+        // established conntrack entries can finish. The drain DROP rule is the
+        // authoritative fence for new flows.
+        runtime
+            .exit_node_manager
+            .set_enabled(runtime.exit_forwarder.is_some());
+    } else if effective {
+        if let Some(forwarder) = runtime.exit_forwarder.as_mut() {
+            if forwarder.is_draining() {
+                forwarder.cancel_drain().await.map_err(|error| {
+                    RuntimeControlError::Unavailable(format!(
+                        "取消 Exit Node 排空失败，无法重新开放数据面: {error:#}"
+                    ))
+                })?;
+            }
+        }
         if runtime.exit_forwarder.is_none() {
             let forwarder =
                 LinuxExitForwarder::install(&runtime.config.exit_node, runtime.tun_io.name())
@@ -1595,14 +1703,10 @@ async fn apply_runtime_local_exit_capability(
                     })?;
             runtime.exit_forwarder = Some(forwarder);
         }
+        runtime.exit_drain_deadline = None;
         runtime.exit_node_manager.set_enabled(true);
-    } else if let Some(mut forwarder) = runtime.exit_forwarder.take() {
-        if let Err(error) = forwarder.rollback_within(Duration::from_secs(4)).await {
-            runtime.exit_forwarder = Some(forwarder);
-            return Err(RuntimeControlError::Unavailable(format!(
-                "清理 Exit Node 内核转发失败，可重试: {error:#}"
-            )));
-        }
+    } else {
+        runtime.exit_node_manager.set_enabled(false);
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -1615,6 +1719,41 @@ async fn apply_runtime_local_exit_capability(
     }
 
     Ok(local_exit_runtime_status(runtime))
+}
+
+#[cfg(target_os = "linux")]
+fn local_exit_accepts_inbound(runtime: &ClientRuntime) -> bool {
+    runtime.local_exit_enabled
+        || runtime
+            .exit_forwarder
+            .as_ref()
+            .is_some_and(LinuxExitForwarder::is_draining)
+}
+
+#[cfg(target_os = "linux")]
+async fn finish_runtime_local_exit_drain(runtime: &mut ClientRuntime) {
+    if runtime.local_exit_enabled {
+        runtime.exit_drain_deadline = None;
+        return;
+    }
+
+    runtime.exit_drain_deadline = None;
+    let Some(mut forwarder) = runtime.exit_forwarder.take() else {
+        runtime.exit_node_manager.set_enabled(false);
+        return;
+    };
+
+    match forwarder.rollback_within(Duration::from_secs(4)).await {
+        Ok(()) => {
+            runtime.exit_node_manager.set_enabled(false);
+            tracing::info!("Exit Node 排空窗口结束，内核转发资源已清理");
+        }
+        Err(error) => {
+            runtime.exit_forwarder = Some(forwarder);
+            runtime.exit_drain_deadline = Some(Instant::now() + LOCAL_EXIT_DRAIN_RETRY_TIMEOUT);
+            tracing::warn!("Exit Node 排空后的资源清理失败，保留排空栅栏并自动重试: {error:#}");
+        }
+    }
 }
 
 async fn apply_runtime_routing(
@@ -1911,7 +2050,11 @@ async fn admit_inbound_packet(
     // Virtual-network destinations remain ordinary Mesh traffic. Any other
     // destination is privileged exit traffic and must pass every policy check.
     if !runtime.route_engine.is_virtual_network(target_dst) {
-        if !runtime.local_exit_enabled || !runtime.exit_node_manager.is_exit_node() {
+        #[cfg(target_os = "linux")]
+        let owner_accepts_exit = local_exit_accepts_inbound(runtime);
+        #[cfg(not(target_os = "linux"))]
+        let owner_accepts_exit = runtime.local_exit_enabled;
+        if !owner_accepts_exit || !runtime.exit_node_manager.is_exit_node() {
             tracing::debug!(
                 "本机 Exit owner intent 或网络角色未启用，丢弃 {} -> {target_dst}",
                 packet_src

@@ -258,11 +258,11 @@ impl LinuxExitForwarder {
         }
 
         let mut rules = Vec::new();
-        let mut programs = vec!["iptables"];
-        if self.external_v6_interface.is_some() {
-            programs.push("ip6tables");
-        }
-        for program in programs {
+        // Always fence both address families. If this host had no IPv6
+        // default route at install time the ip6tables chain may be absent;
+        // that specific case is safe to skip, while an existing chain must
+        // never keep accepting new flows during drain.
+        for program in ["iptables", "ip6tables"] {
             let args = drain_forward_rule(&self.forward_chain, &self.tun_name);
             if let Err(error) = install_iptables_rule(
                 self.runner.as_ref(),
@@ -273,6 +273,10 @@ impl LinuxExitForwarder {
             )
             .await
             {
+                if program == "ip6tables" && is_missing_firewall_resource(&error) {
+                    tracing::debug!("Exit Node 无 IPv6 转发链，跳过 IPv6 排空规则");
+                    continue;
+                }
                 self.drain_rules = rules;
                 self.draining = true;
                 let cleanup = self.cancel_drain().await;
@@ -360,9 +364,6 @@ impl LinuxExitForwarder {
 
     /// Grant forwarding resources to one authenticated client.
     pub async fn allow_client(&mut self, client_id: &str, virtual_ips: &VirtualIps) -> Result<()> {
-        if self.draining {
-            anyhow::bail!("Exit Node 正在排空，拒绝授权新客户端 {client_id}");
-        }
         let addresses: HashSet<IpAddr> = [
             virtual_ips.ipv4.map(IpAddr::V4),
             virtual_ips.ipv6.map(IpAddr::V6),
@@ -374,8 +375,18 @@ impl LinuxExitForwarder {
 
         if let Some(existing) = self.clients.get(client_id) {
             if existing.authorized && existing.addresses == addresses {
+                // Existing authenticated clients keep their established-flow
+                // rules during drain. The top-of-chain conntrack DROP rejects
+                // their new flows without interrupting packets already tracked.
                 return Ok(());
             }
+        }
+
+        if self.draining {
+            anyhow::bail!("Exit Node 正在排空，拒绝授权新客户端 {client_id}");
+        }
+
+        if self.clients.contains_key(client_id) {
             self.remove_client(client_id).await?;
         }
 
@@ -1676,6 +1687,11 @@ mod tests {
             assert!(runs.contains(&iptables_invocation(program, Some("filter"), &refs)));
         }
 
+        forwarder
+            .allow_client("peer-1", &client)
+            .await
+            .expect("existing client keeps established flow resources during drain");
+
         let rejected = forwarder
             .allow_client(
                 "peer-2",
@@ -1716,6 +1732,44 @@ mod tests {
             )
             .await
             .expect("cancel drain restores new client acceptance");
+    }
+
+    #[tokio::test]
+    async fn drain_still_fences_ipv6_when_no_default_route_was_detected() {
+        let runner = Arc::new(FakeCommandRunner::default());
+        let mut forwarder = fake_forwarder(runner.clone(), None);
+
+        forwarder
+            .begin_drain()
+            .await
+            .expect("drain without an IPv6 default route");
+
+        let runs = runner.async_runs();
+        let drain = drain_forward_rule(&forwarder.forward_chain, &forwarder.tun_name);
+        let refs: Vec<&str> = drain.iter().map(String::as_str).collect();
+        for program in ["iptables", "ip6tables"] {
+            assert!(runs.contains(&iptables_invocation(program, Some("filter"), &refs)));
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_skips_an_absent_ipv6_chain_but_keeps_ipv4_fenced() {
+        let runner = Arc::new(FakeCommandRunner::default());
+        let mut forwarder = fake_forwarder(runner.clone(), None);
+        let drain = drain_forward_rule(&forwarder.forward_chain, &forwarder.tun_name);
+        let refs: Vec<&str> = drain.iter().map(String::as_str).collect();
+        runner.fail_async_with(
+            iptables_invocation("ip6tables", Some("filter"), &refs),
+            "No chain/target/match by that name",
+        );
+
+        forwarder
+            .begin_drain()
+            .await
+            .expect("absent IPv6 chain must not block an IPv4-only host");
+        assert!(forwarder.is_draining());
+        assert_eq!(forwarder.drain_rules.len(), 1);
+        assert_eq!(forwarder.drain_rules[0].program, "iptables");
     }
 
     #[tokio::test]

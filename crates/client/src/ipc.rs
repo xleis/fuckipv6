@@ -72,6 +72,7 @@ pub struct LocalExitRuntimeStatus {
     pub network_allowed: bool,
     pub effective: bool,
     pub healthy: bool,
+    pub draining: bool,
     pub active_clients: u32,
     pub total_clients: u64,
 }

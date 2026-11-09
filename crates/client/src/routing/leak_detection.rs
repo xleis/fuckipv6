@@ -332,6 +332,7 @@ struct FamilyObservation {
 }
 
 impl FamilyObservation {
+    #[cfg(not(target_os = "linux"))]
     fn unsupported(family: IpFamily) -> Self {
         Self {
             family,
@@ -839,31 +840,6 @@ mod tests {
     use std::collections::BTreeSet;
 
     const NOW: u64 = 1_700_000_000_000;
-
-    fn passing_probe(
-        _target: LeakDetectionTarget,
-        _observed_at_unix_ms: u64,
-    ) -> LeakProbeFuture<'static> {
-        Box::pin(async {
-            LeakProbeOutcome {
-                state: LeakDetectionEvidenceState::Passed,
-                duration_ms: 1,
-                error_code: None,
-            }
-        })
-    }
-
-    struct PassingProbes;
-
-    impl LeakDetectionProbeRunner for PassingProbes {
-        fn probe<'a>(
-            &'a self,
-            target: LeakDetectionTarget,
-            observed_at_unix_ms: u64,
-        ) -> LeakProbeFuture<'a> {
-            passing_probe(target, observed_at_unix_ms)
-        }
-    }
 
     fn passing_dns() -> DnsObservation {
         DnsObservation {

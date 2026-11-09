@@ -15,37 +15,27 @@ use super::{DomainError, DomainResult};
 pub const LEAK_DETECTION_DEFAULT_MAX_AGE_MS: u64 = 90_000;
 pub const LEAK_DETECTION_MAX_FUTURE_SKEW_MS: u64 = 5_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LeakDetectionPlatform {
     Linux,
     Windows,
     Macos,
+    #[default]
     Other,
-}
-
-impl Default for LeakDetectionPlatform {
-    fn default() -> Self {
-        Self::Other
-    }
 }
 
 /// DNS path that was actually observed. DoT support is not implied merely
 /// because this enum can represent it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LeakDetectionDnsMode {
     SystemResolver,
     Doh,
     Dot,
     NetworkSpecified,
+    #[default]
     Unmanaged,
-}
-
-impl Default for LeakDetectionDnsMode {
-    fn default() -> Self {
-        Self::Unmanaged
-    }
 }
 
 #[derive(

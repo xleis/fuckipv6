@@ -10,9 +10,11 @@ use fuckipv6_common::domain::{
     ExitHealthRetest, ExitHealthRetestPhase, ExitHealthSnapshot, ExitHealthSource,
     ExitHealthTarget, InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
     InvitationRedeemRequest, InvitationRedemption, InvitationStatusView, IssuedInvitation,
-    JoinRequest, JoinRequestId, MemberLifecycleChange, MemberLifecycleChangeRequest,
+    JoinRequest, JoinRequestId, LeakDetectionEvidence, LeakDetectionEvidenceState,
+    LeakDetectionIsolationAction, LeakDetectionProtocol, LeakDetectionSnapshot,
+    LeakDetectionSource, LeakDetectionTarget, MemberLifecycleChange, MemberLifecycleChangeRequest,
     MemberRemovalPreview, MemberRemovalPreviewRequest, MembershipRole, NetworkId,
-    NetworkMemberDirectory,
+    NetworkMemberDirectory, TrafficProtectionState,
 };
 use fuckipv6_common::{
     ClientConfig, ExitNodeCapabilities, ExitNodeUnsupportedReason, JoinRequestBatchReviewItem,
@@ -43,6 +45,7 @@ use crate::config_manager::{ConfigManager, NetworkConfig, NetworkCreationError};
 use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
 use crate::network_setup::{self, NetworkSetupStage};
 use crate::node::runtime_metadata;
+use crate::routing::leak_detection::{collect_leak_detection, LeakDetectionContext};
 use crate::signaling::client::{
     InvitationControlError, JoinRequestControlError, JoinRequestStatusSnapshot, SignalingClient,
 };
@@ -1366,6 +1369,7 @@ fn diagnostic_recovery_actions(
 
 fn build_exit_health_snapshot(
     snapshot: &NodeSnapshot,
+    leak_detection: &LeakDetectionSnapshot,
     started_at_unix_ms: u64,
     completed_at_unix_ms: u64,
 ) -> ExitHealthSnapshot {
@@ -1374,112 +1378,98 @@ fn build_exit_health_snapshot(
         .iter()
         .filter(|network| network.roles.contains(&NodeNetworkRole::ExitNode))
         .collect::<Vec<_>>();
-    if local_exit_networks.is_empty() {
-        return ExitHealthSnapshot::default();
-    }
 
     let mut evidence = Vec::new();
-    let process_state = if snapshot.local_exit.problem.is_some()
-        || snapshot.local_exit.stage == LocalExitCapabilityStage::Failed
-    {
-        ExitHealthEvidenceState::Failed
-    } else if matches!(
-        snapshot.local_exit.stage,
-        LocalExitCapabilityStage::Listening
-            | LocalExitCapabilityStage::HealthChecking
-            | LocalExitCapabilityStage::Enabled
-            | LocalExitCapabilityStage::Draining
-            | LocalExitCapabilityStage::Cleaning
-    ) {
-        ExitHealthEvidenceState::Passed
-    } else {
-        ExitHealthEvidenceState::NotTested
-    };
-    evidence.push(ExitHealthEvidence {
-        layer: ExitHealthLayer::Process,
-        state: process_state,
-        source: ExitHealthSource::LocalProcess,
-        observed_at_unix_ms: completed_at_unix_ms.max(1),
-        duration_ms: 0,
-        target: None,
-        protocol: None,
-        error_code: snapshot
-            .local_exit
-            .problem
-            .as_ref()
-            .map(|_| "exit.health.process_unhealthy".into()),
-    });
-
-    let listening_state = if matches!(
-        snapshot.local_exit.stage,
-        LocalExitCapabilityStage::Listening | LocalExitCapabilityStage::Enabled
-    ) {
-        ExitHealthEvidenceState::Passed
-    } else if snapshot.local_exit.stage == LocalExitCapabilityStage::Failed {
-        ExitHealthEvidenceState::Failed
-    } else {
-        ExitHealthEvidenceState::NotTested
-    };
-    evidence.push(ExitHealthEvidence {
-        layer: ExitHealthLayer::Listening,
-        state: listening_state,
-        source: ExitHealthSource::LocalSocket,
-        observed_at_unix_ms: completed_at_unix_ms.max(1),
-        duration_ms: 0,
-        target: None,
-        protocol: None,
-        error_code: None,
-    });
-
-    let network_state = if local_exit_networks
-        .iter()
-        .any(|network| network.status == NodeNetworkStatus::Offline)
-    {
-        ExitHealthEvidenceState::Failed
-    } else if local_exit_networks.iter().any(|network| {
-        matches!(
-            network.status,
-            NodeNetworkStatus::Online | NodeNetworkStatus::Degraded
-        )
-    }) {
-        ExitHealthEvidenceState::Passed
-    } else {
-        ExitHealthEvidenceState::NotTested
-    };
-    evidence.push(ExitHealthEvidence {
-        layer: ExitHealthLayer::Network,
-        state: network_state,
-        source: ExitHealthSource::LocalNetwork,
-        observed_at_unix_ms: completed_at_unix_ms.max(1),
-        duration_ms: 0,
-        target: None,
-        protocol: None,
-        error_code: None,
-    });
-
-    // A listening process is not evidence that resolver or Internet probes
-    // succeeded. These layers stay explicit until a controlled probe records a
-    // fresh observation.
-    for (target, protocol) in [
-        (ExitHealthTarget::DnsResolver, ExitHealthProtocol::Dns),
-        (ExitHealthTarget::Ipv4Internet, ExitHealthProtocol::Ipv4),
-        (ExitHealthTarget::Ipv6Internet, ExitHealthProtocol::Ipv6),
-    ] {
+    if !local_exit_networks.is_empty() {
+        let process_state = if snapshot.local_exit.problem.is_some()
+            || snapshot.local_exit.stage == LocalExitCapabilityStage::Failed
+        {
+            ExitHealthEvidenceState::Failed
+        } else if matches!(
+            snapshot.local_exit.stage,
+            LocalExitCapabilityStage::Listening
+                | LocalExitCapabilityStage::HealthChecking
+                | LocalExitCapabilityStage::Enabled
+                | LocalExitCapabilityStage::Draining
+                | LocalExitCapabilityStage::Cleaning
+        ) {
+            ExitHealthEvidenceState::Passed
+        } else {
+            ExitHealthEvidenceState::NotTested
+        };
         evidence.push(ExitHealthEvidence {
-            layer: if target == ExitHealthTarget::DnsResolver {
-                ExitHealthLayer::Dns
-            } else {
-                ExitHealthLayer::InternetReachability
-            },
-            state: ExitHealthEvidenceState::NotTested,
-            source: ExitHealthSource::ControlledProbe,
+            layer: ExitHealthLayer::Process,
+            state: process_state,
+            source: ExitHealthSource::LocalProcess,
             observed_at_unix_ms: completed_at_unix_ms.max(1),
             duration_ms: 0,
-            target: Some(target),
-            protocol: Some(protocol),
-            error_code: Some("exit.health.probe_not_executed".into()),
+            target: None,
+            protocol: None,
+            error_code: snapshot
+                .local_exit
+                .problem
+                .as_ref()
+                .map(|_| "exit.health.process_unhealthy".into()),
+        });
+
+        let listening_state = if matches!(
+            snapshot.local_exit.stage,
+            LocalExitCapabilityStage::Listening | LocalExitCapabilityStage::Enabled
+        ) {
+            ExitHealthEvidenceState::Passed
+        } else if snapshot.local_exit.stage == LocalExitCapabilityStage::Failed {
+            ExitHealthEvidenceState::Failed
+        } else {
+            ExitHealthEvidenceState::NotTested
+        };
+        evidence.push(ExitHealthEvidence {
+            layer: ExitHealthLayer::Listening,
+            state: listening_state,
+            source: ExitHealthSource::LocalSocket,
+            observed_at_unix_ms: completed_at_unix_ms.max(1),
+            duration_ms: 0,
+            target: None,
+            protocol: None,
+            error_code: None,
+        });
+
+        let network_state = if local_exit_networks
+            .iter()
+            .any(|network| network.status == NodeNetworkStatus::Offline)
+        {
+            ExitHealthEvidenceState::Failed
+        } else if local_exit_networks.iter().any(|network| {
+            matches!(
+                network.status,
+                NodeNetworkStatus::Online | NodeNetworkStatus::Degraded
+            )
+        }) {
+            ExitHealthEvidenceState::Passed
+        } else {
+            ExitHealthEvidenceState::NotTested
+        };
+        evidence.push(ExitHealthEvidence {
+            layer: ExitHealthLayer::Network,
+            state: network_state,
+            source: ExitHealthSource::LocalNetwork,
+            observed_at_unix_ms: completed_at_unix_ms.max(1),
+            duration_ms: 0,
+            target: None,
+            protocol: None,
+            error_code: None,
         });
     }
+
+    // Exit DNS and reachability are projected from leak evidence rather than
+    // inferred from a healthy process/listener. Keep one deterministic evidence
+    // item per protocol: the worst state wins, then the newest observation, and
+    // finally the stable target key. This keeps a passing host route from hiding
+    // an escaping route, an unexecuted probe or an isolated unavailable family.
+    evidence.extend(
+        aggregate_leak_evidence_for_exit_health(leak_detection)
+            .into_iter()
+            .map(leak_evidence_to_exit_health),
+    );
 
     let retest = ExitHealthRetest {
         phase: ExitHealthRetestPhase::Completed,
@@ -1494,6 +1484,102 @@ fn build_exit_health_snapshot(
     }
 }
 
+fn aggregate_leak_evidence_for_exit_health(
+    leak_detection: &LeakDetectionSnapshot,
+) -> Vec<&LeakDetectionEvidence> {
+    let mut by_protocol = BTreeMap::<LeakDetectionProtocol, &LeakDetectionEvidence>::new();
+    for candidate in &leak_detection.evidence {
+        let protocol = candidate.target.protocol();
+        match by_protocol.get(&protocol) {
+            Some(current) if !leak_evidence_is_worse(candidate, current) => {}
+            _ => {
+                by_protocol.insert(protocol, candidate);
+            }
+        }
+    }
+    by_protocol.into_values().collect()
+}
+
+fn leak_evidence_is_worse(
+    candidate: &LeakDetectionEvidence,
+    current: &LeakDetectionEvidence,
+) -> bool {
+    leak_evidence_severity(candidate.state)
+        .cmp(&leak_evidence_severity(current.state))
+        .then_with(|| {
+            candidate
+                .observed_at_unix_ms
+                .cmp(&current.observed_at_unix_ms)
+        })
+        .then_with(|| current.target.key().cmp(candidate.target.key()))
+        .is_gt()
+}
+
+fn leak_evidence_severity(state: LeakDetectionEvidenceState) -> u8 {
+    match state {
+        LeakDetectionEvidenceState::Passed => 0,
+        LeakDetectionEvidenceState::Unsupported => 1,
+        LeakDetectionEvidenceState::NotTested => 2,
+        LeakDetectionEvidenceState::Failed => 3,
+    }
+}
+
+fn leak_evidence_to_exit_health(evidence: &LeakDetectionEvidence) -> ExitHealthEvidence {
+    ExitHealthEvidence {
+        layer: match evidence.target.protocol() {
+            LeakDetectionProtocol::Dns => ExitHealthLayer::Dns,
+            LeakDetectionProtocol::Ipv4 | LeakDetectionProtocol::Ipv6 => {
+                ExitHealthLayer::InternetReachability
+            }
+        },
+        state: match evidence.state {
+            LeakDetectionEvidenceState::Passed => ExitHealthEvidenceState::Passed,
+            LeakDetectionEvidenceState::Failed => ExitHealthEvidenceState::Failed,
+            LeakDetectionEvidenceState::Unsupported => ExitHealthEvidenceState::Unsupported,
+            LeakDetectionEvidenceState::NotTested => ExitHealthEvidenceState::NotTested,
+        },
+        source: match evidence.source {
+            LeakDetectionSource::SystemResolver | LeakDetectionSource::ManagedDoh => {
+                ExitHealthSource::LocalDns
+            }
+            LeakDetectionSource::LocalRoutingTable | LeakDetectionSource::LinkCapability => {
+                ExitHealthSource::LocalNetwork
+            }
+            LeakDetectionSource::ControlledProbe
+            | LeakDetectionSource::ExternalReachabilityProbe
+            | LeakDetectionSource::ApplicationBehaviorProbe => ExitHealthSource::ControlledProbe,
+        },
+        observed_at_unix_ms: evidence.observed_at_unix_ms,
+        duration_ms: evidence.duration_ms,
+        target: Some(leak_target_to_exit_target(evidence.target)),
+        protocol: Some(match evidence.target.protocol() {
+            LeakDetectionProtocol::Dns => ExitHealthProtocol::Dns,
+            LeakDetectionProtocol::Ipv4 => ExitHealthProtocol::Ipv4,
+            LeakDetectionProtocol::Ipv6 => ExitHealthProtocol::Ipv6,
+        }),
+        error_code: evidence.error_code.clone(),
+    }
+}
+
+fn leak_target_to_exit_target(target: LeakDetectionTarget) -> ExitHealthTarget {
+    match target {
+        LeakDetectionTarget::DnsResolver => ExitHealthTarget::DnsResolver,
+        LeakDetectionTarget::Ipv4ExternalTarget => ExitHealthTarget::Ipv4Internet,
+        LeakDetectionTarget::Ipv6ExternalTarget => ExitHealthTarget::Ipv6Internet,
+        LeakDetectionTarget::BrowserApplicationDns
+        | LeakDetectionTarget::Ipv4Carrier
+        | LeakDetectionTarget::Ipv4SourceAddress
+        | LeakDetectionTarget::Ipv4DefaultRoute
+        | LeakDetectionTarget::Ipv4ControlledLeakService
+        | LeakDetectionTarget::Ipv6Carrier
+        | LeakDetectionTarget::Ipv6SourceAddress
+        | LeakDetectionTarget::Ipv6DefaultRoute
+        | LeakDetectionTarget::Ipv6ControlledLeakService => {
+            ExitHealthTarget::Controlled(target.key().into())
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_sanitized_diagnostic_report(
     diagnostic_id: &str,
@@ -1502,6 +1588,7 @@ fn build_sanitized_diagnostic_report(
     timed_out: bool,
     checks: &[NodeDiagnosticCheck],
     exit_health: &ExitHealthSnapshot,
+    leak_detection: &LeakDetectionSnapshot,
     recovery_actions: &[NodeDiagnosticRecoveryAction],
     residue: &NodeRuntimeResidueSnapshot,
 ) -> String {
@@ -1556,6 +1643,41 @@ fn build_sanitized_diagnostic_report(
             .collect::<Vec<_>>()
             .join(","),
     ));
+    let leak_assessment = leak_detection.assess(completed_at_unix_ms);
+    report.push_str(&format!(
+        "leak_detection: state={} reason={} fail_closed_required={} affected_protocols={} affected_targets={}\n",
+        leak_assessment.state.key(),
+        leak_assessment.reason_code,
+        leak_assessment.fail_closed_required,
+        leak_assessment
+            .affected_protocols
+            .iter()
+            .map(|protocol| protocol.key())
+            .collect::<Vec<_>>()
+            .join(","),
+        leak_assessment
+            .affected_targets
+            .iter()
+            .map(|target| target.key())
+            .collect::<Vec<_>>()
+            .join(","),
+    ));
+    report.push_str("leak_detection_evidence:\n");
+    for evidence in &leak_detection.evidence {
+        report.push_str(&format!(
+            "- {}: state={} source={} observed_at_unix_ms={} duration_ms={} error_code={} isolation_action={}\n",
+            evidence.target.key(),
+            leak_evidence_state_key(evidence.state),
+            leak_source_key(evidence.source),
+            evidence.observed_at_unix_ms,
+            evidence.duration_ms,
+            stable_report_token(evidence.error_code.as_deref()),
+            evidence
+                .isolation_action
+                .map(leak_isolation_action_key)
+                .unwrap_or("none"),
+        ));
+    }
     report.push_str(&format!(
         "residue: sessions={} listeners={} peers={} services={} residual_networks={}\n",
         residue.sessions_remaining,
@@ -1572,6 +1694,48 @@ fn build_sanitized_diagnostic_report(
         ));
     }
     report
+}
+
+fn leak_evidence_state_key(state: LeakDetectionEvidenceState) -> &'static str {
+    match state {
+        LeakDetectionEvidenceState::Passed => "passed",
+        LeakDetectionEvidenceState::Failed => "failed",
+        LeakDetectionEvidenceState::Unsupported => "unsupported",
+        LeakDetectionEvidenceState::NotTested => "not_tested",
+    }
+}
+
+fn leak_source_key(source: LeakDetectionSource) -> &'static str {
+    match source {
+        LeakDetectionSource::SystemResolver => "system_resolver",
+        LeakDetectionSource::ManagedDoh => "managed_doh",
+        LeakDetectionSource::LocalRoutingTable => "local_routing_table",
+        LeakDetectionSource::LinkCapability => "link_capability",
+        LeakDetectionSource::ControlledProbe => "controlled_probe",
+        LeakDetectionSource::ExternalReachabilityProbe => "external_reachability_probe",
+        LeakDetectionSource::ApplicationBehaviorProbe => "application_behavior_probe",
+    }
+}
+
+fn leak_isolation_action_key(action: LeakDetectionIsolationAction) -> &'static str {
+    match action {
+        LeakDetectionIsolationAction::BlockedUnavailableIpv4 => "blocked_unavailable_ipv4",
+        LeakDetectionIsolationAction::BlockedUnavailableIpv6 => "blocked_unavailable_ipv6",
+        LeakDetectionIsolationAction::FailClosedAffectedTraffic => "fail_closed_affected_traffic",
+        LeakDetectionIsolationAction::RetainedProtectedRoute => "retained_protected_route",
+    }
+}
+
+fn stable_report_token(value: Option<&str>) -> &str {
+    value
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })
+        .unwrap_or("none")
 }
 
 /// A manager-wide single-flight gate for lifecycle operations. The permit is
@@ -5270,10 +5434,40 @@ impl NetworkRuntimeActor {
         let residue = cleanup.to_public();
         let checks = build_diagnostic_checks(&snapshot, &residue, started_at_unix_ms);
         let recovery_actions = diagnostic_recovery_actions(&checks, &residue);
+        let protected_networks = snapshot
+            .networks
+            .iter()
+            .filter(|network| {
+                matches!(
+                    network.status,
+                    NodeNetworkStatus::Online | NodeNetworkStatus::Degraded
+                )
+            })
+            .map(|network| network.name.as_str())
+            .collect::<BTreeSet<_>>();
+        let protected_interfaces = self
+            .sessions
+            .iter()
+            .filter(|(network_name, _)| protected_networks.contains(network_name.as_str()))
+            .map(|(_, session)| session.tun_name.clone())
+            .collect::<Vec<_>>();
+        let leak_detection = collect_leak_detection(
+            LeakDetectionContext::new(
+                snapshot.traffic_session.state == TrafficProtectionState::Protected,
+                protected_interfaces,
+            ),
+            unix_time_ms(),
+        )
+        .await;
         let completed_at_unix_ms = unix_time_ms();
-        let exit_health =
-            build_exit_health_snapshot(&snapshot, started_at_unix_ms, completed_at_unix_ms);
+        let exit_health = build_exit_health_snapshot(
+            &snapshot,
+            &leak_detection,
+            started_at_unix_ms,
+            completed_at_unix_ms,
+        );
         let exit_health_assessment = exit_health.assess(completed_at_unix_ms);
+        let leak_detection_assessment = leak_detection.assess(completed_at_unix_ms);
         let sanitized_report = build_sanitized_diagnostic_report(
             &diagnostic_id,
             started_at_unix_ms,
@@ -5281,6 +5475,7 @@ impl NetworkRuntimeActor {
             false,
             &checks,
             &exit_health,
+            &leak_detection,
             &recovery_actions,
             &residue,
         );
@@ -5296,6 +5491,8 @@ impl NetworkRuntimeActor {
             checks,
             exit_health,
             exit_health_assessment,
+            leak_detection,
+            leak_detection_assessment,
             recovery_actions,
             sanitized_report,
         })
@@ -10503,6 +10700,7 @@ mod tests {
             false,
             &checks,
             &ExitHealthSnapshot::default(),
+            &LeakDetectionSnapshot::default(),
             &actions,
             &residue,
         );
@@ -10539,7 +10737,12 @@ mod tests {
             traffic: NodeTrafficSnapshot::default(),
         });
 
-        let health = build_exit_health_snapshot(&snapshot, 1_700_000_000_000, 1_700_000_001_000);
+        let health = build_exit_health_snapshot(
+            &snapshot,
+            &LeakDetectionSnapshot::default(),
+            1_700_000_000_000,
+            1_700_000_001_000,
+        );
         let assessment = health.assess(1_700_000_001_000);
         assert_eq!(
             assessment.state,
@@ -10554,6 +10757,202 @@ mod tests {
             .affected_targets
             .contains(&ExitHealthTarget::Ipv6Internet));
         assert_eq!(health.retest.phase, ExitHealthRetestPhase::Completed);
+    }
+
+    #[test]
+    fn leak_evidence_is_projected_without_fabricating_a_local_exit_role() {
+        let now = 1_700_000_000_000;
+        let leak_detection = LeakDetectionSnapshot {
+            generated_at_unix_ms: now,
+            evidence: vec![
+                LeakDetectionEvidence {
+                    target: LeakDetectionTarget::DnsResolver,
+                    state: LeakDetectionEvidenceState::Passed,
+                    source: LeakDetectionSource::ManagedDoh,
+                    observed_at_unix_ms: now,
+                    duration_ms: 2,
+                    error_code: None,
+                    isolation_action: None,
+                },
+                LeakDetectionEvidence {
+                    target: LeakDetectionTarget::BrowserApplicationDns,
+                    state: LeakDetectionEvidenceState::NotTested,
+                    source: LeakDetectionSource::ApplicationBehaviorProbe,
+                    observed_at_unix_ms: now,
+                    duration_ms: 0,
+                    error_code: Some("leak_detection.probe_not_configured".into()),
+                    isolation_action: None,
+                },
+                LeakDetectionEvidence {
+                    target: LeakDetectionTarget::Ipv4DefaultRoute,
+                    state: LeakDetectionEvidenceState::Failed,
+                    source: LeakDetectionSource::LocalRoutingTable,
+                    observed_at_unix_ms: now,
+                    duration_ms: 4,
+                    error_code: Some(
+                        "leak_detection.ipv4_default_route_outside_protected_path".into(),
+                    ),
+                    isolation_action: None,
+                },
+                LeakDetectionEvidence {
+                    target: LeakDetectionTarget::Ipv6Carrier,
+                    state: LeakDetectionEvidenceState::Unsupported,
+                    source: LeakDetectionSource::LinkCapability,
+                    observed_at_unix_ms: now,
+                    duration_ms: 1,
+                    error_code: Some("leak_detection.ipv6_carrier_unavailable".into()),
+                    isolation_action: Some(LeakDetectionIsolationAction::BlockedUnavailableIpv6),
+                },
+            ],
+            ..LeakDetectionSnapshot::default()
+        };
+
+        let health =
+            build_exit_health_snapshot(&NodeSnapshot::default(), &leak_detection, now - 1, now);
+        assert!(!health
+            .evidence
+            .iter()
+            .any(|evidence| evidence.layer == ExitHealthLayer::Process));
+        assert_eq!(health.evidence.len(), 3);
+        assert_eq!(
+            health.evidence[0].target,
+            Some(ExitHealthTarget::Controlled(
+                "browser_application_dns".into()
+            ))
+        );
+        assert_eq!(health.evidence[1].state, ExitHealthEvidenceState::Failed);
+        assert_eq!(
+            health.evidence[2].state,
+            ExitHealthEvidenceState::Unsupported
+        );
+        let assessment = health.assess(now);
+        assert_eq!(
+            assessment.state,
+            fuckipv6_common::domain::ExitHealthState::Unknown
+        );
+        assert!(assessment
+            .affected_layers
+            .contains(&ExitHealthLayer::Process));
+        assert!(assessment
+            .affected_layers
+            .contains(&ExitHealthLayer::Listening));
+        assert!(assessment
+            .affected_layers
+            .contains(&ExitHealthLayer::Network));
+    }
+
+    #[test]
+    fn leak_evidence_aggregation_is_worst_first_then_latest_and_deterministic() {
+        let now = 1_700_000_000_000;
+        let evidence = |target, state, observed_at_unix_ms| LeakDetectionEvidence {
+            target,
+            state,
+            source: LeakDetectionSource::ControlledProbe,
+            observed_at_unix_ms,
+            duration_ms: 1,
+            error_code: (state == LeakDetectionEvidenceState::Failed)
+                .then(|| "leak_detection.check_failed".into()),
+            isolation_action: None,
+        };
+        let leak_detection = LeakDetectionSnapshot {
+            generated_at_unix_ms: now,
+            evidence: vec![
+                evidence(
+                    LeakDetectionTarget::DnsResolver,
+                    LeakDetectionEvidenceState::Passed,
+                    now,
+                ),
+                evidence(
+                    LeakDetectionTarget::BrowserApplicationDns,
+                    LeakDetectionEvidenceState::Passed,
+                    now,
+                ),
+                evidence(
+                    LeakDetectionTarget::Ipv4Carrier,
+                    LeakDetectionEvidenceState::Passed,
+                    now + 3,
+                ),
+                evidence(
+                    LeakDetectionTarget::Ipv4SourceAddress,
+                    LeakDetectionEvidenceState::Unsupported,
+                    now + 2,
+                ),
+                evidence(
+                    LeakDetectionTarget::Ipv4DefaultRoute,
+                    LeakDetectionEvidenceState::NotTested,
+                    now + 1,
+                ),
+                evidence(
+                    LeakDetectionTarget::Ipv4ControlledLeakService,
+                    LeakDetectionEvidenceState::Failed,
+                    now,
+                ),
+                LeakDetectionEvidence {
+                    isolation_action: Some(LeakDetectionIsolationAction::BlockedUnavailableIpv6),
+                    ..evidence(
+                        LeakDetectionTarget::Ipv6Carrier,
+                        LeakDetectionEvidenceState::Unsupported,
+                        now,
+                    )
+                },
+            ],
+            ..LeakDetectionSnapshot::default()
+        };
+
+        let projected = aggregate_leak_evidence_for_exit_health(&leak_detection);
+
+        assert_eq!(projected.len(), 3);
+        assert_eq!(
+            projected[0].target,
+            LeakDetectionTarget::BrowserApplicationDns,
+            "equal-severity evidence uses the stable target key"
+        );
+        assert_eq!(
+            projected[1].target,
+            LeakDetectionTarget::Ipv4ControlledLeakService,
+            "the worst state must win over newer passed or not-tested evidence"
+        );
+        assert_eq!(projected[1].state, LeakDetectionEvidenceState::Failed);
+        assert_eq!(
+            projected[2].isolation_action,
+            Some(LeakDetectionIsolationAction::BlockedUnavailableIpv6),
+            "isolated unsupported evidence must remain unsupported"
+        );
+    }
+
+    #[test]
+    fn leak_report_drops_non_token_error_text() {
+        let now = 1_700_000_000_000;
+        let leak_detection = LeakDetectionSnapshot {
+            generated_at_unix_ms: now,
+            evidence: vec![LeakDetectionEvidence {
+                target: LeakDetectionTarget::Ipv4DefaultRoute,
+                state: LeakDetectionEvidenceState::Failed,
+                source: LeakDetectionSource::LocalRoutingTable,
+                observed_at_unix_ms: now,
+                duration_ms: 1,
+                error_code: Some("http://resolver.example/1.2.3.4 /home/private".into()),
+                isolation_action: None,
+            }],
+            ..LeakDetectionSnapshot::default()
+        };
+        let report = build_sanitized_diagnostic_report(
+            "diag-sanitized",
+            now - 1,
+            now,
+            false,
+            &[],
+            &ExitHealthSnapshot::default(),
+            &leak_detection,
+            &[],
+            &NodeRuntimeResidueSnapshot::default(),
+        );
+
+        assert!(report.contains("leak_detection:"));
+        assert!(report.contains("ipv4_default_route: state=failed"));
+        assert!(!report.contains("resolver.example"));
+        assert!(!report.contains("1.2.3.4"));
+        assert!(!report.contains("/home/private"));
     }
 
     #[tokio::test]

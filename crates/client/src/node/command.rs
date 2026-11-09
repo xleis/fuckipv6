@@ -11,11 +11,12 @@ use fuckipv6_common::domain::{
     ExitHealthSnapshot, ExitSelectionPolicy, InvitationCode, InvitationCreateRequest, InvitationId,
     InvitationPreview, InvitationRedeemRequest, InvitationRedemption, InvitationStatusView,
     IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
-    MemberLifecycleAction, MemberLifecycleChange, MemberRemovalPreview, MembershipRole,
-    NetworkCreateProfile, NetworkDiscoveryRecord, NetworkEndpoint, NetworkId, NetworkJoinMode,
-    NetworkMemberDirectory, NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate,
-    NetworkVisibility, PermissionDenialCode, PolicyTestInput, PolicyTestResult, TrafficPolicy,
-    TrafficPolicyTestComparison, TrafficPolicyTestInput, TrafficPolicyTestVisibility,
+    LeakDetectionAssessment, LeakDetectionSnapshot, MemberLifecycleAction, MemberLifecycleChange,
+    MemberRemovalPreview, MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord,
+    NetworkEndpoint, NetworkId, NetworkJoinMode, NetworkMemberDirectory, NetworkProfileApplyResult,
+    NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility, PermissionDenialCode,
+    PolicyTestInput, PolicyTestResult, TrafficPolicy, TrafficPolicyTestComparison,
+    TrafficPolicyTestInput, TrafficPolicyTestVisibility,
     JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS, JOIN_REQUEST_MAX_REASON_CHARS,
     NETWORK_PROFILE_MAX_TAG_CHARS,
 };
@@ -2582,6 +2583,13 @@ pub struct NodeDiagnosticsSnapshot {
     /// this result and never recompute health from process state.
     #[serde(default)]
     pub exit_health_assessment: ExitHealthAssessment,
+    /// Bounded local DNS, IPv4 and IPv6 evidence. Missing, stale, unsupported or
+    /// unexecuted checks remain visible and are never promoted to a pass.
+    #[serde(default)]
+    pub leak_detection: LeakDetectionSnapshot,
+    /// Server-authoritative leak conclusion at `completed_at_unix_ms`.
+    #[serde(default)]
+    pub leak_detection_assessment: LeakDetectionAssessment,
     pub recovery_actions: Vec<NodeDiagnosticRecoveryAction>,
     /// Canonical redacted report suitable for clipboard/export. It is generated
     /// server-side from stable fields, never from raw stderr.

@@ -16023,6 +16023,8 @@ mod tests {
                 observed_at_unix_ms: Some(1_700_000_001_250),
                 source: Some(ExitHealthSource::ControlledProbe),
             },
+            leak_detection: fuckipv6_common::domain::LeakDetectionSnapshot::default(),
+            leak_detection_assessment: fuckipv6_common::domain::LeakDetectionAssessment::default(),
             recovery_actions: vec![crate::node::NodeDiagnosticRecoveryAction {
                 action_id: "cleanup_residuals".into(),
                 impact_key: "diagnostic.recovery.impact.cleanup_residuals".into(),

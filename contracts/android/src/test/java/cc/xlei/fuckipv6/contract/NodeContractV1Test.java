@@ -4,6 +4,7 @@ import java.util.Collections;
 
 import cc.xlei.fuckipv6.contract.NodeContractV1.CommandEnvelope;
 import cc.xlei.fuckipv6.contract.NodeContractV1.CapabilityState;
+import cc.xlei.fuckipv6.contract.NodeContractV1.LocalExitCapabilityStage;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCleanupFailureReason;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCleanupStepStatus;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCommandKind;
@@ -46,7 +47,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 252,
+                NodeContractV1.DTO_CLASS_NAMES.length == 254,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -93,6 +94,7 @@ public final class NodeContractV1Test {
         for (String field : new String[] {
             "revision",
             "lifecycle",
+            "local_exit",
             "identity",
             "configuration",
             "exit_node_capabilities",
@@ -206,6 +208,18 @@ public final class NodeContractV1Test {
         }
         NodeContractV1.NodeSnapshot.class.getDeclaredField("traffic_routing_page");
         NodeContractV1.ProjectedNodeSnapshot.class.getDeclaredField("traffic_routing_page");
+        NodeContractV1.NodeSnapshot.class.getDeclaredField("local_exit");
+        NodeContractV1.ProjectedNodeSnapshot.class.getDeclaredField("local_exit");
+        for (String field : new String[] {
+            "active_clients", "healthy", "last_transition_at_unix_ms", "network_allowed",
+            "owner_exit_enabled", "problem", "stage", "total_clients"
+        }) {
+            NodeContractV1.LocalExitCapabilitySnapshot.class.getDeclaredField(field);
+        }
+        NodeContractV1.NodeSetLocalExitCapabilityCommand.class.getDeclaredField("enabled");
+        NodeContractV1.NodeCommand.SetLocalExitCapability.class.getDeclaredField("payload");
+        NodeContractV1.NodeCommandOutcome.LocalExitCapability.class.getDeclaredField("data");
+        NodeContractV1.ProjectedNodeCommandOutcome.LocalExitCapability.class.getDeclaredField("data");
         for (String field : new String[] {
             "authority_revision", "can_edit", "default_policy", "failure_policy",
             "hard_constraint_target", "hard_constraints", "node_id", "observation", "rules",
@@ -496,6 +510,10 @@ public final class NodeContractV1Test {
                 NodeProblemCode.fromWireName("unsupported"),
                 "platform-unsupported problem code");
         assertSame(
+                NodeProblemCode.RESOURCE_EXHAUSTED,
+                NodeProblemCode.fromWireName("resource_exhausted"),
+                "resource-exhausted problem code");
+        assertSame(
                 TunPlatform.LINUX,
                 TunPlatform.fromWireName("linux"),
                 "TUN platform");
@@ -535,6 +553,10 @@ public final class NodeContractV1Test {
                 NodeCleanupStepStatus.DEFERRED,
                 NodeCleanupStepStatus.fromWireName("deferred"),
                 "runtime cleanup step status");
+        assertSame(
+                LocalExitCapabilityStage.HEALTH_CHECKING,
+                LocalExitCapabilityStage.fromWireName("health_checking"),
+                "local Exit health-checking stage");
         assertSame(
                 NodeEventReplayReason.REVISION_GAP,
                 NodeEventReplayReason.fromWireName("revision_gap"),
@@ -666,6 +688,18 @@ public final class NodeContractV1Test {
                 rotateIdentity,
                 rotateCommand.payload,
                 "rotate_node_identity payload identity");
+        NodeContractV1.NodeSetLocalExitCapabilityCommand localExitCommandPayload =
+                new NodeContractV1.NodeSetLocalExitCapabilityCommand(true);
+        NodeContractV1.NodeCommand.SetLocalExitCapability localExitCommand =
+                new NodeContractV1.NodeCommand.SetLocalExitCapability(localExitCommandPayload);
+        assertSame(
+                NodeCommandKind.SET_LOCAL_EXIT_CAPABILITY,
+                localExitCommand.command,
+                "set_local_exit_capability command DTO");
+        assertSame(
+                localExitCommandPayload,
+                localExitCommand.payload,
+                "set_local_exit_capability payload identity");
 
         NodeContractV1.NodeCommandOutcome.Completed completed =
                 new NodeContractV1.NodeCommandOutcome.Completed(
@@ -685,6 +719,11 @@ public final class NodeContractV1Test {
         new NodeContractV1.NodeCommandOutcome.IdentityRotated(
                 new NodeContractV1.NodeIdentityRotationSnapshot(
                         0L, 0L, "new", "new-node", "old", "old-node", false, false));
+        NodeContractV1.NodeCommandOutcome.LocalExitCapability localExitOutcome =
+                new NodeContractV1.NodeCommandOutcome.LocalExitCapability(null);
+        assertSame(
+                "local_exit_capability", localExitOutcome.status,
+                "local_exit_capability outcome tag");
         new NodeContractV1.NodeCommandOutcome.Accepted(null);
         new NodeContractV1.NodeCommandOutcome.Rejected(null);
 

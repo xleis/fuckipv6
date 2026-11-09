@@ -518,22 +518,9 @@ impl LinuxExitForwarder {
             }
         }
 
-        let mut chains = vec![
-            ("iptables", "filter", "FORWARD", self.forward_chain.as_str()),
-            ("iptables", "nat", "POSTROUTING", self.nat_chain.as_str()),
-        ];
-        if self.external_v6_interface.is_some() {
-            chains.extend([
-                (
-                    "ip6tables",
-                    "filter",
-                    "FORWARD",
-                    self.forward_chain.as_str(),
-                ),
-                ("ip6tables", "nat", "POSTROUTING", self.nat_chain.as_str()),
-            ]);
-        }
-        for (program, table, builtin, chain) in chains {
+        for (program, table, builtin, chain) in
+            owned_firewall_chains(&self.forward_chain, &self.nat_chain)
+        {
             if rollback_remaining(deadline).is_none() {
                 failures.push("Exit 防火墙清理超过总期限，剩余资源已保留".to_string());
                 break;
@@ -626,36 +613,13 @@ impl LinuxExitForwarder {
             }
         }
 
-        let chains = [
-            ("iptables", "filter", "FORWARD", self.forward_chain.as_str()),
-            ("iptables", "nat", "POSTROUTING", self.nat_chain.as_str()),
-        ];
-        for (program, table, builtin, chain) in chains {
+        for (program, table, builtin, chain) in
+            owned_firewall_chains(&self.forward_chain, &self.nat_chain)
+        {
             if let Err(error) =
                 cleanup_iptables_chain_sync(self.runner.as_ref(), program, table, builtin, chain)
             {
                 failures.push(format!("清理 {program} 链 {chain} 失败: {error:#}"));
-            }
-        }
-        if self.external_v6_interface.is_some() {
-            for (program, table, builtin, chain) in [
-                (
-                    "ip6tables",
-                    "filter",
-                    "FORWARD",
-                    self.forward_chain.as_str(),
-                ),
-                ("ip6tables", "nat", "POSTROUTING", self.nat_chain.as_str()),
-            ] {
-                if let Err(error) = cleanup_iptables_chain_sync(
-                    self.runner.as_ref(),
-                    program,
-                    table,
-                    builtin,
-                    chain,
-                ) {
-                    failures.push(format!("清理 {program} 链 {chain} 失败: {error:#}"));
-                }
             }
         }
 
@@ -898,6 +862,18 @@ fn host_prefix(address: IpAddr) -> Result<String> {
 fn rollback_remaining(deadline: Instant) -> Option<Duration> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     (!remaining.is_zero()).then_some(remaining)
+}
+
+fn owned_firewall_chains<'a>(
+    forward_chain: &'a str,
+    nat_chain: &'a str,
+) -> [(&'static str, &'static str, &'static str, &'a str); 4] {
+    [
+        ("iptables", "filter", "FORWARD", forward_chain),
+        ("iptables", "nat", "POSTROUTING", nat_chain),
+        ("ip6tables", "filter", "FORWARD", forward_chain),
+        ("ip6tables", "nat", "POSTROUTING", nat_chain),
+    ]
 }
 
 fn ip_invocation(ipv6: bool, args: &[&str]) -> CommandInvocation {
@@ -1448,6 +1424,30 @@ mod tests {
         }
     }
 
+    fn assert_owned_firewall_cleanup(
+        runs: &[CommandInvocation],
+        forward_chain: &str,
+        nat_chain: &str,
+    ) {
+        for (program, table, builtin, chain) in [
+            ("iptables", "filter", "FORWARD", forward_chain),
+            ("iptables", "nat", "POSTROUTING", nat_chain),
+            ("ip6tables", "filter", "FORWARD", forward_chain),
+            ("ip6tables", "nat", "POSTROUTING", nat_chain),
+        ] {
+            for args in [
+                vec!["-D", builtin, "-j", chain],
+                vec!["-F", chain],
+                vec!["-X", chain],
+            ] {
+                assert!(
+                    runs.contains(&iptables_invocation(program, Some(table), &args)),
+                    "missing {program} {table} rollback: {args:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn default_route_parser_finds_interface() {
         let output = "default via 185.217.110.1 dev eth0 proto static metric 100\n";
@@ -1592,6 +1592,80 @@ mod tests {
         LinuxExitForwarder::purge_stale_with_runner(runner.as_ref(), tun_name)
             .await
             .expect("missing stale firewall resources are already clean");
+    }
+
+    #[tokio::test]
+    async fn rollback_cleans_both_address_families_without_ipv6_default_route() {
+        let runner = Arc::new(FakeCommandRunner::default());
+        let mut forwarder = fake_forwarder(runner.clone(), None);
+        forwarder.clients.insert(
+            "peer-v6".into(),
+            ClientForwardState {
+                addresses: HashSet::from(["fd00::2".parse().expect("valid IPv6")]),
+                owned_routes: vec!["fd00::2".parse().expect("valid IPv6")],
+                rules: Vec::new(),
+                authorized: true,
+            },
+        );
+
+        forwarder
+            .rollback_async()
+            .await
+            .expect("async rollback must clean owned IPv6 resources");
+        let async_runs = runner.async_runs();
+        assert_owned_firewall_cleanup(&async_runs, &forwarder.forward_chain, &forwarder.nat_chain);
+        assert!(async_runs.contains(&ip_invocation(
+            true,
+            &[
+                "route",
+                "del",
+                "fd00::2/128",
+                "dev",
+                "fkexit",
+                "proto",
+                "99",
+            ],
+        )));
+        let async_count = async_runs.len();
+        forwarder
+            .rollback_async()
+            .await
+            .expect("repeated async rollback is idempotent");
+        assert_eq!(runner.async_runs().len(), async_count);
+
+        let runner = Arc::new(FakeCommandRunner::default());
+        let mut forwarder = fake_forwarder(runner.clone(), None);
+        forwarder.clients.insert(
+            "peer-v6".into(),
+            ClientForwardState {
+                addresses: HashSet::from(["fd00::2".parse().expect("valid IPv6")]),
+                owned_routes: vec!["fd00::2".parse().expect("valid IPv6")],
+                rules: Vec::new(),
+                authorized: true,
+            },
+        );
+        forwarder
+            .rollback()
+            .expect("sync rollback must clean owned IPv6 resources");
+        let sync_runs = runner.sync_runs();
+        assert_owned_firewall_cleanup(&sync_runs, &forwarder.forward_chain, &forwarder.nat_chain);
+        assert!(sync_runs.contains(&ip_invocation(
+            true,
+            &[
+                "route",
+                "del",
+                "fd00::2/128",
+                "dev",
+                "fkexit",
+                "proto",
+                "99",
+            ],
+        )));
+        let sync_count = sync_runs.len();
+        forwarder
+            .rollback()
+            .expect("repeated sync rollback is idempotent");
+        assert_eq!(runner.sync_runs().len(), sync_count);
     }
 
     #[test]

@@ -3,11 +3,13 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 use crate::domain::{
+    ContentHash, ExitContributionAuthorizationSnapshot, ExitContributionRequest,
+    ExitContributionRequestId, ExitContributionRequestState, ExitContributionReviewAction,
     InvitationCreateRequest, InvitationId, InvitationPreviewRequest, InvitationRedeemRequest,
     InvitationRedemption, InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest,
     JoinRequestId, JoinRequestReviewAction, JoinRequestState, MemberLifecycleChange,
     MemberLifecycleChangeRequest, MemberRemovalPreview, MemberRemovalPreviewRequest, NetworkId,
-    NetworkMemberDirectory,
+    NetworkMemberDirectory, NodeId,
 };
 use crate::types::{ClientId, NatType, PeerInfo, RouteEntry, VirtualIps};
 
@@ -278,6 +280,73 @@ pub enum SignalingMessage {
     },
     MemberLifecycleChanged {
         change: MemberLifecycleChange,
+    },
+
+    // Exit contribution authorization. Requests are authenticated and
+    // server-originated acknowledgements are never accepted from clients.
+    ExitContributionSubmit {
+        network_id: NetworkId,
+        request_id: ExitContributionRequestId,
+        expected_policy_revision: u64,
+        expected_terms_hash: ContentHash,
+        requested_bandwidth_kbps: Option<u64>,
+        requested_traffic_quota_bytes: Option<u64>,
+    },
+    ExitContributionSubmitAck {
+        request: ExitContributionRequest,
+    },
+    ExitContributionList {
+        network_id: NetworkId,
+    },
+    ExitContributionListAck {
+        requests: Vec<ExitContributionRequest>,
+    },
+    ExitContributionStatus {
+        network_id: NetworkId,
+        request_id: ExitContributionRequestId,
+    },
+    ExitContributionStatusAck {
+        request: ExitContributionRequest,
+    },
+    ExitContributionReview {
+        network_id: NetworkId,
+        request_id: ExitContributionRequestId,
+        expected_revision: u64,
+        action: ExitContributionReviewAction,
+        decision_reason_code: Option<String>,
+    },
+    ExitContributionReviewAck {
+        request: ExitContributionRequest,
+    },
+    ExitContributionWithdraw {
+        network_id: NetworkId,
+        request_id: ExitContributionRequestId,
+        expected_revision: u64,
+    },
+    ExitContributionWithdrawAck {
+        request: ExitContributionRequest,
+    },
+    ExitContributionAuthorizationList {
+        network_id: NetworkId,
+    },
+    ExitContributionAuthorizationListAck {
+        authorizations: Vec<ExitContributionAuthorizationSnapshot>,
+    },
+    ExitContributionChanged {
+        request_id: ExitContributionRequestId,
+        node_id: NodeId,
+        state: ExitContributionRequestState,
+        revision: u64,
+    },
+    ExitAvailabilityReport {
+        network_id: NetworkId,
+        available: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason_code: Option<String>,
+    },
+    ExitAvailabilityReportAck {
+        network_id: NetworkId,
+        observed_at_unix_ms: u64,
     },
 }
 

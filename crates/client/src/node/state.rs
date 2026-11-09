@@ -784,6 +784,15 @@ fn exit_node_capability_state(snapshot: &NodeSnapshot) -> CapabilityState {
     {
         return CapabilityState::Degraded;
     }
+    // Disabling the owner intent is immediate, but the data plane may still be
+    // draining established flows. Keep that transitional state observable as
+    // Starting until the runtime confirms that cleanup has completed.
+    if matches!(
+        local_exit.stage,
+        LocalExitCapabilityStage::Draining | LocalExitCapabilityStage::Cleaning
+    ) {
+        return CapabilityState::Starting;
+    }
     if !local_exit.owner_exit_enabled {
         return CapabilityState::Disabled;
     }
@@ -2301,6 +2310,20 @@ mod tests {
         assert_eq!(
             updated.capabilities.state(CapabilityKind::Exit),
             CapabilityState::Enabled
+        );
+
+        let draining = state
+            .update(|snapshot| {
+                snapshot.local_exit.owner_exit_enabled = false;
+                snapshot.local_exit.stage = LocalExitCapabilityStage::Cleaning;
+                snapshot.local_exit.healthy = false;
+                snapshot.local_exit.network_allowed = true;
+            })
+            .await;
+        assert_eq!(
+            draining.capabilities.state(CapabilityKind::Exit),
+            CapabilityState::Starting,
+            "cleanup must remain visible after owner intent is disabled"
         );
     }
 

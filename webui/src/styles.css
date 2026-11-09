@@ -1935,7 +1935,8 @@ button:disabled {
 .diagnostic-check-meta code {
   font-family: var(--font-mono);
 }
-.diagnostic-exit-health {
+.diagnostic-exit-health,
+.diagnostic-leak-detection {
   display: grid;
   gap: var(--space-3);
   margin-bottom: var(--space-3);
@@ -1944,7 +1945,8 @@ button:disabled {
   border-radius: var(--radius-md);
   background: var(--surface);
 }
-.diagnostic-exit-health-heading {
+.diagnostic-exit-health-heading,
+.diagnostic-leak-detection-heading {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-start;
@@ -1952,26 +1954,33 @@ button:disabled {
   gap: var(--space-2);
 }
 .diagnostic-exit-health-heading h4,
-.diagnostic-exit-health-heading p {
+.diagnostic-exit-health-heading p,
+.diagnostic-leak-detection-heading h4,
+.diagnostic-leak-detection-heading p {
   margin: 0;
 }
-.diagnostic-exit-health-heading h4 {
+.diagnostic-exit-health-heading h4,
+.diagnostic-leak-detection-heading h4 {
   color: var(--text);
 }
-.diagnostic-exit-health-heading p {
+.diagnostic-exit-health-heading p,
+.diagnostic-leak-detection-heading p {
   margin-top: var(--space-1);
   color: var(--text-secondary);
   font-size: var(--font-size-xs);
 }
-.diagnostic-exit-health-summary {
+.diagnostic-exit-health-summary,
+.diagnostic-leak-detection-summary {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
-.diagnostic-exit-health-evidence {
+.diagnostic-exit-health-evidence,
+.diagnostic-leak-detection-evidence {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-2);
 }
-.diagnostic-exit-health-evidence > article {
+.diagnostic-exit-health-evidence > article,
+.diagnostic-leak-detection-evidence > article {
   display: grid;
   gap: var(--space-2);
   min-width: 0;
@@ -1980,18 +1989,21 @@ button:disabled {
   border-radius: var(--radius-sm);
   background: var(--surface-raised);
 }
-.diagnostic-exit-health-evidence > article > div:first-child {
+.diagnostic-exit-health-evidence > article > div:first-child,
+.diagnostic-leak-detection-evidence > article > div:first-child {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
 }
-.diagnostic-exit-health-evidence > article > div:first-child strong {
+.diagnostic-exit-health-evidence > article > div:first-child strong,
+.diagnostic-leak-detection-evidence > article > div:first-child strong {
   color: var(--text);
   font-size: var(--font-size-xs);
 }
-.diagnostic-exit-health-evidence > article > div:first-child span {
+.diagnostic-exit-health-evidence > article > div:first-child span,
+.diagnostic-leak-detection-evidence > article > div:first-child span {
   color: var(--text-muted);
   font-size: var(--font-size-xs);
 }
@@ -2663,10 +2675,9 @@ button:disabled {
 }
 .topology-filters {
   display: grid;
-  grid-template-columns: minmax(210px, 1.5fr) repeat(
-      4,
-      minmax(120px, 1fr)
-    ) auto auto;
+  grid-template-columns:
+    minmax(210px, 1.5fr) repeat(4, minmax(120px, 1fr))
+    auto auto;
   align-items: end;
   gap: var(--space-2);
   padding: var(--space-3);
@@ -6863,6 +6874,8 @@ button:disabled {
   .diagnostic-checks,
   .diagnostic-exit-health-evidence,
   .diagnostic-exit-health-summary,
+  .diagnostic-leak-detection-evidence,
+  .diagnostic-leak-detection-summary,
   .overview-grid,
   .overview-shortcuts,
   .settings-grid {

@@ -464,6 +464,63 @@ function diagnosticsFixture(): NodeDiagnosticsSnapshot {
       observed_at_unix_ms: 1_700_000_001_250,
       source: "controlled_probe",
     },
+    leak_detection: {
+      generated_at_unix_ms: 1_700_000_001_200,
+      max_age_ms: 90_000,
+      environment: {
+        platform: "linux",
+        dns_mode: "doh",
+        protected_path_active: true,
+        ipv4_carrier_available: true,
+        ipv6_carrier_available: false,
+      },
+      evidence: [
+        {
+          target: "dns_resolver",
+          state: "passed",
+          source: "managed_doh",
+          observed_at_unix_ms: 1_700_000_001_100,
+          duration_ms: 2,
+          error_code: null,
+          isolation_action: null,
+        },
+        {
+          target: "browser_application_dns",
+          state: "not_tested",
+          source: "application_behavior_probe",
+          observed_at_unix_ms: 1_700_000_001_120,
+          duration_ms: 0,
+          error_code: "leak_detection.probe_not_configured",
+          isolation_action: null,
+        },
+        {
+          target: "ipv4_default_route",
+          state: "failed",
+          source: "local_routing_table",
+          observed_at_unix_ms: 1_700_000_001_140,
+          duration_ms: 3,
+          error_code:
+            "leak_detection.ipv4_default_route_outside_protected_path",
+          isolation_action: null,
+        },
+        {
+          target: "ipv6_carrier",
+          state: "unsupported",
+          source: "link_capability",
+          observed_at_unix_ms: 1_700_000_001_160,
+          duration_ms: 1,
+          error_code: "leak_detection.ipv6_carrier_unavailable",
+          isolation_action: "blocked_unavailable_ipv6",
+        },
+      ],
+    },
+    leak_detection_assessment: {
+      state: "leak_detected",
+      reason_code: "leak_detection.leak_detected",
+      fail_closed_required: true,
+      affected_protocols: ["ipv4", "ipv6"],
+      affected_targets: ["ipv4_default_route", "ipv6_carrier"],
+    },
     recovery_actions: [
       {
         action_id: "cleanup_residuals",
@@ -924,6 +981,47 @@ describe("React WebUI shell", () => {
       ["dns", "degraded"],
       ["internet_reachability", "failed"],
     ]);
+
+    const leakDetection = within(diagnosticsPanel).getByTestId(
+      "diagnostic-leak-detection",
+    );
+    expect(leakDetection).toHaveAttribute(
+      "data-leak-detection-state",
+      "leak_detected",
+    );
+    expect(leakDetection).toHaveAttribute(
+      "data-leak-detection-fail-closed",
+      "true",
+    );
+    expect(leakDetection).toHaveTextContent(
+      "translated:diagnostic.leak_detection.state.leak_detected",
+    );
+    expect(leakDetection).toHaveTextContent("leak_detection.leak_detected");
+    expect(leakDetection).toHaveTextContent(
+      "translated:diagnostic.leak_detection.dns_mode.doh",
+    );
+    expect(
+      Array.from(leakDetection.querySelectorAll("[data-leak-target]")).map(
+        (row) => [
+          row.getAttribute("data-leak-target"),
+          row.getAttribute("data-leak-state"),
+        ],
+      ),
+    ).toEqual([
+      ["dns_resolver", "passed"],
+      ["browser_application_dns", "not_tested"],
+      ["ipv4_default_route", "failed"],
+      ["ipv6_carrier", "unsupported"],
+    ]);
+    expect(leakDetection).toHaveTextContent(
+      "translated:diagnostic.leak_detection.evidence_state.not_tested",
+    );
+    expect(leakDetection).toHaveTextContent(
+      "translated:diagnostic.leak_detection.evidence_state.unsupported",
+    );
+    expect(leakDetection).toHaveTextContent(
+      "translated:diagnostic.leak_detection.isolation_action.blocked_unavailable_ipv6",
+    );
 
     const recovery = diagnosticsPanel.querySelector(
       '[data-recovery-action-id="cleanup_residuals"]',

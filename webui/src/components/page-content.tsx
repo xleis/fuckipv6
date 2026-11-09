@@ -55,6 +55,10 @@ import type {
   ExitHealthProtocol,
   ExitHealthTarget,
   ExitSelectionSource,
+  LeakDetectionEvidence,
+  LeakDetectionProtocol,
+  LeakDetectionState,
+  LeakDetectionTarget,
   NodeDiagnosticLayer,
   NodeDiagnosticState,
   NodeDiagnosticsSnapshot,
@@ -172,9 +176,14 @@ function statusTone(value: string): string {
   )
     return "good";
   if (
-    ["failed", "error", "unavailable", "unsupported", "down", "fail_closed"].includes(
-      value,
-    )
+    [
+      "failed",
+      "error",
+      "unavailable",
+      "unsupported",
+      "down",
+      "fail_closed",
+    ].includes(value)
   )
     return "bad";
   if (
@@ -952,15 +961,16 @@ function Overview({
           )}
         </div>
         <div className="traffic-session-summary">
-          <span className={`status-pill ${traffic.tone}`}>
-            {traffic.label}
-          </span>
+          <span className={`status-pill ${traffic.tone}`}>{traffic.label}</span>
           <code>{traffic.detail}</code>
         </div>
         <div className="traffic-session-meta">
           <span>
             {label(locale, "traffic.session.reason")}
-            <code>{trafficSession?.reason_code ?? label(locale, "traffic.session.no_reason")}</code>
+            <code>
+              {trafficSession?.reason_code ??
+                label(locale, "traffic.session.no_reason")}
+            </code>
           </span>
           <span>
             {label(locale, "traffic.session.failure")}
@@ -1207,6 +1217,36 @@ function exitHealthEvidenceStateLabel(
   );
 }
 
+function leakDetectionStateTone(state: LeakDetectionState): string {
+  if (state === "leak_free") return "good";
+  if (state === "isolated" || state === "insufficient_evidence") return "warn";
+  return "bad";
+}
+
+function leakDetectionTargetLabel(
+  locale: Locale,
+  target: LeakDetectionTarget,
+): string {
+  return label(locale, `diagnostic.leak_detection.target.${target}`);
+}
+
+function leakDetectionProtocolLabel(
+  locale: Locale,
+  protocol: LeakDetectionProtocol,
+): string {
+  return label(locale, `diagnostic.leak_detection.protocol.${protocol}`);
+}
+
+function leakDetectionEvidenceStateLabel(
+  locale: Locale,
+  evidence: LeakDetectionEvidence,
+): string {
+  return label(
+    locale,
+    `diagnostic.leak_detection.evidence_state.${evidence.state}`,
+  );
+}
+
 function diagnosticDuration(locale: Locale, durationMs: number): string {
   if (durationMs < 1000) {
     return tr(locale, "diagnostic.duration_ms_value", {
@@ -1303,6 +1343,15 @@ function DiagnosticsPanel({
     phase: "idle" as const,
     requested_at_unix_ms: 1,
   };
+  const leakAssessment = diagnostics.leak_detection_assessment ?? {
+    state: "insufficient_evidence" as const,
+    reason_code: "leak_detection.evidence_missing",
+    fail_closed_required: true,
+    affected_protocols: ["dns", "ipv4", "ipv6"] as LeakDetectionProtocol[],
+    affected_targets: [] as LeakDetectionTarget[],
+  };
+  const leakEnvironment = diagnostics.leak_detection?.environment ?? {};
+  const leakEvidence = diagnostics.leak_detection?.evidence ?? [];
   const listSeparator = label(locale, "common.list_separator");
   const affectedLayers =
     exitHealthAssessment.affected_layers.length === 0
@@ -1321,6 +1370,18 @@ function DiagnosticsPanel({
       ? label(locale, "diagnostic.exit_health.none")
       : exitHealthAssessment.affected_protocols
           .map((protocol) => exitHealthProtocolLabel(locale, protocol))
+          .join(listSeparator);
+  const leakAffectedTargets =
+    leakAssessment.affected_targets.length === 0
+      ? label(locale, "diagnostic.leak_detection.none")
+      : leakAssessment.affected_targets
+          .map((target) => leakDetectionTargetLabel(locale, target))
+          .join(listSeparator);
+  const leakAffectedProtocols =
+    leakAssessment.affected_protocols.length === 0
+      ? label(locale, "diagnostic.leak_detection.none")
+      : leakAssessment.affected_protocols
+          .map((protocol) => leakDetectionProtocolLabel(locale, protocol))
           .join(listSeparator);
   const residueSummary =
     residue.sessions_remaining === 0 &&
@@ -1614,6 +1675,221 @@ function DiagnosticsPanel({
                       <code>
                         {evidence.error_code ?? label(locale, "common.none")}
                       </code>
+                    </dd>
+                  </div>
+                </dl>
+              </article>
+            ))
+          )}
+        </div>
+      </section>
+
+      <section
+        className="diagnostic-leak-detection"
+        data-testid="diagnostic-leak-detection"
+        data-leak-detection-state={leakAssessment.state}
+        data-leak-detection-fail-closed={
+          leakAssessment.fail_closed_required ? "true" : "false"
+        }
+      >
+        <div className="diagnostic-leak-detection-heading">
+          <div>
+            <h4>{label(locale, "diagnostic.leak_detection.title")}</h4>
+            <p>{label(locale, "diagnostic.leak_detection.disclaimer")}</p>
+          </div>
+          <span
+            className={`status-pill ${leakDetectionStateTone(leakAssessment.state)}`}
+          >
+            {label(
+              locale,
+              `diagnostic.leak_detection.state.${leakAssessment.state}`,
+            )}
+          </span>
+        </div>
+        <dl className="detail-list diagnostic-leak-detection-summary">
+          <div>
+            <dt>{label(locale, "diagnostic.leak_detection.reason")}</dt>
+            <dd>
+              <code>{leakAssessment.reason_code}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>
+              {label(locale, "diagnostic.leak_detection.fail_closed_required")}
+            </dt>
+            <dd>
+              {label(
+                locale,
+                leakAssessment.fail_closed_required
+                  ? "diagnostic.leak_detection.yes"
+                  : "diagnostic.leak_detection.no",
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>
+              {label(locale, "diagnostic.leak_detection.affected_protocols")}
+            </dt>
+            <dd>{leakAffectedProtocols}</dd>
+          </div>
+          <div>
+            <dt>
+              {label(locale, "diagnostic.leak_detection.affected_targets")}
+            </dt>
+            <dd>{leakAffectedTargets}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "diagnostic.leak_detection.dns_mode")}</dt>
+            <dd>
+              {label(
+                locale,
+                `diagnostic.leak_detection.dns_mode.${leakEnvironment.dns_mode ?? "unmanaged"}`,
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "diagnostic.leak_detection.platform")}</dt>
+            <dd>
+              {label(
+                locale,
+                `diagnostic.leak_detection.platform.${leakEnvironment.platform ?? "other"}`,
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "diagnostic.leak_detection.protected_path")}</dt>
+            <dd>
+              {label(
+                locale,
+                leakEnvironment.protected_path_active
+                  ? "diagnostic.leak_detection.yes"
+                  : "diagnostic.leak_detection.no",
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "diagnostic.leak_detection.ipv4_carrier")}</dt>
+            <dd>
+              {label(
+                locale,
+                leakEnvironment.ipv4_carrier_available
+                  ? "diagnostic.leak_detection.available"
+                  : "diagnostic.leak_detection.unavailable_or_unverified",
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "diagnostic.leak_detection.ipv6_carrier")}</dt>
+            <dd>
+              {label(
+                locale,
+                leakEnvironment.ipv6_carrier_available
+                  ? "diagnostic.leak_detection.available"
+                  : "diagnostic.leak_detection.unavailable_or_unverified",
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "diagnostic.leak_detection.generated_at")}</dt>
+            <dd>
+              {diagnostics.leak_detection?.generated_at_unix_ms
+                ? formatTimestamp(
+                    locale,
+                    diagnostics.leak_detection.generated_at_unix_ms,
+                  )
+                : label(locale, "common.not_available")}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "diagnostic.leak_detection.max_age")}</dt>
+            <dd>
+              {diagnosticDuration(
+                locale,
+                diagnostics.leak_detection?.max_age_ms ?? 0,
+              )}
+            </dd>
+          </div>
+        </dl>
+        <div className="diagnostic-leak-detection-evidence">
+          {leakEvidence.length === 0 ? (
+            <p className="empty-copy">
+              {label(locale, "diagnostic.leak_detection.no_evidence")}
+            </p>
+          ) : (
+            leakEvidence.map((evidence, index) => (
+              <article
+                data-leak-target={evidence.target}
+                data-leak-state={evidence.state}
+                key={`${evidence.target}-${evidence.observed_at_unix_ms}-${index}`}
+              >
+                <div>
+                  <strong>
+                    {leakDetectionTargetLabel(locale, evidence.target)}
+                  </strong>
+                  <span>
+                    {leakDetectionEvidenceStateLabel(locale, evidence)}
+                  </span>
+                </div>
+                <dl className="detail-list">
+                  <div>
+                    <dt>
+                      {label(locale, "diagnostic.leak_detection.protocol")}
+                    </dt>
+                    <dd>
+                      {leakDetectionProtocolLabel(
+                        locale,
+                        evidence.target === "dns_resolver" ||
+                          evidence.target === "browser_application_dns"
+                          ? "dns"
+                          : evidence.target.startsWith("ipv4_")
+                            ? "ipv4"
+                            : "ipv6",
+                      )}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "diagnostic.leak_detection.source")}</dt>
+                    <dd>
+                      {label(
+                        locale,
+                        `diagnostic.leak_detection.source.${evidence.source}`,
+                      )}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>
+                      {label(locale, "diagnostic.leak_detection.observed_at")}
+                    </dt>
+                    <dd>
+                      {formatTimestamp(locale, evidence.observed_at_unix_ms)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "diagnostic.duration")}</dt>
+                    <dd>{diagnosticDuration(locale, evidence.duration_ms)}</dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "diagnostic.error_code")}</dt>
+                    <dd>
+                      <code>
+                        {evidence.error_code ?? label(locale, "common.none")}
+                      </code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>
+                      {label(
+                        locale,
+                        "diagnostic.leak_detection.isolation_action",
+                      )}
+                    </dt>
+                    <dd>
+                      {evidence.isolation_action
+                        ? label(
+                            locale,
+                            `diagnostic.leak_detection.isolation_action.${evidence.isolation_action}`,
+                          )
+                        : label(locale, "diagnostic.leak_detection.none")}
                     </dd>
                   </div>
                 </dl>

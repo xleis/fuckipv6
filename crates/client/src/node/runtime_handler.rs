@@ -910,6 +910,17 @@ fn project_local_exit_owner_intent(
     capabilities: &fuckipv6_common::ExitNodeCapabilities,
 ) -> super::LocalExitCapabilitySnapshot {
     if !owner_exit_enabled {
+        if matches!(
+            current.stage,
+            super::LocalExitCapabilityStage::Draining
+                | super::LocalExitCapabilityStage::Cleaning
+                | super::LocalExitCapabilityStage::Failed
+        ) {
+            let mut projected = current.clone();
+            projected.owner_exit_enabled = false;
+            projected.healthy = false;
+            return projected;
+        }
         return super::LocalExitCapabilitySnapshot {
             last_transition_at_unix_ms: current.last_transition_at_unix_ms,
             ..super::LocalExitCapabilitySnapshot::default()
@@ -4484,6 +4495,39 @@ mod tests {
         assert!(snapshot.local_exit.problem.is_none());
 
         let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[test]
+    fn persisted_disable_does_not_hide_local_exit_cleanup_state() {
+        let capabilities = ExitNodeCapabilities::for_platform(ExitNodePlatform::Linux);
+        let problem =
+            NodeProblem::new(NodeProblemCode::Unavailable, "cleanup failed").retryable(true);
+
+        for (stage, expected_problem) in [
+            (crate::node::LocalExitCapabilityStage::Draining, false),
+            (crate::node::LocalExitCapabilityStage::Cleaning, false),
+            (crate::node::LocalExitCapabilityStage::Failed, true),
+        ] {
+            let current = crate::node::LocalExitCapabilitySnapshot {
+                owner_exit_enabled: false,
+                stage,
+                healthy: true,
+                network_allowed: true,
+                active_clients: 2,
+                total_clients: 7,
+                problem: expected_problem.then(|| problem.clone()),
+                last_transition_at_unix_ms: 42,
+            };
+            let projected = project_local_exit_owner_intent(&current, false, &capabilities);
+            assert_eq!(projected.stage, stage);
+            assert!(!projected.owner_exit_enabled);
+            assert!(!projected.healthy);
+            assert!(projected.network_allowed);
+            assert_eq!(projected.active_clients, 2);
+            assert_eq!(projected.total_clients, 7);
+            assert_eq!(projected.problem.is_some(), expected_problem);
+            assert_eq!(projected.last_transition_at_unix_ms, 42);
+        }
     }
 
     #[tokio::test]

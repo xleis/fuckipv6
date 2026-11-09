@@ -602,11 +602,16 @@ pub struct ExitContributionAuthorizationSnapshot {
 }
 
 impl ExitContributionAuthorizationSnapshot {
-    pub fn permits_contribution(&self, policy_revision: u64, terms_hash: &ContentHash) -> bool {
+    pub fn permits_contribution(
+        &self,
+        policy_revision: u64,
+        terms_hash: &ContentHash,
+        now_unix_ms: u64,
+    ) -> bool {
         self.state == ExitContributionRequestState::Approved
             && self.policy_revision == policy_revision
             && &self.terms_hash == terms_hash
-            && self.expires_at_unix_ms > 0
+            && now_unix_ms < self.expires_at_unix_ms
     }
 }
 
@@ -944,7 +949,11 @@ pub fn authorize_exit_contribution(
             let Some(request) = input.request else {
                 return ExitContributionAuthorizationReason::AuthorizationRequired;
             };
-            if request.permits_contribution(input.policy_revision, input.terms_hash) {
+            if request.permits_contribution(
+                input.policy_revision,
+                input.terms_hash,
+                input.now_unix_ms,
+            ) {
                 ExitContributionAuthorizationReason::Authorized
             } else if request.state == ExitContributionRequestState::Pending {
                 if input.now_unix_ms >= request.expires_at_unix_ms {
@@ -1260,8 +1269,13 @@ mod tests {
             .request;
         let approved_snapshot = approved.authorization_snapshot();
         assert_eq!(approved_snapshot.revision, 2);
-        assert!(approved_snapshot.permits_contribution(4, &terms_hash()));
-        assert!(!approved_snapshot.permits_contribution(5, &terms_hash()));
-        assert!(!approved_snapshot.permits_contribution(4, &ContentHash::from_bytes(b"new")));
+        assert!(approved_snapshot.permits_contribution(4, &terms_hash(), 102));
+        assert!(!approved_snapshot.permits_contribution(5, &terms_hash(), 102));
+        assert!(!approved_snapshot.permits_contribution(4, &ContentHash::from_bytes(b"new"), 102,));
+        assert!(!approved_snapshot.permits_contribution(
+            4,
+            &terms_hash(),
+            approved_snapshot.expires_at_unix_ms,
+        ));
     }
 }

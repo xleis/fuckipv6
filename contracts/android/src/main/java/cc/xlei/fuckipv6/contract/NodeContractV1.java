@@ -1703,6 +1703,7 @@ public final class NodeContractV1 {
         CANCELLED("cancelled"),
         TIMED_OUT("timed_out"),
         INTERNAL("internal"),
+        RESOURCE_EXHAUSTED("resource_exhausted"),
         UNSUPPORTED("unsupported");
 
         private final String wireName;

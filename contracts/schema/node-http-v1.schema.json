@@ -7075,6 +7075,11 @@
           "type": "string"
         },
         {
+          "const": "resource_exhausted",
+          "description": "A finite host resource (memory, file descriptors, storage or firewall\ncapacity) prevented the requested operation.",
+          "type": "string"
+        },
+        {
           "const": "unsupported",
           "description": "The operation is valid but unavailable on this platform or host.",
           "type": "string"

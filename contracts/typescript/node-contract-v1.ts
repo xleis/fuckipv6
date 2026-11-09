@@ -1830,7 +1830,7 @@ export type NodeProblem = {
   "retryable": boolean;
 };
 
-export type NodeProblemCode = "authentication_required" | "invalid_request" | "not_found" | "conflict" | "unavailable" | "permission_denied" | "cancelled" | "timed_out" | "internal" | "unsupported";
+export type NodeProblemCode = "authentication_required" | "invalid_request" | "not_found" | "conflict" | "unavailable" | "permission_denied" | "cancelled" | "timed_out" | "internal" | "resource_exhausted" | "unsupported";
 
 export type NodeProblemDetails = {
   "current_revision"?: number | null;

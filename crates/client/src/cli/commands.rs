@@ -19,6 +19,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration, Instant};
@@ -1945,6 +1946,15 @@ async fn apply_runtime_local_exit_capability(
     Ok(local_exit_runtime_status(runtime))
 }
 
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 #[cfg(target_os = "linux")]
 fn local_exit_accepts_inbound(runtime: &ClientRuntime) -> bool {
     runtime.local_exit_enabled
@@ -2353,6 +2363,9 @@ async fn admit_inbound_packet(
         tracing::debug!("丢弃未注册来源 {src_ip} 的入站数据包");
         return None;
     };
+    // Use one authoritative time sample for all authorization and accounting
+    // decisions made while admitting this packet.
+    let now_unix_ms = unix_time_ms();
     let trusted_exit_peer = runtime
         .p2p
         .resolve_exit_peer(runtime.configured_exit_node.as_deref())
@@ -2404,6 +2417,17 @@ async fn admit_inbound_packet(
             tracing::warn!("Exit Node 拒绝未授权客户端 {}", peer.client_id);
             return None;
         }
+        if let Err(denial) = runtime
+            .exit_contribution_gate
+            .authorize(&peer.node_id, now_unix_ms)
+        {
+            tracing::warn!(
+                client = %peer.node_id,
+                reason_code = denial.reason_code(),
+                "Exit Node 拒绝未通过贡献治理授权的数据包"
+            );
+            return None;
+        }
 
         #[cfg(target_os = "linux")]
         {
@@ -2433,10 +2457,17 @@ async fn admit_inbound_packet(
             return None;
         }
 
+        // Reaching this point means every Exit policy, contribution, and
+        // kernel-forwarding check has succeeded. Only accepted bytes count
+        // toward owner bandwidth and quota limits.
+        runtime
+            .exit_contribution_gate
+            .record_forwarded(plain_payload.len(), now_unix_ms);
+
         #[cfg(target_os = "linux")]
         tracing::debug!(
             "Exit Node 转发已认证数据包: client={}, {} -> {target_dst}, {} 字节",
-            peer.client_id,
+            peer.node_id,
             packet_src,
             plain_payload.len()
         );

@@ -7564,6 +7564,128 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_exit_toggle_operations_surface_authoritative_lifecycle_stages() {
+        let harness = TestHarness::new("local-exit-operation").await;
+        start_fake_network(&harness, "local-exit-operation").await;
+        set_supported_exit_capabilities(&harness).await;
+        harness
+            .runtime
+            .update_routing(routing_command(
+                "local-exit-operation",
+                NodeRoutingMode::GlobalProxy,
+                Some("office"),
+                true,
+            ))
+            .await
+            .expect("enable network exit role");
+        let bus = crate::node::spawn_command_bus_with_runtime(
+            harness.state.clone(),
+            MultiNetworkRegistry::new(),
+            harness.events.clone(),
+            harness.services.clone(),
+            harness.runtime.clone(),
+            harness.configs.clone(),
+        );
+        let operations = crate::node::OperationService::in_memory(
+            bus,
+            harness.state.clone(),
+            harness.events.clone(),
+        );
+        let context = crate::node::NodeCommandContext::local_owner_for_snapshot(
+            &harness.state.snapshot().await,
+            "local-exit-operation",
+        );
+
+        let submit = |request_id, enabled, key| {
+            operations.submit(
+                context.clone(),
+                NodeCommandRequest::new(
+                    request_id,
+                    NodeCommand::SetLocalExitCapability(NodeSetLocalExitCapabilityCommand {
+                        enabled,
+                    }),
+                ),
+                fuckipv6_common::domain::IdempotencyKey::from_public_key(key),
+            )
+        };
+        let (enable, created) = submit(1300, true, b"local-exit-enable-operation")
+            .await
+            .expect("submit local exit enable operation");
+        assert!(created);
+        let enable = timeout(Duration::from_secs(2), async {
+            loop {
+                let snapshot = operations
+                    .lookup(enable.operation.operation_id.as_str())
+                    .expect("enable operation remains registered");
+                if snapshot.operation.state.is_terminal() {
+                    break snapshot;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("enable operation must finish");
+        assert_eq!(
+            enable.operation.kind,
+            fuckipv6_common::domain::OperationKind::CapabilityEnable
+        );
+        assert_eq!(
+            enable.operation.state,
+            fuckipv6_common::domain::OperationState::Succeeded
+        );
+        let Some(result) = enable.result else {
+            panic!("enable operation must expose its result");
+        };
+        let NodeCommandOutcome::LocalExitCapability(enabled) = result.outcome else {
+            panic!("enable operation must return the local Exit lifecycle");
+        };
+        assert_eq!(enabled.stage, LocalExitCapabilityStage::Enabled);
+        assert_eq!(
+            harness.state.snapshot().await.local_exit.stage,
+            LocalExitCapabilityStage::Enabled
+        );
+
+        let (disable, created) = submit(1301, false, b"local-exit-disable-operation")
+            .await
+            .expect("submit local exit disable operation");
+        assert!(created);
+        let disable = timeout(Duration::from_secs(2), async {
+            loop {
+                let snapshot = operations
+                    .lookup(disable.operation.operation_id.as_str())
+                    .expect("disable operation remains registered");
+                if snapshot.operation.state.is_terminal() {
+                    break snapshot;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("disable operation must finish");
+        assert_eq!(
+            disable.operation.kind,
+            fuckipv6_common::domain::OperationKind::CapabilityDisable
+        );
+        assert_eq!(
+            disable.operation.state,
+            fuckipv6_common::domain::OperationState::Succeeded
+        );
+        let Some(result) = disable.result else {
+            panic!("disable operation must expose its result");
+        };
+        let NodeCommandOutcome::LocalExitCapability(disabled) = result.outcome else {
+            panic!("disable operation must return the local Exit lifecycle");
+        };
+        assert_eq!(disabled.stage, LocalExitCapabilityStage::Disabled);
+        assert_eq!(
+            harness.state.snapshot().await.local_exit.stage,
+            LocalExitCapabilityStage::Disabled
+        );
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn local_exit_enable_without_network_authorization_waits_without_claiming_health() {
         let harness = TestHarness::new("local-exit-waiting").await;
         start_fake_network(&harness, "local-exit-waiting").await;

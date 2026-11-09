@@ -509,6 +509,7 @@ fn command_timeout(command: &crate::node::NodeCommand) -> Duration {
         | NodeCommandKind::UpdateNetworkAllocation
         | NodeCommandKind::UpdateRouting
         | NodeCommandKind::SetNetworkRole
+        | NodeCommandKind::SetLocalExitCapability
         | NodeCommandKind::SetNodeDisplayName
         | NodeCommandKind::RotateNodeIdentity
         | NodeCommandKind::ProbePeer

@@ -31,11 +31,11 @@ use super::command::{
 };
 use super::event::{NodeEvent, NodeEventKind};
 use super::state::{
-    NodeAccessControlSnapshot, NodeCapabilityRegistrySnapshot, NodeConfigurationSnapshot,
-    NodeControlHealth, NodeEmbeddedServiceSnapshot, NodeEmbeddedServiceStatus,
-    NodeInterfaceAddress, NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceStatus,
-    NodeLogEntry, NodeNetworkMembershipSnapshot, NodeNetworkRole, NodeNetworkSnapshot,
-    NodeNetworkStatus, NodePeerSnapshot, NodePermissionSnapshot, NodeProblem,
+    LocalExitCapabilitySnapshot, NodeAccessControlSnapshot, NodeCapabilityRegistrySnapshot,
+    NodeConfigurationSnapshot, NodeControlHealth, NodeEmbeddedServiceSnapshot,
+    NodeEmbeddedServiceStatus, NodeInterfaceAddress, NodeInterfaceKind, NodeInterfaceOwnership,
+    NodeInterfaceStatus, NodeLogEntry, NodeNetworkMembershipSnapshot, NodeNetworkRole,
+    NodeNetworkSnapshot, NodeNetworkStatus, NodePeerSnapshot, NodePermissionSnapshot, NodeProblem,
     NodeRoutingSummarySnapshot, NodeSnapshot, NodeTrafficSnapshot,
 };
 use super::{NodeLifecycleSnapshot, NodeLogLevel, NodeRoutingMode, NodeUiManifest};
@@ -74,6 +74,8 @@ pub struct ProjectedNodeSnapshot {
     pub configuration: Option<NodeConfigurationSnapshot>,
     #[serde(default)]
     pub exit_node_capabilities: ExitNodeCapabilities,
+    #[serde(default)]
+    pub local_exit: LocalExitCapabilitySnapshot,
     #[serde(default)]
     pub capabilities: NodeCapabilityRegistrySnapshot,
     #[serde(default)]
@@ -247,6 +249,7 @@ pub enum ProjectedNodeCommandOutcome {
     InvitationRedeemed(Box<InvitationRedemption>),
     NetworkLeft(Box<ProjectedNodeNetworkLeaveResult>),
     MembershipPolicyAcknowledged(Box<NodeNetworkMembershipSnapshot>),
+    LocalExitCapability(Box<LocalExitCapabilitySnapshot>),
     IdentityRotated(NodeIdentityRotationSnapshot),
     Configuration(ConfigurationDocument),
     ConfigurationPreview(Box<ConfigurationPreview>),
@@ -448,6 +451,9 @@ pub fn project_node_command_result(
         }
         NodeCommandOutcome::MembershipPolicyAcknowledged(membership) => {
             ProjectedNodeCommandOutcome::MembershipPolicyAcknowledged(membership.clone())
+        }
+        NodeCommandOutcome::LocalExitCapability(snapshot) => {
+            ProjectedNodeCommandOutcome::LocalExitCapability(snapshot.clone())
         }
         NodeCommandOutcome::IdentityRotated(rotation) => {
             ProjectedNodeCommandOutcome::IdentityRotated(rotation.clone())
@@ -1063,6 +1069,7 @@ pub fn project_node_snapshot(
         identity,
         configuration: owner.then(|| snapshot.configuration.clone()),
         exit_node_capabilities: snapshot.exit_node_capabilities.clone(),
+        local_exit: snapshot.local_exit.clone(),
         capabilities: snapshot.capabilities.clone(),
         permissions: snapshot.permissions.clone(),
         access_control: if owner {
@@ -1420,6 +1427,7 @@ mod tests {
             }),
             configuration: NodeConfigurationSnapshot::default(),
             exit_node_capabilities: ExitNodeCapabilities::default(),
+            local_exit: Default::default(),
             capabilities: NodeCapabilityRegistrySnapshot::default(),
             permissions: NodePermissionSnapshot::default(),
             access_control: NodeAccessControlSnapshot {

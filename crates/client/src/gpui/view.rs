@@ -2403,6 +2403,12 @@ impl GpuiShell {
                     comparison.delta.changed, comparison.delta.route_changed
                 ));
             }
+            NodeCommandOutcome::LocalExitCapability(snapshot) => {
+                self.notice = Some(format!(
+                    "local Exit · enabled={} · stage={:?} · healthy={}",
+                    snapshot.owner_exit_enabled, snapshot.stage, snapshot.healthy
+                ));
+            }
             NodeCommandOutcome::Accepted { operation_id } => {
                 self.notice = Some(tr(
                     self.locale,
@@ -13302,6 +13308,7 @@ fn action_label(locale: Locale, id: &str) -> String {
         "update_network_allocation" => "action.update_network_allocation",
         "update_routing" => "action.update_routing",
         "set_exit_node_role" => "action.set_exit_node_role",
+        "set_local_exit_capability" => "action.set_local_exit_capability",
         "set_relay_role" => "action.set_relay_role",
         "set_node_display_name" => "action.set_node_display_name",
         "rotate_node_identity" => "action.rotate_node_identity",

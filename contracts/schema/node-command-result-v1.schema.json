@@ -1324,6 +1324,69 @@
       ],
       "type": "string"
     },
+    "LocalExitCapabilitySnapshot": {
+      "description": "Owner intent and observed lifecycle of the local Exit data plane.",
+      "properties": {
+        "active_clients": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "healthy": {
+          "default": false,
+          "type": "boolean"
+        },
+        "last_transition_at_unix_ms": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_allowed": {
+          "default": false,
+          "type": "boolean"
+        },
+        "owner_exit_enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "problem": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeProblem"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stage": {
+          "$ref": "#/$defs/LocalExitCapabilityStage",
+          "default": "disabled"
+        },
+        "total_clients": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "LocalExitCapabilityStage": {
+      "enum": [
+        "disabled",
+        "waiting_for_network_authorization",
+        "listening",
+        "health_checking",
+        "enabled",
+        "draining",
+        "cleaning",
+        "failed"
+      ],
+      "type": "string"
+    },
     "MemberLifecycleAction": {
       "description": "Every durable governance action uses this vocabulary. Runtime connection\nstates stay in `MembershipState`; this enum is the operation semantics shared\nby the Coordinator, command bus, audit/activity projections and UI adapters.",
       "enum": [
@@ -3121,6 +3184,22 @@
             },
             "status": {
               "const": "membership_policy_acknowledged",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "$ref": "#/$defs/LocalExitCapabilitySnapshot"
+            },
+            "status": {
+              "const": "local_exit_capability",
               "type": "string"
             }
           },
@@ -5777,6 +5856,19 @@
         "lifecycle": {
           "$ref": "#/$defs/NodeLifecycleSnapshot"
         },
+        "local_exit": {
+          "$ref": "#/$defs/LocalExitCapabilitySnapshot",
+          "default": {
+            "active_clients": 0,
+            "healthy": false,
+            "last_transition_at_unix_ms": 0,
+            "network_allowed": false,
+            "owner_exit_enabled": false,
+            "stage": "disabled",
+            "total_clients": 0
+          },
+          "description": "Authoritative local Exit lifecycle. `owner_exit_enabled` is the durable\nlocal veto; network Exit roles only decide whether the data plane may\nserve after this intent is true."
+        },
         "logs": {
           "items": {
             "$ref": "#/$defs/NodeLogEntry"
@@ -6005,6 +6097,7 @@
             "acknowledge_membership_policy",
             "update_routing",
             "set_network_role",
+            "set_local_exit_capability",
             "set_node_display_name",
             "rotate_node_identity",
             "get_blacklist",

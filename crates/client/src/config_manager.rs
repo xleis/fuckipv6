@@ -132,6 +132,10 @@ pub enum NetworkProfileError {
     Storage(String),
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Node-wide metadata that is independent from any one joined network.
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -144,6 +148,10 @@ struct NodeMetadata {
     /// once from the identity file's modification time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     identity_created_at_unix_ms: Option<u64>,
+    /// Durable node-owner intent for serving Exit traffic. Network role
+    /// configuration is separate and can never turn this back on remotely.
+    #[serde(default, skip_serializing_if = "is_false")]
+    local_exit_enabled: bool,
 }
 
 /// 配置管理器
@@ -532,6 +540,17 @@ impl ConfigManager {
     pub(crate) fn set_node_display_name(&self, display_name: Option<&str>) -> Result<()> {
         let mut metadata = self.load_node_metadata()?;
         metadata.display_name = normalize_display_name(display_name.map(str::to_string))?;
+        self.save_node_metadata(&metadata)
+    }
+
+    /// Durable node-owner intent for the local Exit data plane.
+    pub(crate) fn node_local_exit_enabled(&self) -> Result<bool> {
+        Ok(self.load_node_metadata()?.local_exit_enabled)
+    }
+
+    pub(crate) fn set_node_local_exit_enabled(&self, enabled: bool) -> Result<()> {
+        let mut metadata = self.load_node_metadata()?;
+        metadata.local_exit_enabled = enabled;
         self.save_node_metadata(&metadata)
     }
 
@@ -2211,6 +2230,32 @@ mod tests {
         assert!(manager
             .set_node_display_name(Some(&"界".repeat(81)))
             .is_err());
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn local_exit_intent_defaults_off_for_legacy_metadata_and_persists() -> anyhow::Result<()> {
+        let dir = temp_config_dir("local-exit-intent");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        std::fs::write(
+            dir.join(NODE_METADATA_FILE),
+            r#"{"display_name":"legacy-node"}"#,
+        )?;
+
+        assert!(!manager.node_local_exit_enabled()?);
+        manager.set_node_local_exit_enabled(true)?;
+        assert!(manager.node_local_exit_enabled()?);
+        manager.set_node_display_name(Some("gateway"))?;
+        assert!(manager.node_local_exit_enabled()?);
+
+        let reopened = ConfigManager::new_for_dir(dir.clone())?;
+        assert!(reopened.node_local_exit_enabled()?);
+        assert_eq!(reopened.node_display_name()?, Some("gateway".into()));
+        reopened.set_node_local_exit_enabled(false)?;
+        assert!(!reopened.node_local_exit_enabled()?);
 
         let _ = std::fs::remove_dir_all(dir);
         Ok(())

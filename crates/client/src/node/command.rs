@@ -114,6 +114,7 @@ pub enum NodeCommandKind {
     AcknowledgeMembershipPolicy,
     UpdateRouting,
     SetNetworkRole,
+    SetLocalExitCapability,
     SetNodeDisplayName,
     RotateNodeIdentity,
     GetBlacklist,
@@ -150,7 +151,7 @@ pub enum NodeCommandKind {
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 68] = [
+    pub const ALL: [Self; 69] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -187,6 +188,7 @@ impl NodeCommandKind {
         Self::AcknowledgeMembershipPolicy,
         Self::UpdateRouting,
         Self::SetNetworkRole,
+        Self::SetLocalExitCapability,
         Self::SetNodeDisplayName,
         Self::RotateNodeIdentity,
         Self::GetBlacklist,
@@ -223,7 +225,7 @@ impl NodeCommandKind {
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 67] = [
+    pub const ACTIONS: [Self; 68] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -259,6 +261,7 @@ impl NodeCommandKind {
         Self::AcknowledgeMembershipPolicy,
         Self::UpdateRouting,
         Self::SetNetworkRole,
+        Self::SetLocalExitCapability,
         Self::SetNodeDisplayName,
         Self::RotateNodeIdentity,
         Self::GetBlacklist,
@@ -358,6 +361,7 @@ impl NodeCommandKind {
             Self::AcknowledgeMembershipPolicy => "acknowledge_membership_policy",
             Self::UpdateRouting => "update_routing",
             Self::SetNetworkRole => "set_network_role",
+            Self::SetLocalExitCapability => "set_local_exit_capability",
             Self::SetNodeDisplayName => "set_node_display_name",
             Self::RotateNodeIdentity => "rotate_node_identity",
             Self::GetBlacklist => "get_blacklist",
@@ -425,6 +429,7 @@ impl NodeCommandKind {
                 | Self::AcknowledgeMembershipPolicy
                 | Self::UpdateRouting
                 | Self::SetNetworkRole
+                | Self::SetLocalExitCapability
                 | Self::SetNodeDisplayName
                 | Self::RotateNodeIdentity
                 | Self::BanClient
@@ -540,6 +545,9 @@ pub enum NodeCommand {
     AcknowledgeMembershipPolicy(NodeAcknowledgeMembershipPolicyCommand),
     UpdateRouting(NodeUpdateRoutingCommand),
     SetNetworkRole(NodeSetNetworkRoleCommand),
+    /// Owner-controlled local intent for actually serving as an Exit Node.
+    /// Network authorization remains in each network's `exit_node.enabled`.
+    SetLocalExitCapability(NodeSetLocalExitCapabilityCommand),
     SetNodeDisplayName(NodeSetNodeDisplayNameCommand),
     RotateNodeIdentity(NodeRotateNodeIdentityCommand),
     GetBlacklist {
@@ -650,6 +658,7 @@ impl NodeCommand {
             Self::AcknowledgeMembershipPolicy(_) => NodeCommandKind::AcknowledgeMembershipPolicy,
             Self::UpdateRouting(_) => NodeCommandKind::UpdateRouting,
             Self::SetNetworkRole(_) => NodeCommandKind::SetNetworkRole,
+            Self::SetLocalExitCapability(_) => NodeCommandKind::SetLocalExitCapability,
             Self::SetNodeDisplayName(_) => NodeCommandKind::SetNodeDisplayName,
             Self::RotateNodeIdentity(_) => NodeCommandKind::RotateNodeIdentity,
             Self::GetBlacklist { .. } => NodeCommandKind::GetBlacklist,
@@ -785,6 +794,7 @@ impl NodeCommand {
             Self::AcknowledgeMembershipPolicy(command) => command.validate(),
             Self::UpdateRouting(command) => command.validate(),
             Self::SetNetworkRole(command) => command.validate(),
+            Self::SetLocalExitCapability(command) => command.validate(),
             Self::SetNodeDisplayName(command) => command.validate(),
             Self::RotateNodeIdentity(command) => command.validate(),
             Self::GetBlacklist { network_name } | Self::GetNetworkAllocation { network_name } => {
@@ -2062,6 +2072,22 @@ impl NodeSetNetworkRoleCommand {
     }
 }
 
+/// Node-owner intent for the local Exit data plane.
+///
+/// This does not grant network exposure. A live network also has to carry the
+/// Exit Node role in its network configuration. Disabling this value is a local
+/// veto that network administrators cannot override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeSetLocalExitCapabilityCommand {
+    pub enabled: bool,
+}
+
+impl NodeSetLocalExitCapabilityCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeSetNodeDisplayNameCommand {
     pub display_name: Option<String>,
@@ -2628,6 +2654,7 @@ pub enum NodeCommandOutcome {
     InvitationRedeemed(Box<InvitationRedemption>),
     NetworkLeft(Box<NodeNetworkLeaveResult>),
     MembershipPolicyAcknowledged(Box<crate::node::NodeNetworkMembershipSnapshot>),
+    LocalExitCapability(Box<crate::node::LocalExitCapabilitySnapshot>),
     IdentityRotated(NodeIdentityRotationSnapshot),
     Configuration(ConfigurationDocument),
     ConfigurationPreview(Box<ConfigurationPreview>),
@@ -4034,6 +4061,9 @@ mod tests {
                 role: NodeNetworkRole::ExitNode,
                 enabled: true,
             }),
+            NodeCommand::SetLocalExitCapability(NodeSetLocalExitCapabilityCommand {
+                enabled: true,
+            }),
             NodeCommand::SetNodeDisplayName(NodeSetNodeDisplayNameCommand {
                 display_name: Some("edge-gateway".into()),
             }),
@@ -4212,8 +4242,8 @@ mod tests {
 
     #[test]
     fn command_kind_inventory_and_sensitive_reauth_contract_are_complete() {
-        assert_eq!(NodeCommandKind::ALL.len(), 68);
-        assert_eq!(NodeCommandKind::ACTIONS.len(), 67);
+        assert_eq!(NodeCommandKind::ALL.len(), 69);
+        assert_eq!(NodeCommandKind::ACTIONS.len(), 68);
         for kind in [
             NodeCommandKind::CreateInvitation,
             NodeCommandKind::RevokeInvitation,

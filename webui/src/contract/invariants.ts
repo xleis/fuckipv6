@@ -158,6 +158,7 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   unban_client: "unban_client",
   update_routing: "update_routing",
   set_exit_node_role: "set_network_role",
+  set_local_exit_capability: "set_local_exit_capability",
   set_relay_role: "set_network_role",
   set_node_display_name: "set_node_display_name",
   rotate_node_identity: "rotate_node_identity",
@@ -2910,6 +2911,11 @@ export function buildCommand(
           exit_node: optional(values, "exit_node"),
           is_exit_node: booleanValue(values.is_exit_node, locale),
         },
+      };
+    case "set_local_exit_capability":
+      return {
+        command: "set_local_exit_capability",
+        payload: { enabled: booleanValue(requireValue("enabled"), locale) },
       };
     case "set_exit_node_role":
     case "set_relay_role":

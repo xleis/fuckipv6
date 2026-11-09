@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "ConfirmedTrafficDirectFallback", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitNodeCapabilities", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeApplyPolicyCommand", "NodeApplyTrafficPolicyCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodePreviewPolicyCommand", "NodePreviewPolicyRollbackCommand", "NodePreviewTrafficPolicyCommand", "NodePreviewTrafficPolicyRollbackCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRollbackPolicyCommand", "NodeRollbackTrafficPolicyCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTestTrafficPolicyCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyAffectedObject", "PolicyApplyResult", "PolicyCurrent", "PolicyDiffEntry", "PolicyHistoryEntry", "PolicyHistorySnapshot", "PolicyPrecedenceExplanation", "PolicyPreview", "PolicyRiskSummary", "PolicyRollbackResult", "PolicyRuleExplanation", "PolicySnapshot", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "PortRange", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TrafficDefaultPolicy", "TrafficFailureDecision", "TrafficFailurePolicy", "TrafficFlow", "TrafficMatch", "TrafficPolicy", "TrafficPolicyAffectedObject", "TrafficPolicyApplyResult", "TrafficPolicyCurrent", "TrafficPolicyDiffEntry", "TrafficPolicyDraft", "TrafficPolicyHistoryEntry", "TrafficPolicyHistorySnapshot", "TrafficPolicyPreview", "TrafficPolicyRollbackResult", "TrafficPolicyTestComparison", "TrafficPolicyTestDelta", "TrafficPolicyTestInput", "TrafficRoutingDefaultPolicyView", "TrafficRoutingHardConstraints", "TrafficRoutingHitSample", "TrafficRoutingMoveAction", "TrafficRoutingNavigation", "TrafficRoutingObservedHit", "TrafficRoutingPageModel", "TrafficRoutingRuleImpact", "TrafficRoutingRuleView", "TrafficRoutingTarget", "TrafficRoutingTargetRef", "TrafficRule", "TrafficRuleRisk", "TunCapabilities", "UiModeResolution", "ApplicationIdentity", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector", "TrafficAction", "TrafficMatchRisk", "TrafficPolicyTestContextSource", "TrafficPolicyTestDecision", "TrafficRoutingObservation", "TrafficRoutingRuleActivityEffect", "TrafficRoutingRuleImpactView", "TrafficRoutingWorkflowState"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "ConfirmedTrafficDirectFallback", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitNodeCapabilities", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "LocalExitCapabilitySnapshot", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeApplyPolicyCommand", "NodeApplyTrafficPolicyCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodePreviewPolicyCommand", "NodePreviewPolicyRollbackCommand", "NodePreviewTrafficPolicyCommand", "NodePreviewTrafficPolicyRollbackCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRollbackPolicyCommand", "NodeRollbackTrafficPolicyCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetLocalExitCapabilityCommand", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTestTrafficPolicyCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyAffectedObject", "PolicyApplyResult", "PolicyCurrent", "PolicyDiffEntry", "PolicyHistoryEntry", "PolicyHistorySnapshot", "PolicyPrecedenceExplanation", "PolicyPreview", "PolicyRiskSummary", "PolicyRollbackResult", "PolicyRuleExplanation", "PolicySnapshot", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "PortRange", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TrafficDefaultPolicy", "TrafficFailureDecision", "TrafficFailurePolicy", "TrafficFlow", "TrafficMatch", "TrafficPolicy", "TrafficPolicyAffectedObject", "TrafficPolicyApplyResult", "TrafficPolicyCurrent", "TrafficPolicyDiffEntry", "TrafficPolicyDraft", "TrafficPolicyHistoryEntry", "TrafficPolicyHistorySnapshot", "TrafficPolicyPreview", "TrafficPolicyRollbackResult", "TrafficPolicyTestComparison", "TrafficPolicyTestDelta", "TrafficPolicyTestInput", "TrafficRoutingDefaultPolicyView", "TrafficRoutingHardConstraints", "TrafficRoutingHitSample", "TrafficRoutingMoveAction", "TrafficRoutingNavigation", "TrafficRoutingObservedHit", "TrafficRoutingPageModel", "TrafficRoutingRuleImpact", "TrafficRoutingRuleView", "TrafficRoutingTarget", "TrafficRoutingTargetRef", "TrafficRule", "TrafficRuleRisk", "TunCapabilities", "UiModeResolution", "ApplicationIdentity", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector", "TrafficAction", "TrafficMatchRisk", "TrafficPolicyTestContextSource", "TrafficPolicyTestDecision", "TrafficRoutingObservation", "TrafficRoutingRuleActivityEffect", "TrafficRoutingRuleImpactView", "TrafficRoutingWorkflowState"
     };
 
     public enum AclAction {
@@ -611,6 +611,36 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum LocalExitCapabilityStage {
+        DISABLED("disabled"),
+        WAITING_FOR_NETWORK_AUTHORIZATION("waiting_for_network_authorization"),
+        LISTENING("listening"),
+        HEALTH_CHECKING("health_checking"),
+        ENABLED("enabled"),
+        DRAINING("draining"),
+        CLEANING("cleaning"),
+        FAILED("failed");
+
+        private final String wireName;
+
+        LocalExitCapabilityStage(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static LocalExitCapabilityStage fromWireName(String value) {
+            for (LocalExitCapabilityStage candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown LocalExitCapabilityStage wire value: " + value);
+        }
+    }
+
     public enum MemberLifecycleAction {
         INVITE("invite"),
         APPROVE("approve"),
@@ -1095,6 +1125,7 @@ public final class NodeContractV1 {
         ROLLBACK_POLICY("rollback_policy"),
         ROLLBACK_TRAFFIC_POLICY("rollback_traffic_policy"),
         ROTATE_NODE_IDENTITY("rotate_node_identity"),
+        SET_LOCAL_EXIT_CAPABILITY("set_local_exit_capability"),
         SET_NETWORK_ROLE("set_network_role"),
         SET_NODE_DISPLAY_NAME("set_node_display_name"),
         SHUTDOWN("shutdown"),
@@ -3603,6 +3634,29 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for LocalExitCapabilitySnapshot. */
+    public static final class LocalExitCapabilitySnapshot {
+        public final Long active_clients;
+        public final Boolean healthy;
+        public final Long last_transition_at_unix_ms;
+        public final Boolean network_allowed;
+        public final Boolean owner_exit_enabled;
+        public final NodeProblem problem;
+        public final LocalExitCapabilityStage stage;
+        public final Long total_clients;
+
+        public LocalExitCapabilitySnapshot(Long active_clients, Boolean healthy, Long last_transition_at_unix_ms, Boolean network_allowed, Boolean owner_exit_enabled, NodeProblem problem, LocalExitCapabilityStage stage, Long total_clients) {
+            this.active_clients = active_clients;
+            this.healthy = healthy;
+            this.last_transition_at_unix_ms = last_transition_at_unix_ms;
+            this.network_allowed = network_allowed;
+            this.owner_exit_enabled = owner_exit_enabled;
+            this.problem = problem;
+            this.stage = stage;
+            this.total_clients = total_clients;
+        }
+    }
+
     /** DTO for MemberLifecycleChange. */
     public static final class MemberLifecycleChange {
         public final Long access_epoch;
@@ -5775,6 +5829,15 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeSetLocalExitCapabilityCommand. */
+    public static final class NodeSetLocalExitCapabilityCommand {
+        public final Boolean enabled;
+
+        public NodeSetLocalExitCapabilityCommand(Boolean enabled) {
+            this.enabled = enabled;
+        }
+    }
+
     /** DTO for NodeSetNetworkRoleCommand. */
     public static final class NodeSetNetworkRoleCommand {
         public final Boolean enabled;
@@ -5824,6 +5887,7 @@ public final class NodeContractV1 {
         public final List<NodeInterfaceSnapshot> interfaces;
         public final NodeProblem last_error;
         public final NodeLifecycleSnapshot lifecycle;
+        public final LocalExitCapabilitySnapshot local_exit;
         public final List<NodeLogEntry> logs;
         public final List<NodeNetworkMembershipSnapshot> memberships;
         public final List<NodeNetworkProfileSnapshot> network_profiles;
@@ -5838,7 +5902,7 @@ public final class NodeContractV1 {
         public final TunCapabilities tun_capabilities;
         public final UiModeResolution ui_mode;
 
-        public NodeSnapshot(NodeAccessControlSnapshot access_control, NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, NodeDiscoveryIndexSnapshot discovery_index, List<NodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, NodeIdentitySnapshot identity, List<NodeProblem> interface_problems, List<NodeInterfaceSnapshot> interfaces, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, List<NodeLogEntry> logs, List<NodeNetworkMembershipSnapshot> memberships, List<NodeNetworkProfileSnapshot> network_profiles, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, NodePermissionSnapshot permissions, List<ActivityEntry> recent_activity, Long revision, List<NodeRoutingSummarySnapshot> routing_summaries, TopologySnapshot topology, TrafficRoutingPageModel traffic_routing_page, TunCapabilities tun_capabilities, UiModeResolution ui_mode) {
+        public NodeSnapshot(NodeAccessControlSnapshot access_control, NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, NodeDiscoveryIndexSnapshot discovery_index, List<NodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, NodeIdentitySnapshot identity, List<NodeProblem> interface_problems, List<NodeInterfaceSnapshot> interfaces, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, LocalExitCapabilitySnapshot local_exit, List<NodeLogEntry> logs, List<NodeNetworkMembershipSnapshot> memberships, List<NodeNetworkProfileSnapshot> network_profiles, List<NodeNetworkSnapshot> networks, List<NodePeerSnapshot> peers, NodePermissionSnapshot permissions, List<ActivityEntry> recent_activity, Long revision, List<NodeRoutingSummarySnapshot> routing_summaries, TopologySnapshot topology, TrafficRoutingPageModel traffic_routing_page, TunCapabilities tun_capabilities, UiModeResolution ui_mode) {
             this.access_control = access_control;
             this.capabilities = capabilities;
             this.configuration = configuration;
@@ -5851,6 +5915,7 @@ public final class NodeContractV1 {
             this.interfaces = interfaces;
             this.last_error = last_error;
             this.lifecycle = lifecycle;
+            this.local_exit = local_exit;
             this.logs = logs;
             this.memberships = memberships;
             this.network_profiles = network_profiles;
@@ -6667,6 +6732,7 @@ public final class NodeContractV1 {
         public final List<ProjectedNodeInterfaceSnapshot> interfaces;
         public final NodeProblem last_error;
         public final NodeLifecycleSnapshot lifecycle;
+        public final LocalExitCapabilitySnapshot local_exit;
         public final List<NodeLogEntry> logs;
         public final List<NodeNetworkMembershipSnapshot> memberships;
         public final List<NodeNetworkProfileSnapshot> network_profiles;
@@ -6681,7 +6747,7 @@ public final class NodeContractV1 {
         public final TunCapabilities tun_capabilities;
         public final UiModeResolution ui_mode;
 
-        public ProjectedNodeSnapshot(NodeAccessControlSnapshot access_control, NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, NodeDiscoveryIndexSnapshot discovery_index, List<ProjectedNodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, ProjectedNodeIdentitySnapshot identity, List<NodeProblem> interface_problems, List<ProjectedNodeInterfaceSnapshot> interfaces, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, List<NodeLogEntry> logs, List<NodeNetworkMembershipSnapshot> memberships, List<NodeNetworkProfileSnapshot> network_profiles, List<ProjectedNodeNetworkSnapshot> networks, List<ProjectedNodePeerSnapshot> peers, NodePermissionSnapshot permissions, List<ProjectedActivityEntry> recent_activity, Long revision, List<NodeRoutingSummarySnapshot> routing_summaries, TopologySnapshot topology, TrafficRoutingPageModel traffic_routing_page, TunCapabilities tun_capabilities, UiModeResolution ui_mode) {
+        public ProjectedNodeSnapshot(NodeAccessControlSnapshot access_control, NodeCapabilityRegistrySnapshot capabilities, NodeConfigurationSnapshot configuration, NodeControlHealth control_health, NodeDiscoveryIndexSnapshot discovery_index, List<ProjectedNodeEmbeddedServiceSnapshot> embedded_services, ExitNodeCapabilities exit_node_capabilities, ProjectedNodeIdentitySnapshot identity, List<NodeProblem> interface_problems, List<ProjectedNodeInterfaceSnapshot> interfaces, NodeProblem last_error, NodeLifecycleSnapshot lifecycle, LocalExitCapabilitySnapshot local_exit, List<NodeLogEntry> logs, List<NodeNetworkMembershipSnapshot> memberships, List<NodeNetworkProfileSnapshot> network_profiles, List<ProjectedNodeNetworkSnapshot> networks, List<ProjectedNodePeerSnapshot> peers, NodePermissionSnapshot permissions, List<ProjectedActivityEntry> recent_activity, Long revision, List<NodeRoutingSummarySnapshot> routing_summaries, TopologySnapshot topology, TrafficRoutingPageModel traffic_routing_page, TunCapabilities tun_capabilities, UiModeResolution ui_mode) {
             this.access_control = access_control;
             this.capabilities = capabilities;
             this.configuration = configuration;
@@ -6694,6 +6760,7 @@ public final class NodeContractV1 {
             this.interfaces = interfaces;
             this.last_error = last_error;
             this.lifecycle = lifecycle;
+            this.local_exit = local_exit;
             this.logs = logs;
             this.memberships = memberships;
             this.network_profiles = network_profiles;
@@ -7940,6 +8007,15 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class SetLocalExitCapability extends NodeCommand {
+            public final NodeSetLocalExitCapabilityCommand payload;
+
+            public SetLocalExitCapability(NodeSetLocalExitCapabilityCommand payload) {
+                super(NodeCommandKind.SET_LOCAL_EXIT_CAPABILITY);
+                this.payload = payload;
+            }
+        }
+
         public static final class SetNodeDisplayName extends NodeCommand {
             public final NodeSetNodeDisplayNameCommand payload;
 
@@ -8472,6 +8548,15 @@ public final class NodeContractV1 {
 
             public MembershipPolicyAcknowledged(NodeNetworkMembershipSnapshot data) {
                 super("membership_policy_acknowledged");
+                this.data = data;
+            }
+        }
+
+        public static final class LocalExitCapability extends NodeCommandOutcome {
+            public final LocalExitCapabilitySnapshot data;
+
+            public LocalExitCapability(LocalExitCapabilitySnapshot data) {
+                super("local_exit_capability");
                 this.data = data;
             }
         }
@@ -9321,6 +9406,15 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class LocalExitCapability extends ProjectedNodeCommandOutcome {
+            public final LocalExitCapabilitySnapshot data;
+
+            public LocalExitCapability(LocalExitCapabilitySnapshot data) {
+                super("local_exit_capability");
+                this.data = data;
+            }
+        }
+
         public static final class IdentityRotated extends ProjectedNodeCommandOutcome {
             public final NodeIdentityRotationSnapshot data;
 
@@ -10134,6 +10228,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.ROLLBACK_POLICY ||
             command == NodeCommandKind.ROLLBACK_TRAFFIC_POLICY ||
             command == NodeCommandKind.ROTATE_NODE_IDENTITY ||
+            command == NodeCommandKind.SET_LOCAL_EXIT_CAPABILITY ||
             command == NodeCommandKind.SET_NETWORK_ROLE ||
             command == NodeCommandKind.SET_NODE_DISPLAY_NAME ||
             command == NodeCommandKind.SHUTDOWN ||

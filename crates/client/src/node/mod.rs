@@ -45,9 +45,9 @@ pub use command::{
     NodeRedeemInvitationCommand, NodeResidualCleanupResult, NodeResubmitJoinRequestCommand,
     NodeReviewJoinRequestCommand, NodeRevokeInvitationCommand, NodeRollbackConfigurationCommand,
     NodeRollbackPolicyCommand, NodeRollbackTrafficPolicyCommand, NodeRotateNodeIdentityCommand,
-    NodeRuntimeResidueSnapshot, NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand,
-    NodeSubmitJoinRequestCommand, NodeTestTrafficPolicyCommand, NodeUpdateNetworkAllocationCommand,
-    NodeUpdateRoutingCommand, NodeWithdrawJoinRequestCommand,
+    NodeRuntimeResidueSnapshot, NodeSetLocalExitCapabilityCommand, NodeSetNetworkRoleCommand,
+    NodeSetNodeDisplayNameCommand, NodeSubmitJoinRequestCommand, NodeTestTrafficPolicyCommand,
+    NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand, NodeWithdrawJoinRequestCommand,
 };
 pub use event::{
     NodeEvent, NodeEventBus, NodeEventCursor, NodeEventKind, NodeEventReplay, NodeEventReplayReason,
@@ -81,17 +81,17 @@ pub(crate) use runtime_control::{
 pub(crate) use runtime_handler::spawn_command_bus_with_runtime;
 pub use runtime_handler::{spawn_command_bus, spawn_command_bus_with_services, NodeRuntimeHandler};
 pub use state::{
-    NodeAccessModel, NodeCapabilityRegistrySnapshot, NodeCapabilitySnapshot,
-    NodeConfigurationSnapshot, NodeControlHealth, NodeEmbeddedServiceSnapshot,
-    NodeEmbeddedServiceStatus, NodeErrorCategory, NodeIdentitySnapshot, NodeInterfaceAddress,
-    NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceSnapshot, NodeInterfaceStatus,
-    NodeLogEntry, NodeLogLevel, NodeNetworkConfigSnapshot, NodeNetworkMembershipSnapshot,
-    NodeNetworkRole, NodeNetworkSnapshot, NodeNetworkStatus, NodePeerSnapshot, NodePermission,
-    NodePermission as NodeUiPermission, NodePermissionSnapshot, NodePrimaryStatus, NodeProblem,
-    NodeProblemCode, NodeProblemDetails, NodeRoutingDefaultAction, NodeRoutingMode,
-    NodeRoutingSummarySnapshot, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
-    NodeSignedNetworkProfileSnapshot, NodeSnapshot, NodeStateStore, NodeTrafficSnapshot,
-    NodeValidationIssue,
+    LocalExitCapabilitySnapshot, LocalExitCapabilityStage, NodeAccessModel,
+    NodeCapabilityRegistrySnapshot, NodeCapabilitySnapshot, NodeConfigurationSnapshot,
+    NodeControlHealth, NodeEmbeddedServiceSnapshot, NodeEmbeddedServiceStatus, NodeErrorCategory,
+    NodeIdentitySnapshot, NodeInterfaceAddress, NodeInterfaceKind, NodeInterfaceOwnership,
+    NodeInterfaceSnapshot, NodeInterfaceStatus, NodeLogEntry, NodeLogLevel,
+    NodeNetworkConfigSnapshot, NodeNetworkMembershipSnapshot, NodeNetworkRole, NodeNetworkSnapshot,
+    NodeNetworkStatus, NodePeerSnapshot, NodePermission, NodePermission as NodeUiPermission,
+    NodePermissionSnapshot, NodePrimaryStatus, NodeProblem, NodeProblemCode, NodeProblemDetails,
+    NodeRoutingDefaultAction, NodeRoutingMode, NodeRoutingSummarySnapshot,
+    NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot, NodeSignedNetworkProfileSnapshot,
+    NodeSnapshot, NodeStateStore, NodeTrafficSnapshot, NodeValidationIssue,
 };
 pub use ui_manifest::{
     audit_for_command, node_ui_manifest, NodeUiAction, NodeUiActionBlockReason, NodeUiAudit,

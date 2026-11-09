@@ -537,6 +537,9 @@ mod tests {
                 role: NodeNetworkRole::Relay,
                 enabled: true,
             }),
+            NodeCommand::SetLocalExitCapability(crate::node::NodeSetLocalExitCapabilityCommand {
+                enabled: true,
+            }),
             NodeCommand::SetNodeDisplayName(NodeSetNodeDisplayNameCommand {
                 display_name: Some("edge-gateway".into()),
             }),

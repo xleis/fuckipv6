@@ -1882,6 +1882,28 @@
       "title_key": "page.exit_node",
       "actions": [
         {
+          "id": "set_local_exit_capability",
+          "label_key": "action.set_local_exit_capability",
+          "command": "set_local_exit_capability",
+          "backend_status": "unavailable",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "node.local_exit.set"
+          },
+          "availability": "always",
+          "fields": [
+            {
+              "id": "enabled",
+              "label_key": "field.enabled",
+              "input": "boolean",
+              "required": true,
+              "validation": "none"
+            }
+          ],
+          "confirmation": null
+        },
+        {
           "id": "set_exit_node_role",
           "label_key": "action.set_exit_node_role",
           "command": "set_network_role",

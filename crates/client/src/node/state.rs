@@ -38,6 +38,11 @@ pub struct NodeSnapshot {
     /// of inferring success from configuration alone.
     #[serde(default)]
     pub exit_node_capabilities: ExitNodeCapabilities,
+    /// Authoritative local Exit lifecycle. `owner_exit_enabled` is the durable
+    /// local veto; network Exit roles only decide whether the data plane may
+    /// serve after this intent is true.
+    #[serde(default)]
+    pub local_exit: LocalExitCapabilitySnapshot,
     /// Unified four-capability projection shared by every UI adapter. Missing
     /// entries deserialize as `Unknown`; they are never inferred as enabled.
     #[serde(default)]
@@ -633,6 +638,56 @@ impl NodePrimaryStatus {
     }
 }
 
+/// Owner intent and observed lifecycle of the local Exit data plane.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct LocalExitCapabilitySnapshot {
+    #[serde(default)]
+    pub owner_exit_enabled: bool,
+    #[serde(default)]
+    pub stage: LocalExitCapabilityStage,
+    #[serde(default)]
+    pub healthy: bool,
+    #[serde(default)]
+    pub network_allowed: bool,
+    #[serde(default)]
+    pub active_clients: u32,
+    #[serde(default)]
+    pub total_clients: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<NodeProblem>,
+    #[serde(default)]
+    pub last_transition_at_unix_ms: u64,
+}
+
+impl Default for LocalExitCapabilitySnapshot {
+    fn default() -> Self {
+        Self {
+            owner_exit_enabled: false,
+            stage: LocalExitCapabilityStage::Disabled,
+            healthy: false,
+            network_allowed: false,
+            active_clients: 0,
+            total_clients: 0,
+            problem: None,
+            last_transition_at_unix_ms: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalExitCapabilityStage {
+    #[default]
+    Disabled,
+    WaitingForNetworkAuthorization,
+    Listening,
+    HealthChecking,
+    Enabled,
+    Draining,
+    Cleaning,
+    Failed,
+}
+
 /// Stable projection of the fixed first-version capability set. Unknown
 /// entries fail closed and unsupported capabilities remain visible so the UI
 /// can explain why an action is unavailable.
@@ -724,35 +779,24 @@ fn exit_node_capability_state(snapshot: &NodeSnapshot) -> CapabilityState {
     if !snapshot.exit_node_capabilities.supported {
         return CapabilityState::Unsupported;
     }
-    let exit_networks = snapshot
-        .networks
-        .iter()
-        .filter(|network| network.roles.contains(&NodeNetworkRole::ExitNode))
-        .collect::<Vec<_>>();
-    if exit_networks.is_empty() {
+    let local_exit = &snapshot.local_exit;
+    if local_exit.problem.is_some() || matches!(local_exit.stage, LocalExitCapabilityStage::Failed)
+    {
+        return CapabilityState::Degraded;
+    }
+    if !local_exit.owner_exit_enabled {
         return CapabilityState::Disabled;
     }
-    if exit_networks
-        .iter()
-        .any(|network| network.status == NodeNetworkStatus::Failed)
-    {
-        CapabilityState::Degraded
-    } else if exit_networks.iter().any(|network| {
-        matches!(
-            network.status,
-            NodeNetworkStatus::Online | NodeNetworkStatus::Degraded
-        )
-    }) {
-        if exit_networks
-            .iter()
-            .any(|network| network.status == NodeNetworkStatus::Degraded)
-        {
-            CapabilityState::Degraded
-        } else {
-            CapabilityState::Enabled
-        }
-    } else {
-        CapabilityState::Starting
+    match local_exit.stage {
+        LocalExitCapabilityStage::Enabled if local_exit.healthy => CapabilityState::Enabled,
+        LocalExitCapabilityStage::Listening
+        | LocalExitCapabilityStage::HealthChecking
+        | LocalExitCapabilityStage::Draining
+        | LocalExitCapabilityStage::Cleaning => CapabilityState::Starting,
+        LocalExitCapabilityStage::Disabled
+        | LocalExitCapabilityStage::WaitingForNetworkAuthorization
+        | LocalExitCapabilityStage::Failed => CapabilityState::Disabled,
+        LocalExitCapabilityStage::Enabled => CapabilityState::Degraded,
     }
 }
 
@@ -2240,6 +2284,10 @@ mod tests {
             .update(|snapshot| {
                 snapshot.embedded_services[0].status = NodeEmbeddedServiceStatus::Running;
                 snapshot.networks[0].roles = vec![NodeNetworkRole::ExitNode];
+                snapshot.local_exit.owner_exit_enabled = true;
+                snapshot.local_exit.stage = LocalExitCapabilityStage::Enabled;
+                snapshot.local_exit.healthy = true;
+                snapshot.local_exit.network_allowed = true;
             })
             .await;
         assert_eq!(

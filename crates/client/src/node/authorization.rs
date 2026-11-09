@@ -452,7 +452,7 @@ pub(crate) fn authorize_command(
         ));
     }
 
-    let (action, resource) = policy_target(kind);
+    let (action, resource) = policy_target_kind(kind);
 
     // Sensitive commands require a fresh WebUI ceremony regardless of whether
     // they are local host operations or network governance. Local owner status
@@ -705,6 +705,7 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::BanClient
         | NodeCommandKind::UnbanClient
         | NodeCommandKind::UpdateNetworkAllocation
+        | NodeCommandKind::SetLocalExitCapability
         | NodeCommandKind::SetNodeDisplayName
         | NodeCommandKind::RotateNodeIdentity
         | NodeCommandKind::StartNode
@@ -742,6 +743,7 @@ fn is_local_owner_only(kind: NodeCommandKind) -> bool {
             | NodeCommandKind::RedeemInvitation
             | NodeCommandKind::LeaveNetwork
             | NodeCommandKind::AcknowledgeMembershipPolicy
+            | NodeCommandKind::SetLocalExitCapability
             | NodeCommandKind::SetNodeDisplayName
             | NodeCommandKind::RotateNodeIdentity
             | NodeCommandKind::StartNode
@@ -770,7 +772,7 @@ fn is_local_owner_only(kind: NodeCommandKind) -> bool {
     )
 }
 
-fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
+fn policy_target_kind(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
     match kind {
         NodeCommandKind::GetSnapshot
         | NodeCommandKind::GetUiManifest
@@ -839,7 +841,9 @@ fn policy_target(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
             (PolicyAction::Update, ResourceKind::Membership)
         }
         NodeCommandKind::UpdateRouting => (PolicyAction::Update, ResourceKind::TrafficPolicy),
-        NodeCommandKind::SetNetworkRole => (PolicyAction::Update, ResourceKind::Capability),
+        NodeCommandKind::SetNetworkRole | NodeCommandKind::SetLocalExitCapability => {
+            (PolicyAction::Update, ResourceKind::Capability)
+        }
         NodeCommandKind::BanClient | NodeCommandKind::UnbanClient => {
             (PolicyAction::Update, ResourceKind::SecurityPolicy)
         }
@@ -867,6 +871,7 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
         | NodeCommand::CreateNetwork(_)
         | NodeCommand::PreviewJoinNetwork(_)
         | NodeCommand::JoinNetwork(_)
+        | NodeCommand::SetLocalExitCapability(_)
         | NodeCommand::SetNodeDisplayName(_)
         | NodeCommand::RotateNodeIdentity(_)
         | NodeCommand::StartNode
@@ -2628,7 +2633,7 @@ mod tests {
             NodePermission::ManageNetworks
         );
         assert_eq!(
-            policy_target(NodeCommandKind::TestPolicy),
+            policy_target_kind(NodeCommandKind::TestPolicy),
             (PolicyAction::Test, ResourceKind::SecurityPolicy)
         );
         let command = policy_test_command();

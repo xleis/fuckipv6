@@ -38,8 +38,8 @@ use crate::node::{
     NodeRevokeInvitationCommand, NodeRollbackConfigurationCommand, NodeRollbackPolicyCommand,
     NodeRollbackTrafficPolicyCommand, NodeRotateNodeIdentityCommand, NodeRoutingDefaultAction,
     NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
-    NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeSnapshot,
-    NodeSubmitJoinRequestCommand, NodeTestTrafficPolicyCommand, NodeUiAction,
+    NodeSetLocalExitCapabilityCommand, NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand,
+    NodeSnapshot, NodeSubmitJoinRequestCommand, NodeTestTrafficPolicyCommand, NodeUiAction,
     NodeUiActionBlockReason, NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage,
     NodeUiPermission, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
     NodeWithdrawJoinRequestCommand,
@@ -413,6 +413,7 @@ pub enum ActionBinding {
     UpdateNetworkAllocation,
     UpdateRouting,
     SetExitNodeRole,
+    SetLocalExitCapability,
     SetRelayRole,
     SetNodeDisplayName,
     RotateNodeIdentity,
@@ -443,7 +444,7 @@ pub enum ActionBinding {
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 68] = [
+    pub const ALL: [Self; 69] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
@@ -485,6 +486,7 @@ impl ActionBinding {
         Self::UpdateNetworkAllocation,
         Self::UpdateRouting,
         Self::SetExitNodeRole,
+        Self::SetLocalExitCapability,
         Self::SetRelayRole,
         Self::SetNodeDisplayName,
         Self::RotateNodeIdentity,
@@ -557,6 +559,7 @@ impl ActionBinding {
             Self::UpdateNetworkAllocation => "update_network_allocation",
             Self::UpdateRouting => "update_routing",
             Self::SetExitNodeRole => "set_exit_node_role",
+            Self::SetLocalExitCapability => "set_local_exit_capability",
             Self::SetRelayRole => "set_relay_role",
             Self::SetNodeDisplayName => "set_node_display_name",
             Self::RotateNodeIdentity => "rotate_node_identity",
@@ -1592,6 +1595,10 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             ActionBinding::SetExitNodeRole,
             NodeCommandKind::SetNetworkRole,
         ),
+        "set_local_exit_capability" => (
+            ActionBinding::SetLocalExitCapability,
+            NodeCommandKind::SetLocalExitCapability,
+        ),
         "set_relay_role" => (ActionBinding::SetRelayRole, NodeCommandKind::SetNetworkRole),
         "set_node_display_name" => (
             ActionBinding::SetNodeDisplayName,
@@ -2387,6 +2394,11 @@ pub fn build_command(
                 enabled: parse_bool(action, "enabled", &required("enabled")?)?,
             }))
         }
+        Ok(ActionBinding::SetLocalExitCapability) => Ok(NodeCommand::SetLocalExitCapability(
+            NodeSetLocalExitCapabilityCommand {
+                enabled: parse_bool(action, "enabled", &required("enabled")?)?,
+            },
+        )),
         Ok(ActionBinding::SetNodeDisplayName) => Ok(NodeCommand::SetNodeDisplayName(
             NodeSetNodeDisplayNameCommand {
                 display_name: optional_non_empty(field("display_name")),
@@ -2732,6 +2744,7 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
         "set_exit_node_role" | "set_relay_role" => {
             HashSet::from(["network_name", "role", "enabled"])
         }
+        "set_local_exit_capability" => HashSet::from(["enabled"]),
         "set_node_display_name" => HashSet::from(["display_name"]),
         "rotate_node_identity" => HashSet::from(["expected_fingerprint"]),
         "get_configuration" | "get_configuration_history" => HashSet::from([]),
@@ -8123,7 +8136,7 @@ mod tests {
 
     #[test]
     fn every_manifest_action_has_an_explicit_binding() {
-        assert_eq!(ActionBinding::ALL.len(), 68);
+        assert_eq!(ActionBinding::ALL.len(), 69);
         let manifest = node_ui_manifest();
         let actual = manifest
             .pages

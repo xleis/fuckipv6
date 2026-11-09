@@ -706,6 +706,10 @@ pub(crate) fn operation_kind(command: &NodeCommand) -> OperationKind {
         NodeCommand::LeaveNetwork(_) => OperationKind::NetworkLeave,
         NodeCommand::UpdateRouting(_) => OperationKind::TrafficRulesApply,
         NodeCommand::SetNetworkRole(_) => OperationKind::NetworkRoleUpdate,
+        NodeCommand::SetLocalExitCapability(command) if command.enabled => {
+            OperationKind::CapabilityEnable
+        }
+        NodeCommand::SetLocalExitCapability(_) => OperationKind::CapabilityDisable,
         NodeCommand::SetNodeDisplayName(_) | NodeCommand::RotateNodeIdentity(_) => {
             OperationKind::IdentityUpdate
         }
@@ -795,6 +799,7 @@ pub(crate) fn operation_target(command: &NodeCommand, local_node_id: &NodeId) ->
         NodeCommand::RebuildTun { network_name } => network_target(network_name),
         NodeCommand::UpdateRouting(command) => network_target(&command.network_name),
         NodeCommand::SetNetworkRole(command) => network_target(&command.network_name),
+        NodeCommand::SetLocalExitCapability(_) => node_target(),
         NodeCommand::BanClient(command) | NodeCommand::UnbanClient(command) => {
             network_target(&command.network_name)
         }

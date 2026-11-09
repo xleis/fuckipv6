@@ -62,6 +62,7 @@
             "acknowledge_membership_policy",
             "update_routing",
             "set_network_role",
+            "set_local_exit_capability",
             "set_node_display_name",
             "rotate_node_identity",
             "get_blacklist",

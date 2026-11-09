@@ -1352,6 +1352,7 @@ fn status_for_command_result(result: &NodeCommandResult) -> StatusCode {
         | NodeCommandOutcome::InvitationRedeemed(_)
         | NodeCommandOutcome::NetworkLeft(_)
         | NodeCommandOutcome::MembershipPolicyAcknowledged(_)
+        | NodeCommandOutcome::LocalExitCapability(_)
         | NodeCommandOutcome::IdentityRotated(_)
         | NodeCommandOutcome::Configuration(_)
         | NodeCommandOutcome::ConfigurationPreview(_)
@@ -1451,6 +1452,10 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         NodeCommand::LeaveNetwork(_) => OperationKind::NetworkLeave,
         NodeCommand::UpdateRouting(_) => OperationKind::TrafficRulesApply,
         NodeCommand::SetNetworkRole(_) => OperationKind::NetworkRoleUpdate,
+        NodeCommand::SetLocalExitCapability(command) if command.enabled => {
+            OperationKind::CapabilityEnable
+        }
+        NodeCommand::SetLocalExitCapability(_) => OperationKind::CapabilityDisable,
         NodeCommand::SetNodeDisplayName(_) | NodeCommand::RotateNodeIdentity(_) => {
             OperationKind::IdentityUpdate
         }
@@ -1543,6 +1548,7 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
         NodeCommand::AcknowledgeMembershipPolicy(command) => network_target(&command.network_id),
         NodeCommand::UpdateRouting(command) => network_target(&command.network_name),
         NodeCommand::SetNetworkRole(command) => network_target(&command.network_name),
+        NodeCommand::SetLocalExitCapability(_) => node_target(),
         NodeCommand::RebuildTun { network_name } => network_target(network_name),
         NodeCommand::BanClient(command) | NodeCommand::UnbanClient(command) => {
             network_target(&command.network_name)

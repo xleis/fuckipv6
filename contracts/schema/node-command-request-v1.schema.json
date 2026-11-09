@@ -1472,6 +1472,23 @@
           "type": "object"
         },
         {
+          "description": "Owner-controlled local intent for actually serving as an Exit Node.\nNetwork authorization remains in each network's `exit_node.enabled`.",
+          "properties": {
+            "command": {
+              "const": "set_local_exit_capability",
+              "type": "string"
+            },
+            "payload": {
+              "$ref": "#/$defs/NodeSetLocalExitCapabilityCommand"
+            }
+          },
+          "required": [
+            "command",
+            "payload"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "command": {
               "const": "set_node_display_name",
@@ -2828,6 +2845,18 @@
         "global_proxy"
       ],
       "type": "string"
+    },
+    "NodeSetLocalExitCapabilityCommand": {
+      "description": "Node-owner intent for the local Exit data plane.\n\nThis does not grant network exposure. A live network also has to carry the\nExit Node role in its network configuration. Disabling this value is a local\nveto that network administrators cannot override.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "enabled"
+      ],
+      "type": "object"
     },
     "NodeSetNetworkRoleCommand": {
       "properties": {

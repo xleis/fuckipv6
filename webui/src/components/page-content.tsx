@@ -619,7 +619,9 @@ function MembershipPolicyNotice({
             <span>
               {label(locale, "join.exit.disclosure.purpose")}{" "}
               {label(locale, "join.exit.disclosure.bandwidth")}{" "}
+              {label(locale, "join.exit.disclosure.traffic")}{" "}
               {label(locale, "join.exit.disclosure.logging")}{" "}
+              {label(locale, "join.exit.disclosure.operational_impact")}{" "}
               {label(locale, "join.exit.disclosure.disable")}
             </span>
           </div>

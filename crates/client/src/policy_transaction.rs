@@ -1701,6 +1701,7 @@ mod tests {
                 "home",
             )]),
             contribution_vetoes: Vec::new(),
+            exit_contribution: None,
             rules,
         }
     }

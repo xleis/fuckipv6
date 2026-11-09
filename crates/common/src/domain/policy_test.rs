@@ -1463,6 +1463,7 @@ mod tests {
                 network_id: input.network_id.clone(),
                 contributions: vec![ContributionKind::Exit],
             }],
+            exit_contribution: None,
             rules: Vec::new(),
         });
         let result = input.evaluate();
@@ -1606,6 +1607,7 @@ mod tests {
             expires_at_unix_ms: 10_000,
             network_scope: NodeNetworkScope::Only(vec![network_id(b"another-network")]),
             contribution_vetoes: Vec::new(),
+            exit_contribution: None,
             rules: Vec::new(),
         });
         let result = input.evaluate();

@@ -1769,6 +1769,7 @@ mod tests {
                 source: NetworkMemberObservationSource::LiveSession,
                 observed_at_unix_ms: Some(1_400),
             },
+            exit_availability: Default::default(),
             joined_at_unix_ms: Some(1_300),
         }
     }

@@ -150,6 +150,9 @@ pub struct NodeLocalAccessPolicy {
     pub network_scope: NodeNetworkScope,
     #[serde(default)]
     pub contribution_vetoes: Vec<NodeContributionVeto>,
+    /// Owner restrictions specific to serving as an Exit for a network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_contribution: Option<super::exit_contribution::ExitContributionRestrictions>,
     #[serde(default)]
     pub rules: Vec<PermissionRule>,
 }
@@ -178,6 +181,9 @@ impl NodeLocalAccessPolicy {
             ));
         }
         self.network_scope.validate()?;
+        if let Some(restrictions) = &self.exit_contribution {
+            restrictions.validate()?;
+        }
         let mut rule_ids = BTreeSet::new();
         for rule in &self.rules {
             rule.validate()?;
@@ -1232,6 +1238,7 @@ mod tests {
             expires_at_unix_ms: 10_000,
             network_scope: NodeNetworkScope::All,
             contribution_vetoes: Vec::new(),
+            exit_contribution: None,
             rules: vec![allow_rule(
                 b"local-allow",
                 SubjectSelector::AnyMember,

@@ -346,7 +346,7 @@ describe("membership policy reconfirmation", () => {
 
     expect(card).toHaveTextContent("translated:membership.policy.confirmation_required");
     expect(card).toHaveTextContent(
-      "translated:join.exit.disclosure.purpose translated:join.exit.disclosure.bandwidth translated:join.exit.disclosure.logging translated:join.exit.disclosure.disable",
+      "translated:join.exit.disclosure.purpose translated:join.exit.disclosure.bandwidth translated:join.exit.disclosure.traffic translated:join.exit.disclosure.logging translated:join.exit.disclosure.operational_impact translated:join.exit.disclosure.disable",
     );
     expect(card).toHaveTextContent("translated:join.exit.local_supported");
     expect(card).toHaveTextContent("translated:join.exit.local_not_enabled");

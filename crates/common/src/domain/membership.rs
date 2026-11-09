@@ -8,7 +8,9 @@ use super::{DomainError, DomainResult};
 
 /// A member's governance role. Temporary Coordinator authority is intentionally
 /// represented by `CoordinatorTerm`, never by mutating this durable role.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, JsonSchema, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum MembershipRole {
     Owner,
@@ -628,6 +630,10 @@ pub struct NetworkMember {
     #[serde(default)]
     pub available_actions: Vec<MemberLifecycleAction>,
     pub presence: NetworkMemberPresence,
+    /// Authoritative Exit observation for this member. A roster declaration is
+    /// not an observation, so missing evidence remains `unknown`.
+    #[serde(default)]
+    pub exit_availability: super::exit_contribution::ExitContributionAvailability,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub joined_at_unix_ms: Option<u64>,
 }

@@ -1182,6 +1182,7 @@ mod tests {
             expires_at_unix_ms: now.saturating_add(60_000),
             network_scope,
             contribution_vetoes,
+            exit_contribution: None,
             rules,
         }
     }

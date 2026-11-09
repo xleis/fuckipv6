@@ -4125,6 +4125,7 @@ mod tests {
                 expires_at_unix_ms: now + 86_400_000,
                 network_scope: NodeNetworkScope::Only(vec![network_id.clone()]),
                 contribution_vetoes: Vec::new(),
+                exit_contribution: None,
                 rules: vec![policy_transaction_rule(
                     "runtime-local-read",
                     PermissionEffect::Allow,
@@ -6235,7 +6236,10 @@ mod tests {
             exit_contribution_mode,
             exit_contribution_purpose_key: "join.exit.disclosure.purpose".into(),
             exit_contribution_bandwidth_impact_key: "join.exit.disclosure.bandwidth".into(),
+            exit_contribution_traffic_impact_key: "join.exit.disclosure.traffic".into(),
             exit_contribution_logging_boundary_key: "join.exit.disclosure.logging".into(),
+            exit_contribution_operational_impact_key: "join.exit.disclosure.operational_impact"
+                .into(),
             exit_contribution_disable_key: "join.exit.disclosure.disable".into(),
             local_exit_available: false,
             local_exit_enabled: false,

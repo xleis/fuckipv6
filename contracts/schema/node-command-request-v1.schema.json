@@ -116,6 +116,56 @@
       "description": "Canonical DNS suffix. A bare domain matches itself and descendant labels;\na leading `*.` is accepted only as an explicit spelling of that same\ncomplete-label boundary rule. It never performs substring matching.",
       "type": "string"
     },
+    "ExitContributionMemberScope": {
+      "description": "Owner-selected members that may use this node's Exit. The default allows all\nactive network members; an explicit selection requires at least one subject.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "all_members",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "groups": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/GroupId"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "selected",
+              "type": "string"
+            },
+            "nodes": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/NodeId"
+              },
+              "type": "array"
+            },
+            "roles": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/MembershipRole"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ExitContributionMode": {
       "description": "Explicit Exit contribution policy. The legacy obligation/scope pair remains\non the wire for compatibility, but it cannot distinguish voluntary\ncontribution from a prohibition or an authorization flow. New policies bind\nthis mode into terms hashes and signed discovery data.",
       "oneOf": [
@@ -149,6 +199,50 @@
       ],
       "type": "string"
     },
+    "ExitContributionQuotaPeriod": {
+      "enum": [
+        "daily",
+        "weekly"
+      ],
+      "type": "string"
+    },
+    "ExitContributionRestrictions": {
+      "description": "Owner-authored restrictions beyond the global network allow-list and local\nExit veto. The network allow-list remains `NodeLocalAccessPolicy::network_scope`.",
+      "properties": {
+        "max_bandwidth_kbps": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "members": {
+          "$ref": "#/$defs/ExitContributionMemberScope",
+          "default": {
+            "kind": "all_members"
+          }
+        },
+        "time_windows_utc": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ExitContributionTimeWindow"
+          },
+          "type": "array"
+        },
+        "traffic_quota": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitContributionTrafficQuota"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
     "ExitContributionScope": {
       "description": "The membership population covered by an Exit contribution obligation.\n`NotApplicable` is the only valid scope when contribution is not required.",
       "oneOf": [
@@ -169,6 +263,55 @@
           "type": "string"
         }
       ]
+    },
+    "ExitContributionTimeWindow": {
+      "description": "UTC half-open minute window. `weekdays` uses Monday=0 through Sunday=6.",
+      "properties": {
+        "end_minute_utc": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start_minute_utc": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "weekdays": {
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "weekdays",
+        "start_minute_utc",
+        "end_minute_utc"
+      ],
+      "type": "object"
+    },
+    "ExitContributionTrafficQuota": {
+      "properties": {
+        "max_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "period": {
+          "$ref": "#/$defs/ExitContributionQuotaPeriod"
+        }
+      },
+      "required": [
+        "max_bytes",
+        "period"
+      ],
+      "type": "object"
     },
     "GroupId": {
       "type": "string"
@@ -2366,6 +2509,17 @@
             "$ref": "#/$defs/NodeContributionVeto"
           },
           "type": "array"
+        },
+        "exit_contribution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitContributionRestrictions"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Owner restrictions specific to serving as an Exit for a network."
         },
         "expires_at_unix_ms": {
           "format": "uint64",

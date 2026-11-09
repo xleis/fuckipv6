@@ -112,6 +112,12 @@ prefixed_id!(
     "join request id"
 );
 prefixed_id!(
+    ExitContributionRequestId,
+    "exitreq_",
+    "^exitreq_[A-Za-z0-9_-]{43}$",
+    "exit contribution request id"
+);
+prefixed_id!(
     InvitationId,
     "inv_",
     "^inv_[A-Za-z0-9_-]{43}$",

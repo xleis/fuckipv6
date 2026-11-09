@@ -159,11 +159,52 @@ export type EffectiveAccessReason = "allowed" | "cross_network_denied" | "networ
 
 export type EffectivePolicyLayer = "local" | "network" | "request";
 
+export type ExitAvailabilitySource = "not_observed" | "local_runtime" | "coordinator_health" | "remote_peer_report";
+
+export type ExitAvailabilityState = "unknown" | "available" | "degraded" | "unavailable";
+
+export type ExitContributionAvailability = {
+  "declared_available"?: boolean | null;
+  "observed_at_unix_ms"?: number | null;
+  "reason_code"?: string | null;
+  "source": ExitAvailabilitySource;
+  "state": ExitAvailabilityState;
+};
+
+export type ExitContributionMemberScope = {
+  "kind": "all_members";
+} | {
+  "groups"?: Array<GroupId>;
+  "kind": "selected";
+  "nodes"?: Array<NodeId>;
+  "roles"?: Array<MembershipRole>;
+};
+
 export type ExitContributionMode = "autonomous" | "required_on_join" | "disabled" | "approval_required";
 
 export type ExitContributionObligation = "required" | "not_required";
 
+export type ExitContributionQuotaPeriod = "daily" | "weekly";
+
+export type ExitContributionRestrictions = {
+  "max_bandwidth_kbps"?: number | null;
+  "members"?: ExitContributionMemberScope;
+  "time_windows_utc"?: Array<ExitContributionTimeWindow>;
+  "traffic_quota"?: ExitContributionTrafficQuota | null;
+};
+
 export type ExitContributionScope = "not_applicable" | "joining_members" | "all_members";
+
+export type ExitContributionTimeWindow = {
+  "end_minute_utc": number;
+  "start_minute_utc": number;
+  "weekdays": Array<number>;
+};
+
+export type ExitContributionTrafficQuota = {
+  "max_bytes": number;
+  "period": ExitContributionQuotaPeriod;
+};
 
 export type ExitNodeCapabilities = {
   "cleanup": boolean;
@@ -480,6 +521,7 @@ export type NetworkMember = {
   "available_actions"?: Array<MemberLifecycleAction>;
   "capabilities"?: Array<CapabilityKind> | null;
   "display_name"?: string | null;
+  "exit_availability"?: ExitContributionAvailability;
   "groups": Array<NetworkMemberGroup>;
   "identity_fingerprint"?: string | null;
   "joined_at_unix_ms"?: number | null;
@@ -1531,6 +1573,7 @@ export type NodeListJoinRequestsCommand = {
 
 export type NodeLocalAccessPolicy = {
   "contribution_vetoes"?: Array<NodeContributionVeto>;
+  "exit_contribution"?: ExitContributionRestrictions | null;
   "expires_at_unix_ms": number;
   "issued_at_unix_ms": number;
   "network_scope": NodeNetworkScope;
@@ -1620,8 +1663,10 @@ export type NodeNetworkJoinPreview = {
   "exit_contribution_disable_key": string;
   "exit_contribution_logging_boundary_key": string;
   "exit_contribution_mode": ExitContributionMode;
+  "exit_contribution_operational_impact_key": string;
   "exit_contribution_purpose_key": string;
   "exit_contribution_scope": ExitContributionScope;
+  "exit_contribution_traffic_impact_key": string;
   "expires_at_unix_ms": number;
   "issued_at_unix_ms": number;
   "join_mode": NetworkJoinMode;

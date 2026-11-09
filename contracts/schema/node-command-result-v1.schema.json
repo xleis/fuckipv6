@@ -662,6 +662,110 @@
       ],
       "type": "string"
     },
+    "ExitAvailabilitySource": {
+      "enum": [
+        "not_observed",
+        "local_runtime",
+        "coordinator_health",
+        "remote_peer_report"
+      ],
+      "type": "string"
+    },
+    "ExitAvailabilityState": {
+      "enum": [
+        "unknown",
+        "available",
+        "degraded",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "ExitContributionAvailability": {
+      "description": "Availability projected beside a member's declared capability. Unknown or\nstale evidence is never promoted to `available`.",
+      "properties": {
+        "declared_available": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "observed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "reason_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/ExitAvailabilitySource"
+        },
+        "state": {
+          "$ref": "#/$defs/ExitAvailabilityState"
+        }
+      },
+      "required": [
+        "state",
+        "source"
+      ],
+      "type": "object"
+    },
+    "ExitContributionMemberScope": {
+      "description": "Owner-selected members that may use this node's Exit. The default allows all\nactive network members; an explicit selection requires at least one subject.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "all_members",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "groups": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/GroupId"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "selected",
+              "type": "string"
+            },
+            "nodes": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/NodeId"
+              },
+              "type": "array"
+            },
+            "roles": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/MembershipRole"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ExitContributionMode": {
       "description": "Explicit Exit contribution policy. The legacy obligation/scope pair remains\non the wire for compatibility, but it cannot distinguish voluntary\ncontribution from a prohibition or an authorization flow. New policies bind\nthis mode into terms hashes and signed discovery data.",
       "oneOf": [
@@ -695,6 +799,50 @@
       ],
       "type": "string"
     },
+    "ExitContributionQuotaPeriod": {
+      "enum": [
+        "daily",
+        "weekly"
+      ],
+      "type": "string"
+    },
+    "ExitContributionRestrictions": {
+      "description": "Owner-authored restrictions beyond the global network allow-list and local\nExit veto. The network allow-list remains `NodeLocalAccessPolicy::network_scope`.",
+      "properties": {
+        "max_bandwidth_kbps": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "members": {
+          "$ref": "#/$defs/ExitContributionMemberScope",
+          "default": {
+            "kind": "all_members"
+          }
+        },
+        "time_windows_utc": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ExitContributionTimeWindow"
+          },
+          "type": "array"
+        },
+        "traffic_quota": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitContributionTrafficQuota"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
     "ExitContributionScope": {
       "description": "The membership population covered by an Exit contribution obligation.\n`NotApplicable` is the only valid scope when contribution is not required.",
       "oneOf": [
@@ -715,6 +863,55 @@
           "type": "string"
         }
       ]
+    },
+    "ExitContributionTimeWindow": {
+      "description": "UTC half-open minute window. `weekdays` uses Monday=0 through Sunday=6.",
+      "properties": {
+        "end_minute_utc": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "start_minute_utc": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "weekdays": {
+          "items": {
+            "format": "uint8",
+            "maximum": 255,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "weekdays",
+        "start_minute_utc",
+        "end_minute_utc"
+      ],
+      "type": "object"
+    },
+    "ExitContributionTrafficQuota": {
+      "properties": {
+        "max_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "period": {
+          "$ref": "#/$defs/ExitContributionQuotaPeriod"
+        }
+      },
+      "required": [
+        "max_bytes",
+        "period"
+      ],
+      "type": "object"
     },
     "ExitNodeCapabilities": {
       "description": "Current, non-secret Exit Node capability truth for one node process.\n\n`supported` describes whether a basic IPv4 Exit Node can be installed now.\n`ipv6_forwarding` is independent because an IPv6-only limitation does not\nmake the IPv4 Exit Node implementation unusable.",
@@ -2101,6 +2298,15 @@
             "string",
             "null"
           ]
+        },
+        "exit_availability": {
+          "$ref": "#/$defs/ExitContributionAvailability",
+          "default": {
+            "reason_code": "exit.availability.not_observed",
+            "source": "not_observed",
+            "state": "unknown"
+          },
+          "description": "Authoritative Exit observation for this member. A roster declaration is\nnot an observation, so missing evidence remains `unknown`."
         },
         "groups": {
           "items": {
@@ -4383,6 +4589,17 @@
           },
           "type": "array"
         },
+        "exit_contribution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitContributionRestrictions"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Owner restrictions specific to serving as an Exit for a network."
+        },
         "expires_at_unix_ms": {
           "format": "uint64",
           "minimum": 0,
@@ -4710,12 +4927,18 @@
         "exit_contribution_mode": {
           "$ref": "#/$defs/ExitContributionMode"
         },
+        "exit_contribution_operational_impact_key": {
+          "type": "string"
+        },
         "exit_contribution_purpose_key": {
           "description": "Stable disclosure keys cover what the local owner is consenting to.\nThey never enable or advertise the local Exit service by themselves.",
           "type": "string"
         },
         "exit_contribution_scope": {
           "$ref": "#/$defs/ExitContributionScope"
+        },
+        "exit_contribution_traffic_impact_key": {
+          "type": "string"
         },
         "expires_at_unix_ms": {
           "format": "uint64",
@@ -4821,7 +5044,9 @@
         "exit_contribution_mode",
         "exit_contribution_purpose_key",
         "exit_contribution_bandwidth_impact_key",
+        "exit_contribution_traffic_impact_key",
         "exit_contribution_logging_boundary_key",
+        "exit_contribution_operational_impact_key",
         "exit_contribution_disable_key",
         "local_exit_available",
         "local_exit_enabled",

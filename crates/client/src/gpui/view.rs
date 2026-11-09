@@ -10040,7 +10040,9 @@ impl GpuiShell {
                         .child(t(self.locale, "join.exit.scope_all_members_hint"))
                         .child(t(self.locale, "join.exit.disclosure.purpose"))
                         .child(t(self.locale, "join.exit.disclosure.bandwidth"))
+                        .child(t(self.locale, "join.exit.disclosure.traffic"))
                         .child(t(self.locale, "join.exit.disclosure.logging"))
+                        .child(t(self.locale, "join.exit.disclosure.operational_impact"))
                         .child(t(self.locale, "join.exit.disclosure.disable"))
                         .child(t(
                             self.locale,
@@ -14062,6 +14064,7 @@ mod tests {
             access_epoch: 1,
             available_actions: Vec::new(),
             presence,
+            exit_availability: Default::default(),
             joined_at_unix_ms: Some(1_700_000_000_000),
         }
     }
@@ -14245,6 +14248,7 @@ mod tests {
                         MemberLifecycleAction::UndoRemove,
                     ],
                     presence: relay_presence,
+                    exit_availability: Default::default(),
                     joined_at_unix_ms: Some(1_700_000_000_000),
                 },
                 NetworkMember {
@@ -14260,6 +14264,7 @@ mod tests {
                     access_epoch: 1,
                     available_actions: Vec::new(),
                     presence: viewer_presence,
+                    exit_availability: Default::default(),
                     joined_at_unix_ms: Some(1_700_000_000_000),
                 },
             ],
@@ -14915,7 +14920,10 @@ mod tests {
             exit_contribution_mode: fuckipv6_common::domain::ExitContributionMode::RequiredOnJoin,
             exit_contribution_purpose_key: "join.exit.disclosure.purpose".into(),
             exit_contribution_bandwidth_impact_key: "join.exit.disclosure.bandwidth".into(),
+            exit_contribution_traffic_impact_key: "join.exit.disclosure.traffic".into(),
             exit_contribution_logging_boundary_key: "join.exit.disclosure.logging".into(),
+            exit_contribution_operational_impact_key: "join.exit.disclosure.operational_impact"
+                .into(),
             exit_contribution_disable_key: "join.exit.disclosure.disable".into(),
             local_exit_available: true,
             local_exit_enabled: false,

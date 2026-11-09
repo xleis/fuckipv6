@@ -193,6 +193,7 @@ fn project_members(
                 retained_administrators,
             ),
             presence: member_presence,
+            exit_availability: Default::default(),
             joined_at_unix_ms: approved_request
                 .and_then(|request| request.approved_at_unix_ms)
                 .or_else(|| redemption.map(|redemption| redemption.joined_at_unix_ms))

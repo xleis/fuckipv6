@@ -280,7 +280,10 @@ const joinPreview: NodeNetworkJoinPreview = {
   exit_contribution_mode: "required_on_join",
   exit_contribution_purpose_key: "join.exit.disclosure.purpose",
   exit_contribution_bandwidth_impact_key: "join.exit.disclosure.bandwidth",
+  exit_contribution_traffic_impact_key: "join.exit.disclosure.traffic",
   exit_contribution_logging_boundary_key: "join.exit.disclosure.logging",
+  exit_contribution_operational_impact_key:
+    "join.exit.disclosure.operational_impact",
   exit_contribution_disable_key: "join.exit.disclosure.disable",
   local_exit_available: true,
   local_exit_enabled: false,

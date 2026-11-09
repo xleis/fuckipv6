@@ -1980,7 +1980,9 @@ pub struct NodeNetworkJoinPreview {
     /// They never enable or advertise the local Exit service by themselves.
     pub exit_contribution_purpose_key: String,
     pub exit_contribution_bandwidth_impact_key: String,
+    pub exit_contribution_traffic_impact_key: String,
     pub exit_contribution_logging_boundary_key: String,
+    pub exit_contribution_operational_impact_key: String,
     pub exit_contribution_disable_key: String,
     /// Local host support is separate from the network's declaration.
     pub local_exit_available: bool,

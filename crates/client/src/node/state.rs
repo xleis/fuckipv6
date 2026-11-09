@@ -2518,6 +2518,7 @@ mod tests {
             access_epoch: 1,
             available_actions: Vec::new(),
             presence: NetworkMemberPresence::live(1_000),
+            exit_availability: Default::default(),
             joined_at_unix_ms: Some(1),
         }
     }

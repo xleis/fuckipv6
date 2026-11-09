@@ -1608,6 +1608,7 @@ mod tests {
             revision: 3,
             access_epoch: 4,
             available_actions: vec![MemberLifecycleAction::Exit],
+            exit_availability: Default::default(),
             presence: NetworkMemberPresence {
                 state: NetworkMemberOnlineState::Online,
                 source: super::super::membership::NetworkMemberObservationSource::LiveSession,

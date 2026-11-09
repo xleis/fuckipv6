@@ -1003,7 +1003,9 @@ function ExitContributionDisclosure({
   scope,
   purposeKey = "join.exit.disclosure.purpose",
   bandwidthKey = "join.exit.disclosure.bandwidth",
+  trafficKey = "join.exit.disclosure.traffic",
   loggingKey = "join.exit.disclosure.logging",
+  operationalImpactKey = "join.exit.disclosure.operational_impact",
   disableKey = "join.exit.disclosure.disable",
   localSupported,
   localEnabled,
@@ -1014,7 +1016,9 @@ function ExitContributionDisclosure({
   scope: NodeNetworkJoinPreview["exit_contribution_scope"];
   purposeKey?: string;
   bandwidthKey?: string;
+  trafficKey?: string;
   loggingKey?: string;
+  operationalImpactKey?: string;
   disableKey?: string;
   localSupported: boolean;
   localEnabled: boolean;
@@ -1037,7 +1041,9 @@ function ExitContributionDisclosure({
         <>
           <p>{label(locale, purposeKey)}</p>
           <p>{label(locale, bandwidthKey)}</p>
+          <p>{label(locale, trafficKey)}</p>
           <p>{label(locale, loggingKey)}</p>
+          <p>{label(locale, operationalImpactKey)}</p>
           <p>{label(locale, disableKey)}</p>
           {required ? <p>{label(locale, `join.exit.scope.${scope}`)}</p> : null}
         </>
@@ -1271,7 +1277,9 @@ function JoinPreviewCard({
         scope={preview.exit_contribution_scope}
         purposeKey={preview.exit_contribution_purpose_key}
         bandwidthKey={preview.exit_contribution_bandwidth_impact_key}
+        trafficKey={preview.exit_contribution_traffic_impact_key}
         loggingKey={preview.exit_contribution_logging_boundary_key}
+        operationalImpactKey={preview.exit_contribution_operational_impact_key}
         disableKey={preview.exit_contribution_disable_key}
         localSupported={preview.local_exit_available}
         localEnabled={preview.local_exit_enabled}

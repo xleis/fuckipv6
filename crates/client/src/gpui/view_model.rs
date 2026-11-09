@@ -6691,6 +6691,7 @@ mod tests {
             access_epoch: 1,
             available_actions: Vec::new(),
             presence,
+            exit_availability: Default::default(),
             joined_at_unix_ms: Some(1_700_000_000_000),
         }
     }
@@ -9531,6 +9532,7 @@ mod tests {
                 access_epoch: 3,
                 available_actions,
                 presence,
+                exit_availability: Default::default(),
                 joined_at_unix_ms: Some(1_700_000_000_000),
             }],
         }

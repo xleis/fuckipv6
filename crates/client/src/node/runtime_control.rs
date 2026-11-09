@@ -10716,26 +10716,28 @@ mod tests {
 
     #[test]
     fn exit_health_never_infers_dns_or_internet_from_a_healthy_process() {
-        let mut snapshot = NodeSnapshot::default();
-        snapshot.local_exit = LocalExitCapabilitySnapshot {
-            owner_exit_enabled: true,
-            stage: LocalExitCapabilityStage::Enabled,
-            healthy: true,
-            network_allowed: true,
-            ..LocalExitCapabilitySnapshot::default()
+        let snapshot = NodeSnapshot {
+            local_exit: LocalExitCapabilitySnapshot {
+                owner_exit_enabled: true,
+                stage: LocalExitCapabilityStage::Enabled,
+                healthy: true,
+                network_allowed: true,
+                ..LocalExitCapabilitySnapshot::default()
+            },
+            networks: vec![crate::node::NodeNetworkSnapshot {
+                name: "exit-network".into(),
+                tun_name: "fuckipv6-test".into(),
+                status: NodeNetworkStatus::Online,
+                assigned_ipv6: None,
+                assigned_ipv4: None,
+                p2p_listen_addr: None,
+                uptime_secs: 1,
+                roles: vec![NodeNetworkRole::ExitNode],
+                peer_count: 0,
+                traffic: NodeTrafficSnapshot::default(),
+            }],
+            ..NodeSnapshot::default()
         };
-        snapshot.networks.push(crate::node::NodeNetworkSnapshot {
-            name: "exit-network".into(),
-            tun_name: "fuckipv6-test".into(),
-            status: NodeNetworkStatus::Online,
-            assigned_ipv6: None,
-            assigned_ipv4: None,
-            p2p_listen_addr: None,
-            uptime_secs: 1,
-            roles: vec![NodeNetworkRole::ExitNode],
-            peer_count: 0,
-            traffic: NodeTrafficSnapshot::default(),
-        });
 
         let now = 1_700_000_000_000;
         let leak_detection = LeakDetectionSnapshot {

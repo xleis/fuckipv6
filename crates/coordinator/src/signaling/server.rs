@@ -847,6 +847,7 @@ async fn handle_signaling_message(
                 tx,
                 client_id,
                 join_request_store,
+                member_lifecycle_store,
                 exit_contribution_store,
                 exit_availability,
             )
@@ -1306,6 +1307,7 @@ async fn handle_exit_availability_report(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
     join_request_store: Option<&JoinRequestStore>,
+    member_lifecycle_store: Option<&MemberLifecycleStore>,
     exit_contribution_store: Option<&ExitContributionRequestStore>,
     exit_availability: &ExitAvailabilityObservationRegistry,
 ) -> Result<()> {
@@ -1335,6 +1337,28 @@ async fn handle_exit_availability_report(
             exit_availability_error_message("exit_availability.error.member_required"),
         )?;
         return Ok(());
+    }
+    if let Some(store) = member_lifecycle_store {
+        let lifecycle = match store.record(&network_id, &actor) {
+            Ok(lifecycle) => lifecycle,
+            Err(error) => {
+                tracing::warn!(%error, "读取 Exit 可用性成员生命周期失败");
+                send_binary(
+                    tx,
+                    session_manager,
+                    exit_availability_error_message("exit_availability.error.member_required"),
+                )?;
+                return Ok(());
+            }
+        };
+        if lifecycle.is_some_and(|record| !record.status.grants_network_access()) {
+            send_binary(
+                tx,
+                session_manager,
+                exit_availability_error_message("exit_availability.error.member_required"),
+            )?;
+            return Ok(());
+        }
     }
     let observed_at_unix_ms = unix_time_ms();
     if let Err(error) = exit_availability.observe(

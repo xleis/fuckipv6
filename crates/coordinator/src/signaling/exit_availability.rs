@@ -69,8 +69,8 @@ impl ExitAvailabilityObservationRegistry {
                 .observed_at_unix_ms
                 .saturating_add(EXIT_AVAILABILITY_OBSERVATION_MAX_AGE_MS)
         {
-            return ExitContributionAvailability::stale(
-                declared_available.unwrap_or(observation.available),
+            return ExitContributionAvailability::stale_with_declaration(
+                declared_available,
                 observation.observed_at_unix_ms,
             );
         }
@@ -181,6 +181,29 @@ mod tests {
             Some("exit.availability.stale")
         );
         assert_eq!(availability.declared_available, Some(true));
+    }
+
+    #[test]
+    fn expired_undeclared_observation_stays_undeclared() {
+        let registry = ExitAvailabilityObservationRegistry::default();
+        registry
+            .observe(network(), node(), true, None, 1_000)
+            .unwrap();
+        let availability = registry.project(
+            &network(),
+            &node(),
+            None,
+            1_000 + EXIT_AVAILABILITY_OBSERVATION_MAX_AGE_MS + 1,
+        );
+        assert_eq!(
+            availability.state,
+            fuckipv6_common::domain::ExitAvailabilityState::Unknown
+        );
+        assert_eq!(availability.declared_available, None);
+        assert_eq!(
+            availability.reason_code.as_deref(),
+            Some("exit.availability.stale")
+        );
     }
 
     #[test]

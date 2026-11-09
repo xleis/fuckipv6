@@ -63,6 +63,17 @@ pub struct RoutingUpdateResult {
     pub is_exit_node: bool,
 }
 
+/// Runtime observation returned by one network's local Exit control plane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalExitRuntimeStatus {
+    pub owner_exit_enabled: bool,
+    pub network_allowed: bool,
+    pub effective: bool,
+    pub healthy: bool,
+    pub active_clients: u32,
+    pub total_clients: u64,
+}
+
 /// Commands delivered from the local control interface to the live runtime.
 pub enum RuntimeCommand {
     ProbePeer {
@@ -75,6 +86,10 @@ pub enum RuntimeCommand {
         exit_node: Option<String>,
         is_exit_node: bool,
         reply: oneshot::Sender<Result<RoutingUpdateResult, String>>,
+    },
+    SetLocalExitCapability {
+        enabled: bool,
+        reply: oneshot::Sender<Result<LocalExitRuntimeStatus, String>>,
     },
     Disconnect {
         reply: oneshot::Sender<Result<(), String>>,

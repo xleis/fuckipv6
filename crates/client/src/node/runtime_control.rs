@@ -676,6 +676,7 @@ struct NetworkLaunchRequest {
     network_id: Option<NetworkId>,
     config_path: String,
     config: ClientConfig,
+    local_exit_enabled: bool,
 }
 
 struct StartedNetworkRuntime {
@@ -745,6 +746,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
                 request.config,
                 request.network_id.clone(),
                 Some(&request.network_name),
+                request.local_exit_enabled,
                 false,
             )
             .await
@@ -3334,11 +3336,17 @@ impl NetworkRuntimeActor {
                     spec.name
                 ))
             })?;
+        let local_exit_enabled = self.configs.node_local_exit_enabled().map_err(|error| {
+            RuntimeControlError::Persistence(format!(
+                "网络 [{network_name}] 读取本机 Exit owner intent 失败: {error:#}"
+            ))
+        })?;
         let launch = self.launcher.launch(NetworkLaunchRequest {
             network_name: network_name.clone(),
             network_id,
             config_path: spec.config_path.to_string_lossy().into_owned(),
             config: spec.config,
+            local_exit_enabled,
         });
         let started = match timeout(remaining.min(self.timeouts.start), launch).await {
             Ok(started) => started,
@@ -6125,6 +6133,18 @@ mod tests {
                                         };
                                         routing_in_flight.fetch_sub(1, Ordering::SeqCst);
                                         let _ = reply.send(result);
+                                    }
+                                    ipc::RuntimeCommand::SetLocalExitCapability { enabled, reply } => {
+                                        let network_allowed = current_config.exit_node.enabled;
+                                        let effective = enabled && network_allowed;
+                                        let _ = reply.send(Ok(ipc::LocalExitRuntimeStatus {
+                                            owner_exit_enabled: enabled,
+                                            network_allowed,
+                                            effective,
+                                            healthy: effective,
+                                            active_clients: 0,
+                                            total_clients: 0,
+                                        }));
                                     }
                                     ipc::RuntimeCommand::ProbePeer { reply, .. } => {
                                         let _ = reply.send(Err("测试运行时不支持探测".into()));

@@ -548,6 +548,7 @@ pub(crate) struct ClientRuntime {
     pub(crate) heartbeat_interval: tokio::time::Interval,
     pub(crate) config_path: String,
     pub(crate) config: ClientConfig,
+    pub(crate) local_exit_enabled: bool,
     pub(crate) control_rx: mpsc::UnboundedReceiver<ipc::RuntimeCommand>,
     pub(crate) ipc_task: Option<JoinHandle<()>>,
     pub(crate) config_reload_task: Option<JoinHandle<()>>,
@@ -587,6 +588,7 @@ pub(crate) async fn prepare_client_runtime_ext(
     mut config: ClientConfig,
     network_id: Option<NetworkId>,
     network_name: Option<&str>,
+    local_exit_enabled: bool,
     enable_ipc: bool,
 ) -> Result<ClientRuntime> {
     config.tun.name = crate::multi_network::derive_tun_name(network_name, &config.tun.name);
@@ -620,7 +622,10 @@ pub(crate) async fn prepare_client_runtime_ext(
     for cidr in parse_cidr_list(&config.routing.proxy_cidrs, "routing.proxy_cidrs")? {
         route_engine.add_proxy_cidr(cidr);
     }
-    let exit_node_manager = ExitNodeManager::new(config.exit_node.clone());
+    let effective_exit_enabled = local_exit_effective(local_exit_enabled, config.exit_node.enabled);
+    let mut effective_exit_config = config.exit_node.clone();
+    effective_exit_config.enabled = effective_exit_enabled;
+    let exit_node_manager = ExitNodeManager::new(effective_exit_config);
     let configured_exit_node = config.routing.exit_node.clone();
     #[cfg(target_os = "linux")]
     let configured_exit_node_id = match configured_exit_node.as_deref() {
@@ -693,8 +698,14 @@ pub(crate) async fn prepare_client_runtime_ext(
                 return Err(error).context("安装节点物理网络旁路失败");
             }
         }
-        let exit_forwarder = match LinuxExitForwarder::install(&config.exit_node, tun.name()).await
-        {
+        let exit_forwarder = if effective_exit_enabled {
+            LinuxExitForwarder::install(&config.exit_node, tun.name()).await
+        } else {
+            LinuxExitForwarder::purge_stale(tun.name())
+                .await
+                .map(|()| None)
+        };
+        let exit_forwarder = match exit_forwarder {
             Ok(forwarder) => forwarder,
             Err(error) => {
                 let _ = manager.rollback().await;
@@ -703,7 +714,7 @@ pub(crate) async fn prepare_client_runtime_ext(
                     relay.close().await;
                 }
                 let _ = tun.delete().await;
-                return Err(error).context("安装 Exit Node 内核转发失败");
+                return Err(error).context("准备 Exit Node 内核转发失败");
             }
         };
         (manager, exit_forwarder)
@@ -788,6 +799,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         heartbeat_interval,
         config_path: config_path.to_string(),
         config,
+        local_exit_enabled,
         control_rx,
         ipc_task: Some(tasks.ipc_task),
         config_reload_task: Some(tasks.config_reload_task),
@@ -1451,6 +1463,11 @@ async fn handle_runtime_command(
             let _ = reply.send(result);
             RuntimeCommandOutcome::Continue
         }
+        ipc::RuntimeCommand::SetLocalExitCapability { enabled, reply } => {
+            let result = apply_runtime_local_exit_capability(runtime, enabled).await;
+            let _ = reply.send(result);
+            RuntimeCommandOutcome::Continue
+        }
         ipc::RuntimeCommand::Disconnect { reply } => {
             tracing::info!("收到本地控制接口的断开请求，等待 launcher 完成资源清理");
             RuntimeCommandOutcome::Disconnect(reply)
@@ -1522,6 +1539,71 @@ fn exit_forwarding_action(enabled: bool, has_forwarder: bool) -> ExitForwardingA
     }
 }
 
+fn local_exit_effective(owner_enabled: bool, network_allowed: bool) -> bool {
+    owner_enabled && network_allowed
+}
+
+fn local_exit_runtime_status(runtime: &ClientRuntime) -> ipc::LocalExitRuntimeStatus {
+    let network_allowed = runtime.config.exit_node.enabled;
+    let effective = local_exit_effective(runtime.local_exit_enabled, network_allowed);
+    #[cfg(target_os = "linux")]
+    let (healthy, active_clients, total_clients) = runtime
+        .exit_forwarder
+        .as_ref()
+        .map_or((false, 0, 0), |forwarder| {
+            (true, forwarder.active_clients(), forwarder.total_clients())
+        });
+    #[cfg(not(target_os = "linux"))]
+    let (healthy, active_clients, total_clients) = (false, 0, 0);
+    ipc::LocalExitRuntimeStatus {
+        owner_exit_enabled: runtime.local_exit_enabled,
+        network_allowed,
+        effective,
+        healthy: effective && healthy,
+        active_clients,
+        total_clients,
+    }
+}
+
+async fn apply_runtime_local_exit_capability(
+    runtime: &mut ClientRuntime,
+    enabled: bool,
+) -> std::result::Result<ipc::LocalExitRuntimeStatus, String> {
+    // Revoke authorization before touching resources. Every error path below
+    // therefore remains fail-closed even when cleanup has to be retried.
+    runtime.exit_node_manager.set_enabled(false);
+    let network_allowed = runtime.config.exit_node.enabled;
+    let effective = local_exit_effective(enabled, network_allowed);
+
+    #[cfg(target_os = "linux")]
+    if effective {
+        if runtime.exit_forwarder.is_none() {
+            let forwarder =
+                LinuxExitForwarder::install(&runtime.config.exit_node, runtime.tun_io.name())
+                    .await
+                    .map_err(|error| format!("安装 Exit Node 内核转发失败: {error:#}"))?
+                    .ok_or_else(|| "Exit Node 网络角色已启用，但未创建内核转发器".to_string())?;
+            runtime.exit_forwarder = Some(forwarder);
+        }
+        runtime.exit_node_manager.set_enabled(true);
+    } else if let Some(mut forwarder) = runtime.exit_forwarder.take() {
+        if let Err(error) = forwarder.rollback_within(Duration::from_secs(4)).await {
+            runtime.exit_forwarder = Some(forwarder);
+            return Err(format!("清理 Exit Node 内核转发失败，可重试: {error:#}"));
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        if effective {
+            return Err("当前平台不支持本机 Exit 数据面".into());
+        }
+    }
+
+    runtime.local_exit_enabled = enabled;
+    Ok(local_exit_runtime_status(runtime))
+}
+
 async fn apply_runtime_routing(
     runtime: &mut ClientRuntime,
     mode: &str,
@@ -1536,12 +1618,14 @@ async fn apply_runtime_routing(
     updated_config.routing.mode = parsed_mode;
     updated_config.routing.exit_node = exit_node.clone();
     updated_config.exit_node.enabled = is_exit_node;
+    let effective_exit_enabled = local_exit_effective(runtime.local_exit_enabled, is_exit_node);
 
     // Stage new kernel resources before changing policy routes. A disabled Exit
     // Node keeps its current resources until persistence succeeds, so a failed
     // config write can leave the old runtime completely untouched.
     #[cfg(target_os = "linux")]
-    let exit_action = exit_forwarding_action(is_exit_node, runtime.exit_forwarder.is_some());
+    let exit_action =
+        exit_forwarding_action(effective_exit_enabled, runtime.exit_forwarder.is_some());
     #[cfg(target_os = "linux")]
     let mut staged_exit_forwarder = if exit_action == ExitForwardingAction::Install {
         let forwarder =
@@ -1581,7 +1665,9 @@ async fn apply_runtime_routing(
     }
 
     runtime.route_engine.set_routing_mode(parsed_mode);
-    runtime.exit_node_manager.set_enabled(is_exit_node);
+    runtime
+        .exit_node_manager
+        .set_enabled(effective_exit_enabled);
     runtime.configured_exit_node = exit_node.clone();
     runtime.config = updated_config;
     #[cfg(target_os = "linux")]
@@ -5658,6 +5744,18 @@ mod tests {
         );
         assert_eq!(
             exit_forwarding_action(false, false),
+            ExitForwardingAction::Keep
+        );
+    }
+
+    #[test]
+    fn local_exit_veto_overrides_network_exit_role() {
+        assert!(local_exit_effective(true, true));
+        assert!(!local_exit_effective(false, true));
+        assert!(!local_exit_effective(true, false));
+        assert!(!local_exit_effective(false, false));
+        assert_eq!(
+            exit_forwarding_action(local_exit_effective(false, true), false),
             ExitForwardingAction::Keep
         );
     }

@@ -1492,17 +1492,24 @@ impl NodeStateStore {
     /// from observed peer sessions.
     pub async fn set_member_directory(&self, directory: NetworkMemberDirectory) -> bool {
         let network_id = directory.network_id.clone();
+        {
+            let mut directories = self.directories.write().await;
+            if let Some(current) = directories.get(&network_id) {
+                let incoming_is_older = directory.exit_selection_policy_revision
+                    < current.exit_selection_policy_revision
+                    || (directory.exit_selection_policy_revision
+                        == current.exit_selection_policy_revision
+                        && directory.generated_at_unix_ms < current.generated_at_unix_ms);
+                if current == &directory || incoming_is_older {
+                    return false;
+                }
+            }
+            directories.insert(network_id.clone(), directory);
+        }
         self.directory_received_at
             .write()
             .await
-            .insert(network_id.clone(), unix_time_ms());
-        {
-            let mut directories = self.directories.write().await;
-            if directories.get(&network_id) == Some(&directory) {
-                return false;
-            }
-            directories.insert(network_id, directory);
-        }
+            .insert(network_id, unix_time_ms());
         self.update(|_| {}).await;
         true
     }
@@ -2793,9 +2800,9 @@ mod tests {
             state
                 .member_directory_received_at(&network_id)
                 .await
-                .expect("receipt time is refreshed")
-                > received_at,
-            "an unchanged roster still refreshes trusted evidence"
+                .expect("receipt time is cached")
+                == received_at,
+            "an unchanged roster must not refresh trusted evidence"
         );
 
         assert!(state.clear_member_directory(&network_id).await);
@@ -2809,6 +2816,57 @@ mod tests {
             .is_none());
         assert!(!state.clear_member_directory(&network_id).await);
         assert_eq!(state.snapshot().await.revision, cleared.revision);
+    }
+
+    #[tokio::test]
+    async fn member_directory_competition_never_rolls_back_or_refreshes_authority() {
+        let state = NodeStateStore::new();
+        let viewer = topology_node("viewer");
+        let network_id = topology_network("alpha");
+        let current = NetworkMemberDirectory {
+            network_id: network_id.clone(),
+            generated_at_unix_ms: 4_000,
+            viewer_role: MembershipRole::Member,
+            can_manage_members: false,
+            exit_selection_policy: Default::default(),
+            exit_selection_policy_revision: 7,
+            members: vec![directory_member(
+                &viewer,
+                "current",
+                MembershipRole::Member,
+                Vec::new(),
+            )],
+        };
+        assert!(state.set_member_directory(current.clone()).await);
+        let received_at = state
+            .member_directory_received_at(&network_id)
+            .await
+            .expect("receipt time is cached");
+
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let mut older_revision = current.clone();
+        older_revision.generated_at_unix_ms = 4_100;
+        older_revision.exit_selection_policy_revision = 6;
+        older_revision.members[0].display_name = Some("stale revision".into());
+        assert!(!state.set_member_directory(older_revision).await);
+        assert_eq!(
+            state.member_directory(&network_id).await,
+            Some(current.clone())
+        );
+        assert_eq!(
+            state.member_directory_received_at(&network_id).await,
+            Some(received_at)
+        );
+
+        let mut older_generation = current.clone();
+        older_generation.generated_at_unix_ms = 3_999;
+        older_generation.members[0].display_name = Some("stale generation".into());
+        assert!(!state.set_member_directory(older_generation).await);
+        assert_eq!(state.member_directory(&network_id).await, Some(current));
+        assert_eq!(
+            state.member_directory_received_at(&network_id).await,
+            Some(received_at)
+        );
     }
 
     #[tokio::test]

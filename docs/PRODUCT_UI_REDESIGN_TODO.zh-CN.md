@@ -2490,7 +2490,7 @@ GPUI 的 routing 页面同样只消费 `snapshot.traffic_routing_page`，页面�
 
 - [x] 单元测试覆盖顺序、AND/OR、边界和未知应用；
 - [x] 集成测试覆盖 TUN/路由/DNS 应用与补偿；
-- [x] 失败注入覆盖休眠、切网、Exit 断开和 DNS 超时；
+- [x] 失败注入覆盖休眠、切网、Exit/Relay 断开和 DNS 超时；
 - [x] E2E 覆盖域名和应用分流及回滚；
 - [x] 验证拒绝/失败关闭时无真实源 IP 泄漏；
 - [x] 验证固定 Exit 不可被 fallback 绕过；
@@ -2508,10 +2508,10 @@ GPUI 的 routing 页面同样只消费 `snapshot.traffic_routing_page`，页面�
 中创建真实 TUN，安装 policy rule、路由表和隔离 `/etc/resolv.conf`，注入首次路由规则删除与 TUN 删除失败，验证 DNS 恢复、
 保留资源的补偿重试、成功清理及幂等清理。该测试同时发现并修复了 TUN 在 link up 前添加设备路由会失败的真实初始化顺序问题。
 
-`unshare -Urnm --propagation private -- ./scripts/test-recovery-netns.sh`（4 passed）在私有 network/mount namespace 中使用真实
+`unshare -Urnm --propagation private -- ./scripts/test-recovery-netns.sh`（5 passed）在私有 network/mount namespace 中使用真实
 TUN、policy rule、路由表和隔离 `/etc/resolv.conf`，分别注入休眠唤醒后的 TUN/路由丢失、切网后的路由与 DNS 丢失、Exit
-监听断开，以及真实 UDP DNS 查询超时。测试直接调用生产 `RecoveryCoordinator` 与 Linux TUN/路由适配器，验证恢复/失败关闭状态、
-分阶段探测、脱敏失败决策审计和清理；不访问或修改宿主网络。
+监听断开、Relay 监听断开，以及真实 UDP DNS 查询超时。测试直接调用生产 `RecoveryCoordinator` 与 Linux TUN/路由适配器，
+验证恢复/失败关闭状态、分阶段探测、脱敏失败决策审计和清理；不访问或修改宿主网络。
 
 `./scripts/test-traffic-routing-netns.sh`（1 passed）在私有 user/network/mount namespace 中建立四条真实 veth 路径和合成 DNS：
 `domain.test`、`app.test`、`fail.test`、`blocked.test` 分别解析到稳定测试地址。测试直接调用生产 `TrafficPolicy::evaluate`

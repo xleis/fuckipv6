@@ -83,6 +83,7 @@ const RECOVERY_TRIGGER_QUEUE_CAPACITY: usize = 8;
 const EXIT_CONTRIBUTION_MEMBER_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const EXIT_CONTRIBUTION_DIRECTORY_QUEUE_CAPACITY: usize = 4;
 const EXIT_AVAILABILITY_REPORT_INTERVAL: Duration = Duration::from_secs(30);
+const EXIT_CONNECTION_WATCHDOG_INTERVAL: Duration = Duration::from_millis(250);
 #[cfg(target_os = "linux")]
 const LOCAL_EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(target_os = "linux")]
@@ -552,6 +553,8 @@ pub(crate) struct ClientRuntime {
     exit_recovery_path: PathRecoveryState,
     #[cfg(target_os = "linux")]
     relay_recovery_path: PathRecoveryState,
+    #[cfg(target_os = "linux")]
+    exit_connection_watchdog: Option<ExitConnectionWatchdog>,
     pub(crate) tun_io: RuntimeTunIo,
     pub(crate) assigned_ip: Ipv6Addr,
     pub(crate) assigned_ips: VirtualIps,
@@ -578,6 +581,64 @@ pub(crate) struct ClientRuntime {
     pub(crate) ipc_task: Option<JoinHandle<()>>,
     pub(crate) config_reload_task: Option<JoinHandle<()>>,
     pub(crate) relay_reconnect_task: Option<JoinHandle<()>>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExitConnectionWatchdog {
+    target: NodeId,
+    deadline_unix_ms: u64,
+    validation_trigger: RecoveryTrigger,
+    validation_queued: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitConnectionWatchdogAction {
+    Wait,
+    Validate(RecoveryTrigger),
+    TimedOut,
+}
+
+#[cfg(target_os = "linux")]
+impl ExitConnectionWatchdog {
+    fn new(
+        target: NodeId,
+        now_unix_ms: u64,
+        connect_timeout_secs: u64,
+        validation_trigger: RecoveryTrigger,
+    ) -> Self {
+        debug_assert!(matches!(
+            validation_trigger,
+            RecoveryTrigger::Manual | RecoveryTrigger::ExitMigration
+        ));
+        Self {
+            target,
+            deadline_unix_ms: now_unix_ms
+                .saturating_add(connect_timeout_secs.saturating_mul(1_000)),
+            validation_trigger,
+            validation_queued: false,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        now_unix_ms: u64,
+        session_established: bool,
+    ) -> ExitConnectionWatchdogAction {
+        if self.validation_queued {
+            return ExitConnectionWatchdogAction::Wait;
+        }
+        if now_unix_ms >= self.deadline_unix_ms {
+            self.validation_queued = true;
+            return ExitConnectionWatchdogAction::TimedOut;
+        }
+        if session_established {
+            self.validation_queued = true;
+            return ExitConnectionWatchdogAction::Validate(self.validation_trigger);
+        }
+        ExitConnectionWatchdogAction::Wait
+    }
 }
 
 impl ClientRuntime {
@@ -692,6 +753,10 @@ impl ClientRuntime {
         reason_code: &'static str,
     ) {
         self.exit_selection_blocked = true;
+        #[cfg(target_os = "linux")]
+        {
+            self.exit_connection_watchdog = None;
+        }
         self.exit_selection_gate.set_current_exit(None);
         self.exit_selection_gate.discard_pending_exit();
         if let Err(error) =
@@ -733,6 +798,46 @@ impl ClientRuntime {
             .cloned()
     }
 
+    fn arm_exit_connection_watchdog(
+        &mut self,
+        target: NodeId,
+        now_unix_ms: u64,
+        validation_trigger: RecoveryTrigger,
+    ) {
+        #[cfg(target_os = "linux")]
+        {
+            if self
+                .exit_connection_watchdog
+                .as_ref()
+                .is_some_and(|watchdog| watchdog.target == target)
+            {
+                return;
+            }
+            self.exit_connection_watchdog = Some(ExitConnectionWatchdog::new(
+                target,
+                now_unix_ms,
+                self.config.p2p.connect_timeout,
+                validation_trigger,
+            ));
+            self.exit_recovery_path = PathRecoveryState::Disconnected;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = target;
+            if !self.recovery_trigger_tx.try_trigger(validation_trigger) {
+                tracing::warn!(
+                    diagnostic_id = "recovery.trigger_queue_unavailable",
+                    "Exit 验证无法排队，数据平面已失败关闭"
+                );
+                self.block_exit_session(
+                    TrafficFailureKind::ConnectionTimeout,
+                    now_unix_ms,
+                    "traffic.session.validation_schedule_failed",
+                );
+            }
+        }
+    }
+
     async fn begin_exit_migration(
         &mut self,
         to: NodeId,
@@ -749,6 +854,11 @@ impl ClientRuntime {
                 .await;
                 return;
             }
+            self.arm_exit_connection_watchdog(
+                pending.clone(),
+                now_unix_ms,
+                RecoveryTrigger::ExitMigration,
+            );
             self.exit_selection_blocked = true;
             if self.traffic_session.state != TrafficProtectionState::Migrating {
                 if let Err(error) =
@@ -767,7 +877,7 @@ impl ClientRuntime {
             return;
         }
 
-        if !self.exit_selection_gate.begin_pending_exit(to) {
+        if !self.exit_selection_gate.begin_pending_exit(to.clone()) {
             self.enter_fail_closed(
                 TrafficFailureKind::ExitUnavailable,
                 now_unix_ms,
@@ -790,45 +900,27 @@ impl ClientRuntime {
             self.publish_traffic_session().await;
             return;
         }
-        if !self
-            .recovery_trigger_tx
-            .try_trigger(RecoveryTrigger::ExitMigration)
-        {
-            tracing::warn!(
-                diagnostic_id = "recovery.trigger_queue_unavailable",
-                "Exit 迁移已挂起，但恢复触发队列已满或已关闭"
-            );
-            self.block_exit_session(
-                TrafficFailureKind::ExitUnavailable,
-                now_unix_ms,
-                "exit.selection.migration_schedule_failed",
-            );
-        }
+        self.arm_exit_connection_watchdog(to, now_unix_ms, RecoveryTrigger::ExitMigration);
         self.publish_traffic_session().await;
     }
 
     async fn begin_exit_recovery(&mut self, trigger: RecoveryTrigger, now_unix_ms: u64) {
         self.exit_selection_blocked = true;
-        if !matches!(
-            self.traffic_session.state,
-            TrafficProtectionState::Connecting | TrafficProtectionState::Migrating
+        let migrating = self.exit_selection_gate.current_exit().is_some()
+            && self.exit_selection_gate.pending_exit().is_some();
+        if let Err(error) = self.traffic_session.begin_recovery(
+            migrating,
+            now_unix_ms.max(1),
+            recovery_started_reason_code(trigger),
         ) {
-            let migrating = self.exit_selection_gate.current_exit().is_some()
-                || self.exit_selection_gate.pending_exit().is_some();
-            if let Err(error) = self.traffic_session.begin_recovery(
-                migrating,
-                now_unix_ms.max(1),
-                recovery_started_reason_code(trigger),
-            ) {
-                tracing::error!(error = %error, "无法写入恢复中的流量会话状态");
-                self.block_exit_session(
-                    trigger
-                        .failure_kind()
-                        .unwrap_or(TrafficFailureKind::ConnectionTimeout),
-                    now_unix_ms,
-                    "recovery.state_transition_failed",
-                );
-            }
+            tracing::error!(error = %error, "无法写入恢复中的流量会话状态");
+            self.block_exit_session(
+                trigger
+                    .failure_kind()
+                    .unwrap_or(TrafficFailureKind::ConnectionTimeout),
+                now_unix_ms,
+                "recovery.state_transition_failed",
+            );
         }
         self.publish_traffic_session().await;
     }
@@ -1037,7 +1129,10 @@ impl ClientRuntime {
                     requested = ?requested,
                     "管理员 Exit 策略为新会话选定出口，等待恢复验证"
                 );
-                if !self.exit_selection_gate.begin_pending_exit(selected) {
+                if !self
+                    .exit_selection_gate
+                    .begin_pending_exit(selected.clone())
+                {
                     self.enter_fail_closed(
                         TrafficFailureKind::ExitUnavailable,
                         now_unix_ms,
@@ -1057,18 +1152,11 @@ impl ClientRuntime {
                         now_unix_ms,
                         "traffic.session.connecting_state_failed",
                     );
-                } else if !self
-                    .recovery_trigger_tx
-                    .try_trigger(RecoveryTrigger::Manual)
-                {
-                    tracing::warn!(
-                        diagnostic_id = "recovery.trigger_queue_unavailable",
-                        "新 Exit 会话已选择，但恢复验证无法排队"
-                    );
-                    self.block_exit_session(
-                        TrafficFailureKind::ConnectionTimeout,
+                } else {
+                    self.arm_exit_connection_watchdog(
+                        selected,
                         now_unix_ms,
-                        "traffic.session.validation_schedule_failed",
+                        RecoveryTrigger::Manual,
                     );
                 }
                 self.publish_traffic_session().await;
@@ -1382,6 +1470,8 @@ pub(crate) async fn prepare_client_runtime_ext(
         exit_recovery_path: PathRecoveryState::Unknown,
         #[cfg(target_os = "linux")]
         relay_recovery_path,
+        #[cfg(target_os = "linux")]
+        exit_connection_watchdog: None,
         tun_io,
         assigned_ip,
         assigned_ips,
@@ -1718,16 +1808,20 @@ async fn refresh_linux_recovery_paths(runtime: &mut ClientRuntime) {
         fuckipv6_common::RoutingMode::BypassMainland
         | fuckipv6_common::RoutingMode::GlobalProxy => {
             if let Some(exit_node_id) = runtime.intended_exit() {
-                if runtime
+                let exit_ip = runtime
                     .p2p
                     .resolve_exit_peer_by_node_id(&exit_node_id)
-                    .await
-                    .is_some()
-                {
-                    PathRecoveryState::Connected
-                } else {
-                    PathRecoveryState::Disconnected
-                }
+                    .await;
+                let established = match exit_ip {
+                    Some(exit_ip) => {
+                        runtime
+                            .p2p
+                            .has_established_session_by_ip(IpAddr::V6(exit_ip))
+                            .await
+                    }
+                    None => false,
+                };
+                exit_path_from_session_evidence(exit_ip, established)
             } else {
                 PathRecoveryState::Disconnected
             }
@@ -1738,6 +1832,114 @@ async fn refresh_linux_recovery_paths(runtime: &mut ClientRuntime) {
     } else {
         PathRecoveryState::Disconnected
     };
+}
+
+#[cfg(target_os = "linux")]
+fn exit_path_from_session_evidence(
+    exit_ip: Option<Ipv6Addr>,
+    session_established: bool,
+) -> PathRecoveryState {
+    if exit_ip.is_some() && session_established {
+        PathRecoveryState::Connected
+    } else {
+        PathRecoveryState::Disconnected
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn drive_exit_connection_watchdog(runtime: &mut ClientRuntime) {
+    let Some(watchdog_target) = runtime
+        .exit_connection_watchdog
+        .as_ref()
+        .map(|watchdog| watchdog.target.clone())
+    else {
+        return;
+    };
+    let Some(intended_exit) = runtime.intended_exit() else {
+        runtime.exit_connection_watchdog = None;
+        return;
+    };
+    if watchdog_target != intended_exit
+        || (runtime.exit_selection_gate.pending_exit().is_none()
+            && runtime.traffic_session.state.may_carry_traffic())
+        || runtime.traffic_session.state == TrafficProtectionState::FailClosed
+    {
+        runtime.exit_connection_watchdog = None;
+        return;
+    }
+
+    let exit_ip = runtime
+        .p2p
+        .resolve_exit_peer_by_node_id(&intended_exit)
+        .await;
+    let session_established = match exit_ip {
+        Some(exit_ip) => {
+            runtime
+                .p2p
+                .has_established_session_by_ip(IpAddr::V6(exit_ip))
+                .await
+        }
+        None => false,
+    };
+    runtime.exit_recovery_path = if session_established {
+        PathRecoveryState::Connected
+    } else {
+        PathRecoveryState::Disconnected
+    };
+
+    let now_unix_ms = unix_time_ms();
+    let action = runtime
+        .exit_connection_watchdog
+        .as_mut()
+        .expect("watchdog was checked above")
+        .observe(now_unix_ms, session_established);
+    match action {
+        ExitConnectionWatchdogAction::Wait => {}
+        ExitConnectionWatchdogAction::Validate(trigger) => {
+            if !runtime.recovery_trigger_tx.try_trigger(trigger) {
+                tracing::warn!(
+                    diagnostic_id = "recovery.trigger_queue_unavailable",
+                    trigger = ?trigger,
+                    "Exit 已建立 Secure Session，但恢复验证无法排队"
+                );
+                runtime
+                    .enter_fail_closed(
+                        TrafficFailureKind::ConnectionTimeout,
+                        now_unix_ms,
+                        "traffic.session.validation_schedule_failed",
+                    )
+                    .await;
+            }
+        }
+        ExitConnectionWatchdogAction::TimedOut => {
+            tracing::warn!(
+                exit = %intended_exit,
+                timeout_secs = runtime.config.p2p.connect_timeout,
+                "Exit 未在连接截止时间内完成 Secure Session，请求失败关闭恢复"
+            );
+            if !runtime
+                .recovery_trigger_tx
+                .try_trigger(RecoveryTrigger::ExitConnectionTimeout)
+            {
+                tracing::warn!(
+                    diagnostic_id = "recovery.trigger_queue_unavailable",
+                    "Exit 连接超时恢复无法排队，直接失败关闭"
+                );
+                runtime
+                    .enter_fail_closed(
+                        TrafficFailureKind::ConnectionTimeout,
+                        now_unix_ms,
+                        "traffic.session.connection_timeout_schedule_failed",
+                    )
+                    .await;
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn drive_exit_connection_watchdog(runtime: &mut ClientRuntime) {
+    let _ = runtime;
 }
 
 #[cfg(target_os = "linux")]
@@ -1930,14 +2132,32 @@ async fn handle_linux_recovery_trigger(runtime: &mut ClientRuntime, trigger: Rec
         &mut runtime.relay_recovery_path,
     );
 
-    // A lost Exit must first pass through the same administrator policy used by
-    // packet routing. This may stage a replacement; it never promotes the
-    // replacement before recovery evidence arrives.
+    match trigger {
+        // A lost Exit must first pass through the same administrator policy
+        // used by packet routing. A staged replacement waits for its own
+        // Secure Session and watchdog before recovery can validate it.
+        RecoveryTrigger::ExitDisconnected => {
+            runtime.reconcile_exit_selection(unix_time_ms()).await;
+            if runtime.traffic_session.state == TrafficProtectionState::FailClosed
+                || runtime.exit_selection_gate.pending_exit().is_some()
+            {
+                return;
+            }
+        }
+        // The selected target never completed key confirmation. Discard it so
+        // the recovery pass records a fail-closed outcome for this attempt
+        // instead of silently promoting another target.
+        RecoveryTrigger::ExitConnectionTimeout => {
+            runtime.exit_connection_watchdog = None;
+            runtime.exit_selection_gate.discard_pending_exit();
+        }
+        _ => {}
+    }
     if matches!(
         trigger,
-        RecoveryTrigger::ExitDisconnected | RecoveryTrigger::ExitConnectionTimeout
+        RecoveryTrigger::Manual | RecoveryTrigger::ExitMigration
     ) {
-        runtime.reconcile_exit_selection(unix_time_ms()).await;
+        refresh_linux_recovery_paths(runtime).await;
     }
     let expected_exit = runtime.intended_exit();
     runtime.begin_exit_recovery(trigger, unix_time_ms()).await;
@@ -2022,6 +2242,7 @@ async fn handle_linux_recovery_trigger(runtime: &mut ClientRuntime, trigger: Rec
         return;
     }
     runtime.exit_selection_blocked = false;
+    runtime.exit_connection_watchdog = None;
     runtime.publish_traffic_session().await;
 }
 
@@ -2037,6 +2258,8 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
     let mut node_state_updates = runtime.node_state_updates.clone();
     let mut exit_contribution_directory_updates =
         runtime.exit_contribution_directory_updates.take();
+    let mut exit_connection_watchdog = tokio::time::interval(EXIT_CONNECTION_WATCHDOG_INTERVAL);
+    exit_connection_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let exit_drain_deadline = local_exit_drain_deadline(runtime);
         let exit_drain = wait_for_local_exit_drain(exit_drain_deadline);
@@ -2084,6 +2307,14 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                         "Linux 恢复事件通道已关闭；本次运行不再接收系统休眠或网络变化事件"
                     ),
                 }
+            }
+
+            // A selected Exit is not routable until its Secure Session has
+            // completed key confirmation. This bounded poll turns that fact
+            // into exactly one validation trigger or one timeout recovery,
+            // while packet admission remains closed in the meantime.
+            _ = exit_connection_watchdog.tick() => {
+                drive_exit_connection_watchdog(runtime).await;
             }
 
             // Membership terms and the owner-authored local policy can change
@@ -7571,6 +7802,62 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
         assert_eq!(
             recovery_failure_reason_code(RecoveryTrigger::ExitConnectionTimeout),
             "recovery.connection_timeout.failed_closed"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exit_connection_watchdog_validates_once_and_times_out_once() {
+        let exit = NodeId::from_public_key(b"watchdog-exit");
+        let mut established =
+            ExitConnectionWatchdog::new(exit.clone(), 1_000, 10, RecoveryTrigger::Manual);
+        assert_eq!(
+            established.observe(1_001, false),
+            ExitConnectionWatchdogAction::Wait
+        );
+        assert_eq!(
+            established.observe(1_500, true),
+            ExitConnectionWatchdogAction::Validate(RecoveryTrigger::Manual)
+        );
+        assert_eq!(
+            established.observe(20_000, true),
+            ExitConnectionWatchdogAction::Wait,
+            "an Exit must never enqueue duplicate validation work"
+        );
+
+        let mut timed_out =
+            ExitConnectionWatchdog::new(exit, 1_000, 10, RecoveryTrigger::ExitMigration);
+        assert_eq!(
+            timed_out.observe(10_999, false),
+            ExitConnectionWatchdogAction::Wait
+        );
+        assert_eq!(
+            timed_out.observe(11_000, true),
+            ExitConnectionWatchdogAction::TimedOut,
+            "the deadline takes precedence over a session that completes in the same poll"
+        );
+        assert_eq!(
+            timed_out.observe(30_000, true),
+            ExitConnectionWatchdogAction::Wait,
+            "a timed-out Exit must not later be promoted by the same watchdog"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recovery_exit_path_requires_an_established_secure_session() {
+        let exit_ip = Some("fd00::1001".parse().unwrap());
+        assert_eq!(
+            exit_path_from_session_evidence(exit_ip, false),
+            PathRecoveryState::Disconnected
+        );
+        assert_eq!(
+            exit_path_from_session_evidence(exit_ip, true),
+            PathRecoveryState::Connected
+        );
+        assert_eq!(
+            exit_path_from_session_evidence(None, true),
+            PathRecoveryState::Disconnected
         );
     }
 

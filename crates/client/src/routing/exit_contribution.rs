@@ -5,33 +5,51 @@
 //! identity, the authoritative member roster, and Exit-only usage accounting.
 
 use fuckipv6_common::domain::{
-    evaluate_exit_contribution_access, ExitContributionAccessDecision,
-    ExitContributionAccessReason, ExitContributionQuotaPeriod, ExitContributionRestrictions,
+    authorize_exit_contribution, evaluate_exit_contribution_access, ContentHash,
+    ExitContributionAccessDecision, ExitContributionAccessReason,
+    ExitContributionAuthorizationInput, ExitContributionAuthorizationReason, ExitContributionMode,
+    ExitContributionQuotaPeriod, ExitContributionRequest, ExitContributionRestrictions,
     ExitContributionUsage, MemberLifecycleStatus, MembershipRole, NetworkId,
     NetworkMemberDirectory, NodeId, NodeLocalAccessPolicy,
 };
+use std::collections::BTreeMap;
 
 /// A roster older than this is not safe evidence for an owner restriction.
 pub(crate) const EXIT_MEMBER_DIRECTORY_MAX_AGE_MS: u64 = 90_000;
 const EXIT_BANDWIDTH_WINDOW_MS: u64 = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExitContributionNetworkContext {
+    pub(crate) mode: ExitContributionMode,
+    pub(crate) policy_revision: u64,
+    pub(crate) terms_hash: ContentHash,
+    pub(crate) policy_confirmation_required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExitContributionRuntimeDenial {
     MissingNetworkContext,
+    NetworkContextUnavailable,
+    PolicyUnavailable,
     PolicyOwnerMismatch,
     InvalidPolicy,
+    PolicyConfirmationRequired,
     MemberDirectoryUnavailable,
     RequesterNotInRoster,
     RequesterNotActive,
     AccessDenied(ExitContributionAccessReason),
+    AuthorizationDenied(ExitContributionAuthorizationReason),
 }
 
 impl ExitContributionRuntimeDenial {
     pub(crate) const fn reason_code(&self) -> &'static str {
         match self {
             Self::MissingNetworkContext => "exit.contribution.missing_network_context",
+            Self::NetworkContextUnavailable => "exit.contribution.network_context_unavailable",
+            Self::PolicyUnavailable => "exit.contribution.policy_unavailable",
             Self::PolicyOwnerMismatch => "exit.contribution.policy_owner_mismatch",
             Self::InvalidPolicy => "exit.contribution.invalid_policy",
+            Self::PolicyConfirmationRequired => "exit.contribution.policy_confirmation_required",
             Self::MemberDirectoryUnavailable => "exit.contribution.member_directory_unavailable",
             Self::RequesterNotInRoster => "exit.contribution.requester_not_in_roster",
             Self::RequesterNotActive => "exit.contribution.requester_not_active",
@@ -59,6 +77,33 @@ impl ExitContributionRuntimeDenial {
             Self::AccessDenied(ExitContributionAccessReason::Allowed) => {
                 "exit.contribution.allowed"
             }
+            Self::AuthorizationDenied(ExitContributionAuthorizationReason::Authorized) => {
+                "exit.contribution.authorized"
+            }
+            Self::AuthorizationDenied(ExitContributionAuthorizationReason::NetworkDisabled) => {
+                "exit.contribution.network_disabled"
+            }
+            Self::AuthorizationDenied(
+                ExitContributionAuthorizationReason::AuthorizationRequired,
+            ) => "exit.contribution.authorization_required",
+            Self::AuthorizationDenied(
+                ExitContributionAuthorizationReason::AuthorizationPending,
+            ) => "exit.contribution.authorization_pending",
+            Self::AuthorizationDenied(
+                ExitContributionAuthorizationReason::AuthorizationRejected,
+            ) => "exit.contribution.authorization_rejected",
+            Self::AuthorizationDenied(
+                ExitContributionAuthorizationReason::AuthorizationExpired,
+            ) => "exit.contribution.authorization_expired",
+            Self::AuthorizationDenied(
+                ExitContributionAuthorizationReason::AuthorizationSuperseded,
+            ) => "exit.contribution.authorization_superseded",
+            Self::AuthorizationDenied(ExitContributionAuthorizationReason::LocalVeto) => {
+                "exit.contribution.local_veto"
+            }
+            Self::AuthorizationDenied(ExitContributionAuthorizationReason::LocalRestriction) => {
+                "exit.contribution.local_restriction"
+            }
         }
     }
 }
@@ -70,9 +115,11 @@ impl ExitContributionRuntimeDenial {
 pub(crate) struct ExitContributionGate {
     owner_node_id: NodeId,
     network_id: Option<NetworkId>,
+    network_context: Option<ExitContributionNetworkContext>,
     policy: Option<NodeLocalAccessPolicy>,
     member_directory: Option<NetworkMemberDirectory>,
     member_directory_received_at_unix_ms: Option<u64>,
+    authorization_requests: BTreeMap<NodeId, ExitContributionRequest>,
     usage_period_started_at_unix_ms: u64,
     bytes_forwarded: u64,
     bandwidth_window_started_at_unix_ms: Option<u64>,
@@ -84,9 +131,11 @@ impl ExitContributionGate {
         Self {
             owner_node_id,
             network_id,
+            network_context: None,
             policy: None,
             member_directory: None,
             member_directory_received_at_unix_ms: None,
+            authorization_requests: BTreeMap::new(),
             usage_period_started_at_unix_ms: 0,
             bytes_forwarded: 0,
             bandwidth_window_started_at_unix_ms: None,
@@ -105,18 +154,56 @@ impl ExitContributionGate {
         self.reset_usage();
     }
 
+    /// Replace the signed network terms that authorize Exit contribution. A
+    /// missing context is never equivalent to permission.
+    pub(crate) fn replace_network_context(&mut self, context: ExitContributionNetworkContext) {
+        self.network_context = Some(context);
+    }
+
+    pub(crate) fn clear_network_context(&mut self) {
+        self.network_context = None;
+        self.authorization_requests.clear();
+    }
+
     pub(crate) fn replace_member_directory(
         &mut self,
         directory: NetworkMemberDirectory,
         received_at_unix_ms: u64,
-    ) {
+    ) -> Result<(), ExitContributionRuntimeDenial> {
+        let network_id = self
+            .network_id
+            .as_ref()
+            .ok_or(ExitContributionRuntimeDenial::MissingNetworkContext)?;
+        if directory.network_id != *network_id {
+            return Err(ExitContributionRuntimeDenial::MemberDirectoryUnavailable);
+        }
         self.member_directory = Some(directory);
         self.member_directory_received_at_unix_ms = Some(received_at_unix_ms);
+        Ok(())
     }
 
     pub(crate) fn clear_member_directory(&mut self) {
         self.member_directory = None;
         self.member_directory_received_at_unix_ms = None;
+    }
+
+    /// Cache the latest Coordinator-reviewed request for the authenticated
+    /// member. Requests from another network are ignored rather than widening
+    /// this gate's authority.
+    pub(crate) fn replace_authorization_request(&mut self, request: ExitContributionRequest) {
+        if self.network_id.as_ref() != Some(&request.network_id) {
+            return;
+        }
+        self.authorization_requests
+            .insert(request.node_id.clone(), request);
+    }
+
+    pub(crate) fn clear_authorization_request(&mut self, requester_node_id: &NodeId) {
+        self.authorization_requests.remove(requester_node_id);
+    }
+
+    pub(crate) fn clear_authorization_requests(&mut self) {
+        self.authorization_requests.clear();
     }
 
     /// Check one authenticated Exit request without consuming quota. Call
@@ -126,17 +213,22 @@ impl ExitContributionGate {
         &self,
         requester_node_id: &NodeId,
         now_unix_ms: u64,
-    ) -> Result<Option<ExitContributionAccessDecision>, ExitContributionRuntimeDenial> {
-        let Some(policy) = self.policy.as_ref() else {
-            // No owner-authored policy means no additional owner restriction.
-            // The existing network ACL, capability and Exit role checks remain
-            // mandatory and are evaluated independently by the datapath.
-            return Ok(None);
-        };
+    ) -> Result<ExitContributionAccessDecision, ExitContributionRuntimeDenial> {
         let network_id = self
             .network_id
             .as_ref()
             .ok_or(ExitContributionRuntimeDenial::MissingNetworkContext)?;
+        let network_context = self
+            .network_context
+            .as_ref()
+            .ok_or(ExitContributionRuntimeDenial::NetworkContextUnavailable)?;
+        if network_context.policy_confirmation_required {
+            return Err(ExitContributionRuntimeDenial::PolicyConfirmationRequired);
+        }
+        let policy = self
+            .policy
+            .as_ref()
+            .ok_or(ExitContributionRuntimeDenial::PolicyUnavailable)?;
         if policy.node_id != self.owner_node_id {
             return Err(ExitContributionRuntimeDenial::PolicyOwnerMismatch);
         }
@@ -144,23 +236,51 @@ impl ExitContributionGate {
             return Err(ExitContributionRuntimeDenial::InvalidPolicy);
         }
 
-        let Some(restrictions) = policy.exit_contribution.as_ref() else {
-            let decision = evaluate_exit_contribution_access(
-                policy,
-                requester_node_id,
-                MembershipRole::Member,
-                &[],
-                network_id,
-                ExitContributionUsage::default(),
-                now_unix_ms,
-            );
-            return if decision.allowed {
-                Ok(Some(decision))
-            } else {
-                Err(ExitContributionRuntimeDenial::AccessDenied(decision.reason))
-            };
-        };
+        let member = self.authoritative_member(requester_node_id, now_unix_ms)?;
 
+        // Custom-group catalogues are not part of the authoritative runtime
+        // roster yet. Passing no GroupId makes group-only selectors fail closed
+        // while explicit node and role selectors remain fully enforceable.
+        let usage = self.usage_for(now_unix_ms, policy.exit_contribution.as_ref());
+        let decision = evaluate_exit_contribution_access(
+            policy,
+            requester_node_id,
+            member.role,
+            &[],
+            network_id,
+            usage,
+            now_unix_ms,
+        );
+        if !decision.allowed {
+            return Err(ExitContributionRuntimeDenial::AccessDenied(decision.reason));
+        }
+
+        let authorization = authorize_exit_contribution(ExitContributionAuthorizationInput {
+            mode: network_context.mode,
+            policy_revision: network_context.policy_revision,
+            terms_hash: &network_context.terms_hash,
+            request: self.authorization_requests.get(requester_node_id),
+            local_veto: false,
+            local_access_allowed: true,
+            now_unix_ms,
+        });
+        if authorization != ExitContributionAuthorizationReason::Authorized {
+            return Err(ExitContributionRuntimeDenial::AuthorizationDenied(
+                authorization,
+            ));
+        }
+        Ok(decision)
+    }
+
+    fn authoritative_member(
+        &self,
+        requester_node_id: &NodeId,
+        now_unix_ms: u64,
+    ) -> Result<&fuckipv6_common::domain::NetworkMember, ExitContributionRuntimeDenial> {
+        let network_id = self
+            .network_id
+            .as_ref()
+            .ok_or(ExitContributionRuntimeDenial::MissingNetworkContext)?;
         let directory = self
             .member_directory
             .as_ref()
@@ -174,35 +294,15 @@ impl ExitContributionGate {
         if now_unix_ms.saturating_sub(received_at) > EXIT_MEMBER_DIRECTORY_MAX_AGE_MS {
             return Err(ExitContributionRuntimeDenial::MemberDirectoryUnavailable);
         }
-        let Some(member) = directory
+        let member = directory
             .members
             .iter()
             .find(|member| member.node_id == *requester_node_id)
-        else {
-            return Err(ExitContributionRuntimeDenial::RequesterNotInRoster);
-        };
+            .ok_or(ExitContributionRuntimeDenial::RequesterNotInRoster)?;
         if !member.lifecycle_state.grants_network_access() {
             return Err(ExitContributionRuntimeDenial::RequesterNotActive);
         }
-
-        // Custom-group catalogues are not part of the authoritative runtime
-        // roster yet. Passing no GroupId makes group-only selectors fail closed
-        // while explicit node and role selectors remain fully enforceable.
-        let usage = self.usage_for(now_unix_ms, Some(restrictions));
-        let decision = evaluate_exit_contribution_access(
-            policy,
-            requester_node_id,
-            member.role,
-            &[],
-            network_id,
-            usage,
-            now_unix_ms,
-        );
-        if decision.allowed {
-            Ok(Some(decision))
-        } else {
-            Err(ExitContributionRuntimeDenial::AccessDenied(decision.reason))
-        }
+        Ok(member)
     }
 
     /// Account bytes that were accepted by every Exit forwarding check.
@@ -287,6 +387,7 @@ mod tests {
     use super::*;
     use fuckipv6_common::domain::{
         ContributionKind, ExitContributionMemberScope, ExitContributionQuotaPeriod,
+        ExitContributionRequestId, ExitContributionRequestState, ExitContributionReviewAction,
         ExitContributionTimeWindow, ExitContributionTrafficQuota, NetworkMember,
         NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberPresence, NetworkMemberStatus,
         NodeContributionVeto, NodeNetworkScope, SecurityRuleId,
@@ -298,12 +399,29 @@ mod tests {
         NetworkId::from_public_key(b"exit-runtime-network")
     }
 
+    fn other_network() -> NetworkId {
+        NetworkId::from_public_key(b"exit-runtime-other-network")
+    }
+
     fn owner() -> NodeId {
         NodeId::from_public_key(b"exit-runtime-owner")
     }
 
     fn member_node() -> NodeId {
         NodeId::from_public_key(b"exit-runtime-member")
+    }
+
+    fn terms_hash() -> ContentHash {
+        ContentHash::from_bytes(b"exit-runtime-terms-v1")
+    }
+
+    fn context(mode: ExitContributionMode) -> ExitContributionNetworkContext {
+        ExitContributionNetworkContext {
+            mode,
+            policy_revision: 11,
+            terms_hash: terms_hash(),
+            policy_confirmation_required: false,
+        }
     }
 
     fn policy(restrictions: ExitContributionRestrictions) -> NodeLocalAccessPolicy {
@@ -367,44 +485,131 @@ mod tests {
         }
     }
 
-    fn gate(restrictions: ExitContributionRestrictions) -> ExitContributionGate {
+    fn gate(
+        restrictions: ExitContributionRestrictions,
+        mode: ExitContributionMode,
+    ) -> ExitContributionGate {
         let mut gate = ExitContributionGate::new(owner(), Some(network()));
         gate.replace_policy(Some(policy(restrictions)));
+        gate.replace_network_context(context(mode));
         gate.replace_member_directory(
             directory(member(
                 MembershipRole::Member,
                 MemberLifecycleStatus::Active,
             )),
             NOW,
-        );
+        )
+        .unwrap();
         gate
+    }
+
+    fn pending_request() -> ExitContributionRequest {
+        ExitContributionRequest::submit(
+            ExitContributionRequestId::from_public_key(b"exit-runtime-request"),
+            network(),
+            member_node(),
+            11,
+            terms_hash(),
+            Some(20_000),
+            Some(1_000_000),
+            NOW,
+        )
+        .unwrap()
+    }
+
+    fn approved_request() -> ExitContributionRequest {
+        pending_request()
+            .review(
+                NodeId::from_public_key(b"exit-runtime-reviewer"),
+                1,
+                ExitContributionReviewAction::Approve,
+                Some("exit.approved.standard".into()),
+                NOW + 1,
+            )
+            .unwrap()
+            .request
+    }
+
+    fn rejected_request() -> ExitContributionRequest {
+        pending_request()
+            .review(
+                NodeId::from_public_key(b"exit-runtime-reviewer"),
+                1,
+                ExitContributionReviewAction::Reject,
+                Some("exit.rejected.policy".into()),
+                NOW + 1,
+            )
+            .unwrap()
+            .request
     }
 
     #[test]
     fn remote_member_is_evaluated_against_owner_policy_and_active_roster() {
-        let gate = gate(selected_nodes(vec![member_node()]));
-        assert_ne!(owner(), member_node());
-        assert!(gate.authorize(&member_node(), NOW).unwrap().is_some());
-        assert!(matches!(
+        let gate = gate(
+            selected_nodes(vec![member_node()]),
+            ExitContributionMode::Autonomous,
+        );
+        assert!(gate.authorize(&member_node(), NOW).is_ok());
+        assert_eq!(
             gate.authorize(&NodeId::from_public_key(b"unlisted"), NOW),
             Err(ExitContributionRuntimeDenial::RequesterNotInRoster)
-        ));
+        );
+    }
+
+    #[test]
+    fn absent_network_context_policy_confirmation_and_roster_fail_closed() {
+        let mut gate = ExitContributionGate::new(owner(), Some(network()));
+        gate.replace_policy(Some(policy(ExitContributionRestrictions::default())));
+        assert_eq!(
+            gate.authorize(&member_node(), NOW),
+            Err(ExitContributionRuntimeDenial::NetworkContextUnavailable)
+        );
+
+        gate.replace_network_context(context(ExitContributionMode::Autonomous));
+        assert_eq!(
+            gate.authorize(&member_node(), NOW),
+            Err(ExitContributionRuntimeDenial::MemberDirectoryUnavailable)
+        );
+
+        gate.replace_member_directory(
+            directory(member(
+                MembershipRole::Member,
+                MemberLifecycleStatus::Active,
+            )),
+            NOW,
+        )
+        .unwrap();
+        gate.replace_policy(None);
+        assert_eq!(
+            gate.authorize(&member_node(), NOW),
+            Err(ExitContributionRuntimeDenial::PolicyUnavailable)
+        );
+
+        gate.replace_policy(Some(policy(ExitContributionRestrictions::default())));
+        let mut unconfirmed = context(ExitContributionMode::RequiredOnJoin);
+        unconfirmed.policy_confirmation_required = true;
+        gate.replace_network_context(unconfirmed);
+        assert_eq!(
+            gate.authorize(&member_node(), NOW),
+            Err(ExitContributionRuntimeDenial::PolicyConfirmationRequired)
+        );
     }
 
     #[test]
     fn network_scope_and_local_veto_fail_closed() {
         let mut network_policy = policy(selected_nodes(vec![member_node()]));
-        network_policy.network_scope =
-            NodeNetworkScope::Only(vec![NetworkId::from_public_key(b"other-network")]);
+        network_policy.network_scope = NodeNetworkScope::Only(vec![other_network()]);
         let mut gate = ExitContributionGate::new(owner(), Some(network()));
         gate.replace_policy(Some(network_policy));
+        gate.replace_network_context(context(ExitContributionMode::Autonomous));
         gate.replace_member_directory(
             directory(member(
                 MembershipRole::Member,
                 MemberLifecycleStatus::Active,
             )),
             NOW,
-        );
+        )
+        .unwrap();
         assert_eq!(
             gate.authorize(&member_node(), NOW),
             Err(ExitContributionRuntimeDenial::AccessDenied(
@@ -420,13 +625,15 @@ mod tests {
         }];
         let mut gate = ExitContributionGate::new(owner(), Some(network()));
         gate.replace_policy(Some(veto_policy));
+        gate.replace_network_context(context(ExitContributionMode::RequiredOnJoin));
         gate.replace_member_directory(
             directory(member(
                 MembershipRole::Member,
                 MemberLifecycleStatus::Active,
             )),
             NOW,
-        );
+        )
+        .unwrap();
         assert_eq!(
             gate.authorize(&member_node(), NOW),
             Err(ExitContributionRuntimeDenial::AccessDenied(
@@ -441,16 +648,8 @@ mod tests {
         if let ExitContributionMemberScope::Selected { roles, .. } = &mut role_policy.members {
             roles.push(MembershipRole::Member);
         }
-        let mut gate = ExitContributionGate::new(owner(), Some(network()));
-        gate.replace_policy(Some(policy(role_policy)));
-        gate.replace_member_directory(
-            directory(member(
-                MembershipRole::Member,
-                MemberLifecycleStatus::Active,
-            )),
-            NOW,
-        );
-        assert!(gate.authorize(&member_node(), NOW).unwrap().is_some());
+        let role_gate = gate(role_policy, ExitContributionMode::Autonomous);
+        assert!(role_gate.authorize(&member_node(), NOW).is_ok());
 
         let group_only = ExitContributionRestrictions {
             members: ExitContributionMemberScope::Selected {
@@ -462,15 +661,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let mut gate = ExitContributionGate::new(owner(), Some(network()));
-        gate.replace_policy(Some(policy(group_only)));
-        gate.replace_member_directory(
-            directory(member(
-                MembershipRole::Member,
-                MemberLifecycleStatus::Active,
-            )),
-            NOW,
-        );
+        let gate = gate(group_only, ExitContributionMode::Autonomous);
         assert_eq!(
             gate.authorize(&member_node(), NOW),
             Err(ExitContributionRuntimeDenial::AccessDenied(
@@ -483,7 +674,8 @@ mod tests {
     fn missing_or_stale_roster_and_inactive_member_are_denied() {
         let restrictions = selected_nodes(vec![member_node()]);
         let mut gate = ExitContributionGate::new(owner(), Some(network()));
-        gate.replace_policy(Some(policy(restrictions.clone())));
+        gate.replace_policy(Some(policy(restrictions)));
+        gate.replace_network_context(context(ExitContributionMode::Autonomous));
         assert_eq!(
             gate.authorize(&member_node(), NOW),
             Err(ExitContributionRuntimeDenial::MemberDirectoryUnavailable)
@@ -495,7 +687,8 @@ mod tests {
                 MemberLifecycleStatus::Suspended,
             )),
             NOW,
-        );
+        )
+        .unwrap();
         assert_eq!(
             gate.authorize(&member_node(), NOW),
             Err(ExitContributionRuntimeDenial::RequesterNotActive)
@@ -507,9 +700,22 @@ mod tests {
                 MemberLifecycleStatus::Active,
             )),
             NOW.saturating_sub(EXIT_MEMBER_DIRECTORY_MAX_AGE_MS + 1),
-        );
+        )
+        .unwrap();
         assert_eq!(
             gate.authorize(&member_node(), NOW),
+            Err(ExitContributionRuntimeDenial::MemberDirectoryUnavailable)
+        );
+
+        let foreign = NetworkMemberDirectory {
+            network_id: other_network(),
+            ..directory(member(
+                MembershipRole::Member,
+                MemberLifecycleStatus::Active,
+            ))
+        };
+        assert_eq!(
+            gate.replace_member_directory(foreign, NOW),
             Err(ExitContributionRuntimeDenial::MemberDirectoryUnavailable)
         );
     }
@@ -520,23 +726,23 @@ mod tests {
         wrong_owner.node_id = NodeId::from_public_key(b"another-owner");
         let mut gate = ExitContributionGate::new(owner(), Some(network()));
         gate.replace_policy(Some(wrong_owner));
-        assert_eq!(
-            gate.authorize(&member_node(), NOW),
-            Err(ExitContributionRuntimeDenial::PolicyOwnerMismatch)
-        );
-
-        gate.replace_policy(None);
-        assert_eq!(gate.authorize(&member_node(), NOW), Ok(None));
-        gate.replace_policy(Some(policy(selected_nodes(vec![NodeId::from_public_key(
-            b"different-member",
-        )]))));
+        gate.replace_network_context(context(ExitContributionMode::Autonomous));
         gate.replace_member_directory(
             directory(member(
                 MembershipRole::Member,
                 MemberLifecycleStatus::Active,
             )),
             NOW,
+        )
+        .unwrap();
+        assert_eq!(
+            gate.authorize(&member_node(), NOW),
+            Err(ExitContributionRuntimeDenial::PolicyOwnerMismatch)
         );
+
+        gate.replace_policy(Some(policy(selected_nodes(vec![NodeId::from_public_key(
+            b"different-member",
+        )]))));
         assert_eq!(
             gate.authorize(&member_node(), NOW),
             Err(ExitContributionRuntimeDenial::AccessDenied(
@@ -560,7 +766,7 @@ mod tests {
                 period: ExitContributionQuotaPeriod::Daily,
             }),
         };
-        let mut gate = gate(restrictions);
+        let mut gate = gate(restrictions, ExitContributionMode::Autonomous);
         let outside_window = NOW + 60 * 60 * 1_000;
         gate.replace_member_directory(
             directory(member(
@@ -568,7 +774,8 @@ mod tests {
                 MemberLifecycleStatus::Active,
             )),
             outside_window,
-        );
+        )
+        .unwrap();
         assert_eq!(
             gate.authorize(&member_node(), outside_window),
             Err(ExitContributionRuntimeDenial::AccessDenied(
@@ -582,7 +789,8 @@ mod tests {
                 MemberLifecycleStatus::Active,
             )),
             NOW,
-        );
+        )
+        .unwrap();
         gate.record_forwarded(100_000, NOW);
         assert_eq!(
             gate.authorize(&member_node(), NOW + 500),
@@ -597,6 +805,142 @@ mod tests {
             Err(ExitContributionRuntimeDenial::AccessDenied(
                 ExitContributionAccessReason::TrafficQuotaExceeded
             ))
+        );
+    }
+
+    #[test]
+    fn four_network_modes_and_approval_states_are_enforced() {
+        assert!(gate(
+            ExitContributionRestrictions::default(),
+            ExitContributionMode::Autonomous
+        )
+        .authorize(&member_node(), NOW)
+        .is_ok());
+        assert!(gate(
+            ExitContributionRestrictions::default(),
+            ExitContributionMode::RequiredOnJoin
+        )
+        .authorize(&member_node(), NOW)
+        .is_ok());
+
+        let disabled = gate(
+            ExitContributionRestrictions::default(),
+            ExitContributionMode::Disabled,
+        );
+        assert_eq!(
+            disabled.authorize(&member_node(), NOW),
+            Err(ExitContributionRuntimeDenial::AuthorizationDenied(
+                ExitContributionAuthorizationReason::NetworkDisabled
+            ))
+        );
+
+        let mut approval = gate(
+            ExitContributionRestrictions::default(),
+            ExitContributionMode::ApprovalRequired,
+        );
+        assert_eq!(
+            approval.authorize(&member_node(), NOW),
+            Err(ExitContributionRuntimeDenial::AuthorizationDenied(
+                ExitContributionAuthorizationReason::AuthorizationRequired
+            ))
+        );
+
+        approval.replace_authorization_request(pending_request());
+        assert_eq!(
+            approval.authorize(&member_node(), NOW + 2),
+            Err(ExitContributionRuntimeDenial::AuthorizationDenied(
+                ExitContributionAuthorizationReason::AuthorizationPending
+            ))
+        );
+
+        approval.replace_authorization_request(approved_request());
+        assert!(approval.authorize(&member_node(), NOW + 2).is_ok());
+
+        approval.replace_authorization_request(rejected_request());
+        assert_eq!(
+            approval.authorize(&member_node(), NOW + 2),
+            Err(ExitContributionRuntimeDenial::AuthorizationDenied(
+                ExitContributionAuthorizationReason::AuthorizationRejected
+            ))
+        );
+
+        let mut expired = pending_request();
+        expired.expires_at_unix_ms = NOW + 3;
+        approval.replace_authorization_request(expired);
+        assert_eq!(
+            approval.authorize(&member_node(), NOW + 4),
+            Err(ExitContributionRuntimeDenial::AuthorizationDenied(
+                ExitContributionAuthorizationReason::AuthorizationExpired
+            ))
+        );
+
+        let mut stale_context = context(ExitContributionMode::ApprovalRequired);
+        stale_context.policy_revision += 1;
+        approval.replace_network_context(stale_context);
+        approval.replace_authorization_request(approved_request());
+        assert_eq!(
+            approval.authorize(&member_node(), NOW + 2),
+            Err(ExitContributionRuntimeDenial::AuthorizationDenied(
+                ExitContributionAuthorizationReason::AuthorizationSuperseded
+            ))
+        );
+    }
+
+    #[test]
+    fn approval_cache_is_scoped_to_the_gate_network_and_can_be_cleared() {
+        let mut approval = gate(
+            ExitContributionRestrictions::default(),
+            ExitContributionMode::ApprovalRequired,
+        );
+        let mut foreign = approved_request();
+        foreign.network_id = other_network();
+        approval.replace_authorization_request(foreign);
+        assert_eq!(
+            approval.authorize(&member_node(), NOW + 2),
+            Err(ExitContributionRuntimeDenial::AuthorizationDenied(
+                ExitContributionAuthorizationReason::AuthorizationRequired
+            ))
+        );
+
+        approval.replace_authorization_request(approved_request());
+        assert!(approval.authorize(&member_node(), NOW + 2).is_ok());
+        approval.clear_authorization_request(&member_node());
+        assert_eq!(
+            approval.authorize(&member_node(), NOW + 2),
+            Err(ExitContributionRuntimeDenial::AuthorizationDenied(
+                ExitContributionAuthorizationReason::AuthorizationRequired
+            ))
+        );
+    }
+
+    #[test]
+    fn denial_reason_codes_are_stable_and_never_report_implicit_permission() {
+        assert_eq!(
+            ExitContributionRuntimeDenial::NetworkContextUnavailable.reason_code(),
+            "exit.contribution.network_context_unavailable"
+        );
+        assert_eq!(
+            ExitContributionRuntimeDenial::PolicyUnavailable.reason_code(),
+            "exit.contribution.policy_unavailable"
+        );
+        assert_eq!(
+            ExitContributionRuntimeDenial::PolicyConfirmationRequired.reason_code(),
+            "exit.contribution.policy_confirmation_required"
+        );
+        assert_eq!(
+            ExitContributionRuntimeDenial::AuthorizationDenied(
+                ExitContributionAuthorizationReason::AuthorizationRequired
+            )
+            .reason_code(),
+            "exit.contribution.authorization_required"
+        );
+        assert_eq!(
+            approved_request().state,
+            ExitContributionRequestState::Approved
+        );
+        assert_eq!(
+            pending_request().state,
+            ExitContributionRequestState::Pending
         );
     }
 }

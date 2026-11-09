@@ -1484,12 +1484,31 @@ impl NodeStateStore {
     /// topology. Cached rosters are never treated as live link state: presence
     /// and connections still come from the entries the Coordinator returned or
     /// from observed peer sessions.
-    pub async fn set_member_directory(&self, directory: NetworkMemberDirectory) {
+    pub async fn set_member_directory(&self, directory: NetworkMemberDirectory) -> bool {
         {
             let mut directories = self.directories.write().await;
+            if directories.get(&directory.network_id) == Some(&directory) {
+                return false;
+            }
             directories.insert(directory.network_id.clone(), directory);
         }
         self.update(|_| {}).await;
+        true
+    }
+
+    pub async fn member_directory(&self, network_id: &NetworkId) -> Option<NetworkMemberDirectory> {
+        self.directories.read().await.get(network_id).cloned()
+    }
+
+    /// Remove a roster when the control channel or membership evidence is no
+    /// longer authoritative. This republishes topology immediately so stale
+    /// members never remain visible as live peers.
+    pub async fn clear_member_directory(&self, network_id: &NetworkId) -> bool {
+        let removed = self.directories.write().await.remove(network_id).is_some();
+        if removed {
+            self.update(|_| {}).await;
+        }
+        removed
     }
 
     pub fn subscribe(&self) -> watch::Receiver<NodeSnapshot> {
@@ -2714,9 +2733,42 @@ mod tests {
 
         let after = state.snapshot().await;
         assert_eq!(after.revision, before.revision + 1);
-        let topology = after.topology.expect("topology is projected");
+        let topology = after.topology.clone().expect("topology is projected");
         assert!(topology.node(&relay).is_some());
         assert_eq!(topology.boundaries[0].member_count, 2);
+        assert_eq!(
+            state
+                .member_directory(&network_id)
+                .await
+                .expect("directory is cached")
+                .members
+                .len(),
+            2
+        );
+
+        assert!(
+            !state
+                .set_member_directory(
+                    state
+                        .member_directory(&network_id)
+                        .await
+                        .expect("directory is cached")
+                )
+                .await
+        );
+        assert_eq!(state.snapshot().await.revision, after.revision);
+
+        assert!(state.clear_member_directory(&network_id).await);
+        let cleared = state.snapshot().await;
+        assert_eq!(cleared.revision, after.revision + 1);
+        assert!(state.member_directory(&network_id).await.is_none());
+        assert!(cleared
+            .topology
+            .expect("topology is projected")
+            .node(&relay)
+            .is_none());
+        assert!(!state.clear_member_directory(&network_id).await);
+        assert_eq!(state.snapshot().await.revision, cleared.revision);
     }
 
     #[tokio::test]

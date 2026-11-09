@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
     TrafficFailureDecision, TrafficFailureKind, TrafficFailurePolicy, TrafficFailureRouteContext,
-    TrafficRuntimeDegradation, TrafficRuntimeDegradationState,
+    TrafficRuntimeDegradation, TrafficRuntimeDegradationState, TrafficSessionValidation,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,13 @@ pub enum RecoveryTrigger {
     SleepWake,
     NetworkChanged,
     ExitDisconnected,
+    /// An administrator-authorized Exit replacement is waiting for fresh
+    /// resource and reachability evidence. The old Exit remains recorded but
+    /// packet admission stays closed until the replacement is committed.
+    ExitMigration,
     RelayDisconnected,
+    HandshakeInterrupted,
+    RuntimeDisconnected,
     Manual,
 }
 
@@ -53,16 +59,22 @@ impl RecoveryTrigger {
     fn invalidated_path(self) -> Option<InvalidatedPath> {
         match self {
             Self::ExitDisconnected => Some(InvalidatedPath::Exit),
-            Self::RelayDisconnected => Some(InvalidatedPath::Relay),
-            Self::SleepWake | Self::NetworkChanged | Self::Manual => None,
+            Self::RelayDisconnected | Self::HandshakeInterrupted => Some(InvalidatedPath::Relay),
+            Self::ExitMigration
+            | Self::RuntimeDisconnected
+            | Self::SleepWake
+            | Self::NetworkChanged
+            | Self::Manual => None,
         }
     }
 
-    fn failure_kind(self) -> Option<TrafficFailureKind> {
+    pub(crate) fn failure_kind(self) -> Option<TrafficFailureKind> {
         match self {
             Self::ExitDisconnected => Some(TrafficFailureKind::ExitUnavailable),
             Self::RelayDisconnected => Some(TrafficFailureKind::NetworkSelectionUnavailable),
-            Self::SleepWake | Self::NetworkChanged | Self::Manual => None,
+            Self::HandshakeInterrupted => Some(TrafficFailureKind::HandshakeInterrupted),
+            Self::RuntimeDisconnected => Some(TrafficFailureKind::RuntimeDisconnected),
+            Self::ExitMigration | Self::SleepWake | Self::NetworkChanged | Self::Manual => None,
         }
     }
 }
@@ -83,6 +95,8 @@ pub struct RecoveryExpectations {
     pub tun_required: bool,
     pub routes_required: bool,
     pub dns_required: bool,
+    pub exit_path_required: bool,
+    pub relay_path_required: bool,
 }
 
 impl Default for RecoveryExpectations {
@@ -91,6 +105,8 @@ impl Default for RecoveryExpectations {
             tun_required: true,
             routes_required: true,
             dns_required: true,
+            exit_path_required: true,
+            relay_path_required: true,
         }
     }
 }
@@ -415,6 +431,10 @@ pub struct RecoveryReport {
     pub revoked_paths: Vec<InvalidatedPath>,
     pub failure_decisions: Vec<TrafficFailureDecision>,
     pub degradation: Option<TrafficRuntimeDegradation>,
+    /// Fresh evidence from this pass. Present only when every protected-path
+    /// layer and reachability probe passed; a degraded direct fallback does not
+    /// prove the tunneled path is protected.
+    pub traffic_session_validation: Option<TrafficSessionValidation>,
     pub probes: Vec<RecoveryProbeResult>,
 }
 
@@ -441,6 +461,7 @@ impl RecoveryReport {
             revoked_paths: Vec::new(),
             failure_decisions: Vec::new(),
             degradation: None,
+            traffic_session_validation: None,
             probes: Vec::new(),
         }
     }
@@ -492,8 +513,8 @@ impl RecoveryCoordinator {
         };
         report.before = Some(before);
 
-        if let Some(path) = request.trigger.invalidated_path() {
-            let revoke_ok = match bounded(deadline, backend.revoke_path(path)).await {
+        let revoke_ok = if let Some(path) = request.trigger.invalidated_path() {
+            match bounded(deadline, backend.revoke_path(path)).await {
                 Ok(()) => {
                     report.revoked_paths.push(path);
                     true
@@ -502,12 +523,12 @@ impl RecoveryCoordinator {
                 Err(BoundedError::TimedOut) => {
                     return report.finish(RecoveryStatus::TimedOut, Some("recovery.timed_out"));
                 }
-            };
+            }
+        } else {
+            true
+        };
 
-            let failure = request
-                .trigger
-                .failure_kind()
-                .expect("disconnect triggers have a failure kind");
+        if let Some(failure) = request.trigger.failure_kind() {
             let decision = if revoke_ok {
                 request
                     .failure_policy
@@ -549,10 +570,10 @@ impl RecoveryCoordinator {
                     return report.finish(RecoveryStatus::TimedOut, Some("recovery.timed_out"));
                 }
             }
+        }
 
-            if !revoke_ok {
-                return report.finish(RecoveryStatus::Failed, Some("recovery.path_revoke_failed"));
-            }
+        if !revoke_ok {
+            return report.finish(RecoveryStatus::Failed, Some("recovery.path_revoke_failed"));
         }
 
         let repair = match bounded(deadline, backend.reconcile(request.trigger)).await {
@@ -671,6 +692,18 @@ impl RecoveryCoordinator {
                     }
                 }
             });
+        if status == RecoveryStatus::Recovered {
+            report.traffic_session_validation = Some(TrafficSessionValidation::passed(
+                !request.expectations.tun_required || after.tun.is_healthy(),
+                !request.expectations.routes_required || after.routes.is_healthy(),
+                !request.expectations.dns_required || after.dns.is_secure_and_healthy(),
+                report
+                    .probes
+                    .iter()
+                    .all(|probe| probe.state == RecoveryProbeState::Passed),
+                unix_time_ms().max(1),
+            ));
+        }
         report.finish(status, None)
     }
 }
@@ -700,6 +733,18 @@ fn resource_validation_error(
     if expectations.routes_required && !snapshot.routes.is_healthy() {
         return Some((
             "recovery.routes_unhealthy",
+            TrafficFailureKind::NetworkSelectionUnavailable,
+        ));
+    }
+    if expectations.exit_path_required && snapshot.exit_path != PathRecoveryState::Connected {
+        return Some((
+            "recovery.exit_path_unhealthy",
+            TrafficFailureKind::ExitUnavailable,
+        ));
+    }
+    if expectations.relay_path_required && snapshot.relay_path != PathRecoveryState::Connected {
+        return Some((
+            "recovery.relay_path_unhealthy",
             TrafficFailureKind::NetworkSelectionUnavailable,
         ));
     }

@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use fuckipv6_common::domain::{ExitSessionAction, NetworkId, NetworkMemberDirectory, NodeId};
+use fuckipv6_common::domain::{
+    ExitSessionAction, NetworkId, NetworkMemberDirectory, NodeId, TrafficSessionSnapshot,
+};
 #[cfg(test)]
 use fuckipv6_common::is_encrypted_config_path;
 use fuckipv6_common::recent_error_log_lines;
@@ -564,7 +566,10 @@ pub(crate) struct ClientRuntime {
     pub(crate) config: ClientConfig,
     pub(crate) local_exit_enabled: bool,
     pub(crate) control_rx: mpsc::UnboundedReceiver<ipc::RuntimeCommand>,
+    node_state: Option<NodeStateStore>,
     node_state_updates: Option<watch::Receiver<NodeSnapshot>>,
+    traffic_session: TrafficSessionSnapshot,
+    pending_exit: Option<NodeId>,
     local_exit_snapshot: Option<LocalExitCapabilitySnapshot>,
     local_exit_availability_report_interval: tokio::time::Interval,
     exit_contribution_member_refresh_task: Option<JoinHandle<()>>,
@@ -596,8 +601,12 @@ impl ClientRuntime {
     /// independently so a stale one fails closed without blocking packet flow.
     pub(crate) async fn attach_node_state(&mut self, state: NodeStateStore) {
         let snapshot = state.snapshot().await;
+        self.node_state = Some(state.clone());
         self.local_exit_snapshot = Some(snapshot.local_exit.clone());
         self.apply_exit_contribution_snapshot(&snapshot);
+        state
+            .set_traffic_session(self.traffic_session.clone())
+            .await;
 
         let Some(network_id) = self.network_id.clone() else {
             self.node_state_updates = Some(state.subscribe());
@@ -1163,7 +1172,10 @@ pub(crate) async fn prepare_client_runtime_ext(
         config,
         local_exit_enabled,
         control_rx,
+        node_state: None,
         node_state_updates: None,
+        traffic_session: TrafficSessionSnapshot::default(),
+        pending_exit: None,
         local_exit_snapshot: None,
         local_exit_availability_report_interval: {
             let mut interval = tokio::time::interval(EXIT_AVAILABILITY_REPORT_INTERVAL);
@@ -1532,8 +1544,13 @@ fn invalidate_linux_recovery_path(
     relay_path: &mut PathRecoveryState,
 ) {
     match trigger {
-        RecoveryTrigger::ExitDisconnected => *exit_path = PathRecoveryState::Disconnected,
-        RecoveryTrigger::RelayDisconnected => *relay_path = PathRecoveryState::Disconnected,
+        RecoveryTrigger::ExitDisconnected | RecoveryTrigger::ExitMigration => {
+            *exit_path = PathRecoveryState::Disconnected;
+        }
+        RecoveryTrigger::RelayDisconnected | RecoveryTrigger::HandshakeInterrupted => {
+            *relay_path = PathRecoveryState::Disconnected;
+        }
+        RecoveryTrigger::RuntimeDisconnected => {}
         RecoveryTrigger::SleepWake | RecoveryTrigger::NetworkChanged | RecoveryTrigger::Manual => {}
     }
 }

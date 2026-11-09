@@ -33,19 +33,29 @@ pub enum TrafficFailureKind {
     NetworkSelectionUnavailable,
     /// A connection did not establish before the policy deadline.
     ConnectionTimeout,
+    /// The secure handshake with a Relay or Exit was interrupted after it
+    /// started. Existing flows may have observed partial authentication state,
+    /// so this class must fail closed.
+    HandshakeInterrupted,
+    /// The local runtime lost ownership of or disconnected from the data-plane
+    /// process. It cannot prove that traffic remained inside the protected
+    /// path, so this class must fail closed.
+    RuntimeDisconnected,
     /// Some attempts completed and others failed, so switching routes would be
     /// ambiguous or could leak an already-established flow.
     PartialConnectionFailure,
 }
 
 impl TrafficFailureKind {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::UnknownApplication,
         Self::DnsResolutionTimeout,
         Self::DnsPollutionDetected,
         Self::ExitUnavailable,
         Self::NetworkSelectionUnavailable,
         Self::ConnectionTimeout,
+        Self::HandshakeInterrupted,
+        Self::RuntimeDisconnected,
         Self::PartialConnectionFailure,
     ];
 
@@ -57,6 +67,8 @@ impl TrafficFailureKind {
             Self::ExitUnavailable => "exit_unavailable",
             Self::NetworkSelectionUnavailable => "network_selection_unavailable",
             Self::ConnectionTimeout => "connection_timeout",
+            Self::HandshakeInterrupted => "handshake_interrupted",
+            Self::RuntimeDisconnected => "runtime_disconnected",
             Self::PartialConnectionFailure => "partial_connection_failure",
         }
     }
@@ -65,7 +77,9 @@ impl TrafficFailureKind {
     /// fallback. DNS failures cannot safely fall back because doing so would
     /// change the security properties of name resolution. A partial failure is
     /// also never switched automatically because an established flow may
-    /// already have used the failed path.
+    /// already have used the failed path. Interrupted handshakes and runtime
+    /// disconnects are also unsafe because the runtime cannot prove the path
+    /// never carried traffic or retained protocol state.
     pub const fn can_explicitly_fallback_to_direct(self) -> bool {
         matches!(
             self,
@@ -649,6 +663,8 @@ mod tests {
         for failure in [
             TrafficFailureKind::DnsResolutionTimeout,
             TrafficFailureKind::DnsPollutionDetected,
+            TrafficFailureKind::HandshakeInterrupted,
+            TrafficFailureKind::RuntimeDisconnected,
             TrafficFailureKind::PartialConnectionFailure,
         ] {
             assert!(!failure.can_explicitly_fallback_to_direct());
@@ -766,6 +782,8 @@ mod tests {
 
         for failure in [
             TrafficFailureKind::DnsPollutionDetected,
+            TrafficFailureKind::HandshakeInterrupted,
+            TrafficFailureKind::RuntimeDisconnected,
             TrafficFailureKind::PartialConnectionFailure,
         ] {
             let decision = policy.decide(&route, failure).unwrap();

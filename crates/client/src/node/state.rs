@@ -13,7 +13,7 @@ use fuckipv6_common::domain::{
     NetworkAcl, NetworkId, NetworkJoinMode, NetworkMemberDirectory, NetworkMemberPresence,
     NetworkMemberStatus, NetworkVisibility, NodeId, NodeLocalAccessPolicy, OperationRecovery,
     TopologyBuilder, TopologyLinkObservation, TopologyMemberInput, TopologyNetworkInput,
-    TopologySnapshot, TopologyViewer, TrafficRoutingPageModel,
+    TopologySnapshot, TopologyViewer, TrafficRoutingPageModel, TrafficSessionSnapshot,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -86,6 +86,11 @@ pub struct NodeSnapshot {
     /// adapter is unavailable, not that an empty policy was applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traffic_routing_page: Option<TrafficRoutingPageModel>,
+    /// Runtime-authoritative local traffic-protection session. `Protected` is
+    /// emitted only after fresh TUN, route, DNS and reachability validation;
+    /// migration and failure states are never inferred by UI adapters.
+    #[serde(default)]
+    pub traffic_session: TrafficSessionSnapshot,
     /// Owner-authored public network-profile projections. This field is an
     /// allowlisted public snapshot: it never contains member identities,
     /// addresses, topology, activity, invitation tickets or secret material.
@@ -1717,6 +1722,14 @@ impl NodeStateStore {
     pub async fn set_recent_activity(&self, activity: Vec<ActivityEntry>) {
         self.update(|snapshot| snapshot.recent_activity = activity)
             .await;
+    }
+
+    /// Publish the runtime-authoritative traffic-protection session. Adapters
+    /// only render this value and must not derive protection from interfaces,
+    /// route configuration or a successful CLI command.
+    pub async fn set_traffic_session(&self, session: TrafficSessionSnapshot) -> NodeSnapshot {
+        self.update(|snapshot| snapshot.traffic_session = session)
+            .await
     }
 
     /// Refresh the host-interface projection and reconcile live TUN names.

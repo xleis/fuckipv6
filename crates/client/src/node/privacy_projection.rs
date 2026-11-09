@@ -1501,6 +1501,7 @@ mod tests {
             interface_problems: Vec::new(),
             routing_summaries: Vec::new(),
             traffic_routing_page: None,
+            traffic_session: Default::default(),
             network_profiles: Vec::new(),
             exit_selections: vec![exit_selection(home.clone())],
             memberships: vec![membership(

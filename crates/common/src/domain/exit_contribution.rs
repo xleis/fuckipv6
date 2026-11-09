@@ -332,7 +332,10 @@ pub fn evaluate_exit_contribution_access(
         local_policy_revision: policy.revision,
         traffic_quota_reset_at_unix_ms: None,
     };
-    if policy.validate_at(now_unix_ms).is_err() || policy.node_id != *actor {
+    // `policy.node_id` identifies the Exit-serving owner. `actor` is the
+    // remote member whose request is being evaluated, so these identities are
+    // intentionally different.
+    if policy.validate_at(now_unix_ms).is_err() {
         return denied(ExitContributionAccessReason::InvalidPolicy);
     }
     if !policy.network_scope.allows(network_id) {
@@ -960,7 +963,7 @@ mod tests {
     #[test]
     fn owner_restrictions_enforce_member_time_bandwidth_and_quota() {
         let network_id = network();
-        let actor = node(b"owner");
+        let actor = node(b"remote-member");
         let group = GroupId::from_public_key(b"selected-group");
         let now = 1_700_006_400_000; // 2023-11-15 00:00 UTC, Wednesday.
         let restrictions = ExitContributionRestrictions {
@@ -981,6 +984,7 @@ mod tests {
             }),
         };
         let policy = policy(restrictions);
+        assert_ne!(policy.node_id, actor);
         let allowed = evaluate_exit_contribution_access(
             &policy,
             &actor,
@@ -1039,7 +1043,7 @@ mod tests {
     #[test]
     fn local_veto_wins_even_with_an_approved_network_request() {
         let network_id = network();
-        let actor = node(b"owner");
+        let actor = node(b"remote-member");
         let request = ExitContributionRequest::submit(
             ExitContributionRequestId::from_public_key(b"request"),
             network_id.clone(),

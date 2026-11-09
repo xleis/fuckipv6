@@ -2564,16 +2564,31 @@ Linux forwarder 进入 drain 后先 fence 新客户端并保留已有 flow 资�
 
 **验收**：Exit 能力的所有权边界清晰，可由本机可靠启停且不影响其他能力。
 
-### W12-02 贡献策略与成员告知 `[ ]`
+### W12-02 贡献策略与成员告知 `[x]`
 
-- [ ] 网络支持自主贡献、加入即贡献、禁止贡献和申请授权模式；
-- [ ] 策略展示带宽、流量、隐私和运营影响；
-- [ ] 加入前和策略变更后要求知情确认；
-- [ ] 节点 owner 可限制可用网络、成员范围、时段和配额；
-- [ ] 管理员可要求贡献但不能覆盖本地否决；
-- [ ] 实际状态与声明能力不一致时标记降级；
-- [ ] 所有同意、拒绝、撤回和策略版本审计；
-- [ ] 成员列表展示真实 Exit 可用性。
+- [x] 网络支持自主贡献、加入即贡献、禁止贡献和申请授权模式；
+- [x] 策略展示带宽、流量、隐私和运营影响；
+- [x] 加入前和策略变更后要求知情确认；
+- [x] 节点 owner 可限制可用网络、成员范围、时段和配额；
+- [x] 管理员可要求贡献但不能覆盖本地否决；
+- [x] 实际状态与声明能力不一致时标记降级；
+- [x] 所有同意、拒绝、撤回和策略版本审计；
+- [x] 成员列表展示真实 Exit 可用性。
+
+网络策略使用 `autonomous`、`required_on_join`、`disabled`、`approval_required` 四种稳定模式，`NetworkCreateProfile`、
+`MembershipTerms` 和运行时上下文统一携带模式与 content hash。邀请、加入预览和策略重确认均展示带宽、流量、隐私、运营四项影响以及
+确认/授权要求；普通条款必须确认，`required_on_join` 额外要求独立的 Exit 同意，`autonomous` 与 `approval_required` 只披露事实、不强制
+加入时承诺。缺少精确版本确认时 `ExitContributionGate` 返回 `PolicyConfirmationRequired` 并拒绝贡献，而不是仅在 UI 提示。
+节点 owner 的网络、成员范围、时段、带宽和配额限制与本地 veto 独立生效，管理员要求不能覆盖本地否决。成员目录展示声明状态与观测状态、
+来源、时间戳、新鲜度及原因；声明可用但实际不可用、实际可用但声明不可用、缺失或陈旧证据分别显示降级/未知，不把未知当作可用。
+Exit 申请的提交、审核、撤回、过期和策略 supersede 均写入持久审计；加入同意、拒绝与策略确认记录精确 terms hash、模式、时间和
+同意事实，命令审计同时记录网络创建、策略更新、成员快照及 rejected problem 中的 `exit_contribution_mode`。
+
+**验证通过（2026-11-09）**：`cargo fmt --all -- --check`、`cargo check --workspace`、
+`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`（1683 passed、10 ignored）、
+`./scripts/generate-contracts.sh`、`./scripts/check-contracts.sh`、`node scripts/test_i18n_runtime.mjs`、WebUI `typecheck`、`lint`、
+`npm test -- --run`（276 passed）和 `npm run build`（仅保留现有 i18n 非 module 与 >500 kB chunk 警告）。
+相关提交：`59312ee`。本项不宣称 W12-03 至 W12-07 的治理、健康、故障切换、DNS/IPv4/IPv6 泄漏、Google/YouTube 或性能稳定性验收完成。
 
 **验收**：不存在隐式 Exit 贡献；治理策略与节点实际状态可核对。
 

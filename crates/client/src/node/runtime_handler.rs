@@ -683,9 +683,19 @@ impl NodeRuntimeHandler {
                         }
                     }
                 }
-                super::NodeCommand::SetLocalExitCapability(_) => {
-                    unavailable(request_id, "本机 Exit 能力启停需要运行中的本机 Exit 控制面")
-                }
+                super::NodeCommand::SetLocalExitCapability(command) => match runtime {
+                    Some(runtime) => match runtime.set_local_exit_capability(command.enabled).await
+                    {
+                        Ok(snapshot) => NodeCommandResult::completed(
+                            request_id,
+                            NodeCommandOutcome::LocalExitCapability(Box::new(snapshot)),
+                        ),
+                        Err(error) => runtime_rejection(request_id, error),
+                    },
+                    None => {
+                        unavailable(request_id, "本机 Exit 能力启停需要运行中的本机 Exit 控制面")
+                    }
+                },
                 super::NodeCommand::SetNetworkRole(command) => {
                     let capabilities = state.snapshot().await.exit_node_capabilities;
                     if command.role == super::NodeNetworkRole::ExitNode

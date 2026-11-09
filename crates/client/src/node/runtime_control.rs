@@ -13,7 +13,8 @@ use fuckipv6_common::domain::{
     NetworkMemberDirectory,
 };
 use fuckipv6_common::{
-    ClientConfig, JoinRequestBatchReviewItem, JoinRequestReviewResult, NatType, NetworkTicket,
+    ClientConfig, ExitNodeCapabilities, ExitNodeUnsupportedReason, JoinRequestBatchReviewItem,
+    JoinRequestReviewResult, NatType, NetworkTicket,
 };
 use futures::future::join_all;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -21,8 +22,9 @@ use tokio::task::JoinHandle;
 use tokio::time::{timeout, Instant};
 
 use super::{
-    NodeCleanupFailureReason, NodeCleanupFailureSnapshot, NodeCleanupStepSnapshot,
-    NodeCleanupStepStatus, NodeCreateNetworkCommand, NodeDiagnosticCheck, NodeDiagnosticLayer,
+    LocalExitCapabilitySnapshot, LocalExitCapabilityStage, NodeCleanupFailureReason,
+    NodeCleanupFailureSnapshot, NodeCleanupStepSnapshot, NodeCleanupStepStatus,
+    NodeCreateNetworkCommand, NodeDiagnosticCheck, NodeDiagnosticLayer,
     NodeDiagnosticRecoveryAction, NodeDiagnosticState, NodeDiagnosticsSnapshot,
     NodeEmbeddedServiceSnapshot, NodeEmbeddedServiceStatus, NodeEventBus, NodeEventKind,
     NodeIdentitySnapshot, NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceStatus,
@@ -51,6 +53,7 @@ pub(crate) const STOP_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const RESTART_TIMEOUT: Duration = Duration::from_secs(60);
 const ROUTING_UPDATE_TIMEOUT: Duration = Duration::from_secs(20);
+const LOCAL_EXIT_UPDATE_TIMEOUT: Duration = Duration::from_secs(20);
 const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +62,7 @@ struct RuntimeTimeouts {
     start: Duration,
     restart: Duration,
     routing_update: Duration,
+    local_exit_update: Duration,
     diagnostics: Duration,
 }
 
@@ -69,6 +73,7 @@ impl Default for RuntimeTimeouts {
             start: START_TIMEOUT,
             restart: RESTART_TIMEOUT,
             routing_update: ROUTING_UPDATE_TIMEOUT,
+            local_exit_update: LOCAL_EXIT_UPDATE_TIMEOUT,
             diagnostics: DIAGNOSTICS_TIMEOUT,
         }
     }
@@ -101,6 +106,8 @@ pub(crate) enum RuntimeControlError {
     PermissionDenied(String),
     #[error("{0}")]
     Cancelled(String),
+    #[error("{0}")]
+    Unsupported(String),
     #[error("{0}")]
     NotFound(String),
     #[error("{0}")]
@@ -139,6 +146,7 @@ impl RuntimeControlError {
             Self::Conflict(_) | Self::CreationConflict { .. } => NodeProblemCode::Conflict,
             Self::PermissionDenied(_) => NodeProblemCode::PermissionDenied,
             Self::Cancelled(_) => NodeProblemCode::Cancelled,
+            Self::Unsupported(_) => NodeProblemCode::Unsupported,
             Self::NotFound(_) => NodeProblemCode::NotFound,
             Self::NetworkSetup { stage, .. } => network_setup_problem_code(*stage),
             Self::ActorClosed
@@ -171,6 +179,7 @@ impl RuntimeControlError {
                 | Self::CreationConflict { .. }
                 | Self::PermissionDenied(_)
                 | Self::Cancelled(_)
+                | Self::Unsupported(_)
                 | Self::NotFound(_)
                 | Self::NetworkSetup {
                     stage: NetworkSetupStage::PermissionDenied
@@ -1464,6 +1473,11 @@ enum RuntimeControlCommand {
         command: NodeSetNetworkRoleCommand,
         reply: oneshot::Sender<Result<RoleUpdateResult, RuntimeControlError>>,
     },
+    SetLocalExitCapability {
+        enabled: bool,
+        _operation: OperationGuard,
+        reply: oneshot::Sender<Result<LocalExitCapabilitySnapshot, RuntimeControlError>>,
+    },
     JoinRequest {
         command: JoinRequestRuntimeCommand,
         reply: oneshot::Sender<Result<JoinRequestExecutionResult, RuntimeControlError>>,
@@ -1926,6 +1940,23 @@ impl NetworkRuntimeManager {
         let (reply, response) = oneshot::channel();
         self.send(RuntimeControlCommand::SetNetworkRole { command, reply })
             .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
+    pub(crate) async fn set_local_exit_capability(
+        &self,
+        enabled: bool,
+    ) -> Result<LocalExitCapabilitySnapshot, RuntimeControlError> {
+        let operation = self.operation_gate.try_acquire()?;
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::SetLocalExitCapability {
+            enabled,
+            _operation: operation,
+            reply,
+        })
+        .await?;
         response
             .await
             .map_err(|_| RuntimeControlError::ActorClosed)?
@@ -2400,6 +2431,7 @@ async fn run_actor(
     mut receiver: mpsc::Receiver<RuntimeControlCommand>,
     mut actor: NetworkRuntimeActor,
 ) {
+    actor.refresh_local_exit_capability_state().await;
     while let Some(command) = receiver.recv().await {
         match command {
             RuntimeControlCommand::Diagnostics { cancel, reply } => {
@@ -2456,6 +2488,14 @@ async fn run_actor(
             }
             RuntimeControlCommand::SetNetworkRole { command, reply } => {
                 let result = actor.set_network_role(command).await;
+                let _ = reply.send(result);
+            }
+            RuntimeControlCommand::SetLocalExitCapability {
+                enabled,
+                _operation,
+                reply,
+            } => {
+                let result = actor.set_local_exit_capability(enabled).await;
                 let _ = reply.send(result);
             }
             RuntimeControlCommand::JoinRequest { command, reply } => {
@@ -2539,6 +2579,184 @@ struct NetworkRuntimeActor {
 }
 
 impl NetworkRuntimeActor {
+    async fn local_exit_owner_intent(&self) -> Result<bool, RuntimeControlError> {
+        self.configs.node_local_exit_enabled().map_err(|error| {
+            RuntimeControlError::Persistence(format!("读取本机 Exit owner intent 失败: {error:#}"))
+        })
+    }
+
+    async fn publish_local_exit_capability(
+        &self,
+        capability: LocalExitCapabilitySnapshot,
+    ) -> LocalExitCapabilitySnapshot {
+        let capability = LocalExitCapabilitySnapshot {
+            last_transition_at_unix_ms: unix_time_ms(),
+            ..capability
+        };
+        self.state
+            .update(|snapshot| snapshot.local_exit = capability.clone())
+            .await;
+        capability
+    }
+
+    async fn set_local_exit_transition(&self, stage: LocalExitCapabilityStage) {
+        self.state
+            .update(|snapshot| {
+                snapshot.local_exit.stage = stage;
+                snapshot.local_exit.healthy = false;
+                snapshot.local_exit.problem = None;
+                snapshot.local_exit.last_transition_at_unix_ms = unix_time_ms();
+            })
+            .await;
+    }
+
+    async fn request_all_local_exit_capabilities(
+        &self,
+        enabled: bool,
+    ) -> Vec<(
+        String,
+        Result<ipc::LocalExitRuntimeStatus, RuntimeRoutingRequestError>,
+    )> {
+        let wait = self.timeouts.local_exit_update;
+        let requests = self
+            .sessions
+            .iter()
+            .map(|(network_name, session)| {
+                let network_name = network_name.clone();
+                let routing_control = session.routing_control.clone();
+                async move {
+                    let result = request_runtime_local_exit(&routing_control, enabled, wait).await;
+                    (network_name, result)
+                }
+            })
+            .collect::<Vec<_>>();
+        join_all(requests).await
+    }
+
+    async fn refresh_local_exit_capability_state(&self) {
+        let owner_exit_enabled = match self.local_exit_owner_intent().await {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                let problem = runtime_control_problem(&error);
+                let current = self.state.snapshot().await.local_exit;
+                self.publish_local_exit_capability(LocalExitCapabilitySnapshot {
+                    owner_exit_enabled: current.owner_exit_enabled,
+                    stage: LocalExitCapabilityStage::Failed,
+                    problem: Some(problem),
+                    ..LocalExitCapabilitySnapshot::default()
+                })
+                .await;
+                return;
+            }
+        };
+
+        let capabilities = self.state.snapshot().await.exit_node_capabilities;
+        let unsupported_problem = owner_exit_enabled
+            .then(|| local_exit_unsupported_error(&capabilities))
+            .flatten()
+            .map(|error| runtime_control_problem(&error));
+        let results = self
+            .request_all_local_exit_capabilities(owner_exit_enabled)
+            .await;
+        let (statuses, request_problem) = local_exit_request_results(results);
+        let problem = unsupported_problem.or(request_problem);
+        self.publish_local_exit_capability(local_exit_capability_from_statuses(
+            owner_exit_enabled,
+            &statuses,
+            problem,
+        ))
+        .await;
+    }
+
+    async fn set_local_exit_capability(
+        &mut self,
+        enabled: bool,
+    ) -> Result<LocalExitCapabilitySnapshot, RuntimeControlError> {
+        self.reconcile_finished_sessions().await;
+
+        let previous = self.local_exit_owner_intent().await?;
+        if enabled {
+            let capabilities = self.state.snapshot().await.exit_node_capabilities;
+            if let Some(error) = local_exit_unsupported_error(&capabilities) {
+                let problem = runtime_control_problem(&error);
+                self.publish_local_exit_capability(local_exit_capability_from_statuses(
+                    previous,
+                    &[],
+                    Some(problem),
+                ))
+                .await;
+                return Err(error);
+            }
+        }
+
+        self.set_local_exit_transition(if enabled {
+            LocalExitCapabilityStage::Listening
+        } else {
+            LocalExitCapabilityStage::Draining
+        })
+        .await;
+
+        let results = self.request_all_local_exit_capabilities(enabled).await;
+        let failed = results.iter().find_map(|(network_name, result)| {
+            result
+                .as_ref()
+                .err()
+                .map(|error| local_exit_request_error(network_name, error))
+        });
+
+        if let Some(error) = failed {
+            let rollback_results = self.request_all_local_exit_capabilities(previous).await;
+            let (statuses, rollback_problem) = local_exit_request_results(rollback_results);
+            let mut problem = runtime_control_problem(&error);
+            if let Some(rollback_problem) = rollback_problem {
+                problem.message.push_str(&format!(
+                    "；部分网络的 owner intent 回滚未能确认: {}",
+                    rollback_problem.message
+                ));
+                problem.retryable = true;
+            }
+            self.publish_local_exit_capability(local_exit_capability_from_statuses(
+                previous,
+                &statuses,
+                Some(problem),
+            ))
+            .await;
+            return Err(error);
+        }
+
+        if let Err(error) = self.configs.set_node_local_exit_enabled(enabled) {
+            let rollback_results = self.request_all_local_exit_capabilities(previous).await;
+            let (statuses, rollback_problem) = local_exit_request_results(rollback_results);
+            let persistence_error = RuntimeControlError::Persistence(format!(
+                "保存本机 Exit owner intent 失败: {error:#}"
+            ));
+            let mut problem = runtime_control_problem(&persistence_error);
+            if let Some(rollback_problem) = rollback_problem {
+                problem.message.push_str(&format!(
+                    "；运行时 owner intent 回滚未能确认: {}",
+                    rollback_problem.message
+                ));
+            }
+            self.publish_local_exit_capability(local_exit_capability_from_statuses(
+                previous,
+                &statuses,
+                Some(problem),
+            ))
+            .await;
+            return Err(persistence_error);
+        }
+
+        let statuses = results
+            .into_iter()
+            .filter_map(|(_, result)| result.ok())
+            .collect::<Vec<_>>();
+        Ok(self
+            .publish_local_exit_capability(local_exit_capability_from_statuses(
+                enabled, &statuses, None,
+            ))
+            .await)
+    }
+
     async fn live_tun_names(&mut self) -> Result<BTreeMap<String, String>, RuntimeControlError> {
         self.reconcile_finished_sessions().await;
         Ok(self
@@ -3412,6 +3630,7 @@ impl NetworkRuntimeActor {
                 handle: started.handle,
             },
         );
+        self.refresh_local_exit_capability_state().await;
         Ok(())
     }
 
@@ -3977,6 +4196,7 @@ impl NetworkRuntimeActor {
                 roles: updated_roles,
             });
         }
+        self.refresh_local_exit_capability_state().await;
 
         Ok(result)
     }
@@ -4160,6 +4380,7 @@ impl NetworkRuntimeActor {
             enabled: command.enabled,
             roles: desired_roles.clone(),
         });
+        self.refresh_local_exit_capability_state().await;
 
         Ok(RoleUpdateResult {
             network_name,
@@ -4405,6 +4626,7 @@ impl NetworkRuntimeActor {
         let mut cleanup = self.inspect_cleanup(&target_names).await?;
         cleanup.runtime_outcomes = runtime_outcomes;
         self.publish_stop_lifecycle(&failed).await;
+        self.refresh_local_exit_capability_state().await;
         Ok(StopSummary {
             stopped,
             failed,
@@ -4892,6 +5114,7 @@ impl NetworkRuntimeActor {
             .map(|(network_name, _)| network_name.clone())
             .collect::<Vec<_>>();
 
+        let had_finished_sessions = !finished.is_empty();
         for network_name in finished {
             let Some(session) = self.sessions.remove(&network_name) else {
                 continue;
@@ -4926,6 +5149,9 @@ impl NetworkRuntimeActor {
                         .await;
                 }
             }
+        }
+        if had_finished_sessions {
+            self.refresh_local_exit_capability_state().await;
         }
     }
 
@@ -5631,6 +5857,145 @@ fn describe_routing_request_failure(error: &RuntimeRoutingRequestError) -> Strin
     }
 }
 
+async fn request_runtime_local_exit(
+    routing_control: &mpsc::UnboundedSender<ipc::RuntimeCommand>,
+    enabled: bool,
+    wait: Duration,
+) -> Result<ipc::LocalExitRuntimeStatus, RuntimeRoutingRequestError> {
+    let (reply, response) = oneshot::channel();
+    routing_control
+        .send(ipc::RuntimeCommand::SetLocalExitCapability { enabled, reply })
+        .map_err(|_| RuntimeRoutingRequestError::ControlClosed)?;
+
+    match timeout(wait, response).await {
+        Err(_) => Err(RuntimeRoutingRequestError::TimedOut(wait)),
+        Ok(Err(_)) => Err(RuntimeRoutingRequestError::ResponseClosed),
+        Ok(Ok(Ok(result))) => Ok(result),
+        Ok(Ok(Err(message))) => Err(RuntimeRoutingRequestError::Rejected(message)),
+    }
+}
+
+fn local_exit_unsupported_error(
+    capabilities: &ExitNodeCapabilities,
+) -> Option<RuntimeControlError> {
+    if capabilities.supported {
+        return None;
+    }
+    let message = if capabilities.unsupported_reasons.is_empty() {
+        "当前平台缺少可用的本机 Exit 数据面能力".to_string()
+    } else {
+        capabilities.unsupported_explanation()
+    };
+    if capabilities
+        .unsupported_reasons
+        .contains(&ExitNodeUnsupportedReason::PrivilegesRequired)
+    {
+        Some(RuntimeControlError::PermissionDenied(message))
+    } else {
+        Some(RuntimeControlError::Unsupported(message))
+    }
+}
+
+fn runtime_control_problem(error: &RuntimeControlError) -> NodeProblem {
+    NodeProblem::new(error.problem_code(), error.to_string())
+        .with_message_key(error.message_key())
+        .retryable(error.retryable())
+}
+
+fn local_exit_request_error(
+    network_name: &str,
+    error: &RuntimeRoutingRequestError,
+) -> RuntimeControlError {
+    match error {
+        RuntimeRoutingRequestError::ControlClosed => RuntimeControlError::Unavailable(format!(
+            "网络 [{network_name}] 的本机 Exit 运行时控制通道已关闭"
+        )),
+        RuntimeRoutingRequestError::TimedOut(wait) => RuntimeControlError::Timeout(format!(
+            "网络 [{network_name}] 等待本机 Exit 启停响应超时（{} 秒）",
+            wait.as_secs_f64()
+        )),
+        RuntimeRoutingRequestError::ResponseClosed => RuntimeControlError::Unavailable(format!(
+            "网络 [{network_name}] 的运行时在完成本机 Exit 启停前关闭了响应通道"
+        )),
+        RuntimeRoutingRequestError::Rejected(message) => RuntimeControlError::Unavailable(format!(
+            "网络 [{network_name}] 的运行时拒绝本机 Exit 启停: {message}"
+        )),
+    }
+}
+
+fn local_exit_request_results(
+    results: Vec<(
+        String,
+        Result<ipc::LocalExitRuntimeStatus, RuntimeRoutingRequestError>,
+    )>,
+) -> (Vec<ipc::LocalExitRuntimeStatus>, Option<NodeProblem>) {
+    let mut statuses = Vec::with_capacity(results.len());
+    let mut problem = None;
+    for (network_name, result) in results {
+        match result {
+            Ok(status) => statuses.push(status),
+            Err(error) if problem.is_none() => {
+                let error = local_exit_request_error(&network_name, &error);
+                problem = Some(runtime_control_problem(&error));
+            }
+            Err(_) => {}
+        }
+    }
+    (statuses, problem)
+}
+
+fn local_exit_capability_from_statuses(
+    owner_exit_enabled: bool,
+    statuses: &[ipc::LocalExitRuntimeStatus],
+    problem: Option<NodeProblem>,
+) -> LocalExitCapabilitySnapshot {
+    let network_allowed = statuses.iter().any(|status| status.network_allowed);
+    let effective = statuses
+        .iter()
+        .filter(|status| status.effective)
+        .collect::<Vec<_>>();
+    let healthy = !effective.is_empty() && effective.iter().all(|status| status.healthy);
+    let active_clients = statuses.iter().fold(0u32, |total, status| {
+        total.saturating_add(status.active_clients)
+    });
+    let total_clients = statuses.iter().fold(0u64, |total, status| {
+        total.saturating_add(status.total_clients)
+    });
+
+    let effective_unhealthy = owner_exit_enabled && !effective.is_empty() && !healthy;
+    let problem = problem.or_else(|| {
+        effective_unhealthy.then(|| {
+            NodeProblem::new(
+                NodeProblemCode::Unavailable,
+                "本机 Exit 已授权，但数据面健康检查未通过",
+            )
+            .retryable(true)
+        })
+    });
+    let stage = if problem.is_some() || effective_unhealthy {
+        LocalExitCapabilityStage::Failed
+    } else if !owner_exit_enabled {
+        LocalExitCapabilityStage::Disabled
+    } else if !network_allowed {
+        LocalExitCapabilityStage::WaitingForNetworkAuthorization
+    } else if healthy {
+        LocalExitCapabilityStage::Enabled
+    } else {
+        LocalExitCapabilityStage::HealthChecking
+    };
+
+    LocalExitCapabilitySnapshot {
+        owner_exit_enabled,
+        stage,
+        healthy: stage == LocalExitCapabilityStage::Enabled,
+        network_allowed,
+        active_clients,
+        total_clients,
+        problem,
+        last_transition_at_unix_ms: 0,
+    }
+}
+
 fn runtime_routing_mode_name(mode: NodeRoutingMode) -> &'static str {
     match mode {
         NodeRoutingMode::MeshOnly => "MeshOnly",
@@ -5738,6 +6103,11 @@ mod tests {
         next_routing_failures: Arc<Mutex<HashSet<String>>>,
         next_routing_persistence_failures: Arc<Mutex<HashSet<String>>>,
         runtime_exit_nodes: Arc<Mutex<HashMap<String, bool>>>,
+        local_exit_calls: Arc<Mutex<Vec<(String, bool)>>>,
+        next_local_exit_failures: Arc<Mutex<HashSet<String>>>,
+        runtime_local_exit_owners: Arc<Mutex<HashMap<String, bool>>>,
+        local_exit_health: Arc<Mutex<HashMap<String, bool>>>,
+        local_exit_clients: Arc<Mutex<HashMap<String, (u32, u64)>>>,
         routing_delay_ms: Arc<AtomicU64>,
         routing_in_flight: Arc<AtomicUsize>,
         routing_max_in_flight: Arc<AtomicUsize>,
@@ -5877,6 +6247,42 @@ mod tests {
                 .copied()
         }
 
+        fn fail_next_local_exit(&self, network_name: &str) {
+            self.next_local_exit_failures
+                .lock()
+                .expect("next local exit failure lock poisoned")
+                .insert(network_name.into());
+        }
+
+        fn local_exit_calls(&self) -> Vec<(String, bool)> {
+            self.local_exit_calls
+                .lock()
+                .expect("local exit call lock poisoned")
+                .clone()
+        }
+
+        fn runtime_local_exit_owner(&self, network_name: &str) -> Option<bool> {
+            self.runtime_local_exit_owners
+                .lock()
+                .expect("runtime local exit owner lock poisoned")
+                .get(network_name)
+                .copied()
+        }
+
+        fn set_local_exit_health(&self, network_name: &str, healthy: bool) {
+            self.local_exit_health
+                .lock()
+                .expect("local exit health lock poisoned")
+                .insert(network_name.into(), healthy);
+        }
+
+        fn set_local_exit_clients(&self, network_name: &str, active: u32, total: u64) {
+            self.local_exit_clients
+                .lock()
+                .expect("local exit clients lock poisoned")
+                .insert(network_name.into(), (active, total));
+        }
+
         fn set_launch_delay(&self, delay: Duration) {
             self.launch_delay_ms
                 .store(delay.as_millis() as u64, Ordering::SeqCst);
@@ -5951,6 +6357,11 @@ mod tests {
             let next_routing_failures = self.next_routing_failures.clone();
             let next_routing_persistence_failures = self.next_routing_persistence_failures.clone();
             let runtime_exit_nodes = self.runtime_exit_nodes.clone();
+            let local_exit_calls = self.local_exit_calls.clone();
+            let next_local_exit_failures = self.next_local_exit_failures.clone();
+            let runtime_local_exit_owners = self.runtime_local_exit_owners.clone();
+            let local_exit_health = self.local_exit_health.clone();
+            let local_exit_clients = self.local_exit_clients.clone();
             let routing_delay_ms = self.routing_delay_ms.clone();
             let routing_in_flight = self.routing_in_flight.clone();
             let routing_max_in_flight = self.routing_max_in_flight.clone();
@@ -6002,6 +6413,11 @@ mod tests {
                         request.config.tun.name.clone(),
                     ));
                 let network_name = request.network_name.clone();
+                let initial_local_exit_enabled = request.local_exit_enabled;
+                runtime_local_exit_owners
+                    .lock()
+                    .expect("runtime local exit owner lock poisoned")
+                    .insert(network_name.clone(), initial_local_exit_enabled);
                 let routing_network_name = network_name.clone();
                 let shutdown_network_name = network_name.clone();
                 let config_path = PathBuf::from(request.config_path);
@@ -6135,15 +6551,46 @@ mod tests {
                                         let _ = reply.send(result);
                                     }
                                     ipc::RuntimeCommand::SetLocalExitCapability { enabled, reply } => {
+                                        local_exit_calls
+                                            .lock()
+                                            .expect("local exit call lock poisoned")
+                                            .push((routing_network_name.clone(), enabled));
+                                        let failed = next_local_exit_failures
+                                            .lock()
+                                            .expect("next local exit failure lock poisoned")
+                                            .remove(&routing_network_name);
+                                        if failed {
+                                            let _ = reply.send(Err(format!(
+                                                "网络 [{}] 测试本机 Exit 启停失败",
+                                                routing_network_name
+                                            )));
+                                            continue;
+                                        }
                                         let network_allowed = current_config.exit_node.enabled;
                                         let effective = enabled && network_allowed;
+                                        let health_override = local_exit_health
+                                            .lock()
+                                            .expect("local exit health lock poisoned")
+                                            .get(&routing_network_name)
+                                            .copied()
+                                            .unwrap_or(true);
+                                        let (active_clients, total_clients) = local_exit_clients
+                                            .lock()
+                                            .expect("local exit clients lock poisoned")
+                                            .get(&routing_network_name)
+                                            .copied()
+                                            .unwrap_or((0, 0));
+                                        runtime_local_exit_owners
+                                            .lock()
+                                            .expect("runtime local exit owner lock poisoned")
+                                            .insert(routing_network_name.clone(), enabled);
                                         let _ = reply.send(Ok(ipc::LocalExitRuntimeStatus {
                                             owner_exit_enabled: enabled,
                                             network_allowed,
                                             effective,
-                                            healthy: effective,
-                                            active_clients: 0,
-                                            total_clients: 0,
+                                            healthy: effective && health_override,
+                                            active_clients,
+                                            total_clients,
                                         }));
                                     }
                                     ipc::RuntimeCommand::ProbePeer { reply, .. } => {
@@ -6363,6 +6810,28 @@ mod tests {
         assert_eq!(summary.started, vec![network_name]);
     }
 
+    fn supported_exit_capabilities() -> fuckipv6_common::ExitNodeCapabilities {
+        fuckipv6_common::ExitNodeCapabilities {
+            schema_version: fuckipv6_common::EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
+            platform: fuckipv6_common::ExitNodePlatform::Linux,
+            supported: true,
+            ipv4_forwarding: true,
+            ipv6_forwarding: true,
+            nat: true,
+            cleanup: true,
+            unsupported_reasons: Vec::new(),
+        }
+    }
+
+    async fn set_supported_exit_capabilities(harness: &TestHarness) {
+        harness
+            .state
+            .update(|snapshot| {
+                snapshot.exit_node_capabilities = supported_exit_capabilities();
+            })
+            .await;
+    }
+
     async fn wait_for_routing_calls(fake: &FakeLauncher, expected: usize) {
         timeout(Duration::from_secs(2), async {
             loop {
@@ -6442,6 +6911,307 @@ mod tests {
             }
         }
         statuses
+    }
+
+    #[tokio::test]
+    async fn local_exit_enable_disable_is_idempotent_and_preserves_network_runtime() {
+        let harness = TestHarness::new("local-exit-toggle").await;
+        start_fake_network(&harness, "local-exit-toggle").await;
+        set_supported_exit_capabilities(&harness).await;
+        harness
+            .fake
+            .set_local_exit_clients("local-exit-toggle", 3, 9);
+
+        harness
+            .runtime
+            .update_routing(routing_command(
+                "local-exit-toggle",
+                NodeRoutingMode::GlobalProxy,
+                Some("office"),
+                true,
+            ))
+            .await
+            .expect("enable network exit role");
+
+        let enabled = harness
+            .runtime
+            .set_local_exit_capability(true)
+            .await
+            .expect("enable local exit");
+        assert!(enabled.owner_exit_enabled);
+        assert!(enabled.network_allowed);
+        assert!(enabled.healthy);
+        assert_eq!(enabled.stage, LocalExitCapabilityStage::Enabled);
+        assert_eq!(enabled.active_clients, 3);
+        assert_eq!(enabled.total_clients, 9);
+        assert_eq!(enabled.problem, None);
+        assert!(enabled.last_transition_at_unix_ms > 0);
+        assert!(harness.configs.node_local_exit_enabled().unwrap());
+
+        let enabled_again = harness
+            .runtime
+            .set_local_exit_capability(true)
+            .await
+            .expect("repeat enable local exit");
+        assert_eq!(enabled_again.stage, LocalExitCapabilityStage::Enabled);
+        assert!(enabled_again.owner_exit_enabled);
+
+        let disabled = harness
+            .runtime
+            .set_local_exit_capability(false)
+            .await
+            .expect("disable local exit");
+        assert!(!disabled.owner_exit_enabled);
+        assert!(!disabled.healthy);
+        assert_eq!(disabled.stage, LocalExitCapabilityStage::Disabled);
+        assert!(!harness.configs.node_local_exit_enabled().unwrap());
+
+        let disabled_again = harness
+            .runtime
+            .set_local_exit_capability(false)
+            .await
+            .expect("repeat disable local exit");
+        assert_eq!(disabled_again.stage, LocalExitCapabilityStage::Disabled);
+        assert_eq!(harness.fake.launches(), vec!["local-exit-toggle"]);
+        assert_eq!(harness.fake.shutdown_count(), 0);
+        let calls = harness.fake.local_exit_calls();
+        assert!(calls
+            .iter()
+            .any(|(network, enabled)| { network == "local-exit-toggle" && *enabled }));
+        assert!(calls
+            .iter()
+            .any(|(network, enabled)| { network == "local-exit-toggle" && !*enabled }));
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn local_exit_enable_without_network_authorization_waits_without_claiming_health() {
+        let harness = TestHarness::new("local-exit-waiting").await;
+        start_fake_network(&harness, "local-exit-waiting").await;
+        set_supported_exit_capabilities(&harness).await;
+
+        let snapshot = harness
+            .runtime
+            .set_local_exit_capability(true)
+            .await
+            .expect("enable local exit intent");
+        assert!(snapshot.owner_exit_enabled);
+        assert!(!snapshot.network_allowed);
+        assert!(!snapshot.healthy);
+        assert_eq!(
+            snapshot.stage,
+            LocalExitCapabilityStage::WaitingForNetworkAuthorization
+        );
+        assert_eq!(snapshot.problem, None);
+        assert!(harness.configs.node_local_exit_enabled().unwrap());
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn local_exit_restart_restores_owner_intent_but_not_network_authorization() {
+        let harness = TestHarness::new("local-exit-restart").await;
+        harness
+            .configs
+            .set_node_local_exit_enabled(true)
+            .expect("persist owner intent");
+        set_supported_exit_capabilities(&harness).await;
+        start_fake_network(&harness, "local-exit-restart").await;
+
+        let snapshot = harness.state.snapshot().await.local_exit;
+        assert!(snapshot.owner_exit_enabled);
+        assert!(!snapshot.network_allowed);
+        assert_eq!(
+            snapshot.stage,
+            LocalExitCapabilityStage::WaitingForNetworkAuthorization
+        );
+        assert_eq!(
+            harness.fake.runtime_local_exit_owner("local-exit-restart"),
+            Some(true)
+        );
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn local_exit_platform_and_privilege_failures_are_structured() {
+        let harness = TestHarness::new("local-exit-unsupported").await;
+        harness
+            .state
+            .update(|snapshot| {
+                snapshot.exit_node_capabilities =
+                    ExitNodeCapabilities::for_platform(fuckipv6_common::ExitNodePlatform::Windows);
+            })
+            .await;
+        let error = harness
+            .runtime
+            .set_local_exit_capability(true)
+            .await
+            .expect_err("unsupported local exit must fail");
+        assert_eq!(error.problem_code(), NodeProblemCode::Unsupported);
+        assert!(!error.retryable());
+        let snapshot = harness.state.snapshot().await.local_exit;
+        assert_eq!(snapshot.stage, LocalExitCapabilityStage::Failed);
+        assert_eq!(
+            snapshot.problem.as_ref().map(|problem| problem.code),
+            Some(NodeProblemCode::Unsupported)
+        );
+        assert!(!harness.configs.node_local_exit_enabled().unwrap());
+        harness.shutdown().await;
+
+        let harness = TestHarness::new("local-exit-privilege").await;
+        harness
+            .state
+            .update(|snapshot| {
+                snapshot.exit_node_capabilities = ExitNodeCapabilities {
+                    supported: false,
+                    unsupported_reasons: vec![ExitNodeUnsupportedReason::PrivilegesRequired],
+                    ..supported_exit_capabilities()
+                };
+            })
+            .await;
+        let error = harness
+            .runtime
+            .set_local_exit_capability(true)
+            .await
+            .expect_err("privileged local exit must fail");
+        assert_eq!(error.problem_code(), NodeProblemCode::PermissionDenied);
+        assert!(!error.retryable());
+        assert_eq!(
+            harness
+                .state
+                .snapshot()
+                .await
+                .local_exit
+                .problem
+                .as_ref()
+                .map(|problem| problem.code),
+            Some(NodeProblemCode::PermissionDenied)
+        );
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn local_exit_runtime_failure_rolls_back_and_remains_retryable() {
+        let harness = TestHarness::new("local-exit-runtime-failure").await;
+        start_fake_network(&harness, "local-exit-runtime-failure").await;
+        set_supported_exit_capabilities(&harness).await;
+        harness
+            .fake
+            .fail_next_local_exit("local-exit-runtime-failure");
+
+        let error = harness
+            .runtime
+            .set_local_exit_capability(true)
+            .await
+            .expect_err("runtime local exit failure must be reported");
+        assert_eq!(error.problem_code(), NodeProblemCode::Unavailable);
+        assert!(error.retryable());
+        assert!(!harness.configs.node_local_exit_enabled().unwrap());
+        assert_eq!(
+            harness
+                .fake
+                .runtime_local_exit_owner("local-exit-runtime-failure"),
+            Some(false)
+        );
+        let snapshot = harness.state.snapshot().await.local_exit;
+        assert!(!snapshot.owner_exit_enabled);
+        assert_eq!(snapshot.stage, LocalExitCapabilityStage::Failed);
+        assert!(snapshot
+            .problem
+            .as_ref()
+            .is_some_and(|problem| problem.retryable));
+
+        let retried = harness
+            .runtime
+            .set_local_exit_capability(true)
+            .await
+            .expect("retry after runtime failure");
+        assert_eq!(
+            retried.stage,
+            LocalExitCapabilityStage::WaitingForNetworkAuthorization
+        );
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn local_exit_effective_unhealthy_surfaces_retryable_problem() {
+        let harness = TestHarness::new("local-exit-unhealthy").await;
+        start_fake_network(&harness, "local-exit-unhealthy").await;
+        set_supported_exit_capabilities(&harness).await;
+        harness
+            .runtime
+            .update_routing(routing_command(
+                "local-exit-unhealthy",
+                NodeRoutingMode::GlobalProxy,
+                Some("office"),
+                true,
+            ))
+            .await
+            .expect("enable network exit role");
+        harness
+            .fake
+            .set_local_exit_health("local-exit-unhealthy", false);
+
+        let snapshot = harness
+            .runtime
+            .set_local_exit_capability(true)
+            .await
+            .expect("persist local exit owner intent");
+        assert!(snapshot.owner_exit_enabled);
+        assert!(snapshot.network_allowed);
+        assert!(!snapshot.healthy);
+        assert_eq!(snapshot.stage, LocalExitCapabilityStage::Failed);
+        assert!(snapshot
+            .problem
+            .as_ref()
+            .is_some_and(|problem| problem.retryable));
+        assert!(harness.configs.node_local_exit_enabled().unwrap());
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn local_exit_multi_network_failure_rolls_back_every_runtime() {
+        let harness = TestHarness::new("local-exit-partial").await;
+        for network_name in ["local-exit-a", "local-exit-b"] {
+            harness
+                .configs
+                .create_network(network_name, "ws://127.0.0.1:6666", true)
+                .expect("create test config");
+        }
+        let plan = NodeRuntimePlan::load(&harness.configs, NodeNetworkSelection::All)
+            .expect("load test plan");
+        let summary = harness
+            .runtime
+            .start_plan(plan)
+            .await
+            .expect("start fake networks");
+        assert_eq!(summary.started.len(), 2);
+        set_supported_exit_capabilities(&harness).await;
+        harness.fake.fail_next_local_exit("local-exit-b");
+
+        let error = harness
+            .runtime
+            .set_local_exit_capability(true)
+            .await
+            .expect_err("partial runtime failure must fail the operation");
+        assert_eq!(error.problem_code(), NodeProblemCode::Unavailable);
+        assert!(!harness.configs.node_local_exit_enabled().unwrap());
+        assert_eq!(
+            harness.fake.runtime_local_exit_owner("local-exit-a"),
+            Some(false)
+        );
+        assert_eq!(
+            harness.fake.runtime_local_exit_owner("local-exit-b"),
+            Some(false)
+        );
+        let snapshot = harness.state.snapshot().await.local_exit;
+        assert_eq!(snapshot.stage, LocalExitCapabilityStage::Failed);
+        assert!(!snapshot.owner_exit_enabled);
+        assert!(snapshot.problem.is_some());
+        harness.shutdown().await;
     }
 
     #[tokio::test]

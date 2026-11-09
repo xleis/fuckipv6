@@ -3,20 +3,25 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
-#[cfg(test)]
-use fuckipv6_common::domain::ExitContributionObligation;
 use fuckipv6_common::domain::{
     ActivityCategory, ActivitySeverity, AuditOutcome, CapabilityKind, ExitContributionMode,
     ExitHealthEvidenceState, ExitHealthLayer, ExitHealthProtocol, ExitHealthSource,
     ExitHealthState, ExitHealthTarget, IdempotencyKey, InvitationPreview, InvitationState,
     InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
-    MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode, NetworkMember,
-    NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberObservationSource,
+    LeakDetectionDnsMode, LeakDetectionEvidenceState, LeakDetectionIsolationAction,
+    LeakDetectionPlatform, LeakDetectionProtocol, LeakDetectionSource, LeakDetectionState,
+    LeakDetectionTarget, MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode,
+    NetworkMember, NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberObservationSource,
     NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileApplyResult,
     NetworkProfilePreview, NetworkProfileProjections, NetworkProfileWarningCode,
     NetworkPublicProfileDocument, NetworkVisibility, OperationError, OperationState,
     TopologyConnectionState, TopologySnapshot, TrafficProtectionState,
     JOIN_REQUEST_MAX_REASON_CHARS,
+};
+#[cfg(test)]
+use fuckipv6_common::domain::{
+    ExitContributionObligation, LeakDetectionAssessment, LeakDetectionEnvironment,
+    LeakDetectionEvidence, LeakDetectionSnapshot,
 };
 use fuckipv6_common::i18n::{
     detect_system_locale, format_decimal, format_integer, format_timestamp, resolve_language, t,
@@ -6234,6 +6239,337 @@ impl GpuiShell {
             })
             .children(health_evidence);
 
+        let leak_assessment = &diagnostics.leak_detection_assessment;
+        let leak_palette = semantic_palette(leak_detection_state_semantic(leak_assessment.state));
+        let leak_state_label = t(
+            self.locale,
+            leak_detection_state_label_key(leak_assessment.state),
+        )
+        .to_string();
+        let leak_separator = t(self.locale, "common.list_separator");
+        let leak_affected_protocols = if leak_assessment.affected_protocols.is_empty() {
+            t(self.locale, "diagnostic.leak_detection.none").to_string()
+        } else {
+            leak_assessment
+                .affected_protocols
+                .iter()
+                .map(|protocol| {
+                    t(self.locale, leak_detection_protocol_label_key(*protocol)).to_string()
+                })
+                .collect::<Vec<_>>()
+                .join(leak_separator)
+        };
+        let leak_affected_targets = if leak_assessment.affected_targets.is_empty() {
+            t(self.locale, "diagnostic.leak_detection.none").to_string()
+        } else {
+            leak_assessment
+                .affected_targets
+                .iter()
+                .map(|target| t(self.locale, leak_detection_target_label_key(*target)).to_string())
+                .collect::<Vec<_>>()
+                .join(leak_separator)
+        };
+        let leak_dns_mode = t(
+            self.locale,
+            leak_detection_dns_mode_label_key(diagnostics.leak_detection.environment.dns_mode),
+        )
+        .to_string();
+        let leak_platform = t(
+            self.locale,
+            leak_detection_platform_label_key(diagnostics.leak_detection.environment.platform),
+        )
+        .to_string();
+        let leak_protected_path = t(
+            self.locale,
+            if diagnostics.leak_detection.environment.protected_path_active {
+                "diagnostic.leak_detection.yes"
+            } else {
+                "diagnostic.leak_detection.no"
+            },
+        )
+        .to_string();
+        let leak_ipv4_carrier = t(
+            self.locale,
+            if diagnostics
+                .leak_detection
+                .environment
+                .ipv4_carrier_available
+            {
+                "diagnostic.leak_detection.available"
+            } else {
+                "diagnostic.leak_detection.unavailable_or_unverified"
+            },
+        )
+        .to_string();
+        let leak_ipv6_carrier = t(
+            self.locale,
+            if diagnostics
+                .leak_detection
+                .environment
+                .ipv6_carrier_available
+            {
+                "diagnostic.leak_detection.available"
+            } else {
+                "diagnostic.leak_detection.unavailable_or_unverified"
+            },
+        )
+        .to_string();
+        let leak_generated_at = if diagnostics.leak_detection.generated_at_unix_ms == 0 {
+            t(self.locale, "common.not_available").to_string()
+        } else {
+            format_diagnostic_timestamp(
+                self.locale,
+                diagnostics.leak_detection.generated_at_unix_ms,
+            )
+        };
+        let leak_evidence = diagnostics
+            .leak_detection
+            .evidence
+            .iter()
+            .enumerate()
+            .map(|(index, evidence)| {
+                let target_label = t(
+                    self.locale,
+                    leak_detection_target_label_key(evidence.target),
+                )
+                .to_string();
+                let state_label = t(
+                    self.locale,
+                    leak_detection_evidence_state_label_key(evidence.state),
+                )
+                .to_string();
+                let source_label = t(
+                    self.locale,
+                    leak_detection_source_label_key(evidence.source),
+                )
+                .to_string();
+                let protocol_label = t(
+                    self.locale,
+                    leak_detection_protocol_label_key(evidence.target.protocol()),
+                )
+                .to_string();
+                let error_code = evidence
+                    .error_code
+                    .clone()
+                    .unwrap_or_else(|| t(self.locale, "common.none").to_string());
+                let isolation_action = evidence
+                    .isolation_action
+                    .map(|action| {
+                        t(
+                            self.locale,
+                            leak_detection_isolation_action_label_key(action),
+                        )
+                        .to_string()
+                    })
+                    .unwrap_or_else(|| {
+                        t(self.locale, "diagnostic.leak_detection.none").to_string()
+                    });
+                let role = if evidence.state == LeakDetectionEvidenceState::Failed {
+                    Role::Alert
+                } else {
+                    Role::Status
+                };
+                let selector = format!(
+                    "visual-diagnostic-leak-target-{}-{index}",
+                    evidence.target.key()
+                );
+                let aria_label = format!("{target_label}: {state_label}");
+                div()
+                    .id(SharedString::from(format!(
+                        "diagnostic-leak-target-{}-{index}",
+                        evidence.target.key()
+                    )))
+                    .debug_selector(move || selector)
+                    .role(role)
+                    .aria_label(aria_label)
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgba(COLOR_PANEL_RAISED))
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(target_label),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(state_label),
+                            ),
+                    )
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "diagnostic.leak_detection.protocol"),
+                        protocol_label,
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "diagnostic.leak_detection.source"),
+                        source_label,
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "diagnostic.leak_detection.observed_at"),
+                        format_diagnostic_timestamp(self.locale, evidence.observed_at_unix_ms),
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "diagnostic.duration"),
+                        format_diagnostic_duration(self.locale, evidence.duration_ms),
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "diagnostic.error_code"),
+                        error_code,
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "diagnostic.leak_detection.isolation_action"),
+                        isolation_action,
+                    ))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        let leak_detection = div()
+            .id("diagnostic-leak-detection")
+            .debug_selector(|| "visual-diagnostic-leak-detection".into())
+            .role(
+                if leak_assessment.state == LeakDetectionState::LeakDetected {
+                    Role::Alert
+                } else {
+                    Role::Status
+                },
+            )
+            .aria_label(format!(
+                "{}: {leak_state_label}",
+                t(self.locale, "diagnostic.leak_detection.title")
+            ))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .rounded_md()
+            .bg(rgba(leak_palette.background.rgba_hex()))
+            .border_1()
+            .border_color(rgba(leak_palette.border.rgba_hex()))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_start()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(
+                                        t(self.locale, "diagnostic.leak_detection.title")
+                                            .to_string(),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .line_height(px(18.0))
+                                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                    .child(
+                                        t(self.locale, "diagnostic.leak_detection.disclaimer")
+                                            .to_string(),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .rounded_full()
+                            .bg(rgba(COLOR_PANEL_RAISED))
+                            .text_xs()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(leak_palette.foreground.rgba_hex()))
+                            .child(leak_state_label),
+                    ),
+            )
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.leak_detection.reason"),
+                leak_assessment.reason_code.clone(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(
+                    self.locale,
+                    "diagnostic.leak_detection.fail_closed_required",
+                ),
+                t(
+                    self.locale,
+                    if leak_assessment.fail_closed_required {
+                        "diagnostic.leak_detection.yes"
+                    } else {
+                        "diagnostic.leak_detection.no"
+                    },
+                )
+                .to_string(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.leak_detection.affected_protocols"),
+                leak_affected_protocols,
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.leak_detection.affected_targets"),
+                leak_affected_targets,
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.leak_detection.dns_mode"),
+                leak_dns_mode,
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.leak_detection.platform"),
+                leak_platform,
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.leak_detection.protected_path"),
+                leak_protected_path,
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.leak_detection.ipv4_carrier"),
+                leak_ipv4_carrier,
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.leak_detection.ipv6_carrier"),
+                leak_ipv6_carrier,
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.leak_detection.generated_at"),
+                leak_generated_at,
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.leak_detection.max_age"),
+                format_diagnostic_duration(self.locale, diagnostics.leak_detection.max_age_ms),
+            ))
+            .when(leak_evidence.is_empty(), |card| {
+                card.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(t(self.locale, "diagnostic.leak_detection.no_evidence").to_string()),
+                )
+            })
+            .children(leak_evidence);
+
         let residue_summary = if diagnostics.residue.is_clean() {
             t(self.locale, "diagnostic.residue_clean").to_string()
         } else {
@@ -6441,6 +6777,7 @@ impl GpuiShell {
             .child(metadata)
             .child(div().flex().flex_col().gap_2().children(checks))
             .child(exit_health)
+            .child(leak_detection)
             .child(residue)
             .child(recovery)
             .child(
@@ -13359,6 +13696,141 @@ fn exit_health_evidence_state_label_key(state: ExitHealthEvidenceState) -> &'sta
     }
 }
 
+fn leak_detection_state_semantic(state: LeakDetectionState) -> SemanticState {
+    match state {
+        LeakDetectionState::LeakFree => SemanticState::Success,
+        LeakDetectionState::Isolated | LeakDetectionState::InsufficientEvidence => {
+            SemanticState::Warning
+        }
+        LeakDetectionState::LeakDetected => SemanticState::Danger,
+    }
+}
+
+fn leak_detection_state_label_key(state: LeakDetectionState) -> &'static str {
+    match state {
+        LeakDetectionState::LeakFree => "diagnostic.leak_detection.state.leak_free",
+        LeakDetectionState::Isolated => "diagnostic.leak_detection.state.isolated",
+        LeakDetectionState::LeakDetected => "diagnostic.leak_detection.state.leak_detected",
+        LeakDetectionState::InsufficientEvidence => {
+            "diagnostic.leak_detection.state.insufficient_evidence"
+        }
+    }
+}
+
+fn leak_detection_protocol_label_key(protocol: LeakDetectionProtocol) -> &'static str {
+    match protocol {
+        LeakDetectionProtocol::Dns => "diagnostic.leak_detection.protocol.dns",
+        LeakDetectionProtocol::Ipv4 => "diagnostic.leak_detection.protocol.ipv4",
+        LeakDetectionProtocol::Ipv6 => "diagnostic.leak_detection.protocol.ipv6",
+    }
+}
+
+fn leak_detection_target_label_key(target: LeakDetectionTarget) -> &'static str {
+    match target {
+        LeakDetectionTarget::DnsResolver => "diagnostic.leak_detection.target.dns_resolver",
+        LeakDetectionTarget::BrowserApplicationDns => {
+            "diagnostic.leak_detection.target.browser_application_dns"
+        }
+        LeakDetectionTarget::Ipv4Carrier => "diagnostic.leak_detection.target.ipv4_carrier",
+        LeakDetectionTarget::Ipv4SourceAddress => {
+            "diagnostic.leak_detection.target.ipv4_source_address"
+        }
+        LeakDetectionTarget::Ipv4DefaultRoute => {
+            "diagnostic.leak_detection.target.ipv4_default_route"
+        }
+        LeakDetectionTarget::Ipv4ControlledLeakService => {
+            "diagnostic.leak_detection.target.ipv4_controlled_leak_service"
+        }
+        LeakDetectionTarget::Ipv4ExternalTarget => {
+            "diagnostic.leak_detection.target.ipv4_external_target"
+        }
+        LeakDetectionTarget::Ipv6Carrier => "diagnostic.leak_detection.target.ipv6_carrier",
+        LeakDetectionTarget::Ipv6SourceAddress => {
+            "diagnostic.leak_detection.target.ipv6_source_address"
+        }
+        LeakDetectionTarget::Ipv6DefaultRoute => {
+            "diagnostic.leak_detection.target.ipv6_default_route"
+        }
+        LeakDetectionTarget::Ipv6ControlledLeakService => {
+            "diagnostic.leak_detection.target.ipv6_controlled_leak_service"
+        }
+        LeakDetectionTarget::Ipv6ExternalTarget => {
+            "diagnostic.leak_detection.target.ipv6_external_target"
+        }
+    }
+}
+
+fn leak_detection_source_label_key(source: LeakDetectionSource) -> &'static str {
+    match source {
+        LeakDetectionSource::SystemResolver => "diagnostic.leak_detection.source.system_resolver",
+        LeakDetectionSource::ManagedDoh => "diagnostic.leak_detection.source.managed_doh",
+        LeakDetectionSource::LocalRoutingTable => {
+            "diagnostic.leak_detection.source.local_routing_table"
+        }
+        LeakDetectionSource::LinkCapability => "diagnostic.leak_detection.source.link_capability",
+        LeakDetectionSource::ControlledProbe => "diagnostic.leak_detection.source.controlled_probe",
+        LeakDetectionSource::ExternalReachabilityProbe => {
+            "diagnostic.leak_detection.source.external_reachability_probe"
+        }
+        LeakDetectionSource::ApplicationBehaviorProbe => {
+            "diagnostic.leak_detection.source.application_behavior_probe"
+        }
+    }
+}
+
+fn leak_detection_evidence_state_label_key(state: LeakDetectionEvidenceState) -> &'static str {
+    match state {
+        LeakDetectionEvidenceState::Passed => "diagnostic.leak_detection.evidence_state.passed",
+        LeakDetectionEvidenceState::Failed => "diagnostic.leak_detection.evidence_state.failed",
+        LeakDetectionEvidenceState::Unsupported => {
+            "diagnostic.leak_detection.evidence_state.unsupported"
+        }
+        LeakDetectionEvidenceState::NotTested => {
+            "diagnostic.leak_detection.evidence_state.not_tested"
+        }
+    }
+}
+
+fn leak_detection_isolation_action_label_key(action: LeakDetectionIsolationAction) -> &'static str {
+    match action {
+        LeakDetectionIsolationAction::BlockedUnavailableIpv4 => {
+            "diagnostic.leak_detection.isolation_action.blocked_unavailable_ipv4"
+        }
+        LeakDetectionIsolationAction::BlockedUnavailableIpv6 => {
+            "diagnostic.leak_detection.isolation_action.blocked_unavailable_ipv6"
+        }
+        LeakDetectionIsolationAction::FailClosedAffectedTraffic => {
+            "diagnostic.leak_detection.isolation_action.fail_closed_affected_traffic"
+        }
+        LeakDetectionIsolationAction::RetainedProtectedRoute => {
+            "diagnostic.leak_detection.isolation_action.retained_protected_route"
+        }
+    }
+}
+
+fn leak_detection_dns_mode_label_key(mode: LeakDetectionDnsMode) -> &'static str {
+    match mode {
+        LeakDetectionDnsMode::SystemResolver => {
+            "diagnostic.leak_detection.dns_mode.system_resolver"
+        }
+        LeakDetectionDnsMode::Doh => "diagnostic.leak_detection.dns_mode.doh",
+        LeakDetectionDnsMode::Dot => "diagnostic.leak_detection.dns_mode.dot",
+        LeakDetectionDnsMode::NetworkSpecified => {
+            "diagnostic.leak_detection.dns_mode.network_specified"
+        }
+        LeakDetectionDnsMode::Unmanaged => "diagnostic.leak_detection.dns_mode.unmanaged",
+    }
+}
+
+fn leak_detection_platform_label_key(platform: LeakDetectionPlatform) -> &'static str {
+    match platform {
+        LeakDetectionPlatform::Linux => "diagnostic.leak_detection.platform.linux",
+        LeakDetectionPlatform::Windows => "diagnostic.leak_detection.platform.windows",
+        LeakDetectionPlatform::Macos => "diagnostic.leak_detection.platform.macos",
+        LeakDetectionPlatform::Other => "diagnostic.leak_detection.platform.other",
+    }
+}
+
 fn exit_health_retest_label_key(phase: &str) -> &'static str {
     match phase {
         "requested" => "diagnostic.exit_health.retest_phase.requested",
@@ -16023,8 +16495,69 @@ mod tests {
                 observed_at_unix_ms: Some(1_700_000_001_250),
                 source: Some(ExitHealthSource::ControlledProbe),
             },
-            leak_detection: fuckipv6_common::domain::LeakDetectionSnapshot::default(),
-            leak_detection_assessment: fuckipv6_common::domain::LeakDetectionAssessment::default(),
+            leak_detection: LeakDetectionSnapshot {
+                generated_at_unix_ms: 1_700_000_001_200,
+                max_age_ms: 90_000,
+                environment: LeakDetectionEnvironment {
+                    platform: LeakDetectionPlatform::Linux,
+                    dns_mode: LeakDetectionDnsMode::Doh,
+                    protected_path_active: true,
+                    ipv4_carrier_available: true,
+                    ipv6_carrier_available: false,
+                },
+                evidence: vec![
+                    LeakDetectionEvidence {
+                        target: LeakDetectionTarget::DnsResolver,
+                        state: LeakDetectionEvidenceState::Passed,
+                        source: LeakDetectionSource::ManagedDoh,
+                        observed_at_unix_ms: 1_700_000_001_100,
+                        duration_ms: 2,
+                        error_code: None,
+                        isolation_action: None,
+                    },
+                    LeakDetectionEvidence {
+                        target: LeakDetectionTarget::BrowserApplicationDns,
+                        state: LeakDetectionEvidenceState::NotTested,
+                        source: LeakDetectionSource::ApplicationBehaviorProbe,
+                        observed_at_unix_ms: 1_700_000_001_120,
+                        duration_ms: 0,
+                        error_code: Some("leak_detection.probe_not_configured".into()),
+                        isolation_action: None,
+                    },
+                    LeakDetectionEvidence {
+                        target: LeakDetectionTarget::Ipv4DefaultRoute,
+                        state: LeakDetectionEvidenceState::Failed,
+                        source: LeakDetectionSource::LocalRoutingTable,
+                        observed_at_unix_ms: 1_700_000_001_140,
+                        duration_ms: 3,
+                        error_code: Some(
+                            "leak_detection.ipv4_default_route_outside_protected_path".into(),
+                        ),
+                        isolation_action: None,
+                    },
+                    LeakDetectionEvidence {
+                        target: LeakDetectionTarget::Ipv6Carrier,
+                        state: LeakDetectionEvidenceState::Unsupported,
+                        source: LeakDetectionSource::LinkCapability,
+                        observed_at_unix_ms: 1_700_000_001_160,
+                        duration_ms: 1,
+                        error_code: Some("leak_detection.ipv6_carrier_unavailable".into()),
+                        isolation_action: Some(
+                            LeakDetectionIsolationAction::BlockedUnavailableIpv6,
+                        ),
+                    },
+                ],
+            },
+            leak_detection_assessment: LeakDetectionAssessment {
+                state: LeakDetectionState::LeakDetected,
+                reason_code: "leak_detection.leak_detected".into(),
+                fail_closed_required: true,
+                affected_protocols: vec![LeakDetectionProtocol::Ipv4, LeakDetectionProtocol::Ipv6],
+                affected_targets: vec![
+                    LeakDetectionTarget::Ipv4DefaultRoute,
+                    LeakDetectionTarget::Ipv6Carrier,
+                ],
+            },
             recovery_actions: vec![crate::node::NodeDiagnosticRecoveryAction {
                 action_id: "cleanup_residuals".into(),
                 impact_key: "diagnostic.recovery.impact.cleanup_residuals".into(),
@@ -16237,12 +16770,72 @@ mod tests {
             "visual-diagnostic-exit-health-network",
             "visual-diagnostic-exit-health-dns",
             "visual-diagnostic-exit-health-internet_reachability",
+            "visual-diagnostic-leak-detection",
+            "visual-diagnostic-leak-target-dns_resolver-0",
+            "visual-diagnostic-leak-target-browser_application_dns-1",
+            "visual-diagnostic-leak-target-ipv4_default_route-2",
+            "visual-diagnostic-leak-target-ipv6_carrier-3",
         ] {
             assert!(
                 visible.debug_bounds(selector).is_some(),
                 "missing fixed diagnostic element {selector}"
             );
         }
+        let leak_target_offsets = [
+            "visual-diagnostic-leak-target-dns_resolver-0",
+            "visual-diagnostic-leak-target-browser_application_dns-1",
+            "visual-diagnostic-leak-target-ipv4_default_route-2",
+            "visual-diagnostic-leak-target-ipv6_carrier-3",
+        ]
+        .into_iter()
+        .map(|selector| {
+            f32::from(
+                visible
+                    .debug_bounds(selector)
+                    .expect("leak evidence bounds")
+                    .origin
+                    .y,
+            )
+        })
+        .collect::<Vec<_>>();
+        assert!(
+            leak_target_offsets.windows(2).all(|pair| pair[0] < pair[1]),
+            "leak evidence must preserve server order: {leak_target_offsets:?}"
+        );
+    }
+
+    #[test]
+    fn leak_detection_labels_preserve_non_passing_evidence_semantics() {
+        assert_eq!(
+            leak_detection_state_semantic(LeakDetectionState::LeakDetected),
+            SemanticState::Danger
+        );
+        assert_eq!(
+            leak_detection_state_semantic(LeakDetectionState::InsufficientEvidence),
+            SemanticState::Warning
+        );
+        assert_eq!(
+            leak_detection_evidence_state_label_key(LeakDetectionEvidenceState::Failed),
+            "diagnostic.leak_detection.evidence_state.failed"
+        );
+        assert_eq!(
+            leak_detection_evidence_state_label_key(LeakDetectionEvidenceState::Unsupported),
+            "diagnostic.leak_detection.evidence_state.unsupported"
+        );
+        assert_eq!(
+            leak_detection_evidence_state_label_key(LeakDetectionEvidenceState::NotTested),
+            "diagnostic.leak_detection.evidence_state.not_tested"
+        );
+        assert_eq!(
+            leak_detection_target_label_key(LeakDetectionTarget::BrowserApplicationDns),
+            "diagnostic.leak_detection.target.browser_application_dns"
+        );
+        assert_eq!(
+            leak_detection_isolation_action_label_key(
+                LeakDetectionIsolationAction::BlockedUnavailableIpv6
+            ),
+            "diagnostic.leak_detection.isolation_action.blocked_unavailable_ipv6"
+        );
     }
 
     #[gpui::test]

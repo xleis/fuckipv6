@@ -9763,6 +9763,8 @@ mod tests {
             generated_at_unix_ms: 1_700_000_010_000,
             viewer_role: MembershipRole::Administrator,
             can_manage_members: true,
+            exit_selection_policy: Default::default(),
+            exit_selection_policy_revision: 0,
             members: vec![NetworkMember {
                 node_id: node_id.clone(),
                 display_name: Some("Directory relay".into()),

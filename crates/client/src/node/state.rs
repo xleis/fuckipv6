@@ -2632,6 +2632,8 @@ mod tests {
             generated_at_unix_ms: 4_000,
             viewer_role: MembershipRole::Member,
             can_manage_members: false,
+            exit_selection_policy: Default::default(),
+            exit_selection_policy_revision: 0,
             members: vec![
                 directory_member(&viewer, "me", MembershipRole::Member, Vec::new()),
                 directory_member(
@@ -2688,6 +2690,8 @@ mod tests {
             generated_at_unix_ms: 4_000,
             viewer_role: MembershipRole::Member,
             can_manage_members: false,
+            exit_selection_policy: Default::default(),
+            exit_selection_policy_revision: 0,
             members: vec![
                 directory_member(&viewer, "me", MembershipRole::Member, Vec::new()),
                 directory_member(&relay, "relay", MembershipRole::Member, Vec::new()),
@@ -2744,6 +2748,8 @@ mod tests {
                 generated_at_unix_ms: 4_000,
                 viewer_role: MembershipRole::Member,
                 can_manage_members: false,
+                exit_selection_policy: Default::default(),
+                exit_selection_policy_revision: 0,
                 members: vec![
                     directory_member(&viewer, "me", MembershipRole::Member, Vec::new()),
                     directory_member(&relay, "relay", MembershipRole::Member, Vec::new()),

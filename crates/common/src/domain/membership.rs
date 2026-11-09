@@ -647,6 +647,15 @@ pub struct NetworkMemberDirectory {
     /// Role observed from the authoritative roster, never from a client claim.
     pub viewer_role: MembershipRole,
     pub can_manage_members: bool,
+    /// Administrator Exit selection policy for this network. This is part of
+    /// the authenticated member projection rather than the public discovery
+    /// document so member and group rules are only exposed to network members.
+    #[serde(default)]
+    pub exit_selection_policy: super::exit_selection::ExitSelectionPolicy,
+    /// Revision of the network policy carried with the directory. Consumers
+    /// must reject older revisions instead of replacing fresher governance.
+    #[serde(default)]
+    pub exit_selection_policy_revision: u64,
     pub members: Vec<NetworkMember>,
 }
 

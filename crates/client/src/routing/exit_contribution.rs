@@ -483,6 +483,8 @@ mod tests {
             generated_at_unix_ms: NOW,
             viewer_role: MembershipRole::Owner,
             can_manage_members: true,
+            exit_selection_policy: Default::default(),
+            exit_selection_policy_revision: 0,
             members: vec![member],
         }
     }

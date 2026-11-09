@@ -14416,6 +14416,8 @@ mod tests {
             generated_at_unix_ms: 1_700_000_010_000,
             viewer_role: MembershipRole::Owner,
             can_manage_members: true,
+            exit_selection_policy: Default::default(),
+            exit_selection_policy_revision: 0,
             members,
         }
     }
@@ -14521,6 +14523,8 @@ mod tests {
             generated_at_unix_ms: 1_700_000_010_200,
             viewer_role: MembershipRole::Owner,
             can_manage_members: true,
+            exit_selection_policy: Default::default(),
+            exit_selection_policy_revision: 0,
             members: vec![
                 NetworkMember {
                     node_id: relay_id.clone(),
@@ -14650,6 +14654,8 @@ mod tests {
                 generated_at_unix_ms: topology.generated_at_unix_ms,
                 viewer_role: boundary.viewer_role.unwrap_or(MembershipRole::Member),
                 can_manage_members: false,
+                exit_selection_policy: Default::default(),
+                exit_selection_policy_revision: 0,
                 members: Vec::new(),
             },
             network_id: boundary.network_id.clone(),

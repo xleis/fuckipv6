@@ -960,6 +960,8 @@ pub fn project_member_directory(
             generated_at_unix_ms: directory.generated_at_unix_ms,
             viewer_role: directory.viewer_role,
             can_manage_members: false,
+            exit_selection_policy: Default::default(),
+            exit_selection_policy_revision: 0,
             members: Vec::new(),
         };
     }
@@ -1084,6 +1086,8 @@ pub fn project_member_directory(
         generated_at_unix_ms: directory.generated_at_unix_ms,
         viewer_role: directory.viewer_role,
         can_manage_members: directory.can_manage_members && viewer.principal.is_network_manager(),
+        exit_selection_policy: directory.exit_selection_policy.clone(),
+        exit_selection_policy_revision: directory.exit_selection_policy_revision,
         members,
     }
 }
@@ -1624,6 +1628,8 @@ mod tests {
             generated_at_unix_ms: 1_200,
             viewer_role: MembershipRole::Member,
             can_manage_members: false,
+            exit_selection_policy: Default::default(),
+            exit_selection_policy_revision: 0,
             members,
         }
     }

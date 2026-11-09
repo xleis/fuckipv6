@@ -52,6 +52,8 @@ pub(crate) async fn build_member_directory(
         generated_at_unix_ms: now_unix_ms,
         viewer_role,
         can_manage_members: viewer_role != MembershipRole::Member,
+        exit_selection_policy: record.exit_selection_policy.clone(),
+        exit_selection_policy_revision: record.policy_revision,
         members: project_members(
             &record,
             actor,
@@ -331,11 +333,12 @@ fn group_for_role(role: MembershipRole) -> NetworkMemberGroup {
 mod tests {
     use super::*;
     use fuckipv6_common::domain::{
-        CapabilityKind, ExitContributionObligation, ExitContributionScope, IdempotencyKey,
-        InvitationId, JoinApplicantProfile, JoinRequestGrantPreview, JoinRequestReviewAction,
-        MemberLifecycleAction, MemberLifecycleChangeRequest, MemberLifecycleStatus,
-        MembershipTerms, NetworkCreateProfile, NetworkJoinMode, NetworkMemberOnlineState,
-        NetworkMemberStatus, NetworkVisibility, PublicKey,
+        CapabilityKind, ExitContributionObligation, ExitContributionScope, ExitSelectionMode,
+        ExitSelectionPolicy, IdempotencyKey, InvitationId, JoinApplicantProfile,
+        JoinRequestGrantPreview, JoinRequestReviewAction, MemberLifecycleAction,
+        MemberLifecycleChangeRequest, MemberLifecycleStatus, MembershipTerms, NetworkCreateProfile,
+        NetworkJoinMode, NetworkMemberOnlineState, NetworkMemberStatus, NetworkVisibility,
+        PublicKey,
     };
     use std::path::{Path, PathBuf};
 
@@ -691,6 +694,84 @@ mod tests {
                 .all(|member| member.node_id != target),
             "ordinary members must not discover lifecycle-only tombstones"
         );
+    }
+
+    #[tokio::test]
+    async fn member_directory_projects_and_refreshes_exit_selection_policy() {
+        let dir = test_dir("exit-selection-policy");
+        let record_path = dir.join("network.json");
+        let mut record = record();
+        let exit_a = node("exit-a");
+        let exit_b = node("exit-b");
+        record.exit_selection_policy = ExitSelectionPolicy {
+            default_exit: Some(exit_a.clone()),
+            available_exits: vec![exit_a.clone(), exit_b.clone()],
+            ..ExitSelectionPolicy::default()
+        };
+        record.policy_revision = 2;
+        record.updated_at_unix_ms = 10_000;
+        record.validate().unwrap();
+        write_record(&record_path, &record);
+        let requests = JoinRequestStore::new(
+            dir.join("requests.json"),
+            Some(record_path.clone()),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        let sessions = SessionManager::new("fd00::1000/120").unwrap();
+        let first = build_member_directory(
+            &record.network_id,
+            &record.owner,
+            10_000,
+            &requests,
+            None,
+            None,
+            &sessions,
+            &ExitAvailabilityObservationRegistry::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.exit_selection_policy_revision, 2);
+        assert_eq!(
+            first.exit_selection_policy.default_exit.as_ref(),
+            Some(&exit_a)
+        );
+        assert_eq!(first.exit_selection_policy.available_exits.len(), 2);
+
+        record.exit_selection_policy = ExitSelectionPolicy {
+            mode: ExitSelectionMode::Fixed {
+                exit: exit_b.clone(),
+            },
+            available_exits: vec![exit_b.clone()],
+            ..ExitSelectionPolicy::default()
+        };
+        record.policy_revision = 3;
+        record.updated_at_unix_ms = 11_000;
+        record.validate().unwrap();
+        write_record(&record_path, &record);
+        let second = build_member_directory(
+            &record.network_id,
+            &record.owner,
+            11_000,
+            &requests,
+            None,
+            None,
+            &sessions,
+            &ExitAvailabilityObservationRegistry::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.exit_selection_policy_revision, 3);
+        assert_eq!(
+            second.exit_selection_policy.fixed_exit().cloned(),
+            Some(exit_b)
+        );
+        assert!(second
+            .exit_selection_policy
+            .available_exits
+            .iter()
+            .all(|exit| *exit != exit_a));
     }
 
     #[test]

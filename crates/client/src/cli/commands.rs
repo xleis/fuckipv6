@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
-    ExitSessionAction, NetworkId, NetworkMemberDirectory, NodeId, TrafficSessionSnapshot,
+    ExitSessionAction, NetworkId, NetworkMemberDirectory, NodeId, TrafficFailureKind,
+    TrafficProtectionState, TrafficSessionSnapshot,
 };
 #[cfg(test)]
 use fuckipv6_common::is_encrypted_config_path;
@@ -53,7 +54,8 @@ use crate::routing::linux_route::LinuxRouteManager;
 use crate::routing::recovery::RecoveryTrigger;
 #[cfg(target_os = "linux")]
 use crate::routing::recovery::{
-    PathRecoveryState, RecoveryCoordinator, RecoveryReport, RecoveryRequest,
+    PathRecoveryState, RecoveryCoordinator, RecoveryExpectations, RecoveryReport, RecoveryRequest,
+    RecoveryStatus,
 };
 #[cfg(target_os = "linux")]
 use crate::routing::table::{parse_linux_ip_routes, RouteEntry};
@@ -569,7 +571,6 @@ pub(crate) struct ClientRuntime {
     node_state: Option<NodeStateStore>,
     node_state_updates: Option<watch::Receiver<NodeSnapshot>>,
     traffic_session: TrafficSessionSnapshot,
-    pending_exit: Option<NodeId>,
     local_exit_snapshot: Option<LocalExitCapabilitySnapshot>,
     local_exit_availability_report_interval: tokio::time::Interval,
     exit_contribution_member_refresh_task: Option<JoinHandle<()>>,
@@ -603,10 +604,8 @@ impl ClientRuntime {
         let snapshot = state.snapshot().await;
         self.node_state = Some(state.clone());
         self.local_exit_snapshot = Some(snapshot.local_exit.clone());
-        self.apply_exit_contribution_snapshot(&snapshot);
-        state
-            .set_traffic_session(self.traffic_session.clone())
-            .await;
+        self.apply_exit_contribution_snapshot(&snapshot).await;
+        self.publish_traffic_session().await;
 
         let Some(network_id) = self.network_id.clone() else {
             self.node_state_updates = Some(state.subscribe());
@@ -630,11 +629,13 @@ impl ClientRuntime {
                     );
                     self.exit_contribution_gate.clear_member_directory();
                 }
-                self.replace_exit_selection_directory(selection_directory, received_at_unix_ms);
+                self.replace_exit_selection_directory(selection_directory, received_at_unix_ms)
+                    .await;
             }
             _ => {
                 self.exit_contribution_gate.clear_member_directory();
-                self.clear_exit_selection();
+                self.clear_exit_selection("exit.selection.directory_unavailable")
+                    .await;
             }
         }
 
@@ -675,14 +676,172 @@ impl ClientRuntime {
         }
     }
 
-    fn apply_exit_contribution_snapshot(&mut self, snapshot: &NodeSnapshot) {
+    async fn publish_traffic_session(&self) {
+        let Some(state) = self.node_state.as_ref() else {
+            return;
+        };
+        state
+            .set_traffic_session(self.traffic_session.clone())
+            .await;
+    }
+
+    fn block_exit_session(
+        &mut self,
+        failure: TrafficFailureKind,
+        now_unix_ms: u64,
+        reason_code: &'static str,
+    ) {
+        self.exit_selection_blocked = true;
+        self.exit_selection_gate.set_current_exit(None);
+        self.exit_selection_gate.discard_pending_exit();
+        if let Err(error) =
+            self.traffic_session
+                .enter_fail_closed(Some(failure), now_unix_ms.max(1), reason_code)
+        {
+            tracing::error!(
+                error = %error,
+                reason_code,
+                "无法写入失败关闭的流量会话状态"
+            );
+        }
+    }
+
+    async fn enter_fail_closed(
+        &mut self,
+        failure: TrafficFailureKind,
+        now_unix_ms: u64,
+        reason_code: &'static str,
+    ) {
+        self.block_exit_session(failure, now_unix_ms, reason_code);
+        self.publish_traffic_session().await;
+    }
+
+    async fn clear_exit_selection(&mut self, reason_code: &'static str) {
+        self.exit_selection_gate.clear_member_directory();
+        self.enter_fail_closed(
+            TrafficFailureKind::NetworkSelectionUnavailable,
+            unix_time_ms(),
+            reason_code,
+        )
+        .await;
+    }
+
+    fn intended_exit(&self) -> Option<NodeId> {
+        self.exit_selection_gate
+            .pending_exit()
+            .or_else(|| self.exit_selection_gate.current_exit())
+            .cloned()
+    }
+
+    async fn begin_exit_migration(
+        &mut self,
+        to: NodeId,
+        now_unix_ms: u64,
+        reason_code: &'static str,
+    ) {
+        if let Some(pending) = self.exit_selection_gate.pending_exit() {
+            if pending != &to {
+                self.enter_fail_closed(
+                    TrafficFailureKind::ExitUnavailable,
+                    now_unix_ms,
+                    "exit.selection.migration_target_conflict",
+                )
+                .await;
+                return;
+            }
+            self.exit_selection_blocked = true;
+            if self.traffic_session.state != TrafficProtectionState::Migrating {
+                if let Err(error) =
+                    self.traffic_session
+                        .begin_recovery(true, now_unix_ms.max(1), reason_code)
+                {
+                    tracing::error!(error = %error, "无法写入 Exit 迁移状态");
+                    self.block_exit_session(
+                        TrafficFailureKind::ExitUnavailable,
+                        now_unix_ms,
+                        "exit.selection.migration_state_failed",
+                    );
+                }
+            }
+            self.publish_traffic_session().await;
+            return;
+        }
+
+        if !self.exit_selection_gate.begin_pending_exit(to) {
+            self.enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                now_unix_ms,
+                "exit.selection.migration_target_unavailable",
+            )
+            .await;
+            return;
+        }
+        self.exit_selection_blocked = true;
+        if let Err(error) =
+            self.traffic_session
+                .begin_recovery(true, now_unix_ms.max(1), reason_code)
+        {
+            tracing::error!(error = %error, "无法写入 Exit 迁移状态");
+            self.block_exit_session(
+                TrafficFailureKind::ExitUnavailable,
+                now_unix_ms,
+                "exit.selection.migration_state_failed",
+            );
+            self.publish_traffic_session().await;
+            return;
+        }
+        if !self
+            .recovery_trigger_tx
+            .try_trigger(RecoveryTrigger::ExitMigration)
+        {
+            tracing::warn!(
+                diagnostic_id = "recovery.trigger_queue_unavailable",
+                "Exit 迁移已挂起，但恢复触发队列已满或已关闭"
+            );
+            self.block_exit_session(
+                TrafficFailureKind::ExitUnavailable,
+                now_unix_ms,
+                "exit.selection.migration_schedule_failed",
+            );
+        }
+        self.publish_traffic_session().await;
+    }
+
+    async fn begin_exit_recovery(&mut self, trigger: RecoveryTrigger, now_unix_ms: u64) {
+        self.exit_selection_blocked = true;
+        if !matches!(
+            self.traffic_session.state,
+            TrafficProtectionState::Connecting | TrafficProtectionState::Migrating
+        ) {
+            let migrating = self.exit_selection_gate.current_exit().is_some()
+                || self.exit_selection_gate.pending_exit().is_some();
+            if let Err(error) = self.traffic_session.begin_recovery(
+                migrating,
+                now_unix_ms.max(1),
+                recovery_started_reason_code(trigger),
+            ) {
+                tracing::error!(error = %error, "无法写入恢复中的流量会话状态");
+                self.block_exit_session(
+                    trigger
+                        .failure_kind()
+                        .unwrap_or(TrafficFailureKind::ConnectionTimeout),
+                    now_unix_ms,
+                    "recovery.state_transition_failed",
+                );
+            }
+        }
+        self.publish_traffic_session().await;
+    }
+
+    async fn apply_exit_contribution_snapshot(&mut self, snapshot: &NodeSnapshot) {
         self.exit_contribution_gate
             .replace_policy(snapshot.access_control.local_policy.clone());
 
         let Some(network_id) = self.network_id.clone() else {
             self.exit_contribution_gate.clear_network_context();
             self.exit_contribution_gate.clear_member_directory();
-            self.clear_exit_selection();
+            self.clear_exit_selection("exit.selection.network_context_missing")
+                .await;
             return;
         };
         let local_node_id = NodeId::from_public_key(&self.identity.public_key());
@@ -692,7 +851,8 @@ impl ClientRuntime {
                 && membership.state.can_access_network_resources()
         });
         if !membership_has_network_access {
-            self.clear_exit_selection();
+            self.clear_exit_selection("exit.selection.authorization_revoked")
+                .await;
         }
         match exit_contribution_context_from_snapshot(snapshot, &network_id, &local_node_id) {
             Some(context) => self.exit_contribution_gate.replace_network_context(context),
@@ -707,7 +867,7 @@ impl ClientRuntime {
         }
     }
 
-    fn replace_exit_selection_directory(
+    async fn replace_exit_selection_directory(
         &mut self,
         directory: NetworkMemberDirectory,
         received_at_unix_ms: u64,
@@ -719,7 +879,7 @@ impl ClientRuntime {
             Ok(update) => {
                 if update == crate::routing::ExitSelectionDirectoryUpdate::Applied {
                     self.exit_selection_blocked = false;
-                    self.reconcile_exit_selection(unix_time_ms());
+                    self.reconcile_exit_selection(unix_time_ms()).await;
                 }
             }
             Err(denial) => {
@@ -727,17 +887,13 @@ impl ClientRuntime {
                     reason_code = denial.reason_code(),
                     "成员目录不能用于管理员 Exit 选择授权，已失败关闭"
                 );
-                self.clear_exit_selection();
+                self.clear_exit_selection("exit.selection.directory_rejected")
+                    .await;
             }
         }
     }
 
-    fn clear_exit_selection(&mut self) {
-        self.exit_selection_gate.clear_member_directory();
-        self.exit_selection_blocked = true;
-    }
-
-    fn reconcile_exit_selection(&mut self, now_unix_ms: u64) {
+    async fn reconcile_exit_selection(&mut self, now_unix_ms: u64) {
         let Some(current_exit) = self.exit_selection_gate.current_exit().cloned() else {
             return;
         };
@@ -753,29 +909,24 @@ impl ClientRuntime {
                         to_exit = %to,
                         policy_revision = transition.policy_revision,
                         reason = ?transition.reason,
-                        "管理员 Exit 策略已变更，迁移当前会话"
+                        "管理员 Exit 策略已变更，先挂起迁移并关闭数据平面"
                     );
-                    self.exit_selection_gate.set_current_exit(Some(to));
+                    self.begin_exit_migration(to, now_unix_ms, "exit.selection.migration_pending")
+                        .await;
                 }
-                ExitSessionAction::Terminate => {
+                ExitSessionAction::Terminate | ExitSessionAction::FailClosed => {
                     tracing::warn!(
                         from_exit = %current_exit,
                         policy_revision = transition.policy_revision,
                         reason = ?transition.reason,
                         "管理员 Exit 策略已撤权，终止当前 Exit 会话"
                     );
-                    self.exit_selection_gate.set_current_exit(None);
-                    self.exit_selection_blocked = true;
-                }
-                ExitSessionAction::FailClosed => {
-                    tracing::warn!(
-                        from_exit = %current_exit,
-                        policy_revision = transition.policy_revision,
-                        reason = ?transition.reason,
-                        "管理员 Exit 策略已撤权，当前 Exit 会话失败关闭"
-                    );
-                    self.exit_selection_gate.set_current_exit(None);
-                    self.exit_selection_blocked = true;
+                    self.enter_fail_closed(
+                        TrafficFailureKind::NetworkSelectionUnavailable,
+                        now_unix_ms,
+                        "exit.selection.authorization_revoked",
+                    )
+                    .await;
                 }
             },
             Err(denial) => {
@@ -784,8 +935,12 @@ impl ClientRuntime {
                     reason_code = denial.reason_code(),
                     "Exit 选择授权不可用，当前 Exit 会话失败关闭"
                 );
-                self.exit_selection_gate.set_current_exit(None);
-                self.exit_selection_blocked = true;
+                self.enter_fail_closed(
+                    TrafficFailureKind::NetworkSelectionUnavailable,
+                    now_unix_ms,
+                    "exit.selection.authorization_unavailable",
+                )
+                .await;
             }
         }
     }
@@ -800,12 +955,14 @@ impl ClientRuntime {
         Some(NodeId::from_public_key(&peer.public_key))
     }
 
-    /// Return the one administrator-authorized Exit for this packet. A blocked
-    /// session remains closed until a newly applied directory revision proves
-    /// the authority has changed; packets cannot retry their way around a
-    /// revocation or missing replacement.
+    /// Return the one administrator-authorized Exit for this packet. Packet
+    /// admission is allowed only after recovery has produced complete evidence
+    /// for the current Exit. A pending migration never promotes its target here.
     async fn exit_for_packet(&mut self, now_unix_ms: u64) -> Option<NodeId> {
-        if self.exit_selection_blocked {
+        if self.route_engine.routing_mode() == fuckipv6_common::RoutingMode::MeshOnly {
+            return None;
+        }
+        if self.exit_selection_blocked || self.exit_selection_gate.pending_exit().is_some() {
             return None;
         }
         if let Some(current_exit) = self.exit_selection_gate.current_exit().cloned() {
@@ -814,16 +971,28 @@ impl ClientRuntime {
                 .plan_current_session_transition(now_unix_ms)
             {
                 Ok(transition) => match transition.action {
-                    ExitSessionAction::Keep => return Some(current_exit),
+                    ExitSessionAction::Keep => {
+                        return exit_packet_admission_allowed(
+                            self.exit_selection_blocked,
+                            self.exit_selection_gate.pending_exit().is_some(),
+                            self.traffic_session.state,
+                        )
+                        .then_some(current_exit);
+                    }
                     ExitSessionAction::Migrate { to } => {
                         tracing::warn!(
                             from_exit = %current_exit,
                             to_exit = %to,
                             reason = ?transition.reason,
-                            "Exit 会话迁移到管理员允许的替代节点"
+                            "Exit 会话迁移已挂起，验证完成前不放行数据包"
                         );
-                        self.exit_selection_gate.set_current_exit(Some(to.clone()));
-                        return Some(to);
+                        self.begin_exit_migration(
+                            to,
+                            now_unix_ms,
+                            "exit.selection.migration_pending",
+                        )
+                        .await;
+                        return None;
                     }
                     ExitSessionAction::Terminate | ExitSessionAction::FailClosed => {
                         tracing::warn!(
@@ -831,8 +1000,12 @@ impl ClientRuntime {
                             reason = ?transition.reason,
                             "Exit 会话已按管理员策略关闭"
                         );
-                        self.exit_selection_gate.set_current_exit(None);
-                        self.exit_selection_blocked = true;
+                        self.enter_fail_closed(
+                            TrafficFailureKind::NetworkSelectionUnavailable,
+                            now_unix_ms,
+                            "exit.selection.authorization_revoked",
+                        )
+                        .await;
                         return None;
                     }
                 },
@@ -842,8 +1015,12 @@ impl ClientRuntime {
                         reason_code = denial.reason_code(),
                         "Exit 选择授权陈旧或无效，当前 Exit 会话失败关闭"
                     );
-                    self.exit_selection_gate.set_current_exit(None);
-                    self.exit_selection_blocked = true;
+                    self.enter_fail_closed(
+                        TrafficFailureKind::NetworkSelectionUnavailable,
+                        now_unix_ms,
+                        "exit.selection.authorization_unavailable",
+                    )
+                    .await;
                     return None;
                 }
             }
@@ -858,11 +1035,44 @@ impl ClientRuntime {
                 tracing::debug!(
                     exit = %selected,
                     requested = ?requested,
-                    "管理员 Exit 策略为新会话选定出口"
+                    "管理员 Exit 策略为新会话选定出口，等待恢复验证"
                 );
-                self.exit_selection_gate
-                    .set_current_exit(Some(selected.clone()));
-                Some(selected)
+                if !self.exit_selection_gate.begin_pending_exit(selected) {
+                    self.enter_fail_closed(
+                        TrafficFailureKind::ExitUnavailable,
+                        now_unix_ms,
+                        "exit.selection.pending_target_conflict",
+                    )
+                    .await;
+                    return None;
+                }
+                self.exit_selection_blocked = true;
+                if let Err(error) = self
+                    .traffic_session
+                    .set_connecting(now_unix_ms.max(1), "traffic.session.exit_selected")
+                {
+                    tracing::error!(error = %error, "无法写入 Exit 连接状态");
+                    self.block_exit_session(
+                        TrafficFailureKind::ConnectionTimeout,
+                        now_unix_ms,
+                        "traffic.session.connecting_state_failed",
+                    );
+                } else if !self
+                    .recovery_trigger_tx
+                    .try_trigger(RecoveryTrigger::Manual)
+                {
+                    tracing::warn!(
+                        diagnostic_id = "recovery.trigger_queue_unavailable",
+                        "新 Exit 会话已选择，但恢复验证无法排队"
+                    );
+                    self.block_exit_session(
+                        TrafficFailureKind::ConnectionTimeout,
+                        now_unix_ms,
+                        "traffic.session.validation_schedule_failed",
+                    );
+                }
+                self.publish_traffic_session().await;
+                None
             }
             Err(denial) => {
                 tracing::warn!(
@@ -870,11 +1080,27 @@ impl ClientRuntime {
                     requested = ?requested,
                     "没有可证明授权的新 Exit 会话，数据平面失败关闭"
                 );
-                self.exit_selection_blocked = true;
+                self.enter_fail_closed(
+                    TrafficFailureKind::NetworkSelectionUnavailable,
+                    now_unix_ms,
+                    "exit.selection.no_authorized_exit",
+                )
+                .await;
                 None
             }
         }
     }
+}
+
+/// Packet admission is deliberately narrower than "a target was selected": an
+/// active recovery or migration must close the data plane even while the
+/// previous Exit identity is still retained for diagnosis.
+fn exit_packet_admission_allowed(
+    blocked: bool,
+    migration_pending: bool,
+    state: TrafficProtectionState,
+) -> bool {
+    !blocked && !migration_pending && state.may_carry_traffic()
 }
 
 impl Drop for ClientRuntime {
@@ -1175,7 +1401,6 @@ pub(crate) async fn prepare_client_runtime_ext(
         node_state: None,
         node_state_updates: None,
         traffic_session: TrafficSessionSnapshot::default(),
-        pending_exit: None,
         local_exit_snapshot: None,
         local_exit_availability_report_interval: {
             let mut interval = tokio::time::interval(EXIT_AVAILABILITY_REPORT_INTERVAL);
@@ -1492,7 +1717,7 @@ async fn refresh_linux_recovery_paths(runtime: &mut ClientRuntime) {
         fuckipv6_common::RoutingMode::MeshOnly => PathRecoveryState::Unknown,
         fuckipv6_common::RoutingMode::BypassMainland
         | fuckipv6_common::RoutingMode::GlobalProxy => {
-            if let Some(exit_node_id) = runtime.exit_for_packet(unix_time_ms()).await {
+            if let Some(exit_node_id) = runtime.intended_exit() {
                 if runtime
                     .p2p
                     .resolve_exit_peer_by_node_id(&exit_node_id)
@@ -1517,24 +1742,21 @@ async fn refresh_linux_recovery_paths(runtime: &mut ClientRuntime) {
 
 #[cfg(target_os = "linux")]
 async fn current_linux_recovery_route_context(
-    runtime: &mut ClientRuntime,
+    runtime: &ClientRuntime,
 ) -> TrafficFailureRouteContext {
     let mode = runtime.route_engine.routing_mode();
     if mode == fuckipv6_common::RoutingMode::MeshOnly {
         return linux_recovery_route_context(mode, None, None);
     }
-    let now_unix_ms = unix_time_ms();
-    let Some(selected_exit_id) = runtime.exit_for_packet(now_unix_ms).await else {
+    let Some(selected_exit_id) = runtime.intended_exit() else {
         return TrafficFailureRouteContext::new(TrafficAction::Reject);
     };
-    let Ok(resolution) = runtime.exit_selection_gate.resolution(now_unix_ms) else {
-        return TrafficFailureRouteContext::new(TrafficAction::Reject);
-    };
-    linux_recovery_route_context(
-        mode,
-        Some(&selected_exit_id),
-        resolution.fixed_exit.as_ref(),
-    )
+    let fixed_exit = runtime
+        .exit_selection_gate
+        .resolution(unix_time_ms())
+        .ok()
+        .and_then(|resolution| resolution.fixed_exit);
+    linux_recovery_route_context(mode, Some(&selected_exit_id), fixed_exit.as_ref())
 }
 
 #[cfg(target_os = "linux")]
@@ -1575,11 +1797,21 @@ fn linux_recovery_route_context(
 }
 
 #[cfg(target_os = "linux")]
+fn linux_recovery_expectations(mode: fuckipv6_common::RoutingMode) -> RecoveryExpectations {
+    RecoveryExpectations {
+        exit_path_required: mode != fuckipv6_common::RoutingMode::MeshOnly,
+        relay_path_required: false,
+        ..RecoveryExpectations::default()
+    }
+}
+
 fn linux_recovery_request(
+    mode: fuckipv6_common::RoutingMode,
     trigger: RecoveryTrigger,
     route_context: TrafficFailureRouteContext,
 ) -> RecoveryRequest {
     RecoveryRequest::new(trigger, route_context, TrafficFailurePolicy::fail_closed())
+        .with_expectations(linux_recovery_expectations(mode))
 }
 
 #[cfg(target_os = "linux")]
@@ -1637,6 +1869,56 @@ fn log_linux_recovery_report(report: &RecoveryReport) {
 }
 
 #[cfg(target_os = "linux")]
+fn recovery_started_reason_code(trigger: RecoveryTrigger) -> &'static str {
+    match trigger {
+        RecoveryTrigger::SleepWake => "recovery.sleep_wake.started",
+        RecoveryTrigger::NetworkChanged => "recovery.network_changed.started",
+        RecoveryTrigger::ExitDisconnected => "recovery.exit_disconnected.started",
+        RecoveryTrigger::ExitMigration => "recovery.exit_migration.started",
+        RecoveryTrigger::RelayDisconnected => "recovery.relay_disconnected.started",
+        RecoveryTrigger::HandshakeInterrupted => "recovery.handshake_interrupted.started",
+        RecoveryTrigger::RuntimeDisconnected => "recovery.runtime_disconnected.started",
+        RecoveryTrigger::Manual => "recovery.manual.started",
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn recovery_failure_reason_code(trigger: RecoveryTrigger) -> &'static str {
+    match trigger {
+        RecoveryTrigger::SleepWake => "recovery.sleep_wake.failed_closed",
+        RecoveryTrigger::NetworkChanged => "recovery.network_changed.failed_closed",
+        RecoveryTrigger::ExitDisconnected => "recovery.exit_unavailable.failed_closed",
+        RecoveryTrigger::ExitMigration => "recovery.exit_migration.failed_closed",
+        RecoveryTrigger::RelayDisconnected => "recovery.relay_disconnected.failed_closed",
+        RecoveryTrigger::HandshakeInterrupted => "recovery.handshake_interrupted.failed_closed",
+        RecoveryTrigger::RuntimeDisconnected => "recovery.runtime_disconnected.failed_closed",
+        RecoveryTrigger::Manual => "recovery.validation.failed_closed",
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn recovery_failure_kind(trigger: RecoveryTrigger, report: &RecoveryReport) -> TrafficFailureKind {
+    report
+        .failure_decisions
+        .last()
+        .map(|decision| decision.failure)
+        .or_else(|| trigger.failure_kind())
+        .or_else(|| {
+            let code = report.error_code.as_deref().unwrap_or_default();
+            if code.contains("dns") {
+                Some(TrafficFailureKind::DnsResolutionTimeout)
+            } else if code.contains("exit") {
+                Some(TrafficFailureKind::ExitUnavailable)
+            } else if code.contains("relay") {
+                Some(TrafficFailureKind::NetworkSelectionUnavailable)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(TrafficFailureKind::ConnectionTimeout)
+}
+
+#[cfg(target_os = "linux")]
 async fn handle_linux_recovery_trigger(runtime: &mut ClientRuntime, trigger: RecoveryTrigger) {
     invalidate_linux_recovery_path(
         trigger,
@@ -1644,8 +1926,18 @@ async fn handle_linux_recovery_trigger(runtime: &mut ClientRuntime, trigger: Rec
         &mut runtime.relay_recovery_path,
     );
 
+    // A lost Exit must first pass through the same administrator policy used by
+    // packet routing. This may stage a replacement; it never promotes the
+    // replacement before recovery evidence arrives.
+    if trigger == RecoveryTrigger::ExitDisconnected {
+        runtime.reconcile_exit_selection(unix_time_ms()).await;
+    }
+    let expected_exit = runtime.intended_exit();
+    runtime.begin_exit_recovery(trigger, unix_time_ms()).await;
+
+    let mode = runtime.route_engine.routing_mode();
     let route_context = current_linux_recovery_route_context(runtime).await;
-    let request = linux_recovery_request(trigger, route_context.clone());
+    let request = linux_recovery_request(mode, trigger, route_context.clone());
     let audit = RecoveryAuditContext {
         config_root: linux_recovery_audit_root(&runtime.config_path),
         actor: NodeId::from_public_key(&runtime.identity.public_key_bytes()),
@@ -1667,6 +1959,63 @@ async fn handle_linux_recovery_trigger(runtime: &mut ClientRuntime, trigger: Rec
 
     refresh_linux_recovery_paths(runtime).await;
     log_linux_recovery_report(&report);
+
+    let validation = report
+        .traffic_session_validation
+        .clone()
+        .filter(|validation| validation.is_complete());
+    if report.status != RecoveryStatus::Recovered || validation.is_none() {
+        runtime
+            .enter_fail_closed(
+                recovery_failure_kind(trigger, &report),
+                unix_time_ms(),
+                recovery_failure_reason_code(trigger),
+            )
+            .await;
+        return;
+    }
+
+    let pending = runtime.exit_selection_gate.pending_exit().cloned();
+    if let Some(staged) = pending {
+        let committed = runtime.exit_selection_gate.commit_pending_exit();
+        if committed.as_ref() != Some(&staged) || expected_exit.as_ref() != Some(&staged) {
+            runtime
+                .enter_fail_closed(
+                    TrafficFailureKind::ExitUnavailable,
+                    unix_time_ms(),
+                    "recovery.exit_migration.target_mismatch",
+                )
+                .await;
+            return;
+        }
+    } else if runtime.exit_selection_gate.current_exit().cloned() != expected_exit {
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_target_changed_during_validation",
+            )
+            .await;
+        return;
+    }
+
+    let validation = validation.expect("checked immediately above");
+    if let Err(error) = runtime
+        .traffic_session
+        .mark_protected(validation, unix_time_ms().max(1))
+    {
+        tracing::error!(error = %error, "恢复证据无法建立受保护流量会话");
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ConnectionTimeout,
+                unix_time_ms(),
+                "recovery.validation_application_failed",
+            )
+            .await;
+        return;
+    }
+    runtime.exit_selection_blocked = false;
+    runtime.publish_traffic_session().await;
 }
 
 enum RuntimeCommandOutcome {
@@ -1745,7 +2094,7 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                         let local_exit_changed =
                             runtime.local_exit_snapshot.as_ref() != Some(&snapshot.local_exit);
                         runtime.local_exit_snapshot = Some(snapshot.local_exit.clone());
-                        runtime.apply_exit_contribution_snapshot(&snapshot);
+                        runtime.apply_exit_contribution_snapshot(&snapshot).await;
                         if local_exit_changed {
                             runtime.report_local_exit_availability("state_changed").await;
                         }
@@ -1754,7 +2103,8 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                     node_state_updates = None;
                     runtime.exit_contribution_gate.clear_network_context();
                     runtime.exit_contribution_gate.clear_member_directory();
-                    runtime.clear_exit_selection();
+                    runtime.clear_exit_selection("exit.selection.state_channel_closed")
+                        .await;
                 }
             }
 
@@ -1780,14 +2130,17 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                             );
                             runtime.exit_contribution_gate.clear_member_directory();
                         }
-                        runtime.replace_exit_selection_directory(
-                            selection_directory,
-                            received_at_unix_ms,
-                        );
+                        runtime
+                            .replace_exit_selection_directory(
+                                selection_directory,
+                                received_at_unix_ms,
+                            )
+                            .await;
                     }
                     Some(_) => {
                         runtime.exit_contribution_gate.clear_member_directory();
-                        runtime.clear_exit_selection();
+                        runtime.clear_exit_selection("exit.selection.directory_unavailable")
+                        .await;
                     }
                     None => exit_contribution_directory_updates = None,
                 }
@@ -7172,7 +7525,12 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
         assert_eq!(context.fixed_exit, Some(exit_id));
         assert!(context.validate().is_ok());
         assert_eq!(
-            linux_recovery_request(RecoveryTrigger::ExitDisconnected, context).failure_policy,
+            linux_recovery_request(
+                fuckipv6_common::RoutingMode::GlobalProxy,
+                RecoveryTrigger::ExitDisconnected,
+                context,
+            )
+            .failure_policy,
             TrafficFailurePolicy::fail_closed()
         );
     }

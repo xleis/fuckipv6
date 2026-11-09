@@ -2630,16 +2630,37 @@ pixels 全部通过，geometry max delta 2.1875px；未放宽阈值）。测试�
 
 **验收**：用户可解释为何某 Exit 可选/不可选；固定 Exit 不可被本地或 fallback 静默绕过。
 
-### W12-04 Exit 健康与可达性 `[ ]`
+### W12-04 Exit 健康与可达性 `[x]`
 
-- [ ] 健康检查区分进程、监听、网络、DNS 和互联网可达；
-- [ ] 使用短超时、并发上限和退避，避免探测造成负担；
-- [ ] 健康结果带时间戳、新鲜度和来源；
-- [ ] 不可用 Exit 不进入默认候选；
-- [ ] 部分可用状态明确哪些目标/协议受影响；
-- [ ] 健康检查不向第三方泄漏成员身份；
-- [ ] 支持手动复测并取消；
-- [ ] 建立误报、抖动和恢复测试。
+- [x] 健康检查区分进程、监听、网络、DNS 和互联网可达；
+- [x] 使用短超时、并发上限和退避，避免探测造成负担；
+- [x] 健康结果带时间戳、新鲜度和来源；
+- [x] 不可用 Exit 不进入默认候选；
+- [x] 部分可用状态明确哪些目标/协议受影响；
+- [x] 健康检查不向第三方泄漏成员身份；
+- [x] 支持手动复测并取消；
+- [x] 建立误报、抖动和恢复测试。
+
+新增的 `ExitHealthSnapshot` 按进程、监听、网络、DNS、互联网可达五层保存证据。每条证据携带 passed/degraded/failed/unsupported/not_tested/unknown
+状态、来源、观测时间、耗时、可选目标/协议和稳定错误码；默认 90 秒新鲜度并拒绝超出 5 秒的未来时钟偏移。只有五层都存在新鲜且
+passed 的证据时，`default_candidate` 才为真；缺失、陈旧、降级、失败和未测试均不可进入默认候选，并通过稳定 reason code 与受影响
+层/目标/协议解释原因。探测策略将单次超时限制在 5 秒、并发限制在 8、尝试次数限制在 5，并使用有界指数退避和确定性抖动。
+
+手动诊断运行会生成新的分层快照，复测状态机明确区分 requested/running/cancelled/completed/failed；取消是终态，不能被后续完成覆盖。
+运行时不会从健康进程推断 DNS 或互联网可达，二者保持 `not_tested`，直到受控探测提供新证据。诊断 DTO 由后端计算
+`ExitHealthAssessment`，WebUI 和 GPUI 只展示该权威结果及逐层证据，不在客户端重新判定健康。目标 ID 只允许不透明的稳定 token，错误码
+禁止包含命令输出、地址或成员身份；可复制诊断报告只包含稳定摘要，不导出原始探测细节。
+
+**验证通过（2026-11-10）**：`cargo test -p fuckipv6-common exit_health --lib`（8 passed）、
+`cargo test -p fuckipv6-client diagnostic --lib`（14 passed）、`cargo test -p fuckipv6-client exit_health --lib`（1 passed）、
+`cargo clippy -p fuckipv6-common -p fuckipv6-client --lib -- -D warnings`、`./scripts/generate-contracts.sh`、
+`./scripts/check-contracts.sh`（含 TypeScript/Java 绑定与 Android 契约测试）、`node scripts/test_i18n_runtime.mjs`，
+以及 WebUI `npm run typecheck`、`npm run lint`、`npm test -- --run`（278 passed）、`npm run build`（仅保留现有 i18n 非 module 与
+>500 kB chunk 警告）。测试覆盖五层完整性、新鲜度/时钟偏移、未知与陈旧不可选、部分失败目标/协议、探测边界和退避、误报/漏报恢复、
+取消终态、进程健康但 DNS/互联网未测试，以及 WebUI/GPUI 权威状态和逐层证据展示。
+
+本项证据来自领域、运行时、协议和 UI 自动化测试，不代表已执行真实受控 Exit 探测、真实泄漏服务、浏览器/应用 DNS 行为审查、
+真实数据面探测或真实多节点 Exit 故障演练；这些未测试路径没有被标记为 passed。
 
 **验收**：候选选择基于新鲜健康证据；未知/陈旧不会被当成健康。
 

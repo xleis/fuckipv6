@@ -1845,6 +1845,66 @@ button:disabled {
 .diagnostic-check-meta code {
   font-family: var(--font-mono);
 }
+.diagnostic-exit-health {
+  display: grid;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.diagnostic-exit-health-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.diagnostic-exit-health-heading h4,
+.diagnostic-exit-health-heading p {
+  margin: 0;
+}
+.diagnostic-exit-health-heading h4 {
+  color: var(--text);
+}
+.diagnostic-exit-health-heading p {
+  margin-top: var(--space-1);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+}
+.diagnostic-exit-health-summary {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.diagnostic-exit-health-evidence {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+.diagnostic-exit-health-evidence > article {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+}
+.diagnostic-exit-health-evidence > article > div:first-child {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.diagnostic-exit-health-evidence > article > div:first-child strong {
+  color: var(--text);
+  font-size: var(--font-size-xs);
+}
+.diagnostic-exit-health-evidence > article > div:first-child span {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
 .diagnostic-residue {
   display: flex;
   flex-wrap: wrap;
@@ -2513,7 +2573,10 @@ button:disabled {
 }
 .topology-filters {
   display: grid;
-  grid-template-columns: minmax(210px, 1.5fr) repeat(4, minmax(120px, 1fr)) auto auto;
+  grid-template-columns: minmax(210px, 1.5fr) repeat(
+      4,
+      minmax(120px, 1fr)
+    ) auto auto;
   align-items: end;
   gap: var(--space-2);
   padding: var(--space-3);
@@ -2610,7 +2673,9 @@ button:disabled {
 }
 .topology-node.selected .topology-node-halo {
   fill: var(--accent-soft);
-  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 70%, transparent));
+  filter: drop-shadow(
+    0 0 5px color-mix(in srgb, var(--accent) 70%, transparent)
+  );
 }
 .topology-node-selection-mark circle {
   fill: var(--accent);
@@ -3469,7 +3534,11 @@ button:disabled {
 }
 .exit-contribution-disclosure.required {
   border-color: color-mix(in srgb, var(--warning) 48%, var(--border));
-  background: color-mix(in srgb, var(--surface-raised) 86%, var(--warning-soft));
+  background: color-mix(
+    in srgb,
+    var(--surface-raised) 86%,
+    var(--warning-soft)
+  );
 }
 .exit-contribution-disclosure h4,
 .exit-contribution-disclosure p {
@@ -4870,7 +4939,8 @@ button:disabled {
   line-height: 1.6;
   tab-size: 2;
   white-space: pre;
-  transition: border-color var(--motion-duration-base) var(--motion-ease-standard);
+  transition: border-color var(--motion-duration-base)
+    var(--motion-ease-standard);
 }
 
 .configuration-editor:hover {
@@ -6701,6 +6771,8 @@ button:disabled {
     padding: var(--space-4);
   }
   .diagnostic-checks,
+  .diagnostic-exit-health-evidence,
+  .diagnostic-exit-health-summary,
   .overview-grid,
   .overview-shortcuts,
   .settings-grid {
@@ -7049,8 +7121,7 @@ button:disabled {
     width: 100%;
     height: 100dvh;
     max-height: none;
-    padding:
-      max(var(--space-4), env(safe-area-inset-top))
+    padding: max(var(--space-4), env(safe-area-inset-top))
       max(var(--space-4), env(safe-area-inset-right))
       max(var(--space-4), env(safe-area-inset-bottom))
       max(var(--space-4), env(safe-area-inset-left));
@@ -7319,12 +7390,11 @@ button:disabled {
   padding: var(--space-4);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background:
-    linear-gradient(
-      160deg,
-      color-mix(in srgb, var(--surface) 86%, transparent),
-      color-mix(in srgb, var(--background-deep) 88%, transparent)
-    );
+  background: linear-gradient(
+    160deg,
+    color-mix(in srgb, var(--surface) 86%, transparent),
+    color-mix(in srgb, var(--background-deep) 88%, transparent)
+  );
 }
 
 .traffic-rule-heading {

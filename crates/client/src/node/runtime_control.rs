@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
-    InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
+    ExitHealthEvidence, ExitHealthEvidenceState, ExitHealthLayer, ExitHealthProtocol,
+    ExitHealthRetest, ExitHealthRetestPhase, ExitHealthSnapshot, ExitHealthSource,
+    ExitHealthTarget, InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
     InvitationRedeemRequest, InvitationRedemption, InvitationStatusView, IssuedInvitation,
     JoinRequest, JoinRequestId, MemberLifecycleChange, MemberLifecycleChangeRequest,
     MemberRemovalPreview, MemberRemovalPreviewRequest, MembershipRole, NetworkId,
@@ -1362,12 +1364,144 @@ fn diagnostic_recovery_actions(
     actions
 }
 
+fn build_exit_health_snapshot(
+    snapshot: &NodeSnapshot,
+    started_at_unix_ms: u64,
+    completed_at_unix_ms: u64,
+) -> ExitHealthSnapshot {
+    let local_exit_networks = snapshot
+        .networks
+        .iter()
+        .filter(|network| network.roles.contains(&NodeNetworkRole::ExitNode))
+        .collect::<Vec<_>>();
+    if local_exit_networks.is_empty() {
+        return ExitHealthSnapshot::default();
+    }
+
+    let mut evidence = Vec::new();
+    let process_state = if snapshot.local_exit.problem.is_some()
+        || snapshot.local_exit.stage == LocalExitCapabilityStage::Failed
+    {
+        ExitHealthEvidenceState::Failed
+    } else if matches!(
+        snapshot.local_exit.stage,
+        LocalExitCapabilityStage::Listening
+            | LocalExitCapabilityStage::HealthChecking
+            | LocalExitCapabilityStage::Enabled
+            | LocalExitCapabilityStage::Draining
+            | LocalExitCapabilityStage::Cleaning
+    ) {
+        ExitHealthEvidenceState::Passed
+    } else {
+        ExitHealthEvidenceState::NotTested
+    };
+    evidence.push(ExitHealthEvidence {
+        layer: ExitHealthLayer::Process,
+        state: process_state,
+        source: ExitHealthSource::LocalProcess,
+        observed_at_unix_ms: completed_at_unix_ms.max(1),
+        duration_ms: 0,
+        target: None,
+        protocol: None,
+        error_code: snapshot
+            .local_exit
+            .problem
+            .as_ref()
+            .map(|_| "exit.health.process_unhealthy".into()),
+    });
+
+    let listening_state = if matches!(
+        snapshot.local_exit.stage,
+        LocalExitCapabilityStage::Listening | LocalExitCapabilityStage::Enabled
+    ) {
+        ExitHealthEvidenceState::Passed
+    } else if snapshot.local_exit.stage == LocalExitCapabilityStage::Failed {
+        ExitHealthEvidenceState::Failed
+    } else {
+        ExitHealthEvidenceState::NotTested
+    };
+    evidence.push(ExitHealthEvidence {
+        layer: ExitHealthLayer::Listening,
+        state: listening_state,
+        source: ExitHealthSource::LocalSocket,
+        observed_at_unix_ms: completed_at_unix_ms.max(1),
+        duration_ms: 0,
+        target: None,
+        protocol: None,
+        error_code: None,
+    });
+
+    let network_state = if local_exit_networks
+        .iter()
+        .any(|network| network.status == NodeNetworkStatus::Offline)
+    {
+        ExitHealthEvidenceState::Failed
+    } else if local_exit_networks.iter().any(|network| {
+        matches!(
+            network.status,
+            NodeNetworkStatus::Online | NodeNetworkStatus::Degraded
+        )
+    }) {
+        ExitHealthEvidenceState::Passed
+    } else {
+        ExitHealthEvidenceState::NotTested
+    };
+    evidence.push(ExitHealthEvidence {
+        layer: ExitHealthLayer::Network,
+        state: network_state,
+        source: ExitHealthSource::LocalNetwork,
+        observed_at_unix_ms: completed_at_unix_ms.max(1),
+        duration_ms: 0,
+        target: None,
+        protocol: None,
+        error_code: None,
+    });
+
+    // A listening process is not evidence that resolver or Internet probes
+    // succeeded. These layers stay explicit until a controlled probe records a
+    // fresh observation.
+    for (target, protocol) in [
+        (ExitHealthTarget::DnsResolver, ExitHealthProtocol::Dns),
+        (ExitHealthTarget::Ipv4Internet, ExitHealthProtocol::Ipv4),
+        (ExitHealthTarget::Ipv6Internet, ExitHealthProtocol::Ipv6),
+    ] {
+        evidence.push(ExitHealthEvidence {
+            layer: if target == ExitHealthTarget::DnsResolver {
+                ExitHealthLayer::Dns
+            } else {
+                ExitHealthLayer::InternetReachability
+            },
+            state: ExitHealthEvidenceState::NotTested,
+            source: ExitHealthSource::ControlledProbe,
+            observed_at_unix_ms: completed_at_unix_ms.max(1),
+            duration_ms: 0,
+            target: Some(target),
+            protocol: Some(protocol),
+            error_code: Some("exit.health.probe_not_executed".into()),
+        });
+    }
+
+    let retest = ExitHealthRetest {
+        phase: ExitHealthRetestPhase::Completed,
+        requested_at_unix_ms: started_at_unix_ms.max(1),
+        started_at_unix_ms: Some(started_at_unix_ms.max(1)),
+        finished_at_unix_ms: Some(completed_at_unix_ms.max(1)),
+    };
+    ExitHealthSnapshot {
+        evidence,
+        retest,
+        ..ExitHealthSnapshot::default()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_sanitized_diagnostic_report(
     diagnostic_id: &str,
     started_at_unix_ms: u64,
     completed_at_unix_ms: u64,
     timed_out: bool,
     checks: &[NodeDiagnosticCheck],
+    exit_health: &ExitHealthSnapshot,
     recovery_actions: &[NodeDiagnosticRecoveryAction],
     residue: &NodeRuntimeResidueSnapshot,
 ) -> String {
@@ -1385,6 +1519,43 @@ fn build_sanitized_diagnostic_report(
             check.suggestion_key.as_deref().unwrap_or("none"),
         ));
     }
+    let exit_health_assessment = exit_health.assess(completed_at_unix_ms);
+    report.push_str(&format!(
+        "exit_health: state={} default_candidate={} reason={} affected_layers={} affected_targets={} affected_protocols={}\n",
+        match exit_health_assessment.state {
+            fuckipv6_common::domain::ExitHealthState::Unknown => "unknown",
+            fuckipv6_common::domain::ExitHealthState::Available => "available",
+            fuckipv6_common::domain::ExitHealthState::Degraded => "degraded",
+            fuckipv6_common::domain::ExitHealthState::Unavailable => "unavailable",
+        },
+        exit_health_assessment.default_candidate,
+        exit_health_assessment.reason_code,
+        exit_health_assessment
+            .affected_layers
+            .iter()
+            .map(|layer| layer.key())
+            .collect::<Vec<_>>()
+            .join(","),
+        exit_health_assessment
+            .affected_targets
+            .iter()
+            .map(ExitHealthTarget::key)
+            .collect::<Vec<_>>()
+            .join(","),
+        exit_health_assessment
+            .affected_protocols
+            .iter()
+            .map(|protocol| match protocol {
+                ExitHealthProtocol::Dns => "dns",
+                ExitHealthProtocol::Tcp => "tcp",
+                ExitHealthProtocol::Udp => "udp",
+                ExitHealthProtocol::Quic => "quic",
+                ExitHealthProtocol::Ipv4 => "ipv4",
+                ExitHealthProtocol::Ipv6 => "ipv6",
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+    ));
     report.push_str(&format!(
         "residue: sessions={} listeners={} peers={} services={} residual_networks={}\n",
         residue.sessions_remaining,
@@ -5100,12 +5271,16 @@ impl NetworkRuntimeActor {
         let checks = build_diagnostic_checks(&snapshot, &residue, started_at_unix_ms);
         let recovery_actions = diagnostic_recovery_actions(&checks, &residue);
         let completed_at_unix_ms = unix_time_ms();
+        let exit_health =
+            build_exit_health_snapshot(&snapshot, started_at_unix_ms, completed_at_unix_ms);
+        let exit_health_assessment = exit_health.assess(completed_at_unix_ms);
         let sanitized_report = build_sanitized_diagnostic_report(
             &diagnostic_id,
             started_at_unix_ms,
             completed_at_unix_ms,
             false,
             &checks,
+            &exit_health,
             &recovery_actions,
             &residue,
         );
@@ -5119,6 +5294,8 @@ impl NetworkRuntimeActor {
             cleanup_candidate_networks,
             residue,
             checks,
+            exit_health,
+            exit_health_assessment,
             recovery_actions,
             sanitized_report,
         })
@@ -10325,6 +10502,7 @@ mod tests {
             12,
             false,
             &checks,
+            &ExitHealthSnapshot::default(),
             &actions,
             &residue,
         );
@@ -10336,6 +10514,46 @@ mod tests {
         assert!(!report.contains("/home/"));
         assert!(!report.contains("token"));
         assert!(!report.contains("private-key"));
+    }
+
+    #[test]
+    fn exit_health_never_infers_dns_or_internet_from_a_healthy_process() {
+        let mut snapshot = NodeSnapshot::default();
+        snapshot.local_exit = LocalExitCapabilitySnapshot {
+            owner_exit_enabled: true,
+            stage: LocalExitCapabilityStage::Enabled,
+            healthy: true,
+            network_allowed: true,
+            ..LocalExitCapabilitySnapshot::default()
+        };
+        snapshot.networks.push(crate::node::NodeNetworkSnapshot {
+            name: "exit-network".into(),
+            tun_name: "fuckipv6-test".into(),
+            status: NodeNetworkStatus::Online,
+            assigned_ipv6: None,
+            assigned_ipv4: None,
+            p2p_listen_addr: None,
+            uptime_secs: 1,
+            roles: vec![NodeNetworkRole::ExitNode],
+            peer_count: 0,
+            traffic: NodeTrafficSnapshot::default(),
+        });
+
+        let health = build_exit_health_snapshot(&snapshot, 1_700_000_000_000, 1_700_000_001_000);
+        let assessment = health.assess(1_700_000_001_000);
+        assert_eq!(
+            assessment.state,
+            fuckipv6_common::domain::ExitHealthState::Unknown
+        );
+        assert!(!assessment.default_candidate);
+        assert!(assessment.affected_layers.contains(&ExitHealthLayer::Dns));
+        assert!(assessment
+            .affected_layers
+            .contains(&ExitHealthLayer::InternetReachability));
+        assert!(assessment
+            .affected_targets
+            .contains(&ExitHealthTarget::Ipv6Internet));
+        assert_eq!(health.retest.phase, ExitHealthRetestPhase::Completed);
     }
 
     #[tokio::test]

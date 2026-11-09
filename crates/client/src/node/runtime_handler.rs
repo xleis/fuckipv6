@@ -1919,9 +1919,10 @@ async fn diagnostics_runtime(
         None => runtime.diagnostics().await,
     };
     match result {
-        Ok(diagnostics) => {
-            NodeCommandResult::completed(request_id, NodeCommandOutcome::Diagnostics(diagnostics))
-        }
+        Ok(diagnostics) => NodeCommandResult::completed(
+            request_id,
+            NodeCommandOutcome::Diagnostics(Box::new(diagnostics)),
+        ),
         Err(error) => runtime_rejection(request_id, error),
     }
 }

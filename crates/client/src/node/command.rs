@@ -7,14 +7,14 @@ use base64::Engine;
 use fuckipv6_common::domain::{
     default_network_icon, default_network_language, default_network_purpose,
     default_network_region, ActivityEntry, AuditEntry, AuditOutcome, CapabilityKind, ContentHash,
-    ExitContributionMode, ExitContributionObligation, ExitContributionScope, ExitSelectionPolicy,
-    InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
-    InvitationRedeemRequest, InvitationRedemption, InvitationStatusView, IssuedInvitation,
-    JoinRequest, JoinRequestReviewAction, JoinRequestState, MemberLifecycleAction,
-    MemberLifecycleChange, MemberRemovalPreview, MembershipRole, NetworkCreateProfile,
-    NetworkDiscoveryRecord, NetworkEndpoint, NetworkId, NetworkJoinMode, NetworkMemberDirectory,
-    NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility,
-    PermissionDenialCode, PolicyTestInput, PolicyTestResult, TrafficPolicy,
+    ExitContributionMode, ExitContributionObligation, ExitContributionScope, ExitHealthAssessment,
+    ExitHealthSnapshot, ExitSelectionPolicy, InvitationCode, InvitationCreateRequest, InvitationId,
+    InvitationPreview, InvitationRedeemRequest, InvitationRedemption, InvitationStatusView,
+    IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
+    MemberLifecycleAction, MemberLifecycleChange, MemberRemovalPreview, MembershipRole,
+    NetworkCreateProfile, NetworkDiscoveryRecord, NetworkEndpoint, NetworkId, NetworkJoinMode,
+    NetworkMemberDirectory, NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate,
+    NetworkVisibility, PermissionDenialCode, PolicyTestInput, PolicyTestResult, TrafficPolicy,
     TrafficPolicyTestComparison, TrafficPolicyTestInput, TrafficPolicyTestVisibility,
     JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS, JOIN_REQUEST_MAX_REASON_CHARS,
     NETWORK_PROFILE_MAX_TAG_CHARS,
@@ -2574,6 +2574,14 @@ pub struct NodeDiagnosticsSnapshot {
     pub cleanup_candidate_networks: Vec<String>,
     pub residue: NodeRuntimeResidueSnapshot,
     pub checks: Vec<NodeDiagnosticCheck>,
+    /// Layered local Exit evidence. Missing/stale DNS or Internet evidence is
+    /// visible here and cannot be promoted from the process state.
+    #[serde(default)]
+    pub exit_health: ExitHealthSnapshot,
+    /// Server-authoritative assessment at `completed_at_unix_ms`. Clients render
+    /// this result and never recompute health from process state.
+    #[serde(default)]
+    pub exit_health_assessment: ExitHealthAssessment,
     pub recovery_actions: Vec<NodeDiagnosticRecoveryAction>,
     /// Canonical redacted report suitable for clipboard/export. It is generated
     /// server-side from stable fields, never from raw stderr.
@@ -2661,7 +2669,7 @@ pub struct NodeJoinRequestReviewAck {
 pub enum NodeCommandOutcome {
     Snapshot(Box<NodeSnapshot>),
     UiManifest(Box<NodeUiManifest>),
-    Diagnostics(NodeDiagnosticsSnapshot),
+    Diagnostics(Box<NodeDiagnosticsSnapshot>),
     Cleanup(NodeResidualCleanupResult),
     Blacklist(NodeBlacklistSnapshot),
     NetworkAllocation(NodeNetworkAllocationSnapshot),

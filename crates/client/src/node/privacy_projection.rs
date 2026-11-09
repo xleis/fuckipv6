@@ -227,7 +227,7 @@ pub struct ProjectedNodeCommandResult {
 pub enum ProjectedNodeCommandOutcome {
     Snapshot(Box<ProjectedNodeSnapshot>),
     UiManifest(Box<NodeUiManifest>),
-    Diagnostics(NodeDiagnosticsSnapshot),
+    Diagnostics(Box<NodeDiagnosticsSnapshot>),
     Cleanup(NodeResidualCleanupResult),
     Blacklist(NodeBlacklistSnapshot),
     NetworkAllocation(NodeNetworkAllocationSnapshot),

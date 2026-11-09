@@ -392,6 +392,78 @@ function diagnosticsFixture(): NodeDiagnosticsSnapshot {
         suggestion_key: null,
       },
     ],
+    exit_health: {
+      evidence: [
+        {
+          layer: "process",
+          state: "passed",
+          source: "local_process",
+          observed_at_unix_ms: 1_700_000_001_000,
+          duration_ms: 1,
+          target: null,
+          protocol: null,
+          error_code: null,
+        },
+        {
+          layer: "listening",
+          state: "passed",
+          source: "local_socket",
+          observed_at_unix_ms: 1_700_000_001_010,
+          duration_ms: 2,
+          target: null,
+          protocol: null,
+          error_code: null,
+        },
+        {
+          layer: "network",
+          state: "passed",
+          source: "local_network",
+          observed_at_unix_ms: 1_700_000_001_020,
+          duration_ms: 3,
+          target: null,
+          protocol: null,
+          error_code: null,
+        },
+        {
+          layer: "dns",
+          state: "degraded",
+          source: "controlled_probe",
+          observed_at_unix_ms: 1_700_000_001_030,
+          duration_ms: 250,
+          target: { kind: "dns_resolver" },
+          protocol: "dns",
+          error_code: "exit.health.dns_timeout",
+        },
+        {
+          layer: "internet_reachability",
+          state: "failed",
+          source: "controlled_probe",
+          observed_at_unix_ms: 1_700_000_001_040,
+          duration_ms: 1500,
+          target: { kind: "ipv6_internet" },
+          protocol: "ipv6",
+          error_code: "exit.health.ipv6_unreachable",
+        },
+      ],
+      max_age_ms: 90_000,
+      retest: {
+        phase: "completed",
+        requested_at_unix_ms: 1_700_000_000_500,
+        started_at_unix_ms: 1_700_000_000_600,
+        finished_at_unix_ms: 1_700_000_001_250,
+      },
+    },
+    exit_health_assessment: {
+      state: "degraded",
+      default_candidate: false,
+      reason_code: "exit.health.partially_available",
+      affected_layers: ["dns", "internet_reachability"],
+      affected_targets: [{ kind: "dns_resolver" }, { kind: "ipv6_internet" }],
+      affected_protocols: ["dns", "ipv6"],
+      fresh_evidence_count: 5,
+      observed_at_unix_ms: 1_700_000_001_250,
+      source: "controlled_probe",
+    },
     recovery_actions: [
       {
         action_id: "cleanup_residuals",
@@ -528,8 +600,7 @@ describe("React WebUI shell", () => {
       identity: {
         node_id: "node-current",
         display_name: "Home node",
-        public_key_fingerprint:
-          "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        public_key_fingerprint: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         created_at_unix_ms: 1_700_000_000_000,
       },
     });
@@ -824,6 +895,36 @@ describe("React WebUI shell", () => {
       "translated:diagnostic.suggestion.exit_retry",
     );
 
+    const exitHealth = within(diagnosticsPanel).getByTestId(
+      "diagnostic-exit-health",
+    );
+    expect(exitHealth).toHaveAttribute("data-exit-health-state", "degraded");
+    expect(exitHealth).toHaveAttribute(
+      "data-exit-health-default-candidate",
+      "false",
+    );
+    expect(exitHealth).toHaveTextContent(
+      "translated:diagnostic.exit_health.state.degraded",
+    );
+    expect(exitHealth).toHaveTextContent("exit.health.partially_available");
+    expect(exitHealth).toHaveTextContent(
+      "translated:diagnostic.exit_health.retest_phase.completed",
+    );
+    expect(
+      Array.from(exitHealth.querySelectorAll("[data-exit-health-layer]")).map(
+        (row) => [
+          row.getAttribute("data-exit-health-layer"),
+          row.getAttribute("data-exit-health-state"),
+        ],
+      ),
+    ).toEqual([
+      ["process", "passed"],
+      ["listening", "passed"],
+      ["network", "passed"],
+      ["dns", "degraded"],
+      ["internet_reachability", "failed"],
+    ]);
+
     const recovery = diagnosticsPanel.querySelector(
       '[data-recovery-action-id="cleanup_residuals"]',
     );
@@ -848,9 +949,9 @@ describe("React WebUI shell", () => {
     await waitFor(() =>
       expect(writeText).toHaveBeenCalledWith(diagnostics.sanitized_report),
     );
-    expect(
-      within(diagnosticsPanel).getByRole("status"),
-    ).toHaveTextContent("translated:diagnostic.report_copied");
+    expect(within(diagnosticsPanel).getByRole("status")).toHaveTextContent(
+      "translated:diagnostic.report_copied",
+    );
     expect(sendCommand).toHaveBeenCalledTimes(1);
   });
 
@@ -1134,9 +1235,9 @@ describe("React WebUI shell", () => {
     expect(
       await screen.findByRole("heading", { name: "translated:page.routing" }),
     ).toBeInTheDocument();
-    expect(container.querySelectorAll(".traffic-routing-workspace")).toHaveLength(
-      1,
-    );
+    expect(
+      container.querySelectorAll(".traffic-routing-workspace"),
+    ).toHaveLength(1);
     const actionPanel = container.querySelector(
       '[data-ui-region="action-panel"]',
     );
@@ -1264,12 +1365,13 @@ describe("React WebUI shell", () => {
 
     act(() => firstSocket.emit("open"));
     act(() => firstSocket.emit("close"));
-    await waitFor(
-      () => expect(SilentWebSocket.instances).toHaveLength(2),
-      { timeout: 3_000, interval: 100 },
-    );
+    await waitFor(() => expect(SilentWebSocket.instances).toHaveLength(2), {
+      timeout: 3_000,
+      interval: 100,
+    });
     const reconnectSocket = SilentWebSocket.instances.at(-1);
-    if (!reconnectSocket) throw new Error("Reconnect WebSocket was not created");
+    if (!reconnectSocket)
+      throw new Error("Reconnect WebSocket was not created");
 
     act(() => reconnectSocket.emit("open"));
     await waitFor(() => {
@@ -1487,7 +1589,9 @@ describe("React WebUI shell", () => {
     expect(groups[0]).toHaveTextContent(
       "translated:choice.permission.manage_networks",
     );
-    expect(groups[1]).toHaveTextContent("translated:settings.value.not_exposed");
+    expect(groups[1]).toHaveTextContent(
+      "translated:settings.value.not_exposed",
+    );
     expect(groups[1]).not.toHaveTextContent(
       "translated:settings.webui_configuration.detail",
     );
@@ -2219,7 +2323,9 @@ describe("React WebUI shell", () => {
       within(result).getByText("translated:discovery.result.details"),
     );
     expect(result).toHaveTextContent("network-family");
-    expect(result).toHaveTextContent("translated:discovery.result.privacy_summary");
+    expect(result).toHaveTextContent(
+      "translated:discovery.result.privacy_summary",
+    );
 
     await user.click(
       within(result).getByRole("button", {
@@ -2334,7 +2440,9 @@ describe("React WebUI shell", () => {
     });
     await waitFor(() =>
       expect(
-        within(screen.getByTestId("joined-networks-section")).queryByText("home"),
+        within(screen.getByTestId("joined-networks-section")).queryByText(
+          "home",
+        ),
       ).not.toBeInTheDocument(),
     );
     expect(
@@ -2386,9 +2494,11 @@ describe("React WebUI shell", () => {
     authenticate(populatedSnapshot);
     renderApp();
 
-    await screen.findByRole("button", {
-      name: /translated:shortcut\.discover_networks/,
-    }).then((button) => button.click());
+    await screen
+      .findByRole("button", {
+        name: /translated:shortcut\.discover_networks/,
+      })
+      .then((button) => button.click());
     const joined = await screen.findByTestId("joined-networks-section");
     const homeCard = within(joined).getByText("home").closest("article");
     expect(homeCard).not.toBeNull();
@@ -2423,9 +2533,11 @@ describe("React WebUI shell", () => {
     authenticate(populatedSnapshot);
     renderApp();
 
-    await screen.findByRole("button", {
-      name: /translated:shortcut\.discover_networks/,
-    }).then((button) => button.click());
+    await screen
+      .findByRole("button", {
+        name: /translated:shortcut\.discover_networks/,
+      })
+      .then((button) => button.click());
     const joined = await screen.findByTestId("joined-networks-section");
     const homeCard = within(joined).getByText("home").closest("article");
     expect(homeCard).not.toBeNull();
@@ -2466,9 +2578,11 @@ describe("React WebUI shell", () => {
     authenticate(populatedSnapshot);
     renderApp();
 
-    await screen.findByRole("button", {
-      name: /translated:shortcut\.discover_networks/,
-    }).then((button) => button.click());
+    await screen
+      .findByRole("button", {
+        name: /translated:shortcut\.discover_networks/,
+      })
+      .then((button) => button.click());
     const joined = await screen.findByTestId("joined-networks-section");
     const homeCard = within(joined).getByText("home").closest("article");
     const trigger = within(joined).getByRole("button", {
@@ -2512,9 +2626,11 @@ describe("React WebUI shell", () => {
     );
     renderApp();
 
-    await screen.findByRole("button", {
-      name: /translated:shortcut\.discover_networks/,
-    }).then((button) => button.click());
+    await screen
+      .findByRole("button", {
+        name: /translated:shortcut\.discover_networks/,
+      })
+      .then((button) => button.click());
 
     expect(await screen.findByTestId("discovery-state")).toHaveTextContent(
       "translated:discovery.state.degraded",
@@ -2526,9 +2642,9 @@ describe("React WebUI shell", () => {
       "translated:discovery.state.stale",
     );
     expect(screen.getByTestId("discovery-result")).toHaveTextContent("cached");
-    expect(screen.getByTestId("discovery-results-section")).not.toHaveTextContent(
-      "translated:discovery.state.empty",
-    );
+    expect(
+      screen.getByTestId("discovery-results-section"),
+    ).not.toHaveTextContent("translated:discovery.state.empty");
   });
 
   it("distinguishes discovery failure from an empty result and exposes retry", async () => {

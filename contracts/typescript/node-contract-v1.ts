@@ -206,6 +206,71 @@ export type ExitContributionTrafficQuota = {
   "period": ExitContributionQuotaPeriod;
 };
 
+export type ExitHealthAssessment = {
+  "affected_layers": Array<ExitHealthLayer>;
+  "affected_protocols": Array<ExitHealthProtocol>;
+  "affected_targets": Array<ExitHealthTarget>;
+  "default_candidate": boolean;
+  "fresh_evidence_count": number;
+  "observed_at_unix_ms"?: number | null;
+  "reason_code": string;
+  "source"?: ExitHealthSource | null;
+  "state": ExitHealthState;
+};
+
+export type ExitHealthEvidence = {
+  "duration_ms": number;
+  "error_code"?: string | null;
+  "layer": ExitHealthLayer;
+  "observed_at_unix_ms": number;
+  "protocol"?: ExitHealthProtocol | null;
+  "source": ExitHealthSource;
+  "state": ExitHealthEvidenceState;
+  "target"?: ExitHealthTarget | null;
+};
+
+export type ExitHealthEvidenceState = "passed" | "degraded" | "failed" | "unsupported" | "not_tested" | "unknown";
+
+export type ExitHealthLayer = "process" | "listening" | "network" | "dns" | "internet_reachability";
+
+export type ExitHealthProtocol = "dns" | "tcp" | "udp" | "quic" | "ipv4" | "ipv6";
+
+export type ExitHealthRetest = {
+  "finished_at_unix_ms"?: number | null;
+  "phase"?: ExitHealthRetestPhase;
+  "requested_at_unix_ms"?: number;
+  "started_at_unix_ms"?: number | null;
+};
+
+export type ExitHealthRetestPhase = "idle" | "requested" | "running" | "cancelled" | "completed" | "failed";
+
+export type ExitHealthSnapshot = {
+  "evidence"?: Array<ExitHealthEvidence>;
+  "max_age_ms"?: number;
+  "retest"?: ExitHealthRetest;
+};
+
+export type ExitHealthSource = "local_process" | "local_socket" | "local_network" | "local_dns" | "controlled_probe" | "coordinator_health" | "remote_peer_report";
+
+export type ExitHealthState = "unknown" | "available" | "degraded" | "unavailable";
+
+export type ExitHealthTarget = {
+  "kind": "dns_resolver";
+} | {
+  "kind": "ipv4_internet";
+} | {
+  "kind": "ipv6_internet";
+} | {
+  "kind": "tcp_internet";
+} | {
+  "kind": "udp_internet";
+} | {
+  "kind": "quic_internet";
+} | {
+  "id": string;
+  "kind": "controlled";
+};
+
 export type ExitNodeCapabilities = {
   "cleanup": boolean;
   "ipv4_forwarding": boolean;
@@ -1371,6 +1436,8 @@ export type NodeDiagnosticsSnapshot = {
   "cleanup_candidate_networks": Array<string>;
   "completed_at_unix_ms": number;
   "diagnostic_id": string;
+  "exit_health"?: ExitHealthSnapshot;
+  "exit_health_assessment"?: ExitHealthAssessment;
   "lifecycle": NodeLifecycleSnapshot;
   "recovery_actions": Array<NodeDiagnosticRecoveryAction>;
   "residue": NodeRuntimeResidueSnapshot;

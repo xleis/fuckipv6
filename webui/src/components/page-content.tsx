@@ -50,6 +50,10 @@ import {
 } from "react";
 import type {
   ActivityEntry,
+  ExitHealthEvidence,
+  ExitHealthLayer,
+  ExitHealthProtocol,
+  ExitHealthTarget,
   ExitSelectionSource,
   NodeDiagnosticLayer,
   NodeDiagnosticState,
@@ -117,10 +121,7 @@ type PageContentProps = {
   footer?: ReactNode;
   onSelectNetwork(name: string): void;
   onNavigate(pageId: string): void;
-  onRequestAction(
-    actionId: string,
-    initialValues?: ActionValues,
-  ): void;
+  onRequestAction(actionId: string, initialValues?: ActionValues): void;
   onRunAction(actionId: string): Promise<void>;
   manifestActions?: NodeUiAction[];
   onSubmitAction?: TopologyActionSubmit;
@@ -482,7 +483,10 @@ function NetworkContextMenu({
             </ContextMenu.Item>
           ) : null}
           <ContextMenu.Separator className="context-separator" />
-          <ContextMenu.Item className="context-item danger" onSelect={leaveNetwork}>
+          <ContextMenu.Item
+            className="context-item danger"
+            onSelect={leaveNetwork}
+          >
             {label(locale, "action.leave_network")}
           </ContextMenu.Item>
         </ContextMenu.Content>
@@ -517,10 +521,7 @@ function MembershipPolicyNotice({
   membership: NonNullable<NodeSnapshot["memberships"]>[number];
   snapshot: NodeSnapshot;
   locale: Locale;
-  onRequestAction(
-    actionId: string,
-    initialValues?: ActionValues,
-  ): void;
+  onRequestAction(actionId: string, initialValues?: ActionValues): void;
 }) {
   const [exitConfirmed, setExitConfirmed] = useState(false);
   const currentTerms = membership.current_terms;
@@ -603,9 +604,7 @@ function MembershipPolicyNotice({
         </div>
         <div>
           <dt>{label(locale, "join.exit.scope")}</dt>
-          <dd>
-            {label(locale, membershipExitModeLabelKey(currentExitMode))}
-          </dd>
+          <dd>{label(locale, membershipExitModeLabelKey(currentExitMode))}</dd>
         </div>
         <div>
           <dt>{label(locale, "join.exit_contribution")}</dt>
@@ -613,7 +612,11 @@ function MembershipPolicyNotice({
         </div>
         <div>
           <dt>{label(locale, "membership.policy.current")}</dt>
-          <dd>{currentHash ?? membership.terms_hash ?? label(locale, "common.none")}</dd>
+          <dd>
+            {currentHash ??
+              membership.terms_hash ??
+              label(locale, "common.none")}
+          </dd>
         </div>
         <div>
           <dt>{label(locale, "membership.policy.local_exit_state")}</dt>
@@ -1009,6 +1012,47 @@ function diagnosticStateTone(state: NodeDiagnosticState): string {
   return "neutral";
 }
 
+function exitHealthStateTone(
+  state: "available" | "degraded" | "unavailable" | "unknown",
+): string {
+  if (state === "available") return "good";
+  if (state === "degraded") return "warn";
+  if (state === "unavailable") return "bad";
+  return "neutral";
+}
+
+function exitHealthLayerLabel(locale: Locale, layer: ExitHealthLayer): string {
+  return label(locale, `diagnostic.exit_health.layer.${layer}`);
+}
+
+function exitHealthTargetLabel(
+  locale: Locale,
+  target: ExitHealthTarget,
+): string {
+  return target.kind === "controlled"
+    ? tr(locale, "diagnostic.exit_health.controlled_target", {
+        target: target.id,
+      })
+    : label(locale, `diagnostic.exit_health.target.${target.kind}`);
+}
+
+function exitHealthProtocolLabel(
+  locale: Locale,
+  protocol: ExitHealthProtocol,
+): string {
+  return label(locale, `diagnostic.exit_health.protocol.${protocol}`);
+}
+
+function exitHealthEvidenceStateLabel(
+  locale: Locale,
+  evidence: ExitHealthEvidence,
+): string {
+  return label(
+    locale,
+    `diagnostic.exit_health.evidence_state.${evidence.state}`,
+  );
+}
+
 function diagnosticDuration(locale: Locale, durationMs: number): string {
   if (durationMs < 1000) {
     return tr(locale, "diagnostic.duration_ms_value", {
@@ -1078,6 +1122,52 @@ function DiagnosticsPanel({
     diagnostics.completed_at_unix_ms - diagnostics.started_at_unix_ms,
   );
   const residue = diagnostics.residue;
+  const exitHealth = diagnostics.exit_health ?? {
+    evidence: [],
+    max_age_ms: 90_000,
+    retest: { phase: "idle" as const, requested_at_unix_ms: 1 },
+  };
+  const exitHealthAssessment = diagnostics.exit_health_assessment ?? {
+    state: "unknown" as const,
+    default_candidate: false,
+    reason_code: "exit.health.not_observed",
+    affected_layers: [
+      "process",
+      "listening",
+      "network",
+      "dns",
+      "internet_reachability",
+    ] as ExitHealthLayer[],
+    affected_targets: [] as ExitHealthTarget[],
+    affected_protocols: [] as ExitHealthProtocol[],
+    fresh_evidence_count: 0,
+    observed_at_unix_ms: null,
+    source: null,
+  };
+  const exitHealthEvidence = exitHealth.evidence ?? [];
+  const exitHealthRetest = exitHealth.retest ?? {
+    phase: "idle" as const,
+    requested_at_unix_ms: 1,
+  };
+  const listSeparator = label(locale, "common.list_separator");
+  const affectedLayers =
+    exitHealthAssessment.affected_layers.length === 0
+      ? label(locale, "diagnostic.exit_health.none")
+      : exitHealthAssessment.affected_layers
+          .map((layer) => exitHealthLayerLabel(locale, layer))
+          .join(listSeparator);
+  const affectedTargets =
+    exitHealthAssessment.affected_targets.length === 0
+      ? label(locale, "diagnostic.exit_health.none")
+      : exitHealthAssessment.affected_targets
+          .map((target) => exitHealthTargetLabel(locale, target))
+          .join(listSeparator);
+  const affectedProtocols =
+    exitHealthAssessment.affected_protocols.length === 0
+      ? label(locale, "diagnostic.exit_health.none")
+      : exitHealthAssessment.affected_protocols
+          .map((protocol) => exitHealthProtocolLabel(locale, protocol))
+          .join(listSeparator);
   const residueSummary =
     residue.sessions_remaining === 0 &&
     residue.listeners_remaining === 0 &&
@@ -1187,7 +1277,9 @@ function DiagnosticsPanel({
               key={layer}
             >
               <div className="diagnostic-check-heading">
-                <strong>{label(locale, `diagnostic.layer.${check.layer}`)}</strong>
+                <strong>
+                  {label(locale, `diagnostic.layer.${check.layer}`)}
+                </strong>
                 <span
                   className={`status-pill ${diagnosticStateTone(check.state)}`}
                 >
@@ -1207,7 +1299,9 @@ function DiagnosticsPanel({
                 <div>
                   <dt>{label(locale, "diagnostic.error_code")}</dt>
                   <dd>
-                    <code>{check.error_code ?? label(locale, "common.none")}</code>
+                    <code>
+                      {check.error_code ?? label(locale, "common.none")}
+                    </code>
                   </dd>
                 </div>
                 <div>
@@ -1219,6 +1313,161 @@ function DiagnosticsPanel({
           );
         })}
       </div>
+
+      <section
+        className="diagnostic-exit-health"
+        data-testid="diagnostic-exit-health"
+        data-exit-health-state={exitHealthAssessment.state}
+        data-exit-health-default-candidate={
+          exitHealthAssessment.default_candidate ? "true" : "false"
+        }
+      >
+        <div className="diagnostic-exit-health-heading">
+          <div>
+            <h4>{label(locale, "diagnostic.exit_health.title")}</h4>
+            <p>{label(locale, "diagnostic.exit_health.disclaimer")}</p>
+          </div>
+          <span
+            className={`status-pill ${exitHealthStateTone(exitHealthAssessment.state)}`}
+            data-exit-health-retest-phase={exitHealthRetest.phase ?? "idle"}
+          >
+            {label(
+              locale,
+              `diagnostic.exit_health.state.${exitHealthAssessment.state}`,
+            )}
+          </span>
+        </div>
+        <dl className="detail-list diagnostic-exit-health-summary">
+          <div>
+            <dt>{label(locale, "diagnostic.exit_health.default_candidate")}</dt>
+            <dd>
+              {label(
+                locale,
+                exitHealthAssessment.default_candidate
+                  ? "diagnostic.exit_health.yes"
+                  : "diagnostic.exit_health.no",
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "diagnostic.exit_health.reason")}</dt>
+            <dd>
+              <code>{exitHealthAssessment.reason_code}</code>
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "diagnostic.exit_health.affected_layers")}</dt>
+            <dd>{affectedLayers}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "diagnostic.exit_health.affected_targets")}</dt>
+            <dd>{affectedTargets}</dd>
+          </div>
+          <div>
+            <dt>
+              {label(locale, "diagnostic.exit_health.affected_protocols")}
+            </dt>
+            <dd>{affectedProtocols}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "diagnostic.exit_health.fresh_evidence")}</dt>
+            <dd>{exitHealthAssessment.fresh_evidence_count}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "diagnostic.exit_health.observed_at")}</dt>
+            <dd>
+              {exitHealthAssessment.observed_at_unix_ms
+                ? formatTimestamp(
+                    locale,
+                    exitHealthAssessment.observed_at_unix_ms,
+                  )
+                : label(locale, "common.not_available")}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "diagnostic.exit_health.retest")}</dt>
+            <dd>
+              {label(
+                locale,
+                `diagnostic.exit_health.retest_phase.${exitHealthRetest.phase ?? "idle"}`,
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "diagnostic.exit_health.max_age")}</dt>
+            <dd>{diagnosticDuration(locale, exitHealth.max_age_ms ?? 0)}</dd>
+          </div>
+        </dl>
+        <div className="diagnostic-exit-health-evidence">
+          {exitHealthEvidence.length === 0 ? (
+            <p className="empty-copy">
+              {label(locale, "diagnostic.exit_health.no_evidence")}
+            </p>
+          ) : (
+            exitHealthEvidence.map((evidence, index) => (
+              <article
+                data-exit-health-layer={evidence.layer}
+                data-exit-health-state={evidence.state}
+                key={`${evidence.layer}-${evidence.observed_at_unix_ms}-${index}`}
+              >
+                <div>
+                  <strong>
+                    {exitHealthLayerLabel(locale, evidence.layer)}
+                  </strong>
+                  <span>{exitHealthEvidenceStateLabel(locale, evidence)}</span>
+                </div>
+                <dl className="detail-list">
+                  <div>
+                    <dt>{label(locale, "diagnostic.exit_health.source")}</dt>
+                    <dd>
+                      {label(
+                        locale,
+                        `diagnostic.exit_health.source.${evidence.source}`,
+                      )}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "diagnostic.exit_health.target")}</dt>
+                    <dd>
+                      {evidence.target
+                        ? exitHealthTargetLabel(locale, evidence.target)
+                        : label(locale, "diagnostic.exit_health.none")}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "diagnostic.exit_health.protocol")}</dt>
+                    <dd>
+                      {evidence.protocol
+                        ? exitHealthProtocolLabel(locale, evidence.protocol)
+                        : label(locale, "diagnostic.exit_health.none")}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>
+                      {label(locale, "diagnostic.exit_health.observed_at")}
+                    </dt>
+                    <dd>
+                      {formatTimestamp(locale, evidence.observed_at_unix_ms)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "diagnostic.duration")}</dt>
+                    <dd>{diagnosticDuration(locale, evidence.duration_ms)}</dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "diagnostic.error_code")}</dt>
+                    <dd>
+                      <code>
+                        {evidence.error_code ?? label(locale, "common.none")}
+                      </code>
+                    </dd>
+                  </div>
+                </dl>
+              </article>
+            ))
+          )}
+        </div>
+      </section>
 
       <div className="diagnostic-residue">
         <strong>{label(locale, "diagnostic.residue")}</strong>
@@ -1284,9 +1533,7 @@ function DiagnosticsPanel({
           <button
             className="secondary-button"
             type="button"
-            onClick={() =>
-              void copy(diagnostics.sanitized_report, "report")
-            }
+            onClick={() => void copy(diagnostics.sanitized_report, "report")}
           >
             {copyFeedback === "report" ? (
               <Check size={14} />
@@ -1732,7 +1979,10 @@ function discoveryStateMessage(
   return label(locale, `discovery.state.${projection.state}`);
 }
 
-function discoveryJoinLabel(locale: Locale, mode: DiscoveryResult["joinMode"]): string {
+function discoveryJoinLabel(
+  locale: Locale,
+  mode: DiscoveryResult["joinMode"],
+): string {
   switch (mode) {
     case "open":
       return label(locale, "discovery.result.open_join");
@@ -1750,10 +2000,7 @@ function DiscoveryResultCard({
 }: {
   result: DiscoveryResult;
   locale: Locale;
-  onRequestAction(
-    actionId: string,
-    initialValues?: ActionValues,
-  ): void;
+  onRequestAction(actionId: string, initialValues?: ActionValues): void;
 }) {
   return (
     <article
@@ -1786,9 +2033,11 @@ function DiscoveryResultCard({
         </div>
       </div>
       <div className="discovery-result-meta">
-        <span>{tr(locale, "discovery.result.last_verified", {
-          time: formatTimestamp(locale, result.verifiedAtUnixMs),
-        })}</span>
+        <span>
+          {tr(locale, "discovery.result.last_verified", {
+            time: formatTimestamp(locale, result.verifiedAtUnixMs),
+          })}
+        </span>
         {result.stale ? (
           <span>{label(locale, "discovery.result.stale_detail")}</span>
         ) : null}
@@ -1982,7 +2231,11 @@ function Networks({
             </small>
           </div>
 
-          <div className="discovery-filters" role="group" aria-label={label(locale, "discovery.section.results")}>
+          <div
+            className="discovery-filters"
+            role="group"
+            aria-label={label(locale, "discovery.section.results")}
+          >
             <label>
               <span>{label(locale, "discovery.filter.visibility")}</span>
               <select
@@ -1994,9 +2247,15 @@ function Networks({
                   )
                 }
               >
-                <option value="all">{label(locale, "discovery.filter.all")}</option>
-                <option value="public">{label(locale, "discovery.filter.public")}</option>
-                <option value="private">{label(locale, "discovery.filter.private")}</option>
+                <option value="all">
+                  {label(locale, "discovery.filter.all")}
+                </option>
+                <option value="public">
+                  {label(locale, "discovery.filter.public")}
+                </option>
+                <option value="private">
+                  {label(locale, "discovery.filter.private")}
+                </option>
               </select>
             </label>
             <label>
@@ -2010,8 +2269,12 @@ function Networks({
                   )
                 }
               >
-                <option value="all">{label(locale, "discovery.filter.all")}</option>
-                <option value="open">{label(locale, "choice.join_mode.open")}</option>
+                <option value="all">
+                  {label(locale, "discovery.filter.all")}
+                </option>
+                <option value="open">
+                  {label(locale, "choice.join_mode.open")}
+                </option>
                 <option value="approval_required">
                   {label(locale, "choice.join_mode.approval_required")}
                 </option>
@@ -2024,9 +2287,13 @@ function Networks({
               <span>{label(locale, "discovery.filter.language")}</span>
               <select
                 value={filters.language}
-                onChange={(event) => updateFilter("language", event.target.value)}
+                onChange={(event) =>
+                  updateFilter("language", event.target.value)
+                }
               >
-                <option value="all">{label(locale, "discovery.filter.all")}</option>
+                <option value="all">
+                  {label(locale, "discovery.filter.all")}
+                </option>
                 {facets.languages.map((language) => (
                   <option key={language} value={language}>
                     {language}
@@ -2040,7 +2307,9 @@ function Networks({
                 value={filters.region}
                 onChange={(event) => updateFilter("region", event.target.value)}
               >
-                <option value="all">{label(locale, "discovery.filter.all")}</option>
+                <option value="all">
+                  {label(locale, "discovery.filter.all")}
+                </option>
                 {facets.regions.map((region) => (
                   <option key={region} value={region}>
                     {region}
@@ -2071,12 +2340,17 @@ function Networks({
                   </small>
                 ) : null}
                 {projection.state === "pending" ? (
-                  <small>{label(locale, "discovery.pending.cancel_hint")}</small>
+                  <small>
+                    {label(locale, "discovery.pending.cancel_hint")}
+                  </small>
                 ) : null}
               </div>
             ) : null}
             {projection.partial ? (
-              <span className="status-pill warn" data-testid="discovery-partial">
+              <span
+                className="status-pill warn"
+                data-testid="discovery-partial"
+              >
                 {projection.rejectedRecordCount > 0
                   ? tr(locale, "discovery.state.rejected", {
                       count: String(projection.rejectedRecordCount),
@@ -2285,11 +2559,7 @@ function activityActionLabel(entry: ActivityEntry, locale: Locale): string {
 }
 
 function activityObjectKindLabel(kind: string, locale: Locale): string {
-  return activityLocalizedValue(
-    locale,
-    `activity.object_kind.${kind}`,
-    kind,
-  );
+  return activityLocalizedValue(locale, `activity.object_kind.${kind}`, kind);
 }
 
 function activityActorRoleLabel(role: string, locale: Locale): string {
@@ -2297,14 +2567,13 @@ function activityActorRoleLabel(role: string, locale: Locale): string {
 }
 
 function activityReasonLabel(reason: string, locale: Locale): string {
-  return activityLocalizedValue(
-    locale,
-    `activity.reason.${reason}`,
-    reason,
-  );
+  return activityLocalizedValue(locale, `activity.reason.${reason}`, reason);
 }
 
-function activityNetworkName(snapshot: NodeSnapshot, networkId: string): string {
+function activityNetworkName(
+  snapshot: NodeSnapshot,
+  networkId: string,
+): string {
   return (
     snapshot.memberships?.find(
       (membership) => membership.network_id === networkId,
@@ -2435,7 +2704,10 @@ function ActivityPage({
 
   return (
     <div className="page-stack activity-page" data-testid="activity-page">
-      <section className="activity-intro" aria-label={label(locale, "activity.filters")}>
+      <section
+        className="activity-intro"
+        aria-label={label(locale, "activity.filters")}
+      >
         <div>
           <h2>{label(locale, "activity.filters")}</h2>
           <p>{label(locale, "activity.description")}</p>
@@ -2735,7 +3007,9 @@ function ActivityPage({
                     </div>
                     <div>
                       <dt>{label(locale, "activity.filter.outcome")}</dt>
-                      <dd>{label(locale, `activity.outcome.${entry.outcome}`)}</dd>
+                      <dd>
+                        {label(locale, `activity.outcome.${entry.outcome}`)}
+                      </dd>
                     </div>
                     <div>
                       <dt>{label(locale, "activity.field.reason")}</dt>
@@ -2748,7 +3022,11 @@ function ActivityPage({
                     <div>
                       <dt>{label(locale, "activity.field.time")}</dt>
                       <dd>
-                        <time dateTime={new Date(entry.occurred_at_unix_ms).toISOString()}>
+                        <time
+                          dateTime={new Date(
+                            entry.occurred_at_unix_ms,
+                          ).toISOString()}
+                        >
                           {formatTimestamp(locale, entry.occurred_at_unix_ms)}
                         </time>
                       </dd>
@@ -2970,8 +3248,7 @@ function ExitGovernanceCard({
                     <dt>{label(locale, "exit_governance.fixed_exit")}</dt>
                     <dd>
                       <code>
-                        {resolution?.fixed_exit ??
-                          label(locale, "common.none")}
+                        {resolution?.fixed_exit ?? label(locale, "common.none")}
                       </code>
                     </dd>
                   </div>
@@ -2979,11 +3256,11 @@ function ExitGovernanceCard({
                     <dt>{label(locale, "exit_governance.effective_set")}</dt>
                     <dd className="exit-governance-effective">
                       {effective.length > 0 ? (
-                        effective.map((exit) => (
-                          <code key={exit}>{exit}</code>
-                        ))
+                        effective.map((exit) => <code key={exit}>{exit}</code>)
                       ) : (
-                        <span>{label(locale, "exit_governance.no_effective")}</span>
+                        <span>
+                          {label(locale, "exit_governance.no_effective")}
+                        </span>
                       )}
                     </dd>
                   </div>
@@ -2997,7 +3274,9 @@ function ExitGovernanceCard({
                     </dd>
                   </div>
                   <div>
-                    <dt>{label(locale, "exit_governance.directory_generated")}</dt>
+                    <dt>
+                      {label(locale, "exit_governance.directory_generated")}
+                    </dt>
                     <dd>
                       {selection.directory_generated_at_unix_ms
                         ? formatTimestamp(
@@ -3008,7 +3287,9 @@ function ExitGovernanceCard({
                     </dd>
                   </div>
                   <div>
-                    <dt>{label(locale, "exit_governance.directory_received")}</dt>
+                    <dt>
+                      {label(locale, "exit_governance.directory_received")}
+                    </dt>
                     <dd>
                       {selection.directory_received_at_unix_ms
                         ? formatTimestamp(
@@ -3020,7 +3301,9 @@ function ExitGovernanceCard({
                   </div>
                   <div>
                     <dt>{label(locale, "exit_governance.evaluated_at")}</dt>
-                    <dd>{formatTimestamp(locale, selection.evaluated_at_unix_ms)}</dd>
+                    <dd>
+                      {formatTimestamp(locale, selection.evaluated_at_unix_ms)}
+                    </dd>
                   </div>
                 </dl>
                 {selection.reason_code ? (
@@ -3031,7 +3314,9 @@ function ExitGovernanceCard({
                   >
                     <AlertTriangle size={17} aria-hidden="true" />
                     <div>
-                      <strong>{label(locale, "exit_governance.top_reason")}</strong>
+                      <strong>
+                        {label(locale, "exit_governance.top_reason")}
+                      </strong>
                       <p>
                         {exitSelectionReasonLabel(
                           locale,
@@ -3080,7 +3365,9 @@ function ExitGovernanceCard({
                             </div>
                             <dl className="detail-list">
                               <div>
-                                <dt>{label(locale, "exit_governance.source")}</dt>
+                                <dt>
+                                  {label(locale, "exit_governance.source")}
+                                </dt>
                                 <dd>
                                   {exitSelectionSourceLabel(
                                     locale,
@@ -3089,7 +3376,9 @@ function ExitGovernanceCard({
                                 </dd>
                               </div>
                               <div>
-                                <dt>{label(locale, "exit_governance.reason")}</dt>
+                                <dt>
+                                  {label(locale, "exit_governance.reason")}
+                                </dt>
                                 <dd>
                                   {exitSelectionReasonLabel(
                                     locale,
@@ -3099,7 +3388,12 @@ function ExitGovernanceCard({
                                 </dd>
                               </div>
                               <div>
-                                <dt>{label(locale, "exit_governance.availability")}</dt>
+                                <dt>
+                                  {label(
+                                    locale,
+                                    "exit_governance.availability",
+                                  )}
+                                </dt>
                                 <dd>
                                   {label(
                                     locale,
@@ -3207,7 +3501,9 @@ function CapabilityPage({
             </div>
             <div>
               <dt>{label(locale, "gpui.local_exit.stage")}</dt>
-              <dd>{label(locale, `gpui.local_exit.stage.${localExitStage}`)}</dd>
+              <dd>
+                {label(locale, `gpui.local_exit.stage.${localExitStage}`)}
+              </dd>
             </div>
             <div>
               <dt>{label(locale, "gpui.local_exit.network_authorization")}</dt>
@@ -3438,7 +3734,9 @@ function Identity({
           <h3>{label(locale, "identity.security.title")}</h3>
           <ShieldCheck size={17} />
         </div>
-        <p className="muted-copy">{label(locale, "identity.security.detail")}</p>
+        <p className="muted-copy">
+          {label(locale, "identity.security.detail")}
+        </p>
         <button
           className="secondary-button"
           type="button"
@@ -3481,10 +3779,7 @@ function Settings({
   locale,
   selectedNetwork,
   manifestActions = [],
-}: Omit<
-  PageContentProps,
-  "page" | "onSelectNetwork" | "onNavigate"
->) {
+}: Omit<PageContentProps, "page" | "onSelectNetwork" | "onNavigate">) {
   const security = projectSecurityState(
     snapshot,
     locale,

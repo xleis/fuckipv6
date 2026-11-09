@@ -7,13 +7,15 @@ use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
 use fuckipv6_common::domain::ExitContributionObligation;
 use fuckipv6_common::domain::{
     ActivityCategory, ActivitySeverity, AuditOutcome, CapabilityKind, ExitContributionMode,
-    IdempotencyKey, InvitationPreview, InvitationState, InvitationStatusView, IssuedInvitation,
-    JoinRequest, JoinRequestReviewAction, JoinRequestState, MemberLifecycleAction, MembershipRole,
-    NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
-    NetworkMemberObservationSource, NetworkMemberOnlineState, NetworkMemberStatus,
-    NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileProjections,
-    NetworkProfileWarningCode, NetworkPublicProfileDocument, NetworkVisibility, OperationError,
-    OperationState, TopologyConnectionState, TopologySnapshot, JOIN_REQUEST_MAX_REASON_CHARS,
+    ExitHealthEvidenceState, ExitHealthLayer, ExitHealthProtocol, ExitHealthSource,
+    ExitHealthState, ExitHealthTarget, IdempotencyKey, InvitationPreview, InvitationState,
+    InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
+    MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode, NetworkMember,
+    NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberObservationSource,
+    NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileApplyResult,
+    NetworkProfilePreview, NetworkProfileProjections, NetworkProfileWarningCode,
+    NetworkPublicProfileDocument, NetworkVisibility, OperationError, OperationState,
+    TopologyConnectionState, TopologySnapshot, JOIN_REQUEST_MAX_REASON_CHARS,
 };
 use fuckipv6_common::i18n::{
     detect_system_locale, format_decimal, format_integer, format_timestamp, resolve_language, t,
@@ -2157,7 +2159,7 @@ impl GpuiShell {
                         ("summary", &summary),
                     ],
                 ));
-                self.recent_diagnostics = Some(diagnostics);
+                self.recent_diagnostics = Some(*diagnostics);
             }
             NodeCommandOutcome::Cleanup(cleanup) => {
                 let summary = if cleanup.residue.issues.is_empty() {
@@ -5789,6 +5791,262 @@ impl GpuiShell {
             })
             .collect::<Vec<_>>();
 
+        let assessment = &diagnostics.exit_health_assessment;
+        let health_palette = semantic_palette(exit_health_state_semantic(assessment.state));
+        let health_state_label =
+            t(self.locale, exit_health_state_label_key(assessment.state)).to_string();
+        let health_separator = t(self.locale, "common.list_separator");
+        let affected_layers = if assessment.affected_layers.is_empty() {
+            t(self.locale, "diagnostic.exit_health.none").to_string()
+        } else {
+            assessment
+                .affected_layers
+                .iter()
+                .map(|layer| t(self.locale, exit_health_layer_label_key(*layer)).to_string())
+                .collect::<Vec<_>>()
+                .join(health_separator)
+        };
+        let affected_targets = if assessment.affected_targets.is_empty() {
+            t(self.locale, "diagnostic.exit_health.none").to_string()
+        } else {
+            assessment
+                .affected_targets
+                .iter()
+                .map(|target| exit_health_target_label(self.locale, target))
+                .collect::<Vec<_>>()
+                .join(health_separator)
+        };
+        let affected_protocols = if assessment.affected_protocols.is_empty() {
+            t(self.locale, "diagnostic.exit_health.none").to_string()
+        } else {
+            assessment
+                .affected_protocols
+                .iter()
+                .map(|protocol| t(self.locale, exit_health_protocol_key(*protocol)).to_string())
+                .collect::<Vec<_>>()
+                .join(health_separator)
+        };
+        let assessment_source = assessment
+            .source
+            .map(|source| t(self.locale, exit_health_source_label_key(source)).to_string())
+            .unwrap_or_else(|| t(self.locale, "diagnostic.exit_health.none").to_string());
+        let assessment_observed = assessment
+            .observed_at_unix_ms
+            .map(|observed_at| format_diagnostic_timestamp(self.locale, observed_at))
+            .unwrap_or_else(|| t(self.locale, "common.not_available").to_string());
+        let retest_label = t(
+            self.locale,
+            exit_health_retest_label_key(diagnostics.exit_health.retest.phase.key()),
+        )
+        .to_string();
+        let health_evidence = diagnostics
+            .exit_health
+            .evidence
+            .iter()
+            .map(|evidence| {
+                let layer_label =
+                    t(self.locale, exit_health_layer_label_key(evidence.layer)).to_string();
+                let state_label = t(
+                    self.locale,
+                    exit_health_evidence_state_label_key(evidence.state),
+                )
+                .to_string();
+                let source_label =
+                    t(self.locale, exit_health_source_label_key(evidence.source)).to_string();
+                let target_label = evidence
+                    .target
+                    .as_ref()
+                    .map(|target| exit_health_target_label(self.locale, target))
+                    .unwrap_or_else(|| t(self.locale, "diagnostic.exit_health.none").to_string());
+                let protocol_label = evidence
+                    .protocol
+                    .map(|protocol| t(self.locale, exit_health_protocol_key(protocol)).to_string())
+                    .unwrap_or_else(|| t(self.locale, "diagnostic.exit_health.none").to_string());
+                let error_code = evidence
+                    .error_code
+                    .clone()
+                    .unwrap_or_else(|| t(self.locale, "common.none").to_string());
+                let selector = format!("visual-diagnostic-exit-health-{}", evidence.layer.key());
+                div()
+                    .id(SharedString::from(format!(
+                        "diagnostic-exit-health-{}",
+                        evidence.layer.key()
+                    )))
+                    .debug_selector(move || selector)
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgba(COLOR_PANEL_RAISED))
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(layer_label),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(state_label),
+                            ),
+                    )
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "diagnostic.exit_health.source"),
+                        source_label,
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "diagnostic.exit_health.target"),
+                        target_label,
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "diagnostic.exit_health.protocol"),
+                        protocol_label,
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "diagnostic.exit_health.observed_at"),
+                        format_diagnostic_timestamp(self.locale, evidence.observed_at_unix_ms),
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "diagnostic.duration"),
+                        format_diagnostic_duration(self.locale, evidence.duration_ms),
+                    ))
+                    .child(diagnostic_metadata_row(
+                        t(self.locale, "diagnostic.error_code"),
+                        error_code,
+                    ))
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        let exit_health = div()
+            .id("diagnostic-exit-health")
+            .debug_selector(|| "visual-diagnostic-exit-health".into())
+            .role(Role::Status)
+            .aria_label(format!(
+                "{}: {health_state_label}",
+                t(self.locale, "diagnostic.exit_health.title")
+            ))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .rounded_md()
+            .bg(rgba(health_palette.background.rgba_hex()))
+            .border_1()
+            .border_color(rgba(health_palette.border.rgba_hex()))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_start()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(
+                                        t(self.locale, "diagnostic.exit_health.title").to_string(),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .line_height(px(18.0))
+                                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                    .child(
+                                        t(self.locale, "diagnostic.exit_health.disclaimer")
+                                            .to_string(),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .rounded_full()
+                            .bg(rgba(COLOR_PANEL_RAISED))
+                            .text_xs()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(health_palette.foreground.rgba_hex()))
+                            .child(health_state_label),
+                    ),
+            )
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.exit_health.default_candidate"),
+                t(
+                    self.locale,
+                    if assessment.default_candidate {
+                        "diagnostic.exit_health.yes"
+                    } else {
+                        "diagnostic.exit_health.no"
+                    },
+                )
+                .to_string(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.exit_health.reason"),
+                assessment.reason_code.clone(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.exit_health.affected_layers"),
+                affected_layers,
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.exit_health.affected_targets"),
+                affected_targets,
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.exit_health.affected_protocols"),
+                affected_protocols,
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.exit_health.fresh_evidence"),
+                format_integer(self.locale, assessment.fresh_evidence_count as i64),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.exit_health.observed_at"),
+                assessment_observed,
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.exit_health.retest"),
+                retest_label,
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.exit_health.max_age"),
+                format_diagnostic_duration(self.locale, diagnostics.exit_health.max_age_ms),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "diagnostic.exit_health.source"),
+                assessment_source,
+            ))
+            .when(health_evidence.is_empty(), |card| {
+                card.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(t(self.locale, "diagnostic.exit_health.no_evidence").to_string()),
+                )
+            })
+            .children(health_evidence);
+
         let residue_summary = if diagnostics.residue.is_clean() {
             t(self.locale, "diagnostic.residue_clean").to_string()
         } else {
@@ -5995,6 +6253,7 @@ impl GpuiShell {
             })
             .child(metadata)
             .child(div().flex().flex_col().gap_2().children(checks))
+            .child(exit_health)
             .child(residue)
             .child(recovery)
             .child(
@@ -12821,6 +13080,109 @@ fn diagnostic_layer_label_key(layer: NodeDiagnosticLayer) -> &'static str {
     }
 }
 
+fn exit_health_state_semantic(state: ExitHealthState) -> SemanticState {
+    match state {
+        ExitHealthState::Available => SemanticState::Success,
+        ExitHealthState::Degraded => SemanticState::Warning,
+        ExitHealthState::Unavailable => SemanticState::Danger,
+        ExitHealthState::Unknown => SemanticState::Neutral,
+    }
+}
+
+fn exit_health_state_label_key(state: ExitHealthState) -> &'static str {
+    match state {
+        ExitHealthState::Available => "diagnostic.exit_health.state.available",
+        ExitHealthState::Degraded => "diagnostic.exit_health.state.degraded",
+        ExitHealthState::Unavailable => "diagnostic.exit_health.state.unavailable",
+        ExitHealthState::Unknown => "diagnostic.exit_health.state.unknown",
+    }
+}
+
+fn exit_health_layer_label_key(layer: ExitHealthLayer) -> &'static str {
+    match layer {
+        ExitHealthLayer::Process => "diagnostic.exit_health.layer.process",
+        ExitHealthLayer::Listening => "diagnostic.exit_health.layer.listening",
+        ExitHealthLayer::Network => "diagnostic.exit_health.layer.network",
+        ExitHealthLayer::Dns => "diagnostic.exit_health.layer.dns",
+        ExitHealthLayer::InternetReachability => {
+            "diagnostic.exit_health.layer.internet_reachability"
+        }
+    }
+}
+
+fn exit_health_protocol_key(protocol: ExitHealthProtocol) -> &'static str {
+    match protocol {
+        ExitHealthProtocol::Dns => "diagnostic.exit_health.protocol.dns",
+        ExitHealthProtocol::Tcp => "diagnostic.exit_health.protocol.tcp",
+        ExitHealthProtocol::Udp => "diagnostic.exit_health.protocol.udp",
+        ExitHealthProtocol::Quic => "diagnostic.exit_health.protocol.quic",
+        ExitHealthProtocol::Ipv4 => "diagnostic.exit_health.protocol.ipv4",
+        ExitHealthProtocol::Ipv6 => "diagnostic.exit_health.protocol.ipv6",
+    }
+}
+
+fn exit_health_target_label(locale: Locale, target: &ExitHealthTarget) -> String {
+    match target {
+        ExitHealthTarget::DnsResolver => {
+            t(locale, "diagnostic.exit_health.target.dns_resolver").to_string()
+        }
+        ExitHealthTarget::Ipv4Internet => {
+            t(locale, "diagnostic.exit_health.target.ipv4_internet").to_string()
+        }
+        ExitHealthTarget::Ipv6Internet => {
+            t(locale, "diagnostic.exit_health.target.ipv6_internet").to_string()
+        }
+        ExitHealthTarget::TcpInternet => {
+            t(locale, "diagnostic.exit_health.target.tcp_internet").to_string()
+        }
+        ExitHealthTarget::UdpInternet => {
+            t(locale, "diagnostic.exit_health.target.udp_internet").to_string()
+        }
+        ExitHealthTarget::QuicInternet => {
+            t(locale, "diagnostic.exit_health.target.quic_internet").to_string()
+        }
+        ExitHealthTarget::Controlled(id) => tr(
+            locale,
+            "diagnostic.exit_health.controlled_target",
+            &[("target", id)],
+        ),
+    }
+}
+
+fn exit_health_source_label_key(source: ExitHealthSource) -> &'static str {
+    match source {
+        ExitHealthSource::LocalProcess => "diagnostic.exit_health.source.local_process",
+        ExitHealthSource::LocalSocket => "diagnostic.exit_health.source.local_socket",
+        ExitHealthSource::LocalNetwork => "diagnostic.exit_health.source.local_network",
+        ExitHealthSource::LocalDns => "diagnostic.exit_health.source.local_dns",
+        ExitHealthSource::ControlledProbe => "diagnostic.exit_health.source.controlled_probe",
+        ExitHealthSource::CoordinatorHealth => "diagnostic.exit_health.source.coordinator_health",
+        ExitHealthSource::RemotePeerReport => "diagnostic.exit_health.source.remote_peer_report",
+    }
+}
+
+fn exit_health_evidence_state_label_key(state: ExitHealthEvidenceState) -> &'static str {
+    match state {
+        ExitHealthEvidenceState::Passed => "diagnostic.exit_health.evidence_state.passed",
+        ExitHealthEvidenceState::Degraded => "diagnostic.exit_health.evidence_state.degraded",
+        ExitHealthEvidenceState::Failed => "diagnostic.exit_health.evidence_state.failed",
+        ExitHealthEvidenceState::Unsupported => "diagnostic.exit_health.evidence_state.unsupported",
+        ExitHealthEvidenceState::NotTested => "diagnostic.exit_health.evidence_state.not_tested",
+        ExitHealthEvidenceState::Unknown => "diagnostic.exit_health.evidence_state.unknown",
+    }
+}
+
+fn exit_health_retest_label_key(phase: &str) -> &'static str {
+    match phase {
+        "requested" => "diagnostic.exit_health.retest_phase.requested",
+        "running" => "diagnostic.exit_health.retest_phase.running",
+        "cancelled" => "diagnostic.exit_health.retest_phase.cancelled",
+        "completed" => "diagnostic.exit_health.retest_phase.completed",
+        "failed" => "diagnostic.exit_health.retest_phase.failed",
+        _ => "diagnostic.exit_health.retest_phase.idle",
+    }
+}
+
 fn diagnostic_layer_selector(layer: NodeDiagnosticLayer) -> &'static str {
     match layer {
         NodeDiagnosticLayer::Network => "visual-diagnostic-layer-network",
@@ -13924,6 +14286,7 @@ mod tests {
     use fuckipv6_common::crypto::Identity;
     use fuckipv6_common::domain::{
         DiscoveryTransport, ExitAvailabilitySource, ExitContributionAvailability,
+        ExitHealthAssessment, ExitHealthEvidence, ExitHealthRetest, ExitHealthRetestPhase,
         JoinApplicantProfile, JoinRequest, JoinRequestGrantPreview, JoinRequestId, MembershipState,
         MembershipTerms, NetworkDiscoveryDocument, NetworkDiscoveryRecord, NetworkEndpoint,
         NetworkId, NetworkMemberPresence, NodeId, Signature, TopologyBoundary, TopologyConnection,
@@ -15385,6 +15748,81 @@ mod tests {
                     suggestion_key: None,
                 },
             ],
+            exit_health: fuckipv6_common::domain::ExitHealthSnapshot {
+                evidence: vec![
+                    ExitHealthEvidence {
+                        layer: ExitHealthLayer::Process,
+                        state: ExitHealthEvidenceState::Passed,
+                        source: ExitHealthSource::LocalProcess,
+                        observed_at_unix_ms: 1_700_000_001_000,
+                        duration_ms: 1,
+                        target: None,
+                        protocol: None,
+                        error_code: None,
+                    },
+                    ExitHealthEvidence {
+                        layer: ExitHealthLayer::Listening,
+                        state: ExitHealthEvidenceState::Passed,
+                        source: ExitHealthSource::LocalSocket,
+                        observed_at_unix_ms: 1_700_000_001_010,
+                        duration_ms: 2,
+                        target: None,
+                        protocol: None,
+                        error_code: None,
+                    },
+                    ExitHealthEvidence {
+                        layer: ExitHealthLayer::Network,
+                        state: ExitHealthEvidenceState::Passed,
+                        source: ExitHealthSource::LocalNetwork,
+                        observed_at_unix_ms: 1_700_000_001_020,
+                        duration_ms: 3,
+                        target: None,
+                        protocol: None,
+                        error_code: None,
+                    },
+                    ExitHealthEvidence {
+                        layer: ExitHealthLayer::Dns,
+                        state: ExitHealthEvidenceState::Degraded,
+                        source: ExitHealthSource::ControlledProbe,
+                        observed_at_unix_ms: 1_700_000_001_030,
+                        duration_ms: 250,
+                        target: Some(ExitHealthTarget::DnsResolver),
+                        protocol: Some(ExitHealthProtocol::Dns),
+                        error_code: Some("exit.health.dns_timeout".into()),
+                    },
+                    ExitHealthEvidence {
+                        layer: ExitHealthLayer::InternetReachability,
+                        state: ExitHealthEvidenceState::Failed,
+                        source: ExitHealthSource::ControlledProbe,
+                        observed_at_unix_ms: 1_700_000_001_040,
+                        duration_ms: 1_500,
+                        target: Some(ExitHealthTarget::Ipv6Internet),
+                        protocol: Some(ExitHealthProtocol::Ipv6),
+                        error_code: Some("exit.health.ipv6_unreachable".into()),
+                    },
+                ],
+                max_age_ms: 90_000,
+                retest: ExitHealthRetest {
+                    phase: ExitHealthRetestPhase::Completed,
+                    requested_at_unix_ms: 1_700_000_000_500,
+                    started_at_unix_ms: Some(1_700_000_000_600),
+                    finished_at_unix_ms: Some(1_700_000_001_250),
+                },
+            },
+            exit_health_assessment: ExitHealthAssessment {
+                state: ExitHealthState::Degraded,
+                default_candidate: false,
+                reason_code: "exit.health.partially_available".into(),
+                affected_layers: vec![ExitHealthLayer::Dns, ExitHealthLayer::InternetReachability],
+                affected_targets: vec![
+                    ExitHealthTarget::DnsResolver,
+                    ExitHealthTarget::Ipv6Internet,
+                ],
+                affected_protocols: vec![ExitHealthProtocol::Dns, ExitHealthProtocol::Ipv6],
+                fresh_evidence_count: 5,
+                observed_at_unix_ms: Some(1_700_000_001_250),
+                source: Some(ExitHealthSource::ControlledProbe),
+            },
             recovery_actions: vec![crate::node::NodeDiagnosticRecoveryAction {
                 action_id: "cleanup_residuals".into(),
                 impact_key: "diagnostic.recovery.impact.cleanup_residuals".into(),
@@ -15591,10 +16029,16 @@ mod tests {
             "visual-diagnostic-layer-coordinator",
             "visual-diagnostic-layer-relay",
             "visual-diagnostic-layer-exit",
+            "visual-diagnostic-exit-health",
+            "visual-diagnostic-exit-health-process",
+            "visual-diagnostic-exit-health-listening",
+            "visual-diagnostic-exit-health-network",
+            "visual-diagnostic-exit-health-dns",
+            "visual-diagnostic-exit-health-internet_reachability",
         ] {
             assert!(
                 visible.debug_bounds(selector).is_some(),
-                "missing fixed diagnostic layer {selector}"
+                "missing fixed diagnostic element {selector}"
             );
         }
     }

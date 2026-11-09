@@ -844,6 +844,350 @@
       ],
       "type": "object"
     },
+    "ExitHealthAssessment": {
+      "additionalProperties": false,
+      "properties": {
+        "affected_layers": {
+          "items": {
+            "$ref": "#/$defs/ExitHealthLayer"
+          },
+          "type": "array"
+        },
+        "affected_protocols": {
+          "items": {
+            "$ref": "#/$defs/ExitHealthProtocol"
+          },
+          "type": "array"
+        },
+        "affected_targets": {
+          "items": {
+            "$ref": "#/$defs/ExitHealthTarget"
+          },
+          "type": "array"
+        },
+        "default_candidate": {
+          "type": "boolean"
+        },
+        "fresh_evidence_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "observed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitHealthSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/ExitHealthState"
+        }
+      },
+      "required": [
+        "state",
+        "default_candidate",
+        "reason_code",
+        "affected_layers",
+        "affected_targets",
+        "affected_protocols",
+        "fresh_evidence_count"
+      ],
+      "type": "object"
+    },
+    "ExitHealthEvidence": {
+      "additionalProperties": false,
+      "description": "One sanitized observation. `error_code` is a stable machine token and must\nnot contain raw command output, addresses or member identity.",
+      "properties": {
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "layer": {
+          "$ref": "#/$defs/ExitHealthLayer"
+        },
+        "observed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "protocol": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitHealthProtocol"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/ExitHealthSource"
+        },
+        "state": {
+          "$ref": "#/$defs/ExitHealthEvidenceState"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitHealthTarget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "layer",
+        "state",
+        "source",
+        "observed_at_unix_ms",
+        "duration_ms"
+      ],
+      "type": "object"
+    },
+    "ExitHealthEvidenceState": {
+      "enum": [
+        "passed",
+        "degraded",
+        "failed",
+        "unsupported",
+        "not_tested",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "ExitHealthLayer": {
+      "enum": [
+        "process",
+        "listening",
+        "network",
+        "dns",
+        "internet_reachability"
+      ],
+      "type": "string"
+    },
+    "ExitHealthProtocol": {
+      "enum": [
+        "dns",
+        "tcp",
+        "udp",
+        "quic",
+        "ipv4",
+        "ipv6"
+      ],
+      "type": "string"
+    },
+    "ExitHealthRetest": {
+      "additionalProperties": false,
+      "description": "Explicit retest lifecycle. Cancellation is terminal and can never be\nrewritten as a successful completion.",
+      "properties": {
+        "finished_at_unix_ms": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/ExitHealthRetestPhase",
+          "default": "idle"
+        },
+        "requested_at_unix_ms": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "started_at_unix_ms": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ExitHealthRetestPhase": {
+      "enum": [
+        "idle",
+        "requested",
+        "running",
+        "cancelled",
+        "completed",
+        "failed"
+      ],
+      "type": "string"
+    },
+    "ExitHealthSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ExitHealthEvidence"
+          },
+          "type": "array"
+        },
+        "max_age_ms": {
+          "default": 90000,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "retest": {
+          "$ref": "#/$defs/ExitHealthRetest",
+          "default": {
+            "finished_at_unix_ms": null,
+            "phase": "idle",
+            "requested_at_unix_ms": 0,
+            "started_at_unix_ms": null
+          }
+        }
+      },
+      "type": "object"
+    },
+    "ExitHealthSource": {
+      "enum": [
+        "local_process",
+        "local_socket",
+        "local_network",
+        "local_dns",
+        "controlled_probe",
+        "coordinator_health",
+        "remote_peer_report"
+      ],
+      "type": "string"
+    },
+    "ExitHealthState": {
+      "enum": [
+        "unknown",
+        "available",
+        "degraded",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "ExitHealthTarget": {
+      "description": "Stable, non-identifying probe targets. A deployment-controlled target may be\nnamed by an opaque ID, but host names, resolver addresses and member\nidentities are never stored in this health contract.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "dns_resolver",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "ipv4_internet",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "ipv6_internet",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "tcp_internet",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "udp_internet",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "quic_internet",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "controlled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "ExitNodeCapabilities": {
       "description": "Current, non-secret Exit Node capability truth for one node process.\n\n`supported` describes whether a basic IPv4 Exit Node can be installed now.\n`ipv6_forwarding` is independent because an IPv6-only limitation does not\nmake the IPv4 Exit Node implementation unusable.",
       "properties": {
@@ -5673,6 +6017,39 @@
         },
         "diagnostic_id": {
           "type": "string"
+        },
+        "exit_health": {
+          "$ref": "#/$defs/ExitHealthSnapshot",
+          "default": {
+            "evidence": [],
+            "max_age_ms": 90000,
+            "retest": {
+              "finished_at_unix_ms": null,
+              "phase": "idle",
+              "requested_at_unix_ms": 0,
+              "started_at_unix_ms": null
+            }
+          },
+          "description": "Layered local Exit evidence. Missing/stale DNS or Internet evidence is\nvisible here and cannot be promoted from the process state."
+        },
+        "exit_health_assessment": {
+          "$ref": "#/$defs/ExitHealthAssessment",
+          "default": {
+            "affected_layers": [
+              "process",
+              "listening",
+              "network",
+              "dns",
+              "internet_reachability"
+            ],
+            "affected_protocols": [],
+            "affected_targets": [],
+            "default_candidate": false,
+            "fresh_evidence_count": 0,
+            "reason_code": "exit.health.not_observed",
+            "state": "unknown"
+          },
+          "description": "Server-authoritative assessment at `completed_at_unix_ms`. Clients render\nthis result and never recompute health from process state."
         },
         "lifecycle": {
           "$ref": "#/$defs/NodeLifecycleSnapshot"

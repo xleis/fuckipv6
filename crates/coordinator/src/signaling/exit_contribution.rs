@@ -1,8 +1,8 @@
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use fuckipv6_common::domain::{
-    ExitContributionMode, ExitContributionRequest, ExitContributionRequestId,
-    ExitContributionReviewAction, NetworkId, NetworkRecord, NodeId,
+    ExitContributionAuthorizationSnapshot, ExitContributionMode, ExitContributionRequest,
+    ExitContributionRequestId, ExitContributionReviewAction, NetworkId, NetworkRecord, NodeId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -201,6 +201,50 @@ impl ExitContributionRequestStore {
             }
             Ok(request.clone())
         })
+    }
+
+    /// Return the sanitized authorization evidence visible to every current
+    /// network member. Only the newest state per node is projected so a stale
+    /// terminal request cannot overwrite newer approval authority.
+    pub fn authorization_snapshots(
+        &self,
+        network_id: &NetworkId,
+        actor: &NodeId,
+        now_unix_ms: u64,
+    ) -> Result<Vec<ExitContributionAuthorizationSnapshot>> {
+        self.transaction(network_id, now_unix_ms, |file, record, _| {
+            if !record.members.contains(actor) {
+                bail!("exit_contribution.error.permission_denied");
+            }
+            let mut latest = BTreeMap::<NodeId, &ExitContributionRequest>::new();
+            for request in file.requests.values().filter(|request| {
+                request.network_id == *network_id && record.members.contains(&request.node_id)
+            }) {
+                let replace = latest.get(&request.node_id).is_none_or(|current| {
+                    (
+                        request.updated_at_unix_ms,
+                        request.revision,
+                        &request.request_id,
+                    ) > (
+                        current.updated_at_unix_ms,
+                        current.revision,
+                        &current.request_id,
+                    )
+                });
+                if replace {
+                    latest.insert(request.node_id.clone(), request);
+                }
+            }
+            Ok(latest
+                .into_values()
+                .map(ExitContributionRequest::authorization_snapshot)
+                .collect())
+        })
+    }
+
+    /// Read the trusted roster for authenticated availability observations.
+    pub(crate) fn network_record(&self, network_id: &NetworkId) -> Result<NetworkRecord> {
+        read_network_record(&self.network_record_path, network_id)
     }
 
     pub fn review(
@@ -545,6 +589,57 @@ mod tests {
         assert!(reopened
             .list(&network_id(), &member(b"exit-store-outsider"), 2_001)
             .is_err());
+    }
+
+    #[test]
+    fn members_only_receive_the_latest_sanitized_authorization_projection() {
+        let dir = test_dir("authorization-projection");
+        let record = record(ExitContributionMode::ApprovalRequired);
+        let store = store(&dir, &record);
+        let first = submit(&store, b"exit-store-member", &record, 2_000).unwrap();
+        store
+            .review(
+                &network_id(),
+                &admin(),
+                &first.request_id,
+                1,
+                ExitContributionReviewAction::Reject,
+                Some("exit.rejected.policy".into()),
+                2_001,
+            )
+            .unwrap();
+        let second = store
+            .submit(
+                &record.network_id,
+                &member(b"exit-store-member"),
+                ExitContributionRequestId::from_public_key(b"exit-store-second"),
+                record.policy_revision,
+                terms(&record),
+                Some(50_000),
+                Some(5_000_000),
+                2_002,
+            )
+            .unwrap();
+
+        let snapshots = store
+            .authorization_snapshots(&network_id(), &member(b"exit-store-member"), 2_003)
+            .unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].request_id, second.request_id);
+        assert_eq!(snapshots[0].state, ExitContributionRequestState::Pending);
+        let encoded = serde_json::to_value(&snapshots[0]).unwrap();
+        assert!(encoded.get("requested_bandwidth_kbps").is_none());
+        assert!(encoded.get("requested_traffic_quota_bytes").is_none());
+        assert!(encoded.get("reviewer_node_id").is_none());
+        assert!(encoded.get("decision_reason_code").is_none());
+        assert!(store
+            .authorization_snapshots(&network_id(), &member(b"exit-store-outsider"), 2_003)
+            .is_err());
+        assert!(store
+            .network_record(&network_id())
+            .unwrap()
+            .members
+            .contains(&member(b"exit-store-member")));
     }
 
     #[test]

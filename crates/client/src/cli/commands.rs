@@ -27,7 +27,7 @@ use crate::ipc::{self, IpcRequest, IpcResponse};
 use crate::local_ipc::IpcRole;
 use crate::node::{
     NodeCommand, NodeCommandContext, NodeCommandOutcome, NodeCommandRequest, NodeNetworkSnapshot,
-    NodeNetworkStatus, NodeProbePeerCommand, NodeSnapshot,
+    NodeNetworkStatus, NodeProbePeerCommand, NodeSnapshot, RuntimeControlError,
 };
 use crate::p2p::buffer_pool::InboundPayload;
 use crate::p2p::connection::{InPlaceSendOutcome, InboundPacket, P2pEngine, PeerRouteInfo};
@@ -1568,9 +1568,11 @@ fn local_exit_runtime_status(runtime: &ClientRuntime) -> ipc::LocalExitRuntimeSt
 async fn apply_runtime_local_exit_capability(
     runtime: &mut ClientRuntime,
     enabled: bool,
-) -> std::result::Result<ipc::LocalExitRuntimeStatus, String> {
-    // Revoke authorization before touching resources. Every error path below
-    // therefore remains fail-closed even when cleanup has to be retried.
+) -> std::result::Result<ipc::LocalExitRuntimeStatus, RuntimeControlError> {
+    // Persist the owner decision in memory before touching resources. Disable
+    // therefore vetoes every ingress path immediately; enable still requires a
+    // successfully installed data plane before the Exit manager is re-enabled.
+    runtime.local_exit_enabled = enabled;
     runtime.exit_node_manager.set_enabled(false);
     let network_allowed = runtime.config.exit_node.enabled;
     let effective = local_exit_effective(enabled, network_allowed);
@@ -1581,26 +1583,37 @@ async fn apply_runtime_local_exit_capability(
             let forwarder =
                 LinuxExitForwarder::install(&runtime.config.exit_node, runtime.tun_io.name())
                     .await
-                    .map_err(|error| format!("安装 Exit Node 内核转发失败: {error:#}"))?
-                    .ok_or_else(|| "Exit Node 网络角色已启用，但未创建内核转发器".to_string())?;
+                    .map_err(|error| {
+                        RuntimeControlError::Unavailable(format!(
+                            "安装 Exit Node 内核转发失败: {error:#}"
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        RuntimeControlError::Unavailable(
+                            "Exit Node 网络角色已启用，但未创建内核转发器".to_string(),
+                        )
+                    })?;
             runtime.exit_forwarder = Some(forwarder);
         }
         runtime.exit_node_manager.set_enabled(true);
     } else if let Some(mut forwarder) = runtime.exit_forwarder.take() {
         if let Err(error) = forwarder.rollback_within(Duration::from_secs(4)).await {
             runtime.exit_forwarder = Some(forwarder);
-            return Err(format!("清理 Exit Node 内核转发失败，可重试: {error:#}"));
+            return Err(RuntimeControlError::Unavailable(format!(
+                "清理 Exit Node 内核转发失败，可重试: {error:#}"
+            )));
         }
     }
 
     #[cfg(not(target_os = "linux"))]
     {
         if effective {
-            return Err("当前平台不支持本机 Exit 数据面".into());
+            return Err(RuntimeControlError::Unsupported(
+                "当前平台不支持本机 Exit 数据面".into(),
+            ));
         }
     }
 
-    runtime.local_exit_enabled = enabled;
     Ok(local_exit_runtime_status(runtime))
 }
 
@@ -1898,8 +1911,11 @@ async fn admit_inbound_packet(
     // Virtual-network destinations remain ordinary Mesh traffic. Any other
     // destination is privileged exit traffic and must pass every policy check.
     if !runtime.route_engine.is_virtual_network(target_dst) {
-        if !runtime.exit_node_manager.is_exit_node() {
-            tracing::debug!("本机未启用 Exit Node，丢弃 {} -> {target_dst}", packet_src);
+        if !runtime.local_exit_enabled || !runtime.exit_node_manager.is_exit_node() {
+            tracing::debug!(
+                "本机 Exit owner intent 或网络角色未启用，丢弃 {} -> {target_dst}",
+                packet_src
+            );
             return None;
         }
         if !runtime.exit_node_manager.should_forward_as_exit(target_dst) {

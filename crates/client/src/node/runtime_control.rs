@@ -87,6 +87,7 @@ enum RuntimeRoutingRequestError {
     TimedOut(Duration),
     ResponseClosed,
     Rejected(String),
+    LocalExitRejected(RuntimeControlError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -2610,6 +2611,32 @@ impl NetworkRuntimeActor {
             .await;
     }
 
+    async fn set_local_exit_post_request_transition(
+        &self,
+        stage: LocalExitCapabilityStage,
+        owner_exit_enabled: bool,
+        statuses: &[ipc::LocalExitRuntimeStatus],
+    ) {
+        let network_allowed = statuses.iter().any(|status| status.network_allowed);
+        let active_clients = statuses.iter().fold(0u32, |total, status| {
+            total.saturating_add(status.active_clients)
+        });
+        let total_clients = statuses.iter().fold(0u64, |total, status| {
+            total.saturating_add(status.total_clients)
+        });
+        self.publish_local_exit_capability(LocalExitCapabilitySnapshot {
+            owner_exit_enabled,
+            stage,
+            healthy: false,
+            network_allowed,
+            active_clients,
+            total_clients,
+            problem: None,
+            last_transition_at_unix_ms: 0,
+        })
+        .await;
+    }
+
     async fn request_all_local_exit_capabilities(
         &self,
         enabled: bool,
@@ -2722,6 +2749,30 @@ impl NetworkRuntimeActor {
             ))
             .await;
             return Err(error);
+        }
+
+        let requested_statuses = results
+            .iter()
+            .filter_map(|(_, result)| result.as_ref().ok().copied())
+            .collect::<Vec<_>>();
+        if enabled
+            && requested_statuses
+                .iter()
+                .any(|status| status.network_allowed)
+        {
+            self.set_local_exit_post_request_transition(
+                LocalExitCapabilityStage::HealthChecking,
+                enabled,
+                &requested_statuses,
+            )
+            .await;
+        } else if !enabled {
+            self.set_local_exit_post_request_transition(
+                LocalExitCapabilityStage::Cleaning,
+                enabled,
+                &requested_statuses,
+            )
+            .await;
         }
 
         if let Err(error) = self.configs.set_node_local_exit_enabled(enabled) {
@@ -5819,7 +5870,7 @@ async fn request_runtime_routing_update(
         Err(_) => Err(RuntimeRoutingRequestError::TimedOut(wait)),
         Ok(Err(_)) => Err(RuntimeRoutingRequestError::ResponseClosed),
         Ok(Ok(Ok(result))) => Ok(result),
-        Ok(Ok(Err(message))) => Err(RuntimeRoutingRequestError::Rejected(message)),
+        Ok(Ok(Err(error))) => Err(RuntimeRoutingRequestError::Rejected(error)),
     }
 }
 
@@ -5854,6 +5905,9 @@ fn describe_routing_request_failure(error: &RuntimeRoutingRequestError) -> Strin
         }
         RuntimeRoutingRequestError::ResponseClosed => "运行时在完成前关闭了响应通道".into(),
         RuntimeRoutingRequestError::Rejected(message) => format!("运行时拒绝更新: {message}"),
+        RuntimeRoutingRequestError::LocalExitRejected(error) => {
+            format!("运行时拒绝本机 Exit 请求: {error}")
+        }
     }
 }
 
@@ -5871,11 +5925,11 @@ async fn request_runtime_local_exit(
         Err(_) => Err(RuntimeRoutingRequestError::TimedOut(wait)),
         Ok(Err(_)) => Err(RuntimeRoutingRequestError::ResponseClosed),
         Ok(Ok(Ok(result))) => Ok(result),
-        Ok(Ok(Err(message))) => Err(RuntimeRoutingRequestError::Rejected(message)),
+        Ok(Ok(Err(error))) => Err(RuntimeRoutingRequestError::LocalExitRejected(error)),
     }
 }
 
-fn local_exit_unsupported_error(
+pub(crate) fn local_exit_unsupported_error(
     capabilities: &ExitNodeCapabilities,
 ) -> Option<RuntimeControlError> {
     if capabilities.supported {
@@ -5896,7 +5950,7 @@ fn local_exit_unsupported_error(
     }
 }
 
-fn runtime_control_problem(error: &RuntimeControlError) -> NodeProblem {
+pub(crate) fn runtime_control_problem(error: &RuntimeControlError) -> NodeProblem {
     NodeProblem::new(error.problem_code(), error.to_string())
         .with_message_key(error.message_key())
         .retryable(error.retryable())
@@ -5917,9 +5971,85 @@ fn local_exit_request_error(
         RuntimeRoutingRequestError::ResponseClosed => RuntimeControlError::Unavailable(format!(
             "网络 [{network_name}] 的运行时在完成本机 Exit 启停前关闭了响应通道"
         )),
+        RuntimeRoutingRequestError::LocalExitRejected(error) => {
+            local_exit_error_with_network(network_name, error.clone())
+        }
         RuntimeRoutingRequestError::Rejected(message) => RuntimeControlError::Unavailable(format!(
             "网络 [{network_name}] 的运行时拒绝本机 Exit 启停: {message}"
         )),
+    }
+}
+
+fn local_exit_error_with_network(
+    network_name: &str,
+    error: RuntimeControlError,
+) -> RuntimeControlError {
+    let context = format!("网络 [{network_name}] 的本机 Exit 启停");
+    match error {
+        RuntimeControlError::ActorClosed => {
+            RuntimeControlError::Unavailable(format!("{context}：节点运行时已关闭"))
+        }
+        RuntimeControlError::Invalid(message) => {
+            RuntimeControlError::Invalid(format!("{context}：{message}"))
+        }
+        RuntimeControlError::Conflict(message) => {
+            RuntimeControlError::Conflict(format!("{context}：{message}"))
+        }
+        RuntimeControlError::CreationConflict { reason, message } => {
+            RuntimeControlError::CreationConflict {
+                reason,
+                message: format!("{context}：{message}"),
+            }
+        }
+        RuntimeControlError::PermissionDenied(message) => {
+            RuntimeControlError::PermissionDenied(format!("{context}：{message}"))
+        }
+        RuntimeControlError::Cancelled(message) => {
+            RuntimeControlError::Cancelled(format!("{context}：{message}"))
+        }
+        RuntimeControlError::Unsupported(message) => {
+            RuntimeControlError::Unsupported(format!("{context}：{message}"))
+        }
+        RuntimeControlError::NotFound(message) => {
+            RuntimeControlError::NotFound(format!("{context}：{message}"))
+        }
+        RuntimeControlError::Unavailable(message) => {
+            RuntimeControlError::Unavailable(format!("{context}：{message}"))
+        }
+        RuntimeControlError::Persistence(message) => {
+            RuntimeControlError::Persistence(format!("{context}：{message}"))
+        }
+        RuntimeControlError::Storage(message) => {
+            RuntimeControlError::Storage(format!("{context}：{message}"))
+        }
+        RuntimeControlError::Launch(message) => {
+            RuntimeControlError::Launch(format!("{context}：{message}"))
+        }
+        RuntimeControlError::NetworkSetup { stage, message } => RuntimeControlError::NetworkSetup {
+            stage,
+            message: format!("{context}：{message}"),
+        },
+        RuntimeControlError::Timeout(message) => {
+            RuntimeControlError::Timeout(format!("{context}：{message}"))
+        }
+        RuntimeControlError::JoinRequest {
+            code,
+            message_key,
+            message,
+        } => RuntimeControlError::JoinRequest {
+            code,
+            message_key,
+            message: format!("{context}：{message}"),
+        },
+        RuntimeControlError::Invitation {
+            code,
+            message_key,
+            message,
+        } => RuntimeControlError::Invitation {
+            code,
+            message_key,
+            message: format!("{context}：{message}"),
+        },
     }
 }
 
@@ -6560,10 +6690,12 @@ mod tests {
                                             .expect("next local exit failure lock poisoned")
                                             .remove(&routing_network_name);
                                         if failed {
-                                            let _ = reply.send(Err(format!(
-                                                "网络 [{}] 测试本机 Exit 启停失败",
-                                                routing_network_name
-                                            )));
+                                            let _ = reply.send(Err(
+                                                RuntimeControlError::Unavailable(format!(
+                                                    "网络 [{}] 测试本机 Exit 启停失败",
+                                                    routing_network_name
+                                                )),
+                                            ));
                                             continue;
                                         }
                                         let network_allowed = current_config.exit_node.enabled;

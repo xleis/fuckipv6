@@ -10,7 +10,9 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
-use crate::node::{NodeCommandBus, NodeCommandContext, NodeCommandRequest, NodeCommandResult};
+use crate::node::{
+    NodeCommandBus, NodeCommandContext, NodeCommandRequest, NodeCommandResult, RuntimeControlError,
+};
 use crate::p2p::connection::{P2pEngine, PeerProbeOutcome};
 use crate::stats::StatsCollector;
 
@@ -75,7 +77,7 @@ pub struct LocalExitRuntimeStatus {
 }
 
 /// Commands delivered from the local control interface to the live runtime.
-pub enum RuntimeCommand {
+pub(crate) enum RuntimeCommand {
     ProbePeer {
         target: String,
         timeout_ms: u64,
@@ -89,7 +91,7 @@ pub enum RuntimeCommand {
     },
     SetLocalExitCapability {
         enabled: bool,
-        reply: oneshot::Sender<Result<LocalExitRuntimeStatus, String>>,
+        reply: oneshot::Sender<Result<LocalExitRuntimeStatus, RuntimeControlError>>,
     },
     Disconnect {
         reply: oneshot::Sender<Result<(), String>>,
@@ -312,14 +314,14 @@ impl MultiNetworkRegistry {
         }
     }
 
-    pub fn set_control_sender(&self, tx: mpsc::UnboundedSender<RuntimeCommand>) {
+    pub(crate) fn set_control_sender(&self, tx: mpsc::UnboundedSender<RuntimeCommand>) {
         *self
             .control_tx
             .write()
             .expect("IPC control sender lock poisoned") = Some(tx);
     }
 
-    pub fn send_control(&self, command: RuntimeCommand) -> bool {
+    pub(crate) fn send_control(&self, command: RuntimeCommand) -> bool {
         if let Some(tx) = self
             .control_tx
             .read()
@@ -434,7 +436,7 @@ pub fn spawn_server(
     spawn_multi_server_at(default_addr(), registry)
 }
 
-pub fn spawn_server_with_control(
+pub(crate) fn spawn_server_with_control(
     stats: StatsCollector,
     p2p: P2pEngine,
     assigned_ip: Ipv6Addr,

@@ -18,7 +18,7 @@ use fuckipv6_common::domain::{
     MemberRemovalPreview, MembershipState, NetworkId, NetworkMemberDirectory,
     NetworkProfileApplyResult, NetworkProfilePreview, NodeId, PolicyTestResult, PrivacyField,
     PrivacyObjectState, PrivacyViewer, ProjectedActivityEntry, TopologyConnection, TopologyNode,
-    TopologySnapshot, TrafficPolicyTestComparison, TrafficRoutingPageModel,
+    TopologySnapshot, TrafficPolicyTestComparison, TrafficRoutingPageModel, TrafficSessionSnapshot,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -97,6 +97,11 @@ pub struct ProjectedNodeSnapshot {
     pub routing_summaries: Vec<NodeRoutingSummarySnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traffic_routing_page: Option<TrafficRoutingPageModel>,
+    /// Authoritative local protection state. It contains only stable state,
+    /// timestamps, reason codes and validation booleans, so every authorized
+    /// snapshot viewer can render it without receiving host details.
+    #[serde(default)]
+    pub traffic_session: TrafficSessionSnapshot,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub network_profiles: Vec<super::state::NodeNetworkProfileSnapshot>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1133,6 +1138,7 @@ pub fn project_node_snapshot(
         traffic_routing_page: owner
             .then(|| snapshot.traffic_routing_page.clone())
             .flatten(),
+        traffic_session: snapshot.traffic_session.clone(),
         network_profiles: snapshot.network_profiles.clone(),
         exit_selections,
         memberships: if owner {
@@ -1572,7 +1578,11 @@ mod tests {
 
     #[test]
     fn non_owner_serialization_omits_hidden_fields_and_control_plane_data() {
-        let snapshot = full_snapshot();
+        let mut snapshot = full_snapshot();
+        snapshot
+            .traffic_session
+            .set_connecting(1_500, "traffic.session.connecting")
+            .unwrap();
         let original = snapshot.clone();
         let home = network("home");
         let policy = snapshot.access_control.field_privacy_policies[0].clone();
@@ -1597,6 +1607,8 @@ mod tests {
         assert!(projected.interfaces.is_empty());
         assert!(projected.memberships.is_empty());
         assert!(projected.logs.is_empty());
+        assert_eq!(projected.traffic_session, snapshot.traffic_session);
+        assert_eq!(json["traffic_session"]["state"], "connecting");
         for key in [
             "identity",
             "configuration",

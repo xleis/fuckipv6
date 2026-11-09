@@ -1922,11 +1922,7 @@ fn apply_local_join_capabilities(
         .map(|capability| capability.kind)
         .collect();
     preview.local_exit_available = snapshot.exit_node_capabilities.supported;
-    preview.local_exit_enabled = snapshot
-        .networks
-        .iter()
-        .find(|network| network.name == preview.network_name)
-        .is_some_and(|network| network.roles.contains(&super::NodeNetworkRole::ExitNode));
+    preview.local_exit_enabled = snapshot.local_exit.owner_exit_enabled;
     if preview.exit_contribution == ExitContributionObligation::Required
         && !preview.local_exit_available
     {
@@ -5870,7 +5866,8 @@ mod tests {
 
     fn local_capability_snapshot(
         supported: bool,
-        exit_role_enabled: bool,
+        network_exit_role_enabled: bool,
+        owner_exit_enabled: bool,
         exit_capability_state: fuckipv6_common::domain::CapabilityState,
     ) -> crate::node::NodeSnapshot {
         use crate::node::state::{NodeCapabilityRegistrySnapshot, NodeCapabilitySnapshot};
@@ -5901,7 +5898,7 @@ mod tests {
                 assigned_ipv4: None,
                 p2p_listen_addr: None,
                 uptime_secs: 30,
-                roles: if exit_role_enabled {
+                roles: if network_exit_role_enabled {
                     vec![NodeNetworkRole::Member, NodeNetworkRole::ExitNode]
                 } else {
                     vec![NodeNetworkRole::Member]
@@ -5909,6 +5906,10 @@ mod tests {
                 peer_count: 2,
                 traffic: NodeTrafficSnapshot::default(),
             }],
+            local_exit: crate::node::LocalExitCapabilitySnapshot {
+                owner_exit_enabled,
+                ..crate::node::LocalExitCapabilitySnapshot::default()
+            },
             ..crate::node::NodeSnapshot::default()
         }
     }
@@ -5918,6 +5919,7 @@ mod tests {
         let mut preview =
             join_preview_for_local_capability_test(ExitContributionObligation::Required);
         let snapshot = local_capability_snapshot(
+            false,
             false,
             false,
             fuckipv6_common::domain::CapabilityState::Unsupported,
@@ -5947,6 +5949,7 @@ mod tests {
         let snapshot = local_capability_snapshot(
             true,
             false,
+            false,
             fuckipv6_common::domain::CapabilityState::Enabled,
         );
 
@@ -5966,6 +5969,7 @@ mod tests {
         let enabled_snapshot = local_capability_snapshot(
             true,
             true,
+            true,
             fuckipv6_common::domain::CapabilityState::Enabled,
         );
         apply_local_join_capabilities(&mut preview, &enabled_snapshot);
@@ -5973,10 +5977,28 @@ mod tests {
     }
 
     #[test]
+    fn network_exit_role_does_not_override_disabled_local_owner_intent() {
+        let mut preview =
+            join_preview_for_local_capability_test(ExitContributionObligation::NotRequired);
+        let snapshot = local_capability_snapshot(
+            true,
+            true,
+            false,
+            fuckipv6_common::domain::CapabilityState::Enabled,
+        );
+
+        apply_local_join_capabilities(&mut preview, &snapshot);
+
+        assert!(preview.local_exit_available);
+        assert!(!preview.local_exit_enabled);
+    }
+
+    #[test]
     fn optional_exit_join_remains_available_without_local_exit_support() {
         let mut preview =
             join_preview_for_local_capability_test(ExitContributionObligation::NotRequired);
         let snapshot = local_capability_snapshot(
+            false,
             false,
             false,
             fuckipv6_common::domain::CapabilityState::Unsupported,

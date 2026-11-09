@@ -131,6 +131,8 @@ pub struct LinuxExitForwarder {
     forward_chain: String,
     nat_chain: String,
     clients: HashMap<String, ClientForwardState>,
+    authorized_client_ids: HashSet<String>,
+    total_clients: u64,
     ipv4_forward_changed: bool,
     ipv6_forward_changed: bool,
     cleaned: bool,
@@ -147,6 +149,7 @@ impl fmt::Debug for LinuxExitForwarder {
             .field("forward_chain", &self.forward_chain)
             .field("nat_chain", &self.nat_chain)
             .field("clients", &self.clients)
+            .field("total_clients", &self.total_clients)
             .field("cleaned", &self.cleaned)
             .finish_non_exhaustive()
     }
@@ -176,6 +179,8 @@ impl LinuxExitForwarder {
             forward_chain,
             nat_chain,
             clients: HashMap::new(),
+            authorized_client_ids: HashSet::new(),
+            total_clients: 0,
             ipv4_forward_changed: false,
             ipv6_forward_changed: false,
             cleaned: false,
@@ -214,6 +219,36 @@ impl LinuxExitForwarder {
             IpAddr::V4(_) => true,
             IpAddr::V6(_) => self.external_v6_interface.is_some(),
         }
+    }
+
+    /// Number of clients whose forwarding resources are currently authorized.
+    pub fn active_clients(&self) -> u32 {
+        self.clients
+            .values()
+            .filter(|state| state.authorized)
+            .count()
+            .try_into()
+            .unwrap_or(u32::MAX)
+    }
+
+    /// Number of distinct clients ever authorized by this forwarder.
+    pub fn total_clients(&self) -> u64 {
+        self.total_clients
+    }
+
+    /// Remove stale Exit resources keyed by this TUN name without changing
+    /// kernel forwarding sysctls. Both address families are always checked:
+    /// a previous process may have installed IPv6 resources even when the
+    /// current host no longer has an IPv6 default route.
+    pub async fn purge_stale(tun_name: &str) -> Result<()> {
+        let runner = SystemCommandRunner;
+        Self::purge_stale_with_runner(&runner, tun_name).await
+    }
+
+    async fn purge_stale_with_runner(runner: &dyn ExitCommandRunner, tun_name: &str) -> Result<()> {
+        let deadline = Instant::now() + ROLLBACK_TIMEOUT;
+        purge_stale_chains_for_tun(runner, tun_name, deadline).await?;
+        purge_stale_return_routes_for_tun(runner, tun_name, deadline).await
     }
 
     /// Grant forwarding resources to one authenticated client.
@@ -295,6 +330,9 @@ impl LinuxExitForwarder {
 
         state.authorized = true;
         self.clients.insert(client_id.to_string(), state);
+        if self.authorized_client_ids.insert(client_id.to_string()) {
+            self.total_clients = self.total_clients.saturating_add(1);
+        }
         tracing::info!(
             "Exit Node 已授权客户端 {}: {:?}",
             client_id,
@@ -433,67 +471,13 @@ impl LinuxExitForwarder {
     }
 
     async fn purge_stale_return_routes(&self) -> Result<()> {
-        let mut families = vec![false];
-        if self.external_v6_interface.is_some() {
-            families.push(true);
-        }
-        for ipv6 in families {
-            let mut args = vec!["route".to_string()];
-            if ipv6 {
-                args.insert(0, "-6".to_string());
-            }
-            args.extend(
-                [
-                    "flush",
-                    "table",
-                    "main",
-                    "proto",
-                    ROUTE_PROTOCOL,
-                    "dev",
-                    &self.tun_name,
-                ]
-                .into_iter()
-                .map(str::to_string),
-            );
-            let output = self
-                .runner
-                .run(CommandInvocation {
-                    program: "ip".to_string(),
-                    args,
-                })
-                .await
-                .context("清理 Exit Node 残留回程路由时无法执行 ip 命令")?;
-            if !output.success {
-                anyhow::bail!(
-                    "清理 Exit Node 残留回程路由失败: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
-            }
-        }
-        Ok(())
+        let deadline = Instant::now() + ROLLBACK_TIMEOUT;
+        purge_stale_return_routes_for_tun(self.runner.as_ref(), &self.tun_name, deadline).await
     }
 
     async fn purge_stale_chains(&mut self) -> Result<()> {
-        for (program, table, builtin, chain) in [
-            ("iptables", "filter", "FORWARD", self.forward_chain.as_str()),
-            ("iptables", "nat", "POSTROUTING", self.nat_chain.as_str()),
-        ] {
-            purge_iptables_chain(self.runner.as_ref(), program, table, builtin, chain).await?;
-        }
-        if self.external_v6_interface.is_some() {
-            for (program, table, builtin, chain) in [
-                (
-                    "ip6tables",
-                    "filter",
-                    "FORWARD",
-                    self.forward_chain.as_str(),
-                ),
-                ("ip6tables", "nat", "POSTROUTING", self.nat_chain.as_str()),
-            ] {
-                purge_iptables_chain(self.runner.as_ref(), program, table, builtin, chain).await?;
-            }
-        }
-        Ok(())
+        let deadline = Instant::now() + ROLLBACK_TIMEOUT;
+        purge_stale_chains_for_tun(self.runner.as_ref(), &self.tun_name, deadline).await
     }
 
     /// Remove every resource owned by this manager with a hard deadline.
@@ -1056,23 +1040,59 @@ fn remove_return_route_sync(
     Ok(())
 }
 
-async fn purge_iptables_chain(
+async fn purge_stale_chains_for_tun(
     runner: &dyn ExitCommandRunner,
-    program: &str,
-    table: &str,
-    builtin: &str,
-    chain: &str,
+    tun_name: &str,
+    deadline: Instant,
 ) -> Result<()> {
-    for _ in 0..MAX_STALE_JUMP_RULES {
-        if run_iptables(runner, program, Some(table), &["-D", builtin, "-j", chain])
+    let forward_chain = chain_name("F", tun_name);
+    let nat_chain = chain_name("N", tun_name);
+    for (program, table, builtin, chain) in [
+        ("iptables", "filter", "FORWARD", forward_chain.as_str()),
+        ("iptables", "nat", "POSTROUTING", nat_chain.as_str()),
+        ("ip6tables", "filter", "FORWARD", forward_chain.as_str()),
+        ("ip6tables", "nat", "POSTROUTING", nat_chain.as_str()),
+    ] {
+        cleanup_iptables_chain_bounded(runner, program, table, builtin, chain, deadline)
             .await
-            .is_err()
-        {
-            break;
+            .with_context(|| format!("清理 {program} {table} 残留链 {chain} 失败"))?;
+    }
+    Ok(())
+}
+
+async fn purge_stale_return_routes_for_tun(
+    runner: &dyn ExitCommandRunner,
+    tun_name: &str,
+    deadline: Instant,
+) -> Result<()> {
+    for ipv6 in [false, true] {
+        let Some(remaining) = rollback_remaining(deadline) else {
+            anyhow::bail!("清理 Exit Node 残留回程路由超过总期限");
+        };
+        let invocation = ip_invocation(
+            ipv6,
+            &[
+                "route",
+                "flush",
+                "table",
+                "main",
+                "proto",
+                ROUTE_PROTOCOL,
+                "dev",
+                tun_name,
+            ],
+        );
+        let output = timeout(remaining.min(COMMAND_TIMEOUT), runner.run(invocation))
+            .await
+            .map_err(|_| anyhow::anyhow!("清理 Exit Node 残留回程路由超过期限"))?
+            .context("清理 Exit Node 残留回程路由时无法执行 ip 命令")?;
+        if !output.success {
+            anyhow::bail!(
+                "清理 Exit Node 残留回程路由失败: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
         }
     }
-    let _ = run_iptables(runner, program, Some(table), &["-F", chain]).await;
-    let _ = run_iptables(runner, program, Some(table), &["-X", chain]).await;
     Ok(())
 }
 
@@ -1419,6 +1439,8 @@ mod tests {
             external_v4_interface: "eth0".to_string(),
             external_v6_interface: external_v6_interface.map(str::to_string),
             clients: HashMap::new(),
+            authorized_client_ids: HashSet::new(),
+            total_clients: 0,
             ipv4_forward_changed: false,
             ipv6_forward_changed: false,
             cleaned: false,
@@ -1472,6 +1494,104 @@ mod tests {
         let args = iptables_delete_args(&rule);
         assert_eq!(&args[..3], ["-D", "FKV6F-TEST", "-i"]);
         assert!(!args.contains(&"1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn client_metrics_track_active_and_distinct_totals() {
+        let runner = Arc::new(FakeCommandRunner::default());
+        let mut forwarder = fake_forwarder(runner, None);
+        let first = VirtualIps::from_ipv4("10.8.0.2".parse().expect("valid IPv4"));
+        let second = VirtualIps::from_ipv4("10.8.0.3".parse().expect("valid IPv4"));
+
+        forwarder
+            .allow_client("peer-1", &first)
+            .await
+            .expect("authorize first client");
+        forwarder
+            .allow_client("peer-1", &first)
+            .await
+            .expect("repeat authorization is idempotent");
+        assert_eq!(forwarder.active_clients(), 1);
+        assert_eq!(forwarder.total_clients(), 1);
+
+        forwarder
+            .allow_client("peer-2", &second)
+            .await
+            .expect("authorize second client");
+        assert_eq!(forwarder.active_clients(), 2);
+        assert_eq!(forwarder.total_clients(), 2);
+
+        forwarder
+            .remove_client("peer-1")
+            .await
+            .expect("revoke first client");
+        assert_eq!(forwarder.active_clients(), 1);
+        assert_eq!(forwarder.total_clients(), 2);
+        forwarder
+            .remove_client("peer-2")
+            .await
+            .expect("revoke second client");
+        assert_eq!(forwarder.active_clients(), 0);
+        assert_eq!(forwarder.total_clients(), 2);
+    }
+
+    #[tokio::test]
+    async fn stale_purge_covers_both_address_families_and_is_idempotent() {
+        let runner = Arc::new(FakeCommandRunner::default());
+        let tun_name = "fip6stale";
+        let forward_chain = chain_name("F", tun_name);
+        let nat_chain = chain_name("N", tun_name);
+
+        LinuxExitForwarder::purge_stale_with_runner(runner.as_ref(), tun_name)
+            .await
+            .expect("fake host accepts stale cleanup");
+        LinuxExitForwarder::purge_stale_with_runner(runner.as_ref(), tun_name)
+            .await
+            .expect("repeating stale cleanup is idempotent");
+
+        let runs = runner.async_runs();
+        for (program, table, builtin, chain) in [
+            ("iptables", "filter", "FORWARD", forward_chain.as_str()),
+            ("iptables", "nat", "POSTROUTING", nat_chain.as_str()),
+            ("ip6tables", "filter", "FORWARD", forward_chain.as_str()),
+            ("ip6tables", "nat", "POSTROUTING", nat_chain.as_str()),
+        ] {
+            for args in [
+                vec!["-D", builtin, "-j", chain],
+                vec!["-F", chain],
+                vec!["-X", chain],
+            ] {
+                assert!(
+                    runs.contains(&iptables_invocation(program, Some(table), &args)),
+                    "missing {program} {table} stale cleanup: {args:?}"
+                );
+            }
+        }
+        for ipv6 in [false, true] {
+            assert!(runs.contains(&ip_invocation(
+                ipv6,
+                &["route", "flush", "table", "main", "proto", "99", "dev", tun_name,],
+            )));
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_purge_accepts_already_missing_firewall_resources() {
+        let runner = Arc::new(FakeCommandRunner::default());
+        let tun_name = "fip6stale";
+        let nat_chain = chain_name("N", tun_name);
+        runner.fail_async_with(
+            iptables_invocation(
+                "ip6tables",
+                Some("nat"),
+                &["-D", "POSTROUTING", "-j", nat_chain.as_str()],
+            ),
+            "No chain/target/match by that name.",
+        );
+
+        LinuxExitForwarder::purge_stale_with_runner(runner.as_ref(), tun_name)
+            .await
+            .expect("missing stale firewall resources are already clean");
     }
 
     #[test]

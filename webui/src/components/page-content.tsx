@@ -69,6 +69,7 @@ import type {
   NodeSnapshot,
   NodeUiAction,
   NodeUiPage,
+  TrafficFailureKind,
 } from "../../../contracts/typescript/node-contract-v1";
 import {
   EMPTY_ACTIVITY_FILTERS,
@@ -87,6 +88,7 @@ import {
   i18n,
   label,
   primaryStatus,
+  trafficProtectionStatus,
   type ActionValues,
 } from "../contract/invariants";
 import {
@@ -163,13 +165,39 @@ function exitSelectionReasonLabel(locale: Locale, code: string): string {
 }
 
 function statusTone(value: string): string {
-  if (["online", "running", "enabled", "available", "up"].includes(value))
+  if (
+    ["online", "running", "enabled", "available", "up", "protected"].includes(
+      value,
+    )
+  )
     return "good";
-  if (["failed", "error", "unavailable", "unsupported", "down"].includes(value))
+  if (
+    ["failed", "error", "unavailable", "unsupported", "down", "fail_closed"].includes(
+      value,
+    )
+  )
     return "bad";
-  if (["degraded", "connecting", "starting", "stopping"].includes(value))
+  if (
+    [
+      "degraded",
+      "connecting",
+      "starting",
+      "stopping",
+      "migrating",
+      "explicit_direct_fallback",
+    ].includes(value)
+  )
     return "warn";
   return "neutral";
+}
+
+function trafficFailureLabel(
+  locale: Locale,
+  failure: TrafficFailureKind,
+): string {
+  const key = `traffic.session.failure.${failure}`;
+  const localized = label(locale, key);
+  return localized === key ? failure : localized;
 }
 
 function routingTone(status: NodeRoutingSummarySnapshot["status"]): string {
@@ -836,6 +864,10 @@ function Overview({
   "snapshot" | "locale" | "onSelectNetwork" | "onNavigate" | "onRequestAction"
 >) {
   const status = primaryStatus(snapshot, locale);
+  const traffic = trafficProtectionStatus(snapshot, locale);
+  const trafficSession = snapshot.traffic_session;
+  const trafficValidation = trafficSession?.validation;
+  const trafficEvents = (trafficSession?.events ?? []).slice(-8).reverse();
   const issues = overviewIssues(snapshot, locale);
   const activity = recentOverviewActivity(snapshot, locale);
   const nodeName =
@@ -892,6 +924,128 @@ function Overview({
           ))}
         </section>
       ) : null}
+
+      <section
+        className={`surface-card traffic-session-card ${traffic.tone}`}
+        data-testid="overview-traffic-session"
+      >
+        <div className="card-heading">
+          <div>
+            <h3>{label(locale, "traffic.session.title")}</h3>
+            <p>
+              {trafficSession?.changed_at_unix_ms
+                ? tr(locale, "traffic.session.changed_at_value", {
+                    time: formatTimestamp(
+                      locale,
+                      trafficSession.changed_at_unix_ms,
+                    ),
+                  })
+                : label(locale, "traffic.session.not_observed")}
+            </p>
+          </div>
+          {traffic.id === "protected" ? (
+            <ShieldCheck size={17} />
+          ) : traffic.id === "fail_closed" ? (
+            <AlertTriangle size={17} />
+          ) : (
+            <Activity size={17} />
+          )}
+        </div>
+        <div className="traffic-session-summary">
+          <span className={`status-pill ${traffic.tone}`}>
+            {traffic.label}
+          </span>
+          <code>{traffic.detail}</code>
+        </div>
+        <div className="traffic-session-meta">
+          <span>
+            {label(locale, "traffic.session.reason")}
+            <code>{trafficSession?.reason_code ?? label(locale, "traffic.session.no_reason")}</code>
+          </span>
+          <span>
+            {label(locale, "traffic.session.failure")}
+            <code>
+              {trafficSession?.failure
+                ? trafficFailureLabel(locale, trafficSession.failure)
+                : label(locale, "common.none")}
+            </code>
+          </span>
+        </div>
+        <h4>{label(locale, "traffic.session.validation.title")}</h4>
+        {trafficValidation ? (
+          <>
+            <p className="traffic-session-validation-time">
+              {tr(locale, "traffic.session.validation.observed_at", {
+                time: formatTimestamp(
+                  locale,
+                  trafficValidation.observed_at_unix_ms,
+                ),
+              })}
+            </p>
+            <div className="traffic-session-validation">
+              {(
+                [
+                  ["tun", trafficValidation.tun_validated],
+                  ["routes", trafficValidation.routes_validated],
+                  ["dns", trafficValidation.dns_validated],
+                  ["reachability", trafficValidation.reachability_validated],
+                ] as Array<[string, boolean]>
+              ).map(([key, passed]) => (
+                <span
+                  className={`status-pill ${passed ? "good" : "bad"}`}
+                  key={key}
+                >
+                  {label(locale, `traffic.session.validation.${key}`)}:{" "}
+                  {label(
+                    locale,
+                    passed
+                      ? "traffic.session.validation.passed"
+                      : "traffic.session.validation.failed",
+                  )}
+                </span>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p className="traffic-session-empty">
+            {label(locale, "traffic.session.validation.none")}
+          </p>
+        )}
+        <h4>{label(locale, "traffic.session.events.title")}</h4>
+        {trafficEvents.length === 0 ? (
+          <p className="traffic-session-empty">
+            {label(locale, "traffic.session.events.empty")}
+          </p>
+        ) : (
+          <div className="traffic-session-events">
+            {trafficEvents.map((event, index) => (
+              <div
+                className="traffic-session-event"
+                data-event-kind={event.kind}
+                key={`${event.occurred_at_unix_ms}-${event.kind}-${index}`}
+              >
+                <CircleDot size={14} className={statusTone(event.state)} />
+                <span>
+                  <strong>
+                    {label(locale, `traffic.session.event.${event.kind}`)}
+                  </strong>
+                  <small>
+                    {label(locale, `traffic.session.state.${event.state}`)} ·{" "}
+                    {formatTimestamp(locale, event.occurred_at_unix_ms)}
+                  </small>
+                  {event.failure ? (
+                    <code>
+                      {label(locale, "traffic.session.failure")}:{" "}
+                      {trafficFailureLabel(locale, event.failure)}
+                    </code>
+                  ) : null}
+                  {event.reason_code ? <code>{event.reason_code}</code> : null}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
 
       <section className="surface-card" data-testid="overview-networks">
         <div className="card-heading">

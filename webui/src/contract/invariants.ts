@@ -39,6 +39,7 @@ import type {
   TrafficPolicyPreview,
   TrafficPolicyRollbackResult,
   TrafficPolicyTestComparison,
+  TrafficProtectionState,
   NodeProblem,
   NodeSnapshot,
   NodeUiAction,
@@ -759,6 +760,8 @@ export function validateSnapshot(snapshot: unknown): NodeSnapshot {
   ) {
     fail("permissions invalid");
   }
+  if (value.traffic_session !== undefined)
+    validateTrafficSessionSnapshot(value.traffic_session);
   if (value.tun_capabilities !== undefined) {
     if (
       !record(value.tun_capabilities) ||
@@ -909,6 +912,36 @@ export function primaryStatus(
     id,
     label: label(locale, `status.primary.${id}`),
     detail: label(locale, `status.primary.${id}.detail`),
+  };
+}
+
+export function trafficProtectionStatus(
+  snapshot: NodeSnapshot,
+  locale: Locale,
+): {
+  id: TrafficProtectionState;
+  label: string;
+  detail: string;
+  tone: "good" | "warn" | "bad" | "neutral";
+} {
+  const session = snapshot.traffic_session;
+  const id = session?.state ?? "idle";
+  if (!TRAFFIC_PROTECTION_STATES.has(id))
+    fail(`unknown traffic protection state ${id}`);
+  return {
+    id,
+    label: label(locale, `traffic.session.state.${id}`),
+    detail: session?.reason_code || label(locale, "traffic.session.no_reason"),
+    tone:
+      id === "protected"
+        ? "good"
+        : id === "fail_closed"
+          ? "bad"
+          : id === "connecting" ||
+              id === "migrating" ||
+              id === "explicit_direct_fallback"
+            ? "warn"
+            : "neutral",
   };
 }
 
@@ -1556,8 +1589,121 @@ const TRAFFIC_FAILURE_KINDS = new Set([
   "exit_unavailable",
   "network_selection_unavailable",
   "connection_timeout",
+  "handshake_interrupted",
+  "runtime_disconnected",
   "partial_connection_failure",
 ]);
+
+const TRAFFIC_PROTECTION_STATES = new Set<TrafficProtectionState>([
+  "idle",
+  "connecting",
+  "migrating",
+  "protected",
+  "fail_closed",
+  "explicit_direct_fallback",
+]);
+
+const TRAFFIC_SESSION_EVENT_KINDS = new Set([
+  "connecting",
+  "recovery_started",
+  "migration_started",
+  "failure_detected",
+  "protection_established",
+  "fail_closed",
+  "direct_fallback",
+]);
+
+function validateTrafficSessionSnapshot(value: unknown): void {
+  if (!record(value)) fail("traffic session snapshot invalid");
+  if (
+    value.state !== undefined &&
+    !TRAFFIC_PROTECTION_STATES.has(value.state as TrafficProtectionState)
+  ) {
+    fail("traffic session state invalid");
+  }
+  if (value.changed_at_unix_ms !== undefined)
+    nonNegativeInteger(
+      value.changed_at_unix_ms,
+      "traffic session changed time invalid",
+    );
+  if (
+    value.reason_code !== undefined &&
+    value.reason_code !== null &&
+    typeof value.reason_code !== "string"
+  ) {
+    fail("traffic session reason invalid");
+  }
+  if (
+    value.failure !== undefined &&
+    value.failure !== null &&
+    !TRAFFIC_FAILURE_KINDS.has(String(value.failure))
+  ) {
+    fail("traffic session failure invalid");
+  }
+  if (value.validation !== undefined && value.validation !== null) {
+    const validation = value.validation;
+    if (!record(validation)) fail("traffic session validation invalid");
+    for (const field of [
+      "tun_validated",
+      "routes_validated",
+      "dns_validated",
+      "reachability_validated",
+    ]) {
+      booleanValueRaw(
+        validation[field],
+        `traffic session ${field} invalid`,
+      );
+    }
+    nonNegativeInteger(
+      validation.observed_at_unix_ms,
+      "traffic session validation time invalid",
+    );
+  }
+  if (value.state === "protected") {
+    const validation = value.validation;
+    if (
+      !record(validation) ||
+      validation.tun_validated !== true ||
+      validation.routes_validated !== true ||
+      validation.dns_validated !== true ||
+      validation.reachability_validated !== true ||
+      !Number.isSafeInteger(validation.observed_at_unix_ms) ||
+      Number(validation.observed_at_unix_ms) <= 0
+    ) {
+      fail("protected traffic session lacks complete validation");
+    }
+  }
+  if (value.events !== undefined) {
+    for (const event of arrayValue(
+      value.events,
+      "traffic session events invalid",
+    )) {
+      if (!record(event)) fail("traffic session event invalid");
+      if (!TRAFFIC_SESSION_EVENT_KINDS.has(String(event.kind)))
+        fail("traffic session event kind invalid");
+      if (!TRAFFIC_PROTECTION_STATES.has(event.state as TrafficProtectionState))
+        fail("traffic session event state invalid");
+      nonNegativeInteger(
+        event.occurred_at_unix_ms,
+        "traffic session event time invalid",
+      );
+      if (
+        event.reason_code !== undefined &&
+        event.reason_code !== null &&
+        typeof event.reason_code !== "string"
+      ) {
+        fail("traffic session event reason invalid");
+      }
+      if (
+        event.failure !== undefined &&
+        event.failure !== null &&
+        !TRAFFIC_FAILURE_KINDS.has(String(event.failure))
+      ) {
+        fail("traffic session event failure invalid");
+      }
+    }
+  }
+}
 const TRAFFIC_FAILURE_OUTCOMES = new Set(["fail_closed", "direct_fallback"]);
 const TRAFFIC_FAILURE_REASONS = new Set([
   "default_fail_closed",

@@ -228,6 +228,19 @@ button {
   flex: 1 1 auto;
 }
 
+.top-status-group {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-3);
+  overflow: hidden;
+}
+
+.top-status-group > .top-status + .top-status {
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--border);
+}
+
 .top-status {
   display: flex;
   min-width: 0;
@@ -874,6 +887,83 @@ button:disabled {
 }
 .issues-card {
   border-color: color-mix(in srgb, var(--warning) 35%, var(--border));
+}
+.traffic-session-card.good {
+  border-color: color-mix(in srgb, var(--success) 35%, var(--border));
+}
+.traffic-session-card.warn {
+  border-color: color-mix(in srgb, var(--warning) 35%, var(--border));
+}
+.traffic-session-card.bad {
+  border-color: color-mix(in srgb, var(--danger) 40%, var(--border));
+}
+.traffic-session-card h4 {
+  margin: var(--space-4) 0 var(--space-2);
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+}
+.traffic-session-summary,
+.traffic-session-meta,
+.traffic-session-validation,
+.traffic-session-events {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.traffic-session-summary {
+  align-items: center;
+}
+.traffic-session-summary code,
+.traffic-session-event code {
+  color: var(--text-muted);
+}
+.traffic-session-meta {
+  margin-top: var(--space-3);
+}
+.traffic-session-meta > span {
+  display: grid;
+  min-width: 180px;
+  gap: 3px;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+.traffic-session-meta code {
+  color: var(--text);
+}
+.traffic-session-validation-time,
+.traffic-session-empty {
+  margin: 0 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+.traffic-session-events {
+  flex-direction: column;
+}
+.traffic-session-event {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--border);
+}
+.traffic-session-event:first-child {
+  border-top: 0;
+}
+.traffic-session-event > svg {
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+.traffic-session-event > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.traffic-session-event small {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
 }
 .issue-row {
   display: flex;

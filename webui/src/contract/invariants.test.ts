@@ -32,6 +32,8 @@ import {
   initialActionValues,
   operationStateIsTerminal,
   outcomeSummary,
+  primaryStatus,
+  trafficProtectionStatus,
   validateAcceptedCommandResponse,
   validateActionValues,
   validateCommandOutcome,
@@ -287,6 +289,46 @@ describe("node UI contract invariants", () => {
     invalid.lifecycle.phase = "unknown";
     expect(() => validateSnapshot(invalid as unknown as NodeSnapshot)).toThrow(
       "lifecycle phase invalid",
+    );
+  });
+
+  it("keeps node lifecycle and traffic protection status independent", () => {
+    const value = emptySnapshot();
+    value.lifecycle.phase = "running";
+    value.traffic_session = {
+      state: "fail_closed",
+      changed_at_unix_ms: 1_700_000_100_000,
+      reason_code: "exit.recovery.handshake_interrupted",
+      failure: "handshake_interrupted",
+      validation: null,
+      events: [
+        {
+          kind: "failure_detected",
+          state: "fail_closed",
+          occurred_at_unix_ms: 1_700_000_100_000,
+          failure: "handshake_interrupted",
+          reason_code: "exit.recovery.handshake_interrupted",
+        },
+      ],
+    };
+
+    expect(validateSnapshot(value)).toEqual(value);
+    expect(primaryStatus(value, "zh-CN").id).toBe("running");
+    expect(trafficProtectionStatus(value, "zh-CN")).toMatchObject({
+      id: "fail_closed",
+      label: "translated:traffic.session.state.fail_closed",
+      detail: "exit.recovery.handshake_interrupted",
+      tone: "bad",
+    });
+
+    value.traffic_session = {
+      state: "protected",
+      changed_at_unix_ms: 1_700_000_100_000,
+      validation: null,
+      events: [],
+    };
+    expect(() => validateSnapshot(value)).toThrow(
+      "protected traffic session lacks complete validation",
     );
   });
 

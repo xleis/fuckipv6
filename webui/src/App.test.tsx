@@ -2168,6 +2168,77 @@ describe("React WebUI shell", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows lifecycle and fail-closed traffic protection independently", async () => {
+    if (!window.FuckIPV6I18n) throw new Error("i18n runtime is missing");
+    window.FuckIPV6I18n.tr = (_locale, key, params) =>
+      `translated:${key}:${JSON.stringify(params ?? {})}`;
+    const changedAt = 1_700_000_100_000;
+    authenticate({
+      ...snapshot,
+      lifecycle: { ...snapshot.lifecycle, phase: "running" },
+      traffic_session: {
+        state: "fail_closed",
+        changed_at_unix_ms: changedAt,
+        reason_code: "exit.recovery.handshake_interrupted",
+        failure: "handshake_interrupted",
+        validation: null,
+        events: [
+          {
+            kind: "failure_detected",
+            state: "fail_closed",
+            occurred_at_unix_ms: changedAt,
+            failure: "handshake_interrupted",
+            reason_code: "exit.recovery.handshake_interrupted",
+          },
+          {
+            kind: "fail_closed",
+            state: "fail_closed",
+            occurred_at_unix_ms: changedAt + 1,
+            failure: "handshake_interrupted",
+            reason_code: "exit.recovery.handshake_interrupted",
+          },
+        ],
+      },
+    });
+    renderApp();
+
+    const lifecycle = await screen.findByTestId("top-lifecycle-status");
+    const traffic = await screen.findByTestId("top-traffic-status");
+    expect(lifecycle).toHaveTextContent("translated:status.primary.running");
+    expect(lifecycle).not.toHaveTextContent(
+      "translated:traffic.session.state.fail_closed",
+    );
+    expect(traffic).toHaveClass("top-status", "traffic", "bad");
+    expect(traffic).toHaveTextContent(
+      "translated:traffic.session.state.fail_closed",
+    );
+    expect(traffic).toHaveTextContent(
+      "exit.recovery.handshake_interrupted",
+    );
+
+    const session = await screen.findByTestId("overview-traffic-session");
+    expect(session).toHaveTextContent("translated:traffic.session.title");
+    expect(session).toHaveTextContent(
+      "translated:traffic.session.changed_at_value",
+    );
+    expect(session).toHaveTextContent("translated:traffic.session.reason");
+    expect(session).toHaveTextContent(
+      "translated:traffic.session.failure.handshake_interrupted",
+    );
+    expect(session).toHaveTextContent(
+      "translated:traffic.session.validation.none",
+    );
+    expect(session).toHaveTextContent(
+      "translated:traffic.session.event.failure_detected",
+    );
+    expect(session).toHaveTextContent(
+      "translated:traffic.session.event.fail_closed",
+    );
+    expect(session).not.toHaveTextContent(
+      "translated:traffic.session.state.protected",
+    );
+  });
+
   it("shows at most three deduplicated operational issues", async () => {
     if (!window.FuckIPV6I18n) throw new Error("i18n runtime is missing");
     window.FuckIPV6I18n.tr = (_locale, key, params) =>

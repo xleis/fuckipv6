@@ -93,6 +93,7 @@ import {
   label,
   operationStateIsTerminal,
   primaryStatus,
+  trafficProtectionStatus,
   validateCommandOutcome,
   validateSnapshot,
   type ActionValues,
@@ -603,15 +604,30 @@ function TopStatus({
   locale: Locale;
 }): JSX.Element {
   const status = primaryStatus(snapshot, locale);
+  const traffic = trafficProtectionStatus(snapshot, locale);
   const healthy = status.id === "running";
   return (
-    <div
-      className={`top-status ${healthy ? "good" : status.id === "degraded" || status.id === "control_unavailable" ? "warn" : "bad"}`}
-    >
-      <span className="top-status-dot" aria-hidden="true" />
-      <div>
-        <strong>{status.label}</strong>
-        <span>{status.detail}</span>
+    <div className="top-status-group">
+      <div
+        className={`top-status ${healthy ? "good" : status.id === "degraded" || status.id === "control_unavailable" ? "warn" : "bad"}`}
+        data-testid="top-lifecycle-status"
+      >
+        <span className="top-status-dot" aria-hidden="true" />
+        <div>
+          <strong>{status.label}</strong>
+          <span>{status.detail}</span>
+        </div>
+      </div>
+      <div
+        className={`top-status traffic ${traffic.tone}`}
+        data-testid="top-traffic-status"
+        aria-label={label(locale, "traffic.session.title")}
+      >
+        <span className="top-status-dot" aria-hidden="true" />
+        <div>
+          <strong>{traffic.label}</strong>
+          <span>{traffic.detail}</span>
+        </div>
       </div>
     </div>
   );

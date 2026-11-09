@@ -1850,7 +1850,9 @@ fn status_for_node_problem(code: NodeProblemCode) -> StatusCode {
         NodeProblemCode::NotFound => StatusCode::NOT_FOUND,
         NodeProblemCode::Conflict | NodeProblemCode::Cancelled => StatusCode::CONFLICT,
         NodeProblemCode::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
-        NodeProblemCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        NodeProblemCode::Unavailable | NodeProblemCode::ResourceExhausted => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
         NodeProblemCode::PermissionDenied => StatusCode::FORBIDDEN,
         NodeProblemCode::TimedOut => StatusCode::GATEWAY_TIMEOUT,
         NodeProblemCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,

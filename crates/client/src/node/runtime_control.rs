@@ -116,6 +116,8 @@ pub(crate) enum RuntimeControlError {
     #[error("{0}")]
     Unavailable(String),
     #[error("{0}")]
+    ResourceExhausted(String),
+    #[error("{0}")]
     Persistence(String),
     #[error("{0}")]
     Storage(String),
@@ -157,6 +159,7 @@ impl RuntimeControlError {
             | Self::Persistence(_)
             | Self::Storage(_)
             | Self::Launch(_) => NodeProblemCode::Unavailable,
+            Self::ResourceExhausted(_) => NodeProblemCode::ResourceExhausted,
             Self::Timeout(_) => NodeProblemCode::TimedOut,
             Self::JoinRequest { code, .. } => *code,
             Self::Invitation { code, .. } => *code,
@@ -6110,6 +6113,9 @@ fn local_exit_error_with_network(
         RuntimeControlError::Unavailable(message) => {
             RuntimeControlError::Unavailable(format!("{context}：{message}"))
         }
+        RuntimeControlError::ResourceExhausted(message) => {
+            RuntimeControlError::ResourceExhausted(format!("{context}：{message}"))
+        }
         RuntimeControlError::Persistence(message) => {
             RuntimeControlError::Persistence(format!("{context}：{message}"))
         }
@@ -6320,9 +6326,10 @@ fn set_role_enabled(roles: &mut Vec<NodeNetworkRole>, role: NodeNetworkRole, ena
 mod tests {
     use super::*;
     use crate::node::{
-        NodeCommand, NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest, NodeEvent,
-        NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceSnapshot, NodeInterfaceStatus,
-        NodePeerSnapshot, NodeSetLocalExitCapabilityCommand,
+        NodeCommand, NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest,
+        NodeErrorCategory, NodeEvent, NodeInterfaceKind, NodeInterfaceOwnership,
+        NodeInterfaceSnapshot, NodeInterfaceStatus, NodePeerSnapshot,
+        NodeSetLocalExitCapabilityCommand,
     };
     use crate::p2p::connection::P2pEngine;
     use crate::stats::StatsCollector;
@@ -10729,6 +10736,21 @@ mod tests {
         );
         assert_eq!(failed.stage, LocalExitCapabilityStage::Failed);
         assert_eq!(failed.problem, Some(failure));
+
+        let exhausted_problem = runtime_control_problem(&RuntimeControlError::ResourceExhausted(
+            "本机文件描述符耗尽".to_string(),
+        ));
+        assert_eq!(exhausted_problem.code, NodeProblemCode::ResourceExhausted);
+        assert_eq!(exhausted_problem.category, NodeErrorCategory::Dependency);
+        assert_eq!(
+            exhausted_problem.message_key,
+            "error.operation_resource_exhausted"
+        );
+        assert!(exhausted_problem.retryable);
+        let exhausted =
+            local_exit_capability_from_statuses(true, &[], Some(exhausted_problem.clone()));
+        assert_eq!(exhausted.stage, LocalExitCapabilityStage::Failed);
+        assert_eq!(exhausted.problem, Some(exhausted_problem));
     }
 
     #[tokio::test]

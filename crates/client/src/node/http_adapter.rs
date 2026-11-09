@@ -1383,7 +1383,9 @@ fn status_for_problem(code: NodeProblemCode) -> StatusCode {
         NodeProblemCode::AuthenticationRequired => StatusCode::UNAUTHORIZED,
         NodeProblemCode::Conflict | NodeProblemCode::Cancelled => StatusCode::CONFLICT,
         NodeProblemCode::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
-        NodeProblemCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        NodeProblemCode::Unavailable | NodeProblemCode::ResourceExhausted => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
         NodeProblemCode::PermissionDenied => StatusCode::FORBIDDEN,
         NodeProblemCode::TimedOut => StatusCode::GATEWAY_TIMEOUT,
         NodeProblemCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
@@ -1399,7 +1401,9 @@ fn code_for_problem(code: NodeProblemCode) -> NodeHttpErrorCode {
         NodeProblemCode::Conflict => NodeHttpErrorCode::OperationConflict,
         NodeProblemCode::Cancelled => NodeHttpErrorCode::OperationCancelled,
         NodeProblemCode::TimedOut => NodeHttpErrorCode::OperationTimedOut,
-        NodeProblemCode::Unavailable => NodeHttpErrorCode::DependencyUnavailable,
+        NodeProblemCode::Unavailable | NodeProblemCode::ResourceExhausted => {
+            NodeHttpErrorCode::DependencyUnavailable
+        }
         NodeProblemCode::Unsupported => NodeHttpErrorCode::CapabilityUnavailable,
         NodeProblemCode::Internal => NodeHttpErrorCode::Internal,
     }
@@ -1605,6 +1609,7 @@ fn operation_error_for_problem(problem: &NodeProblem, target: &DomainObjectRef) 
         NodeProblemCode::NotFound => "operation.not_found",
         NodeProblemCode::Conflict => "operation.conflict",
         NodeProblemCode::Unavailable => "operation.unavailable",
+        NodeProblemCode::ResourceExhausted => "operation.unavailable",
         NodeProblemCode::PermissionDenied => "operation.permission_denied",
         NodeProblemCode::Cancelled => "operation.cancelled",
         NodeProblemCode::TimedOut => "operation.timed_out",

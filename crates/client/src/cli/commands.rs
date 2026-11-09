@@ -1692,9 +1692,99 @@ fn local_exit_runtime_status(runtime: &ClientRuntime) -> ipc::LocalExitRuntimeSt
     }
 }
 
-fn set_local_exit_runtime_problem(runtime: &mut ClientRuntime, message: impl Into<String>) {
-    runtime.local_exit_runtime_problem =
-        Some(NodeProblem::new(NodeProblemCode::Unavailable, message).retryable(true));
+#[cfg(target_os = "linux")]
+fn local_exit_forwarder_problem_code(message: &str) -> NodeProblemCode {
+    let message = message.to_ascii_lowercase();
+    if [
+        "permission denied",
+        "operation not permitted",
+        "must be root",
+        "权限不足",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+        || ["os error 1)", "os error 13)"]
+            .iter()
+            .any(|pattern| message.contains(pattern))
+    {
+        NodeProblemCode::PermissionDenied
+    } else if [
+        "resource temporarily unavailable",
+        "no space left on device",
+        "cannot allocate memory",
+        "out of memory",
+        "too many open files",
+        "file table overflow",
+        "no buffer space available",
+        "资源暂时不可用",
+        "资源不足",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+        || [
+            "os error 11)",
+            "os error 12)",
+            "os error 23)",
+            "os error 24)",
+            "os error 28)",
+            "os error 105)",
+        ]
+        .iter()
+        .any(|pattern| message.contains(pattern))
+    {
+        NodeProblemCode::ResourceExhausted
+    } else if [
+        "not supported",
+        "table does not exist",
+        "can't initialize iptables table",
+        "no such file or directory",
+        "not found",
+        "不支持",
+        "未找到",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+    {
+        NodeProblemCode::Unsupported
+    } else {
+        NodeProblemCode::Unavailable
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn local_exit_forwarder_problem(message: &str) -> NodeProblem {
+    let code = local_exit_forwarder_problem_code(message);
+    let retryable = matches!(
+        code,
+        NodeProblemCode::Unavailable | NodeProblemCode::ResourceExhausted
+    );
+    NodeProblem::new(code, message).retryable(retryable)
+}
+
+#[cfg(target_os = "linux")]
+fn local_exit_forwarder_runtime_error(problem: &NodeProblem) -> RuntimeControlError {
+    match problem.code {
+        NodeProblemCode::PermissionDenied => {
+            RuntimeControlError::PermissionDenied(problem.message.clone())
+        }
+        NodeProblemCode::Unsupported => RuntimeControlError::Unsupported(problem.message.clone()),
+        NodeProblemCode::ResourceExhausted => {
+            RuntimeControlError::ResourceExhausted(problem.message.clone())
+        }
+        _ => RuntimeControlError::Unavailable(problem.message.clone()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn set_local_exit_runtime_problem(
+    runtime: &mut ClientRuntime,
+    message: impl Into<String>,
+) -> RuntimeControlError {
+    let message = message.into();
+    let problem = local_exit_forwarder_problem(&message);
+    let error = local_exit_forwarder_runtime_error(&problem);
+    runtime.local_exit_runtime_problem = Some(problem);
+    error
 }
 
 fn clear_local_exit_runtime_problem(runtime: &mut ClientRuntime) {
@@ -1768,18 +1858,15 @@ async fn apply_runtime_local_exit_capability(
                 .exit_node_manager
                 .set_enabled(runtime.exit_forwarder.is_some());
             return match rollback_error {
-                None => {
-                    clear_local_exit_runtime_problem(runtime);
-                    Err(RuntimeControlError::Unavailable(format!(
-                        "进入 Exit Node 排空失败，已失败关闭并清理资源: {error:#}"
-                    )))
-                }
+                None => Err(set_local_exit_runtime_problem(
+                    runtime,
+                    format!("进入 Exit Node 排空失败，已失败关闭并清理资源: {error:#}"),
+                )),
                 Some(rollback_error) => {
                     let message = format!(
                         "进入 Exit Node 排空失败且清理失败，可重试: {error:#}; {rollback_error:#}"
                     );
-                    set_local_exit_runtime_problem(runtime, message.clone());
-                    Err(RuntimeControlError::Unavailable(message))
+                    Err(set_local_exit_runtime_problem(runtime, message))
                 }
             };
         }
@@ -1805,11 +1892,10 @@ async fn apply_runtime_local_exit_capability(
         };
         if let Some(error) = cancel_error {
             let message = format!("取消 Exit Node 排空失败，无法重新开放数据面: {error:#}");
-            set_local_exit_runtime_problem(runtime, message.clone());
             runtime
                 .exit_drain_deadline
                 .get_or_insert_with(|| Instant::now() + LOCAL_EXIT_DRAIN_RETRY_TIMEOUT);
-            return Err(RuntimeControlError::Unavailable(message));
+            return Err(set_local_exit_runtime_problem(runtime, message));
         }
         if runtime.exit_forwarder.is_none() {
             let forwarder =
@@ -1819,13 +1905,11 @@ async fn apply_runtime_local_exit_capability(
                     Ok(Some(forwarder)) => forwarder,
                     Ok(None) => {
                         let message = "Exit Node 网络角色已启用，但未创建内核转发器".to_string();
-                        set_local_exit_runtime_problem(runtime, message.clone());
-                        return Err(RuntimeControlError::Unavailable(message));
+                        return Err(set_local_exit_runtime_problem(runtime, message));
                     }
                     Err(error) => {
                         let message = format!("安装 Exit Node 内核转发失败: {error:#}");
-                        set_local_exit_runtime_problem(runtime, message.clone());
-                        return Err(RuntimeControlError::Unavailable(message));
+                        return Err(set_local_exit_runtime_problem(runtime, message));
                     }
                 };
             runtime.exit_forwarder = Some(forwarder);
@@ -6180,6 +6264,51 @@ mod tests {
             local_exit_runtime_stage(false, true, false, true),
             ipc::LocalExitRuntimeStage::Failed
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn local_exit_forwarder_failures_preserve_structured_cause() {
+        for (message, expected, retryable, expected_message_key) in [
+            (
+                "iptables: Permission denied (you must be root)",
+                NodeProblemCode::PermissionDenied,
+                false,
+                "error.permission_denied",
+            ),
+            (
+                "can't initialize iptables table `nat': Table does not exist",
+                NodeProblemCode::Unsupported,
+                false,
+                "error.operation_unsupported",
+            ),
+            (
+                "iptables: Resource temporarily unavailable (os error 11)",
+                NodeProblemCode::ResourceExhausted,
+                true,
+                "error.operation_resource_exhausted",
+            ),
+            (
+                "write failed: No space left on device (os error 28)",
+                NodeProblemCode::ResourceExhausted,
+                true,
+                "error.operation_resource_exhausted",
+            ),
+            (
+                "injected forwarding failure",
+                NodeProblemCode::Unavailable,
+                true,
+                "error.operation_unavailable",
+            ),
+        ] {
+            let problem = local_exit_forwarder_problem(message);
+            assert_eq!(problem.code, expected, "{message}");
+            assert_eq!(problem.retryable, retryable, "{message}");
+            let error = local_exit_forwarder_runtime_error(&problem);
+            assert_eq!(error.problem_code(), expected, "{message}");
+            assert_eq!(error.retryable(), retryable, "{message}");
+            assert_eq!(error.message_key(), expected_message_key, "{message}");
+        }
     }
 
     #[test]

@@ -213,7 +213,10 @@ impl LocalError {
             crate::node::NodeProblemCode::Cancelled => (IpcErrorCode::Unsupported, false),
             crate::node::NodeProblemCode::PermissionDenied => (IpcErrorCode::Unauthorized, false),
             crate::node::NodeProblemCode::TimedOut => (IpcErrorCode::Timeout, true),
-            crate::node::NodeProblemCode::Unavailable => (IpcErrorCode::BackendUnavailable, true),
+            crate::node::NodeProblemCode::Unavailable
+            | crate::node::NodeProblemCode::ResourceExhausted => {
+                (IpcErrorCode::BackendUnavailable, true)
+            }
             crate::node::NodeProblemCode::InvalidRequest => (IpcErrorCode::MalformedRequest, false),
             _ => (IpcErrorCode::Internal, problem.retryable),
         };
@@ -1058,6 +1061,25 @@ mod tests {
     fn protocol_version_is_explicit() {
         assert_eq!(PROTOCOL_VERSION, 3);
         const { assert!(MAX_FRAME_BYTES <= 16 * 1024 * 1024) };
+    }
+
+    #[test]
+    fn resource_exhaustion_keeps_full_problem_and_retryable_transport_fallback() {
+        let problem = crate::node::NodeProblem::new(
+            crate::node::NodeProblemCode::ResourceExhausted,
+            "firewall capacity exhausted",
+        )
+        .with_message_key("exit.local.problem.resource_insufficient")
+        .retryable(true);
+        let error = LocalError::problem(problem.clone());
+
+        assert_eq!(error.code, IpcErrorCode::BackendUnavailable);
+        assert!(error.retryable);
+        assert_eq!(error.problem, Some(problem));
+
+        let encoded = serde_json::to_value(&error).expect("serialize local error");
+        let decoded: LocalError = serde_json::from_value(encoded).expect("deserialize local error");
+        assert_eq!(decoded, error);
     }
 
     #[cfg(unix)]

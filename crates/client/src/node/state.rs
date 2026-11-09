@@ -1284,6 +1284,9 @@ pub enum NodeProblemCode {
     NotFound,
     Conflict,
     Unavailable,
+    /// A finite host resource (memory, file descriptors, storage or firewall
+    /// capacity) prevented the requested operation.
+    ResourceExhausted,
     PermissionDenied,
     Cancelled,
     TimedOut,
@@ -1314,7 +1317,9 @@ impl NodeProblemCode {
             Self::InvalidRequest => NodeErrorCategory::Validation,
             Self::NotFound | Self::Conflict | Self::Cancelled => NodeErrorCategory::State,
             Self::PermissionDenied => NodeErrorCategory::Authorization,
-            Self::Unavailable | Self::TimedOut => NodeErrorCategory::Dependency,
+            Self::Unavailable | Self::ResourceExhausted | Self::TimedOut => {
+                NodeErrorCategory::Dependency
+            }
             Self::Unsupported => NodeErrorCategory::Capability,
             Self::Internal => NodeErrorCategory::Internal,
         }
@@ -1327,6 +1332,7 @@ impl NodeProblemCode {
             Self::NotFound => "error.operation_not_found",
             Self::Conflict => "error.operation_conflict",
             Self::Unavailable => "error.operation_unavailable",
+            Self::ResourceExhausted => "error.operation_resource_exhausted",
             Self::PermissionDenied => "error.operation_permission_denied",
             Self::Cancelled => "error.operation_cancelled",
             Self::TimedOut => "error.operation_timed_out",
@@ -1340,7 +1346,7 @@ impl NodeProblemCode {
             Self::AuthenticationRequired => Some(("reauth", "recovery.reauthenticate")),
             Self::InvalidRequest => Some(("edit_request", "recovery.fix_request")),
             Self::NotFound | Self::Conflict => Some(("refresh", "recovery.refresh_state")),
-            Self::Unavailable | Self::Cancelled | Self::TimedOut => {
+            Self::Unavailable | Self::ResourceExhausted | Self::Cancelled | Self::TimedOut => {
                 Some(("retry", "recovery.retry"))
             }
             Self::PermissionDenied => Some(("request_access", "recovery.request_access")),
@@ -2121,6 +2127,7 @@ mod tests {
             (NodeProblemCode::NotFound, "not_found"),
             (NodeProblemCode::Conflict, "conflict"),
             (NodeProblemCode::Unavailable, "unavailable"),
+            (NodeProblemCode::ResourceExhausted, "resource_exhausted"),
             (NodeProblemCode::PermissionDenied, "permission_denied"),
             (NodeProblemCode::Cancelled, "cancelled"),
             (NodeProblemCode::TimedOut, "timed_out"),

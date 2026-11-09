@@ -858,6 +858,7 @@ pub(crate) fn operation_error_for_problem(
         NodeProblemCode::NotFound => "operation.not_found",
         NodeProblemCode::Conflict => "operation.conflict",
         NodeProblemCode::Unavailable => "operation.unavailable",
+        NodeProblemCode::ResourceExhausted => "operation.unavailable",
         NodeProblemCode::PermissionDenied => "operation.permission_denied",
         NodeProblemCode::Cancelled => "operation.cancelled",
         NodeProblemCode::TimedOut => "operation.timed_out",

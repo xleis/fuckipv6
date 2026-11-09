@@ -275,28 +275,28 @@ fn remote_problem(request_id: u64, error: anyhow::Error) -> NodeProblem {
     {
         return NodeProblem::new(NodeProblemCode::Internal, error.to_string());
     }
-    let code = error
-        .downcast_ref::<LocalError>()
-        .map(|error| match error.code {
-            IpcErrorCode::Unauthorized => NodeProblemCode::PermissionDenied,
-            IpcErrorCode::VersionMismatch
-            | IpcErrorCode::OversizedFrame
-            | IpcErrorCode::MalformedFrame
-            | IpcErrorCode::MalformedRequest
-            | IpcErrorCode::RequestIdMismatch => NodeProblemCode::InvalidRequest,
-            IpcErrorCode::BackendUnavailable | IpcErrorCode::EventGap | IpcErrorCode::Timeout => {
-                NodeProblemCode::Unavailable
-            }
-            IpcErrorCode::NotFound => NodeProblemCode::NotFound,
-            IpcErrorCode::Conflict => NodeProblemCode::Conflict,
-            IpcErrorCode::Unsupported => NodeProblemCode::Unsupported,
-            IpcErrorCode::Internal => NodeProblemCode::Internal,
-        })
-        .unwrap_or(NodeProblemCode::Unavailable);
-    let retryable = error
-        .downcast_ref::<LocalError>()
-        .is_none_or(|error| error.retryable);
-    NodeProblem::new(code, error.to_string()).retryable(retryable)
+    let Some(local) = error.downcast_ref::<LocalError>() else {
+        return NodeProblem::new(NodeProblemCode::Unavailable, error.to_string()).retryable(true);
+    };
+    if let Some(problem) = &local.problem {
+        return problem.clone();
+    }
+    let code = match local.code {
+        IpcErrorCode::Unauthorized => NodeProblemCode::PermissionDenied,
+        IpcErrorCode::VersionMismatch
+        | IpcErrorCode::OversizedFrame
+        | IpcErrorCode::MalformedFrame
+        | IpcErrorCode::MalformedRequest
+        | IpcErrorCode::RequestIdMismatch => NodeProblemCode::InvalidRequest,
+        IpcErrorCode::BackendUnavailable | IpcErrorCode::EventGap | IpcErrorCode::Timeout => {
+            NodeProblemCode::Unavailable
+        }
+        IpcErrorCode::NotFound => NodeProblemCode::NotFound,
+        IpcErrorCode::Conflict => NodeProblemCode::Conflict,
+        IpcErrorCode::Unsupported => NodeProblemCode::Unsupported,
+        IpcErrorCode::Internal => NodeProblemCode::Internal,
+    };
+    NodeProblem::new(code, error.to_string()).retryable(local.retryable)
 }
 
 async fn request_snapshot(
@@ -455,6 +455,18 @@ mod tests {
         );
         assert_eq!(problem.code, NodeProblemCode::Unsupported);
         assert!(!problem.retryable);
+    }
+
+    #[test]
+    fn typed_remote_errors_preserve_the_full_structured_problem() {
+        let original = NodeProblem::new(
+            NodeProblemCode::ResourceExhausted,
+            "firewall capacity exhausted",
+        )
+        .with_message_key("exit.local.problem.resource_insufficient")
+        .retryable(true);
+        let problem = remote_problem(9, anyhow::Error::new(LocalError::problem(original.clone())));
+        assert_eq!(problem, original);
     }
 
     #[test]

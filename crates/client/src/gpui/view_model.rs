@@ -5355,6 +5355,7 @@ fn node_problem_code_value(code: NodeProblemCode) -> &'static str {
         NodeProblemCode::NotFound => "not_found",
         NodeProblemCode::Conflict => "conflict",
         NodeProblemCode::Unavailable => "unavailable",
+        NodeProblemCode::ResourceExhausted => "resource_exhausted",
         NodeProblemCode::PermissionDenied => "permission_denied",
         NodeProblemCode::Cancelled => "cancelled",
         NodeProblemCode::TimedOut => "timed_out",

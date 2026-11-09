@@ -810,6 +810,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
                     stats,
                 })
                 .await;
+            runtime.attach_node_state(state.clone()).await;
 
             let (shutdown, mut shutdown_rx) = watch::channel(false);
             let network_name = request.network_name.clone();

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use fuckipv6_common::domain::{NetworkId, NodeId};
+use fuckipv6_common::domain::{NetworkId, NetworkMemberDirectory, NodeId};
 #[cfg(test)]
 use fuckipv6_common::is_encrypted_config_path;
 use fuckipv6_common::recent_error_log_lines;
@@ -29,7 +29,7 @@ use crate::local_ipc::IpcRole;
 use crate::node::{
     NodeCommand, NodeCommandContext, NodeCommandOutcome, NodeCommandRequest, NodeNetworkSnapshot,
     NodeNetworkStatus, NodeProbePeerCommand, NodeProblem, NodeProblemCode, NodeSnapshot,
-    RuntimeControlError,
+    NodeStateStore, RuntimeControlError,
 };
 use crate::p2p::buffer_pool::InboundPayload;
 use crate::p2p::connection::{InPlaceSendOutcome, InboundPacket, P2pEngine, PeerRouteInfo};
@@ -54,7 +54,7 @@ use crate::routing::recovery::{
 };
 #[cfg(target_os = "linux")]
 use crate::routing::table::{parse_linux_ip_routes, RouteEntry};
-use crate::routing::{ExitContributionGate, ExitNodeManager};
+use crate::routing::{ExitContributionGate, ExitContributionNetworkContext, ExitNodeManager};
 use crate::signaling::client::{SignalingClient, SignalingEvent};
 use crate::stats::StatsCollector;
 use crate::tun::TunDevice;
@@ -73,6 +73,8 @@ const TASK_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const RUNTIME_CLEANUP_TIMEOUT: Duration = Duration::from_secs(12);
 const OUTBOUND_QUEUE_CAPACITY: usize = 256;
 const RECOVERY_TRIGGER_QUEUE_CAPACITY: usize = 8;
+const EXIT_CONTRIBUTION_MEMBER_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const EXIT_CONTRIBUTION_DIRECTORY_QUEUE_CAPACITY: usize = 4;
 #[cfg(target_os = "linux")]
 const LOCAL_EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(target_os = "linux")]
@@ -560,6 +562,7 @@ pub(crate) struct ClientRuntime {
     pub(crate) control_rx: mpsc::UnboundedReceiver<ipc::RuntimeCommand>,
     node_state_updates: Option<watch::Receiver<NodeSnapshot>>,
     exit_contribution_member_refresh_task: Option<JoinHandle<()>>,
+    exit_contribution_directory_updates: Option<mpsc::Receiver<ExitContributionDirectoryUpdate>>,
     pub(crate) ipc_task: Option<JoinHandle<()>>,
     pub(crate) config_reload_task: Option<JoinHandle<()>>,
     pub(crate) relay_reconnect_task: Option<JoinHandle<()>>,
@@ -580,6 +583,73 @@ impl ClientRuntime {
     pub(crate) async fn shutdown(&mut self) -> RuntimeCleanupOutcome {
         shutdown_runtime(self).await
     }
+
+    /// Bind Exit contribution enforcement to the same authoritative state that
+    /// every UI consumes. Membership terms and the owner policy are copied only
+    /// after validating the exact network/member identity; rosters are refreshed
+    /// independently so a stale one fails closed without blocking packet flow.
+    pub(crate) async fn attach_node_state(&mut self, state: NodeStateStore) {
+        let snapshot = state.snapshot().await;
+        self.apply_exit_contribution_snapshot(&snapshot);
+
+        let Some(network_id) = self.network_id.clone() else {
+            self.node_state_updates = Some(state.subscribe());
+            return;
+        };
+        match (
+            state.member_directory(&network_id).await,
+            state.member_directory_received_at(&network_id).await,
+        ) {
+            (Some(directory), Some(received_at_unix_ms)) => {
+                if let Err(denial) = self
+                    .exit_contribution_gate
+                    .replace_member_directory(directory, received_at_unix_ms)
+                {
+                    tracing::warn!(
+                        reason_code = denial.reason_code(),
+                        "初始成员目录不能用于 Exit 贡献授权，已失败关闭"
+                    );
+                    self.exit_contribution_gate.clear_member_directory();
+                }
+            }
+            _ => self.exit_contribution_gate.clear_member_directory(),
+        }
+
+        let (directory_tx, directory_rx) =
+            mpsc::channel(EXIT_CONTRIBUTION_DIRECTORY_QUEUE_CAPACITY);
+        self.exit_contribution_directory_updates = Some(directory_rx);
+        self.exit_contribution_member_refresh_task =
+            Some(tokio::spawn(run_exit_contribution_member_refresh(
+                self.signaling.clone(),
+                state.clone(),
+                network_id,
+                directory_tx,
+            )));
+        self.node_state_updates = Some(state.subscribe());
+    }
+
+    fn apply_exit_contribution_snapshot(&mut self, snapshot: &NodeSnapshot) {
+        self.exit_contribution_gate
+            .replace_policy(snapshot.access_control.local_policy.clone());
+
+        let Some(network_id) = self.network_id.clone() else {
+            self.exit_contribution_gate.clear_network_context();
+            self.exit_contribution_gate.clear_member_directory();
+            return;
+        };
+        let local_node_id = NodeId::from_public_key(&self.identity.public_key());
+        match exit_contribution_context_from_snapshot(snapshot, &network_id, &local_node_id) {
+            Some(context) => self.exit_contribution_gate.replace_network_context(context),
+            None => {
+                tracing::warn!(
+                    network_id = %network_id,
+                    "成员关系或网络条款不再授权本机 Exit 贡献，已失败关闭"
+                );
+                self.exit_contribution_gate.clear_network_context();
+                self.exit_contribution_gate.clear_member_directory();
+            }
+        }
+    }
 }
 
 impl Drop for ClientRuntime {
@@ -592,6 +662,68 @@ impl Drop for ClientRuntime {
         abort_task(&self.exit_contribution_member_refresh_task);
         self.recovery_events.shutdown();
     }
+}
+
+#[derive(Debug)]
+struct ExitContributionDirectoryUpdate {
+    directory: Option<NetworkMemberDirectory>,
+    received_at_unix_ms: Option<u64>,
+}
+
+async fn run_exit_contribution_member_refresh(
+    signaling: Arc<SignalingClient>,
+    state: NodeStateStore,
+    network_id: NetworkId,
+    updates: mpsc::Sender<ExitContributionDirectoryUpdate>,
+) {
+    loop {
+        let update = match signaling.list_network_members(network_id.clone()).await {
+            Ok(directory) => {
+                state.set_member_directory(directory.clone()).await;
+                ExitContributionDirectoryUpdate {
+                    directory: Some(directory),
+                    received_at_unix_ms: state.member_directory_received_at(&network_id).await,
+                }
+            }
+            Err(error) => {
+                state.clear_member_directory(&network_id).await;
+                tracing::warn!(
+                    network_id = %network_id,
+                    error = %error,
+                    "刷新成员目录失败，Exit 贡献授权已失败关闭"
+                );
+                ExitContributionDirectoryUpdate {
+                    directory: None,
+                    received_at_unix_ms: None,
+                }
+            }
+        };
+        if updates.send(update).await.is_err() {
+            return;
+        }
+        sleep(EXIT_CONTRIBUTION_MEMBER_REFRESH_INTERVAL).await;
+    }
+}
+
+fn exit_contribution_context_from_snapshot(
+    snapshot: &NodeSnapshot,
+    network_id: &NetworkId,
+    local_node_id: &NodeId,
+) -> Option<ExitContributionNetworkContext> {
+    let membership = snapshot.memberships.iter().find(|membership| {
+        membership.network_id == network_id.as_str() && membership.node_id == local_node_id.as_str()
+    })?;
+    if !membership.state.can_access_network_resources() {
+        return None;
+    }
+    let terms = membership.current_terms.as_ref()?;
+    let terms_hash = terms.content_hash().ok()?;
+    Some(ExitContributionNetworkContext {
+        mode: terms.exit_contribution_mode,
+        policy_revision: terms.network_policy_revision,
+        terms_hash,
+        policy_confirmation_required: membership.policy_confirmation_required,
+    })
 }
 
 pub(crate) async fn prepare_client_runtime_ext(
@@ -822,6 +954,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         control_rx,
         node_state_updates: None,
         exit_contribution_member_refresh_task: None,
+        exit_contribution_directory_updates: None,
         ipc_task: Some(tasks.ipc_task),
         config_reload_task: Some(tasks.config_reload_task),
         relay_reconnect_task: None,
@@ -1327,6 +1460,9 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
     runtime: &mut ClientRuntime,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<Option<DisconnectReply>> {
+    let mut node_state_updates = runtime.node_state_updates.clone();
+    let mut exit_contribution_directory_updates =
+        runtime.exit_contribution_directory_updates.take();
     loop {
         let exit_drain_deadline = local_exit_drain_deadline(runtime);
         let exit_drain = wait_for_local_exit_drain(exit_drain_deadline);
@@ -1373,6 +1509,54 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                         diagnostic_id = "recovery.linux.event_channel_closed",
                         "Linux 恢复事件通道已关闭；本次运行不再接收系统休眠或网络变化事件"
                     ),
+                }
+            }
+
+            // Membership terms and the owner-authored local policy can change
+            // while the data plane is live. Reapply them before the next packet
+            // admission decision.
+            changed = async {
+                match node_state_updates.as_mut() {
+                    Some(updates) => updates.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed.is_ok() {
+                    if let Some(updates) = node_state_updates.as_ref() {
+                        let snapshot = updates.borrow().clone();
+                        runtime.apply_exit_contribution_snapshot(&snapshot);
+                    }
+                } else {
+                    node_state_updates = None;
+                    runtime.exit_contribution_gate.clear_network_context();
+                    runtime.exit_contribution_gate.clear_member_directory();
+                }
+            }
+
+            directory_update = async {
+                match exit_contribution_directory_updates.as_mut() {
+                    Some(updates) => updates.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match directory_update {
+                    Some(ExitContributionDirectoryUpdate {
+                        directory: Some(directory),
+                        received_at_unix_ms: Some(received_at_unix_ms),
+                    }) => {
+                        if let Err(denial) = runtime
+                            .exit_contribution_gate
+                            .replace_member_directory(directory, received_at_unix_ms)
+                        {
+                            tracing::warn!(
+                                reason_code = denial.reason_code(),
+                                "拒绝不匹配的成员目录，Exit 贡献授权已失败关闭"
+                            );
+                            runtime.exit_contribution_gate.clear_member_directory();
+                        }
+                    }
+                    Some(_) => runtime.exit_contribution_gate.clear_member_directory(),
+                    None => exit_contribution_directory_updates = None,
                 }
             }
 
@@ -6825,6 +7009,104 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
         assert!(
             !sender.try_trigger(RecoveryTrigger::NetworkChanged),
             "a blocked recovery consumer must not permit unbounded queue growth"
+        );
+    }
+
+    #[test]
+    fn exit_contribution_context_requires_matching_active_membership_and_terms() {
+        use crate::node::NodeNetworkMembershipSnapshot;
+        use fuckipv6_common::domain::{
+            ExitContributionObligation, ExitContributionScope, MembershipRole, MembershipState,
+            MembershipTerms,
+        };
+
+        let network_id = NetworkId::from_public_key(b"exit-context-network");
+        let node_id = NodeId::from_public_key(b"exit-context-node");
+        let terms = MembershipTerms {
+            network_policy_revision: 7,
+            privacy_policy_revision: 3,
+            exit_contribution: ExitContributionObligation::Required,
+            exit_contribution_scope: ExitContributionScope::AllMembers,
+            exit_contribution_mode: fuckipv6_common::domain::ExitContributionMode::RequiredOnJoin,
+            member_limit: Some(8),
+        };
+        let expected_hash = terms.content_hash().expect("valid terms");
+        let membership = |network: &NetworkId, node: &NodeId, state, current_terms| {
+            NodeNetworkMembershipSnapshot {
+                network_name: "home".into(),
+                network_id: network.to_string(),
+                node_id: node.to_string(),
+                state,
+                role: MembershipRole::Member,
+                local_policy_revision: 1,
+                network_policy_revision: Some(7),
+                privacy_policy_revision: Some(3),
+                member_limit: Some(8),
+                exit_contribution: Some(ExitContributionObligation::Required),
+                exit_contribution_scope: Some(ExitContributionScope::AllMembers),
+                exit_contribution_mode: Some(
+                    fuckipv6_common::domain::ExitContributionMode::RequiredOnJoin,
+                ),
+                terms_hash: Some(expected_hash.as_str().to_owned()),
+                current_terms,
+                current_terms_hash: Some(expected_hash.as_str().to_owned()),
+                policy_confirmation_required: true,
+                acknowledged_at_unix_ms: Some(1),
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 2,
+                suspension_reason: None,
+            }
+        };
+
+        let snapshot = NodeSnapshot {
+            memberships: vec![membership(
+                &network_id,
+                &node_id,
+                MembershipState::Active,
+                Some(terms.clone()),
+            )],
+            ..NodeSnapshot::default()
+        };
+        let context = exit_contribution_context_from_snapshot(&snapshot, &network_id, &node_id)
+            .expect("active matching membership with valid terms");
+        assert_eq!(
+            context.mode,
+            fuckipv6_common::domain::ExitContributionMode::RequiredOnJoin
+        );
+        assert_eq!(context.policy_revision, 7);
+        assert_eq!(context.terms_hash, expected_hash);
+        assert!(context.policy_confirmation_required);
+
+        let inactive = NodeSnapshot {
+            memberships: vec![membership(
+                &network_id,
+                &node_id,
+                MembershipState::Suspended,
+                Some(terms.clone()),
+            )],
+            ..NodeSnapshot::default()
+        };
+        assert!(
+            exit_contribution_context_from_snapshot(&inactive, &network_id, &node_id).is_none()
+        );
+
+        let without_terms = NodeSnapshot {
+            memberships: vec![membership(
+                &network_id,
+                &node_id,
+                MembershipState::Active,
+                None,
+            )],
+            ..NodeSnapshot::default()
+        };
+        assert!(
+            exit_contribution_context_from_snapshot(&without_terms, &network_id, &node_id)
+                .is_none()
+        );
+
+        let other_network = NetworkId::from_public_key(b"other-network");
+        assert!(
+            exit_contribution_context_from_snapshot(&snapshot, &other_network, &node_id).is_none()
         );
     }
 

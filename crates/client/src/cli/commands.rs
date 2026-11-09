@@ -7476,6 +7476,42 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
         }
     }
 
+    #[test]
+    fn exit_packet_admission_requires_a_committed_protected_session() {
+        assert!(exit_packet_admission_allowed(
+            false,
+            false,
+            TrafficProtectionState::Protected
+        ));
+        assert!(exit_packet_admission_allowed(
+            false,
+            false,
+            TrafficProtectionState::ExplicitDirectFallback
+        ));
+
+        for state in [
+            TrafficProtectionState::Idle,
+            TrafficProtectionState::Connecting,
+            TrafficProtectionState::Migrating,
+            TrafficProtectionState::FailClosed,
+        ] {
+            assert!(
+                !exit_packet_admission_allowed(false, false, state),
+                "{state:?} must not carry traffic"
+            );
+        }
+        assert!(!exit_packet_admission_allowed(
+            true,
+            false,
+            TrafficProtectionState::Protected
+        ));
+        assert!(!exit_packet_admission_allowed(
+            false,
+            true,
+            TrafficProtectionState::Protected
+        ));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn recovery_trigger_invalidates_only_the_disconnected_path() {

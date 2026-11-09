@@ -11,7 +11,8 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
 use crate::node::{
-    NodeCommandBus, NodeCommandContext, NodeCommandRequest, NodeCommandResult, RuntimeControlError,
+    NodeCommandBus, NodeCommandContext, NodeCommandRequest, NodeCommandResult, NodeProblem,
+    RuntimeControlError,
 };
 use crate::p2p::connection::{P2pEngine, PeerProbeOutcome};
 use crate::stats::StatsCollector;
@@ -65,14 +66,25 @@ pub struct RoutingUpdateResult {
     pub is_exit_node: bool,
 }
 
-/// Runtime observation returned by one network's local Exit control plane.
+/// Explicit local Exit data-plane stage reported by one network runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalExitRuntimeStage {
+    Disabled,
+    Enabled,
+    Draining,
+    Cleaning,
+    Failed,
+}
+
+/// Runtime observation returned by one network's local Exit control plane.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalExitRuntimeStatus {
     pub owner_exit_enabled: bool,
     pub network_allowed: bool,
     pub effective: bool,
     pub healthy: bool,
-    pub draining: bool,
+    pub stage: LocalExitRuntimeStage,
+    pub problem: Option<NodeProblem>,
     pub active_clients: u32,
     pub total_clients: u64,
 }

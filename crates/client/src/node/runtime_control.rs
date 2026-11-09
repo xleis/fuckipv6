@@ -2825,7 +2825,7 @@ impl NetworkRuntimeActor {
 
         let requested_statuses = results
             .iter()
-            .filter_map(|(_, result)| result.as_ref().ok().copied())
+            .filter_map(|(_, result)| result.as_ref().ok().cloned())
             .collect::<Vec<_>>();
         if enabled
             && requested_statuses
@@ -6174,9 +6174,14 @@ fn local_exit_results_are_draining(
         Result<ipc::LocalExitRuntimeStatus, RuntimeRoutingRequestError>,
     )],
 ) -> bool {
-    results
-        .iter()
-        .any(|(_, result)| result.as_ref().is_ok_and(|status| status.draining))
+    results.iter().any(|(_, result)| {
+        result.as_ref().is_ok_and(|status| {
+            matches!(
+                status.stage,
+                ipc::LocalExitRuntimeStage::Draining | ipc::LocalExitRuntimeStage::Cleaning
+            )
+        })
+    })
 }
 
 fn local_exit_capability_from_statuses(
@@ -6196,10 +6201,19 @@ fn local_exit_capability_from_statuses(
     let total_clients = statuses.iter().fold(0u64, |total, status| {
         total.saturating_add(status.total_clients)
     });
-
-    let effective_unhealthy = owner_exit_enabled && !effective.is_empty() && !healthy;
-    let draining = statuses.iter().any(|status| status.draining);
-    let problem = problem.or_else(|| {
+    let draining = statuses
+        .iter()
+        .any(|status| status.stage == ipc::LocalExitRuntimeStage::Draining);
+    let cleaning = statuses
+        .iter()
+        .any(|status| status.stage == ipc::LocalExitRuntimeStage::Cleaning);
+    let failed = statuses
+        .iter()
+        .any(|status| status.stage == ipc::LocalExitRuntimeStage::Failed);
+    let status_problem = statuses.iter().find_map(|status| status.problem.clone());
+    let effective_unhealthy =
+        owner_exit_enabled && !draining && !cleaning && !effective.is_empty() && !healthy;
+    let problem = problem.or(status_problem).or_else(|| {
         effective_unhealthy.then(|| {
             NodeProblem::new(
                 NodeProblemCode::Unavailable,
@@ -6208,10 +6222,12 @@ fn local_exit_capability_from_statuses(
             .retryable(true)
         })
     });
-    let stage = if draining {
-        LocalExitCapabilityStage::Cleaning
-    } else if problem.is_some() || effective_unhealthy {
+    let stage = if problem.is_some() || failed {
         LocalExitCapabilityStage::Failed
+    } else if cleaning {
+        LocalExitCapabilityStage::Cleaning
+    } else if draining {
+        LocalExitCapabilityStage::Draining
     } else if !owner_exit_enabled {
         LocalExitCapabilityStage::Disabled
     } else if !network_allowed {
@@ -6832,12 +6848,23 @@ mod tests {
                                                 _ => false,
                                             }
                                         };
+                                        let healthy = effective && health_override && !draining;
+                                        let stage = if healthy {
+                                            ipc::LocalExitRuntimeStage::Enabled
+                                        } else if draining {
+                                            ipc::LocalExitRuntimeStage::Draining
+                                        } else if effective {
+                                            ipc::LocalExitRuntimeStage::Failed
+                                        } else {
+                                            ipc::LocalExitRuntimeStage::Disabled
+                                        };
                                         let _ = reply.send(Ok(ipc::LocalExitRuntimeStatus {
                                             owner_exit_enabled: enabled,
                                             network_allowed,
                                             effective,
-                                            healthy: effective && health_override && !draining,
-                                            draining,
+                                            healthy,
+                                            stage,
+                                            problem: None,
                                             active_clients,
                                             total_clients,
                                         }));
@@ -6892,12 +6919,23 @@ mod tests {
                                             .lock()
                                             .expect("runtime local exit owner lock poisoned")
                                             .insert(routing_network_name.clone(), enabled);
+                                        let healthy = effective && health_override && !draining;
+                                        let stage = if healthy {
+                                            ipc::LocalExitRuntimeStage::Enabled
+                                        } else if draining {
+                                            ipc::LocalExitRuntimeStage::Draining
+                                        } else if effective {
+                                            ipc::LocalExitRuntimeStage::Failed
+                                        } else {
+                                            ipc::LocalExitRuntimeStage::Disabled
+                                        };
                                         let _ = reply.send(Ok(ipc::LocalExitRuntimeStatus {
                                             owner_exit_enabled: enabled,
                                             network_allowed,
                                             effective,
-                                            healthy: effective && health_override && !draining,
-                                            draining,
+                                            healthy,
+                                            stage,
+                                            problem: None,
                                             active_clients,
                                             total_clients,
                                         }));
@@ -10629,6 +10667,68 @@ mod tests {
         assert_eq!(harness.fake.launches().len(), 2);
 
         harness.shutdown().await;
+    }
+
+    #[test]
+    fn local_exit_runtime_stages_project_without_losing_cleanup_failure() {
+        let status =
+            |stage, owner_exit_enabled, effective, healthy, problem| ipc::LocalExitRuntimeStatus {
+                owner_exit_enabled,
+                network_allowed: true,
+                effective,
+                healthy,
+                stage,
+                problem,
+                active_clients: 2,
+                total_clients: 5,
+            };
+
+        let draining = local_exit_capability_from_statuses(
+            false,
+            &[status(
+                ipc::LocalExitRuntimeStage::Draining,
+                false,
+                false,
+                false,
+                None,
+            )],
+            None,
+        );
+        assert_eq!(draining.stage, LocalExitCapabilityStage::Draining);
+        assert_eq!(draining.active_clients, 2);
+        assert_eq!(draining.total_clients, 5);
+
+        let cleaning = local_exit_capability_from_statuses(
+            false,
+            &[status(
+                ipc::LocalExitRuntimeStage::Cleaning,
+                false,
+                false,
+                false,
+                None,
+            )],
+            None,
+        );
+        assert_eq!(cleaning.stage, LocalExitCapabilityStage::Cleaning);
+
+        let failure = NodeProblem::new(
+            NodeProblemCode::Unavailable,
+            "Exit Node 排空后的资源清理失败，保留排空栅栏并自动重试",
+        )
+        .retryable(true);
+        let failed = local_exit_capability_from_statuses(
+            false,
+            &[status(
+                ipc::LocalExitRuntimeStage::Failed,
+                false,
+                false,
+                false,
+                Some(failure.clone()),
+            )],
+            None,
+        );
+        assert_eq!(failed.stage, LocalExitCapabilityStage::Failed);
+        assert_eq!(failed.problem, Some(failure));
     }
 
     #[tokio::test]

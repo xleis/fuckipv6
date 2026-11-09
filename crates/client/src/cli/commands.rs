@@ -27,7 +27,8 @@ use crate::ipc::{self, IpcRequest, IpcResponse};
 use crate::local_ipc::IpcRole;
 use crate::node::{
     NodeCommand, NodeCommandContext, NodeCommandOutcome, NodeCommandRequest, NodeNetworkSnapshot,
-    NodeNetworkStatus, NodeProbePeerCommand, NodeSnapshot, RuntimeControlError,
+    NodeNetworkStatus, NodeProbePeerCommand, NodeProblem, NodeProblemCode, NodeSnapshot,
+    RuntimeControlError,
 };
 use crate::p2p::buffer_pool::InboundPayload;
 use crate::p2p::connection::{InPlaceSendOutcome, InboundPacket, P2pEngine, PeerRouteInfo};
@@ -535,6 +536,7 @@ pub(crate) struct ClientRuntime {
     pub(crate) exit_forwarder: Option<LinuxExitForwarder>,
     #[cfg(target_os = "linux")]
     pub(crate) exit_drain_deadline: Option<Instant>,
+    pub(crate) local_exit_runtime_problem: Option<NodeProblem>,
     pub(crate) recovery_events: RuntimeRecoveryEvents,
     recovery_trigger_tx: RuntimeRecoveryTriggerSender,
     #[cfg(target_os = "linux")]
@@ -788,6 +790,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         exit_forwarder,
         #[cfg(target_os = "linux")]
         exit_drain_deadline: None,
+        local_exit_runtime_problem: None,
         recovery_events,
         recovery_trigger_tx,
         #[cfg(target_os = "linux")]
@@ -1617,32 +1620,85 @@ fn repeated_local_exit_disable_is_noop(
     !enabled && !owner_exit_enabled && (!has_forwarder || draining)
 }
 
+fn local_exit_runtime_stage(
+    effective: bool,
+    has_forwarder: bool,
+    draining: bool,
+    has_problem: bool,
+) -> ipc::LocalExitRuntimeStage {
+    if has_problem {
+        ipc::LocalExitRuntimeStage::Failed
+    } else if has_forwarder && draining {
+        ipc::LocalExitRuntimeStage::Draining
+    } else if has_forwarder && effective {
+        ipc::LocalExitRuntimeStage::Enabled
+    } else if !has_forwarder && !effective {
+        ipc::LocalExitRuntimeStage::Disabled
+    } else {
+        ipc::LocalExitRuntimeStage::Failed
+    }
+}
+
 fn local_exit_runtime_status(runtime: &ClientRuntime) -> ipc::LocalExitRuntimeStatus {
     let network_allowed = runtime.config.exit_node.enabled;
     let effective = local_exit_effective(runtime.local_exit_enabled, network_allowed);
     #[cfg(target_os = "linux")]
-    let (healthy, draining, active_clients, total_clients) = runtime
+    let (has_forwarder, draining, active_clients, total_clients) = runtime
         .exit_forwarder
         .as_ref()
         .map_or((false, false, 0, 0), |forwarder| {
             (
-                !forwarder.is_draining(),
+                true,
                 forwarder.is_draining(),
                 forwarder.active_clients(),
                 forwarder.total_clients(),
             )
         });
     #[cfg(not(target_os = "linux"))]
-    let (healthy, draining, active_clients, total_clients) = (false, false, 0, 0);
+    let (has_forwarder, draining, active_clients, total_clients) = (false, false, 0, 0);
+
+    let mut problem = runtime.local_exit_runtime_problem.clone();
+    if problem.is_none() {
+        problem = if effective && !has_forwarder {
+            Some(
+                NodeProblem::new(
+                    NodeProblemCode::Unavailable,
+                    "本机 Exit 已授权，但转发数据面未运行",
+                )
+                .retryable(true),
+            )
+        } else if has_forwarder && !effective && !draining {
+            Some(
+                NodeProblem::new(
+                    NodeProblemCode::Unavailable,
+                    "本机 Exit 已关闭，但转发数据面仍处于开放状态",
+                )
+                .retryable(true),
+            )
+        } else {
+            None
+        };
+    }
+    let stage = local_exit_runtime_stage(effective, has_forwarder, draining, problem.is_some());
     ipc::LocalExitRuntimeStatus {
         owner_exit_enabled: runtime.local_exit_enabled,
         network_allowed,
         effective,
-        healthy: effective && healthy && !draining,
-        draining,
+        healthy: stage == ipc::LocalExitRuntimeStage::Enabled,
+        stage,
+        problem,
         active_clients,
         total_clients,
     }
+}
+
+fn set_local_exit_runtime_problem(runtime: &mut ClientRuntime, message: impl Into<String>) {
+    runtime.local_exit_runtime_problem =
+        Some(NodeProblem::new(NodeProblemCode::Unavailable, message).retryable(true));
+}
+
+fn clear_local_exit_runtime_problem(runtime: &mut ClientRuntime) {
+    runtime.local_exit_runtime_problem = None;
 }
 
 async fn apply_runtime_local_exit_capability(
@@ -1712,15 +1768,23 @@ async fn apply_runtime_local_exit_capability(
                 .exit_node_manager
                 .set_enabled(runtime.exit_forwarder.is_some());
             return match rollback_error {
-                None => Err(RuntimeControlError::Unavailable(format!(
-                    "进入 Exit Node 排空失败，已失败关闭并清理资源: {error:#}"
-                ))),
-                Some(rollback_error) => Err(RuntimeControlError::Unavailable(format!(
-                    "进入 Exit Node 排空失败且清理失败，可重试: {error:#}; {rollback_error:#}"
-                ))),
+                None => {
+                    clear_local_exit_runtime_problem(runtime);
+                    Err(RuntimeControlError::Unavailable(format!(
+                        "进入 Exit Node 排空失败，已失败关闭并清理资源: {error:#}"
+                    )))
+                }
+                Some(rollback_error) => {
+                    let message = format!(
+                        "进入 Exit Node 排空失败且清理失败，可重试: {error:#}; {rollback_error:#}"
+                    );
+                    set_local_exit_runtime_problem(runtime, message.clone());
+                    Err(RuntimeControlError::Unavailable(message))
+                }
             };
         }
 
+        clear_local_exit_runtime_problem(runtime);
         if runtime.exit_forwarder.is_some() {
             runtime
                 .exit_drain_deadline
@@ -1735,43 +1799,53 @@ async fn apply_runtime_local_exit_capability(
             .exit_node_manager
             .set_enabled(runtime.exit_forwarder.is_some());
     } else if effective {
-        if let Some(forwarder) = runtime.exit_forwarder.as_mut() {
-            if forwarder.is_draining() {
-                forwarder.cancel_drain().await.map_err(|error| {
-                    RuntimeControlError::Unavailable(format!(
-                        "取消 Exit Node 排空失败，无法重新开放数据面: {error:#}"
-                    ))
-                })?;
-            }
+        let cancel_error = match runtime.exit_forwarder.as_mut() {
+            Some(forwarder) if forwarder.is_draining() => forwarder.cancel_drain().await.err(),
+            _ => None,
+        };
+        if let Some(error) = cancel_error {
+            let message = format!("取消 Exit Node 排空失败，无法重新开放数据面: {error:#}");
+            set_local_exit_runtime_problem(runtime, message.clone());
+            runtime
+                .exit_drain_deadline
+                .get_or_insert_with(|| Instant::now() + LOCAL_EXIT_DRAIN_RETRY_TIMEOUT);
+            return Err(RuntimeControlError::Unavailable(message));
         }
         if runtime.exit_forwarder.is_none() {
             let forwarder =
-                LinuxExitForwarder::install(&runtime.config.exit_node, runtime.tun_io.name())
+                match LinuxExitForwarder::install(&runtime.config.exit_node, runtime.tun_io.name())
                     .await
-                    .map_err(|error| {
-                        RuntimeControlError::Unavailable(format!(
-                            "安装 Exit Node 内核转发失败: {error:#}"
-                        ))
-                    })?
-                    .ok_or_else(|| {
-                        RuntimeControlError::Unavailable(
-                            "Exit Node 网络角色已启用，但未创建内核转发器".to_string(),
-                        )
-                    })?;
+                {
+                    Ok(Some(forwarder)) => forwarder,
+                    Ok(None) => {
+                        let message = "Exit Node 网络角色已启用，但未创建内核转发器".to_string();
+                        set_local_exit_runtime_problem(runtime, message.clone());
+                        return Err(RuntimeControlError::Unavailable(message));
+                    }
+                    Err(error) => {
+                        let message = format!("安装 Exit Node 内核转发失败: {error:#}");
+                        set_local_exit_runtime_problem(runtime, message.clone());
+                        return Err(RuntimeControlError::Unavailable(message));
+                    }
+                };
             runtime.exit_forwarder = Some(forwarder);
         }
+        clear_local_exit_runtime_problem(runtime);
         runtime.exit_drain_deadline = None;
         runtime.exit_node_manager.set_enabled(true);
     } else {
+        clear_local_exit_runtime_problem(runtime);
         runtime.exit_node_manager.set_enabled(false);
     }
 
     #[cfg(not(target_os = "linux"))]
     {
         if effective {
-            return Err(RuntimeControlError::Unsupported(
-                "当前平台不支持本机 Exit 数据面".into(),
-            ));
+            let message = "当前平台不支持本机 Exit 数据面".to_string();
+            runtime.local_exit_runtime_problem = Some(
+                NodeProblem::new(NodeProblemCode::Unsupported, message.clone()).retryable(false),
+            );
+            return Err(RuntimeControlError::Unsupported(message));
         }
     }
 
@@ -1795,16 +1869,19 @@ async fn finish_runtime_local_exit_drain(runtime: &mut ClientRuntime) {
         if let Some(forwarder) = runtime.exit_forwarder.as_mut() {
             if forwarder.is_draining() {
                 if let Err(error) = forwarder.cancel_drain().await {
+                    let message = format!(
+                        "Exit Node 已重新获得授权，但取消排空失败，保持已有 flow 并自动重试: {error:#}"
+                    );
+                    set_local_exit_runtime_problem(runtime, message.clone());
                     runtime.exit_drain_deadline =
                         Some(Instant::now() + LOCAL_EXIT_DRAIN_RETRY_TIMEOUT);
                     runtime.exit_node_manager.set_enabled(true);
-                    tracing::warn!(
-                        "Exit Node 已重新获得授权，但取消排空失败，保持已有 flow 并自动重试: {error:#}"
-                    );
+                    tracing::warn!("{message}");
                     return;
                 }
             }
         }
+        clear_local_exit_runtime_problem(runtime);
         runtime.exit_drain_deadline = None;
         runtime
             .exit_node_manager
@@ -1814,22 +1891,27 @@ async fn finish_runtime_local_exit_drain(runtime: &mut ClientRuntime) {
 
     runtime.exit_drain_deadline = None;
     let Some(mut forwarder) = runtime.exit_forwarder.take() else {
+        clear_local_exit_runtime_problem(runtime);
         runtime.exit_node_manager.set_enabled(false);
         return;
     };
 
     match forwarder.rollback_within(Duration::from_secs(4)).await {
         Ok(()) => {
+            clear_local_exit_runtime_problem(runtime);
             runtime.exit_node_manager.set_enabled(false);
             tracing::info!("Exit Node 排空窗口结束，内核转发资源已清理");
         }
         Err(error) => {
+            let message =
+                format!("Exit Node 排空后的资源清理失败，保留排空栅栏并自动重试: {error:#}");
             runtime.exit_forwarder = Some(forwarder);
             runtime.exit_drain_deadline = Some(Instant::now() + LOCAL_EXIT_DRAIN_RETRY_TIMEOUT);
+            set_local_exit_runtime_problem(runtime, message.clone());
             runtime
                 .exit_node_manager
                 .set_enabled(runtime_exit_manager_enabled(runtime));
-            tracing::warn!("Exit Node 排空后的资源清理失败，保留排空栅栏并自动重试: {error:#}");
+            tracing::warn!("{message}");
         }
     }
 }
@@ -1913,50 +1995,65 @@ async fn apply_runtime_routing(
     match exit_action {
         ExitForwardingAction::Install => {
             runtime.exit_forwarder = staged_exit_forwarder.take();
+            clear_local_exit_runtime_problem(runtime);
         }
         ExitForwardingAction::Drain => {
-            if let Some(forwarder) = runtime.exit_forwarder.as_mut() {
-                if let Err(error) = forwarder.begin_drain().await {
-                    let rollback_error = match runtime.exit_forwarder.take() {
-                        Some(mut forwarder) => forwarder
-                            .rollback_within(Duration::from_secs(4))
-                            .await
-                            .err()
-                            .map(|rollback_error| {
-                                runtime.exit_forwarder = Some(forwarder);
-                                rollback_error
-                            }),
-                        None => None,
-                    };
-                    runtime.exit_drain_deadline = runtime
-                        .exit_forwarder
-                        .is_some()
-                        .then(|| Instant::now() + LOCAL_EXIT_DRAIN_RETRY_TIMEOUT);
-                    runtime
-                        .exit_node_manager
-                        .set_enabled(runtime_exit_manager_enabled(runtime));
-                    return Err(match rollback_error {
-                        None => format!(
+            let drain_error = match runtime.exit_forwarder.as_mut() {
+                Some(forwarder) => forwarder.begin_drain().await.err(),
+                None => None,
+            };
+            if let Some(error) = drain_error {
+                let rollback_error = match runtime.exit_forwarder.take() {
+                    Some(mut forwarder) => forwarder
+                        .rollback_within(Duration::from_secs(4))
+                        .await
+                        .err()
+                        .inspect(|_| {
+                            runtime.exit_forwarder = Some(forwarder);
+                        }),
+                    None => None,
+                };
+                runtime.exit_drain_deadline = runtime
+                    .exit_forwarder
+                    .is_some()
+                    .then(|| Instant::now() + LOCAL_EXIT_DRAIN_RETRY_TIMEOUT);
+                runtime
+                    .exit_node_manager
+                    .set_enabled(runtime_exit_manager_enabled(runtime));
+                return match rollback_error {
+                    None => {
+                        clear_local_exit_runtime_problem(runtime);
+                        Err(format!(
                             "进入 Exit Node 排空失败，已失败关闭并清理资源: {error:#}"
-                        ),
-                        Some(rollback_error) => format!(
+                        ))
+                    }
+                    Some(rollback_error) => {
+                        let message = format!(
                             "进入 Exit Node 排空失败且清理失败，可重试: {error:#}; {rollback_error:#}"
-                        ),
-                    });
-                }
+                        );
+                        set_local_exit_runtime_problem(runtime, message.clone());
+                        Err(message)
+                    }
+                };
             }
+            clear_local_exit_runtime_problem(runtime);
         }
         ExitForwardingAction::Resume => {
-            if let Some(forwarder) = runtime.exit_forwarder.as_mut() {
-                if let Err(error) = forwarder.cancel_drain().await {
-                    runtime.exit_drain_deadline =
-                        Some(Instant::now() + LOCAL_EXIT_DRAIN_RETRY_TIMEOUT);
-                    runtime.exit_node_manager.set_enabled(true);
-                    return Err(format!(
-                        "取消 Exit Node 排空失败，保持现有 flow 并等待重试: {error:#}"
-                    ));
-                }
+            let cancel_error = match runtime.exit_forwarder.as_mut() {
+                Some(forwarder) => forwarder.cancel_drain().await.err(),
+                None => None,
+            };
+            if let Some(error) = cancel_error {
+                let message =
+                    format!("取消 Exit Node 排空失败，保持现有 flow 并等待重试: {error:#}");
+                set_local_exit_runtime_problem(runtime, message.clone());
+                runtime
+                    .exit_drain_deadline
+                    .get_or_insert_with(|| Instant::now() + LOCAL_EXIT_DRAIN_RETRY_TIMEOUT);
+                runtime.exit_node_manager.set_enabled(true);
+                return Err(message);
             }
+            clear_local_exit_runtime_problem(runtime);
         }
         ExitForwardingAction::Keep => {}
     }
@@ -6054,6 +6151,34 @@ mod tests {
         assert_eq!(
             exit_forwarding_action(false, true, true),
             ExitForwardingAction::Keep
+        );
+    }
+
+    #[test]
+    fn local_exit_runtime_stage_keeps_drain_and_failure_distinct() {
+        assert_eq!(
+            local_exit_runtime_stage(false, false, false, false),
+            ipc::LocalExitRuntimeStage::Disabled
+        );
+        assert_eq!(
+            local_exit_runtime_stage(true, true, false, false),
+            ipc::LocalExitRuntimeStage::Enabled
+        );
+        assert_eq!(
+            local_exit_runtime_stage(false, true, true, false),
+            ipc::LocalExitRuntimeStage::Draining
+        );
+        assert_eq!(
+            local_exit_runtime_stage(true, true, true, false),
+            ipc::LocalExitRuntimeStage::Draining
+        );
+        assert_eq!(
+            local_exit_runtime_stage(true, false, false, false),
+            ipc::LocalExitRuntimeStage::Failed
+        );
+        assert_eq!(
+            local_exit_runtime_stage(false, true, false, true),
+            ipc::LocalExitRuntimeStage::Failed
         );
     }
 

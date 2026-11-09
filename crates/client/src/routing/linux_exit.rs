@@ -1735,6 +1735,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancel_drain_failure_keeps_the_new_flow_fence() {
+        let runner = Arc::new(FakeCommandRunner::default());
+        let mut forwarder = fake_forwarder(runner.clone(), Some("eth0"));
+        forwarder.begin_drain().await.expect("begin drain");
+        let installed_rules = forwarder.drain_rules.clone();
+        assert!(!installed_rules.is_empty());
+        let failed_rule = installed_rules[0].clone();
+        let deleted = iptables_delete_args(&failed_rule);
+        let refs = deleted.iter().map(String::as_str).collect::<Vec<_>>();
+        runner.fail_async(iptables_invocation(
+            failed_rule.program,
+            Some("filter"),
+            &refs,
+        ));
+
+        let error = forwarder
+            .cancel_drain()
+            .await
+            .expect_err("delete failure must keep the drain fence observable");
+        assert!(format!("{error:#}").contains("撤销 Exit Node 排空规则失败"));
+        assert!(forwarder.is_draining());
+        assert!(forwarder.drain_rules.contains(&failed_rule));
+    }
+
+    #[tokio::test]
     async fn drain_still_fences_ipv6_when_no_default_route_was_detected() {
         let runner = Arc::new(FakeCommandRunner::default());
         let mut forwarder = fake_forwarder(runner.clone(), None);

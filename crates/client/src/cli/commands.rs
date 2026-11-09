@@ -1576,16 +1576,32 @@ fn parse_runtime_routing_mode(mode: &str) -> Result<fuckipv6_common::RoutingMode
 enum ExitForwardingAction {
     Keep,
     Install,
-    Remove,
+    Drain,
+    Resume,
 }
 
 #[cfg(target_os = "linux")]
-fn exit_forwarding_action(enabled: bool, has_forwarder: bool) -> ExitForwardingAction {
-    match (enabled, has_forwarder) {
-        (true, false) => ExitForwardingAction::Install,
-        (false, true) => ExitForwardingAction::Remove,
+fn exit_forwarding_action(
+    enabled: bool,
+    has_forwarder: bool,
+    draining: bool,
+) -> ExitForwardingAction {
+    match (enabled, has_forwarder, draining) {
+        (true, false, _) => ExitForwardingAction::Install,
+        (true, true, true) => ExitForwardingAction::Resume,
+        (false, true, false) => ExitForwardingAction::Drain,
         _ => ExitForwardingAction::Keep,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn runtime_exit_manager_enabled(runtime: &ClientRuntime) -> bool {
+    let effective =
+        local_exit_effective(runtime.local_exit_enabled, runtime.config.exit_node.enabled);
+    runtime
+        .exit_forwarder
+        .as_ref()
+        .is_some_and(|forwarder| effective || forwarder.is_draining())
 }
 
 fn local_exit_effective(owner_enabled: bool, network_allowed: bool) -> bool {
@@ -1773,8 +1789,26 @@ fn local_exit_accepts_inbound(runtime: &ClientRuntime) -> bool {
 
 #[cfg(target_os = "linux")]
 async fn finish_runtime_local_exit_drain(runtime: &mut ClientRuntime) {
-    if runtime.local_exit_enabled {
+    let effective =
+        local_exit_effective(runtime.local_exit_enabled, runtime.config.exit_node.enabled);
+    if effective {
+        if let Some(forwarder) = runtime.exit_forwarder.as_mut() {
+            if forwarder.is_draining() {
+                if let Err(error) = forwarder.cancel_drain().await {
+                    runtime.exit_drain_deadline =
+                        Some(Instant::now() + LOCAL_EXIT_DRAIN_RETRY_TIMEOUT);
+                    runtime.exit_node_manager.set_enabled(true);
+                    tracing::warn!(
+                        "Exit Node 已重新获得授权，但取消排空失败，保持已有 flow 并自动重试: {error:#}"
+                    );
+                    return;
+                }
+            }
+        }
         runtime.exit_drain_deadline = None;
+        runtime
+            .exit_node_manager
+            .set_enabled(runtime_exit_manager_enabled(runtime));
         return;
     }
 
@@ -1792,6 +1826,9 @@ async fn finish_runtime_local_exit_drain(runtime: &mut ClientRuntime) {
         Err(error) => {
             runtime.exit_forwarder = Some(forwarder);
             runtime.exit_drain_deadline = Some(Instant::now() + LOCAL_EXIT_DRAIN_RETRY_TIMEOUT);
+            runtime
+                .exit_node_manager
+                .set_enabled(runtime_exit_manager_enabled(runtime));
             tracing::warn!("Exit Node 排空后的资源清理失败，保留排空栅栏并自动重试: {error:#}");
         }
     }
@@ -1817,8 +1854,14 @@ async fn apply_runtime_routing(
     // Node keeps its current resources until persistence succeeds, so a failed
     // config write can leave the old runtime completely untouched.
     #[cfg(target_os = "linux")]
-    let exit_action =
-        exit_forwarding_action(effective_exit_enabled, runtime.exit_forwarder.is_some());
+    let exit_action = exit_forwarding_action(
+        effective_exit_enabled,
+        runtime.exit_forwarder.is_some(),
+        runtime
+            .exit_forwarder
+            .as_ref()
+            .is_some_and(LinuxExitForwarder::is_draining),
+    );
     #[cfg(target_os = "linux")]
     let mut staged_exit_forwarder = if exit_action == ExitForwardingAction::Install {
         let forwarder =
@@ -1858,9 +1901,6 @@ async fn apply_runtime_routing(
     }
 
     runtime.route_engine.set_routing_mode(parsed_mode);
-    runtime
-        .exit_node_manager
-        .set_enabled(effective_exit_enabled);
     runtime.configured_exit_node = exit_node.clone();
     runtime.config = updated_config;
     #[cfg(target_os = "linux")]
@@ -1874,13 +1914,74 @@ async fn apply_runtime_routing(
         ExitForwardingAction::Install => {
             runtime.exit_forwarder = staged_exit_forwarder.take();
         }
-        ExitForwardingAction::Remove => {
-            if let Some(mut forwarder) = runtime.exit_forwarder.take() {
-                let _ = forwarder.rollback();
+        ExitForwardingAction::Drain => {
+            if let Some(forwarder) = runtime.exit_forwarder.as_mut() {
+                if let Err(error) = forwarder.begin_drain().await {
+                    let rollback_error = match runtime.exit_forwarder.take() {
+                        Some(mut forwarder) => forwarder
+                            .rollback_within(Duration::from_secs(4))
+                            .await
+                            .err()
+                            .map(|rollback_error| {
+                                runtime.exit_forwarder = Some(forwarder);
+                                rollback_error
+                            }),
+                        None => None,
+                    };
+                    runtime.exit_drain_deadline = runtime
+                        .exit_forwarder
+                        .is_some()
+                        .then(|| Instant::now() + LOCAL_EXIT_DRAIN_RETRY_TIMEOUT);
+                    runtime
+                        .exit_node_manager
+                        .set_enabled(runtime_exit_manager_enabled(runtime));
+                    return Err(match rollback_error {
+                        None => format!(
+                            "进入 Exit Node 排空失败，已失败关闭并清理资源: {error:#}"
+                        ),
+                        Some(rollback_error) => format!(
+                            "进入 Exit Node 排空失败且清理失败，可重试: {error:#}; {rollback_error:#}"
+                        ),
+                    });
+                }
+            }
+        }
+        ExitForwardingAction::Resume => {
+            if let Some(forwarder) = runtime.exit_forwarder.as_mut() {
+                if let Err(error) = forwarder.cancel_drain().await {
+                    runtime.exit_drain_deadline =
+                        Some(Instant::now() + LOCAL_EXIT_DRAIN_RETRY_TIMEOUT);
+                    runtime.exit_node_manager.set_enabled(true);
+                    return Err(format!(
+                        "取消 Exit Node 排空失败，保持现有 flow 并等待重试: {error:#}"
+                    ));
+                }
             }
         }
         ExitForwardingAction::Keep => {}
     }
+
+    #[cfg(target_os = "linux")]
+    {
+        if runtime
+            .exit_forwarder
+            .as_ref()
+            .is_some_and(LinuxExitForwarder::is_draining)
+        {
+            runtime
+                .exit_drain_deadline
+                .get_or_insert_with(|| Instant::now() + LOCAL_EXIT_DRAIN_TIMEOUT);
+        } else {
+            runtime.exit_drain_deadline = None;
+        }
+        runtime
+            .exit_node_manager
+            .set_enabled(runtime_exit_manager_enabled(runtime));
+    }
+    #[cfg(not(target_os = "linux"))]
+    runtime
+        .exit_node_manager
+        .set_enabled(effective_exit_enabled);
 
     let canonical_mode = format!("{parsed_mode:?}");
     tracing::info!(
@@ -5931,19 +6032,27 @@ mod tests {
     #[test]
     fn exit_forwarder_transitions_are_idempotent() {
         assert_eq!(
-            exit_forwarding_action(true, false),
+            exit_forwarding_action(true, false, false),
             ExitForwardingAction::Install
         );
         assert_eq!(
-            exit_forwarding_action(true, true),
+            exit_forwarding_action(true, true, false),
             ExitForwardingAction::Keep
         );
         assert_eq!(
-            exit_forwarding_action(false, true),
-            ExitForwardingAction::Remove
+            exit_forwarding_action(false, true, false),
+            ExitForwardingAction::Drain
         );
         assert_eq!(
-            exit_forwarding_action(false, false),
+            exit_forwarding_action(false, false, false),
+            ExitForwardingAction::Keep
+        );
+        assert_eq!(
+            exit_forwarding_action(true, true, true),
+            ExitForwardingAction::Resume
+        );
+        assert_eq!(
+            exit_forwarding_action(false, true, true),
             ExitForwardingAction::Keep
         );
     }
@@ -5955,7 +6064,7 @@ mod tests {
         assert!(!local_exit_effective(true, false));
         assert!(!local_exit_effective(false, false));
         assert_eq!(
-            exit_forwarding_action(local_exit_effective(false, true), false),
+            exit_forwarding_action(local_exit_effective(false, true), false, false),
             ExitForwardingAction::Keep
         );
     }

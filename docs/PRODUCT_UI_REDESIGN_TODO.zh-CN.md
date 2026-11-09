@@ -58,7 +58,7 @@
 | W9 成员、组与拓扑 | `[~]` | P1 | W8 | 成员列表、邀请审批、组目录和拓扑聚合已完成；多网络视觉、交互、性能与 E2E 进行中 |
 | W10 安全与隐私 | `[x]` | P1 | W9 | 权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计、安全页面状态和可重复治理证据闭环均已完成 |
 | W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约和 W11-09 隔离路由 E2E/失败关闭/网络报告已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，GPUI 已接入同一页面的权威投影、规则/目标/影响展示和精确跳转，真实命中观测、GPUI/WebUI/Android 三端一致、生产后端接线及真实平台监听/适配待完成 |
-| W12 Exit | `[ ]` | P1 | W10,W11 | 治理、Google、DNS、网速报告 |
+| W12 Exit | `[~]` | P1 | W10,W11 | W12-01 本机 Exit 独立启停、operation 阶段、本地否决、结构化失败、能力隔离、重启/残留清理已完成；治理、健康、Google、DNS、泄漏、性能与稳定性待完成 |
 | W13 Relay | `[ ]` | P1 | W10 | 授权、配额、健康、回退 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
 | W15 File | `[ ]` | P2 | W10 | ACL、配额、上传下载、续传 |
@@ -2535,16 +2535,32 @@ GPUI、Android、常见受限网络或一般抗干扰能力已验收；在相应
 
 目标：Exit 是节点自主提供、网络治理授权、用户显式选择的互联网出口。必须验证真实可访问性、DNS/IPv6 泄漏、性能和稳定性。
 
-### W12-01 本机 Exit 能力启停 `[ ]`
+### W12-01 本机 Exit 能力启停 `[x]`
 
-- [ ] 节点 owner 可独立启用/关闭本机 Exit 能力；
-- [ ] 启停是 operation，展示监听、健康检查和清理阶段；
-- [ ] 关闭后停止接受新会话并优雅处理已有会话；
-- [ ] 节点本地拒绝优先于网络管理员要求；
-- [ ] 启停不误停 Coordinator、Relay 或 File；
-- [ ] 资源不足、平台不支持、权限不足有结构化原因；
-- [ ] 不要求管理员远程开启节点本机能力；
-- [ ] 覆盖崩溃、重启和残留监听清理。
+- [x] 节点 owner 可独立启用/关闭本机 Exit 能力；
+- [x] 启停是 operation，展示监听、健康检查和清理阶段；
+- [x] 关闭后停止接受新会话并优雅处理已有会话；
+- [x] 节点本地拒绝优先于网络管理员要求；
+- [x] 启停不误停 Coordinator、Relay 或 File；
+- [x] 资源不足、平台不支持、权限不足有结构化原因；
+- [x] 不要求管理员远程开启节点本机能力；
+- [x] 覆盖崩溃、重启和残留监听清理。
+
+本地 owner 通过 `CapabilityEnable`/`CapabilityDisable` operation 启停本机 Exit，operation 与权威快照返回同一 `LocalExitCapability`；
+GPUI 和 WebUI 均展示 `waiting_for_network_authorization`、`listening`、`health_checking`、`enabled`、`draining`、`cleaning`、`failed`
+等权威阶段以及结构化 problem。网络 Owner、管理员等远程身份不能修改节点本机能力，本地 veto 始终优先于网络 Exit 角色。
+Linux forwarder 进入 drain 后先 fence 新客户端并保留已有 flow 资源，残留清理覆盖 IPv4/IPv6 且可幂等重试；重启只恢复 owner intent，
+仍须重新获得网络授权。能力隔离测试确认启停前后 Coordinator、Relay、File、embedded services、网络角色、peer 数和网络启动状态不变；
+权限不足、平台不支持、资源不足和一般不可用均保留稳定原因、可重试性和诊断信息。
+
+**验证通过（2026-11-09）**：`cargo fmt --all -- --check`、
+`cargo test -p fuckipv6-client --no-default-features --lib local_exit`（25 passed）、
+`cargo test -p fuckipv6-client --no-default-features --lib routing::linux_exit::tests::`（21 passed，2 ignored，需隔离特权 netns 拓扑）、
+`cargo test -p fuckipv6-client --all-features --lib gpui::view_model::tests::exit_node_page_projects_authoritative_local_exit_lifecycle -- --exact`
+（1 passed）、`cargo check --workspace`、`node scripts/test_i18n_runtime.mjs`、WebUI `typecheck`、`lint`、
+`npm test -- --run`（271 passed）和 `npm run build`（仅保留现有 i18n 非 module 与 >500 kB chunk 警告）。
+相关提交：`29b75bc`、`1230aad`、`01bd928`、`939266f`、`6f499df`、`ce15a9a`、`09c7b4e`、`484b259`。
+未执行需要隔离特权的 `linux_netns_*` 用例，也未做真实平台崩溃/防火墙清理实测；这些边界留给后续稳定性与跨平台实机验收。
 
 **验收**：Exit 能力的所有权边界清晰，可由本机可靠启停且不影响其他能力。
 

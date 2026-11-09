@@ -499,6 +499,16 @@ impl ExitContributionAvailability {
         }
     }
 
+    pub fn stale(declared_available: bool, observed_at_unix_ms: u64) -> Self {
+        Self {
+            state: ExitAvailabilityState::Unknown,
+            source: ExitAvailabilitySource::RemotePeerReport,
+            observed_at_unix_ms: Some(observed_at_unix_ms),
+            declared_available: Some(declared_available),
+            reason_code: Some("exit.availability.stale".into()),
+        }
+    }
+
     pub fn is_fresh(&self, now_unix_ms: u64, max_age_ms: u64) -> bool {
         self.observed_at_unix_ms
             .is_some_and(|observed| now_unix_ms <= observed.saturating_add(max_age_ms))
@@ -1206,6 +1216,12 @@ mod tests {
             10,
         );
         assert_eq!(healthy.state, ExitAvailabilityState::Available);
+        let stale = ExitContributionAvailability::stale(true, 10);
+        assert_eq!(stale.state, ExitAvailabilityState::Unknown);
+        assert_eq!(
+            stale.reason_code.as_deref(),
+            Some("exit.availability.stale")
+        );
     }
 
     #[test]

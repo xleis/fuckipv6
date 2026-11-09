@@ -1942,6 +1942,13 @@ pub fn build_command(
         Ok(ActionBinding::RefreshSnapshot) => Ok(NodeCommand::GetSnapshot),
         Ok(ActionBinding::GetDiagnostics) => Ok(NodeCommand::GetDiagnostics),
         Ok(ActionBinding::CreateNetwork) => {
+            let exit_contribution_mode =
+                parse_exit_contribution_mode(action, &required("exit_contribution_mode")?)?;
+            let (exit_contribution, exit_contribution_scope) = resolve_exit_contribution_fields(
+                action,
+                exit_contribution_mode,
+                &required("exit_contribution_scope")?,
+            )?;
             Ok(NodeCommand::CreateNetwork(NodeCreateNetworkCommand {
                 name: field("name"),
                 purpose: field("purpose"),
@@ -1956,18 +1963,9 @@ pub fn build_command(
                 )?,
                 visibility: parse_visibility(field("visibility"))?,
                 join_mode: parse_join_mode(field("join_mode"))?,
-                exit_contribution: parse_exit_contribution(
-                    action,
-                    &required("exit_contribution")?,
-                )?,
-                exit_contribution_scope: parse_exit_contribution_scope(
-                    action,
-                    &required("exit_contribution_scope")?,
-                )?,
-                exit_contribution_mode: parse_exit_contribution_mode(
-                    action,
-                    &required("exit_contribution_mode")?,
-                )?,
+                exit_contribution,
+                exit_contribution_scope,
+                exit_contribution_mode,
                 signaling_port: parse_number(
                     action,
                     "signaling_port",
@@ -1979,6 +1977,13 @@ pub fn build_command(
             }))
         }
         Ok(ActionBinding::PreviewNetworkProfile | ActionBinding::UpdateNetworkProfile) => {
+            let exit_contribution_mode =
+                parse_exit_contribution_mode(action, &required("exit_contribution_mode")?)?;
+            let (exit_contribution, exit_contribution_scope) = resolve_exit_contribution_fields(
+                action,
+                exit_contribution_mode,
+                &required("exit_contribution_scope")?,
+            )?;
             let update = NetworkProfileUpdate {
                 purpose: field("purpose"),
                 icon: field("icon"),
@@ -1992,18 +1997,9 @@ pub fn build_command(
                 )?,
                 visibility: parse_visibility(field("visibility"))?,
                 join_mode: parse_join_mode(field("join_mode"))?,
-                exit_contribution: parse_exit_contribution(
-                    action,
-                    &required("exit_contribution")?,
-                )?,
-                exit_contribution_scope: parse_exit_contribution_scope(
-                    action,
-                    &required("exit_contribution_scope")?,
-                )?,
-                exit_contribution_mode: parse_exit_contribution_mode(
-                    action,
-                    &required("exit_contribution_mode")?,
-                )?,
+                exit_contribution,
+                exit_contribution_scope,
+                exit_contribution_mode,
             };
             let command = NodeNetworkProfileCommand {
                 network_name: field("network_name"),
@@ -2908,18 +2904,29 @@ fn parse_join_mode(value: String) -> Result<NetworkJoinMode, CommandBuildError> 
     }
 }
 
-fn parse_exit_contribution(
+fn resolve_exit_contribution_fields(
     action: &NodeUiAction,
-    value: &str,
-) -> Result<ExitContributionObligation, CommandBuildError> {
-    match value {
-        "required" => Ok(ExitContributionObligation::Required),
-        "not_required" => Ok(ExitContributionObligation::NotRequired),
-        _ => Err(CommandBuildError::InvalidField {
-            action_id: action.id.clone(),
-            field_id: "exit_contribution".into(),
-            value: value.into(),
-        }),
+    mode: ExitContributionMode,
+    requested_scope: &str,
+) -> Result<(ExitContributionObligation, ExitContributionScope), CommandBuildError> {
+    let requested_scope = parse_exit_contribution_scope(action, requested_scope)?;
+    match mode {
+        ExitContributionMode::RequiredOnJoin => {
+            if requested_scope == ExitContributionScope::NotApplicable {
+                return Err(CommandBuildError::InvalidField {
+                    action_id: action.id.clone(),
+                    field_id: "exit_contribution_scope".into(),
+                    value: "not_applicable".into(),
+                });
+            }
+            Ok((ExitContributionObligation::Required, requested_scope))
+        }
+        ExitContributionMode::Autonomous
+        | ExitContributionMode::Disabled
+        | ExitContributionMode::ApprovalRequired => Ok((
+            ExitContributionObligation::NotRequired,
+            ExitContributionScope::NotApplicable,
+        )),
     }
 }
 

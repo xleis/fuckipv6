@@ -19,9 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
-    ContentHash, DomainError, ExitContributionObligation, MembershipTerms,
-    NetworkDiscoveryDocument, NetworkDiscoveryRecord, NetworkJoinMode, NodeId, OperationId,
-    NETWORK_DISCOVERY_VALIDITY_MS,
+    ContentHash, DomainError, MembershipTerms, NetworkDiscoveryDocument, NetworkDiscoveryRecord,
+    NetworkJoinMode, NodeId, OperationId, NETWORK_DISCOVERY_VALIDITY_MS,
 };
 use fuckipv6_common::Identity;
 use schemars::JsonSchema;
@@ -1461,10 +1460,8 @@ fn preview_from_record(
         exit_contribution_disable_key: "join.exit.disclosure.disable".into(),
         local_exit_available: false,
         local_exit_enabled: false,
-        can_join_without_local_exit: document.exit_contribution
-            == ExitContributionObligation::NotRequired,
-        join_requires_exit_consent: document.exit_contribution
-            == ExitContributionObligation::Required,
+        can_join_without_local_exit: !document.exit_contribution_mode.requires_join_commitment(),
+        join_requires_exit_consent: document.exit_contribution_mode.requires_join_commitment(),
         privacy_changes: document.privacy_changes.clone(),
         already_member,
         can_join: blocked_reason_key.is_none(),
@@ -1894,6 +1891,8 @@ mod tests {
         record.exit_contribution = ExitContributionObligation::Required;
         record.exit_contribution_scope =
             fuckipv6_common::domain::ExitContributionScope::JoiningMembers;
+        record.exit_contribution_mode =
+            fuckipv6_common::domain::ExitContributionMode::RequiredOnJoin;
         record.privacy_changes = vec!["Network operators can observe connection metadata".into()];
         let now = now_unix_ms();
         record

@@ -3,8 +3,10 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
+#[cfg(test)]
+use fuckipv6_common::domain::ExitContributionObligation;
 use fuckipv6_common::domain::{
-    ActivityCategory, ActivitySeverity, AuditOutcome, CapabilityKind, ExitContributionObligation,
+    ActivityCategory, ActivitySeverity, AuditOutcome, CapabilityKind, ExitContributionMode,
     IdempotencyKey, InvitationPreview, InvitationState, InvitationStatusView, IssuedInvitation,
     JoinRequest, JoinRequestReviewAction, JoinRequestState, MemberLifecycleAction, MembershipRole,
     NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
@@ -2880,7 +2882,10 @@ impl GpuiShell {
             cx.notify();
             return;
         }
-        if preview.terms.exit_contribution == ExitContributionObligation::Required
+        if preview
+            .terms
+            .exit_contribution_mode
+            .requires_join_commitment()
             && !self.invitation_exit_contribution_confirmed
         {
             self.error =
@@ -2888,8 +2893,10 @@ impl GpuiShell {
             cx.notify();
             return;
         }
-        let exit_contribution_required =
-            preview.terms.exit_contribution == ExitContributionObligation::Required;
+        let exit_contribution_required = preview
+            .terms
+            .exit_contribution_mode
+            .requires_join_commitment();
         self.set_field_value(
             "redeem_invitation",
             "acknowledged_at_unix_ms",
@@ -9381,12 +9388,13 @@ impl GpuiShell {
                 t(self.locale, "join_requests.exit"),
                 t(
                     self.locale,
-                    if request.grant_preview.exit_contribution
-                        == ExitContributionObligation::Required
-                    {
-                        "join_requests.exit.required"
-                    } else {
-                        "join_requests.exit.not_required"
+                    match request.grant_preview.exit_contribution_mode {
+                        ExitContributionMode::RequiredOnJoin => "join_requests.exit.required",
+                        ExitContributionMode::Autonomous => "join_requests.exit.autonomous",
+                        ExitContributionMode::ApprovalRequired => {
+                            "join_requests.exit.approval_required"
+                        }
+                        ExitContributionMode::Disabled => "join_requests.exit.not_required",
                     },
                 )
                 .to_string(),
@@ -9800,10 +9808,13 @@ impl GpuiShell {
         let expires = format_diagnostic_timestamp(self.locale, preview.expires_at_unix_ms);
         let terms_exit = t(
             self.locale,
-            if preview.terms.exit_contribution == ExitContributionObligation::Required {
-                "invitations.terms.exit_required"
-            } else {
-                "invitations.terms.exit_not_required"
+            match preview.terms.exit_contribution_mode {
+                ExitContributionMode::RequiredOnJoin => "invitations.terms.exit_required",
+                ExitContributionMode::Autonomous => "invitations.terms.exit_autonomous",
+                ExitContributionMode::ApprovalRequired => {
+                    "invitations.terms.exit_approval_required"
+                }
+                ExitContributionMode::Disabled => "invitations.terms.exit_not_required",
             },
         )
         .to_string();
@@ -9839,7 +9850,10 @@ impl GpuiShell {
             member_limit,
         ]
         .join(" · ");
-        let exit_required = preview.terms.exit_contribution == ExitContributionObligation::Required;
+        let exit_required = preview
+            .terms
+            .exit_contribution_mode
+            .requires_join_commitment();
         let local_exit_available = self.snapshot.exit_node_capabilities.supported;
         let can_accept = preview.can_accept
             && preview.state == InvitationState::Active
@@ -9919,7 +9933,10 @@ impl GpuiShell {
                     .recent_invitation_preview
                     .as_ref()
                     .is_some_and(|preview| {
-                        preview.terms.exit_contribution != ExitContributionObligation::Required
+                        !preview
+                            .terms
+                            .exit_contribution_mode
+                            .requires_join_commitment()
                             || shell.invitation_exit_contribution_confirmed
                     })
             {
@@ -10163,12 +10180,13 @@ impl GpuiShell {
                 .to_string();
                 let exit = t(
                     self.locale,
-                    if request.grant_preview.exit_contribution
-                        == ExitContributionObligation::Required
-                    {
-                        "join_requests.exit.required"
-                    } else {
-                        "join_requests.exit.not_required"
+                    match request.grant_preview.exit_contribution_mode {
+                        ExitContributionMode::RequiredOnJoin => "join_requests.exit.required",
+                        ExitContributionMode::Autonomous => "join_requests.exit.autonomous",
+                        ExitContributionMode::ApprovalRequired => {
+                            "join_requests.exit.approval_required"
+                        }
+                        ExitContributionMode::Disabled => "join_requests.exit.not_required",
                     },
                 )
                 .to_string();
@@ -11463,9 +11481,13 @@ impl GpuiShell {
                         t(self.locale, "join.exit_contribution"),
                         t(
                             self.locale,
-                            match preview.exit_contribution {
-                                ExitContributionObligation::Required => "join.exit.required",
-                                ExitContributionObligation::NotRequired => "join.exit.not_required",
+                            match preview.exit_contribution_mode {
+                                ExitContributionMode::RequiredOnJoin => "join.exit.required",
+                                ExitContributionMode::Autonomous => "join.exit.autonomous",
+                                ExitContributionMode::ApprovalRequired => {
+                                    "join.exit.approval_required"
+                                }
+                                ExitContributionMode::Disabled => "join.exit.not_required",
                             },
                         ),
                     ))

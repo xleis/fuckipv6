@@ -4,11 +4,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{watch, Mutex};
 
 use fuckipv6_common::domain::{
-    CapabilityKind, ExitContributionObligation, ExitContributionScope, IdempotencyKey,
-    InvitationCreateRequest, InvitationPreview, InvitationRedeemRequest, InvitationRedemption,
-    InvitationState, JoinApplicantProfile, JoinRequest, JoinRequestGrantPreview, JoinRequestId,
-    JoinTermsAck, MemberLifecycleChangeRequest, MemberRemovalPreviewRequest, MembershipRole,
-    MembershipTerms, NetworkDiscoveryRecord, NetworkId, NetworkMembership, NetworkProfileWarning,
+    validate_exit_contribution_policy, CapabilityKind, ExitContributionMode,
+    ExitContributionObligation, ExitContributionScope, IdempotencyKey, InvitationCreateRequest,
+    InvitationPreview, InvitationRedeemRequest, InvitationRedemption, InvitationState,
+    JoinApplicantProfile, JoinRequest, JoinRequestGrantPreview, JoinRequestId, JoinTermsAck,
+    MemberLifecycleChangeRequest, MemberRemovalPreviewRequest, MembershipRole, MembershipTerms,
+    NetworkDiscoveryRecord, NetworkId, NetworkMembership, NetworkProfileWarning,
     NetworkProfileWarningCode, NetworkRecord, NodeId, OperationId, JOIN_REQUEST_DEFAULT_EXPIRY_MS,
 };
 use fuckipv6_common::{Identity, JoinRequestBatchReviewItem};
@@ -2044,9 +2045,7 @@ fn apply_local_join_capabilities(
         .collect();
     preview.local_exit_available = snapshot.exit_node_capabilities.supported;
     preview.local_exit_enabled = snapshot.local_exit.owner_exit_enabled;
-    if preview.exit_contribution == ExitContributionObligation::Required
-        && !preview.local_exit_available
-    {
+    if preview.exit_contribution_mode.requires_join_commitment() && !preview.local_exit_available {
         preview.can_join = false;
         preview.blocked_reason_key = Some("join.error.exit_capability_required".into());
     }
@@ -2322,6 +2321,15 @@ fn exit_contribution_obligation_audit_value(
     }
 }
 
+fn exit_contribution_mode_audit_value(mode: ExitContributionMode) -> &'static str {
+    match mode {
+        ExitContributionMode::Autonomous => "autonomous",
+        ExitContributionMode::RequiredOnJoin => "required_on_join",
+        ExitContributionMode::Disabled => "disabled",
+        ExitContributionMode::ApprovalRequired => "approval_required",
+    }
+}
+
 fn exit_contribution_scope_audit_value(scope: ExitContributionScope) -> &'static str {
     match scope {
         ExitContributionScope::NotApplicable => "not_applicable",
@@ -2337,17 +2345,20 @@ fn validate_exit_contribution_admission(
     snapshot: &super::NodeSnapshot,
     obligation: ExitContributionObligation,
     scope: ExitContributionScope,
+    mode: ExitContributionMode,
     acknowledged: Option<bool>,
     network_name: &str,
 ) -> Result<(), NodeProblem> {
-    if (obligation == ExitContributionObligation::NotRequired)
-        != (scope == ExitContributionScope::NotApplicable)
-    {
+    if validate_exit_contribution_policy(obligation, scope, mode).is_err() {
         return Err(NodeProblem::new(
             NodeProblemCode::InvalidRequest,
-            "Exit 贡献义务与生效范围不一致",
+            "Exit 贡献模式与兼容义务字段不一致",
         )
         .with_message_key("join.error.invalid_exit_contribution_policy")
+        .with_param(
+            "policy_exit_contribution_mode",
+            exit_contribution_mode_audit_value(mode),
+        )
         .with_param(
             "policy_exit_contribution",
             exit_contribution_obligation_audit_value(obligation),
@@ -2359,7 +2370,7 @@ fn validate_exit_contribution_admission(
         .retryable(false)
         .for_network(network_name.to_owned()));
     }
-    if obligation == ExitContributionObligation::NotRequired {
+    if !mode.requires_join_commitment() {
         return Ok(());
     }
     if !snapshot.exit_node_capabilities.supported {
@@ -2615,6 +2626,7 @@ async fn redeem_invitation(
         &state.snapshot().await,
         preview.terms.exit_contribution,
         preview.terms.exit_contribution_scope,
+        preview.terms.exit_contribution_mode,
         command.request.exit_contribution_acknowledged,
         &preview.network_name,
     ) {
@@ -2809,6 +2821,7 @@ async fn acknowledge_membership_policy(
         &state.snapshot().await,
         current_terms.exit_contribution,
         current_terms.exit_contribution_scope,
+        current_terms.exit_contribution_mode,
         command.exit_contribution_acknowledged,
         &joined.network_name,
     ) {
@@ -3403,6 +3416,7 @@ async fn join_runtime_network(
             &state.snapshot().await,
             record.document.exit_contribution,
             record.document.exit_contribution_scope,
+            record.document.exit_contribution_mode,
             command.exit_contribution_acknowledged,
             &record.document.name,
         ) {
@@ -5787,6 +5801,7 @@ mod tests {
             &snapshot,
             ExitContributionObligation::Required,
             ExitContributionScope::JoiningMembers,
+            ExitContributionMode::RequiredOnJoin,
             Some(true),
             "lab",
         )
@@ -5811,6 +5826,7 @@ mod tests {
             &snapshot,
             ExitContributionObligation::Required,
             ExitContributionScope::AllMembers,
+            ExitContributionMode::RequiredOnJoin,
             None,
             "lab",
         )
@@ -5824,6 +5840,7 @@ mod tests {
             &snapshot,
             ExitContributionObligation::Required,
             ExitContributionScope::JoiningMembers,
+            ExitContributionMode::RequiredOnJoin,
             Some(true),
             "lab",
         )
@@ -5832,6 +5849,7 @@ mod tests {
             &snapshot,
             ExitContributionObligation::NotRequired,
             ExitContributionScope::NotApplicable,
+            ExitContributionMode::Disabled,
             None,
             "lab",
         )
@@ -5840,6 +5858,7 @@ mod tests {
             &snapshot,
             ExitContributionObligation::NotRequired,
             ExitContributionScope::AllMembers,
+            ExitContributionMode::Autonomous,
             Some(true),
             "lab",
         )

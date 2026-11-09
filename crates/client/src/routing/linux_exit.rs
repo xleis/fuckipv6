@@ -133,6 +133,8 @@ pub struct LinuxExitForwarder {
     clients: HashMap<String, ClientForwardState>,
     authorized_client_ids: HashSet<String>,
     total_clients: u64,
+    draining: bool,
+    drain_rules: Vec<IptablesRule>,
     ipv4_forward_changed: bool,
     ipv6_forward_changed: bool,
     cleaned: bool,
@@ -181,6 +183,8 @@ impl LinuxExitForwarder {
             clients: HashMap::new(),
             authorized_client_ids: HashSet::new(),
             total_clients: 0,
+            draining: false,
+            drain_rules: Vec::new(),
             ipv4_forward_changed: false,
             ipv6_forward_changed: false,
             cleaned: false,
@@ -236,6 +240,109 @@ impl LinuxExitForwarder {
         self.total_clients
     }
 
+    /// Whether the forwarder is rejecting new client flows while retaining
+    /// established flows, NAT state and return routes for a bounded interval.
+    pub fn is_draining(&self) -> bool {
+        self.draining
+    }
+
+    /// Stop accepting new client flows without tearing down resources needed
+    /// by established flows. A top-of-chain conntrack DROP makes the change
+    /// independent of existing per-client ACCEPT rule ordering.
+    pub(crate) async fn begin_drain(&mut self) -> Result<()> {
+        if self.cleaned {
+            anyhow::bail!("Exit Node 转发资源已经清理，无法进入排空");
+        }
+        if self.draining {
+            return Ok(());
+        }
+
+        let mut rules = Vec::new();
+        let mut programs = vec!["iptables"];
+        if self.external_v6_interface.is_some() {
+            programs.push("ip6tables");
+        }
+        for program in programs {
+            let args = drain_forward_rule(&self.forward_chain, &self.tun_name);
+            if let Err(error) = install_iptables_rule(
+                self.runner.as_ref(),
+                program,
+                Some("filter"),
+                args,
+                &mut rules,
+            )
+            .await
+            {
+                self.drain_rules = rules;
+                self.draining = true;
+                let cleanup = self.cancel_drain().await;
+                return match cleanup {
+                    Ok(()) => Err(error).with_context(|| {
+                        format!("安装 Exit Node 排空规则失败，已撤销部分规则 ({program})")
+                    }),
+                    Err(cleanup_error) => Err(anyhow::anyhow!(
+                        "安装 Exit Node 排空规则失败 ({error:#})，部分规则清理失败: {cleanup_error:#}"
+                    )),
+                };
+            }
+        }
+
+        self.drain_rules = rules;
+        self.draining = true;
+        tracing::info!(
+            "Exit Node 已进入排空：{} 拒绝新客户端 flow，已建立 flow 保持",
+            self.tun_name
+        );
+        Ok(())
+    }
+
+    /// Cancel a drain and restore acceptance for new client flows.
+    pub(crate) async fn cancel_drain(&mut self) -> Result<()> {
+        if self.drain_rules.is_empty() {
+            self.draining = false;
+            return Ok(());
+        }
+
+        let deadline = Instant::now() + ROLLBACK_TIMEOUT;
+        let mut failures = Vec::new();
+        for rule in self.drain_rules.clone().into_iter().rev() {
+            let Some(remaining) = rollback_remaining(deadline) else {
+                failures.push("撤销 Exit Node 排空规则超过总期限，剩余规则已保留".to_string());
+                break;
+            };
+            match timeout(
+                remaining.min(COMMAND_TIMEOUT),
+                run_iptables_delete(self.runner.as_ref(), &rule),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    self.drain_rules.retain(|installed| installed != &rule);
+                }
+                Ok(Err(error)) if is_missing_firewall_resource(&error) => {
+                    self.drain_rules.retain(|installed| installed != &rule);
+                }
+                Ok(Err(error)) => {
+                    failures.push(format!("撤销 Exit Node 排空规则失败: {error:#}"));
+                }
+                Err(_) => failures.push("撤销 Exit Node 排空规则超过单命令期限".to_string()),
+            }
+        }
+
+        if failures.is_empty() {
+            self.draining = false;
+            tracing::info!(
+                "Exit Node 排空已取消，重新接受新客户端 flow: {}",
+                self.tun_name
+            );
+            Ok(())
+        } else {
+            failures.sort();
+            failures.dedup();
+            Err(anyhow::anyhow!("{}", failures.join("; ")))
+        }
+    }
+
     /// Remove stale Exit resources keyed by this TUN name without changing
     /// kernel forwarding sysctls. Both address families are always checked:
     /// a previous process may have installed IPv6 resources even when the
@@ -253,6 +360,9 @@ impl LinuxExitForwarder {
 
     /// Grant forwarding resources to one authenticated client.
     pub async fn allow_client(&mut self, client_id: &str, virtual_ips: &VirtualIps) -> Result<()> {
+        if self.draining {
+            anyhow::bail!("Exit Node 正在排空，拒绝授权新客户端 {client_id}");
+        }
         let addresses: HashSet<IpAddr> = [
             virtual_ips.ipv4.map(IpAddr::V4),
             virtual_ips.ipv6.map(IpAddr::V6),
@@ -772,6 +882,22 @@ fn parse_default_route_interface(output: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn drain_forward_rule(forward_chain: &str, tun_name: &str) -> Vec<String> {
+    vec![
+        "-I".to_string(),
+        forward_chain.to_string(),
+        "1".to_string(),
+        "-i".to_string(),
+        tun_name.to_string(),
+        "-m".to_string(),
+        "conntrack".to_string(),
+        "--ctstate".to_string(),
+        "NEW".to_string(),
+        "-j".to_string(),
+        "DROP".to_string(),
+    ]
 }
 
 fn client_forward_rules(forward_chain: &str, tun_name: &str, source: &str) -> [Vec<String>; 2] {
@@ -1417,6 +1543,8 @@ mod tests {
             clients: HashMap::new(),
             authorized_client_ids: HashSet::new(),
             total_clients: 0,
+            draining: false,
+            drain_rules: Vec::new(),
             ipv4_forward_changed: false,
             ipv6_forward_changed: false,
             cleaned: false,
@@ -1494,6 +1622,129 @@ mod tests {
         let args = iptables_delete_args(&rule);
         assert_eq!(&args[..3], ["-D", "FKV6F-TEST", "-i"]);
         assert!(!args.contains(&"1".to_string()));
+    }
+
+    #[test]
+    fn drain_rule_precedes_per_client_accepts() {
+        let drain = drain_forward_rule("FKV6F-TEST", "fuckipv6");
+        assert_eq!(&drain[..3], ["-I", "FKV6F-TEST", "1"]);
+        assert!(drain.windows(2).any(|pair| pair == ["--ctstate", "NEW"]));
+        assert!(drain.windows(2).any(|pair| pair == ["-j", "DROP"]));
+        let accepted = client_forward_rules("FKV6F-TEST", "fuckipv6", "10.8.0.2/32");
+        assert!(accepted[0]
+            .windows(2)
+            .any(|pair| { pair == ["--ctstate", "NEW,ESTABLISHED,RELATED"] }));
+        assert!(accepted[1]
+            .windows(2)
+            .any(|pair| pair == ["--ctstate", "ESTABLISHED,RELATED"]));
+    }
+
+    #[tokio::test]
+    async fn drain_rejects_new_clients_but_preserves_existing_flow_resources() {
+        let runner = Arc::new(FakeCommandRunner::default());
+        let mut forwarder = fake_forwarder(runner.clone(), Some("eth0"));
+        let client = VirtualIps::dual_stack(
+            "10.8.0.2".parse().expect("valid IPv4"),
+            "fd00::2".parse().expect("valid IPv6"),
+        );
+        forwarder
+            .allow_client("peer-1", &client)
+            .await
+            .expect("authorize existing client");
+        let existing_rules = forwarder
+            .clients
+            .get("peer-1")
+            .expect("existing client state")
+            .rules
+            .clone();
+
+        forwarder.begin_drain().await.expect("begin drain");
+        assert!(forwarder.is_draining());
+        assert_eq!(
+            forwarder
+                .clients
+                .get("peer-1")
+                .expect("existing client state")
+                .rules,
+            existing_rules,
+            "draining must not remove established-flow or NAT rules"
+        );
+        let runs = runner.async_runs();
+        for program in ["iptables", "ip6tables"] {
+            let drain = drain_forward_rule(&forwarder.forward_chain, &forwarder.tun_name);
+            let refs: Vec<&str> = drain.iter().map(String::as_str).collect();
+            assert!(runs.contains(&iptables_invocation(program, Some("filter"), &refs)));
+        }
+
+        let rejected = forwarder
+            .allow_client(
+                "peer-2",
+                &VirtualIps::from_ipv4("10.8.0.3".parse().expect("valid IPv4")),
+            )
+            .await
+            .expect_err("draining must reject new client authorization");
+        assert!(format!("{rejected:#}").contains("正在排空"));
+
+        let run_count = runner.async_runs().len();
+        forwarder
+            .begin_drain()
+            .await
+            .expect("repeated drain is idempotent");
+        assert_eq!(runner.async_runs().len(), run_count);
+
+        forwarder.cancel_drain().await.expect("cancel drain");
+        assert!(!forwarder.is_draining());
+        let runs = runner.async_runs();
+        for program in ["iptables", "ip6tables"] {
+            let drain = drain_forward_rule(&forwarder.forward_chain, &forwarder.tun_name);
+            let deleted = iptables_delete_args(&IptablesRule {
+                program: if program == "iptables" {
+                    "iptables"
+                } else {
+                    "ip6tables"
+                },
+                table: Some("filter"),
+                args: drain,
+            });
+            let refs: Vec<&str> = deleted.iter().map(String::as_str).collect();
+            assert!(runs.contains(&iptables_invocation(program, Some("filter"), &refs)));
+        }
+        forwarder
+            .allow_client(
+                "peer-2",
+                &VirtualIps::from_ipv4("10.8.0.3".parse().expect("valid IPv4")),
+            )
+            .await
+            .expect("cancel drain restores new client acceptance");
+    }
+
+    #[tokio::test]
+    async fn drain_installation_failure_rolls_back_partial_rules() {
+        let runner = Arc::new(FakeCommandRunner::default());
+        let mut forwarder = fake_forwarder(runner.clone(), Some("eth0"));
+        let drain = drain_forward_rule(&forwarder.forward_chain, &forwarder.tun_name);
+        let refs: Vec<&str> = drain.iter().map(String::as_str).collect();
+        runner.fail_async(iptables_invocation("ip6tables", Some("filter"), &refs));
+
+        let error = forwarder
+            .begin_drain()
+            .await
+            .expect_err("IPv6 drain rule failure must fail the operation");
+        assert!(format!("{error:#}").contains("已撤销部分规则"));
+        assert!(!forwarder.is_draining());
+        assert!(forwarder.drain_rules.is_empty());
+
+        let deleted = iptables_delete_args(&IptablesRule {
+            program: "iptables",
+            table: Some("filter"),
+            args: drain,
+        });
+        let refs: Vec<&str> = deleted.iter().map(String::as_str).collect();
+        assert!(runner.async_runs().contains(&iptables_invocation(
+            "iptables",
+            Some("filter"),
+            &refs
+        )));
     }
 
     #[tokio::test]

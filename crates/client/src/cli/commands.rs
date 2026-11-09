@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use fuckipv6_common::domain::{NetworkId, NetworkMemberDirectory, NodeId};
+use fuckipv6_common::domain::{ExitSessionAction, NetworkId, NetworkMemberDirectory, NodeId};
 #[cfg(test)]
 use fuckipv6_common::is_encrypted_config_path;
 use fuckipv6_common::recent_error_log_lines;
@@ -55,7 +55,9 @@ use crate::routing::recovery::{
 };
 #[cfg(target_os = "linux")]
 use crate::routing::table::{parse_linux_ip_routes, RouteEntry};
-use crate::routing::{ExitContributionGate, ExitContributionNetworkContext, ExitNodeManager};
+use crate::routing::{
+    ExitContributionGate, ExitContributionNetworkContext, ExitNodeManager, ExitSelectionGate,
+};
 use crate::signaling::client::{SignalingClient, SignalingEvent};
 use crate::stats::StatsCollector;
 use crate::tun::TunDevice;
@@ -556,6 +558,8 @@ pub(crate) struct ClientRuntime {
     pub(crate) route_engine: SmartRouteEngine,
     pub(crate) exit_node_manager: ExitNodeManager,
     pub(crate) exit_contribution_gate: ExitContributionGate,
+    exit_selection_gate: ExitSelectionGate,
+    exit_selection_blocked: bool,
     pub(crate) configured_exit_node: Option<String>,
     pub(crate) heartbeat_interval: tokio::time::Interval,
     pub(crate) config_path: String,
@@ -608,6 +612,7 @@ impl ClientRuntime {
             state.member_directory_received_at(&network_id).await,
         ) {
             (Some(directory), Some(received_at_unix_ms)) => {
+                let selection_directory = directory.clone();
                 if let Err(denial) = self
                     .exit_contribution_gate
                     .replace_member_directory(directory, received_at_unix_ms)
@@ -618,8 +623,12 @@ impl ClientRuntime {
                     );
                     self.exit_contribution_gate.clear_member_directory();
                 }
+                self.replace_exit_selection_directory(selection_directory, received_at_unix_ms);
             }
-            _ => self.exit_contribution_gate.clear_member_directory(),
+            _ => {
+                self.exit_contribution_gate.clear_member_directory();
+                self.clear_exit_selection();
+            }
         }
 
         let (directory_tx, directory_rx) =
@@ -666,9 +675,18 @@ impl ClientRuntime {
         let Some(network_id) = self.network_id.clone() else {
             self.exit_contribution_gate.clear_network_context();
             self.exit_contribution_gate.clear_member_directory();
+            self.clear_exit_selection();
             return;
         };
         let local_node_id = NodeId::from_public_key(&self.identity.public_key());
+        let membership_has_network_access = snapshot.memberships.iter().any(|membership| {
+            membership.network_id == network_id.as_str()
+                && membership.node_id == local_node_id.as_str()
+                && membership.state.can_access_network_resources()
+        });
+        if !membership_has_network_access {
+            self.clear_exit_selection();
+        }
         match exit_contribution_context_from_snapshot(snapshot, &network_id, &local_node_id) {
             Some(context) => self.exit_contribution_gate.replace_network_context(context),
             None => {
@@ -678,6 +696,175 @@ impl ClientRuntime {
                 );
                 self.exit_contribution_gate.clear_network_context();
                 self.exit_contribution_gate.clear_member_directory();
+            }
+        }
+    }
+
+    fn replace_exit_selection_directory(
+        &mut self,
+        directory: NetworkMemberDirectory,
+        received_at_unix_ms: u64,
+    ) {
+        match self
+            .exit_selection_gate
+            .replace_member_directory(directory, received_at_unix_ms)
+        {
+            Ok(update) => {
+                if update == crate::routing::ExitSelectionDirectoryUpdate::Applied {
+                    self.exit_selection_blocked = false;
+                    self.reconcile_exit_selection(unix_time_ms());
+                }
+            }
+            Err(denial) => {
+                tracing::warn!(
+                    reason_code = denial.reason_code(),
+                    "成员目录不能用于管理员 Exit 选择授权，已失败关闭"
+                );
+                self.clear_exit_selection();
+            }
+        }
+    }
+
+    fn clear_exit_selection(&mut self) {
+        self.exit_selection_gate.clear_member_directory();
+        self.exit_selection_blocked = true;
+    }
+
+    fn reconcile_exit_selection(&mut self, now_unix_ms: u64) {
+        let Some(current_exit) = self.exit_selection_gate.current_exit().cloned() else {
+            return;
+        };
+        match self
+            .exit_selection_gate
+            .plan_current_session_transition(now_unix_ms)
+        {
+            Ok(transition) => match transition.action {
+                ExitSessionAction::Keep => {}
+                ExitSessionAction::Migrate { to } => {
+                    tracing::warn!(
+                        from_exit = %current_exit,
+                        to_exit = %to,
+                        policy_revision = transition.policy_revision,
+                        reason = ?transition.reason,
+                        "管理员 Exit 策略已变更，迁移当前会话"
+                    );
+                    self.exit_selection_gate.set_current_exit(Some(to));
+                }
+                ExitSessionAction::Terminate => {
+                    tracing::warn!(
+                        from_exit = %current_exit,
+                        policy_revision = transition.policy_revision,
+                        reason = ?transition.reason,
+                        "管理员 Exit 策略已撤权，终止当前 Exit 会话"
+                    );
+                    self.exit_selection_gate.set_current_exit(None);
+                    self.exit_selection_blocked = true;
+                }
+                ExitSessionAction::FailClosed => {
+                    tracing::warn!(
+                        from_exit = %current_exit,
+                        policy_revision = transition.policy_revision,
+                        reason = ?transition.reason,
+                        "管理员 Exit 策略已撤权，当前 Exit 会话失败关闭"
+                    );
+                    self.exit_selection_gate.set_current_exit(None);
+                    self.exit_selection_blocked = true;
+                }
+            },
+            Err(denial) => {
+                tracing::warn!(
+                    from_exit = %current_exit,
+                    reason_code = denial.reason_code(),
+                    "Exit 选择授权不可用，当前 Exit 会话失败关闭"
+                );
+                self.exit_selection_gate.set_current_exit(None);
+                self.exit_selection_blocked = true;
+            }
+        }
+    }
+
+    async fn requested_exit_node_id(&self) -> Option<NodeId> {
+        let target = self.configured_exit_node.as_deref()?.trim();
+        if target.is_empty() {
+            return None;
+        }
+        let virtual_ip = self.p2p.resolve_exit_peer(Some(target)).await?;
+        let peer = self.p2p.peer_by_ip(IpAddr::V6(virtual_ip)).await?;
+        Some(NodeId::from_public_key(&peer.public_key))
+    }
+
+    /// Return the one administrator-authorized Exit for this packet. A blocked
+    /// session remains closed until a newly applied directory revision proves
+    /// the authority has changed; packets cannot retry their way around a
+    /// revocation or missing replacement.
+    async fn exit_for_packet(&mut self, now_unix_ms: u64) -> Option<NodeId> {
+        if self.exit_selection_blocked {
+            return None;
+        }
+        if let Some(current_exit) = self.exit_selection_gate.current_exit().cloned() {
+            match self
+                .exit_selection_gate
+                .plan_current_session_transition(now_unix_ms)
+            {
+                Ok(transition) => match transition.action {
+                    ExitSessionAction::Keep => return Some(current_exit),
+                    ExitSessionAction::Migrate { to } => {
+                        tracing::warn!(
+                            from_exit = %current_exit,
+                            to_exit = %to,
+                            reason = ?transition.reason,
+                            "Exit 会话迁移到管理员允许的替代节点"
+                        );
+                        self.exit_selection_gate.set_current_exit(Some(to.clone()));
+                        return Some(to);
+                    }
+                    ExitSessionAction::Terminate | ExitSessionAction::FailClosed => {
+                        tracing::warn!(
+                            from_exit = %current_exit,
+                            reason = ?transition.reason,
+                            "Exit 会话已按管理员策略关闭"
+                        );
+                        self.exit_selection_gate.set_current_exit(None);
+                        self.exit_selection_blocked = true;
+                        return None;
+                    }
+                },
+                Err(denial) => {
+                    tracing::warn!(
+                        from_exit = %current_exit,
+                        reason_code = denial.reason_code(),
+                        "Exit 选择授权陈旧或无效，当前 Exit 会话失败关闭"
+                    );
+                    self.exit_selection_gate.set_current_exit(None);
+                    self.exit_selection_blocked = true;
+                    return None;
+                }
+            }
+        }
+
+        let requested = self.requested_exit_node_id().await;
+        match self
+            .exit_selection_gate
+            .select_for_session(now_unix_ms, requested.as_ref())
+        {
+            Ok(selected) => {
+                tracing::debug!(
+                    exit = %selected,
+                    requested = ?requested,
+                    "管理员 Exit 策略为新会话选定出口"
+                );
+                self.exit_selection_gate
+                    .set_current_exit(Some(selected.clone()));
+                Some(selected)
+            }
+            Err(denial) => {
+                tracing::warn!(
+                    reason_code = denial.reason_code(),
+                    requested = ?requested,
+                    "没有可证明授权的新 Exit 会话，数据平面失败关闭"
+                );
+                self.exit_selection_blocked = true;
+                None
             }
         }
     }
@@ -769,6 +956,10 @@ pub(crate) async fn prepare_client_runtime_ext(
 
     let identity = load_identity(&config)?;
     let exit_contribution_gate = ExitContributionGate::new(
+        NodeId::from_public_key(&identity.public_key()),
+        network_id.clone(),
+    );
+    let exit_selection_gate = ExitSelectionGate::new(
         NodeId::from_public_key(&identity.public_key()),
         network_id.clone(),
     );
@@ -977,6 +1168,8 @@ pub(crate) async fn prepare_client_runtime_ext(
         route_engine,
         exit_node_manager,
         exit_contribution_gate,
+        exit_selection_gate,
+        exit_selection_blocked: false,
         configured_exit_node,
         heartbeat_interval,
         config_path: config_path.to_string(),
@@ -1573,6 +1766,7 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                     node_state_updates = None;
                     runtime.exit_contribution_gate.clear_network_context();
                     runtime.exit_contribution_gate.clear_member_directory();
+                    runtime.clear_exit_selection();
                 }
             }
 
@@ -1587,6 +1781,7 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                         directory: Some(directory),
                         received_at_unix_ms: Some(received_at_unix_ms),
                     }) => {
+                        let selection_directory = directory.clone();
                         if let Err(denial) = runtime
                             .exit_contribution_gate
                             .replace_member_directory(directory, received_at_unix_ms)
@@ -1597,8 +1792,15 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                             );
                             runtime.exit_contribution_gate.clear_member_directory();
                         }
+                        runtime.replace_exit_selection_directory(
+                            selection_directory,
+                            received_at_unix_ms,
+                        );
                     }
-                    Some(_) => runtime.exit_contribution_gate.clear_member_directory(),
+                    Some(_) => {
+                        runtime.exit_contribution_gate.clear_member_directory();
+                        runtime.clear_exit_selection();
+                    }
                     None => exit_contribution_directory_updates = None,
                 }
             }
@@ -2527,11 +2729,13 @@ async fn handle_tun_reader_packet(runtime: &mut ClientRuntime, packet: TunPacket
     }
     runtime.stats.record_tun_rx(payload.len()).await;
 
+    let selected_exit = runtime.exit_for_packet(unix_time_ms()).await;
+
     let Some((src_ip, dst_ip)) = route_tun_packet(
         &runtime.p2p,
         &runtime.assigned_ips,
         &runtime.route_engine,
-        runtime.configured_exit_node.as_deref(),
+        selected_exit.as_ref(),
         payload,
     )
     .await
@@ -2637,10 +2841,15 @@ async fn admit_inbound_packet(
     // Use one authoritative time sample for all authorization and accounting
     // decisions made while admitting this packet.
     let now_unix_ms = unix_time_ms();
-    let trusted_exit_peer = runtime
-        .p2p
-        .resolve_exit_peer(runtime.configured_exit_node.as_deref())
-        .await;
+    let trusted_exit_peer = match runtime.exit_for_packet(now_unix_ms).await {
+        Some(exit_node_id) => {
+            runtime
+                .p2p
+                .resolve_exit_peer_by_node_id(&exit_node_id)
+                .await
+        }
+        None => None,
+    };
     let Some(packet_src) = authenticated_inbound_source(
         &plain_payload,
         &peer,
@@ -3204,7 +3413,7 @@ async fn route_tun_packet(
     p2p: &P2pEngine,
     assigned_ips: &VirtualIps,
     route_engine: &SmartRouteEngine,
-    configured_exit_node: Option<&str>,
+    selected_exit: Option<&NodeId>,
     packet: &[u8],
 ) -> Option<(IpAddr, IpAddr)> {
     let dst_ip = tun_packet_destination(packet)?;
@@ -3226,7 +3435,11 @@ async fn route_tun_packet(
                 return None;
             }
             RoutingAction::Proxy => {
-                if let Some(target_v6) = p2p.resolve_exit_peer(configured_exit_node).await {
+                let target_v6 = match selected_exit {
+                    Some(exit_node_id) => p2p.resolve_exit_peer_by_node_id(exit_node_id).await,
+                    None => None,
+                };
+                if let Some(target_v6) = target_v6 {
                     tracing::debug!(
                         "智能分流判定为 Proxy，经由 Exit Node {} 转发流量至 {}",
                         target_v6,
@@ -3235,7 +3448,7 @@ async fn route_tun_packet(
                     IpAddr::V6(target_v6)
                 } else {
                     tracing::warn!(
-                        "智能分流判定为 Proxy 但未找到可用 Exit Node，丢弃数据包至 {}",
+                        "智能分流判定为 Proxy 但没有管理员授权的可用 Exit，丢弃数据包至 {}",
                         dst_ip
                     );
                     return None;

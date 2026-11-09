@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 
 use fuckipv6_common::domain::{
     DomainError, ExitAvailabilitySource, ExitAvailabilityState, ExitContributionAvailability,
-    ExitSelectionPolicy, ExitSelectionResolution, ExitSessionTransition, MemberLifecycleStatus,
-    NetworkId, NetworkMember, NetworkMemberDirectory, NetworkMemberOnlineState, NodeId,
+    ExitSelectionResolution, ExitSessionTransition, NetworkId, NetworkMember,
+    NetworkMemberDirectory, NetworkMemberOnlineState, NodeId,
 };
 
 pub(crate) const EXIT_SELECTION_DIRECTORY_MAX_AGE_MS: u64 = 90_000;
@@ -295,8 +295,9 @@ mod tests {
     use super::*;
     use fuckipv6_common::domain::{
         ExitAvailabilitySource, ExitSelectionGroupRule, ExitSelectionMemberRule, ExitSelectionMode,
-        ExitSelectionSource, ExitSessionAction, ExitSessionTransitionPolicy, ExitTransitionReason,
-        MembershipRole, NetworkMemberGroup, NetworkMemberPresence, NetworkMemberStatus,
+        ExitSelectionPolicy, ExitSelectionSource, ExitSessionAction, ExitSessionTransitionPolicy,
+        ExitTransitionReason, MemberLifecycleStatus, MembershipRole, NetworkMemberGroup,
+        NetworkMemberPresence, NetworkMemberStatus,
     };
 
     const NOW: u64 = 1_700_006_400_000;

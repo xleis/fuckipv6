@@ -61,7 +61,14 @@ pub struct ExitContributionDisclosure {
     pub traffic: ExitContributionTrafficImpact,
     pub privacy: ExitContributionPrivacyImpact,
     pub operations: ExitContributionOperationalImpact,
+    /// The disclosure must be reviewed before joining and whenever the signed
+    /// Exit policy changes. This applies even when contribution is disabled.
     pub requires_join_confirmation: bool,
+    /// Only `RequiredOnJoin` asks the member to make a separate contribution
+    /// commitment. Voluntary and approval-based modes require an explicit
+    /// opt-in/request later, but joining itself does not create a duty.
+    #[serde(default)]
+    pub requires_explicit_commitment: bool,
     pub requires_authorization: bool,
 }
 
@@ -74,6 +81,7 @@ impl ExitContributionDisclosure {
                 privacy: ExitContributionPrivacyImpact::NoExitTraffic,
                 operations: ExitContributionOperationalImpact::None,
                 requires_join_confirmation: true,
+                requires_explicit_commitment: false,
                 requires_authorization: false,
             },
             ExitContributionMode::Autonomous => Self {
@@ -82,6 +90,7 @@ impl ExitContributionDisclosure {
                 privacy: ExitContributionPrivacyImpact::ThisNodeObservesForwardedTraffic,
                 operations: ExitContributionOperationalImpact::OwnerControlsAvailability,
                 requires_join_confirmation: true,
+                requires_explicit_commitment: false,
                 requires_authorization: false,
             },
             ExitContributionMode::RequiredOnJoin => Self {
@@ -90,6 +99,7 @@ impl ExitContributionDisclosure {
                 privacy: ExitContributionPrivacyImpact::ThisNodeObservesForwardedTraffic,
                 operations: ExitContributionOperationalImpact::RequiredWhileMember,
                 requires_join_confirmation: true,
+                requires_explicit_commitment: true,
                 requires_authorization: false,
             },
             ExitContributionMode::ApprovalRequired => Self {
@@ -99,6 +109,7 @@ impl ExitContributionDisclosure {
                     ExitContributionPrivacyImpact::ThisNodeObservesForwardedTrafficAfterApproval,
                 operations: ExitContributionOperationalImpact::OwnerControlsAfterApproval,
                 requires_join_confirmation: true,
+                requires_explicit_commitment: false,
                 requires_authorization: true,
             },
         }
@@ -953,6 +964,10 @@ mod tests {
         ] {
             let disclosure = ExitContributionDisclosure::for_mode(mode);
             assert!(disclosure.requires_join_confirmation);
+            assert_eq!(
+                disclosure.requires_explicit_commitment,
+                mode == ExitContributionMode::RequiredOnJoin
+            );
             assert_eq!(
                 disclosure.requires_authorization,
                 mode == ExitContributionMode::ApprovalRequired

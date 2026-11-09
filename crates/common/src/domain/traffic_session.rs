@@ -335,6 +335,70 @@ mod tests {
     }
 
     #[test]
+    fn default_session_is_idle_and_cannot_claim_protection() {
+        let session = TrafficSessionSnapshot::default();
+
+        assert_eq!(session.state, TrafficProtectionState::Idle);
+        assert!(!session.state.may_carry_traffic());
+        assert_eq!(session.changed_at_unix_ms, 0);
+        assert!(session.reason_code.is_none());
+        assert!(session.failure.is_none());
+        assert!(session.validation.is_none());
+        assert!(session.events.is_empty());
+    }
+
+    #[test]
+    fn migration_and_fail_closed_transitions_leave_authoritative_activity_evidence() {
+        let mut session = TrafficSessionSnapshot::default();
+        session
+            .begin_recovery(true, 100, "recovery.exit_migration.started")
+            .unwrap();
+        assert_eq!(session.state, TrafficProtectionState::Migrating);
+        assert!(!session.state.may_carry_traffic());
+        assert_eq!(
+            session.events.last().map(|event| event.kind),
+            Some(TrafficSessionEventKind::MigrationStarted)
+        );
+
+        session
+            .mark_protected(
+                TrafficSessionValidation::passed(true, true, true, true, 101),
+                102,
+            )
+            .unwrap();
+        assert_eq!(session.state, TrafficProtectionState::Protected);
+        assert_eq!(
+            session.events.last().map(|event| event.kind),
+            Some(TrafficSessionEventKind::ProtectionEstablished)
+        );
+
+        session
+            .begin_recovery(true, 103, "recovery.connection_timeout.started")
+            .unwrap();
+        session
+            .enter_fail_closed(
+                Some(TrafficFailureKind::ConnectionTimeout),
+                104,
+                "recovery.connection_timeout.failed_closed",
+            )
+            .unwrap();
+
+        assert_eq!(session.state, TrafficProtectionState::FailClosed);
+        assert!(!session.state.may_carry_traffic());
+        assert!(session.validation.is_none());
+        assert_eq!(
+            session.events.last(),
+            Some(&TrafficSessionEvent {
+                kind: TrafficSessionEventKind::FailClosed,
+                state: TrafficProtectionState::FailClosed,
+                occurred_at_unix_ms: 104,
+                failure: Some(TrafficFailureKind::ConnectionTimeout),
+                reason_code: Some("recovery.connection_timeout.failed_closed".into()),
+            })
+        );
+    }
+
+    #[test]
     fn migration_is_visible_and_cannot_claim_protection_before_validation() {
         let mut session = TrafficSessionSnapshot::default();
         session

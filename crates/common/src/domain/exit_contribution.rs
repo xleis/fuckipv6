@@ -517,11 +517,20 @@ impl ExitContributionAvailability {
     }
 
     pub fn stale(declared_available: bool, observed_at_unix_ms: u64) -> Self {
+        Self::stale_with_declaration(Some(declared_available), observed_at_unix_ms)
+    }
+
+    /// Mark a known observation as too old to use as health evidence without
+    /// inventing a capability declaration when one was not observed.
+    pub fn stale_with_declaration(
+        declared_available: Option<bool>,
+        observed_at_unix_ms: u64,
+    ) -> Self {
         Self {
             state: ExitAvailabilityState::Unknown,
             source: ExitAvailabilitySource::RemotePeerReport,
             observed_at_unix_ms: Some(observed_at_unix_ms),
-            declared_available: Some(declared_available),
+            declared_available,
             reason_code: Some("exit.availability.stale".into()),
         }
     }
@@ -1248,6 +1257,9 @@ mod tests {
             stale.reason_code.as_deref(),
             Some("exit.availability.stale")
         );
+        let undeclared_stale = ExitContributionAvailability::stale_with_declaration(None, 10);
+        assert_eq!(undeclared_stale.state, ExitAvailabilityState::Unknown);
+        assert_eq!(undeclared_stale.declared_available, None);
     }
 
     #[test]

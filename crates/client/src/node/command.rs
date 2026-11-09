@@ -1202,6 +1202,7 @@ impl NodeCreateNetworkCommand {
             exit_contribution: self.exit_contribution,
             exit_contribution_scope: self.exit_contribution_scope,
             exit_contribution_mode: self.exit_contribution_mode,
+            exit_selection_policy: Default::default(),
         }
     }
 }
@@ -3908,6 +3909,7 @@ mod tests {
                     exit_contribution: Default::default(),
                     exit_contribution_scope: Default::default(),
                     exit_contribution_mode: Default::default(),
+                    exit_selection_policy: None,
                 },
             }),
             NodeCommand::UpdateNetworkProfile(NodeNetworkProfileCommand {
@@ -3925,6 +3927,7 @@ mod tests {
                     exit_contribution: Default::default(),
                     exit_contribution_scope: Default::default(),
                     exit_contribution_mode: Default::default(),
+                    exit_selection_policy: None,
                 },
             }),
             NodeCommand::PublishNetworkDiscovery(NodeNetworkDiscoveryCommand {

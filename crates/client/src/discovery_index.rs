@@ -1876,6 +1876,7 @@ mod tests {
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
                 exit_contribution_mode: Default::default(),
+                exit_selection_policy: Default::default(),
             },
             public_key,
             owner,
@@ -2339,6 +2340,7 @@ mod tests {
             exit_contribution: Default::default(),
             exit_contribution_scope: Default::default(),
             exit_contribution_mode: Default::default(),
+            exit_selection_policy: Default::default(),
         };
         let created = configs
             .create_owned_network(profile, "ws://127.0.0.1:6666", true)

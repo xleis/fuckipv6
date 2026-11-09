@@ -1177,6 +1177,7 @@ mod tests {
                 exit_contribution: ExitContributionObligation::NotRequired,
                 exit_contribution_scope: ExitContributionScope::NotApplicable,
                 exit_contribution_mode: Default::default(),
+                exit_selection_policy: Default::default(),
             },
             PublicKey::from_bytes([7; 32]),
             owner(),

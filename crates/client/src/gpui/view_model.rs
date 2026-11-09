@@ -2243,6 +2243,7 @@ pub fn build_command(
                 exit_contribution,
                 exit_contribution_scope,
                 exit_contribution_mode,
+                exit_selection_policy: None,
             };
             let command = NodeNetworkProfileCommand {
                 network_name: field("network_name"),

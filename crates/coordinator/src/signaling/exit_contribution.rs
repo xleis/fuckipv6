@@ -656,6 +656,7 @@ mod tests {
                 exit_contribution: obligation,
                 exit_contribution_scope: scope,
                 exit_contribution_mode: mode,
+                exit_selection_policy: Default::default(),
             },
             public_key(),
             owner(),

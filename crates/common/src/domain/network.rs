@@ -7,6 +7,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::capability::CapabilityKind;
+use super::exit_selection::ExitSelectionPolicy;
 use super::ids::{NetworkId, NodeId, PublicKey, Signature};
 use super::membership::{
     legacy_exit_contribution_scope, validate_exit_contribution_policy, ExitContributionMode,
@@ -118,6 +119,10 @@ pub struct NetworkRecord {
     /// Explicit four-mode Exit contribution policy.
     #[serde(default)]
     pub exit_contribution_mode: ExitContributionMode,
+    /// Administrator policy deciding which Exits members may select. This is
+    /// independent from whether a member contributes an Exit.
+    #[serde(default)]
+    pub exit_selection_policy: ExitSelectionPolicy,
     /// Plain-language privacy-policy changes disclosed on the join preview.
     #[serde(default)]
     pub privacy_changes: Vec<String>,
@@ -171,6 +176,8 @@ impl<'de> Deserialize<'de> for NetworkRecord {
             #[serde(default)]
             exit_contribution_mode: Option<ExitContributionMode>,
             #[serde(default)]
+            exit_selection_policy: ExitSelectionPolicy,
+            #[serde(default)]
             privacy_changes: Vec<String>,
             created_at_unix_ms: u64,
             updated_at_unix_ms: u64,
@@ -205,6 +212,7 @@ impl<'de> Deserialize<'de> for NetworkRecord {
             exit_contribution_mode: raw
                 .exit_contribution_mode
                 .unwrap_or_else(|| ExitContributionMode::from_legacy(raw.exit_contribution)),
+            exit_selection_policy: raw.exit_selection_policy,
             privacy_changes: raw.privacy_changes,
             created_at_unix_ms: raw.created_at_unix_ms,
             updated_at_unix_ms: raw.updated_at_unix_ms,
@@ -253,6 +261,7 @@ impl NetworkRecord {
             self.exit_contribution_scope,
             self.exit_contribution_mode,
         )?;
+        self.exit_selection_policy.validate()?;
         if self.updated_at_unix_ms < self.created_at_unix_ms {
             return Err(DomainError::invariant(
                 "network update time predates creation",
@@ -376,12 +385,19 @@ impl NetworkRecord {
         if self.exit_contribution != update.exit_contribution
             || self.exit_contribution_scope != update.exit_contribution_scope
             || self.exit_contribution_mode != update.exit_contribution_mode
+            || update
+                .exit_selection_policy
+                .as_ref()
+                .is_some_and(|policy| policy != &self.exit_selection_policy)
         {
             self.policy_revision = self.policy_revision.saturating_add(1);
         }
         self.exit_contribution = update.exit_contribution;
         self.exit_contribution_scope = update.exit_contribution_scope;
         self.exit_contribution_mode = update.exit_contribution_mode;
+        if let Some(policy) = &update.exit_selection_policy {
+            self.exit_selection_policy = policy.clone();
+        }
         self.revision = self.revision.saturating_add(1);
         self.updated_at_unix_ms = self.updated_at_unix_ms.max(now_unix_ms);
         // The old signature no longer covers the mutated fields. The caller
@@ -423,6 +439,7 @@ impl NetworkRecord {
             exit_contribution: profile.exit_contribution,
             exit_contribution_scope: profile.exit_contribution_scope,
             exit_contribution_mode: profile.exit_contribution_mode,
+            exit_selection_policy: profile.exit_selection_policy,
             privacy_changes: Vec::new(),
             created_at_unix_ms: now_unix_ms,
             updated_at_unix_ms: now_unix_ms,
@@ -531,6 +548,8 @@ pub struct NetworkCreateProfile {
     pub exit_contribution_scope: ExitContributionScope,
     #[serde(default)]
     pub exit_contribution_mode: ExitContributionMode,
+    #[serde(default)]
+    pub exit_selection_policy: ExitSelectionPolicy,
 }
 
 impl<'de> Deserialize<'de> for NetworkCreateProfile {
@@ -558,6 +577,8 @@ impl<'de> Deserialize<'de> for NetworkCreateProfile {
             exit_contribution_scope: Option<ExitContributionScope>,
             #[serde(default)]
             exit_contribution_mode: Option<ExitContributionMode>,
+            #[serde(default)]
+            exit_selection_policy: ExitSelectionPolicy,
         }
 
         let raw = RawNetworkCreateProfile::deserialize(deserializer)?;
@@ -578,6 +599,7 @@ impl<'de> Deserialize<'de> for NetworkCreateProfile {
             exit_contribution_mode: raw
                 .exit_contribution_mode
                 .unwrap_or_else(|| ExitContributionMode::from_legacy(raw.exit_contribution)),
+            exit_selection_policy: raw.exit_selection_policy,
         })
     }
 }
@@ -595,7 +617,8 @@ impl NetworkCreateProfile {
             self.exit_contribution,
             self.exit_contribution_scope,
             self.exit_contribution_mode,
-        )
+        )?;
+        self.exit_selection_policy.validate()
     }
 
     pub fn normalized(mut self) -> DomainResult<Self> {
@@ -626,6 +649,8 @@ pub struct NetworkProfileUpdate {
     pub exit_contribution_scope: ExitContributionScope,
     #[serde(default)]
     pub exit_contribution_mode: ExitContributionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_selection_policy: Option<ExitSelectionPolicy>,
 }
 
 impl<'de> Deserialize<'de> for NetworkProfileUpdate {
@@ -651,6 +676,8 @@ impl<'de> Deserialize<'de> for NetworkProfileUpdate {
             exit_contribution_scope: Option<ExitContributionScope>,
             #[serde(default)]
             exit_contribution_mode: Option<ExitContributionMode>,
+            #[serde(default)]
+            exit_selection_policy: Option<ExitSelectionPolicy>,
         }
 
         let raw = RawNetworkProfileUpdate::deserialize(deserializer)?;
@@ -670,6 +697,7 @@ impl<'de> Deserialize<'de> for NetworkProfileUpdate {
             exit_contribution_mode: raw
                 .exit_contribution_mode
                 .unwrap_or_else(|| ExitContributionMode::from_legacy(raw.exit_contribution)),
+            exit_selection_policy: raw.exit_selection_policy,
         })
     }
 }
@@ -688,6 +716,7 @@ impl NetworkProfileUpdate {
             exit_contribution: record.exit_contribution,
             exit_contribution_scope: record.exit_contribution_scope,
             exit_contribution_mode: record.exit_contribution_mode,
+            exit_selection_policy: Some(record.exit_selection_policy.clone()),
         }
     }
 
@@ -702,7 +731,11 @@ impl NetworkProfileUpdate {
             self.exit_contribution,
             self.exit_contribution_scope,
             self.exit_contribution_mode,
-        )
+        )?;
+        if let Some(policy) = &self.exit_selection_policy {
+            policy.validate()?;
+        }
+        Ok(())
     }
 
     pub fn normalized(mut self) -> DomainResult<Self> {
@@ -1180,6 +1213,23 @@ fn network_profile_diff(
         "exit_contribution_mode",
         format!("{:?}", current.exit_contribution_mode).to_ascii_lowercase(),
         format!("{:?}", update.exit_contribution_mode).to_ascii_lowercase(),
+    );
+    compare(
+        "exit_selection_policy",
+        serde_json::to_string(
+            current
+                .exit_selection_policy
+                .as_ref()
+                .unwrap_or(&record.exit_selection_policy),
+        )
+        .unwrap_or_default(),
+        serde_json::to_string(
+            update
+                .exit_selection_policy
+                .as_ref()
+                .unwrap_or(&record.exit_selection_policy),
+        )
+        .unwrap_or_default(),
     );
     entries
 }
@@ -2122,6 +2172,7 @@ mod tests {
             exit_contribution: ExitContributionObligation::NotRequired,
             exit_contribution_scope: ExitContributionScope::NotApplicable,
             exit_contribution_mode: ExitContributionMode::Disabled,
+            exit_selection_policy: ExitSelectionPolicy::default(),
             privacy_changes: Vec::new(),
             created_at_unix_ms: 1,
             updated_at_unix_ms: 1,
@@ -2146,6 +2197,7 @@ mod tests {
             exit_contribution: ExitContributionObligation::NotRequired,
             exit_contribution_scope: ExitContributionScope::NotApplicable,
             exit_contribution_mode: ExitContributionMode::Disabled,
+            exit_selection_policy: ExitSelectionPolicy::default(),
         }
     }
 
@@ -2425,6 +2477,58 @@ mod tests {
         profile.exit_contribution_scope = ExitContributionScope::NotApplicable;
         profile.exit_contribution_mode = ExitContributionMode::ApprovalRequired;
         profile.validate().unwrap();
+    }
+
+    #[test]
+    fn exit_selection_policy_change_is_diffed_and_advances_policy_revision() {
+        let identity = Identity::generate().unwrap();
+        let public_key = PublicKey::from_bytes(identity.public_key_bytes());
+        let owner = NodeId::from_public_key(b"owner");
+        let mut network =
+            NetworkRecord::create_owned(create_profile(), public_key, owner, 100).unwrap();
+        network.sign_public_profile(&identity, 100, 1_000).unwrap();
+        let exit = NodeId::from_public_key(b"exit-a");
+        let mut update = NetworkProfileUpdate::from_record(&network);
+        update.exit_selection_policy = Some(ExitSelectionPolicy {
+            mode: crate::domain::ExitSelectionMode::Fixed { exit: exit.clone() },
+            available_exits: vec![exit.clone()],
+            ..ExitSelectionPolicy::default()
+        });
+
+        let diff = network.apply_profile_update(&update, 1, 200).unwrap();
+        assert!(diff
+            .iter()
+            .any(|entry| entry.path == "exit_selection_policy"));
+        assert_eq!(network.exit_selection_policy.fixed_exit(), Some(&exit));
+        assert_eq!(network.policy_revision, 2);
+    }
+
+    #[test]
+    fn legacy_profile_update_without_exit_selection_policy_preserves_governance() {
+        let identity = Identity::generate().unwrap();
+        let public_key = PublicKey::from_bytes(identity.public_key_bytes());
+        let owner = NodeId::from_public_key(b"owner");
+        let exit = NodeId::from_public_key(b"fixed-exit");
+        let mut profile = create_profile();
+        profile.exit_selection_policy = ExitSelectionPolicy {
+            mode: crate::domain::ExitSelectionMode::Fixed { exit: exit.clone() },
+            available_exits: vec![exit.clone()],
+            ..ExitSelectionPolicy::default()
+        };
+        let mut network = NetworkRecord::create_owned(profile, public_key, owner, 100).unwrap();
+        network.sign_public_profile(&identity, 100, 1_000).unwrap();
+        let original_policy_revision = network.policy_revision;
+
+        let mut update = NetworkProfileUpdate::from_record(&network);
+        update.exit_selection_policy = None;
+        let encoded = serde_json::to_value(&update).unwrap();
+        assert!(encoded.get("exit_selection_policy").is_none());
+        let decoded: NetworkProfileUpdate = serde_json::from_value(encoded).unwrap();
+        assert!(decoded.exit_selection_policy.is_none());
+
+        network.apply_profile_update(&decoded, 1, 200).unwrap();
+        assert_eq!(network.exit_selection_policy.fixed_exit(), Some(&exit));
+        assert_eq!(network.policy_revision, original_policy_revision);
     }
 
     #[test]

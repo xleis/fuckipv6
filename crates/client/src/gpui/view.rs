@@ -15407,6 +15407,7 @@ mod tests {
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
                 exit_contribution_mode: Default::default(),
+                exit_selection_policy: Default::default(),
             },
             public_key,
             owner,

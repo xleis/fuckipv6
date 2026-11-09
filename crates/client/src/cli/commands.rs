@@ -548,8 +548,6 @@ pub(crate) struct ClientRuntime {
     exit_recovery_path: PathRecoveryState,
     #[cfg(target_os = "linux")]
     relay_recovery_path: PathRecoveryState,
-    #[cfg(target_os = "linux")]
-    configured_exit_node_id: Option<NodeId>,
     pub(crate) tun_io: RuntimeTunIo,
     pub(crate) assigned_ip: Ipv6Addr,
     pub(crate) assigned_ips: VirtualIps,
@@ -997,15 +995,6 @@ pub(crate) async fn prepare_client_runtime_ext(
     let exit_node_manager = ExitNodeManager::new(effective_exit_config);
     let configured_exit_node = config.routing.exit_node.clone();
     #[cfg(target_os = "linux")]
-    let configured_exit_node_id = match configured_exit_node.as_deref() {
-        Some(target) => {
-            let known_peers = signaling.known_peers().await;
-            resolve_configured_exit_node_id(Some(target), &known_peers)
-        }
-        None => None,
-    };
-
-    #[cfg(target_os = "linux")]
     let (route_manager, exit_forwarder) = {
         let mut virtual_cidrs = Vec::new();
         if let Some(network) = parse_optional_ipv6_cidr(
@@ -1158,8 +1147,6 @@ pub(crate) async fn prepare_client_runtime_ext(
         exit_recovery_path: PathRecoveryState::Unknown,
         #[cfg(target_os = "linux")]
         relay_recovery_path,
-        #[cfg(target_os = "linux")]
-        configured_exit_node_id,
         tun_io,
         assigned_ip,
         assigned_ips,
@@ -1488,51 +1475,54 @@ async fn connect_quic_relay(
 pub(crate) type DisconnectReply = tokio::sync::oneshot::Sender<std::result::Result<(), String>>;
 
 #[cfg(target_os = "linux")]
-fn resolve_configured_exit_node_id(
-    configured_exit_node: Option<&str>,
-    peers: &[PeerInfo],
-) -> Option<NodeId> {
-    let target = configured_exit_node
-        .map(str::trim)
-        .filter(|target| !target.is_empty())?;
-    peers
-        .iter()
-        .find(|peer| peer_is_configured_exit(peer, Some(target)))
-        .map(|peer| NodeId::from_public_key(&peer.public_key))
-}
-
-#[cfg(target_os = "linux")]
-async fn refresh_configured_exit_node_id(runtime: &mut ClientRuntime) {
-    let Some(target) = runtime.configured_exit_node.clone() else {
-        runtime.configured_exit_node_id = None;
-        return;
-    };
-
-    let mut peers = runtime.signaling.known_peers().await;
-    peers.extend(runtime.p2p.get_peers().await);
-    if let Some(node_id) = resolve_configured_exit_node_id(Some(&target), &peers) {
-        runtime.configured_exit_node_id = Some(node_id);
-    }
-}
-
-#[cfg(target_os = "linux")]
 async fn refresh_linux_recovery_paths(runtime: &mut ClientRuntime) {
-    refresh_configured_exit_node_id(runtime).await;
-    runtime.exit_recovery_path = match runtime.configured_exit_node.as_deref() {
-        Some(target) => {
-            if runtime.p2p.resolve_exit_peer(Some(target)).await.is_some() {
-                PathRecoveryState::Connected
+    runtime.exit_recovery_path = match runtime.route_engine.routing_mode() {
+        fuckipv6_common::RoutingMode::MeshOnly => PathRecoveryState::Unknown,
+        fuckipv6_common::RoutingMode::BypassMainland
+        | fuckipv6_common::RoutingMode::GlobalProxy => {
+            if let Some(exit_node_id) = runtime.exit_for_packet(unix_time_ms()).await {
+                if runtime
+                    .p2p
+                    .resolve_exit_peer_by_node_id(&exit_node_id)
+                    .await
+                    .is_some()
+                {
+                    PathRecoveryState::Connected
+                } else {
+                    PathRecoveryState::Disconnected
+                }
             } else {
                 PathRecoveryState::Disconnected
             }
         }
-        None => PathRecoveryState::Unknown,
     };
     runtime.relay_recovery_path = if runtime.outbound.relay_handle().await.is_some() {
         PathRecoveryState::Connected
     } else {
         PathRecoveryState::Disconnected
     };
+}
+
+#[cfg(target_os = "linux")]
+async fn current_linux_recovery_route_context(
+    runtime: &mut ClientRuntime,
+) -> TrafficFailureRouteContext {
+    let mode = runtime.route_engine.routing_mode();
+    if mode == fuckipv6_common::RoutingMode::MeshOnly {
+        return linux_recovery_route_context(mode, None, None);
+    }
+    let now_unix_ms = unix_time_ms();
+    let Some(selected_exit_id) = runtime.exit_for_packet(now_unix_ms).await else {
+        return TrafficFailureRouteContext::new(TrafficAction::Reject);
+    };
+    let Ok(resolution) = runtime.exit_selection_gate.resolution(now_unix_ms) else {
+        return TrafficFailureRouteContext::new(TrafficAction::Reject);
+    };
+    linux_recovery_route_context(
+        mode,
+        Some(&selected_exit_id),
+        resolution.fixed_exit.as_ref(),
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -1551,33 +1541,20 @@ fn invalidate_linux_recovery_path(
 #[cfg(target_os = "linux")]
 fn linux_recovery_route_context(
     mode: fuckipv6_common::RoutingMode,
-    network_id: Option<&NetworkId>,
-    configured_exit_node: Option<&str>,
-    configured_exit_node_id: Option<&NodeId>,
+    selected_exit: Option<&NodeId>,
+    fixed_exit: Option<&NodeId>,
 ) -> TrafficFailureRouteContext {
-    if let Some(exit_node_id) = configured_exit_node_id {
-        return TrafficFailureRouteContext {
+    if mode == fuckipv6_common::RoutingMode::MeshOnly {
+        return TrafficFailureRouteContext::new(TrafficAction::Direct);
+    }
+    match selected_exit {
+        Some(exit_node_id) => TrafficFailureRouteContext {
             requested_action: TrafficAction::Exit(exit_node_id.clone()),
-            fixed_exit: Some(exit_node_id.clone()),
+            fixed_exit: fixed_exit.cloned(),
             fixed_network: None,
-        };
+        },
+        None => TrafficFailureRouteContext::new(TrafficAction::Reject),
     }
-
-    // A configured Exit that cannot be resolved to an authenticated identity
-    // is not permission to bypass it. Keep the decision explicit and closed.
-    if configured_exit_node.is_some_and(|target| !target.trim().is_empty()) {
-        return TrafficFailureRouteContext::new(TrafficAction::Reject);
-    }
-
-    let requested_action = match mode {
-        fuckipv6_common::RoutingMode::MeshOnly => TrafficAction::Direct,
-        fuckipv6_common::RoutingMode::BypassMainland
-        | fuckipv6_common::RoutingMode::GlobalProxy => network_id
-            .cloned()
-            .map(TrafficAction::Network)
-            .unwrap_or(TrafficAction::Reject),
-    };
-    TrafficFailureRouteContext::new(requested_action)
 }
 
 #[cfg(target_os = "linux")]
@@ -1644,19 +1621,13 @@ fn log_linux_recovery_report(report: &RecoveryReport) {
 
 #[cfg(target_os = "linux")]
 async fn handle_linux_recovery_trigger(runtime: &mut ClientRuntime, trigger: RecoveryTrigger) {
-    refresh_configured_exit_node_id(runtime).await;
     invalidate_linux_recovery_path(
         trigger,
         &mut runtime.exit_recovery_path,
         &mut runtime.relay_recovery_path,
     );
 
-    let route_context = linux_recovery_route_context(
-        runtime.route_engine.routing_mode(),
-        runtime.network_id.as_ref(),
-        runtime.configured_exit_node.as_deref(),
-        runtime.configured_exit_node_id.as_ref(),
-    );
+    let route_context = current_linux_recovery_route_context(runtime).await;
     let request = linux_recovery_request(trigger, route_context.clone());
     let audit = RecoveryAuditContext {
         config_root: linux_recovery_audit_root(&runtime.config_path),
@@ -2562,10 +2533,7 @@ async fn apply_runtime_routing(
     runtime.configured_exit_node = exit_node.clone();
     runtime.config = updated_config;
     #[cfg(target_os = "linux")]
-    {
-        runtime.configured_exit_node_id = None;
-        refresh_linux_recovery_paths(runtime).await;
-    }
+    refresh_linux_recovery_paths(runtime).await;
 
     #[cfg(target_os = "linux")]
     match exit_action {
@@ -7172,23 +7140,12 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn configured_exit_recovery_context_is_fixed_and_fail_closed() {
-        let peer = PeerInfo::new_with_ips(
-            "exit-peer".to_string(),
-            VirtualIps::dual_stack("10.8.0.1".parse().unwrap(), "fd00::1001".parse().unwrap()),
-            vec![7; 32],
-            Vec::new(),
-            NatType::Open,
-        );
-        let exit_id =
-            resolve_configured_exit_node_id(Some("exit-peer"), std::slice::from_ref(&peer))
-                .expect("configured Exit identity must resolve from its authenticated peer");
-        assert_eq!(exit_id, NodeId::from_public_key(&peer.public_key));
+    fn authorized_exit_recovery_context_is_fixed_and_fail_closed() {
+        let exit_id = NodeId::from_public_key(b"recovery-exit");
 
         let context = linux_recovery_route_context(
             fuckipv6_common::RoutingMode::GlobalProxy,
-            None,
-            Some("exit-peer"),
+            Some(&exit_id),
             Some(&exit_id),
         );
         assert_eq!(
@@ -7205,37 +7162,15 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn unresolved_exit_and_network_modes_never_open_a_recovery_bypass() {
-        let unresolved_exit = linux_recovery_route_context(
-            fuckipv6_common::RoutingMode::GlobalProxy,
-            Some(&NetworkId::from_public_key(b"recovery-network")),
-            Some("offline-exit"),
-            None,
-        );
-        assert_eq!(unresolved_exit.requested_action, TrafficAction::Reject);
-        assert_eq!(unresolved_exit.fixed_exit, None);
-        assert!(unresolved_exit.validate().is_ok());
+    fn missing_exit_selection_never_opens_a_recovery_bypass() {
+        let rejected =
+            linux_recovery_route_context(fuckipv6_common::RoutingMode::GlobalProxy, None, None);
+        assert_eq!(rejected.requested_action, TrafficAction::Reject);
+        assert_eq!(rejected.fixed_exit, None);
+        assert!(rejected.validate().is_ok());
 
-        let network = NetworkId::from_public_key(b"recovery-network");
-        let proxied = linux_recovery_route_context(
-            fuckipv6_common::RoutingMode::GlobalProxy,
-            Some(&network),
-            None,
-            None,
-        );
-        assert_eq!(
-            proxied.requested_action,
-            TrafficAction::Network(network.clone())
-        );
-        assert_eq!(proxied.fixed_network, None);
-        assert!(proxied.validate().is_ok());
-
-        let mesh_only = linux_recovery_route_context(
-            fuckipv6_common::RoutingMode::MeshOnly,
-            Some(&network),
-            None,
-            None,
-        );
+        let mesh_only =
+            linux_recovery_route_context(fuckipv6_common::RoutingMode::MeshOnly, None, None);
         assert_eq!(mesh_only.requested_action, TrafficAction::Direct);
         assert!(mesh_only.validate().is_ok());
     }

@@ -1,4 +1,5 @@
 pub mod blacklist;
+pub mod exit_availability;
 pub mod exit_contribution;
 pub mod invitations;
 pub mod join_requests;

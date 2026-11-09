@@ -468,26 +468,43 @@ impl ExitContributionAvailability {
         source: ExitAvailabilitySource,
         observed_at_unix_ms: u64,
     ) -> Self {
+        Self::observed_with_declaration(
+            Some(declared_available),
+            observed_available,
+            source,
+            observed_at_unix_ms,
+        )
+    }
+
+    /// Project an observation when the member's capability declaration may be
+    /// absent. Missing declaration is not a mismatch; it stays explicit as
+    /// `declared_available: None` while observed health remains visible.
+    pub fn observed_with_declaration(
+        declared_available: Option<bool>,
+        observed_available: bool,
+        source: ExitAvailabilitySource,
+        observed_at_unix_ms: u64,
+    ) -> Self {
         if source == ExitAvailabilitySource::NotObserved {
-            return Self::declared_unknown(Some(declared_available));
+            return Self::declared_unknown(declared_available);
         }
         let (state, reason_code) = match (declared_available, observed_available) {
-            (true, true) => (ExitAvailabilityState::Available, None),
-            (false, true) => (
+            (Some(true), true) | (None, true) => (ExitAvailabilityState::Available, None),
+            (Some(false), true) => (
                 ExitAvailabilityState::Degraded,
                 Some("exit.availability.available_but_not_declared"),
             ),
-            (true, false) => (
+            (Some(true), false) => (
                 ExitAvailabilityState::Degraded,
                 Some("exit.availability.declared_but_unavailable"),
             ),
-            (false, false) => (ExitAvailabilityState::Unavailable, None),
+            (Some(false), false) | (None, false) => (ExitAvailabilityState::Unavailable, None),
         };
         Self {
             state,
             source,
             observed_at_unix_ms: Some(observed_at_unix_ms),
-            declared_available: Some(declared_available),
+            declared_available,
             reason_code: reason_code.map(str::to_owned),
         }
     }

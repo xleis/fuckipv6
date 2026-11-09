@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
-    InvitationId, InvitationState, JoinRequest, JoinRequestId, JoinRequestState,
-    MemberLifecycleChange, MemberLifecycleChangeRequest, MemberRemovalPreviewRequest, NetworkId,
-    NetworkMemberPresence, NodeId,
+    ExitContributionRequest, ExitContributionRequestId, ExitContributionReviewAction, InvitationId,
+    InvitationState, JoinRequest, JoinRequestId, JoinRequestState, MemberLifecycleChange,
+    MemberLifecycleChangeRequest, MemberRemovalPreviewRequest, NetworkId, NetworkMemberPresence,
+    NetworkRecord, NodeId,
 };
 use fuckipv6_common::{
     codec, validate_signaling_message_len, validate_signaling_relay_payload_len, CoordinatorConfig,
@@ -21,6 +22,8 @@ use tokio_tungstenite::{
     tungstenite::{protocol::WebSocketConfig, Message},
 };
 
+use super::exit_availability::ExitAvailabilityObservationRegistry;
+use super::exit_contribution::ExitContributionRequestStore;
 use super::invitations::InvitationStore;
 use super::join_requests::JoinRequestStore;
 use super::member_lifecycle::MemberLifecycleStore;
@@ -59,6 +62,8 @@ pub struct SignalingServer {
     join_request_store: Option<Arc<JoinRequestStore>>,
     invitation_store: Option<Arc<InvitationStore>>,
     member_lifecycle_store: Option<Arc<MemberLifecycleStore>>,
+    exit_contribution_store: Option<Arc<ExitContributionRequestStore>>,
+    exit_availability: Arc<ExitAvailabilityObservationRegistry>,
     listener: Option<TcpListener>,
 }
 
@@ -75,6 +80,8 @@ impl SignalingServer {
             join_request_store: None,
             invitation_store: None,
             member_lifecycle_store: None,
+            exit_contribution_store: None,
+            exit_availability: Arc::new(ExitAvailabilityObservationRegistry::default()),
             listener: None,
         })
     }
@@ -88,6 +95,8 @@ impl SignalingServer {
             join_request_store: None,
             invitation_store: None,
             member_lifecycle_store: None,
+            exit_contribution_store: None,
+            exit_availability: Arc::new(ExitAvailabilityObservationRegistry::default()),
             listener: None,
         }
     }
@@ -211,6 +220,33 @@ impl SignalingServer {
         Ok(self)
     }
 
+    /// Attach the durable approval-gated Exit contribution ledger. Without one,
+    /// Exit governance messages fail closed while unrelated signaling remains
+    /// available.
+    pub fn with_exit_contribution_store(
+        mut self,
+        store: Arc<ExitContributionRequestStore>,
+    ) -> Self {
+        self.exit_contribution_store = Some(store);
+        self
+    }
+
+    pub fn with_exit_contribution_store_from_config(
+        mut self,
+        state_dir: impl AsRef<std::path::Path>,
+        config: &CoordinatorConfig,
+    ) -> Result<Self> {
+        let network_record_path = config
+            .network_record_path
+            .clone()
+            .context("Exit 贡献治理需要可信 network_record_path")?;
+        self.exit_contribution_store = Some(Arc::new(ExitContributionRequestStore::new(
+            state_dir.as_ref().join("exit_contribution_requests.json"),
+            network_record_path,
+        )));
+        Ok(self)
+    }
+
     pub fn session_manager(&self) -> Arc<SessionManager> {
         self.session_manager.clone()
     }
@@ -236,6 +272,8 @@ impl SignalingServer {
                     let join_request_store = self.join_request_store.clone();
                     let invitation_store = self.invitation_store.clone();
                     let member_lifecycle_store = self.member_lifecycle_store.clone();
+                    let exit_contribution_store = self.exit_contribution_store.clone();
+                    let exit_availability = self.exit_availability.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
@@ -247,6 +285,8 @@ impl SignalingServer {
                             join_request_store,
                             invitation_store,
                             member_lifecycle_store,
+                            exit_contribution_store,
+                            exit_availability,
                         )
                         .await
                         {
@@ -296,6 +336,8 @@ async fn handle_connection(
     join_request_store: Option<Arc<JoinRequestStore>>,
     invitation_store: Option<Arc<InvitationStore>>,
     member_lifecycle_store: Option<Arc<MemberLifecycleStore>>,
+    exit_contribution_store: Option<Arc<ExitContributionRequestStore>>,
+    exit_availability: Arc<ExitAvailabilityObservationRegistry>,
 ) -> Result<()> {
     let local_addr = stream.local_addr().ok();
     let ws_stream = accept_async_with_config(stream, Some(signaling_websocket_config()))
@@ -321,6 +363,8 @@ async fn handle_connection(
             join_request_store.as_deref(),
             invitation_store.as_deref(),
             member_lifecycle_store.as_deref(),
+            exit_contribution_store.as_deref(),
+            exit_availability.as_ref(),
         )
         .await
         {
@@ -363,6 +407,8 @@ async fn handle_connection_message(
     join_request_store: Option<&JoinRequestStore>,
     invitation_store: Option<&InvitationStore>,
     member_lifecycle_store: Option<&MemberLifecycleStore>,
+    exit_contribution_store: Option<&ExitContributionRequestStore>,
+    exit_availability: &ExitAvailabilityObservationRegistry,
 ) -> bool {
     match msg {
         Ok(Message::Binary(data)) => {
@@ -378,6 +424,8 @@ async fn handle_connection_message(
                 join_request_store,
                 invitation_store,
                 member_lifecycle_store,
+                exit_contribution_store,
+                exit_availability,
             )
             .await;
             true
@@ -408,6 +456,8 @@ async fn handle_binary_message(
     join_request_store: Option<&JoinRequestStore>,
     invitation_store: Option<&InvitationStore>,
     member_lifecycle_store: Option<&MemberLifecycleStore>,
+    exit_contribution_store: Option<&ExitContributionRequestStore>,
+    exit_availability: &ExitAvailabilityObservationRegistry,
 ) {
     tracing::debug!("收到二进制消息: {} 字节 (来自 {})", data.len(), addr);
     session_manager.record_signaling_rx(data.len());
@@ -430,6 +480,8 @@ async fn handle_binary_message(
                 join_request_store,
                 invitation_store,
                 member_lifecycle_store,
+                exit_contribution_store,
+                exit_availability,
             )
             .await
             {
@@ -493,6 +545,8 @@ async fn handle_signaling_message(
     join_request_store: Option<&JoinRequestStore>,
     invitation_store: Option<&InvitationStore>,
     member_lifecycle_store: Option<&MemberLifecycleStore>,
+    exit_contribution_store: Option<&ExitContributionRequestStore>,
+    exit_availability: &ExitAvailabilityObservationRegistry,
 ) -> Result<()> {
     match msg {
         SignalingMessage::Register { .. } => {
@@ -664,6 +718,7 @@ async fn handle_signaling_message(
                 join_request_store,
                 invitation_store,
                 member_lifecycle_store,
+                exit_availability,
             )
             .await?;
         }
@@ -687,6 +742,116 @@ async fn handle_signaling_message(
             )
             .await?;
         }
+        SignalingMessage::ExitContributionSubmit {
+            network_id,
+            request_id,
+            expected_policy_revision,
+            expected_terms_hash,
+            requested_bandwidth_kbps,
+            requested_traffic_quota_bytes,
+        } => {
+            handle_exit_contribution_submit(
+                network_id,
+                request_id,
+                expected_policy_revision,
+                expected_terms_hash,
+                requested_bandwidth_kbps,
+                requested_traffic_quota_bytes,
+                session_manager,
+                tx,
+                client_id,
+                exit_contribution_store,
+            )
+            .await?;
+        }
+        SignalingMessage::ExitContributionList { network_id } => {
+            handle_exit_contribution_list(
+                network_id,
+                session_manager,
+                tx,
+                client_id,
+                exit_contribution_store,
+            )
+            .await?;
+        }
+        SignalingMessage::ExitContributionStatus {
+            network_id,
+            request_id,
+        } => {
+            handle_exit_contribution_status(
+                network_id,
+                request_id,
+                session_manager,
+                tx,
+                client_id,
+                exit_contribution_store,
+            )
+            .await?;
+        }
+        SignalingMessage::ExitContributionReview {
+            network_id,
+            request_id,
+            expected_revision,
+            action,
+            decision_reason_code,
+        } => {
+            handle_exit_contribution_review(
+                network_id,
+                request_id,
+                expected_revision,
+                action,
+                decision_reason_code,
+                session_manager,
+                tx,
+                client_id,
+                exit_contribution_store,
+            )
+            .await?;
+        }
+        SignalingMessage::ExitContributionWithdraw {
+            network_id,
+            request_id,
+            expected_revision,
+        } => {
+            handle_exit_contribution_withdraw(
+                network_id,
+                request_id,
+                expected_revision,
+                session_manager,
+                tx,
+                client_id,
+                exit_contribution_store,
+            )
+            .await?;
+        }
+        SignalingMessage::ExitContributionAuthorizationList { network_id } => {
+            handle_exit_contribution_authorization_list(
+                network_id,
+                session_manager,
+                tx,
+                client_id,
+                exit_contribution_store,
+            )
+            .await?;
+        }
+        SignalingMessage::ExitAvailabilityReport {
+            network_id,
+            available,
+            reason_code,
+        } => {
+            handle_exit_availability_report(
+                network_id,
+                available,
+                reason_code,
+                session_manager,
+                tx,
+                client_id,
+                join_request_store,
+                exit_contribution_store,
+                exit_availability,
+            )
+            .await?;
+        }
         // These variants are server-to-client events. Accepting one from a
         // client would let it manufacture approval state in another view.
         SignalingMessage::JoinRequestStatus { .. }
@@ -703,7 +868,15 @@ async fn handle_signaling_message(
         | SignalingMessage::MemberDirectoryListAck { .. }
         | SignalingMessage::MemberRemovalPreviewAck { .. }
         | SignalingMessage::MemberLifecycleChangeAck { .. }
-        | SignalingMessage::MemberLifecycleChanged { .. } => {
+        | SignalingMessage::MemberLifecycleChanged { .. }
+        | SignalingMessage::ExitContributionSubmitAck { .. }
+        | SignalingMessage::ExitContributionListAck { .. }
+        | SignalingMessage::ExitContributionStatusAck { .. }
+        | SignalingMessage::ExitContributionReviewAck { .. }
+        | SignalingMessage::ExitContributionWithdrawAck { .. }
+        | SignalingMessage::ExitContributionAuthorizationListAck { .. }
+        | SignalingMessage::ExitContributionChanged { .. }
+        | SignalingMessage::ExitAvailabilityReportAck { .. } => {
             send_binary(
                 tx,
                 session_manager,
@@ -896,6 +1069,7 @@ async fn handle_member_directory_list(
     join_request_store: Option<&JoinRequestStore>,
     invitation_store: Option<&InvitationStore>,
     member_lifecycle_store: Option<&MemberLifecycleStore>,
+    exit_availability: &ExitAvailabilityObservationRegistry,
 ) -> Result<()> {
     let Some((actor, _public_key)) =
         authenticated_join_actor(session_manager, tx, client_id).await?
@@ -913,6 +1087,7 @@ async fn handle_member_directory_list(
         invitation_store,
         member_lifecycle_store,
         session_manager,
+        exit_availability,
     )
     .await
     {
@@ -1090,6 +1265,415 @@ async fn broadcast_member_lifecycle_changed(
         }
     }
     Ok(())
+}
+
+fn trusted_exit_network_record(
+    join_request_store: Option<&JoinRequestStore>,
+    exit_contribution_store: Option<&ExitContributionRequestStore>,
+    network_id: &NetworkId,
+) -> Result<NetworkRecord> {
+    if let Some(store) = exit_contribution_store {
+        return store.network_record(network_id);
+    }
+    if let Some(store) = join_request_store {
+        return store.member_directory_network(network_id);
+    }
+    anyhow::bail!("Exit availability requires a trusted network record")
+}
+
+fn exit_availability_error_message(error: &str) -> SignalingMessage {
+    let code = if error.contains("exit_availability.error.member_required") {
+        ErrorCode::Forbidden
+    } else if error.contains("exit_availability.error.invalid_reason_code") {
+        ErrorCode::BadRequest
+    } else {
+        ErrorCode::Internal
+    };
+    let message = if code == ErrorCode::Internal {
+        "Exit availability report could not be processed"
+    } else {
+        error
+    };
+    SignalingMessage::protocol_error(code, message)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_exit_availability_report(
+    network_id: NetworkId,
+    available: bool,
+    reason_code: Option<String>,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    join_request_store: Option<&JoinRequestStore>,
+    exit_contribution_store: Option<&ExitContributionRequestStore>,
+    exit_availability: &ExitAvailabilityObservationRegistry,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let record =
+        match trusted_exit_network_record(join_request_store, exit_contribution_store, &network_id)
+        {
+            Ok(record) => record,
+            Err(error) => {
+                tracing::warn!(%error, "读取 Exit 可用性权威成员名单失败");
+                send_binary(
+                    tx,
+                    session_manager,
+                    exit_availability_error_message("exit_availability.error.member_required"),
+                )?;
+                return Ok(());
+            }
+        };
+    if !record.members.contains(&actor) {
+        send_binary(
+            tx,
+            session_manager,
+            exit_availability_error_message("exit_availability.error.member_required"),
+        )?;
+        return Ok(());
+    }
+    let observed_at_unix_ms = unix_time_ms();
+    if let Err(error) = exit_availability.observe(
+        network_id.clone(),
+        actor,
+        available,
+        reason_code,
+        observed_at_unix_ms,
+    ) {
+        send_binary(
+            tx,
+            session_manager,
+            exit_availability_error_message(&error.to_string()),
+        )?;
+        return Ok(());
+    }
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::ExitAvailabilityReportAck {
+            network_id,
+            observed_at_unix_ms,
+        },
+    )
+}
+
+fn require_exit_contribution_store<'a>(
+    store: Option<&'a ExitContributionRequestStore>,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> Result<Option<&'a ExitContributionRequestStore>> {
+    if let Some(store) = store {
+        return Ok(Some(store));
+    }
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::protocol_error(
+            ErrorCode::BadRequest,
+            "Exit contribution governance is not configured on this Coordinator",
+        ),
+    )?;
+    Ok(None)
+}
+
+fn exit_contribution_error_message(error: &str) -> SignalingMessage {
+    let code = if error.contains("exit_contribution.error.member_required")
+        || error.contains("exit_contribution.error.permission_denied")
+        || error.contains("exit_contribution.error.reviewer_required")
+        || error.contains("exit_contribution.error.self_review_forbidden")
+        || error.contains("domain.exit_contribution_request_owner_mismatch")
+    {
+        ErrorCode::Forbidden
+    } else if error.contains("exit_contribution.error.request_not_found") {
+        ErrorCode::NotFound
+    } else if error.contains("exit_contribution.error.stale_policy")
+        || error.contains("exit_contribution.error.mode_not_allowed")
+        || error.contains("exit_contribution.error.request_id_collision")
+        || error.contains("exit_contribution.error.active_request_exists")
+        || error.contains("domain.exit_contribution_request_revision_conflict")
+        || error.contains("domain.invalid_transition")
+        || error.contains("domain.exit_contribution_request_revision")
+    {
+        ErrorCode::BadRequest
+    } else {
+        ErrorCode::Internal
+    };
+    let message = if code == ErrorCode::Internal {
+        "Exit contribution request could not be processed"
+    } else {
+        error
+    };
+    SignalingMessage::protocol_error(code, message)
+}
+
+fn send_exit_contribution_error(
+    tx: &mpsc::UnboundedSender<Message>,
+    session_manager: &SessionManager,
+    error: &anyhow::Error,
+) -> Result<()> {
+    tracing::warn!(%error, "Exit contribution request failed");
+    send_binary(
+        tx,
+        session_manager,
+        exit_contribution_error_message(&error.to_string()),
+    )
+}
+
+async fn broadcast_exit_contribution_changed(
+    store: &ExitContributionRequestStore,
+    session_manager: &SessionManager,
+    network_id: &NetworkId,
+    request: &ExitContributionRequest,
+) -> Result<()> {
+    let record = store.network_record(network_id)?;
+    let message = SignalingMessage::ExitContributionChanged {
+        request_id: request.request_id.clone(),
+        node_id: request.node_id.clone(),
+        state: request.state,
+        revision: request.revision,
+    };
+    for peer in session_manager.get_all_peers().await {
+        let node_id = NodeId::from_public_key(&peer.public_key);
+        if record.members.contains(&node_id) {
+            session_manager
+                .send_to_client(&peer.client_id, message.clone())
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_exit_contribution_submit(
+    network_id: NetworkId,
+    request_id: ExitContributionRequestId,
+    expected_policy_revision: u64,
+    expected_terms_hash: fuckipv6_common::domain::ContentHash,
+    requested_bandwidth_kbps: Option<u64>,
+    requested_traffic_quota_bytes: Option<u64>,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&ExitContributionRequestStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_exit_contribution_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let request = match store.submit(
+        &network_id,
+        &actor,
+        request_id,
+        expected_policy_revision,
+        expected_terms_hash,
+        requested_bandwidth_kbps,
+        requested_traffic_quota_bytes,
+        unix_time_ms(),
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            send_exit_contribution_error(tx, session_manager, &error)?;
+            return Ok(());
+        }
+    };
+    if let Err(error) =
+        broadcast_exit_contribution_changed(store, session_manager, &network_id, &request).await
+    {
+        send_exit_contribution_error(tx, session_manager, &error)?;
+        return Ok(());
+    }
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::ExitContributionSubmitAck { request },
+    )
+}
+
+async fn handle_exit_contribution_list(
+    network_id: NetworkId,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&ExitContributionRequestStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_exit_contribution_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let requests = match store.list(&network_id, &actor, unix_time_ms()) {
+        Ok(requests) => requests,
+        Err(error) => {
+            send_exit_contribution_error(tx, session_manager, &error)?;
+            return Ok(());
+        }
+    };
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::ExitContributionListAck { requests },
+    )
+}
+
+async fn handle_exit_contribution_status(
+    network_id: NetworkId,
+    request_id: ExitContributionRequestId,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&ExitContributionRequestStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_exit_contribution_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let request = match store.status(&network_id, &actor, &request_id, unix_time_ms()) {
+        Ok(request) => request,
+        Err(error) => {
+            send_exit_contribution_error(tx, session_manager, &error)?;
+            return Ok(());
+        }
+    };
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::ExitContributionStatusAck { request },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_exit_contribution_review(
+    network_id: NetworkId,
+    request_id: ExitContributionRequestId,
+    expected_revision: u64,
+    action: ExitContributionReviewAction,
+    decision_reason_code: Option<String>,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&ExitContributionRequestStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_exit_contribution_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let request = match store.review(
+        &network_id,
+        &actor,
+        &request_id,
+        expected_revision,
+        action,
+        decision_reason_code,
+        unix_time_ms(),
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            send_exit_contribution_error(tx, session_manager, &error)?;
+            return Ok(());
+        }
+    };
+    if let Err(error) =
+        broadcast_exit_contribution_changed(store, session_manager, &network_id, &request).await
+    {
+        send_exit_contribution_error(tx, session_manager, &error)?;
+        return Ok(());
+    }
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::ExitContributionReviewAck { request },
+    )
+}
+
+async fn handle_exit_contribution_withdraw(
+    network_id: NetworkId,
+    request_id: ExitContributionRequestId,
+    expected_revision: u64,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&ExitContributionRequestStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_exit_contribution_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let request = match store.withdraw(
+        &network_id,
+        &actor,
+        &request_id,
+        expected_revision,
+        unix_time_ms(),
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            send_exit_contribution_error(tx, session_manager, &error)?;
+            return Ok(());
+        }
+    };
+    if let Err(error) =
+        broadcast_exit_contribution_changed(store, session_manager, &network_id, &request).await
+    {
+        send_exit_contribution_error(tx, session_manager, &error)?;
+        return Ok(());
+    }
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::ExitContributionWithdrawAck { request },
+    )
+}
+
+async fn handle_exit_contribution_authorization_list(
+    network_id: NetworkId,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&ExitContributionRequestStore>,
+) -> Result<()> {
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(store) = require_exit_contribution_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let authorizations = match store.authorization_snapshots(&network_id, &actor, unix_time_ms()) {
+        Ok(authorizations) => authorizations,
+        Err(error) => {
+            send_exit_contribution_error(tx, session_manager, &error)?;
+            return Ok(());
+        }
+    };
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::ExitContributionAuthorizationListAck { authorizations },
+    )
 }
 
 async fn handle_join_request_review(

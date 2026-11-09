@@ -1,12 +1,14 @@
 use anyhow::{bail, Result};
 use fuckipv6_common::domain::{
-    authorize_member_lifecycle_action, member_lifecycle_target, InvitationRedemption, JoinRequest,
-    JoinRequestState, MemberLifecycleAction, MemberLifecycleActorRole, MemberLifecycleRecord,
-    MemberLifecycleStatus, MembershipRole, NetworkId, NetworkMember, NetworkMemberDirectory,
-    NetworkMemberGroup, NetworkMemberPresence, NetworkRecord, NodeId,
+    authorize_member_lifecycle_action, member_lifecycle_target, CapabilityKind,
+    InvitationRedemption, JoinRequest, JoinRequestState, MemberLifecycleAction,
+    MemberLifecycleActorRole, MemberLifecycleRecord, MemberLifecycleStatus, MembershipRole,
+    NetworkId, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberPresence,
+    NetworkRecord, NodeId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::exit_availability::ExitAvailabilityObservationRegistry;
 use super::invitations::InvitationStore;
 use super::join_requests::JoinRequestStore;
 use super::member_lifecycle::MemberLifecycleStore;
@@ -23,6 +25,7 @@ pub(crate) async fn build_member_directory(
     invitations: Option<&InvitationStore>,
     lifecycle: Option<&MemberLifecycleStore>,
     sessions: &SessionManager,
+    exit_availability: &ExitAvailabilityObservationRegistry,
 ) -> Result<NetworkMemberDirectory> {
     let record = join_requests.member_directory_network(network_id)?;
     let is_member = record.members.contains(actor);
@@ -56,6 +59,8 @@ pub(crate) async fn build_member_directory(
             &lifecycle_records,
             &presence,
             &fingerprints,
+            now_unix_ms,
+            exit_availability,
         ),
     })
 }
@@ -68,6 +73,8 @@ fn project_members(
     lifecycle_records: &[MemberLifecycleRecord],
     presence: &BTreeMap<NodeId, NetworkMemberPresence>,
     fingerprints: &BTreeMap<NodeId, String>,
+    now_unix_ms: u64,
+    exit_availability: &ExitAvailabilityObservationRegistry,
 ) -> Vec<NetworkMember> {
     let approved = requests
         .iter()
@@ -168,6 +175,19 @@ fn project_members(
         let revision = lifecycle.map(|record| record.revision).unwrap_or(1);
         let access_epoch = lifecycle.map(|record| record.access_epoch).unwrap_or(1);
         let profile = approved_request.or(pending_request).or(expired_request);
+        let declared_exit_available = capabilities
+            .as_ref()
+            .map(|capabilities| capabilities.contains(&CapabilityKind::Exit));
+        let member_exit_availability = if lifecycle_state.grants_network_access() {
+            exit_availability.project(
+                &record.network_id,
+                &node_id,
+                declared_exit_available,
+                now_unix_ms,
+            )
+        } else {
+            Default::default()
+        };
         members.push(NetworkMember {
             node_id: node_id.clone(),
             display_name: profile.and_then(|request| request.applicant.display_name.clone()),
@@ -193,7 +213,7 @@ fn project_members(
                 retained_administrators,
             ),
             presence: member_presence,
-            exit_availability: Default::default(),
+            exit_availability: member_exit_availability,
             joined_at_unix_ms: approved_request
                 .and_then(|request| request.approved_at_unix_ms)
                 .or_else(|| redemption.map(|redemption| redemption.joined_at_unix_ms))
@@ -423,6 +443,10 @@ mod tests {
             grants_permanent_membership: true,
         };
         let presence = BTreeMap::from([(node("member"), NetworkMemberPresence::live(5_000))]);
+        let exit_availability = ExitAvailabilityObservationRegistry::default();
+        exit_availability
+            .observe(record.network_id.clone(), node("member"), true, None, 5_000)
+            .unwrap();
 
         let projected = project_members(
             &record,
@@ -432,6 +456,8 @@ mod tests {
             &[],
             &presence,
             &BTreeMap::new(),
+            5_000,
+            &exit_availability,
         );
         let owner = projected
             .iter()
@@ -447,6 +473,15 @@ mod tests {
         assert_eq!(member.status, NetworkMemberStatus::Active);
         assert_eq!(member.joined_at_unix_ms, Some(2_000));
         assert_eq!(member.presence.observed_at_unix_ms, Some(5_000));
+        assert_eq!(
+            member.exit_availability.state,
+            fuckipv6_common::domain::ExitAvailabilityState::Degraded
+        );
+        assert_eq!(member.exit_availability.declared_available, Some(false));
+        assert_eq!(
+            member.exit_availability.reason_code.as_deref(),
+            Some("exit.availability.available_but_not_declared")
+        );
 
         let unverified = projected
             .iter()
@@ -471,6 +506,7 @@ mod tests {
         let expires_at = expired.expires_at_unix_ms;
         expired.expire_if_due(expires_at).unwrap();
         let pending = request("retry", "second", expires_at + 1);
+        let now_unix_ms = expires_at + 1;
 
         let projected = project_members(
             &record,
@@ -480,6 +516,8 @@ mod tests {
             &[],
             &BTreeMap::new(),
             &BTreeMap::new(),
+            now_unix_ms,
+            &ExitAvailabilityObservationRegistry::default(),
         );
         let rows = projected
             .iter()
@@ -530,6 +568,7 @@ mod tests {
             None,
             None,
             &sessions,
+            &ExitAvailabilityObservationRegistry::default(),
         )
         .await
         .expect_err("non-members must not receive a directory");
@@ -553,6 +592,7 @@ mod tests {
             None,
             None,
             &sessions,
+            &ExitAvailabilityObservationRegistry::default(),
         )
         .await
         .expect_err("a missing authoritative roster must fail closed");
@@ -600,6 +640,7 @@ mod tests {
             None,
             Some(&lifecycle),
             &sessions,
+            &ExitAvailabilityObservationRegistry::default(),
         )
         .await
         .unwrap();
@@ -630,6 +671,7 @@ mod tests {
             None,
             Some(&lifecycle),
             &sessions,
+            &ExitAvailabilityObservationRegistry::default(),
         )
         .await
         .unwrap();
@@ -659,6 +701,8 @@ mod tests {
             &[],
             &BTreeMap::new(),
             &BTreeMap::new(),
+            9_000,
+            &ExitAvailabilityObservationRegistry::default(),
         );
         let owner = projected
             .iter()

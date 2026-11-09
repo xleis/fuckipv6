@@ -1114,6 +1114,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handshake_interruption_revokes_relay_and_fails_closed() {
+        let mut backend = FakeBackend::new(healthy_snapshot(), healthy_snapshot());
+        let report = RecoveryCoordinator
+            .recover(&mut backend, request(RecoveryTrigger::HandshakeInterrupted))
+            .await;
+
+        assert_eq!(report.status, RecoveryStatus::DegradedFailClosed);
+        assert_eq!(report.revoked_paths, vec![InvalidatedPath::Relay]);
+        assert!(report.fail_closed_required);
+        let decision = report.failure_decisions.first().unwrap();
+        assert_eq!(decision.failure, TrafficFailureKind::HandshakeInterrupted);
+        assert_eq!(decision.outcome, TrafficFailureOutcome::FailClosed);
+        assert!(decision.direct_fallback.is_none());
+        assert!(backend.calls().contains(&"revoke:Relay".to_string()));
+    }
+
+    #[tokio::test]
+    async fn runtime_disconnect_fails_closed_without_claiming_recovery() {
+        let mut backend = FakeBackend::new(healthy_snapshot(), healthy_snapshot());
+        let report = RecoveryCoordinator
+            .recover(&mut backend, request(RecoveryTrigger::RuntimeDisconnected))
+            .await;
+
+        assert_eq!(report.status, RecoveryStatus::DegradedFailClosed);
+        assert!(report.revoked_paths.is_empty());
+        assert!(report.fail_closed_required);
+        assert!(
+            report.traffic_session_validation.is_none(),
+            "a fail-closed runtime interruption must not publish protected-path validation"
+        );
+        let decision = report.failure_decisions.first().unwrap();
+        assert_eq!(decision.failure, TrafficFailureKind::RuntimeDisconnected);
+        assert_eq!(decision.outcome, TrafficFailureOutcome::FailClosed);
+        assert!(decision.direct_fallback.is_none());
+    }
+
+    #[tokio::test]
+    async fn sleep_wake_and_network_change_fail_closed_when_a_required_layer_is_missing() {
+        #[derive(Clone, Copy)]
+        enum MissingLayer {
+            Tun,
+            Dns,
+            Routes,
+        }
+
+        for (trigger, layer, expected_error, expected_failure) in [
+            (
+                RecoveryTrigger::SleepWake,
+                MissingLayer::Tun,
+                "recovery.tun_unhealthy",
+                TrafficFailureKind::NetworkSelectionUnavailable,
+            ),
+            (
+                RecoveryTrigger::SleepWake,
+                MissingLayer::Dns,
+                "recovery.dns_unhealthy",
+                TrafficFailureKind::DnsResolutionTimeout,
+            ),
+            (
+                RecoveryTrigger::SleepWake,
+                MissingLayer::Routes,
+                "recovery.routes_unhealthy",
+                TrafficFailureKind::NetworkSelectionUnavailable,
+            ),
+            (
+                RecoveryTrigger::NetworkChanged,
+                MissingLayer::Tun,
+                "recovery.tun_unhealthy",
+                TrafficFailureKind::NetworkSelectionUnavailable,
+            ),
+            (
+                RecoveryTrigger::NetworkChanged,
+                MissingLayer::Dns,
+                "recovery.dns_unhealthy",
+                TrafficFailureKind::DnsResolutionTimeout,
+            ),
+            (
+                RecoveryTrigger::NetworkChanged,
+                MissingLayer::Routes,
+                "recovery.routes_unhealthy",
+                TrafficFailureKind::NetworkSelectionUnavailable,
+            ),
+        ] {
+            let mut after = healthy_snapshot();
+            match layer {
+                MissingLayer::Tun => after.tun.state = RecoveryResourceState::Missing,
+                MissingLayer::Dns => after.dns.state = RecoveryResourceState::Missing,
+                MissingLayer::Routes => {
+                    after.routes.missing_routes = 1;
+                    after.routes.installed_routes = after.routes.expected_routes - 1;
+                }
+            }
+            let mut backend = FakeBackend::new(healthy_snapshot(), after);
+
+            let report = RecoveryCoordinator
+                .recover(&mut backend, request(trigger))
+                .await;
+
+            assert_eq!(report.status, RecoveryStatus::Failed);
+            assert_eq!(report.error_code.as_deref(), Some(expected_error));
+            assert!(report.fail_closed_required);
+            assert!(
+                report.traffic_session_validation.is_none(),
+                "missing {expected_error} evidence must not publish protected-path validation"
+            );
+            let decision = report.failure_decisions.first().unwrap();
+            assert_eq!(decision.failure, expected_failure);
+            assert_eq!(decision.outcome, TrafficFailureOutcome::FailClosed);
+        }
+    }
+
+    #[tokio::test]
     async fn reconciliation_removes_residue_duplicates_and_stale_interface_routes() {
         let mut before = healthy_snapshot();
         before.routes.missing_routes = 2;

@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "ConfirmedTrafficDirectFallback", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitContributionAvailability", "ExitContributionRestrictions", "ExitContributionTimeWindow", "ExitContributionTrafficQuota", "ExitHealthAssessment", "ExitHealthEvidence", "ExitHealthRetest", "ExitHealthSnapshot", "ExitNodeCapabilities", "ExitSelectionCandidate", "ExitSelectionGroupRule", "ExitSelectionMemberRule", "ExitSelectionPolicy", "ExitSelectionResolution", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "LocalExitCapabilitySnapshot", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeApplyPolicyCommand", "NodeApplyTrafficPolicyCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeExitSelectionSnapshot", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodePreviewPolicyCommand", "NodePreviewPolicyRollbackCommand", "NodePreviewTrafficPolicyCommand", "NodePreviewTrafficPolicyRollbackCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRollbackPolicyCommand", "NodeRollbackTrafficPolicyCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetLocalExitCapabilityCommand", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTestTrafficPolicyCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyAffectedObject", "PolicyApplyResult", "PolicyCurrent", "PolicyDiffEntry", "PolicyHistoryEntry", "PolicyHistorySnapshot", "PolicyPrecedenceExplanation", "PolicyPreview", "PolicyRiskSummary", "PolicyRollbackResult", "PolicyRuleExplanation", "PolicySnapshot", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "PortRange", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TrafficDefaultPolicy", "TrafficFailureDecision", "TrafficFailurePolicy", "TrafficFlow", "TrafficMatch", "TrafficPolicy", "TrafficPolicyAffectedObject", "TrafficPolicyApplyResult", "TrafficPolicyCurrent", "TrafficPolicyDiffEntry", "TrafficPolicyDraft", "TrafficPolicyHistoryEntry", "TrafficPolicyHistorySnapshot", "TrafficPolicyPreview", "TrafficPolicyRollbackResult", "TrafficPolicyTestComparison", "TrafficPolicyTestDelta", "TrafficPolicyTestInput", "TrafficRoutingDefaultPolicyView", "TrafficRoutingHardConstraints", "TrafficRoutingHitSample", "TrafficRoutingMoveAction", "TrafficRoutingNavigation", "TrafficRoutingObservedHit", "TrafficRoutingPageModel", "TrafficRoutingRuleImpact", "TrafficRoutingRuleView", "TrafficRoutingTarget", "TrafficRoutingTargetRef", "TrafficRule", "TrafficRuleRisk", "TrafficSessionEvent", "TrafficSessionSnapshot", "TrafficSessionValidation", "TunCapabilities", "UiModeResolution", "ApplicationIdentity", "ExitContributionMemberScope", "ExitHealthTarget", "ExitSelectionMode", "ExitSelectionSource", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector", "TrafficAction", "TrafficMatchRisk", "TrafficPolicyTestContextSource", "TrafficPolicyTestDecision", "TrafficRoutingObservation", "TrafficRoutingRuleActivityEffect", "TrafficRoutingRuleImpactView", "TrafficRoutingWorkflowState"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "ConfirmedTrafficDirectFallback", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitContributionAvailability", "ExitContributionRestrictions", "ExitContributionTimeWindow", "ExitContributionTrafficQuota", "ExitHealthAssessment", "ExitHealthEvidence", "ExitHealthRetest", "ExitHealthSnapshot", "ExitNodeCapabilities", "ExitSelectionCandidate", "ExitSelectionGroupRule", "ExitSelectionMemberRule", "ExitSelectionPolicy", "ExitSelectionResolution", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "LeakDetectionAssessment", "LeakDetectionEnvironment", "LeakDetectionEvidence", "LeakDetectionSnapshot", "LocalExitCapabilitySnapshot", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeApplyPolicyCommand", "NodeApplyTrafficPolicyCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeExitSelectionSnapshot", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodePreviewPolicyCommand", "NodePreviewPolicyRollbackCommand", "NodePreviewTrafficPolicyCommand", "NodePreviewTrafficPolicyRollbackCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRollbackPolicyCommand", "NodeRollbackTrafficPolicyCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetLocalExitCapabilityCommand", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTestTrafficPolicyCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyAffectedObject", "PolicyApplyResult", "PolicyCurrent", "PolicyDiffEntry", "PolicyHistoryEntry", "PolicyHistorySnapshot", "PolicyPrecedenceExplanation", "PolicyPreview", "PolicyRiskSummary", "PolicyRollbackResult", "PolicyRuleExplanation", "PolicySnapshot", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "PortRange", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TrafficDefaultPolicy", "TrafficFailureDecision", "TrafficFailurePolicy", "TrafficFlow", "TrafficMatch", "TrafficPolicy", "TrafficPolicyAffectedObject", "TrafficPolicyApplyResult", "TrafficPolicyCurrent", "TrafficPolicyDiffEntry", "TrafficPolicyDraft", "TrafficPolicyHistoryEntry", "TrafficPolicyHistorySnapshot", "TrafficPolicyPreview", "TrafficPolicyRollbackResult", "TrafficPolicyTestComparison", "TrafficPolicyTestDelta", "TrafficPolicyTestInput", "TrafficRoutingDefaultPolicyView", "TrafficRoutingHardConstraints", "TrafficRoutingHitSample", "TrafficRoutingMoveAction", "TrafficRoutingNavigation", "TrafficRoutingObservedHit", "TrafficRoutingPageModel", "TrafficRoutingRuleImpact", "TrafficRoutingRuleView", "TrafficRoutingTarget", "TrafficRoutingTargetRef", "TrafficRule", "TrafficRuleRisk", "TrafficSessionEvent", "TrafficSessionSnapshot", "TrafficSessionValidation", "TunCapabilities", "UiModeResolution", "ApplicationIdentity", "ExitContributionMemberScope", "ExitHealthTarget", "ExitSelectionMode", "ExitSelectionSource", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector", "TrafficAction", "TrafficMatchRisk", "TrafficPolicyTestContextSource", "TrafficPolicyTestDecision", "TrafficRoutingObservation", "TrafficRoutingRuleActivityEffect", "TrafficRoutingRuleImpactView", "TrafficRoutingWorkflowState"
     };
 
     public enum AclAction {
@@ -901,6 +901,225 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown JoinRequestState wire value: " + value);
+        }
+    }
+
+    public enum LeakDetectionDnsMode {
+        SYSTEM_RESOLVER("system_resolver"),
+        DOH("doh"),
+        DOT("dot"),
+        NETWORK_SPECIFIED("network_specified"),
+        UNMANAGED("unmanaged");
+
+        private final String wireName;
+
+        LeakDetectionDnsMode(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static LeakDetectionDnsMode fromWireName(String value) {
+            for (LeakDetectionDnsMode candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown LeakDetectionDnsMode wire value: " + value);
+        }
+    }
+
+    public enum LeakDetectionEvidenceState {
+        PASSED("passed"),
+        FAILED("failed"),
+        UNSUPPORTED("unsupported"),
+        NOT_TESTED("not_tested");
+
+        private final String wireName;
+
+        LeakDetectionEvidenceState(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static LeakDetectionEvidenceState fromWireName(String value) {
+            for (LeakDetectionEvidenceState candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown LeakDetectionEvidenceState wire value: " + value);
+        }
+    }
+
+    public enum LeakDetectionIsolationAction {
+        BLOCKED_UNAVAILABLE_IPV4("blocked_unavailable_ipv4"),
+        BLOCKED_UNAVAILABLE_IPV6("blocked_unavailable_ipv6"),
+        FAIL_CLOSED_AFFECTED_TRAFFIC("fail_closed_affected_traffic"),
+        RETAINED_PROTECTED_ROUTE("retained_protected_route");
+
+        private final String wireName;
+
+        LeakDetectionIsolationAction(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static LeakDetectionIsolationAction fromWireName(String value) {
+            for (LeakDetectionIsolationAction candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown LeakDetectionIsolationAction wire value: " + value);
+        }
+    }
+
+    public enum LeakDetectionPlatform {
+        LINUX("linux"),
+        WINDOWS("windows"),
+        MACOS("macos"),
+        OTHER("other");
+
+        private final String wireName;
+
+        LeakDetectionPlatform(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static LeakDetectionPlatform fromWireName(String value) {
+            for (LeakDetectionPlatform candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown LeakDetectionPlatform wire value: " + value);
+        }
+    }
+
+    public enum LeakDetectionProtocol {
+        DNS("dns"),
+        IPV4("ipv4"),
+        IPV6("ipv6");
+
+        private final String wireName;
+
+        LeakDetectionProtocol(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static LeakDetectionProtocol fromWireName(String value) {
+            for (LeakDetectionProtocol candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown LeakDetectionProtocol wire value: " + value);
+        }
+    }
+
+    public enum LeakDetectionSource {
+        SYSTEM_RESOLVER("system_resolver"),
+        MANAGED_DOH("managed_doh"),
+        LOCAL_ROUTING_TABLE("local_routing_table"),
+        LINK_CAPABILITY("link_capability"),
+        CONTROLLED_PROBE("controlled_probe"),
+        EXTERNAL_REACHABILITY_PROBE("external_reachability_probe"),
+        APPLICATION_BEHAVIOR_PROBE("application_behavior_probe");
+
+        private final String wireName;
+
+        LeakDetectionSource(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static LeakDetectionSource fromWireName(String value) {
+            for (LeakDetectionSource candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown LeakDetectionSource wire value: " + value);
+        }
+    }
+
+    public enum LeakDetectionState {
+        LEAK_FREE("leak_free"),
+        ISOLATED("isolated"),
+        LEAK_DETECTED("leak_detected"),
+        INSUFFICIENT_EVIDENCE("insufficient_evidence");
+
+        private final String wireName;
+
+        LeakDetectionState(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static LeakDetectionState fromWireName(String value) {
+            for (LeakDetectionState candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown LeakDetectionState wire value: " + value);
+        }
+    }
+
+    public enum LeakDetectionTarget {
+        DNS_RESOLVER("dns_resolver"),
+        BROWSER_APPLICATION_DNS("browser_application_dns"),
+        IPV4_CARRIER("ipv4_carrier"),
+        IPV4_SOURCE_ADDRESS("ipv4_source_address"),
+        IPV4_DEFAULT_ROUTE("ipv4_default_route"),
+        IPV4_CONTROLLED_LEAK_SERVICE("ipv4_controlled_leak_service"),
+        IPV4_EXTERNAL_TARGET("ipv4_external_target"),
+        IPV6_CARRIER("ipv6_carrier"),
+        IPV6_SOURCE_ADDRESS("ipv6_source_address"),
+        IPV6_DEFAULT_ROUTE("ipv6_default_route"),
+        IPV6_CONTROLLED_LEAK_SERVICE("ipv6_controlled_leak_service"),
+        IPV6_EXTERNAL_TARGET("ipv6_external_target");
+
+        private final String wireName;
+
+        LeakDetectionTarget(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static LeakDetectionTarget fromWireName(String value) {
+            for (LeakDetectionTarget candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown LeakDetectionTarget wire value: " + value);
         }
     }
 
@@ -4216,6 +4435,76 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for LeakDetectionAssessment. */
+    public static final class LeakDetectionAssessment {
+        public final List<LeakDetectionProtocol> affected_protocols;
+        public final List<LeakDetectionTarget> affected_targets;
+        public final Boolean fail_closed_required;
+        public final String reason_code;
+        public final LeakDetectionState state;
+
+        public LeakDetectionAssessment(List<LeakDetectionProtocol> affected_protocols, List<LeakDetectionTarget> affected_targets, Boolean fail_closed_required, String reason_code, LeakDetectionState state) {
+            this.affected_protocols = affected_protocols;
+            this.affected_targets = affected_targets;
+            this.fail_closed_required = fail_closed_required;
+            this.reason_code = reason_code;
+            this.state = state;
+        }
+    }
+
+    /** DTO for LeakDetectionEnvironment. */
+    public static final class LeakDetectionEnvironment {
+        public final LeakDetectionDnsMode dns_mode;
+        public final Boolean ipv4_carrier_available;
+        public final Boolean ipv6_carrier_available;
+        public final LeakDetectionPlatform platform;
+        public final Boolean protected_path_active;
+
+        public LeakDetectionEnvironment(LeakDetectionDnsMode dns_mode, Boolean ipv4_carrier_available, Boolean ipv6_carrier_available, LeakDetectionPlatform platform, Boolean protected_path_active) {
+            this.dns_mode = dns_mode;
+            this.ipv4_carrier_available = ipv4_carrier_available;
+            this.ipv6_carrier_available = ipv6_carrier_available;
+            this.platform = platform;
+            this.protected_path_active = protected_path_active;
+        }
+    }
+
+    /** DTO for LeakDetectionEvidence. */
+    public static final class LeakDetectionEvidence {
+        public final Long duration_ms;
+        public final String error_code;
+        public final LeakDetectionIsolationAction isolation_action;
+        public final Long observed_at_unix_ms;
+        public final LeakDetectionSource source;
+        public final LeakDetectionEvidenceState state;
+        public final LeakDetectionTarget target;
+
+        public LeakDetectionEvidence(Long duration_ms, String error_code, LeakDetectionIsolationAction isolation_action, Long observed_at_unix_ms, LeakDetectionSource source, LeakDetectionEvidenceState state, LeakDetectionTarget target) {
+            this.duration_ms = duration_ms;
+            this.error_code = error_code;
+            this.isolation_action = isolation_action;
+            this.observed_at_unix_ms = observed_at_unix_ms;
+            this.source = source;
+            this.state = state;
+            this.target = target;
+        }
+    }
+
+    /** DTO for LeakDetectionSnapshot. */
+    public static final class LeakDetectionSnapshot {
+        public final LeakDetectionEnvironment environment;
+        public final List<LeakDetectionEvidence> evidence;
+        public final Long generated_at_unix_ms;
+        public final Long max_age_ms;
+
+        public LeakDetectionSnapshot(LeakDetectionEnvironment environment, List<LeakDetectionEvidence> evidence, Long generated_at_unix_ms, Long max_age_ms) {
+            this.environment = environment;
+            this.evidence = evidence;
+            this.generated_at_unix_ms = generated_at_unix_ms;
+            this.max_age_ms = max_age_ms;
+        }
+    }
+
     /** DTO for LocalExitCapabilitySnapshot. */
     public static final class LocalExitCapabilitySnapshot {
         public final Long active_clients;
@@ -5246,6 +5535,8 @@ public final class NodeContractV1 {
         public final String diagnostic_id;
         public final ExitHealthSnapshot exit_health;
         public final ExitHealthAssessment exit_health_assessment;
+        public final LeakDetectionSnapshot leak_detection;
+        public final LeakDetectionAssessment leak_detection_assessment;
         public final NodeLifecycleSnapshot lifecycle;
         public final List<NodeDiagnosticRecoveryAction> recovery_actions;
         public final NodeRuntimeResidueSnapshot residue;
@@ -5254,13 +5545,15 @@ public final class NodeContractV1 {
         public final Long started_at_unix_ms;
         public final Boolean timed_out;
 
-        public NodeDiagnosticsSnapshot(List<NodeDiagnosticCheck> checks, List<String> cleanup_candidate_networks, Long completed_at_unix_ms, String diagnostic_id, ExitHealthSnapshot exit_health, ExitHealthAssessment exit_health_assessment, NodeLifecycleSnapshot lifecycle, List<NodeDiagnosticRecoveryAction> recovery_actions, NodeRuntimeResidueSnapshot residue, List<String> retained_owner_networks, String sanitized_report, Long started_at_unix_ms, Boolean timed_out) {
+        public NodeDiagnosticsSnapshot(List<NodeDiagnosticCheck> checks, List<String> cleanup_candidate_networks, Long completed_at_unix_ms, String diagnostic_id, ExitHealthSnapshot exit_health, ExitHealthAssessment exit_health_assessment, LeakDetectionSnapshot leak_detection, LeakDetectionAssessment leak_detection_assessment, NodeLifecycleSnapshot lifecycle, List<NodeDiagnosticRecoveryAction> recovery_actions, NodeRuntimeResidueSnapshot residue, List<String> retained_owner_networks, String sanitized_report, Long started_at_unix_ms, Boolean timed_out) {
             this.checks = checks;
             this.cleanup_candidate_networks = cleanup_candidate_networks;
             this.completed_at_unix_ms = completed_at_unix_ms;
             this.diagnostic_id = diagnostic_id;
             this.exit_health = exit_health;
             this.exit_health_assessment = exit_health_assessment;
+            this.leak_detection = leak_detection;
+            this.leak_detection_assessment = leak_detection_assessment;
             this.lifecycle = lifecycle;
             this.recovery_actions = recovery_actions;
             this.residue = residue;

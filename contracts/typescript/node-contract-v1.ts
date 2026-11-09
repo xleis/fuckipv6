@@ -496,6 +496,55 @@ export type JoinRequestReviewAction = "approve" | "reject" | "request_informatio
 
 export type JoinRequestState = "pending" | "needs_information" | "approved" | "rejected" | "withdrawn" | "expired";
 
+export type LeakDetectionAssessment = {
+  "affected_protocols": Array<LeakDetectionProtocol>;
+  "affected_targets": Array<LeakDetectionTarget>;
+  "fail_closed_required": boolean;
+  "reason_code": string;
+  "state": LeakDetectionState;
+};
+
+export type LeakDetectionDnsMode = "system_resolver" | "doh" | "dot" | "network_specified" | "unmanaged";
+
+export type LeakDetectionEnvironment = {
+  "dns_mode"?: LeakDetectionDnsMode;
+  "ipv4_carrier_available"?: boolean;
+  "ipv6_carrier_available"?: boolean;
+  "platform"?: LeakDetectionPlatform;
+  "protected_path_active"?: boolean;
+};
+
+export type LeakDetectionEvidence = {
+  "duration_ms": number;
+  "error_code"?: string | null;
+  "isolation_action"?: LeakDetectionIsolationAction | null;
+  "observed_at_unix_ms": number;
+  "source": LeakDetectionSource;
+  "state": LeakDetectionEvidenceState;
+  "target": LeakDetectionTarget;
+};
+
+export type LeakDetectionEvidenceState = "passed" | "failed" | "unsupported" | "not_tested";
+
+export type LeakDetectionIsolationAction = "blocked_unavailable_ipv4" | "blocked_unavailable_ipv6" | "fail_closed_affected_traffic" | "retained_protected_route";
+
+export type LeakDetectionPlatform = "linux" | "windows" | "macos" | "other";
+
+export type LeakDetectionProtocol = "dns" | "ipv4" | "ipv6";
+
+export type LeakDetectionSnapshot = {
+  "environment"?: LeakDetectionEnvironment;
+  "evidence"?: Array<LeakDetectionEvidence>;
+  "generated_at_unix_ms"?: number;
+  "max_age_ms"?: number;
+};
+
+export type LeakDetectionSource = "system_resolver" | "managed_doh" | "local_routing_table" | "link_capability" | "controlled_probe" | "external_reachability_probe" | "application_behavior_probe";
+
+export type LeakDetectionState = "leak_free" | "isolated" | "leak_detected" | "insufficient_evidence";
+
+export type LeakDetectionTarget = "dns_resolver" | "browser_application_dns" | "ipv4_carrier" | "ipv4_source_address" | "ipv4_default_route" | "ipv4_controlled_leak_service" | "ipv4_external_target" | "ipv6_carrier" | "ipv6_source_address" | "ipv6_default_route" | "ipv6_controlled_leak_service" | "ipv6_external_target";
+
 export type LocalExitCapabilitySnapshot = {
   "active_clients"?: number;
   "healthy"?: boolean;
@@ -1438,6 +1487,8 @@ export type NodeDiagnosticsSnapshot = {
   "diagnostic_id": string;
   "exit_health"?: ExitHealthSnapshot;
   "exit_health_assessment"?: ExitHealthAssessment;
+  "leak_detection"?: LeakDetectionSnapshot;
+  "leak_detection_assessment"?: LeakDetectionAssessment;
   "lifecycle": NodeLifecycleSnapshot;
   "recovery_actions": Array<NodeDiagnosticRecoveryAction>;
   "residue": NodeRuntimeResidueSnapshot;

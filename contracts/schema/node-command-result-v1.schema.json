@@ -2217,6 +2217,236 @@
       ],
       "type": "string"
     },
+    "LeakDetectionAssessment": {
+      "additionalProperties": false,
+      "properties": {
+        "affected_protocols": {
+          "items": {
+            "$ref": "#/$defs/LeakDetectionProtocol"
+          },
+          "type": "array"
+        },
+        "affected_targets": {
+          "items": {
+            "$ref": "#/$defs/LeakDetectionTarget"
+          },
+          "type": "array"
+        },
+        "fail_closed_required": {
+          "type": "boolean"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/LeakDetectionState"
+        }
+      },
+      "required": [
+        "state",
+        "reason_code",
+        "fail_closed_required",
+        "affected_protocols",
+        "affected_targets"
+      ],
+      "type": "object"
+    },
+    "LeakDetectionDnsMode": {
+      "description": "DNS path that was actually observed. DoT support is not implied merely\nbecause this enum can represent it.",
+      "enum": [
+        "system_resolver",
+        "doh",
+        "dot",
+        "network_specified",
+        "unmanaged"
+      ],
+      "type": "string"
+    },
+    "LeakDetectionEnvironment": {
+      "additionalProperties": false,
+      "properties": {
+        "dns_mode": {
+          "$ref": "#/$defs/LeakDetectionDnsMode",
+          "default": "unmanaged"
+        },
+        "ipv4_carrier_available": {
+          "default": false,
+          "type": "boolean"
+        },
+        "ipv6_carrier_available": {
+          "default": false,
+          "type": "boolean"
+        },
+        "platform": {
+          "$ref": "#/$defs/LeakDetectionPlatform",
+          "default": "other"
+        },
+        "protected_path_active": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "LeakDetectionEvidence": {
+      "additionalProperties": false,
+      "description": "One sanitized observation. `error_code` is a stable machine token and must\nnever contain raw stderr, resolver URLs, addresses or member identity.",
+      "properties": {
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "isolation_action": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LeakDetectionIsolationAction"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source": {
+          "$ref": "#/$defs/LeakDetectionSource"
+        },
+        "state": {
+          "$ref": "#/$defs/LeakDetectionEvidenceState"
+        },
+        "target": {
+          "$ref": "#/$defs/LeakDetectionTarget"
+        }
+      },
+      "required": [
+        "target",
+        "state",
+        "source",
+        "observed_at_unix_ms",
+        "duration_ms"
+      ],
+      "type": "object"
+    },
+    "LeakDetectionEvidenceState": {
+      "enum": [
+        "passed",
+        "failed",
+        "unsupported",
+        "not_tested"
+      ],
+      "type": "string"
+    },
+    "LeakDetectionIsolationAction": {
+      "description": "An isolation action that makes an unsupported path unusable rather than\nsilently allowing it to leave outside the protected route.",
+      "enum": [
+        "blocked_unavailable_ipv4",
+        "blocked_unavailable_ipv6",
+        "fail_closed_affected_traffic",
+        "retained_protected_route"
+      ],
+      "type": "string"
+    },
+    "LeakDetectionPlatform": {
+      "enum": [
+        "linux",
+        "windows",
+        "macos",
+        "other"
+      ],
+      "type": "string"
+    },
+    "LeakDetectionProtocol": {
+      "enum": [
+        "dns",
+        "ipv4",
+        "ipv6"
+      ],
+      "type": "string"
+    },
+    "LeakDetectionSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "environment": {
+          "$ref": "#/$defs/LeakDetectionEnvironment",
+          "default": {
+            "dns_mode": "unmanaged",
+            "ipv4_carrier_available": false,
+            "ipv6_carrier_available": false,
+            "platform": "other",
+            "protected_path_active": false
+          }
+        },
+        "evidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/LeakDetectionEvidence"
+          },
+          "type": "array"
+        },
+        "generated_at_unix_ms": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_age_ms": {
+          "default": 90000,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "LeakDetectionSource": {
+      "enum": [
+        "system_resolver",
+        "managed_doh",
+        "local_routing_table",
+        "link_capability",
+        "controlled_probe",
+        "external_reachability_probe",
+        "application_behavior_probe"
+      ],
+      "type": "string"
+    },
+    "LeakDetectionState": {
+      "enum": [
+        "leak_free",
+        "isolated",
+        "leak_detected",
+        "insufficient_evidence"
+      ],
+      "type": "string"
+    },
+    "LeakDetectionTarget": {
+      "description": "Sanitized check target. A controlled service is represented only by its\nstable role, never by a host name, URL or resolved address.",
+      "enum": [
+        "dns_resolver",
+        "browser_application_dns",
+        "ipv4_carrier",
+        "ipv4_source_address",
+        "ipv4_default_route",
+        "ipv4_controlled_leak_service",
+        "ipv4_external_target",
+        "ipv6_carrier",
+        "ipv6_source_address",
+        "ipv6_default_route",
+        "ipv6_controlled_leak_service",
+        "ipv6_external_target"
+      ],
+      "type": "string"
+    },
     "LocalExitCapabilitySnapshot": {
       "description": "Owner intent and observed lifecycle of the local Exit data plane.",
       "properties": {
@@ -4715,6 +4945,50 @@
             "state": "unknown"
           },
           "description": "Server-authoritative assessment at `completed_at_unix_ms`. Clients render\nthis result and never recompute health from process state."
+        },
+        "leak_detection": {
+          "$ref": "#/$defs/LeakDetectionSnapshot",
+          "default": {
+            "environment": {
+              "dns_mode": "unmanaged",
+              "ipv4_carrier_available": false,
+              "ipv6_carrier_available": false,
+              "platform": "other",
+              "protected_path_active": false
+            },
+            "evidence": [],
+            "generated_at_unix_ms": 0,
+            "max_age_ms": 90000
+          },
+          "description": "Bounded local DNS, IPv4 and IPv6 evidence. Missing, stale, unsupported or\nunexecuted checks remain visible and are never promoted to a pass."
+        },
+        "leak_detection_assessment": {
+          "$ref": "#/$defs/LeakDetectionAssessment",
+          "default": {
+            "affected_protocols": [
+              "dns",
+              "ipv4",
+              "ipv6"
+            ],
+            "affected_targets": [
+              "dns_resolver",
+              "browser_application_dns",
+              "ipv4_carrier",
+              "ipv4_source_address",
+              "ipv4_default_route",
+              "ipv4_controlled_leak_service",
+              "ipv4_external_target",
+              "ipv6_carrier",
+              "ipv6_source_address",
+              "ipv6_default_route",
+              "ipv6_controlled_leak_service",
+              "ipv6_external_target"
+            ],
+            "fail_closed_required": true,
+            "reason_code": "leak_detection.evidence_missing",
+            "state": "insufficient_evidence"
+          },
+          "description": "Server-authoritative leak conclusion at `completed_at_unix_ms`."
         },
         "lifecycle": {
           "$ref": "#/$defs/NodeLifecycleSnapshot"

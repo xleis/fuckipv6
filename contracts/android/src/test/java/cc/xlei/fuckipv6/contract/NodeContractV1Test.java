@@ -47,7 +47,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 272,
+                NodeContractV1.DTO_CLASS_NAMES.length == 279,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -463,6 +463,8 @@ public final class NodeContractV1Test {
             "diagnostic_id",
             "exit_health",
             "exit_health_assessment",
+            "leak_detection",
+            "leak_detection_assessment",
             "lifecycle",
             "recovery_actions",
             "residue",
@@ -472,6 +474,40 @@ public final class NodeContractV1Test {
             "timed_out"
         }) {
             NodeContractV1.NodeDiagnosticsSnapshot.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "dns_mode",
+            "ipv4_carrier_available",
+            "ipv6_carrier_available",
+            "platform",
+            "protected_path_active"
+        }) {
+            NodeContractV1.LeakDetectionEnvironment.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "duration_ms",
+            "error_code",
+            "isolation_action",
+            "observed_at_unix_ms",
+            "source",
+            "state",
+            "target"
+        }) {
+            NodeContractV1.LeakDetectionEvidence.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "environment", "evidence", "generated_at_unix_ms", "max_age_ms"
+        }) {
+            NodeContractV1.LeakDetectionSnapshot.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "affected_protocols",
+            "affected_targets",
+            "fail_closed_required",
+            "reason_code",
+            "state"
+        }) {
+            NodeContractV1.LeakDetectionAssessment.class.getDeclaredField(field);
         }
         for (String field : new String[] {
             "duration_ms",

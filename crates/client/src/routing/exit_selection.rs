@@ -63,6 +63,7 @@ pub(crate) struct ExitSelectionGate {
     member_directory: Option<NetworkMemberDirectory>,
     member_directory_received_at_unix_ms: Option<u64>,
     current_exit: Option<NodeId>,
+    pending_exit: Option<NodeId>,
 }
 
 impl ExitSelectionGate {
@@ -73,6 +74,7 @@ impl ExitSelectionGate {
             member_directory: None,
             member_directory_received_at_unix_ms: None,
             current_exit: None,
+            pending_exit: None,
         }
     }
 
@@ -118,6 +120,7 @@ impl ExitSelectionGate {
         self.member_directory = None;
         self.member_directory_received_at_unix_ms = None;
         self.current_exit = None;
+        self.pending_exit = None;
     }
 
     /// Record the Exit currently carrying this node's established session.
@@ -127,6 +130,33 @@ impl ExitSelectionGate {
 
     pub(crate) fn current_exit(&self) -> Option<&NodeId> {
         self.current_exit.as_ref()
+    }
+
+    /// Stage an administrator-authorized replacement without changing the
+    /// established Exit. Packet admission must stay closed until recovery
+    /// evidence commits this pending target.
+    pub(crate) fn begin_pending_exit(&mut self, exit: NodeId) -> bool {
+        if self.pending_exit.is_some() || self.current_exit.as_ref() == Some(&exit) {
+            return false;
+        }
+        self.pending_exit = Some(exit);
+        true
+    }
+
+    pub(crate) fn pending_exit(&self) -> Option<&NodeId> {
+        self.pending_exit.as_ref()
+    }
+
+    /// Commit exactly the staged target. Callers must only invoke this after a
+    /// successful recovery pass with complete traffic-session validation.
+    pub(crate) fn commit_pending_exit(&mut self) -> Option<NodeId> {
+        let pending = self.pending_exit.take()?;
+        self.current_exit = Some(pending.clone());
+        Some(pending)
+    }
+
+    pub(crate) fn discard_pending_exit(&mut self) {
+        self.pending_exit = None;
     }
 
     /// Resolve the final administrator-authorized set for the local member.
@@ -572,6 +602,36 @@ mod tests {
         gate.set_current_exit(Some(exit("exit-a")));
         let transition = gate.plan_current_session_transition(NOW).unwrap();
         assert_eq!(transition.action, ExitSessionAction::FailClosed);
+    }
+
+    #[test]
+    fn pending_migration_does_not_change_current_exit_until_commit() {
+        let mut gate = ExitSelectionGate::new(subject(), Some(network()));
+        gate.replace_member_directory(directory(7, NOW), NOW)
+            .unwrap();
+        gate.set_current_exit(Some(exit("exit-a")));
+
+        assert!(gate.begin_pending_exit(exit("exit-b")));
+        assert_eq!(gate.current_exit(), Some(&exit("exit-a")));
+        assert_eq!(gate.pending_exit(), Some(&exit("exit-b")));
+        assert!(!gate.begin_pending_exit(exit("exit-b")));
+
+        assert_eq!(gate.commit_pending_exit(), Some(exit("exit-b")));
+        assert_eq!(gate.current_exit(), Some(&exit("exit-b")));
+        assert_eq!(gate.pending_exit(), None);
+    }
+
+    #[test]
+    fn discarding_pending_migration_never_promotes_the_candidate() {
+        let mut gate = ExitSelectionGate::new(subject(), Some(network()));
+        gate.replace_member_directory(directory(7, NOW), NOW)
+            .unwrap();
+        gate.set_current_exit(Some(exit("exit-a")));
+        assert!(gate.begin_pending_exit(exit("exit-b")));
+
+        gate.discard_pending_exit();
+        assert_eq!(gate.current_exit(), Some(&exit("exit-a")));
+        assert_eq!(gate.pending_exit(), None);
     }
 
     #[test]

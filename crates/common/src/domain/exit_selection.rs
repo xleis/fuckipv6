@@ -25,17 +25,14 @@ pub const EXIT_SELECTION_MAX_MEMBER_RULES: usize = 4096;
 
 /// Whether administrators pin one Exit or let members select from the final
 /// administrator-authorized set.
-#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum ExitSelectionMode {
+    #[default]
     MemberChoice,
-    Fixed { exit: NodeId },
-}
-
-impl Default for ExitSelectionMode {
-    fn default() -> Self {
-        Self::MemberChoice
-    }
+    Fixed {
+        exit: NodeId,
+    },
 }
 
 /// What to do with an already established session when its Exit is no longer

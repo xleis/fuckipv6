@@ -21,25 +21,26 @@ use fuckipv6_common::ui_layout::navigation_module_for_page;
 use fuckipv6_common::NetworkMode;
 
 use crate::node::{
-    node_ui_manifest, NodeAcknowledgeMembershipPolicyCommand, NodeApplyConfigurationCommand,
-    NodeApplyPolicyCommand, NodeApplyTrafficPolicyCommand, NodeBatchReviewJoinRequestsCommand,
-    NodeChangeMemberLifecycleCommand, NodeClientBlacklistCommand, NodeCommand, NodeCommandKind,
-    NodeControlHealth, NodeCreateInvitationCommand, NodeCreateNetworkCommand,
-    NodeEmbeddedServiceStatus, NodeGetInvitationStatusCommand, NodeInterfaceKind,
-    NodeInterfaceOwnership, NodeInterfaceStatus, NodeJoinNetworkCommand, NodeJoinRequestReviewItem,
-    NodeLeaveNetworkCommand, NodeListInvitationsCommand, NodeListJoinRequestsCommand,
-    NodeMemberRemovalPreviewCommand, NodeNetworkAllocation, NodeNetworkDiscoveryCommand,
-    NodeNetworkMembersCommand, NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection,
-    NodeNetworkStatus, NodePermission, NodePhase, NodePreviewConfigurationCommand,
-    NodePreviewInvitationCommand, NodePreviewJoinNetworkCommand, NodePreviewPolicyCommand,
-    NodePreviewPolicyRollbackCommand, NodePreviewTrafficPolicyCommand,
-    NodePreviewTrafficPolicyRollbackCommand, NodePrimaryStatus, NodeProbePeerCommand,
-    NodeRedeemInvitationCommand, NodeResubmitJoinRequestCommand, NodeReviewJoinRequestCommand,
-    NodeRevokeInvitationCommand, NodeRollbackConfigurationCommand, NodeRollbackPolicyCommand,
-    NodeRollbackTrafficPolicyCommand, NodeRotateNodeIdentityCommand, NodeRoutingDefaultAction,
-    NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
-    NodeSetLocalExitCapabilityCommand, NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand,
-    NodeSnapshot, NodeSubmitJoinRequestCommand, NodeTestTrafficPolicyCommand, NodeUiAction,
+    node_ui_manifest, LocalExitCapabilityStage, NodeAcknowledgeMembershipPolicyCommand,
+    NodeApplyConfigurationCommand, NodeApplyPolicyCommand, NodeApplyTrafficPolicyCommand,
+    NodeBatchReviewJoinRequestsCommand, NodeChangeMemberLifecycleCommand,
+    NodeClientBlacklistCommand, NodeCommand, NodeCommandKind, NodeControlHealth,
+    NodeCreateInvitationCommand, NodeCreateNetworkCommand, NodeEmbeddedServiceStatus,
+    NodeGetInvitationStatusCommand, NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceStatus,
+    NodeJoinNetworkCommand, NodeJoinRequestReviewItem, NodeLeaveNetworkCommand,
+    NodeListInvitationsCommand, NodeListJoinRequestsCommand, NodeMemberRemovalPreviewCommand,
+    NodeNetworkAllocation, NodeNetworkDiscoveryCommand, NodeNetworkMembersCommand,
+    NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus,
+    NodePermission, NodePhase, NodePreviewConfigurationCommand, NodePreviewInvitationCommand,
+    NodePreviewJoinNetworkCommand, NodePreviewPolicyCommand, NodePreviewPolicyRollbackCommand,
+    NodePreviewTrafficPolicyCommand, NodePreviewTrafficPolicyRollbackCommand, NodePrimaryStatus,
+    NodeProbePeerCommand, NodeProblemCode, NodeRedeemInvitationCommand,
+    NodeResubmitJoinRequestCommand, NodeReviewJoinRequestCommand, NodeRevokeInvitationCommand,
+    NodeRollbackConfigurationCommand, NodeRollbackPolicyCommand, NodeRollbackTrafficPolicyCommand,
+    NodeRotateNodeIdentityCommand, NodeRoutingDefaultAction, NodeRoutingMode,
+    NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot, NodeSetLocalExitCapabilityCommand,
+    NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeSnapshot,
+    NodeSubmitJoinRequestCommand, NodeTestTrafficPolicyCommand, NodeUiAction,
     NodeUiActionBlockReason, NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage,
     NodeUiPermission, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
     NodeWithdrawJoinRequestCommand,
@@ -5143,6 +5144,72 @@ fn project_exit_node(
     locale: Locale,
 ) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let capabilities = &snapshot.exit_node_capabilities;
+    let local_exit = &snapshot.local_exit;
+    let local_exit_stage = t(locale, local_exit_stage_key(local_exit.stage));
+    let local_exit_health = t(
+        locale,
+        if local_exit.healthy {
+            "gpui.local_exit.healthy"
+        } else {
+            "gpui.local_exit.unhealthy"
+        },
+    );
+    let local_exit_clients = tr(
+        locale,
+        "gpui.local_exit.clients_detail",
+        &[
+            ("active_clients", &local_exit.active_clients.to_string()),
+            ("total_clients", &local_exit.total_clients.to_string()),
+        ],
+    );
+    let local_exit_transition = routing_timestamp_label(
+        (local_exit.last_transition_at_unix_ms > 0)
+            .then_some(local_exit.last_transition_at_unix_ms),
+        locale,
+    );
+    let mut local_exit_rows = vec![
+        row(
+            t(locale, "gpui.local_exit.owner_intent"),
+            display_bool(locale, local_exit.owner_exit_enabled),
+        ),
+        row(t(locale, "gpui.local_exit.stage"), local_exit_stage),
+        row(
+            t(locale, "gpui.local_exit.network_authorization"),
+            display_bool(locale, local_exit.network_allowed),
+        ),
+        row(t(locale, "gpui.local_exit.health"), local_exit_health),
+        row(t(locale, "gpui.local_exit.clients"), local_exit_clients),
+        row(
+            t(locale, "gpui.local_exit.last_transition"),
+            local_exit_transition,
+        ),
+    ];
+    if let Some(problem) = &local_exit.problem {
+        let params = problem
+            .params
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let localized = tr(locale, &problem.message_key, &params);
+        let message = if localized == problem.message_key {
+            problem.message.clone()
+        } else {
+            localized
+        };
+        local_exit_rows.push(row(
+            t(locale, "gpui.local_exit.problem"),
+            tr(
+                locale,
+                "gpui.local_exit.problem_detail",
+                &[
+                    ("code", node_problem_code_value(problem.code)),
+                    ("message_key", problem.message_key.as_str()),
+                    ("message", &message),
+                    ("retryable", display_bool(locale, problem.retryable)),
+                ],
+            ),
+        ));
+    }
     let capability_rows = vec![row(
         t(locale, "exit_node.row.platform"),
         tr(
@@ -5230,8 +5297,18 @@ fn project_exit_node(
                 role_rows.len(),
                 "NodeNetworkRole::ExitNode",
             ),
+            metric(
+                t(locale, "gpui.metric.exit_active_clients"),
+                local_exit.active_clients,
+                "NodeSnapshot.local_exit.active_clients",
+            ),
         ],
         vec![
+            section(
+                t(locale, "gpui.section.local_exit_status"),
+                t(locale, "gpui.empty.local_exit_status"),
+                local_exit_rows,
+            ),
             section(
                 t(locale, "gpui.section.platform_capabilities"),
                 t(locale, "gpui.empty.exit_capabilities"),
@@ -5254,6 +5331,36 @@ fn project_exit_node(
             ),
         ],
     )
+}
+
+fn local_exit_stage_key(stage: LocalExitCapabilityStage) -> &'static str {
+    match stage {
+        LocalExitCapabilityStage::Disabled => "gpui.local_exit.stage.disabled",
+        LocalExitCapabilityStage::WaitingForNetworkAuthorization => {
+            "gpui.local_exit.stage.waiting_for_network_authorization"
+        }
+        LocalExitCapabilityStage::Listening => "gpui.local_exit.stage.listening",
+        LocalExitCapabilityStage::HealthChecking => "gpui.local_exit.stage.health_checking",
+        LocalExitCapabilityStage::Enabled => "gpui.local_exit.stage.enabled",
+        LocalExitCapabilityStage::Draining => "gpui.local_exit.stage.draining",
+        LocalExitCapabilityStage::Cleaning => "gpui.local_exit.stage.cleaning",
+        LocalExitCapabilityStage::Failed => "gpui.local_exit.stage.failed",
+    }
+}
+
+fn node_problem_code_value(code: NodeProblemCode) -> &'static str {
+    match code {
+        NodeProblemCode::AuthenticationRequired => "authentication_required",
+        NodeProblemCode::InvalidRequest => "invalid_request",
+        NodeProblemCode::NotFound => "not_found",
+        NodeProblemCode::Conflict => "conflict",
+        NodeProblemCode::Unavailable => "unavailable",
+        NodeProblemCode::PermissionDenied => "permission_denied",
+        NodeProblemCode::Cancelled => "cancelled",
+        NodeProblemCode::TimedOut => "timed_out",
+        NodeProblemCode::Unsupported => "unsupported",
+        NodeProblemCode::Internal => "internal",
+    }
 }
 
 fn exit_node_platform_label(
@@ -8865,17 +8972,172 @@ mod tests {
 
         let model =
             build_page_model_for_page(page, &snapshot, Locale::ZhCn).expect("exit node model");
-        assert!(model.sections[0].rows[0].detail.contains("Windows"));
-        assert!(model.sections[0].rows[0]
+        let platform = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "gpui.section.platform_capabilities"))
+            .expect("platform capability section");
+        let limits = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "gpui.section.capability_limits"))
+            .expect("capability limits section");
+        assert!(platform.rows[0].detail.contains("Windows"));
+        assert!(platform.rows[0]
             .detail
             .contains(t(Locale::ZhCn, "common.disabled")));
-        assert!(model.sections[1].rows[0]
-            .detail
-            .contains("PlatformNotLinux"));
-        assert!(model.sections[1].rows[0].detail.contains(t(
+        assert!(limits.rows[0].detail.contains("PlatformNotLinux"));
+        assert!(limits.rows[0].detail.contains(t(
             Locale::ZhCn,
             "exit_node.unsupported_reason.platform_not_linux"
         )));
+    }
+
+    #[test]
+    fn exit_node_page_projects_authoritative_local_exit_lifecycle() {
+        let manifest = node_ui_manifest();
+        let page = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "exit_node")
+            .expect("exit node page");
+        let mut snapshot = populated_snapshot();
+        snapshot.local_exit.owner_exit_enabled = true;
+        snapshot.local_exit.network_allowed = true;
+        snapshot.local_exit.active_clients = 3;
+        snapshot.local_exit.total_clients = 9;
+        snapshot.local_exit.last_transition_at_unix_ms = 1_700_000_000_123;
+
+        let stages = [
+            (
+                LocalExitCapabilityStage::Disabled,
+                "gpui.local_exit.stage.disabled",
+            ),
+            (
+                LocalExitCapabilityStage::WaitingForNetworkAuthorization,
+                "gpui.local_exit.stage.waiting_for_network_authorization",
+            ),
+            (
+                LocalExitCapabilityStage::Listening,
+                "gpui.local_exit.stage.listening",
+            ),
+            (
+                LocalExitCapabilityStage::HealthChecking,
+                "gpui.local_exit.stage.health_checking",
+            ),
+            (
+                LocalExitCapabilityStage::Enabled,
+                "gpui.local_exit.stage.enabled",
+            ),
+            (
+                LocalExitCapabilityStage::Draining,
+                "gpui.local_exit.stage.draining",
+            ),
+            (
+                LocalExitCapabilityStage::Cleaning,
+                "gpui.local_exit.stage.cleaning",
+            ),
+            (
+                LocalExitCapabilityStage::Failed,
+                "gpui.local_exit.stage.failed",
+            ),
+        ];
+        for (stage, key) in stages {
+            snapshot.local_exit.stage = stage;
+            let model =
+                build_page_model_for_page(page, &snapshot, Locale::ZhCn).expect("exit node model");
+            let local_exit = model
+                .sections
+                .iter()
+                .find(|section| section.title == t(Locale::ZhCn, "gpui.section.local_exit_status"))
+                .expect("local Exit status section");
+            let stage_row = local_exit
+                .rows
+                .iter()
+                .find(|row| row.title == t(Locale::ZhCn, "gpui.local_exit.stage"))
+                .expect("local Exit stage row");
+            assert_eq!(stage_row.detail, t(Locale::ZhCn, key));
+        }
+
+        snapshot.local_exit.stage = LocalExitCapabilityStage::Cleaning;
+        snapshot.local_exit.healthy = false;
+        let model =
+            build_page_model_for_page(page, &snapshot, Locale::ZhCn).expect("exit node model");
+        let local_exit = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "gpui.section.local_exit_status"))
+            .expect("local Exit status section");
+        let row_detail = |title_key| {
+            local_exit
+                .rows
+                .iter()
+                .find(|row| row.title == t(Locale::ZhCn, title_key))
+                .map(|row| row.detail.as_str())
+                .expect("local Exit row")
+        };
+        assert_eq!(
+            row_detail("gpui.local_exit.owner_intent"),
+            t(Locale::ZhCn, "common.enabled")
+        );
+        assert_eq!(
+            row_detail("gpui.local_exit.network_authorization"),
+            t(Locale::ZhCn, "common.enabled")
+        );
+        assert_eq!(
+            row_detail("gpui.local_exit.health"),
+            t(Locale::ZhCn, "gpui.local_exit.unhealthy")
+        );
+        assert_eq!(
+            row_detail("gpui.local_exit.clients"),
+            tr(
+                Locale::ZhCn,
+                "gpui.local_exit.clients_detail",
+                &[("active_clients", "3"), ("total_clients", "9")],
+            )
+        );
+        assert_eq!(
+            row_detail("gpui.local_exit.last_transition"),
+            routing_timestamp_label(Some(1_700_000_000_123), Locale::ZhCn)
+        );
+        assert_eq!(
+            model
+                .metrics
+                .iter()
+                .find(|metric| {
+                    metric.label == t(Locale::ZhCn, "gpui.metric.exit_active_clients")
+                })
+                .expect("active Exit client metric")
+                .value,
+            "3"
+        );
+
+        snapshot.local_exit.stage = LocalExitCapabilityStage::Failed;
+        snapshot.local_exit.problem = Some(
+            crate::node::NodeProblem::new(
+                NodeProblemCode::Unavailable,
+                "raw forwarding resource failure",
+            )
+            .with_message_key("exit.local.problem.resource_insufficient")
+            .retryable(true),
+        );
+        let model =
+            build_page_model_for_page(page, &snapshot, Locale::ZhCn).expect("exit node model");
+        let problem = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "gpui.section.local_exit_status"))
+            .expect("local Exit status section")
+            .rows
+            .iter()
+            .find(|row| row.title == t(Locale::ZhCn, "gpui.local_exit.problem"))
+            .expect("local Exit problem row");
+        assert!(problem.detail.contains("unavailable"));
+        assert!(problem
+            .detail
+            .contains("exit.local.problem.resource_insufficient"));
+        assert!(problem.detail.contains("raw forwarding resource failure"));
+        assert!(problem.detail.contains(t(Locale::ZhCn, "common.enabled")));
     }
 
     #[test]

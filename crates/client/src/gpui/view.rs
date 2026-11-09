@@ -15,7 +15,8 @@ use fuckipv6_common::domain::{
     NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileApplyResult,
     NetworkProfilePreview, NetworkProfileProjections, NetworkProfileWarningCode,
     NetworkPublicProfileDocument, NetworkVisibility, OperationError, OperationState,
-    TopologyConnectionState, TopologySnapshot, JOIN_REQUEST_MAX_REASON_CHARS,
+    TopologyConnectionState, TopologySnapshot, TrafficProtectionState,
+    JOIN_REQUEST_MAX_REASON_CHARS,
 };
 use fuckipv6_common::i18n::{
     detect_system_locale, format_decimal, format_integer, format_timestamp, resolve_language, t,
@@ -53,9 +54,10 @@ use super::view_model::{
     member_lifecycle_action_value, membership_role_value, network_membership_id,
     network_status_key, retain_member_selection, routing_target_search_rows, search_node_snapshot,
     sort_network_members, topology_member_actions, topology_node_detail, topology_presentation,
-    validate_manifest_bindings, ActionBinding, ActivityFilters, MemberCapabilityFilter,
-    MemberDirectoryFilters, MemberHealthFilter, OverviewModel, PageKind, RowModel, RowNavigation,
-    SearchResult, SectionModel, TopologyPresentationCondition, TopologyPresentationSignals,
+    traffic_protection_state_key, validate_manifest_bindings, ActionBinding, ActivityFilters,
+    MemberCapabilityFilter, MemberDirectoryFilters, MemberHealthFilter, OverviewModel, PageKind,
+    RowModel, RowNavigation, SearchResult, SectionModel, TopologyPresentationCondition,
+    TopologyPresentationSignals,
 };
 use crate::config_manager::ConfigManager;
 use crate::config_transaction::{
@@ -3205,37 +3207,67 @@ impl GpuiShell {
     fn top_status(&self) -> impl IntoElement {
         let primary_status = self.snapshot.primary_status();
         let palette = semantic_palette(primary_status_semantic(primary_status));
+        let traffic_state = self.snapshot.traffic_session.state;
+        let traffic_palette = semantic_palette(traffic_protection_semantic(traffic_state));
+        let traffic_label = t(self.locale, traffic_protection_state_key(traffic_state));
         div()
             .flex()
-            .items_center()
-            .gap_2()
+            .flex_col()
+            .gap_1()
             .min_w(px(0.0))
             .child(
                 div()
-                    .w(px(9.0))
-                    .h(px(9.0))
-                    .rounded_full()
-                    .bg(rgba(palette.foreground.rgba_hex())),
-            )
-            .child(
-                div()
                     .flex()
-                    .items_baseline()
+                    .items_center()
                     .gap_2()
                     .min_w(px(0.0))
                     .child(
                         div()
-                            .font_weight(gpui::FontWeight(600.0))
-                            .text_color(rgba(COLOR_TEXT))
-                            .child(t(self.locale, primary_status.label_key()).to_string()),
+                            .w(px(9.0))
+                            .h(px(9.0))
+                            .rounded_full()
+                            .bg(rgba(palette.foreground.rgba_hex())),
                     )
                     .child(
                         div()
-                            .overflow_hidden()
-                            .text_xs()
-                            .text_color(rgba(COLOR_MUTED))
-                            .child(t(self.locale, primary_status.detail_key()).to_string()),
+                            .flex()
+                            .items_baseline()
+                            .gap_2()
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(t(self.locale, primary_status.label_key()).to_string()),
+                            )
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(t(self.locale, primary_status.detail_key()).to_string()),
+                            ),
                     ),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "visual-traffic-session-status".into())
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .child(
+                        div()
+                            .w(px(7.0))
+                            .h(px(7.0))
+                            .rounded_full()
+                            .bg(rgba(traffic_palette.foreground.rgba_hex())),
+                    )
+                    .child(tr(
+                        self.locale,
+                        "traffic.session.top",
+                        &[("state", traffic_label)],
+                    )),
             )
     }
 
@@ -3995,13 +4027,168 @@ impl GpuiShell {
             );
         }
 
+        let traffic_palette =
+            semantic_palette(traffic_protection_semantic(overview.traffic_session.state));
+        let traffic_state_label = overview.traffic_session.state_label.clone();
+        let traffic_reason = overview
+            .traffic_session
+            .reason_code
+            .clone()
+            .unwrap_or_else(|| t(self.locale, "traffic.session.no_reason").to_string());
+        let traffic_changed_at = if overview.traffic_session.changed_at_unix_ms == 0 {
+            t(self.locale, "common.not_available").to_string()
+        } else {
+            format_diagnostic_timestamp(self.locale, overview.traffic_session.changed_at_unix_ms)
+        };
+        let mut traffic_card = surface_card()
+            .id("overview-traffic-session")
+            .debug_selector(|| "visual-traffic-session".into())
+            .role(Role::Status)
+            .aria_label(format!(
+                "{} · {}",
+                t(self.locale, "traffic.session.title"),
+                traffic_state_label
+            ))
+            .flex()
+            .flex_col()
+            .p_4()
+            .border_color(rgba(traffic_palette.border.rgba_hex()))
+            .child(card_heading(
+                t(self.locale, "traffic.session.title").to_string(),
+                lucide_icon(
+                    include_bytes!("../../assets/icons/activity.svg"),
+                    17.0,
+                    traffic_palette.foreground.rgba_hex(),
+                ),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .rounded_full()
+                            .bg(rgba(traffic_palette.background.rgba_hex()))
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(traffic_palette.foreground.rgba_hex()))
+                            .child(traffic_state_label),
+                    )
+                    .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(format!(
+                        "{}: {traffic_changed_at}",
+                        t(self.locale, "traffic.session.changed_at")
+                    ))),
+            )
+            .child(
+                div()
+                    .mt_2()
+                    .text_xs()
+                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                    .child(format!(
+                        "{}: {traffic_reason}",
+                        t(self.locale, "traffic.session.reason")
+                    )),
+            )
+            .child(
+                div()
+                    .mt_3()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight(600.0))
+                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                    .child(t(self.locale, "traffic.session.validation.title").to_string()),
+            );
+        if overview.traffic_session.validation.is_empty() {
+            traffic_card = traffic_card.child(
+                div()
+                    .mt_1()
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "traffic.session.validation.none").to_string()),
+            );
+        } else {
+            traffic_card = traffic_card.child(
+                div().mt_1().flex().flex_wrap().gap_2().children(
+                    overview
+                        .traffic_session
+                        .validation
+                        .iter()
+                        .map(|validation| {
+                            let validation_palette = semantic_palette(if validation.passed {
+                                SemanticState::Success
+                            } else {
+                                SemanticState::Danger
+                            });
+                            div()
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .bg(rgba(validation_palette.background.rgba_hex()))
+                                .text_xs()
+                                .text_color(rgba(validation_palette.foreground.rgba_hex()))
+                                .child(format!(
+                                    "{}: {}",
+                                    validation.label,
+                                    t(
+                                        self.locale,
+                                        if validation.passed {
+                                            "traffic.session.validation.passed"
+                                        } else {
+                                            "traffic.session.validation.failed"
+                                        },
+                                    )
+                                ))
+                        }),
+                ),
+            );
+        }
+        traffic_card = traffic_card.child(
+            div()
+                .mt_3()
+                .text_xs()
+                .font_weight(gpui::FontWeight(600.0))
+                .text_color(rgba(COLOR_TEXT_SECONDARY))
+                .child(t(self.locale, "traffic.session.events.title").to_string()),
+        );
+        if overview.traffic_session.events.is_empty() {
+            traffic_card = traffic_card.child(
+                div()
+                    .mt_1()
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "traffic.session.events.empty").to_string()),
+            );
+        } else {
+            traffic_card = traffic_card.child(div().mt_1().flex().flex_col().children(
+                overview.traffic_session.events.iter().map(|event| {
+                    let occurred_at =
+                        format_diagnostic_timestamp(self.locale, event.occurred_at_unix_ms);
+                    let reason = event.reason_code.as_deref().unwrap_or("-");
+                    div()
+                        .py_1()
+                        .border_t_1()
+                        .border_color(rgba(COLOR_BORDER))
+                        .text_xs()
+                        .text_color(rgba(COLOR_TEXT_SECONDARY))
+                        .child(format!(
+                            "{} · {} · {} · {occurred_at}",
+                            event.kind_label, event.state_label, reason
+                        ))
+                }),
+            ));
+        }
+
         let mut stack = div()
             .id("overview-stack")
             .flex()
             .flex_col()
             .gap_4()
             .max_w(px(980.0))
-            .child(primary_card);
+            .child(primary_card)
+            .child(traffic_card);
 
         if !overview.issues.is_empty() {
             stack = stack.child(
@@ -13836,6 +14023,19 @@ const fn activity_time_window_value(window: ActivityTimeWindow) -> &'static str 
         ActivityTimeWindow::LastHour => "hour",
         ActivityTimeWindow::Last24Hours => "day",
         ActivityTimeWindow::Last7Days => "week",
+    }
+}
+
+fn traffic_protection_semantic(state: TrafficProtectionState) -> SemanticState {
+    match state {
+        TrafficProtectionState::Protected => SemanticState::Success,
+        TrafficProtectionState::Connecting | TrafficProtectionState::Migrating => {
+            SemanticState::Warning
+        }
+        TrafficProtectionState::FailClosed => SemanticState::Danger,
+        TrafficProtectionState::Idle | TrafficProtectionState::ExplicitDirectFallback => {
+            SemanticState::Neutral
+        }
     }
 }
 

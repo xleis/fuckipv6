@@ -14,9 +14,10 @@ use fuckipv6_common::domain::{
     NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId,
     TopologyNode, TopologyNodeHealth, TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy,
     TrafficFlow, TrafficMatch, TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput,
-    TrafficProtocol, TrafficRoutingHitSample, TrafficRoutingObservation, TrafficRoutingPageModel,
-    TrafficRoutingRuleActivityEffect, TrafficRoutingRuleImpactView, TrafficRoutingTarget,
-    TrafficRoutingTargetKind, TrafficRoutingTargetRef, TrafficRoutingWorkflowState,
+    TrafficProtectionState, TrafficProtocol, TrafficRoutingHitSample, TrafficRoutingObservation,
+    TrafficRoutingPageModel, TrafficRoutingRuleActivityEffect, TrafficRoutingRuleImpactView,
+    TrafficRoutingTarget, TrafficRoutingTargetKind, TrafficRoutingTargetRef,
+    TrafficRoutingWorkflowState, TrafficSessionEventKind,
 };
 use fuckipv6_common::i18n::{format_integer, t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
@@ -1311,6 +1312,34 @@ pub struct OverviewShortcut {
     pub unavailable_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverviewTrafficValidation {
+    pub label: String,
+    pub passed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverviewTrafficSessionEvent {
+    pub kind: TrafficSessionEventKind,
+    pub kind_label: String,
+    pub state: TrafficProtectionState,
+    pub state_label: String,
+    pub reason_code: Option<String>,
+    pub occurred_at_unix_ms: u64,
+}
+
+/// Authoritative protection state rendered separately from node lifecycle.
+/// The UI never treats a running node as a protected traffic session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverviewTrafficSession {
+    pub state: TrafficProtectionState,
+    pub state_label: String,
+    pub reason_code: Option<String>,
+    pub changed_at_unix_ms: u64,
+    pub validation: Vec<OverviewTrafficValidation>,
+    pub events: Vec<OverviewTrafficSessionEvent>,
+}
+
 /// Dedicated product projection for the overview. It deliberately does not
 /// reuse generic metric cards: the first screen is organized around the one
 /// primary status, actionable issues, compact network context, and recent
@@ -1321,6 +1350,7 @@ pub struct OverviewModel {
     pub primary_status: NodePrimaryStatus,
     pub primary_page_id: Option<String>,
     pub issues: Vec<String>,
+    pub traffic_session: OverviewTrafficSession,
     pub networks: Vec<OverviewNetwork>,
     pub activity: Vec<OverviewActivity>,
     pub shortcuts: Vec<OverviewShortcut>,
@@ -3739,8 +3769,87 @@ fn row_with_page_navigation(
     }
 }
 
+pub(crate) fn traffic_protection_state_key(state: TrafficProtectionState) -> &'static str {
+    match state {
+        TrafficProtectionState::Idle => "traffic.session.state.idle",
+        TrafficProtectionState::Connecting => "traffic.session.state.connecting",
+        TrafficProtectionState::Migrating => "traffic.session.state.migrating",
+        TrafficProtectionState::Protected => "traffic.session.state.protected",
+        TrafficProtectionState::FailClosed => "traffic.session.state.fail_closed",
+        TrafficProtectionState::ExplicitDirectFallback => {
+            "traffic.session.state.explicit_direct_fallback"
+        }
+    }
+}
+
+fn traffic_session_event_key(kind: TrafficSessionEventKind) -> &'static str {
+    match kind {
+        TrafficSessionEventKind::Connecting => "traffic.session.event.connecting",
+        TrafficSessionEventKind::RecoveryStarted => "traffic.session.event.recovery_started",
+        TrafficSessionEventKind::MigrationStarted => "traffic.session.event.migration_started",
+        TrafficSessionEventKind::FailureDetected => "traffic.session.event.failure_detected",
+        TrafficSessionEventKind::ProtectionEstablished => {
+            "traffic.session.event.protection_established"
+        }
+        TrafficSessionEventKind::FailClosed => "traffic.session.event.fail_closed",
+        TrafficSessionEventKind::DirectFallback => "traffic.session.event.direct_fallback",
+    }
+}
+
+fn project_traffic_session(snapshot: &NodeSnapshot, locale: Locale) -> OverviewTrafficSession {
+    let session = &snapshot.traffic_session;
+    let validation = session
+        .validation
+        .as_ref()
+        .map(|validation| {
+            vec![
+                OverviewTrafficValidation {
+                    label: t(locale, "traffic.session.validation.tun").to_string(),
+                    passed: validation.tun_validated,
+                },
+                OverviewTrafficValidation {
+                    label: t(locale, "traffic.session.validation.routes").to_string(),
+                    passed: validation.routes_validated,
+                },
+                OverviewTrafficValidation {
+                    label: t(locale, "traffic.session.validation.dns").to_string(),
+                    passed: validation.dns_validated,
+                },
+                OverviewTrafficValidation {
+                    label: t(locale, "traffic.session.validation.reachability").to_string(),
+                    passed: validation.reachability_validated,
+                },
+            ]
+        })
+        .unwrap_or_default();
+    let events = session
+        .events
+        .iter()
+        .rev()
+        .take(5)
+        .map(|event| OverviewTrafficSessionEvent {
+            kind: event.kind,
+            kind_label: t(locale, traffic_session_event_key(event.kind)).to_string(),
+            state: event.state,
+            state_label: t(locale, traffic_protection_state_key(event.state)).to_string(),
+            reason_code: event.reason_code.clone(),
+            occurred_at_unix_ms: event.occurred_at_unix_ms,
+        })
+        .collect();
+
+    OverviewTrafficSession {
+        state: session.state,
+        state_label: t(locale, traffic_protection_state_key(session.state)).to_string(),
+        reason_code: session.reason_code.clone(),
+        changed_at_unix_ms: session.changed_at_unix_ms,
+        validation,
+        events,
+    }
+}
+
 fn project_overview(snapshot: &NodeSnapshot, locale: Locale) -> OverviewModel {
     let primary_status = snapshot.primary_status();
+    let traffic_session = project_traffic_session(snapshot, locale);
     let node_name = snapshot
         .identity
         .as_ref()
@@ -3908,6 +4017,7 @@ fn project_overview(snapshot: &NodeSnapshot, locale: Locale) -> OverviewModel {
         primary_status,
         primary_page_id: Some("node_runtime".into()),
         issues,
+        traffic_session,
         networks,
         activity,
         shortcuts: vec![
@@ -7073,9 +7183,9 @@ mod tests {
     use fuckipv6_common::domain::{
         ActivityEntry, AuditId, AuditOutcome, DomainSuffix, MembershipState, NetworkMemberPresence,
         NodeId, PortRange, TopologyBoundary, TopologyConnection, TopologyConnectionState,
-        TopologyNode, TopologyNodeNetwork, TrafficDefaultPolicy, TrafficFailurePolicy,
-        TrafficMatch, TrafficRoutingHardConstraints, TrafficRoutingObservedHit, TrafficRule,
-        TrafficRuleId,
+        TopologyNode, TopologyNodeNetwork, TrafficDefaultPolicy, TrafficFailureKind,
+        TrafficFailurePolicy, TrafficMatch, TrafficRoutingHardConstraints,
+        TrafficRoutingObservedHit, TrafficRule, TrafficRuleId,
     };
     use serde::Deserialize;
     use std::collections::BTreeMap;
@@ -7953,6 +8063,48 @@ mod tests {
             Some("refresh_discovery_index")
         );
         assert!(discover.unavailable_reason.is_none());
+    }
+
+    #[test]
+    fn overview_keeps_node_lifecycle_and_traffic_protection_independent() {
+        let manifest = node_ui_manifest();
+        let page = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "overview")
+            .expect("overview page");
+        let mut snapshot = populated_snapshot();
+        snapshot
+            .traffic_session
+            .enter_fail_closed(
+                Some(TrafficFailureKind::HandshakeInterrupted),
+                1_700_000_000_500,
+                "recovery.handshake_interrupted",
+            )
+            .expect("project fail-closed traffic session");
+        let model =
+            build_page_model_for_page(page, &snapshot, Locale::ZhCn).expect("overview model");
+        let overview = model.overview.as_ref().expect("dedicated overview model");
+
+        assert_eq!(overview.primary_status, NodePrimaryStatus::Running);
+        assert_eq!(
+            overview.traffic_session.state,
+            TrafficProtectionState::FailClosed
+        );
+        assert_eq!(
+            overview.traffic_session.state_label,
+            t(Locale::ZhCn, "traffic.session.state.fail_closed")
+        );
+        assert_eq!(
+            overview.traffic_session.reason_code.as_deref(),
+            Some("recovery.handshake_interrupted")
+        );
+        assert!(overview.traffic_session.validation.is_empty());
+        assert_eq!(overview.traffic_session.events.len(), 1);
+        assert_eq!(
+            overview.traffic_session.events[0].kind,
+            TrafficSessionEventKind::FailClosed
+        );
     }
 
     #[test]

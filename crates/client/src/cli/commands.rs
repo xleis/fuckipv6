@@ -1592,6 +1592,15 @@ fn local_exit_effective(owner_enabled: bool, network_allowed: bool) -> bool {
     owner_enabled && network_allowed
 }
 
+fn repeated_local_exit_disable_is_noop(
+    enabled: bool,
+    owner_exit_enabled: bool,
+    has_forwarder: bool,
+    draining: bool,
+) -> bool {
+    !enabled && !owner_exit_enabled && (!has_forwarder || draining)
+}
+
 fn local_exit_runtime_status(runtime: &ClientRuntime) -> ipc::LocalExitRuntimeStatus {
     let network_allowed = runtime.config.exit_node.enabled;
     let effective = local_exit_effective(runtime.local_exit_enabled, network_allowed);
@@ -1624,6 +1633,34 @@ async fn apply_runtime_local_exit_capability(
     runtime: &mut ClientRuntime,
     enabled: bool,
 ) -> std::result::Result<ipc::LocalExitRuntimeStatus, RuntimeControlError> {
+    #[cfg(target_os = "linux")]
+    let (has_forwarder, draining) = runtime
+        .exit_forwarder
+        .as_ref()
+        .map_or((false, false), |forwarder| (true, forwarder.is_draining()));
+    #[cfg(not(target_os = "linux"))]
+    let (has_forwarder, draining) = (false, false);
+
+    if repeated_local_exit_disable_is_noop(
+        enabled,
+        runtime.local_exit_enabled,
+        has_forwarder,
+        draining,
+    ) {
+        #[cfg(target_os = "linux")]
+        {
+            if draining {
+                runtime
+                    .exit_drain_deadline
+                    .get_or_insert_with(|| Instant::now() + LOCAL_EXIT_DRAIN_TIMEOUT);
+            } else {
+                runtime.exit_drain_deadline = None;
+            }
+        }
+        runtime.exit_node_manager.set_enabled(draining);
+        return Ok(local_exit_runtime_status(runtime));
+    }
+
     // Persist the owner decision in memory before touching resources. Disable
     // therefore vetoes every ingress path immediately; enable still requires a
     // successfully installed data plane before the Exit manager is re-enabled.
@@ -5921,6 +5958,25 @@ mod tests {
             exit_forwarding_action(local_exit_effective(false, true), false),
             ExitForwardingAction::Keep
         );
+    }
+
+    #[test]
+    fn repeated_local_exit_disable_does_not_restart_draining() {
+        assert!(repeated_local_exit_disable_is_noop(
+            false, false, true, true
+        ));
+        assert!(repeated_local_exit_disable_is_noop(
+            false, false, false, false
+        ));
+        assert!(!repeated_local_exit_disable_is_noop(
+            false, false, true, false
+        ));
+        assert!(!repeated_local_exit_disable_is_noop(
+            false, true, true, true
+        ));
+        assert!(!repeated_local_exit_disable_is_noop(
+            true, false, true, true
+        ));
     }
 
     #[test]

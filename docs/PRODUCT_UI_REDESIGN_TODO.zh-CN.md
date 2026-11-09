@@ -58,7 +58,7 @@
 | W9 成员、组与拓扑 | `[~]` | P1 | W8 | 成员列表、邀请审批、组目录和拓扑聚合已完成；多网络视觉、交互、性能与 E2E 进行中 |
 | W10 安全与隐私 | `[x]` | P1 | W9 | 权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计、安全页面状态和可重复治理证据闭环均已完成 |
 | W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约和 W11-09 隔离路由 E2E/失败关闭/网络报告已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，GPUI 已接入同一页面的权威投影、规则/目标/影响展示和精确跳转，真实命中观测、GPUI/WebUI/Android 三端一致、生产后端接线及真实平台监听/适配待完成 |
-| W12 Exit | `[~]` | P1 | W10,W11 | W12-01 本机 Exit 独立启停、operation 阶段、本地否决、结构化失败、能力隔离、重启/残留清理已完成；治理、健康、Google、DNS、泄漏、性能与稳定性待完成 |
+| W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05 已完成：本机启停、贡献治理、管理员选择、分层健康与故障切换/撤权均有权威状态和自动化证据；W12-06 已完成 DNS/IPv4/IPv6 分层证据、失败关闭与脱敏报告，但真实浏览器/应用 DNS、受控泄漏服务和外部可达性复核待完成；Google、性能与稳定性待完成 |
 | W13 Relay | `[ ]` | P1 | W10 | 授权、配额、健康、回退 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
 | W15 File | `[ ]` | P2 | W10 | ACL、配额、上传下载、续传 |
@@ -2655,8 +2655,8 @@ passed 的证据时，`default_candidate` 才为真；缺失、陈旧、降级�
 `cargo test -p fuckipv6-client diagnostic --lib`（14 passed）、`cargo test -p fuckipv6-client exit_health --lib`（1 passed）、
 `cargo clippy -p fuckipv6-common -p fuckipv6-client --lib -- -D warnings`、`./scripts/generate-contracts.sh`、
 `./scripts/check-contracts.sh`（含 TypeScript/Java 绑定与 Android 契约测试）、`node scripts/test_i18n_runtime.mjs`，
-以及 WebUI `npm run typecheck`、`npm run lint`、`npm test -- --run`（278 passed）、`npm run build`（仅保留现有 i18n 非 module 与
->500 kB chunk 警告）。测试覆盖五层完整性、新鲜度/时钟偏移、未知与陈旧不可选、部分失败目标/协议、探测边界和退避、误报/漏报恢复、
+以及 WebUI `npm run typecheck`、`npm run lint`、`npm test -- --run`（280 passed）、`npm run build`（仅保留现有 i18n 非 module 与
+>500 kB chunk 警告）。最终回归 `cargo test --workspace --lib` 为 1713 passed、3 ignored。测试覆盖五层完整性、新鲜度/时钟偏移、未知与陈旧不可选、部分失败目标/协议、探测边界和退避、误报/漏报恢复、
 取消终态、进程健康但 DNS/互联网未测试，以及 WebUI/GPUI 权威状态和逐层证据展示。
 
 本项证据来自领域、运行时、协议和 UI 自动化测试，不代表已执行真实受控 Exit 探测、真实泄漏服务、浏览器/应用 DNS 行为审查、
@@ -2664,29 +2664,75 @@ passed 的证据时，`default_candidate` 才为真；缺失、陈旧、降级�
 
 **验收**：候选选择基于新鲜健康证据；未知/陈旧不会被当成健康。
 
-### W12-05 Exit 故障、切换与撤权 `[ ]`
+### W12-05 Exit 故障、切换与撤权 `[x]`
 
-- [ ] 连接超时、握手中断、运行中断开分别处理；
-- [ ] 按策略选择替代 Exit 或失败关闭；
-- [ ] 切换过程展示过渡状态，不伪报已连接；
-- [ ] 撤销授权后禁止新连接并终止/迁移既有连接；
-- [ ] 失败关闭时停止受影响流量且不泄漏源地址；
-- [ ] 恢复后重新验证 DNS、TUN 和路由；
-- [ ] 活动记录故障、切换和最终状态；
-- [ ] 覆盖断网、后台、休眠和重启场景。
+- [x] 连接超时、握手中断、运行中断开分别处理；
+- [x] 按策略选择替代 Exit 或失败关闭；
+- [x] 切换过程展示过渡状态，不伪报已连接；
+- [x] 撤销授权后禁止新连接并终止/迁移既有连接；
+- [x] 失败关闭时停止受影响流量且不泄漏源地址；
+- [x] 恢复后重新验证 DNS、TUN 和路由；
+- [x] 活动记录故障、切换和最终状态；
+- [x] 覆盖断网、后台、休眠和重启场景。
+
+Exit 连接 watchdog 将“目标 Exit 已选择但 Secure Session 尚未完成密钥确认”保持为过渡态；只有已建立的安全会话才能把恢复路径标为 `connected`，
+否则在期限到达时只发出一次 `ExitConnectionTimeout`，撤销陈旧 Exit 路径并继续失败关闭。连接超时、握手中断、Exit/Relay/Runtime 断开分别映射到
+稳定 trigger、failure kind 和 reason code；替代 Exit 必须先通过管理员授权、健康与新鲜度门禁，固定 Exit 或缺失授权时不会静默直连。授权目录或
+成员条款变化会撤销待提交选择并进入迁移/重连，既有流量在 TUN、路由、DNS 和可达性重新验证完成前不可承载，只有完整新鲜证据才能提交
+`Protected`。活动快照记录迁移开始、故障、失败关闭/显式直连和最终受保护状态，WebUI/GPUI 消费同一权威状态。Linux suspend/resume、稳定网络
+变化和运行时断开均接入有界恢复事件通道；重启不会沿用旧的受保护声明。
+
+**验证通过（2026-11-10）**：`cargo test --workspace --lib`（1713 passed、3 ignored）、
+`cargo test -p fuckipv6-common traffic_session --lib`（8 passed）、
+`cargo test -p fuckipv6-client routing::recovery --lib`（15 passed）、
+`cargo test -p fuckipv6-client cli::commands::tests --lib`（42 passed）、
+`cargo test -p fuckipv6-client node::runtime_control --lib`（72 passed）、
+`cargo test -p fuckipv6-client --all-features --lib gpui::view_model::tests:: -- --test-threads=1`（61 passed）、
+`cargo clippy -p fuckipv6-common -p fuckipv6-client --lib -- -D warnings`、`cargo check --workspace`、
+`cargo fmt --all -- --check`、`./scripts/generate-contracts.sh`、`./scripts/check-contracts.sh`、`node scripts/test_i18n_runtime.mjs`，
+以及 WebUI `npm run typecheck`、`npm run lint`、`npm test -- --run`（280 passed）、`npm run build`（仅保留现有 i18n 非 module 与
+>500 kB chunk 警告）。`npm run visual:regression --prefix webui` 单独执行：语义检查通过，但概述页仍存在既有几何/像素基线差异
+（内容纵向偏移约 68px），未计入本项功能通过证据。测试覆盖超时只触发一次、安全会话门禁、撤权迁移、固定 Exit 失败关闭、
+SleepWake/NetworkChanged 重验 TUN/路由/DNS、故障活动证据和 GPUI 权威投影。
+
+相关提交：`29dd41b`、`1711082`、`3cde450`、`94393ce`、`22fdc3b`、`08b9c7d`、`5a177a7`、`86cce8e`。
+本项证据来自领域、Linux 恢复、命令层、运行时和 UI 自动化测试；未执行真实多节点 Exit 故障、真实休眠/唤醒、真实后台进程或完整重启演练，
+这些实机路径留给 W12-09/W17，不把自动化模拟扩大解释为生产网络已稳定可用。
 
 **验收**：Exit 故障不会静默直连；用户能知道当前是否仍有受保护连接。
 
-### W12-06 DNS、IPv4 与 IPv6 泄漏 `[ ]`
+### W12-06 DNS、IPv4 与 IPv6 泄漏 `[~]`
 
-- [ ] 明确 Exit 支持的 DNS 模式：系统、DoH、DoT 或网络指定；
+- [x] 明确 Exit 支持的 DNS 模式：系统、DoH、DoT 或网络指定；
 - [ ] 验证系统 resolver 和浏览器/应用 DNS 行为；
-- [ ] 检查 IPv4 源地址与默认路由；
-- [ ] 检查 IPv6 是否有可用泄漏路径；
-- [ ] 禁用/隔离不可由网络承载的协议与接口；
-- [ ] 失败关闭覆盖 DNS 查询失败和 IPv6 连接；
+- [x] 检查 IPv4 源地址与默认路由；
+- [x] 检查 IPv6 是否有可用泄漏路径；
+- [x] 禁用/隔离不可由网络承载的协议与接口；
+- [x] 失败关闭覆盖 DNS 查询失败和 IPv6 连接；
 - [ ] 使用受控泄漏检测服务和外部可达性目标复核；
-- [ ] 报告保存查询目标、结果和环境，避免只写“无泄漏”。
+- [x] 报告保存查询目标、结果和环境，避免只写“无泄漏”。
+
+已建立 `LeakDetectionSnapshot`/`LeakDetectionAssessment`：环境记录平台、DNS 模式（`system_resolver`、`doh`、`dot`、
+`network_specified`、`unmanaged`）、受保护路径状态和 IPv6 carrier 可用性；证据按 DNS、IPv4、IPv6 与稳定目标记录
+passed/failed/unsupported/not_tested、来源、时间、耗时和稳定错误码。Linux collector 使用 2 秒上限的 `ip -4/-6` 检查受保护接口上的
+global 地址、源地址、默认路由和 catch-all 策略表；缺失、陈旧、未来时钟、重复、未测试或不受控 DNS 均失败关闭，未承载的 IPv6 只有带
+`blocked_unavailable_ipv6` 隔离动作时才可标为 isolated。评估采用最坏优先，泄漏失败或 required check 失败不可被其他 passed 证据覆盖；
+错误码和公共报告不包含地址、resolver URL、接口名、命令输出或成员身份。受控服务和浏览器/应用行为 probe 已有明确注入边界，
+但生产默认 runner 仍是 noop，因此真实外部检查会保留 `not_tested` 并触发 `fail_closed_required`。
+
+**验证通过（2026-11-10，自动化边界）**：`cargo test --workspace --lib`（1713 passed、3 ignored）、
+`cargo test -p fuckipv6-common leak_detection --lib`（6 passed）、
+`cargo test -p fuckipv6-client routing::leak_detection --lib`（6 passed）、
+`cargo test -p fuckipv6-client node::runtime_control --lib`（72 passed，含泄漏证据聚合/投影）、
+`cargo test -p fuckipv6-client diagnostic --lib`（14 passed）、
+`cargo clippy -p fuckipv6-common -p fuckipv6-client --lib -- -D warnings`、`cargo check --workspace`、
+`cargo fmt --all -- --check`、`./scripts/generate-contracts.sh`（生成资产无变化）、`./scripts/check-contracts.sh`、
+`node scripts/test_i18n_runtime.mjs`，以及 WebUI `npm run typecheck`、`npm run lint`、`npm test -- --run`（280 passed）、
+`npm run build`（仅保留现有 i18n 非 module 与 >500 kB chunk 警告）。
+
+相关提交：`68f630a`、`7b0a84c`、`96e527e`、`a8e0393`、`827086d`、`be791f0`、`5ca9a3e`。
+本项保持 `[~]`：尚未配置真实受控泄漏检测服务，未执行外部 IPv4/IPv6 可达性复核，也未通过真实浏览器/应用验证 DNS 行为；因此不宣称
+“无泄漏”或抗 DNS/IPv6 泄漏已经实测合格。上述未测试路径在报告中必须继续显示为 not_tested，不能由 UI 或本地路由检查推断为 passed。
 
 **验收**：DNS、IPv4 与 IPv6 泄漏测试有可复核证据；任何未测试路径不得标记通过。
 

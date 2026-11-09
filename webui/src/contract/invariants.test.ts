@@ -309,6 +309,7 @@ describe("node UI contract invariants", () => {
         capability_declarations: "",
         visibility: "unlisted",
         join_mode: "invite_only",
+        exit_contribution_mode: "disabled",
         exit_contribution: "not_required",
         exit_contribution_scope: "not_applicable",
         signaling_port: "6666",
@@ -337,6 +338,7 @@ describe("node UI contract invariants", () => {
         capability_declarations: [],
         visibility: "unlisted",
         join_mode: "invite_only",
+        exit_contribution_mode: "disabled",
         exit_contribution: "not_required",
         exit_contribution_scope: "not_applicable",
         signaling_port: 6666,
@@ -508,6 +510,7 @@ describe("node UI contract invariants", () => {
         capability_declarations: ["relay", "exit"],
         visibility: "unlisted",
         join_mode: "invite_only",
+        exit_contribution_mode: "disabled",
         exit_contribution: "not_required",
         exit_contribution_scope: "not_applicable",
       },
@@ -546,6 +549,7 @@ describe("node UI contract invariants", () => {
       capability_declarations: "",
       visibility: "unlisted",
       join_mode: "invite_only",
+      exit_contribution_mode: "disabled",
       exit_contribution: "not_required",
       exit_contribution_scope: "not_applicable",
       signaling_port: "6666",
@@ -595,6 +599,67 @@ describe("node UI contract invariants", () => {
         "zh-CN",
       ),
     ).toEqual(["translated:validation.network_capability_duplicate"]);
+  });
+
+  it("canonicalizes Exit contribution compatibility fields from the mode", () => {
+    const createNetwork = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((action) => action.id === "create_network")!;
+    const values = {
+      name: "home",
+      purpose: "Family devices across two homes",
+      icon: "home.router_2",
+      language: "zh-CN",
+      region: "ZZ",
+      tags: "",
+      capability_declarations: "",
+      visibility: "unlisted",
+      join_mode: "invite_only",
+      exit_contribution: "not_required",
+      exit_contribution_scope: "all_members",
+      signaling_port: "6666",
+      relay_port: "6667",
+      external_host: "",
+      auto_connect: true,
+    };
+
+    for (const [mode, obligation, scope] of [
+      ["autonomous", "not_required", "not_applicable"],
+      ["required_on_join", "required", "all_members"],
+      ["disabled", "not_required", "not_applicable"],
+      ["approval_required", "not_required", "not_applicable"],
+    ] as const) {
+      const command = buildCommand(
+        createNetwork,
+        { ...values, exit_contribution_mode: mode },
+        "en",
+      ) as {
+        payload: {
+          exit_contribution: string;
+          exit_contribution_scope: string;
+          exit_contribution_mode: string;
+        };
+      };
+      expect(command.payload).toMatchObject({
+        exit_contribution: obligation,
+        exit_contribution_scope: scope,
+        exit_contribution_mode: mode,
+      });
+    }
+
+    expect(
+      validateActionValues(
+        createNetwork,
+        {
+          ...values,
+          exit_contribution_mode: "required_on_join",
+          exit_contribution_scope: "not_applicable",
+        },
+        "en",
+      ),
+    ).toEqual([
+      "translated:validation.exit_contribution_scope_required",
+    ]);
   });
 
   it("validates signed profile preview and applied-result contracts", () => {
@@ -695,6 +760,7 @@ describe("node UI contract invariants", () => {
       capability_declarations: "",
       visibility: "unlisted",
       join_mode: "invite_only",
+      exit_contribution_mode: "disabled",
       exit_contribution: "not_required",
       exit_contribution_scope: "not_applicable",
       signaling_port: "6666",

@@ -1931,6 +1931,24 @@ mod tests {
         signed_network_revision_from_profile(identity, &signed_network_profile(identity), revision)
     }
 
+    fn signed_network_for_exit_mode(
+        identity: &Identity,
+        mode: fuckipv6_common::domain::ExitContributionMode,
+    ) -> NetworkDiscoveryRecord {
+        let mut profile = signed_network_profile(identity);
+        profile.exit_contribution_mode = mode;
+        if mode.requires_join_commitment() {
+            profile.exit_contribution = ExitContributionObligation::Required;
+            profile.exit_contribution_scope =
+                fuckipv6_common::domain::ExitContributionScope::JoiningMembers;
+        } else {
+            profile.exit_contribution = ExitContributionObligation::NotRequired;
+            profile.exit_contribution_scope =
+                fuckipv6_common::domain::ExitContributionScope::NotApplicable;
+        }
+        signed_network_revision_from_profile(identity, &profile, 1)
+    }
+
     fn signed_network() -> (NetworkDiscoveryRecord, Identity) {
         let identity = Identity::generate().unwrap();
         let record = signed_network_revision(&identity, 1);
@@ -2388,6 +2406,37 @@ mod tests {
         assert_eq!(first.member_count, 1);
         assert!(first.can_join);
         assert!(first.blocked_reason_key.is_none());
+    }
+
+    #[test]
+    fn join_preview_exit_commitment_is_derived_from_mode() {
+        let identity = Identity::generate().unwrap();
+        for (mode, requires_commitment) in [
+            (
+                fuckipv6_common::domain::ExitContributionMode::Autonomous,
+                false,
+            ),
+            (
+                fuckipv6_common::domain::ExitContributionMode::RequiredOnJoin,
+                true,
+            ),
+            (
+                fuckipv6_common::domain::ExitContributionMode::Disabled,
+                false,
+            ),
+            (
+                fuckipv6_common::domain::ExitContributionMode::ApprovalRequired,
+                false,
+            ),
+        ] {
+            let record = signed_network_for_exit_mode(&identity, mode);
+            let preview =
+                preview_from_record(&record, "signed-discovery-digest", false, now_unix_ms())
+                    .unwrap();
+            assert_eq!(preview.exit_contribution_mode, mode);
+            assert_eq!(preview.join_requires_exit_consent, requires_commitment);
+            assert_eq!(preview.can_join_without_local_exit, !requires_commitment);
+        }
     }
 
     #[tokio::test]
@@ -3040,6 +3089,7 @@ mod tests {
             "member_count",
             "exit_contribution",
             "exit_contribution_scope",
+            "exit_contribution_mode",
             "privacy_changes",
             "issued_at_unix_ms",
             "expires_at_unix_ms",

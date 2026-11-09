@@ -117,6 +117,13 @@
               "validation": "join_mode"
             },
             {
+              "id": "exit_contribution_mode",
+              "label_key": "field.exit_contribution_mode",
+              "input": "exit_contribution_mode",
+              "required": true,
+              "validation": "exit_contribution_mode"
+            },
+            {
               "id": "exit_contribution",
               "label_key": "field.exit_contribution",
               "input": "exit_contribution",
@@ -244,6 +251,13 @@
               "validation": "join_mode"
             },
             {
+              "id": "exit_contribution_mode",
+              "label_key": "field.exit_contribution_mode",
+              "input": "exit_contribution_mode",
+              "required": true,
+              "validation": "exit_contribution_mode"
+            },
+            {
               "id": "exit_contribution",
               "label_key": "field.exit_contribution",
               "input": "exit_contribution",
@@ -341,6 +355,13 @@
               "input": "join_mode",
               "required": true,
               "validation": "join_mode"
+            },
+            {
+              "id": "exit_contribution_mode",
+              "label_key": "field.exit_contribution_mode",
+              "input": "exit_contribution_mode",
+              "required": true,
+              "validation": "exit_contribution_mode"
             },
             {
               "id": "exit_contribution",

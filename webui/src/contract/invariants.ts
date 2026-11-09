@@ -419,6 +419,35 @@ const NETWORK_JOIN_MODES = new Set([
   "approval_required",
   "invite_only",
 ]);
+type ExitContributionMode =
+  | "autonomous"
+  | "required_on_join"
+  | "disabled"
+  | "approval_required";
+type ExitContributionScope =
+  | "not_applicable"
+  | "joining_members"
+  | "all_members";
+
+function canonicalExitContribution(
+  mode: ExitContributionMode,
+  requestedScope: ExitContributionScope,
+): {
+  exit_contribution: "required" | "not_required";
+  exit_contribution_scope: ExitContributionScope;
+} {
+  if (mode === "required_on_join") {
+    return {
+      exit_contribution: "required",
+      exit_contribution_scope: requestedScope,
+    };
+  }
+  return {
+    exit_contribution: "not_required",
+    exit_contribution_scope: "not_applicable",
+  };
+}
+
 const EXIT_CONTRIBUTION_OBLIGATIONS = new Set(["required", "not_required"]);
 const EXIT_CONTRIBUTION_MODES = new Set([
   "autonomous",
@@ -2481,6 +2510,19 @@ export function validateActionValues(
       errors.push(label(locale, key));
     }
   }
+  if (
+    action.id === "create_network" ||
+    action.id === "preview_network_profile" ||
+    action.id === "update_network_profile"
+  ) {
+    const mode = String(values.exit_contribution_mode ?? "");
+    const scope = String(values.exit_contribution_scope ?? "");
+    if (mode === "required_on_join" && scope === "not_applicable") {
+      errors.push(
+        label(locale, "validation.exit_contribution_scope_required"),
+      );
+    }
+  }
   return errors;
 }
 
@@ -2576,14 +2618,11 @@ export function buildCommand(
           join_mode: requiredString("join_mode") as
             "open" | "approval_required" | "invite_only",
           exit_contribution_mode: requiredString("exit_contribution_mode") as
-            | "autonomous"
-            | "required_on_join"
-            | "disabled"
-            | "approval_required",
-          exit_contribution: requiredString("exit_contribution") as
-            "required" | "not_required",
-          exit_contribution_scope: requiredString("exit_contribution_scope") as
-            "not_applicable" | "joining_members" | "all_members",
+            ExitContributionMode,
+          ...canonicalExitContribution(
+            requiredString("exit_contribution_mode") as ExitContributionMode,
+            requiredString("exit_contribution_scope") as ExitContributionScope,
+          ),
           signaling_port: Number(requireValue("signaling_port")),
           relay_port: Number(requireValue("relay_port")),
           external_host: optional(values, "external_host"),
@@ -2613,14 +2652,11 @@ export function buildCommand(
           join_mode: requiredString("join_mode") as
             "open" | "approval_required" | "invite_only",
           exit_contribution_mode: requiredString("exit_contribution_mode") as
-            | "autonomous"
-            | "required_on_join"
-            | "disabled"
-            | "approval_required",
-          exit_contribution: requiredString("exit_contribution") as
-            "required" | "not_required",
-          exit_contribution_scope: requiredString("exit_contribution_scope") as
-            "not_applicable" | "joining_members" | "all_members",
+            ExitContributionMode,
+          ...canonicalExitContribution(
+            requiredString("exit_contribution_mode") as ExitContributionMode,
+            requiredString("exit_contribution_scope") as ExitContributionScope,
+          ),
         },
       };
       return action.id === "preview_network_profile"

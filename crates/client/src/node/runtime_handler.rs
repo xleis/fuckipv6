@@ -2492,7 +2492,10 @@ fn validate_invitation_preview(
             Some(&preview.network_name),
         ));
     }
-    if preview.terms.exit_contribution == ExitContributionObligation::Required
+    if preview
+        .terms
+        .exit_contribution_mode
+        .requires_join_commitment()
         && request.exit_contribution_acknowledged != Some(true)
     {
         return Err(NodeProblem::new(
@@ -2500,6 +2503,10 @@ fn validate_invitation_preview(
             "接受邀请前必须单独确认 Exit 贡献义务",
         )
         .with_message_key("join.error.exit_contribution_consent_required")
+        .with_param(
+            "policy_exit_contribution_mode",
+            exit_contribution_mode_audit_value(preview.terms.exit_contribution_mode),
+        )
         .with_param(
             "policy_exit_contribution",
             exit_contribution_obligation_audit_value(preview.terms.exit_contribution),
@@ -5865,6 +5872,60 @@ mod tests {
         .is_err());
     }
 
+    #[test]
+    fn non_commitment_exit_modes_do_not_require_host_exit_or_consent() {
+        let snapshot = super::super::NodeSnapshot::default();
+        for mode in [
+            ExitContributionMode::Autonomous,
+            ExitContributionMode::Disabled,
+            ExitContributionMode::ApprovalRequired,
+        ] {
+            assert!(validate_exit_contribution_admission(
+                &snapshot,
+                ExitContributionObligation::NotRequired,
+                ExitContributionScope::NotApplicable,
+                mode,
+                None,
+                "lab",
+            )
+            .is_ok());
+
+            let mut preview = join_preview_for_local_capability_test(mode);
+            apply_local_join_capabilities(&mut preview, &snapshot);
+            assert!(preview.can_join, "{mode:?}");
+            assert!(preview.can_join_without_local_exit, "{mode:?}");
+            assert!(!preview.join_requires_exit_consent, "{mode:?}");
+            assert!(!preview.local_exit_available, "{mode:?}");
+            assert!(!preview.local_exit_enabled, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn inconsistent_exit_mode_policy_is_rejected_with_mode_context() {
+        let snapshot = super::super::NodeSnapshot::default();
+        let problem = validate_exit_contribution_admission(
+            &snapshot,
+            ExitContributionObligation::Required,
+            ExitContributionScope::NotApplicable,
+            ExitContributionMode::RequiredOnJoin,
+            Some(true),
+            "lab",
+        )
+        .expect_err("inconsistent compatibility fields must fail closed");
+        assert_problem(&problem, NodeProblemCode::InvalidRequest, false);
+        assert_eq!(
+            problem.message_key.as_str(),
+            "join.error.invalid_exit_contribution_policy"
+        );
+        assert_eq!(
+            problem
+                .params
+                .get("policy_exit_contribution_mode")
+                .map(String::as_str),
+            Some("required_on_join")
+        );
+    }
+
     #[tokio::test]
     async fn policy_reconfirmation_requires_exit_consent_and_clears_pending_state() {
         use crate::config_manager::ConfigManager;
@@ -5980,6 +6041,7 @@ mod tests {
         let mut preview = invitation_preview();
         preview.terms.exit_contribution = ExitContributionObligation::Required;
         preview.terms.exit_contribution_scope = ExitContributionScope::JoiningMembers;
+        preview.terms.exit_contribution_mode = ExitContributionMode::RequiredOnJoin;
         preview.terms_hash = preview.terms.content_hash().expect("terms hash");
         rebind_preview_digest(&mut preview);
         let mut request = invitation_redeem_request(&preview);
@@ -6137,8 +6199,18 @@ mod tests {
     }
 
     fn join_preview_for_local_capability_test(
-        exit_contribution: ExitContributionObligation,
+        exit_contribution_mode: ExitContributionMode,
     ) -> NodeNetworkJoinPreview {
+        let exit_contribution = if exit_contribution_mode.requires_join_commitment() {
+            ExitContributionObligation::Required
+        } else {
+            ExitContributionObligation::NotRequired
+        };
+        let exit_contribution_scope = if exit_contribution_mode.requires_join_commitment() {
+            ExitContributionScope::JoiningMembers
+        } else {
+            ExitContributionScope::NotApplicable
+        };
         NodeNetworkJoinPreview {
             network_id: NetworkId::from_public_key(b"local-exit-preview").to_string(),
             network_name: "exit-lab".into(),
@@ -6159,21 +6231,16 @@ mod tests {
             member_count: 3,
             member_limit: Some(16),
             exit_contribution,
-            exit_contribution_scope: ExitContributionScope::JoiningMembers,
-            exit_contribution_mode: if exit_contribution == ExitContributionObligation::Required {
-                fuckipv6_common::domain::ExitContributionMode::RequiredOnJoin
-            } else {
-                fuckipv6_common::domain::ExitContributionMode::Disabled
-            },
+            exit_contribution_scope,
+            exit_contribution_mode,
             exit_contribution_purpose_key: "join.exit.disclosure.purpose".into(),
             exit_contribution_bandwidth_impact_key: "join.exit.disclosure.bandwidth".into(),
             exit_contribution_logging_boundary_key: "join.exit.disclosure.logging".into(),
             exit_contribution_disable_key: "join.exit.disclosure.disable".into(),
             local_exit_available: false,
             local_exit_enabled: false,
-            can_join_without_local_exit: exit_contribution
-                == ExitContributionObligation::NotRequired,
-            join_requires_exit_consent: exit_contribution == ExitContributionObligation::Required,
+            can_join_without_local_exit: !exit_contribution_mode.requires_join_commitment(),
+            join_requires_exit_consent: exit_contribution_mode.requires_join_commitment(),
             privacy_changes: Vec::new(),
             already_member: false,
             can_join: true,
@@ -6240,7 +6307,7 @@ mod tests {
     #[test]
     fn required_exit_without_local_support_is_explicitly_not_joinable() {
         let mut preview =
-            join_preview_for_local_capability_test(ExitContributionObligation::Required);
+            join_preview_for_local_capability_test(ExitContributionMode::RequiredOnJoin);
         let snapshot = local_capability_snapshot(
             false,
             false,
@@ -6268,7 +6335,7 @@ mod tests {
     #[test]
     fn required_exit_with_local_support_keeps_capability_and_enabled_state_separate() {
         let mut preview =
-            join_preview_for_local_capability_test(ExitContributionObligation::Required);
+            join_preview_for_local_capability_test(ExitContributionMode::RequiredOnJoin);
         let snapshot = local_capability_snapshot(
             true,
             false,
@@ -6301,8 +6368,7 @@ mod tests {
 
     #[test]
     fn network_exit_role_does_not_override_disabled_local_owner_intent() {
-        let mut preview =
-            join_preview_for_local_capability_test(ExitContributionObligation::NotRequired);
+        let mut preview = join_preview_for_local_capability_test(ExitContributionMode::Disabled);
         let snapshot = local_capability_snapshot(
             true,
             true,
@@ -6318,8 +6384,7 @@ mod tests {
 
     #[test]
     fn optional_exit_join_remains_available_without_local_exit_support() {
-        let mut preview =
-            join_preview_for_local_capability_test(ExitContributionObligation::NotRequired);
+        let mut preview = join_preview_for_local_capability_test(ExitContributionMode::Disabled);
         let snapshot = local_capability_snapshot(
             false,
             false,

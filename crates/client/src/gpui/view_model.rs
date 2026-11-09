@@ -8645,6 +8645,86 @@ mod tests {
     }
 
     #[test]
+    fn exit_contribution_mode_canonicalizes_legacy_profile_fields() {
+        let manifest = node_ui_manifest();
+        let action = manifest
+            .pages
+            .iter()
+            .flat_map(|page| &page.actions)
+            .find(|action| action.id == "create_network")
+            .expect("create network action");
+        let values = HashMap::from([
+            ("name".into(), "family".into()),
+            ("purpose".into(), "Family devices".into()),
+            ("icon".into(), "home".into()),
+            ("language".into(), "en".into()),
+            ("region".into(), "US".into()),
+            ("tags".into(), "family".into()),
+            ("capability_declarations".into(), "relay".into()),
+            ("visibility".into(), "public".into()),
+            ("join_mode".into(), "open".into()),
+            ("exit_contribution_scope".into(), "all_members".into()),
+            ("signaling_port".into(), "6666".into()),
+            ("relay_port".into(), "6667".into()),
+            ("external_host".into(), String::new()),
+            ("auto_connect".into(), "true".into()),
+        ]);
+
+        for (mode, expected_obligation, expected_scope) in [
+            (
+                "autonomous",
+                ExitContributionObligation::NotRequired,
+                ExitContributionScope::NotApplicable,
+            ),
+            (
+                "required_on_join",
+                ExitContributionObligation::Required,
+                ExitContributionScope::AllMembers,
+            ),
+            (
+                "disabled",
+                ExitContributionObligation::NotRequired,
+                ExitContributionScope::NotApplicable,
+            ),
+            (
+                "approval_required",
+                ExitContributionObligation::NotRequired,
+                ExitContributionScope::NotApplicable,
+            ),
+        ] {
+            let mut mode_values = values.clone();
+            mode_values.insert("exit_contribution_mode".into(), mode.into());
+            let command = build_command(action, &mode_values)
+                .unwrap_or_else(|error| panic!("{mode} command failed: {error:?}"));
+            let NodeCommand::CreateNetwork(command) = command else {
+                panic!("expected create network command");
+            };
+            assert_eq!(command.exit_contribution, expected_obligation, "{mode}");
+            assert_eq!(command.exit_contribution_scope, expected_scope, "{mode}");
+            assert_eq!(
+                command.exit_contribution_mode,
+                match mode {
+                    "autonomous" => ExitContributionMode::Autonomous,
+                    "required_on_join" => ExitContributionMode::RequiredOnJoin,
+                    "disabled" => ExitContributionMode::Disabled,
+                    "approval_required" => ExitContributionMode::ApprovalRequired,
+                    _ => unreachable!(),
+                },
+                "{mode}"
+            );
+        }
+
+        let mut invalid = values;
+        invalid.insert("exit_contribution_mode".into(), "required_on_join".into());
+        invalid.insert("exit_contribution_scope".into(), "not_applicable".into());
+        assert!(matches!(
+            build_command(action, &invalid),
+            Err(CommandBuildError::InvalidField { ref action_id, ref field_id, .. })
+                if action_id == "create_network" && field_id == "exit_contribution_scope"
+        ));
+    }
+
+    #[test]
     fn discovery_join_builder_requires_and_preserves_confirmed_preview_fields() {
         let manifest = node_ui_manifest();
         let action = manifest

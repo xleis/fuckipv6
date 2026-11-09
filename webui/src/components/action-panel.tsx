@@ -9,6 +9,8 @@ import {
 } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import type {
+  ExitContributionMode,
+  ExitContributionObligation,
   InvitationPreview,
   InvitationState,
   InvitationStatusView,
@@ -945,9 +947,59 @@ function joinList(
     : label(locale, emptyKey);
 }
 
+function normalizeExitContributionMode(
+  mode: ExitContributionMode | null | undefined,
+  obligation: ExitContributionObligation | null | undefined,
+): ExitContributionMode {
+  return mode ?? (obligation === "required" ? "required_on_join" : "disabled");
+}
+
+function exitContributionModeLabelKey(mode: ExitContributionMode): string {
+  switch (mode) {
+    case "autonomous":
+      return "join.exit.autonomous";
+    case "required_on_join":
+      return "join.exit.required";
+    case "approval_required":
+      return "join.exit.approval_required";
+    case "disabled":
+      return "join.exit.not_required";
+  }
+}
+
+function joinRequestExitLabelKey(
+  mode: ExitContributionMode,
+): string {
+  switch (mode) {
+    case "autonomous":
+      return "join_requests.exit.autonomous";
+    case "required_on_join":
+      return "join_requests.exit.required";
+    case "approval_required":
+      return "join_requests.exit.approval_required";
+    case "disabled":
+      return "join_requests.exit.not_required";
+  }
+}
+
+function invitationExitLabelKey(
+  mode: ExitContributionMode,
+): string {
+  switch (mode) {
+    case "autonomous":
+      return "invitations.terms.exit_autonomous";
+    case "required_on_join":
+      return "invitations.terms.exit_required";
+    case "approval_required":
+      return "invitations.terms.exit_approval_required";
+    case "disabled":
+      return "invitations.terms.exit_not_required";
+  }
+}
+
 function ExitContributionDisclosure({
   locale,
-  obligation,
+  mode,
   scope,
   purposeKey = "join.exit.disclosure.purpose",
   bandwidthKey = "join.exit.disclosure.bandwidth",
@@ -958,7 +1010,7 @@ function ExitContributionDisclosure({
   canJoinWithoutLocalExit,
 }: {
   locale: Locale;
-  obligation: NodeNetworkJoinPreview["exit_contribution"];
+  mode: ExitContributionMode;
   scope: NodeNetworkJoinPreview["exit_contribution_scope"];
   purposeKey?: string;
   bandwidthKey?: string;
@@ -968,7 +1020,8 @@ function ExitContributionDisclosure({
   localEnabled: boolean;
   canJoinWithoutLocalExit: boolean;
 }) {
-  const required = obligation === "required";
+  const required = mode === "required_on_join";
+  const contributionAvailable = mode !== "disabled";
   return (
     <section
       className={`exit-contribution-disclosure ${required ? "required" : ""}`}
@@ -977,19 +1030,16 @@ function ExitContributionDisclosure({
       <h4>{label(locale, "join.exit_contribution")}</h4>
       <p>
         <strong>
-          {label(
-            locale,
-            required ? "join.exit.required" : "join.exit.not_required",
-          )}
+          {label(locale, exitContributionModeLabelKey(mode))}
         </strong>
       </p>
-      {required ? (
+      {contributionAvailable ? (
         <>
           <p>{label(locale, purposeKey)}</p>
           <p>{label(locale, bandwidthKey)}</p>
           <p>{label(locale, loggingKey)}</p>
           <p>{label(locale, disableKey)}</p>
-          <p>{label(locale, `join.exit.scope.${scope}`)}</p>
+          {required ? <p>{label(locale, `join.exit.scope.${scope}`)}</p> : null}
         </>
       ) : null}
       <p>
@@ -1143,7 +1193,12 @@ function JoinPreviewCard({
         </div>
         <div>
           <dt>{label(locale, "join.exit_contribution")}</dt>
-          <dd>{label(locale, `join.exit.${preview.exit_contribution}`)}</dd>
+          <dd>
+            {label(
+              locale,
+              exitContributionModeLabelKey(preview.exit_contribution_mode),
+            )}
+          </dd>
         </div>
         <div>
           <dt>{label(locale, "join.privacy_changes")}</dt>
@@ -1212,7 +1267,7 @@ function JoinPreviewCard({
       </div>
       <ExitContributionDisclosure
         locale={locale}
-        obligation={preview.exit_contribution}
+        mode={preview.exit_contribution_mode}
         scope={preview.exit_contribution_scope}
         purposeKey={preview.exit_contribution_purpose_key}
         bandwidthKey={preview.exit_contribution_bandwidth_impact_key}
@@ -1527,7 +1582,11 @@ function InvitationPreviewCard({
   onBackToEdit(): void;
   onConfirm(values: ActionValues): void;
 }) {
-  const exitRequired = preview.terms.exit_contribution === "required";
+  const exitMode = normalizeExitContributionMode(
+    preview.terms.exit_contribution_mode,
+    preview.terms.exit_contribution,
+  );
+  const exitRequired = exitMode === "required_on_join";
   const previewAcceptable =
     preview.can_accept &&
     preview.state === "active" &&
@@ -1548,12 +1607,7 @@ function InvitationPreviewCard({
     tr(locale, "invitations.terms.privacy_policy", {
       revision: i18n().formatInteger(locale, preview.terms.privacy_policy_revision),
     }),
-    label(
-      locale,
-      preview.terms.exit_contribution === "required"
-        ? "invitations.terms.exit_required"
-        : "invitations.terms.exit_not_required",
-    ),
+    label(locale, invitationExitLabelKey(exitMode)),
     preview.terms.member_limit == null
       ? label(locale, "common.unlimited")
       : tr(locale, "invitations.terms.member_limit", {
@@ -1634,11 +1688,8 @@ function InvitationPreviewCard({
       ) : null}
       <ExitContributionDisclosure
         locale={locale}
-        obligation={preview.terms.exit_contribution}
-        scope={
-          preview.terms.exit_contribution_scope ??
-          (exitRequired ? "joining_members" : "not_applicable")
-        }
+        mode={exitMode}
+        scope={preview.terms.exit_contribution_scope ?? "not_applicable"}
         localSupported={localExitAvailable}
         localEnabled={localExitEnabled}
         canJoinWithoutLocalExit={!exitRequired}
@@ -1912,6 +1963,10 @@ function JoinRequestRisk({
   loadedAtUnixMs: number;
 }) {
   const grant = request.grant_preview;
+  const exitMode = normalizeExitContributionMode(
+    grant.exit_contribution_mode,
+    grant.exit_contribution,
+  );
   const capabilities =
     grant.capabilities && grant.capabilities.length > 0
       ? grant.capabilities
@@ -1936,12 +1991,7 @@ function JoinRequestRisk({
         <div>
           <dt>{label(locale, "join_requests.exit")}</dt>
           <dd>
-            {label(
-              locale,
-              grant.exit_contribution === "required"
-                ? "join_requests.exit.required"
-                : "join_requests.exit.not_required",
-            )}
+            {label(locale, joinRequestExitLabelKey(exitMode))}
           </dd>
         </div>
         <div>
@@ -2919,12 +2969,17 @@ function ActionCard({
   }
 
   async function confirmInvitation(confirmValues: ActionValues): Promise<void> {
+    const invitationExitMode = invitationPreview
+      ? normalizeExitContributionMode(
+          invitationPreview.terms.exit_contribution_mode,
+          invitationPreview.terms.exit_contribution,
+        )
+      : "disabled";
     if (
       !invitationPreview ||
       !redeemInvitationAction ||
       !invitationConfirmed ||
-      (invitationPreview.terms.exit_contribution === "required" &&
-        !invitationExitConfirmed) ||
+      (invitationExitMode === "required_on_join" && !invitationExitConfirmed) ||
       invitationRedeemBlockedReason ||
       redeemInvitationPending
     ) {

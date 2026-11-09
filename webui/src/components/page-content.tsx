@@ -469,6 +469,23 @@ function NetworkContextMenu({
   );
 }
 
+function membershipExitModeLabelKey(
+  mode: NonNullable<
+    NonNullable<NodeSnapshot["memberships"]>[number]["exit_contribution_mode"]
+  >,
+): string {
+  switch (mode) {
+    case "autonomous":
+      return "join.exit.autonomous";
+    case "required_on_join":
+      return "join.exit.required";
+    case "approval_required":
+      return "join.exit.approval_required";
+    case "disabled":
+      return "join.exit.not_required";
+  }
+}
+
 function MembershipPolicyNotice({
   membership,
   snapshot,
@@ -492,7 +509,11 @@ function MembershipPolicyNotice({
     currentTerms?.exit_contribution_scope ??
     membership.exit_contribution_scope ??
     "not_applicable";
-  const exitRequired = currentExitObligation === "required";
+  const currentExitMode =
+    currentTerms?.exit_contribution_mode ??
+    membership.exit_contribution_mode ??
+    (currentExitObligation === "required" ? "required_on_join" : "disabled");
+  const exitRequired = currentExitMode === "required_on_join";
   const policyChanged =
     Boolean(currentHash) && currentHash !== membership.terms_hash;
   const confirmationRequired = membership.policy_confirmation_required;
@@ -561,12 +582,7 @@ function MembershipPolicyNotice({
         <div>
           <dt>{label(locale, "join.exit.scope")}</dt>
           <dd>
-            {label(
-              locale,
-              currentExitObligation === "required"
-                ? "join.exit.required"
-                : "join.exit.not_required",
-            )}
+            {label(locale, membershipExitModeLabelKey(currentExitMode))}
           </dd>
         </div>
         <div>

@@ -1432,6 +1432,10 @@ pub struct NodeStateStore {
     /// the derived topology can be rebuilt without a second Coordinator round
     /// trip; `list_network_members` remains the single writer.
     directories: Arc<RwLock<BTreeMap<NetworkId, NetworkMemberDirectory>>>,
+    /// Local receipt time for each roster. Coordinator generation time is not a
+    /// substitute: policy enforcement needs to know how long this process has
+    /// trusted the cached evidence.
+    directory_received_at: Arc<RwLock<BTreeMap<NetworkId, u64>>>,
 }
 
 impl NodeStateStore {
@@ -1444,6 +1448,7 @@ impl NodeStateStore {
             updates,
             events: None,
             directories: Arc::new(RwLock::new(BTreeMap::new())),
+            directory_received_at: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -1473,6 +1478,7 @@ impl NodeStateStore {
             updates,
             events: Some(events),
             directories: Arc::new(RwLock::new(BTreeMap::new())),
+            directory_received_at: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -1485,12 +1491,17 @@ impl NodeStateStore {
     /// and connections still come from the entries the Coordinator returned or
     /// from observed peer sessions.
     pub async fn set_member_directory(&self, directory: NetworkMemberDirectory) -> bool {
+        let network_id = directory.network_id.clone();
+        self.directory_received_at
+            .write()
+            .await
+            .insert(network_id.clone(), unix_time_ms());
         {
             let mut directories = self.directories.write().await;
-            if directories.get(&directory.network_id) == Some(&directory) {
+            if directories.get(&network_id) == Some(&directory) {
                 return false;
             }
-            directories.insert(directory.network_id.clone(), directory);
+            directories.insert(network_id, directory);
         }
         self.update(|_| {}).await;
         true
@@ -1500,10 +1511,19 @@ impl NodeStateStore {
         self.directories.read().await.get(network_id).cloned()
     }
 
+    pub async fn member_directory_received_at(&self, network_id: &NetworkId) -> Option<u64> {
+        self.directory_received_at
+            .read()
+            .await
+            .get(network_id)
+            .copied()
+    }
+
     /// Remove a roster when the control channel or membership evidence is no
     /// longer authoritative. This republishes topology immediately so stale
     /// members never remain visible as live peers.
     pub async fn clear_member_directory(&self, network_id: &NetworkId) -> bool {
+        self.directory_received_at.write().await.remove(network_id);
         let removed = self.directories.write().await.remove(network_id).is_some();
         if removed {
             self.update(|_| {}).await;
@@ -2745,7 +2765,13 @@ mod tests {
                 .len(),
             2
         );
+        let received_at = state
+            .member_directory_received_at(&network_id)
+            .await
+            .expect("receipt time is cached");
+        assert!(received_at > 0);
 
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         assert!(
             !state
                 .set_member_directory(
@@ -2757,6 +2783,14 @@ mod tests {
                 .await
         );
         assert_eq!(state.snapshot().await.revision, after.revision);
+        assert!(
+            state
+                .member_directory_received_at(&network_id)
+                .await
+                .expect("receipt time is refreshed")
+                > received_at,
+            "an unchanged roster still refreshes trusted evidence"
+        );
 
         assert!(state.clear_member_directory(&network_id).await);
         let cleared = state.snapshot().await;

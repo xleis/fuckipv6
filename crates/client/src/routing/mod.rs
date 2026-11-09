@@ -12,6 +12,7 @@ pub mod linux_route;
 mod exit_contribution;
 pub mod exit_node;
 mod exit_selection;
+pub(crate) mod leak_detection;
 pub mod recovery;
 pub mod table;
 pub mod traffic_report;

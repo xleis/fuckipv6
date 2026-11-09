@@ -1766,7 +1766,9 @@ fn invalidate_linux_recovery_path(
     relay_path: &mut PathRecoveryState,
 ) {
     match trigger {
-        RecoveryTrigger::ExitDisconnected | RecoveryTrigger::ExitMigration => {
+        RecoveryTrigger::ExitDisconnected
+        | RecoveryTrigger::ExitConnectionTimeout
+        | RecoveryTrigger::ExitMigration => {
             *exit_path = PathRecoveryState::Disconnected;
         }
         RecoveryTrigger::RelayDisconnected | RecoveryTrigger::HandshakeInterrupted => {
@@ -1874,6 +1876,7 @@ fn recovery_started_reason_code(trigger: RecoveryTrigger) -> &'static str {
         RecoveryTrigger::SleepWake => "recovery.sleep_wake.started",
         RecoveryTrigger::NetworkChanged => "recovery.network_changed.started",
         RecoveryTrigger::ExitDisconnected => "recovery.exit_disconnected.started",
+        RecoveryTrigger::ExitConnectionTimeout => "recovery.connection_timeout.started",
         RecoveryTrigger::ExitMigration => "recovery.exit_migration.started",
         RecoveryTrigger::RelayDisconnected => "recovery.relay_disconnected.started",
         RecoveryTrigger::HandshakeInterrupted => "recovery.handshake_interrupted.started",
@@ -1888,6 +1891,7 @@ fn recovery_failure_reason_code(trigger: RecoveryTrigger) -> &'static str {
         RecoveryTrigger::SleepWake => "recovery.sleep_wake.failed_closed",
         RecoveryTrigger::NetworkChanged => "recovery.network_changed.failed_closed",
         RecoveryTrigger::ExitDisconnected => "recovery.exit_unavailable.failed_closed",
+        RecoveryTrigger::ExitConnectionTimeout => "recovery.connection_timeout.failed_closed",
         RecoveryTrigger::ExitMigration => "recovery.exit_migration.failed_closed",
         RecoveryTrigger::RelayDisconnected => "recovery.relay_disconnected.failed_closed",
         RecoveryTrigger::HandshakeInterrupted => "recovery.handshake_interrupted.failed_closed",
@@ -1929,7 +1933,10 @@ async fn handle_linux_recovery_trigger(runtime: &mut ClientRuntime, trigger: Rec
     // A lost Exit must first pass through the same administrator policy used by
     // packet routing. This may stage a replacement; it never promotes the
     // replacement before recovery evidence arrives.
-    if trigger == RecoveryTrigger::ExitDisconnected {
+    if matches!(
+        trigger,
+        RecoveryTrigger::ExitDisconnected | RecoveryTrigger::ExitConnectionTimeout
+    ) {
         runtime.reconcile_exit_selection(unix_time_ms()).await;
     }
     let expected_exit = runtime.intended_exit();
@@ -7542,6 +7549,29 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
         );
         assert_eq!(exit_path, PathRecoveryState::Connected);
         assert_eq!(relay_path, PathRecoveryState::Disconnected);
+
+        exit_path = PathRecoveryState::Connected;
+        relay_path = PathRecoveryState::Connected;
+        invalidate_linux_recovery_path(
+            RecoveryTrigger::ExitConnectionTimeout,
+            &mut exit_path,
+            &mut relay_path,
+        );
+        assert_eq!(exit_path, PathRecoveryState::Disconnected);
+        assert_eq!(relay_path, PathRecoveryState::Connected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exit_connection_timeout_has_stable_recovery_reason_codes() {
+        assert_eq!(
+            recovery_started_reason_code(RecoveryTrigger::ExitConnectionTimeout),
+            "recovery.connection_timeout.started"
+        );
+        assert_eq!(
+            recovery_failure_reason_code(RecoveryTrigger::ExitConnectionTimeout),
+            "recovery.connection_timeout.failed_closed"
+        );
     }
 
     #[cfg(target_os = "linux")]

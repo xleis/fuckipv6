@@ -45,6 +45,10 @@ pub enum RecoveryTrigger {
     SleepWake,
     NetworkChanged,
     ExitDisconnected,
+    /// The selected Exit did not establish a connection before its deadline.
+    /// The stale Exit path must be revoked and packet admission must remain
+    /// closed until policy reconciliation and fresh recovery evidence finish.
+    ExitConnectionTimeout,
     /// An administrator-authorized Exit replacement is waiting for fresh
     /// resource and reachability evidence. The old Exit remains recorded but
     /// packet admission stays closed until the replacement is committed.
@@ -58,7 +62,7 @@ pub enum RecoveryTrigger {
 impl RecoveryTrigger {
     fn invalidated_path(self) -> Option<InvalidatedPath> {
         match self {
-            Self::ExitDisconnected => Some(InvalidatedPath::Exit),
+            Self::ExitDisconnected | Self::ExitConnectionTimeout => Some(InvalidatedPath::Exit),
             Self::RelayDisconnected | Self::HandshakeInterrupted => Some(InvalidatedPath::Relay),
             Self::ExitMigration
             | Self::RuntimeDisconnected
@@ -71,6 +75,7 @@ impl RecoveryTrigger {
     pub(crate) fn failure_kind(self) -> Option<TrafficFailureKind> {
         match self {
             Self::ExitDisconnected => Some(TrafficFailureKind::ExitUnavailable),
+            Self::ExitConnectionTimeout => Some(TrafficFailureKind::ConnectionTimeout),
             Self::RelayDisconnected => Some(TrafficFailureKind::NetworkSelectionUnavailable),
             Self::HandshakeInterrupted => Some(TrafficFailureKind::HandshakeInterrupted),
             Self::RuntimeDisconnected => Some(TrafficFailureKind::RuntimeDisconnected),
@@ -1090,6 +1095,27 @@ mod tests {
             backend.applications()[0].diagnostic_id,
             report.diagnostic_id
         );
+        assert!(backend.calls().contains(&"revoke:Exit".to_string()));
+    }
+
+    #[tokio::test]
+    async fn exit_connection_timeout_revokes_the_stale_exit_and_fails_closed() {
+        let mut backend = FakeBackend::new(healthy_snapshot(), healthy_snapshot());
+        let report = RecoveryCoordinator
+            .recover(
+                &mut backend,
+                request(RecoveryTrigger::ExitConnectionTimeout),
+            )
+            .await;
+
+        assert_eq!(report.status, RecoveryStatus::DegradedFailClosed);
+        assert_eq!(report.revoked_paths, vec![InvalidatedPath::Exit]);
+        assert!(report.fail_closed_required);
+        assert!(report.traffic_session_validation.is_none());
+        let decision = report.failure_decisions.first().unwrap();
+        assert_eq!(decision.failure, TrafficFailureKind::ConnectionTimeout);
+        assert_eq!(decision.outcome, TrafficFailureOutcome::FailClosed);
+        assert!(decision.direct_fallback.is_none());
         assert!(backend.calls().contains(&"revoke:Exit".to_string()));
     }
 

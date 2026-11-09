@@ -1176,6 +1176,7 @@ mod tests {
                 join_mode: NetworkJoinMode::ApprovalRequired,
                 exit_contribution: ExitContributionObligation::NotRequired,
                 exit_contribution_scope: ExitContributionScope::NotApplicable,
+                exit_contribution_mode: Default::default(),
             },
             PublicKey::from_bytes([7; 32]),
             owner(),

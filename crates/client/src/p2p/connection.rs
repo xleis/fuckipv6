@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::crypto::Identity;
+use fuckipv6_common::domain::NodeId;
 use fuckipv6_common::{
     codec, ControlMessage, DataPacket, FallbackThreshold, NatDetectionConfig, NatType, P2pDatagram,
     PeerInfo, VirtualIps,
@@ -318,6 +319,7 @@ impl ReceiverIndex {
 #[derive(Debug, Clone)]
 pub(crate) struct PeerRouteInfo {
     pub client_id: Arc<str>,
+    pub node_id: NodeId,
     pub virtual_ip: Ipv6Addr,
     pub virtual_ips: VirtualIps,
 }
@@ -332,6 +334,7 @@ impl From<&PeerInfo> for PeerRouteInfo {
     fn from(peer: &PeerInfo) -> Self {
         Self {
             client_id: Arc::from(peer.client_id.as_str()),
+            node_id: NodeId::from_public_key(&peer.public_key),
             virtual_ip: peer.virtual_ip,
             virtual_ips: peer.virtual_ips.clone(),
         }
@@ -1356,6 +1359,7 @@ impl P2pEngine {
             .get(client_id.as_ref())
             .map(|connection| PeerRouteInfo {
                 client_id: client_id.clone(),
+                node_id: NodeId::from_public_key(&connection.peer_info.public_key),
                 virtual_ip: connection.peer_info.virtual_ip,
                 virtual_ips: connection.peer_info.virtual_ips.clone(),
             })
@@ -2814,6 +2818,7 @@ mod tests {
     fn route_info(client_id: &str, ipv6: Ipv6Addr) -> PeerRouteInfo {
         PeerRouteInfo {
             client_id: Arc::from(client_id),
+            node_id: NodeId::from_public_key(client_id.as_bytes()),
             virtual_ip: ipv6,
             virtual_ips: VirtualIps::from_ipv6(ipv6),
         }

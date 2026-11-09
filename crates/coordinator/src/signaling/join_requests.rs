@@ -773,6 +773,7 @@ mod tests {
                 join_mode: NetworkJoinMode::ApprovalRequired,
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
+                exit_contribution_mode: Default::default(),
             },
             roster_public_key(),
             owner.clone(),
@@ -806,6 +807,7 @@ mod tests {
                 privacy_policy_revision: 1,
                 exit_contribution: ExitContributionObligation::NotRequired,
                 exit_contribution_scope: Default::default(),
+                exit_contribution_mode: Default::default(),
                 member_limit: Some(10),
             },
             JoinRequestGrantPreview {
@@ -813,6 +815,7 @@ mod tests {
                 capabilities: vec![CapabilityKind::File],
                 exit_contribution: ExitContributionObligation::NotRequired,
                 exit_contribution_scope: Default::default(),
+                exit_contribution_mode: Default::default(),
                 file_access: true,
                 grants_data_plane_access: false,
             },

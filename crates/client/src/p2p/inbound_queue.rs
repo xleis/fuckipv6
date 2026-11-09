@@ -306,6 +306,7 @@ mod tests {
     use super::*;
     use crate::p2p::buffer_pool::InboundPayload;
     use crate::p2p::connection::PeerRouteInfo;
+    use fuckipv6_common::domain::NodeId;
     use fuckipv6_common::VirtualIps;
     use std::collections::{BTreeMap, HashSet};
 
@@ -313,6 +314,7 @@ mod tests {
         let ipv6 = "fd00::1".parse().expect("test IP");
         PeerRouteInfo {
             client_id: Arc::from("test-peer"),
+            node_id: NodeId::from_public_key(b"test-peer"),
             virtual_ip: ipv6,
             virtual_ips: VirtualIps::from_ipv6(ipv6),
         }

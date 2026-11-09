@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use fuckipv6_common::domain::NetworkId;
+use fuckipv6_common::domain::{NetworkId, NodeId};
 #[cfg(test)]
 use fuckipv6_common::is_encrypted_config_path;
 use fuckipv6_common::recent_error_log_lines;
@@ -19,7 +19,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, watch, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration, Instant};
 
@@ -53,14 +53,12 @@ use crate::routing::recovery::{
 };
 #[cfg(target_os = "linux")]
 use crate::routing::table::{parse_linux_ip_routes, RouteEntry};
-use crate::routing::ExitNodeManager;
+use crate::routing::{ExitContributionGate, ExitNodeManager};
 use crate::signaling::client::{SignalingClient, SignalingEvent};
 use crate::stats::StatsCollector;
 use crate::tun::TunDevice;
 #[cfg(target_os = "linux")]
-use fuckipv6_common::domain::{
-    NodeId, TrafficAction, TrafficFailurePolicy, TrafficFailureRouteContext,
-};
+use fuckipv6_common::domain::{TrafficAction, TrafficFailurePolicy, TrafficFailureRouteContext};
 use fuckipv6_secure_session::{AEAD_TAG_LEN, DATA_HEADER_LEN};
 
 const TUN_PACKET_BUFFER_SIZE: usize = 65536;
@@ -552,12 +550,15 @@ pub(crate) struct ClientRuntime {
     pub(crate) acl: fuckipv6_common::AclEngine,
     pub(crate) route_engine: SmartRouteEngine,
     pub(crate) exit_node_manager: ExitNodeManager,
+    pub(crate) exit_contribution_gate: ExitContributionGate,
     pub(crate) configured_exit_node: Option<String>,
     pub(crate) heartbeat_interval: tokio::time::Interval,
     pub(crate) config_path: String,
     pub(crate) config: ClientConfig,
     pub(crate) local_exit_enabled: bool,
     pub(crate) control_rx: mpsc::UnboundedReceiver<ipc::RuntimeCommand>,
+    node_state_updates: Option<watch::Receiver<NodeSnapshot>>,
+    exit_contribution_member_refresh_task: Option<JoinHandle<()>>,
     pub(crate) ipc_task: Option<JoinHandle<()>>,
     pub(crate) config_reload_task: Option<JoinHandle<()>>,
     pub(crate) relay_reconnect_task: Option<JoinHandle<()>>,
@@ -587,6 +588,7 @@ impl Drop for ClientRuntime {
         abort_task(&self.config_reload_task);
         self.tun_io.abort_reader();
         abort_task(&self.relay_reconnect_task);
+        abort_task(&self.exit_contribution_member_refresh_task);
         self.recovery_events.shutdown();
     }
 }
@@ -602,6 +604,10 @@ pub(crate) async fn prepare_client_runtime_ext(
     config.tun.name = crate::multi_network::derive_tun_name(network_name, &config.tun.name);
 
     let identity = load_identity(&config)?;
+    let exit_contribution_gate = ExitContributionGate::new(
+        NodeId::from_public_key(&identity.public_key()),
+        network_id.clone(),
+    );
     let relay_identity = identity.clone();
 
     let (p2p, nat_report) = create_p2p_engine(&config).await?;
@@ -806,12 +812,15 @@ pub(crate) async fn prepare_client_runtime_ext(
         acl,
         route_engine,
         exit_node_manager,
+        exit_contribution_gate,
         configured_exit_node,
         heartbeat_interval,
         config_path: config_path.to_string(),
         config,
         local_exit_enabled,
         control_rx,
+        node_state_updates: None,
+        exit_contribution_member_refresh_task: None,
         ipc_task: Some(tasks.ipc_task),
         config_reload_task: Some(tasks.config_reload_task),
         relay_reconnect_task: None,

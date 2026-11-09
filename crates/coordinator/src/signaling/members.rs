@@ -344,6 +344,7 @@ mod tests {
                 join_mode: NetworkJoinMode::ApprovalRequired,
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
+                exit_contribution_mode: Default::default(),
             },
             PublicKey::from_bytes([42; 32]),
             owner,
@@ -372,6 +373,7 @@ mod tests {
                 privacy_policy_revision: 1,
                 exit_contribution: ExitContributionObligation::NotRequired,
                 exit_contribution_scope: ExitContributionScope::NotApplicable,
+                exit_contribution_mode: Default::default(),
                 member_limit: Some(20),
             },
             JoinRequestGrantPreview {
@@ -379,6 +381,7 @@ mod tests {
                 capabilities: vec![CapabilityKind::File],
                 exit_contribution: ExitContributionObligation::NotRequired,
                 exit_contribution_scope: ExitContributionScope::NotApplicable,
+                exit_contribution_mode: Default::default(),
                 file_access: true,
                 grants_data_plane_access: true,
             },

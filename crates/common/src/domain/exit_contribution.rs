@@ -576,6 +576,30 @@ pub struct ExitContributionRequestChange {
     pub request: ExitContributionRequest,
 }
 
+/// Sanitized authorization evidence safe to disclose to every network member.
+/// It deliberately omits request prose, member-supplied limits and reviewer
+/// metadata while retaining everything needed to make a fail-closed decision.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct ExitContributionAuthorizationSnapshot {
+    pub request_id: ExitContributionRequestId,
+    pub network_id: NetworkId,
+    pub node_id: NodeId,
+    pub policy_revision: u64,
+    pub terms_hash: ContentHash,
+    pub state: ExitContributionRequestState,
+    pub revision: u64,
+    pub expires_at_unix_ms: u64,
+}
+
+impl ExitContributionAuthorizationSnapshot {
+    pub fn permits_contribution(&self, policy_revision: u64, terms_hash: &ContentHash) -> bool {
+        self.state == ExitContributionRequestState::Approved
+            && self.policy_revision == policy_revision
+            && &self.terms_hash == terms_hash
+            && self.expires_at_unix_ms > 0
+    }
+}
+
 impl ExitContributionRequest {
     #[allow(clippy::too_many_arguments)]
     pub fn submit(
@@ -784,6 +808,19 @@ impl ExitContributionRequest {
             && &self.terms_hash == terms_hash
     }
 
+    pub fn authorization_snapshot(&self) -> ExitContributionAuthorizationSnapshot {
+        ExitContributionAuthorizationSnapshot {
+            request_id: self.request_id.clone(),
+            network_id: self.network_id.clone(),
+            node_id: self.node_id.clone(),
+            policy_revision: self.policy_revision,
+            terms_hash: self.terms_hash.clone(),
+            state: self.state,
+            revision: self.revision,
+            expires_at_unix_ms: self.expires_at_unix_ms,
+        }
+    }
+
     fn ensure_revision(&self, expected_revision: u64) -> DomainResult<()> {
         if self.revision != expected_revision {
             return Err(DomainError::new(
@@ -859,7 +896,7 @@ pub struct ExitContributionAuthorizationInput<'a> {
     pub mode: ExitContributionMode,
     pub policy_revision: u64,
     pub terms_hash: &'a ContentHash,
-    pub request: Option<&'a ExitContributionRequest>,
+    pub request: Option<&'a ExitContributionAuthorizationSnapshot>,
     pub local_veto: bool,
     pub local_access_allowed: bool,
     pub now_unix_ms: u64,
@@ -897,11 +934,6 @@ pub fn authorize_exit_contribution(
             let Some(request) = input.request else {
                 return ExitContributionAuthorizationReason::AuthorizationRequired;
             };
-            let _ = request.reconcile_policy(
-                input.policy_revision,
-                input.terms_hash,
-                input.now_unix_ms,
-            );
             if request.permits_contribution(input.policy_revision, input.terms_hash) {
                 ExitContributionAuthorizationReason::Authorized
             } else if request.state == ExitContributionRequestState::Pending {
@@ -1095,11 +1127,12 @@ mod tests {
             12,
         );
         assert_eq!(decision.reason, ExitContributionAccessReason::LocalVeto);
+        let snapshot = request.authorization_snapshot();
         let reason = authorize_exit_contribution(ExitContributionAuthorizationInput {
             mode: ExitContributionMode::ApprovalRequired,
             policy_revision: 4,
             terms_hash: &terms_hash(),
-            request: Some(&request),
+            request: Some(&snapshot),
             local_veto: true,
             local_access_allowed: false,
             now_unix_ms: 12,
@@ -1173,5 +1206,46 @@ mod tests {
             10,
         );
         assert_eq!(healthy.state, ExitAvailabilityState::Available);
+    }
+
+    #[test]
+    fn authorization_snapshot_excludes_request_prose_and_tracks_approval_revision() {
+        let actor = node(b"requester");
+        let request = ExitContributionRequest::submit(
+            ExitContributionRequestId::from_public_key(b"snapshot-request"),
+            network(),
+            actor.clone(),
+            4,
+            terms_hash(),
+            Some(123_456),
+            Some(987_654),
+            100,
+        )
+        .unwrap();
+        let snapshot = request.authorization_snapshot();
+        assert_eq!(snapshot.node_id, actor);
+        assert_eq!(snapshot.state, ExitContributionRequestState::Pending);
+        assert_eq!(snapshot.revision, 1);
+        let encoded = serde_json::to_value(&snapshot).unwrap();
+        assert!(encoded.get("requested_bandwidth_kbps").is_none());
+        assert!(encoded.get("requested_traffic_quota_bytes").is_none());
+        assert!(encoded.get("reviewer_node_id").is_none());
+        assert!(encoded.get("decision_reason_code").is_none());
+
+        let approved = request
+            .review(
+                node(b"admin"),
+                1,
+                ExitContributionReviewAction::Approve,
+                Some("exit.approved".into()),
+                101,
+            )
+            .unwrap()
+            .request;
+        let approved_snapshot = approved.authorization_snapshot();
+        assert_eq!(approved_snapshot.revision, 2);
+        assert!(approved_snapshot.permits_contribution(4, &terms_hash()));
+        assert!(!approved_snapshot.permits_contribution(5, &terms_hash()));
+        assert!(!approved_snapshot.permits_contribution(4, &ContentHash::from_bytes(b"new")));
     }
 }

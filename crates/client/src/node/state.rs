@@ -6,12 +6,13 @@ use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 
 use fuckipv6_common::domain::{
-    ActivityEntry, CapabilityKind, CapabilityState, ExitContributionObligation,
-    ExitContributionScope, FieldPrivacyPolicy, MembershipRole, MembershipState, MembershipTerms,
-    NetworkAcl, NetworkId, NetworkJoinMode, NetworkMemberDirectory, NetworkMemberPresence,
-    NetworkMemberStatus, NetworkVisibility, NodeId, NodeLocalAccessPolicy, OperationRecovery,
-    TopologyBuilder, TopologyLinkObservation, TopologyMemberInput, TopologyNetworkInput,
-    TopologySnapshot, TopologyViewer, TrafficRoutingPageModel,
+    ActivityEntry, CapabilityKind, CapabilityState, ExitContributionMode,
+    ExitContributionObligation, ExitContributionScope, FieldPrivacyPolicy, MembershipRole,
+    MembershipState, MembershipTerms, NetworkAcl, NetworkId, NetworkJoinMode,
+    NetworkMemberDirectory, NetworkMemberPresence, NetworkMemberStatus, NetworkVisibility, NodeId,
+    NodeLocalAccessPolicy, OperationRecovery, TopologyBuilder, TopologyLinkObservation,
+    TopologyMemberInput, TopologyNetworkInput, TopologySnapshot, TopologyViewer,
+    TrafficRoutingPageModel,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -1051,6 +1052,7 @@ pub struct NodeNetworkMembershipSnapshot {
     pub member_limit: Option<u32>,
     pub exit_contribution: Option<ExitContributionObligation>,
     pub exit_contribution_scope: Option<ExitContributionScope>,
+    pub exit_contribution_mode: Option<ExitContributionMode>,
     pub terms_hash: Option<String>,
     /// Signed terms most recently observed from discovery. When these differ
     /// from `terms_hash`, members see a policy-change notice; the separate
@@ -1082,6 +1084,7 @@ pub struct NodeNetworkProfileSnapshot {
     pub join_mode: NetworkJoinMode,
     pub exit_contribution: ExitContributionObligation,
     pub exit_contribution_scope: ExitContributionScope,
+    pub exit_contribution_mode: ExitContributionMode,
     pub revision: u64,
     pub policy_revision: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2484,6 +2487,7 @@ mod tests {
             member_limit: None,
             exit_contribution: None,
             exit_contribution_scope: None,
+            exit_contribution_mode: None,
             terms_hash: None,
             current_terms: None,
             current_terms_hash: None,

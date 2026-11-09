@@ -7097,6 +7097,7 @@ mod tests {
             join_mode: Default::default(),
             exit_contribution: Default::default(),
             exit_contribution_scope: Default::default(),
+            exit_contribution_mode: Default::default(),
             signaling_port: 0,
             relay_port: 0,
             external_host: None,

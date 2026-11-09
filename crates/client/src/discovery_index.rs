@@ -537,6 +537,7 @@ struct JoinPreviewDigest<'a> {
     member_limit: Option<u32>,
     exit_contribution: fuckipv6_common::domain::ExitContributionObligation,
     exit_contribution_scope: fuckipv6_common::domain::ExitContributionScope,
+    exit_contribution_mode: fuckipv6_common::domain::ExitContributionMode,
     capability_summary: &'a [fuckipv6_common::domain::CapabilityKind],
     endpoints: &'a [fuckipv6_common::domain::NetworkEndpoint],
     privacy_changes: &'a [String],
@@ -1380,6 +1381,7 @@ fn preview_from_record(
         privacy_policy_revision: document.privacy_policy_revision,
         exit_contribution: document.exit_contribution,
         exit_contribution_scope: document.exit_contribution_scope,
+        exit_contribution_mode: document.exit_contribution_mode,
         member_limit: document.member_limit,
     };
     let terms_hash = terms
@@ -1401,6 +1403,7 @@ fn preview_from_record(
         member_limit: document.member_limit,
         exit_contribution: document.exit_contribution,
         exit_contribution_scope: document.exit_contribution_scope,
+        exit_contribution_mode: document.exit_contribution_mode,
         capability_summary: &document.capability_summary,
         endpoints: &document.endpoints,
         privacy_changes: &document.privacy_changes,
@@ -1451,6 +1454,7 @@ fn preview_from_record(
         member_limit: document.member_limit,
         exit_contribution: document.exit_contribution,
         exit_contribution_scope: document.exit_contribution_scope,
+        exit_contribution_mode: document.exit_contribution_mode,
         exit_contribution_purpose_key: "join.exit.disclosure.purpose".into(),
         exit_contribution_bandwidth_impact_key: "join.exit.disclosure.bandwidth".into(),
         exit_contribution_logging_boundary_key: "join.exit.disclosure.logging".into(),
@@ -1872,6 +1876,7 @@ mod tests {
                 join_mode,
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
+                exit_contribution_mode: Default::default(),
             },
             public_key,
             owner,
@@ -2260,6 +2265,7 @@ mod tests {
             member_limit: Some(20),
             exit_contribution: Some(ExitContributionObligation::Required),
             exit_contribution_scope: None,
+            exit_contribution_mode: None,
             terms_hash: None,
             current_terms: None,
             current_terms_hash: None,
@@ -2313,6 +2319,7 @@ mod tests {
             join_mode: NetworkJoinMode::Open,
             exit_contribution: Default::default(),
             exit_contribution_scope: Default::default(),
+            exit_contribution_mode: Default::default(),
         };
         let created = configs
             .create_owned_network(profile, "ws://127.0.0.1:6666", true)
@@ -2734,6 +2741,7 @@ mod tests {
                 privacy_policy_revision: approved_record.document.privacy_policy_revision,
                 exit_contribution: approved_record.document.exit_contribution,
                 exit_contribution_scope: approved_record.document.exit_contribution_scope,
+                exit_contribution_mode: approved_record.document.exit_contribution_mode,
                 member_limit: approved_record.document.member_limit,
             },
             profile.approval_grant_preview(),

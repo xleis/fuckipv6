@@ -6,13 +6,13 @@ use fuckipv6_common::domain::JoinRequestReviewAction;
 use fuckipv6_common::domain::{
     parse_policy_test_input, ActivityCategory, ActivityEntry, ActivitySeverity,
     ApplicationIdentity, AuditOutcome, CapabilityKind, CapabilityState, ContentHash,
-    ExitContributionObligation, ExitContributionScope, InvitationCode, InvitationId,
-    InvitationRedeemRequest, MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode,
-    NetworkMember, NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberOnlineState,
-    NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId, TopologyNode,
-    TopologyNodeHealth, TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy, TrafficFlow,
-    TrafficMatch, TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput, TrafficProtocol,
-    TrafficRoutingHitSample, TrafficRoutingObservation, TrafficRoutingPageModel,
+    ExitContributionMode, ExitContributionObligation, ExitContributionScope, InvitationCode,
+    InvitationId, InvitationRedeemRequest, MemberLifecycleAction, MembershipRole, NetworkId,
+    NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
+    NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId,
+    TopologyNode, TopologyNodeHealth, TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy,
+    TrafficFlow, TrafficMatch, TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput,
+    TrafficProtocol, TrafficRoutingHitSample, TrafficRoutingObservation, TrafficRoutingPageModel,
     TrafficRoutingRuleActivityEffect, TrafficRoutingRuleImpactView, TrafficRoutingTarget,
     TrafficRoutingTargetKind, TrafficRoutingTargetRef, TrafficRoutingWorkflowState,
 };
@@ -1787,6 +1787,7 @@ pub fn default_form_values(
                 ("create_network", "region") => "ZZ".into(),
                 ("create_network", "visibility") => "unlisted".into(),
                 ("create_network", "join_mode") => "invite_only".into(),
+                ("create_network", "exit_contribution_mode") => "disabled".into(),
                 ("create_network", "exit_contribution") => "not_required".into(),
                 ("create_network", "exit_contribution_scope") => "not_applicable".into(),
                 ("create_network", "auto_connect") => "true".into(),
@@ -1824,6 +1825,14 @@ pub fn default_form_values(
                 ("preview_network_profile" | "update_network_profile", "join_mode") => profile
                     .map(|profile| format!("{:?}", profile.join_mode).to_ascii_lowercase())
                     .unwrap_or_else(|| "invite_only".into()),
+                (
+                    "preview_network_profile" | "update_network_profile",
+                    "exit_contribution_mode",
+                ) => profile
+                    .map(|profile| {
+                        exit_contribution_mode_wire_value(profile.exit_contribution_mode).into()
+                    })
+                    .unwrap_or_else(|| "disabled".into()),
                 ("preview_network_profile" | "update_network_profile", "exit_contribution") => {
                     profile
                         .map(|profile| {
@@ -1955,6 +1964,10 @@ pub fn build_command(
                     action,
                     &required("exit_contribution_scope")?,
                 )?,
+                exit_contribution_mode: parse_exit_contribution_mode(
+                    action,
+                    &required("exit_contribution_mode")?,
+                )?,
                 signaling_port: parse_number(
                     action,
                     "signaling_port",
@@ -1986,6 +1999,10 @@ pub fn build_command(
                 exit_contribution_scope: parse_exit_contribution_scope(
                     action,
                     &required("exit_contribution_scope")?,
+                )?,
+                exit_contribution_mode: parse_exit_contribution_mode(
+                    action,
+                    &required("exit_contribution_mode")?,
                 )?,
             };
             let command = NodeNetworkProfileCommand {
@@ -2650,6 +2667,7 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
             "capability_declarations",
             "visibility",
             "join_mode",
+            "exit_contribution_mode",
             "exit_contribution",
             "exit_contribution_scope",
             "signaling_port",
@@ -2668,6 +2686,7 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
             "capability_declarations",
             "visibility",
             "join_mode",
+            "exit_contribution_mode",
             "exit_contribution",
             "exit_contribution_scope",
         ]),
@@ -2901,6 +2920,32 @@ fn parse_exit_contribution(
             field_id: "exit_contribution".into(),
             value: value.into(),
         }),
+    }
+}
+
+fn parse_exit_contribution_mode(
+    action: &NodeUiAction,
+    value: &str,
+) -> Result<ExitContributionMode, CommandBuildError> {
+    match value {
+        "autonomous" => Ok(ExitContributionMode::Autonomous),
+        "required_on_join" => Ok(ExitContributionMode::RequiredOnJoin),
+        "disabled" => Ok(ExitContributionMode::Disabled),
+        "approval_required" => Ok(ExitContributionMode::ApprovalRequired),
+        _ => Err(CommandBuildError::InvalidField {
+            action_id: action.id.clone(),
+            field_id: "exit_contribution_mode".into(),
+            value: value.into(),
+        }),
+    }
+}
+
+fn exit_contribution_mode_wire_value(mode: ExitContributionMode) -> &'static str {
+    match mode {
+        ExitContributionMode::Autonomous => "autonomous",
+        ExitContributionMode::RequiredOnJoin => "required_on_join",
+        ExitContributionMode::Disabled => "disabled",
+        ExitContributionMode::ApprovalRequired => "approval_required",
     }
 }
 
@@ -6606,6 +6651,7 @@ mod tests {
             member_limit: None,
             exit_contribution: Some(ExitContributionObligation::NotRequired),
             exit_contribution_scope: Some(ExitContributionScope::NotApplicable),
+            exit_contribution_mode: Some(ExitContributionMode::Disabled),
             terms_hash: None,
             current_terms: None,
             current_terms_hash: None,

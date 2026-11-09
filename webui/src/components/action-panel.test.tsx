@@ -246,6 +246,7 @@ const profileSnapshot: NodeSnapshot = {
       join_mode: publicProfile.join_mode,
       exit_contribution: "not_required",
       exit_contribution_scope: "not_applicable",
+      exit_contribution_mode: "disabled",
       revision: publicProfile.revision,
       policy_revision: 2,
       signed_profile: {
@@ -276,6 +277,7 @@ const joinPreview: NodeNetworkJoinPreview = {
   member_limit: 16,
   exit_contribution: "required",
   exit_contribution_scope: "joining_members",
+  exit_contribution_mode: "required_on_join",
   exit_contribution_purpose_key: "join.exit.disclosure.purpose",
   exit_contribution_bandwidth_impact_key: "join.exit.disclosure.bandwidth",
   exit_contribution_logging_boundary_key: "join.exit.disclosure.logging",

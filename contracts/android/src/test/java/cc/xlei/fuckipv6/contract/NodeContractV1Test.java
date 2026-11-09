@@ -659,6 +659,7 @@ public final class NodeContractV1Test {
                         null,
                         null,
                         null,
+                        null,
                         "network",
                         "invite_only",
                         "en",

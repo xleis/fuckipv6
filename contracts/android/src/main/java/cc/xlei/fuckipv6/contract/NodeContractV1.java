@@ -381,6 +381,32 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum ExitContributionMode {
+        AUTONOMOUS("autonomous"),
+        REQUIRED_ON_JOIN("required_on_join"),
+        DISABLED("disabled"),
+        APPROVAL_REQUIRED("approval_required");
+
+        private final String wireName;
+
+        ExitContributionMode(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static ExitContributionMode fromWireName(String value) {
+            for (ExitContributionMode candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown ExitContributionMode wire value: " + value);
+        }
+    }
+
     public enum ExitContributionObligation {
         REQUIRED("required"),
         NOT_REQUIRED("not_required");
@@ -1909,6 +1935,7 @@ public final class NodeContractV1 {
         CAPABILITY_DECLARATIONS("capability_declarations"),
         VISIBILITY("visibility"),
         JOIN_MODE("join_mode"),
+        EXIT_CONTRIBUTION_MODE("exit_contribution_mode"),
         EXIT_CONTRIBUTION("exit_contribution"),
         EXIT_CONTRIBUTION_SCOPE("exit_contribution_scope"),
         JOIN_REQUEST_ID("join_request_id"),
@@ -2012,6 +2039,7 @@ public final class NodeContractV1 {
         CAPABILITY_DECLARATIONS("capability_declarations"),
         VISIBILITY("visibility"),
         JOIN_MODE("join_mode"),
+        EXIT_CONTRIBUTION_MODE("exit_contribution_mode"),
         EXIT_CONTRIBUTION("exit_contribution"),
         EXIT_CONTRIBUTION_SCOPE("exit_contribution_scope"),
         JOIN_REQUEST_ID("join_request_id"),
@@ -3620,14 +3648,16 @@ public final class NodeContractV1 {
     public static final class JoinRequestGrantPreview {
         public final List<CapabilityKind> capabilities;
         public final ExitContributionObligation exit_contribution;
+        public final String exit_contribution_mode;
         public final String exit_contribution_scope;
         public final Boolean file_access;
         public final Boolean grants_data_plane_access;
         public final MembershipRole role;
 
-        public JoinRequestGrantPreview(List<CapabilityKind> capabilities, ExitContributionObligation exit_contribution, String exit_contribution_scope, Boolean file_access, Boolean grants_data_plane_access, MembershipRole role) {
+        public JoinRequestGrantPreview(List<CapabilityKind> capabilities, ExitContributionObligation exit_contribution, String exit_contribution_mode, String exit_contribution_scope, Boolean file_access, Boolean grants_data_plane_access, MembershipRole role) {
             this.capabilities = capabilities;
             this.exit_contribution = exit_contribution;
+            this.exit_contribution_mode = exit_contribution_mode;
             this.exit_contribution_scope = exit_contribution_scope;
             this.file_access = file_access;
             this.grants_data_plane_access = grants_data_plane_access;
@@ -3741,13 +3771,15 @@ public final class NodeContractV1 {
     /** DTO for MembershipTerms. */
     public static final class MembershipTerms {
         public final ExitContributionObligation exit_contribution;
+        public final String exit_contribution_mode;
         public final String exit_contribution_scope;
         public final Long member_limit;
         public final Long network_policy_revision;
         public final Long privacy_policy_revision;
 
-        public MembershipTerms(ExitContributionObligation exit_contribution, String exit_contribution_scope, Long member_limit, Long network_policy_revision, Long privacy_policy_revision) {
+        public MembershipTerms(ExitContributionObligation exit_contribution, String exit_contribution_mode, String exit_contribution_scope, Long member_limit, Long network_policy_revision, Long privacy_policy_revision) {
             this.exit_contribution = exit_contribution;
+            this.exit_contribution_mode = exit_contribution_mode;
             this.exit_contribution_scope = exit_contribution_scope;
             this.member_limit = member_limit;
             this.network_policy_revision = network_policy_revision;
@@ -3822,6 +3854,7 @@ public final class NodeContractV1 {
         public final List<CapabilityKind> capability_summary;
         public final List<NetworkEndpoint> endpoints;
         public final ExitContributionObligation exit_contribution;
+        public final String exit_contribution_mode;
         public final String exit_contribution_scope;
         public final Long expires_at_unix_ms;
         public final Long issued_at_unix_ms;
@@ -3845,11 +3878,12 @@ public final class NodeContractV1 {
         public final List<String> tags;
         public final NetworkVisibility visibility;
 
-        public NetworkDiscoveryDocument(List<String> administrators, List<CapabilityKind> capability_summary, List<NetworkEndpoint> endpoints, ExitContributionObligation exit_contribution, String exit_contribution_scope, Long expires_at_unix_ms, Long issued_at_unix_ms, String join_mode, String language, Long member_count, Long member_limit, String name, String network_id, String owner, Long policy_revision, List<String> privacy_changes, Long privacy_policy_revision, String public_key, String publisher, String purpose, String region, Long revision, Long revoked_at_unix_ms, Integer schema_version, List<String> tags, NetworkVisibility visibility) {
+        public NetworkDiscoveryDocument(List<String> administrators, List<CapabilityKind> capability_summary, List<NetworkEndpoint> endpoints, ExitContributionObligation exit_contribution, String exit_contribution_mode, String exit_contribution_scope, Long expires_at_unix_ms, Long issued_at_unix_ms, String join_mode, String language, Long member_count, Long member_limit, String name, String network_id, String owner, Long policy_revision, List<String> privacy_changes, Long privacy_policy_revision, String public_key, String publisher, String purpose, String region, Long revision, Long revoked_at_unix_ms, Integer schema_version, List<String> tags, NetworkVisibility visibility) {
             this.administrators = administrators;
             this.capability_summary = capability_summary;
             this.endpoints = endpoints;
             this.exit_contribution = exit_contribution;
+            this.exit_contribution_mode = exit_contribution_mode;
             this.exit_contribution_scope = exit_contribution_scope;
             this.expires_at_unix_ms = expires_at_unix_ms;
             this.issued_at_unix_ms = issued_at_unix_ms;
@@ -4072,6 +4106,7 @@ public final class NodeContractV1 {
     public static final class NetworkProfileUpdate {
         public final List<CapabilityKind> capability_declarations;
         public final ExitContributionObligation exit_contribution;
+        public final String exit_contribution_mode;
         public final String exit_contribution_scope;
         public final String icon;
         public final String join_mode;
@@ -4081,9 +4116,10 @@ public final class NodeContractV1 {
         public final List<String> tags;
         public final NetworkVisibility visibility;
 
-        public NetworkProfileUpdate(List<CapabilityKind> capability_declarations, ExitContributionObligation exit_contribution, String exit_contribution_scope, String icon, String join_mode, String language, String purpose, String region, List<String> tags, NetworkVisibility visibility) {
+        public NetworkProfileUpdate(List<CapabilityKind> capability_declarations, ExitContributionObligation exit_contribution, String exit_contribution_mode, String exit_contribution_scope, String icon, String join_mode, String language, String purpose, String region, List<String> tags, NetworkVisibility visibility) {
             this.capability_declarations = capability_declarations;
             this.exit_contribution = exit_contribution;
+            this.exit_contribution_mode = exit_contribution_mode;
             this.exit_contribution_scope = exit_contribution_scope;
             this.icon = icon;
             this.join_mode = join_mode;
@@ -4550,6 +4586,7 @@ public final class NodeContractV1 {
         public final Boolean auto_connect;
         public final List<CapabilityKind> capability_declarations;
         public final ExitContributionObligation exit_contribution;
+        public final String exit_contribution_mode;
         public final String exit_contribution_scope;
         public final String external_host;
         public final String icon;
@@ -4563,10 +4600,11 @@ public final class NodeContractV1 {
         public final List<String> tags;
         public final NetworkVisibility visibility;
 
-        public NodeCreateNetworkCommand(Boolean auto_connect, List<CapabilityKind> capability_declarations, ExitContributionObligation exit_contribution, String exit_contribution_scope, String external_host, String icon, String join_mode, String language, String name, String purpose, String region, Integer relay_port, Integer signaling_port, List<String> tags, NetworkVisibility visibility) {
+        public NodeCreateNetworkCommand(Boolean auto_connect, List<CapabilityKind> capability_declarations, ExitContributionObligation exit_contribution, String exit_contribution_mode, String exit_contribution_scope, String external_host, String icon, String join_mode, String language, String name, String purpose, String region, Integer relay_port, Integer signaling_port, List<String> tags, NetworkVisibility visibility) {
             this.auto_connect = auto_connect;
             this.capability_declarations = capability_declarations;
             this.exit_contribution = exit_contribution;
+            this.exit_contribution_mode = exit_contribution_mode;
             this.exit_contribution_scope = exit_contribution_scope;
             this.external_host = external_host;
             this.icon = icon;
@@ -5226,6 +5264,7 @@ public final class NodeContractV1 {
         public final String exit_contribution_bandwidth_impact_key;
         public final String exit_contribution_disable_key;
         public final String exit_contribution_logging_boundary_key;
+        public final String exit_contribution_mode;
         public final String exit_contribution_purpose_key;
         public final String exit_contribution_scope;
         public final Long expires_at_unix_ms;
@@ -5248,7 +5287,7 @@ public final class NodeContractV1 {
         public final String terms_hash;
         public final NetworkVisibility visibility;
 
-        public NodeNetworkJoinPreview(List<String> administrators, Boolean already_member, String blocked_reason_key, Boolean can_join, Boolean can_join_without_local_exit, List<CapabilityKind> capability_summary, String contribution_policy_key, Long discovery_revision, List<NetworkEndpoint> endpoints, ExitContributionObligation exit_contribution, String exit_contribution_bandwidth_impact_key, String exit_contribution_disable_key, String exit_contribution_logging_boundary_key, String exit_contribution_purpose_key, String exit_contribution_scope, Long expires_at_unix_ms, Long issued_at_unix_ms, String join_mode, Boolean join_requires_exit_consent, Boolean local_exit_available, Boolean local_exit_enabled, List<CapabilityKind> locally_contributed_capabilities, Long member_count, Long member_limit, String network_id, String network_name, Long network_policy_revision, String owner, String preview_digest, List<String> privacy_changes, Long privacy_policy_revision, String public_key, String terms_hash, NetworkVisibility visibility) {
+        public NodeNetworkJoinPreview(List<String> administrators, Boolean already_member, String blocked_reason_key, Boolean can_join, Boolean can_join_without_local_exit, List<CapabilityKind> capability_summary, String contribution_policy_key, Long discovery_revision, List<NetworkEndpoint> endpoints, ExitContributionObligation exit_contribution, String exit_contribution_bandwidth_impact_key, String exit_contribution_disable_key, String exit_contribution_logging_boundary_key, String exit_contribution_mode, String exit_contribution_purpose_key, String exit_contribution_scope, Long expires_at_unix_ms, Long issued_at_unix_ms, String join_mode, Boolean join_requires_exit_consent, Boolean local_exit_available, Boolean local_exit_enabled, List<CapabilityKind> locally_contributed_capabilities, Long member_count, Long member_limit, String network_id, String network_name, Long network_policy_revision, String owner, String preview_digest, List<String> privacy_changes, Long privacy_policy_revision, String public_key, String terms_hash, NetworkVisibility visibility) {
             this.administrators = administrators;
             this.already_member = already_member;
             this.blocked_reason_key = blocked_reason_key;
@@ -5262,6 +5301,7 @@ public final class NodeContractV1 {
             this.exit_contribution_bandwidth_impact_key = exit_contribution_bandwidth_impact_key;
             this.exit_contribution_disable_key = exit_contribution_disable_key;
             this.exit_contribution_logging_boundary_key = exit_contribution_logging_boundary_key;
+            this.exit_contribution_mode = exit_contribution_mode;
             this.exit_contribution_purpose_key = exit_contribution_purpose_key;
             this.exit_contribution_scope = exit_contribution_scope;
             this.expires_at_unix_ms = expires_at_unix_ms;
@@ -5332,6 +5372,7 @@ public final class NodeContractV1 {
         public final MembershipTerms current_terms;
         public final String current_terms_hash;
         public final ExitContributionObligation exit_contribution;
+        public final String exit_contribution_mode;
         public final String exit_contribution_scope;
         public final Long local_policy_revision;
         public final Long member_limit;
@@ -5347,12 +5388,13 @@ public final class NodeContractV1 {
         public final String terms_hash;
         public final Long updated_at_unix_ms;
 
-        public NodeNetworkMembershipSnapshot(Long acknowledged_at_unix_ms, Long created_at_unix_ms, MembershipTerms current_terms, String current_terms_hash, ExitContributionObligation exit_contribution, String exit_contribution_scope, Long local_policy_revision, Long member_limit, String network_id, String network_name, Long network_policy_revision, String node_id, Boolean policy_confirmation_required, Long privacy_policy_revision, MembershipRole role, MembershipState state, String suspension_reason, String terms_hash, Long updated_at_unix_ms) {
+        public NodeNetworkMembershipSnapshot(Long acknowledged_at_unix_ms, Long created_at_unix_ms, MembershipTerms current_terms, String current_terms_hash, ExitContributionObligation exit_contribution, String exit_contribution_mode, String exit_contribution_scope, Long local_policy_revision, Long member_limit, String network_id, String network_name, Long network_policy_revision, String node_id, Boolean policy_confirmation_required, Long privacy_policy_revision, MembershipRole role, MembershipState state, String suspension_reason, String terms_hash, Long updated_at_unix_ms) {
             this.acknowledged_at_unix_ms = acknowledged_at_unix_ms;
             this.created_at_unix_ms = created_at_unix_ms;
             this.current_terms = current_terms;
             this.current_terms_hash = current_terms_hash;
             this.exit_contribution = exit_contribution;
+            this.exit_contribution_mode = exit_contribution_mode;
             this.exit_contribution_scope = exit_contribution_scope;
             this.local_policy_revision = local_policy_revision;
             this.member_limit = member_limit;
@@ -5387,6 +5429,7 @@ public final class NodeContractV1 {
     public static final class NodeNetworkProfileSnapshot {
         public final List<CapabilityKind> capability_declarations;
         public final ExitContributionObligation exit_contribution;
+        public final String exit_contribution_mode;
         public final String exit_contribution_scope;
         public final String icon;
         public final String join_mode;
@@ -5401,9 +5444,10 @@ public final class NodeContractV1 {
         public final List<String> tags;
         public final NetworkVisibility visibility;
 
-        public NodeNetworkProfileSnapshot(List<CapabilityKind> capability_declarations, ExitContributionObligation exit_contribution, String exit_contribution_scope, String icon, String join_mode, String language, String name, String network_id, Long policy_revision, String purpose, String region, Long revision, NodeSignedNetworkProfileSnapshot signed_profile, List<String> tags, NetworkVisibility visibility) {
+        public NodeNetworkProfileSnapshot(List<CapabilityKind> capability_declarations, ExitContributionObligation exit_contribution, String exit_contribution_mode, String exit_contribution_scope, String icon, String join_mode, String language, String name, String network_id, Long policy_revision, String purpose, String region, Long revision, NodeSignedNetworkProfileSnapshot signed_profile, List<String> tags, NetworkVisibility visibility) {
             this.capability_declarations = capability_declarations;
             this.exit_contribution = exit_contribution;
+            this.exit_contribution_mode = exit_contribution_mode;
             this.exit_contribution_scope = exit_contribution_scope;
             this.icon = icon;
             this.join_mode = join_mode;

@@ -662,6 +662,31 @@
       ],
       "type": "string"
     },
+    "ExitContributionMode": {
+      "description": "Explicit Exit contribution policy. The legacy obligation/scope pair remains\non the wire for compatibility, but it cannot distinguish voluntary\ncontribution from a prohibition or an authorization flow. New policies bind\nthis mode into terms hashes and signed discovery data.",
+      "oneOf": [
+        {
+          "const": "autonomous",
+          "description": "Members may explicitly opt in; joining never enables Exit locally.",
+          "type": "string"
+        },
+        {
+          "const": "required_on_join",
+          "description": "The member must provide Exit capacity as a condition of joining.",
+          "type": "string"
+        },
+        {
+          "const": "disabled",
+          "description": "Members may not contribute Exit capacity to this network.",
+          "type": "string"
+        },
+        {
+          "const": "approval_required",
+          "description": "Members may request authorization before contributing Exit capacity.",
+          "type": "string"
+        }
+      ]
+    },
     "ExitContributionObligation": {
       "description": "Exit contribution is an explicit network admission obligation, not a\ncapability silently enabled by joining.",
       "enum": [
@@ -1282,6 +1307,10 @@
           "$ref": "#/$defs/ExitContributionObligation",
           "default": "not_required"
         },
+        "exit_contribution_mode": {
+          "$ref": "#/$defs/ExitContributionMode",
+          "default": "disabled"
+        },
         "exit_contribution_scope": {
           "$ref": "#/$defs/ExitContributionScope",
           "default": "not_applicable"
@@ -1616,6 +1645,11 @@
         "exit_contribution": {
           "$ref": "#/$defs/ExitContributionObligation"
         },
+        "exit_contribution_mode": {
+          "$ref": "#/$defs/ExitContributionMode",
+          "default": "disabled",
+          "description": "Explicit four-mode policy. Omitted from the canonical hash for legacy\nRequired/JoiningMembers and NotRequired/NotApplicable records so their\nacknowledgements and signatures remain verifiable."
+        },
         "exit_contribution_scope": {
           "$ref": "#/$defs/ExitContributionScope",
           "default": "not_applicable"
@@ -1821,6 +1855,10 @@
         "exit_contribution": {
           "$ref": "#/$defs/ExitContributionObligation",
           "default": "not_required"
+        },
+        "exit_contribution_mode": {
+          "$ref": "#/$defs/ExitContributionMode",
+          "default": "disabled"
         },
         "exit_contribution_scope": {
           "$ref": "#/$defs/ExitContributionScope",
@@ -4669,6 +4707,9 @@
         "exit_contribution_logging_boundary_key": {
           "type": "string"
         },
+        "exit_contribution_mode": {
+          "$ref": "#/$defs/ExitContributionMode"
+        },
         "exit_contribution_purpose_key": {
           "description": "Stable disclosure keys cover what the local owner is consenting to.\nThey never enable or advertise the local Exit service by themselves.",
           "type": "string"
@@ -4777,6 +4818,7 @@
         "member_count",
         "exit_contribution",
         "exit_contribution_scope",
+        "exit_contribution_mode",
         "exit_contribution_purpose_key",
         "exit_contribution_bandwidth_impact_key",
         "exit_contribution_logging_boundary_key",
@@ -4886,6 +4928,16 @@
             }
           ]
         },
+        "exit_contribution_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExitContributionMode"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "exit_contribution_scope": {
           "anyOf": [
             {
@@ -4985,6 +5037,9 @@
         "exit_contribution": {
           "$ref": "#/$defs/ExitContributionObligation"
         },
+        "exit_contribution_mode": {
+          "$ref": "#/$defs/ExitContributionMode"
+        },
         "exit_contribution_scope": {
           "$ref": "#/$defs/ExitContributionScope"
         },
@@ -5052,6 +5107,7 @@
         "join_mode",
         "exit_contribution",
         "exit_contribution_scope",
+        "exit_contribution_mode",
         "revision",
         "policy_revision"
       ],
@@ -6318,6 +6374,7 @@
         "capability_declarations",
         "visibility",
         "join_mode",
+        "exit_contribution_mode",
         "exit_contribution",
         "exit_contribution_scope",
         "join_request_id",
@@ -6450,6 +6507,7 @@
         "capability_declarations",
         "visibility",
         "join_mode",
+        "exit_contribution_mode",
         "exit_contribution",
         "exit_contribution_scope",
         "join_request_id",

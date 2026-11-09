@@ -983,6 +983,7 @@ async fn refresh_network_memberships(
                     privacy_policy_revision: document.privacy_policy_revision,
                     exit_contribution: document.exit_contribution,
                     exit_contribution_scope: document.exit_contribution_scope,
+                    exit_contribution_mode: document.exit_contribution_mode,
                     member_limit: document.member_limit,
                 },
             )
@@ -1041,6 +1042,10 @@ fn network_membership_snapshot(
             .terms
             .as_ref()
             .map(|terms| terms.exit_contribution_scope),
+        exit_contribution_mode: membership
+            .terms
+            .as_ref()
+            .map(|terms| terms.exit_contribution_mode),
         terms_hash: membership
             .terms_ack
             .as_ref()
@@ -1076,6 +1081,7 @@ fn network_profile_snapshot(record: NetworkRecord) -> NodeNetworkProfileSnapshot
         join_mode: record.join_mode,
         exit_contribution: record.exit_contribution,
         exit_contribution_scope: record.exit_contribution_scope,
+        exit_contribution_mode: record.exit_contribution_mode,
         revision: record.revision,
         policy_revision: record.policy_revision,
         signed_profile: record
@@ -2147,6 +2153,7 @@ fn approval_join_request_from_record(
         privacy_policy_revision: document.privacy_policy_revision,
         exit_contribution: document.exit_contribution,
         exit_contribution_scope: document.exit_contribution_scope,
+        exit_contribution_mode: document.exit_contribution_mode,
         member_limit: document.member_limit,
     };
     let grant_preview = JoinRequestGrantPreview {
@@ -2154,6 +2161,7 @@ fn approval_join_request_from_record(
         capabilities: document.capability_summary.clone(),
         exit_contribution: document.exit_contribution,
         exit_contribution_scope: document.exit_contribution_scope,
+        exit_contribution_mode: document.exit_contribution_mode,
         file_access: document.capability_summary.contains(&CapabilityKind::File),
         grants_data_plane_access: true,
     };
@@ -3529,6 +3537,7 @@ async fn persist_joined_membership(
             privacy_policy_revision: record.document.privacy_policy_revision,
             exit_contribution: record.document.exit_contribution,
             exit_contribution_scope: record.document.exit_contribution_scope,
+            exit_contribution_mode: record.document.exit_contribution_mode,
             member_limit: record.document.member_limit,
         };
         let identity = configs
@@ -4202,6 +4211,7 @@ mod tests {
             privacy_policy_revision: 3,
             exit_contribution: Default::default(),
             exit_contribution_scope: Default::default(),
+            exit_contribution_mode: Default::default(),
             member_limit: Some(25),
         };
         let mut preview = InvitationPreview {
@@ -4298,6 +4308,7 @@ mod tests {
             member_count: 4,
             exit_contribution: ExitContributionObligation::Required,
             exit_contribution_scope: fuckipv6_common::domain::ExitContributionScope::JoiningMembers,
+            exit_contribution_mode: fuckipv6_common::domain::ExitContributionMode::RequiredOnJoin,
             privacy_changes: vec!["仅公开审批所需的资料".into()],
             issued_at_unix_ms: now_unix_ms.saturating_sub(1_000),
             expires_at_unix_ms: now_unix_ms.saturating_add(60_000),
@@ -5648,6 +5659,7 @@ mod tests {
                 join_mode: Default::default(),
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
+                exit_contribution_mode: Default::default(),
                 signaling_port: 6666,
                 relay_port: 6667,
                 external_host: None,
@@ -5853,6 +5865,7 @@ mod tests {
             privacy_policy_revision: 1,
             exit_contribution: ExitContributionObligation::Required,
             exit_contribution_scope: ExitContributionScope::JoiningMembers,
+            exit_contribution_mode: fuckipv6_common::domain::ExitContributionMode::RequiredOnJoin,
             member_limit: None,
         };
         let mut membership = fuckipv6_common::domain::NetworkMembership::new(
@@ -6128,6 +6141,11 @@ mod tests {
             member_limit: Some(16),
             exit_contribution,
             exit_contribution_scope: ExitContributionScope::JoiningMembers,
+            exit_contribution_mode: if exit_contribution == ExitContributionObligation::Required {
+                fuckipv6_common::domain::ExitContributionMode::RequiredOnJoin
+            } else {
+                fuckipv6_common::domain::ExitContributionMode::Disabled
+            },
             exit_contribution_purpose_key: "join.exit.disclosure.purpose".into(),
             exit_contribution_bandwidth_impact_key: "join.exit.disclosure.bandwidth".into(),
             exit_contribution_logging_boundary_key: "join.exit.disclosure.logging".into(),

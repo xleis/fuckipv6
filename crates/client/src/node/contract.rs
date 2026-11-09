@@ -319,6 +319,7 @@ mod tests {
                 join_mode: Default::default(),
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
+                exit_contribution_mode: Default::default(),
                 signaling_port: 41000,
                 relay_port: 42000,
                 external_host: None,
@@ -338,6 +339,7 @@ mod tests {
                     join_mode: Default::default(),
                     exit_contribution: Default::default(),
                     exit_contribution_scope: Default::default(),
+                    exit_contribution_mode: Default::default(),
                 },
             }),
             NodeCommand::UpdateNetworkProfile(NodeNetworkProfileCommand {
@@ -354,6 +356,7 @@ mod tests {
                     join_mode: Default::default(),
                     exit_contribution: Default::default(),
                     exit_contribution_scope: Default::default(),
+                    exit_contribution_mode: Default::default(),
                 },
             }),
             NodeCommand::PublishNetworkDiscovery(NodeNetworkDiscoveryCommand {

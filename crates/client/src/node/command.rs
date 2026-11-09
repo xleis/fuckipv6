@@ -7,14 +7,15 @@ use base64::Engine;
 use fuckipv6_common::domain::{
     default_network_icon, default_network_language, default_network_purpose,
     default_network_region, ActivityEntry, AuditEntry, AuditOutcome, CapabilityKind, ContentHash,
-    ExitContributionObligation, ExitContributionScope, InvitationCode, InvitationCreateRequest,
-    InvitationId, InvitationPreview, InvitationRedeemRequest, InvitationRedemption,
-    InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
-    MemberLifecycleAction, MemberLifecycleChange, MemberRemovalPreview, MembershipRole,
-    NetworkCreateProfile, NetworkDiscoveryRecord, NetworkEndpoint, NetworkId, NetworkJoinMode,
-    NetworkMemberDirectory, NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate,
-    NetworkVisibility, PermissionDenialCode, PolicyTestInput, PolicyTestResult, TrafficPolicy,
-    TrafficPolicyTestComparison, TrafficPolicyTestInput, TrafficPolicyTestVisibility,
+    ExitContributionMode, ExitContributionObligation, ExitContributionScope, InvitationCode,
+    InvitationCreateRequest, InvitationId, InvitationPreview, InvitationRedeemRequest,
+    InvitationRedemption, InvitationStatusView, IssuedInvitation, JoinRequest,
+    JoinRequestReviewAction, JoinRequestState, MemberLifecycleAction, MemberLifecycleChange,
+    MemberRemovalPreview, MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord,
+    NetworkEndpoint, NetworkId, NetworkJoinMode, NetworkMemberDirectory, NetworkProfileApplyResult,
+    NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility, PermissionDenialCode,
+    PolicyTestInput, PolicyTestResult, TrafficPolicy, TrafficPolicyTestComparison,
+    TrafficPolicyTestInput, TrafficPolicyTestVisibility,
     JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS, JOIN_REQUEST_MAX_REASON_CHARS,
     NETWORK_PROFILE_MAX_TAG_CHARS,
 };
@@ -1069,6 +1070,8 @@ pub struct NodeCreateNetworkCommand {
     pub exit_contribution: ExitContributionObligation,
     #[serde(default)]
     pub exit_contribution_scope: ExitContributionScope,
+    #[serde(default)]
+    pub exit_contribution_mode: ExitContributionMode,
     pub signaling_port: u16,
     pub relay_port: u16,
     pub external_host: Option<String>,
@@ -1130,8 +1133,12 @@ impl NodeCreateNetworkCommand {
         }
         validate_profile_tags(&self.tags, &mut issues);
         validate_profile_capabilities(&self.capability_declarations, &mut issues);
-        if (self.exit_contribution == ExitContributionObligation::NotRequired)
-            != (self.exit_contribution_scope == ExitContributionScope::NotApplicable)
+        if fuckipv6_common::domain::validate_exit_contribution_policy(
+            self.exit_contribution,
+            self.exit_contribution_scope,
+            self.exit_contribution_mode,
+        )
+        .is_err()
         {
             issues.push(NodeValidationIssue {
                 path: "exit_contribution_scope".into(),
@@ -1194,6 +1201,7 @@ impl NodeCreateNetworkCommand {
             join_mode: self.join_mode,
             exit_contribution: self.exit_contribution,
             exit_contribution_scope: self.exit_contribution_scope,
+            exit_contribution_mode: self.exit_contribution_mode,
         }
     }
 }
@@ -1967,6 +1975,7 @@ pub struct NodeNetworkJoinPreview {
     pub member_limit: Option<u32>,
     pub exit_contribution: ExitContributionObligation,
     pub exit_contribution_scope: ExitContributionScope,
+    pub exit_contribution_mode: ExitContributionMode,
     /// Stable disclosure keys cover what the local owner is consenting to.
     /// They never enable or advertise the local Exit service by themselves.
     pub exit_contribution_purpose_key: String,
@@ -3851,6 +3860,7 @@ mod tests {
                 join_mode: NetworkJoinMode::InviteOnly,
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
+                exit_contribution_mode: Default::default(),
                 signaling_port: 6666,
                 relay_port: 6667,
                 external_host: Some("vpn.example.com".into()),
@@ -3870,6 +3880,7 @@ mod tests {
                     join_mode: NetworkJoinMode::InviteOnly,
                     exit_contribution: Default::default(),
                     exit_contribution_scope: Default::default(),
+                    exit_contribution_mode: Default::default(),
                 },
             }),
             NodeCommand::UpdateNetworkProfile(NodeNetworkProfileCommand {
@@ -3886,6 +3897,7 @@ mod tests {
                     join_mode: NetworkJoinMode::InviteOnly,
                     exit_contribution: Default::default(),
                     exit_contribution_scope: Default::default(),
+                    exit_contribution_mode: Default::default(),
                 },
             }),
             NodeCommand::PublishNetworkDiscovery(NodeNetworkDiscoveryCommand {
@@ -4346,6 +4358,7 @@ mod tests {
             join_mode: NetworkJoinMode::InviteOnly,
             exit_contribution: Default::default(),
             exit_contribution_scope: Default::default(),
+            exit_contribution_mode: Default::default(),
             signaling_port: 6666,
             relay_port: 6667,
             external_host: None,
@@ -4377,6 +4390,7 @@ mod tests {
             join_mode: NetworkJoinMode::InviteOnly,
             exit_contribution: Default::default(),
             exit_contribution_scope: Default::default(),
+            exit_contribution_mode: Default::default(),
             signaling_port: 6666,
             relay_port: 6667,
             external_host: None,
@@ -4397,6 +4411,7 @@ mod tests {
             join_mode: NetworkJoinMode::InviteOnly,
             exit_contribution: Default::default(),
             exit_contribution_scope: Default::default(),
+            exit_contribution_mode: Default::default(),
             signaling_port: 6666,
             relay_port: 6667,
             external_host: Some("vpn.example.com".into()),
@@ -4577,6 +4592,7 @@ mod tests {
                 join_mode: NetworkJoinMode::InviteOnly,
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
+                exit_contribution_mode: Default::default(),
                 signaling_port: 0,
                 relay_port: 6667,
                 external_host: None,
@@ -4594,6 +4610,7 @@ mod tests {
                 join_mode: NetworkJoinMode::InviteOnly,
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
+                exit_contribution_mode: Default::default(),
                 signaling_port: 6666,
                 relay_port: 6666,
                 external_host: None,
@@ -4611,6 +4628,7 @@ mod tests {
                 join_mode: NetworkJoinMode::InviteOnly,
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
+                exit_contribution_mode: Default::default(),
                 signaling_port: 6666,
                 relay_port: 6667,
                 external_host: Some("  ".into()),
@@ -5337,6 +5355,7 @@ mod tests {
             join_mode: NetworkJoinMode::InviteOnly,
             exit_contribution: Default::default(),
             exit_contribution_scope: Default::default(),
+            exit_contribution_mode: Default::default(),
             signaling_port: 6666,
             relay_port: 6667,
             external_host: None,
@@ -5651,6 +5670,7 @@ mod tests {
             privacy_policy_revision: 2,
             exit_contribution: ExitContributionObligation::Required,
             exit_contribution_scope: ExitContributionScope::AllMembers,
+            exit_contribution_mode: ExitContributionMode::RequiredOnJoin,
             member_limit: Some(16),
         };
         crate::node::NodeNetworkMembershipSnapshot {
@@ -5665,6 +5685,7 @@ mod tests {
             member_limit: Some(16),
             exit_contribution: Some(ExitContributionObligation::Required),
             exit_contribution_scope: Some(ExitContributionScope::AllMembers),
+            exit_contribution_mode: Some(ExitContributionMode::RequiredOnJoin),
             terms_hash: Some(terms_hash.as_str().to_owned()),
             current_terms: Some(terms),
             current_terms_hash: Some(terms_hash.as_str().to_owned()),

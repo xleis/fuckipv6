@@ -459,6 +459,7 @@ describe("node UI contract invariants", () => {
         join_mode: publicProfile.join_mode,
         exit_contribution: "not_required",
         exit_contribution_scope: "not_applicable",
+        exit_contribution_mode: "disabled",
         revision: publicProfile.revision,
         policy_revision: 2,
         signed_profile: {

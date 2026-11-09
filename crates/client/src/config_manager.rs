@@ -1656,6 +1656,7 @@ mod tests {
             join_mode: NetworkJoinMode::InviteOnly,
             exit_contribution: Default::default(),
             exit_contribution_scope: Default::default(),
+            exit_contribution_mode: Default::default(),
         }
     }
 
@@ -1667,6 +1668,7 @@ mod tests {
             privacy_policy_revision: 3,
             exit_contribution: ExitContributionObligation::Required,
             exit_contribution_scope: ExitContributionScope::JoiningMembers,
+            exit_contribution_mode: fuckipv6_common::domain::ExitContributionMode::RequiredOnJoin,
             member_limit: Some(25),
         };
         let now = 1_000;
@@ -1842,6 +1844,7 @@ mod tests {
             join_mode: NetworkJoinMode::ApprovalRequired,
             exit_contribution: Default::default(),
             exit_contribution_scope: Default::default(),
+            exit_contribution_mode: Default::default(),
         };
 
         let result = manager

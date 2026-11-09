@@ -159,6 +159,8 @@ export type EffectiveAccessReason = "allowed" | "cross_network_denied" | "networ
 
 export type EffectivePolicyLayer = "local" | "network" | "request";
 
+export type ExitContributionMode = "autonomous" | "required_on_join" | "disabled" | "approval_required";
+
 export type ExitContributionObligation = "required" | "not_required";
 
 export type ExitContributionScope = "not_applicable" | "joining_members" | "all_members";
@@ -308,6 +310,7 @@ export type JoinRequest = {
 export type JoinRequestGrantPreview = {
   "capabilities"?: Array<CapabilityKind>;
   "exit_contribution"?: ExitContributionObligation;
+  "exit_contribution_mode"?: ExitContributionMode;
   "exit_contribution_scope"?: ExitContributionScope;
   "file_access"?: boolean;
   "grants_data_plane_access"?: boolean;
@@ -384,6 +387,7 @@ export type MembershipState = "discovered" | "applying" | "pending_approval" | "
 
 export type MembershipTerms = {
   "exit_contribution": ExitContributionObligation;
+  "exit_contribution_mode"?: ExitContributionMode;
   "exit_contribution_scope"?: ExitContributionScope;
   "member_limit"?: number | null;
   "network_policy_revision": number;
@@ -424,6 +428,7 @@ export type NetworkDiscoveryDocument = {
   "capability_summary": Array<CapabilityKind>;
   "endpoints"?: Array<NetworkEndpoint>;
   "exit_contribution"?: ExitContributionObligation;
+  "exit_contribution_mode"?: ExitContributionMode;
   "exit_contribution_scope"?: ExitContributionScope;
   "expires_at_unix_ms": number;
   "issued_at_unix_ms": number;
@@ -556,6 +561,7 @@ export type NetworkProfileProjections = {
 export type NetworkProfileUpdate = {
   "capability_declarations"?: Array<CapabilityKind>;
   "exit_contribution"?: ExitContributionObligation;
+  "exit_contribution_mode"?: ExitContributionMode;
   "exit_contribution_scope"?: ExitContributionScope;
   "icon": string;
   "join_mode": NetworkJoinMode;
@@ -1203,6 +1209,7 @@ export type NodeCreateNetworkCommand = {
   "auto_connect": boolean;
   "capability_declarations"?: Array<CapabilityKind>;
   "exit_contribution"?: ExitContributionObligation;
+  "exit_contribution_mode"?: ExitContributionMode;
   "exit_contribution_scope"?: ExitContributionScope;
   "external_host"?: string | null;
   "icon"?: string;
@@ -1612,6 +1619,7 @@ export type NodeNetworkJoinPreview = {
   "exit_contribution_bandwidth_impact_key": string;
   "exit_contribution_disable_key": string;
   "exit_contribution_logging_boundary_key": string;
+  "exit_contribution_mode": ExitContributionMode;
   "exit_contribution_purpose_key": string;
   "exit_contribution_scope": ExitContributionScope;
   "expires_at_unix_ms": number;
@@ -1659,6 +1667,7 @@ export type NodeNetworkMembershipSnapshot = {
   "current_terms"?: MembershipTerms | null;
   "current_terms_hash"?: string | null;
   "exit_contribution"?: ExitContributionObligation | null;
+  "exit_contribution_mode"?: ExitContributionMode | null;
   "exit_contribution_scope"?: ExitContributionScope | null;
   "local_policy_revision": number;
   "member_limit"?: number | null;
@@ -1684,6 +1693,7 @@ export type NodeNetworkProfileCommand = {
 export type NodeNetworkProfileSnapshot = {
   "capability_declarations": Array<CapabilityKind>;
   "exit_contribution": ExitContributionObligation;
+  "exit_contribution_mode": ExitContributionMode;
   "exit_contribution_scope": ExitContributionScope;
   "icon": string;
   "join_mode": NetworkJoinMode;
@@ -2052,7 +2062,7 @@ export type NodeUiField = {
   "validation": NodeUiValidation;
 };
 
-export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "policy_json" | "policy_snapshot_json" | "traffic_policy_json" | "traffic_policy_test_json" | "policy_network_ids" | "display_name" | "external_host" | "fingerprint" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "purpose" | "icon" | "language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution" | "exit_contribution_scope" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "node_id" | "member_lifecycle_action" | "member_lifecycle_reason" | "invitation_code" | "coordinator_url" | "port" | "revision" | "role" | "routing_mode" | "url_or_ticket" | "discovery_index_url" | "timeout_ms";
+export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "policy_json" | "policy_snapshot_json" | "traffic_policy_json" | "traffic_policy_test_json" | "policy_network_ids" | "display_name" | "external_host" | "fingerprint" | "network_mode" | "network_name" | "network_selection" | "peer_target" | "purpose" | "icon" | "language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution_mode" | "exit_contribution" | "exit_contribution_scope" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "node_id" | "member_lifecycle_action" | "member_lifecycle_reason" | "invitation_code" | "coordinator_url" | "port" | "revision" | "role" | "routing_mode" | "url_or_ticket" | "discovery_index_url" | "timeout_ms";
 
 export type NodeUiManifest = {
   "action_block_reasons": Array<NodeUiActionBlockReason>;
@@ -2070,7 +2080,7 @@ export type NodeUiPage = {
 
 export type NodeUiPageState = "initial_loading" | "error" | "maintenance" | "permission_denied" | "unsupported" | "offline" | "control_unavailable" | "node_failed" | "degraded" | "stale" | "refreshing" | "empty" | "ready";
 
-export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_mode" | "network_selection" | "role" | "routing_mode" | "positive_timeout" | "revision" | "configuration_json" | "policy_json" | "policy_snapshot_json" | "traffic_policy_json" | "traffic_policy_test_json" | "policy_network_ids" | "display_name" | "fingerprint" | "network_purpose" | "network_icon" | "network_language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution" | "exit_contribution_scope" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "node_id" | "member_lifecycle_action" | "member_lifecycle_reason" | "invitation_code" | "coordinator_url";
+export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | "distinct_ports" | "network_mode" | "network_selection" | "role" | "routing_mode" | "positive_timeout" | "revision" | "configuration_json" | "policy_json" | "policy_snapshot_json" | "traffic_policy_json" | "traffic_policy_test_json" | "policy_network_ids" | "display_name" | "fingerprint" | "network_purpose" | "network_icon" | "network_language" | "region" | "tags" | "capability_declarations" | "visibility" | "join_mode" | "exit_contribution_mode" | "exit_contribution" | "exit_contribution_scope" | "join_request_id" | "join_request_note" | "join_request_reason" | "join_request_review_action" | "join_request_reviews" | "node_id" | "member_lifecycle_action" | "member_lifecycle_reason" | "invitation_code" | "coordinator_url";
 
 export type NodeUpdateNetworkAllocationCommand = {
   "allocation": NodeNetworkAllocation;

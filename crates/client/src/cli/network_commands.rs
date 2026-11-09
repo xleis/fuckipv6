@@ -34,6 +34,7 @@ pub async fn host(
             join_mode: Default::default(),
             exit_contribution: Default::default(),
             exit_contribution_scope: Default::default(),
+            exit_contribution_mode: Default::default(),
             signaling_port: port,
             relay_port,
             external_host,

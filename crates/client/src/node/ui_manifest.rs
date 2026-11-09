@@ -536,6 +536,7 @@ pub enum NodeUiInputKind {
     CapabilityDeclarations,
     Visibility,
     JoinMode,
+    ExitContributionMode,
     ExitContribution,
     ExitContributionScope,
     JoinRequestId,
@@ -587,6 +588,7 @@ pub enum NodeUiValidation {
     CapabilityDeclarations,
     Visibility,
     JoinMode,
+    ExitContributionMode,
     ExitContribution,
     ExitContributionScope,
     JoinRequestId,
@@ -683,6 +685,13 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                                 NodeUiInputKind::JoinMode,
                                 true,
                                 NodeUiValidation::JoinMode,
+                            ),
+                            field(
+                                "exit_contribution_mode",
+                                "field.exit_contribution_mode",
+                                NodeUiInputKind::ExitContributionMode,
+                                true,
+                                NodeUiValidation::ExitContributionMode,
                             ),
                             field(
                                 "exit_contribution",
@@ -808,6 +817,13 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                                 NodeUiValidation::JoinMode,
                             ),
                             field(
+                                "exit_contribution_mode",
+                                "field.exit_contribution_mode",
+                                NodeUiInputKind::ExitContributionMode,
+                                true,
+                                NodeUiValidation::ExitContributionMode,
+                            ),
+                            field(
                                 "exit_contribution",
                                 "field.exit_contribution",
                                 NodeUiInputKind::ExitContribution,
@@ -901,6 +917,13 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                                 NodeUiInputKind::JoinMode,
                                 true,
                                 NodeUiValidation::JoinMode,
+                            ),
+                            field(
+                                "exit_contribution_mode",
+                                "field.exit_contribution_mode",
+                                NodeUiInputKind::ExitContributionMode,
+                                true,
+                                NodeUiValidation::ExitContributionMode,
                             ),
                             field(
                                 "exit_contribution",

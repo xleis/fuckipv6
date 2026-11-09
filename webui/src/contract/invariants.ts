@@ -233,6 +233,7 @@ const INPUT_KINDS = new Set([
   "capability_declarations",
   "visibility",
   "join_mode",
+  "exit_contribution_mode",
   "exit_contribution",
   "exit_contribution_scope",
   "join_request_id",
@@ -289,6 +290,7 @@ const VALIDATIONS = new Set([
   "capability_declarations",
   "visibility",
   "join_mode",
+  "exit_contribution_mode",
   "exit_contribution",
   "exit_contribution_scope",
   "join_request_id",
@@ -418,6 +420,12 @@ const NETWORK_JOIN_MODES = new Set([
   "invite_only",
 ]);
 const EXIT_CONTRIBUTION_OBLIGATIONS = new Set(["required", "not_required"]);
+const EXIT_CONTRIBUTION_MODES = new Set([
+  "autonomous",
+  "required_on_join",
+  "disabled",
+  "approval_required",
+]);
 const EXIT_CONTRIBUTION_SCOPES = new Set([
   "not_applicable",
   "joining_members",
@@ -963,6 +971,8 @@ export function defaultFieldValue(
       return profile.capability_declarations.join(",");
     if (field.id === "visibility") return profile.visibility;
     if (field.id === "join_mode") return profile.join_mode;
+    if (field.id === "exit_contribution_mode")
+      return profile.exit_contribution_mode;
     if (field.id === "exit_contribution") return profile.exit_contribution;
     if (field.id === "exit_contribution_scope")
       return profile.exit_contribution_scope;
@@ -977,6 +987,7 @@ export function defaultFieldValue(
     return snapshot.discovery_index?.index_url ?? "";
   if (field.id === "visibility") return "unlisted";
   if (field.id === "join_mode") return "invite_only";
+  if (field.id === "exit_contribution_mode") return "disabled";
   if (field.id === "exit_contribution") return "not_required";
   if (field.id === "exit_contribution_scope") return "not_applicable";
   if (field.id === "signaling_port") return "6666";
@@ -2201,6 +2212,11 @@ export function validateActionValues(
     ) {
       errors.push(label(locale, "validation.network_join_mode_invalid"));
     } else if (
+      field.validation === "exit_contribution_mode" &&
+      !EXIT_CONTRIBUTION_MODES.has(String(value))
+    ) {
+      errors.push(label(locale, "validation.exit_contribution_mode_invalid"));
+    } else if (
       field.validation === "exit_contribution" &&
       !EXIT_CONTRIBUTION_OBLIGATIONS.has(String(value))
     ) {
@@ -2559,6 +2575,11 @@ export function buildCommand(
             "public" | "unlisted" | "private",
           join_mode: requiredString("join_mode") as
             "open" | "approval_required" | "invite_only",
+          exit_contribution_mode: requiredString("exit_contribution_mode") as
+            | "autonomous"
+            | "required_on_join"
+            | "disabled"
+            | "approval_required",
           exit_contribution: requiredString("exit_contribution") as
             "required" | "not_required",
           exit_contribution_scope: requiredString("exit_contribution_scope") as
@@ -2591,6 +2612,11 @@ export function buildCommand(
             "public" | "unlisted" | "private",
           join_mode: requiredString("join_mode") as
             "open" | "approval_required" | "invite_only",
+          exit_contribution_mode: requiredString("exit_contribution_mode") as
+            | "autonomous"
+            | "required_on_join"
+            | "disabled"
+            | "approval_required",
           exit_contribution: requiredString("exit_contribution") as
             "required" | "not_required",
           exit_contribution_scope: requiredString("exit_contribution_scope") as

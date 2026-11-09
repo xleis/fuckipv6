@@ -81,6 +81,7 @@ const selectInputs = new Set([
   "routing_mode",
   "visibility",
   "join_mode",
+  "exit_contribution_mode",
   "join_request_review_action",
   "member_lifecycle_action",
 ]);
@@ -100,6 +101,17 @@ function selectOptions(
     return ["open", "approval_required", "invite_only"].map((value) => ({
       value,
       text: label(locale, `choice.join_mode.${value}`),
+    }));
+  }
+  if (field.input === "exit_contribution_mode") {
+    return [
+      "disabled",
+      "autonomous",
+      "required_on_join",
+      "approval_required",
+    ].map((value) => ({
+      value,
+      text: label(locale, `choice.exit_contribution_mode.${value}`),
     }));
   }
   if (field.input === "join_request_review_action") {

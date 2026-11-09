@@ -85,6 +85,45 @@ pub enum ExitContributionObligation {
     NotRequired,
 }
 
+/// Explicit Exit contribution policy. The legacy obligation/scope pair remains
+/// on the wire for compatibility, but it cannot distinguish voluntary
+/// contribution from a prohibition or an authorization flow. New policies bind
+/// this mode into terms hashes and signed discovery data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitContributionMode {
+    /// Members may explicitly opt in; joining never enables Exit locally.
+    Autonomous,
+    /// The member must provide Exit capacity as a condition of joining.
+    RequiredOnJoin,
+    /// Members may not contribute Exit capacity to this network.
+    #[default]
+    Disabled,
+    /// Members may request authorization before contributing Exit capacity.
+    ApprovalRequired,
+}
+
+impl ExitContributionMode {
+    pub fn from_legacy(obligation: ExitContributionObligation) -> Self {
+        match obligation {
+            ExitContributionObligation::Required => Self::RequiredOnJoin,
+            ExitContributionObligation::NotRequired => Self::Disabled,
+        }
+    }
+
+    pub fn permits_contribution(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    pub fn requires_join_commitment(self) -> bool {
+        matches!(self, Self::RequiredOnJoin)
+    }
+
+    pub fn requires_authorization(self) -> bool {
+        matches!(self, Self::ApprovalRequired)
+    }
+}
+
 /// The membership population covered by an Exit contribution obligation.
 /// `NotApplicable` is the only valid scope when contribution is not required.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -107,6 +146,11 @@ pub struct MembershipTerms {
     pub exit_contribution: ExitContributionObligation,
     #[serde(default)]
     pub exit_contribution_scope: ExitContributionScope,
+    /// Explicit four-mode policy. Omitted from the canonical hash for legacy
+    /// Required/JoiningMembers and NotRequired/NotApplicable records so their
+    /// acknowledgements and signatures remain verifiable.
+    #[serde(default)]
+    pub exit_contribution_mode: ExitContributionMode,
     /// Capacity shown when these terms were acknowledged. Omitted for legacy
     /// memberships so their content hash remains stable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,6 +171,8 @@ impl MembershipTerms {
             #[serde(skip_serializing_if = "Option::is_none")]
             exit_contribution_scope: Option<ExitContributionScope>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            exit_contribution_mode: Option<ExitContributionMode>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             member_limit: Option<u32>,
             #[serde(skip)]
             _marker: std::marker::PhantomData<&'a ()>,
@@ -138,6 +184,8 @@ impl MembershipTerms {
             exit_contribution: self.exit_contribution,
             exit_contribution_scope: (!self.has_legacy_exit_contribution_scope())
                 .then_some(self.exit_contribution_scope),
+            exit_contribution_mode: (!self.has_legacy_exit_contribution_mode())
+                .then_some(self.exit_contribution_mode),
             member_limit: self.member_limit,
             _marker: std::marker::PhantomData,
         };
@@ -147,16 +195,13 @@ impl MembershipTerms {
     }
 
     fn has_legacy_exit_contribution_scope(&self) -> bool {
-        matches!(
-            (self.exit_contribution, self.exit_contribution_scope),
-            (
-                ExitContributionObligation::Required,
-                ExitContributionScope::JoiningMembers
-            ) | (
-                ExitContributionObligation::NotRequired,
-                ExitContributionScope::NotApplicable
-            )
-        )
+        self.exit_contribution_scope == legacy_exit_contribution_scope(self.exit_contribution)
+            && !(self.exit_contribution == ExitContributionObligation::Required
+                && self.exit_contribution_scope == ExitContributionScope::AllMembers)
+    }
+
+    pub(crate) fn has_legacy_exit_contribution_mode(&self) -> bool {
+        self.exit_contribution_mode == ExitContributionMode::from_legacy(self.exit_contribution)
     }
 
     pub fn validate(&self) -> DomainResult<()> {
@@ -170,14 +215,11 @@ impl MembershipTerms {
                 "membership member limit must be positive when set",
             ));
         }
-        if (self.exit_contribution == ExitContributionObligation::NotRequired)
-            != (self.exit_contribution_scope == ExitContributionScope::NotApplicable)
-        {
-            return Err(DomainError::invalid_value(
-                "exit contribution obligation and scope must agree",
-            ));
-        }
-        Ok(())
+        validate_exit_contribution_policy(
+            self.exit_contribution,
+            self.exit_contribution_scope,
+            self.exit_contribution_mode,
+        )
     }
 }
 
@@ -194,6 +236,8 @@ impl<'de> Deserialize<'de> for MembershipTerms {
             #[serde(default)]
             exit_contribution_scope: Option<ExitContributionScope>,
             #[serde(default)]
+            exit_contribution_mode: Option<ExitContributionMode>,
+            #[serde(default)]
             member_limit: Option<u32>,
         }
 
@@ -205,6 +249,9 @@ impl<'de> Deserialize<'de> for MembershipTerms {
             exit_contribution_scope: raw
                 .exit_contribution_scope
                 .unwrap_or_else(|| legacy_exit_contribution_scope(raw.exit_contribution)),
+            exit_contribution_mode: raw
+                .exit_contribution_mode
+                .unwrap_or_else(|| ExitContributionMode::from_legacy(raw.exit_contribution)),
             member_limit: raw.member_limit,
         })
     }
@@ -217,6 +264,31 @@ pub(crate) fn legacy_exit_contribution_scope(
         ExitContributionObligation::Required => ExitContributionScope::JoiningMembers,
         ExitContributionObligation::NotRequired => ExitContributionScope::NotApplicable,
     }
+}
+
+pub fn validate_exit_contribution_policy(
+    obligation: ExitContributionObligation,
+    scope: ExitContributionScope,
+    mode: ExitContributionMode,
+) -> DomainResult<()> {
+    let obligation_matches = match mode {
+        ExitContributionMode::RequiredOnJoin => {
+            obligation == ExitContributionObligation::Required
+                && scope != ExitContributionScope::NotApplicable
+        }
+        ExitContributionMode::Autonomous
+        | ExitContributionMode::Disabled
+        | ExitContributionMode::ApprovalRequired => {
+            obligation == ExitContributionObligation::NotRequired
+                && scope == ExitContributionScope::NotApplicable
+        }
+    };
+    if !obligation_matches {
+        return Err(DomainError::invalid_value(
+            "exit contribution mode, obligation and scope must agree",
+        ));
+    }
+    Ok(())
 }
 
 /// Proof that the owner was shown the exact terms before applying to a network.
@@ -334,6 +406,8 @@ pub struct JoinRequestGrantPreview {
     #[serde(default)]
     pub exit_contribution_scope: ExitContributionScope,
     #[serde(default)]
+    pub exit_contribution_mode: ExitContributionMode,
+    #[serde(default)]
     pub file_access: bool,
     #[serde(default)]
     pub grants_data_plane_access: bool,
@@ -354,6 +428,8 @@ impl<'de> Deserialize<'de> for JoinRequestGrantPreview {
             #[serde(default)]
             exit_contribution_scope: Option<ExitContributionScope>,
             #[serde(default)]
+            exit_contribution_mode: Option<ExitContributionMode>,
+            #[serde(default)]
             file_access: bool,
             #[serde(default)]
             grants_data_plane_access: bool,
@@ -367,6 +443,9 @@ impl<'de> Deserialize<'de> for JoinRequestGrantPreview {
             exit_contribution_scope: raw
                 .exit_contribution_scope
                 .unwrap_or_else(|| legacy_exit_contribution_scope(raw.exit_contribution)),
+            exit_contribution_mode: raw
+                .exit_contribution_mode
+                .unwrap_or_else(|| ExitContributionMode::from_legacy(raw.exit_contribution)),
             file_access: raw.file_access,
             grants_data_plane_access: raw.grants_data_plane_access,
         })
@@ -393,13 +472,11 @@ impl JoinRequestGrantPreview {
                 "join request file impact does not match granted capabilities",
             ));
         }
-        if (self.exit_contribution == ExitContributionObligation::NotRequired)
-            != (self.exit_contribution_scope == ExitContributionScope::NotApplicable)
-        {
-            return Err(DomainError::invalid_value(
-                "join request Exit contribution obligation and scope must agree",
-            ));
-        }
+        validate_exit_contribution_policy(
+            self.exit_contribution,
+            self.exit_contribution_scope,
+            self.exit_contribution_mode,
+        )?;
         Ok(())
     }
 }
@@ -1187,6 +1264,7 @@ mod tests {
             privacy_policy_revision: 1,
             exit_contribution: ExitContributionObligation::Required,
             exit_contribution_scope: ExitContributionScope::JoiningMembers,
+            exit_contribution_mode: ExitContributionMode::RequiredOnJoin,
             member_limit: None,
         }
     }
@@ -1340,6 +1418,7 @@ mod tests {
                 capabilities: vec![CapabilityKind::File],
                 exit_contribution: ExitContributionObligation::Required,
                 exit_contribution_scope: ExitContributionScope::JoiningMembers,
+                exit_contribution_mode: ExitContributionMode::RequiredOnJoin,
                 file_access: true,
                 grants_data_plane_access: true,
             },

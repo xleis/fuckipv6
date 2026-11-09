@@ -3252,6 +3252,7 @@ mod tests {
                 member_limit: None,
                 exit_contribution: None,
                 exit_contribution_scope: None,
+                exit_contribution_mode: None,
                 terms_hash: None,
                 current_terms: None,
                 current_terms_hash: None,

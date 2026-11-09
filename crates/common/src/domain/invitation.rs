@@ -558,6 +558,7 @@ mod tests {
             privacy_policy_revision: 1,
             exit_contribution: Default::default(),
             exit_contribution_scope: Default::default(),
+            exit_contribution_mode: Default::default(),
             member_limit: None,
         };
         let mut preview = InvitationPreview {

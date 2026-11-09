@@ -116,6 +116,31 @@
       "description": "Canonical DNS suffix. A bare domain matches itself and descendant labels;\na leading `*.` is accepted only as an explicit spelling of that same\ncomplete-label boundary rule. It never performs substring matching.",
       "type": "string"
     },
+    "ExitContributionMode": {
+      "description": "Explicit Exit contribution policy. The legacy obligation/scope pair remains\non the wire for compatibility, but it cannot distinguish voluntary\ncontribution from a prohibition or an authorization flow. New policies bind\nthis mode into terms hashes and signed discovery data.",
+      "oneOf": [
+        {
+          "const": "autonomous",
+          "description": "Members may explicitly opt in; joining never enables Exit locally.",
+          "type": "string"
+        },
+        {
+          "const": "required_on_join",
+          "description": "The member must provide Exit capacity as a condition of joining.",
+          "type": "string"
+        },
+        {
+          "const": "disabled",
+          "description": "Members may not contribute Exit capacity to this network.",
+          "type": "string"
+        },
+        {
+          "const": "approval_required",
+          "description": "Members may request authorization before contributing Exit capacity.",
+          "type": "string"
+        }
+      ]
+    },
     "ExitContributionObligation": {
       "description": "Exit contribution is an explicit network admission obligation, not a\ncapability silently enabled by joining.",
       "enum": [
@@ -376,6 +401,10 @@
           "$ref": "#/$defs/ExitContributionObligation",
           "default": "not_required"
         },
+        "exit_contribution_mode": {
+          "$ref": "#/$defs/ExitContributionMode",
+          "default": "disabled"
+        },
         "exit_contribution_scope": {
           "$ref": "#/$defs/ExitContributionScope",
           "default": "not_applicable"
@@ -596,6 +625,10 @@
         "exit_contribution": {
           "$ref": "#/$defs/ExitContributionObligation",
           "default": "not_required"
+        },
+        "exit_contribution_mode": {
+          "$ref": "#/$defs/ExitContributionMode",
+          "default": "disabled"
         },
         "exit_contribution_scope": {
           "$ref": "#/$defs/ExitContributionScope",
@@ -2089,6 +2122,10 @@
         "exit_contribution": {
           "$ref": "#/$defs/ExitContributionObligation",
           "default": "not_required"
+        },
+        "exit_contribution_mode": {
+          "$ref": "#/$defs/ExitContributionMode",
+          "default": "disabled"
         },
         "exit_contribution_scope": {
           "$ref": "#/$defs/ExitContributionScope",

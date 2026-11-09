@@ -364,6 +364,7 @@ mod tests {
                 exit_contribution: fuckipv6_common::domain::ExitContributionObligation::NotRequired,
                 exit_contribution_scope:
                     fuckipv6_common::domain::ExitContributionScope::NotApplicable,
+                exit_contribution_mode: fuckipv6_common::domain::ExitContributionMode::Disabled,
                 privacy_changes: Vec::new(),
                 issued_at_unix_ms: self.issued_at_unix_ms,
                 expires_at_unix_ms: self.expires_at_unix_ms,

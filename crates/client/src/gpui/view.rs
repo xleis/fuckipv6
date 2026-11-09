@@ -2446,6 +2446,7 @@ impl GpuiShell {
                         | NodeUiInputKind::NetworkSelection
                         | NodeUiInputKind::Visibility
                         | NodeUiInputKind::JoinMode
+                        | NodeUiInputKind::ExitContributionMode
                         | NodeUiInputKind::ExitContribution
                         | NodeUiInputKind::ExitContributionScope
                         | NodeUiInputKind::JoinRequestReviewAction
@@ -9087,6 +9088,24 @@ impl GpuiShell {
                 ],
                 cx,
             ),
+            NodeUiInputKind::ExitContributionMode => self.choice_field(
+                action,
+                field,
+                &value,
+                &[
+                    ("disabled", "choice.exit_contribution_mode.disabled"),
+                    ("autonomous", "choice.exit_contribution_mode.autonomous"),
+                    (
+                        "required_on_join",
+                        "choice.exit_contribution_mode.required_on_join",
+                    ),
+                    (
+                        "approval_required",
+                        "choice.exit_contribution_mode.approval_required",
+                    ),
+                ],
+                cx,
+            ),
             NodeUiInputKind::ExitContribution => self.choice_field(
                 action,
                 field,
@@ -13884,6 +13903,7 @@ mod tests {
                 member_count: 1,
                 exit_contribution: fuckipv6_common::domain::ExitContributionObligation::NotRequired,
                 exit_contribution_scope: Default::default(),
+                exit_contribution_mode: Default::default(),
                 privacy_changes: Vec::new(),
                 issued_at_unix_ms: self.accepted_at_unix_ms.saturating_sub(1_000),
                 expires_at_unix_ms: self.accepted_at_unix_ms.saturating_add(3_600_000),
@@ -13943,6 +13963,8 @@ mod tests {
                 exit_contribution: ExitContributionObligation::Required,
                 exit_contribution_scope:
                     fuckipv6_common::domain::ExitContributionScope::JoiningMembers,
+                exit_contribution_mode:
+                    fuckipv6_common::domain::ExitContributionMode::RequiredOnJoin,
                 member_limit: Some(16),
             },
             JoinRequestGrantPreview {
@@ -13951,6 +13973,8 @@ mod tests {
                 exit_contribution: ExitContributionObligation::Required,
                 exit_contribution_scope:
                     fuckipv6_common::domain::ExitContributionScope::JoiningMembers,
+                exit_contribution_mode:
+                    fuckipv6_common::domain::ExitContributionMode::RequiredOnJoin,
                 file_access: true,
                 grants_data_plane_access: true,
             },
@@ -13982,6 +14006,7 @@ mod tests {
             exit_contribution_scope: Some(
                 fuckipv6_common::domain::ExitContributionScope::NotApplicable,
             ),
+            exit_contribution_mode: Some(Default::default()),
             terms_hash: None,
             current_terms: None,
             current_terms_hash: None,
@@ -14865,6 +14890,7 @@ mod tests {
             member_limit: Some(8),
             exit_contribution: ExitContributionObligation::Required,
             exit_contribution_scope: fuckipv6_common::domain::ExitContributionScope::JoiningMembers,
+            exit_contribution_mode: fuckipv6_common::domain::ExitContributionMode::RequiredOnJoin,
             exit_contribution_purpose_key: "join.exit.disclosure.purpose".into(),
             exit_contribution_bandwidth_impact_key: "join.exit.disclosure.bandwidth".into(),
             exit_contribution_logging_boundary_key: "join.exit.disclosure.logging".into(),
@@ -14921,6 +14947,7 @@ mod tests {
             privacy_policy_revision: 3,
             exit_contribution: ExitContributionObligation::NotRequired,
             exit_contribution_scope: Default::default(),
+            exit_contribution_mode: Default::default(),
             member_limit: Some(12),
         };
         let mut preview = InvitationPreview {
@@ -15041,6 +15068,7 @@ mod tests {
                 join_mode: NetworkJoinMode::InviteOnly,
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
+                exit_contribution_mode: Default::default(),
             },
             public_key,
             owner,

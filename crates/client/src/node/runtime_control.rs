@@ -2646,7 +2646,18 @@ impl NetworkRuntimeActor {
         String,
         Result<ipc::LocalExitRuntimeStatus, RuntimeRoutingRequestError>,
     )> {
-        let wait = self.timeouts.local_exit_update;
+        self.request_all_local_exit_capabilities_with_wait(enabled, self.timeouts.local_exit_update)
+            .await
+    }
+
+    async fn request_all_local_exit_capabilities_with_wait(
+        &self,
+        enabled: bool,
+        wait: Duration,
+    ) -> Vec<(
+        String,
+        Result<ipc::LocalExitRuntimeStatus, RuntimeRoutingRequestError>,
+    )> {
         let requests = self
             .sessions
             .iter()
@@ -2705,6 +2716,23 @@ impl NetworkRuntimeActor {
     }
 
     async fn refresh_local_exit_capability_state(&self) {
+        self.refresh_local_exit_capability_state_with_wait(self.timeouts.local_exit_update)
+            .await;
+    }
+
+    async fn refresh_local_exit_capability_state_with_deadline(&self, deadline: Instant) {
+        let wait = deadline.saturating_duration_since(Instant::now());
+        if wait.is_zero() {
+            return;
+        }
+        self.refresh_local_exit_capability_state_with_wait(wait)
+            .await;
+    }
+
+    async fn refresh_local_exit_capability_state_with_wait(&self, wait: Duration) {
+        if wait.is_zero() {
+            return;
+        }
         let owner_exit_enabled = match self.local_exit_owner_intent().await {
             Ok(enabled) => enabled,
             Err(error) => {
@@ -2727,7 +2755,7 @@ impl NetworkRuntimeActor {
             .flatten()
             .map(|error| runtime_control_problem(&error));
         let results = self
-            .request_all_local_exit_capabilities(owner_exit_enabled)
+            .request_all_local_exit_capabilities_with_wait(owner_exit_enabled, wait)
             .await;
         let (statuses, request_problem) = local_exit_request_results(results);
         let problem = unsupported_problem.or(request_problem);
@@ -4725,7 +4753,8 @@ impl NetworkRuntimeActor {
         let mut cleanup = self.inspect_cleanup(&target_names).await?;
         cleanup.runtime_outcomes = runtime_outcomes;
         self.publish_stop_lifecycle(&failed).await;
-        self.refresh_local_exit_capability_state().await;
+        self.refresh_local_exit_capability_state_with_deadline(deadline)
+            .await;
         Ok(StopSummary {
             stopped,
             failed,

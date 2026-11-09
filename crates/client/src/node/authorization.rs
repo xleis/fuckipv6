@@ -1442,6 +1442,36 @@ mod tests {
     }
 
     #[test]
+    fn local_exit_capability_can_only_be_changed_by_the_local_owner() {
+        let (local_policy, network_policy) = start_policies();
+        let commands = [true, false].map(|enabled| {
+            NodeCommand::SetLocalExitCapability(crate::node::NodeSetLocalExitCapabilityCommand {
+                enabled,
+            })
+        });
+
+        for role in [NetworkRole::Owner, NetworkRole::Administrator] {
+            let remote = network_context(
+                role,
+                [NodePermission::ManageNetworks],
+                &["home"],
+                MembershipState::Active,
+                local_policy.clone(),
+                network_policy.clone(),
+            );
+            for command in &commands {
+                assert_denied(&remote, command.clone(), "permission.local_owner_required");
+            }
+        }
+
+        let local_owner = NodeCommandContext::local_owner(actor(), "local-owner-exit");
+        for command in &commands {
+            authorize_command(&local_owner, command)
+                .expect("the local owner can enable or disable local Exit");
+        }
+    }
+
+    #[test]
     fn create_network_is_reserved_for_the_local_node_owner() {
         let (local_policy, network_policy) = start_policies();
         assert_denied(

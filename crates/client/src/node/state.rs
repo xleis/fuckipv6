@@ -1056,8 +1056,8 @@ pub struct NodeNetworkMembershipSnapshot {
     pub terms_hash: Option<String>,
     /// Signed terms most recently observed from discovery. When these differ
     /// from `terms_hash`, members see a policy-change notice; the separate
-    /// boolean distinguishes notice-only `JoiningMembers` changes from
-    /// `AllMembers` changes that require explicit acknowledgement.
+    /// boolean distinguishes notice-only metadata changes from Exit disclosure
+    /// or privacy changes that require explicit acknowledgement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_terms: Option<MembershipTerms>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

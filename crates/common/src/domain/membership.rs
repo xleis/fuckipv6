@@ -1052,7 +1052,8 @@ impl NetworkMembership {
 
     /// Record the latest signed network terms without treating them as an
     /// acknowledgement. Existing members are notified when the terms differ;
-    /// only an `AllMembers` Exit migration requires an explicit re-ack.
+    /// any change to the disclosed Exit contribution policy or privacy notice
+    /// requires an explicit re-acknowledgement.
     /// Returns whether the locally persisted observation changed.
     pub fn observe_current_terms(
         &mut self,
@@ -1115,17 +1116,30 @@ impl NetworkMembership {
     }
 
     /// Whether accepting the latest observed terms is currently required.
+    ///
+    /// Network metadata revisions that do not alter the Exit disclosure remain
+    /// notice-only. Exit obligation, member scope, contribution mode and the
+    /// privacy notice are security-relevant and must be acknowledged again.
     pub fn policy_confirmation_required(&self) -> bool {
         let Some(current) = self.current_terms.as_ref() else {
             return false;
         };
-        if current.exit_contribution_scope != ExitContributionScope::AllMembers {
+        let Some(ack) = self.terms_ack.as_ref() else {
+            return true;
+        };
+        if current
+            .content_hash()
+            .is_ok_and(|hash| hash == ack.terms_hash)
+        {
             return false;
         }
-        match (&self.terms_ack, current.content_hash()) {
-            (Some(ack), Ok(hash)) => ack.terms_hash != hash,
-            _ => true,
-        }
+        let Some(acknowledged) = self.terms.as_ref() else {
+            return true;
+        };
+        current.exit_contribution != acknowledged.exit_contribution
+            || current.exit_contribution_scope != acknowledged.exit_contribution_scope
+            || current.exit_contribution_mode != acknowledged.exit_contribution_mode
+            || current.privacy_policy_revision != acknowledged.privacy_policy_revision
     }
 
     pub fn require_approval(&mut self, now_unix_ms: u64) -> DomainResult<()> {
@@ -1276,7 +1290,7 @@ mod tests {
     }
 
     #[test]
-    fn policy_changes_require_confirmation_only_for_all_members_and_pin_the_hash() {
+    fn exit_disclosure_changes_require_confirmation_and_pin_the_hash() {
         let initial = terms();
         let mut membership = new_membership();
         membership
@@ -1292,7 +1306,7 @@ mod tests {
             .expect("observe joining-members policy"));
         assert!(
             !membership.policy_confirmation_required(),
-            "JoiningMembers changes are notice-only for existing members"
+            "unrelated policy revisions are notice-only"
         );
         assert!(!membership
             .observe_current_terms(joining_scope_change, 13)
@@ -1337,6 +1351,46 @@ mod tests {
         assert_eq!(membership.local_policy_revision, revision_before + 1);
         assert!(!membership.policy_confirmation_required());
         membership.validate().expect("reconfirmed membership");
+    }
+
+    #[test]
+    fn exit_mode_change_requires_confirmation_even_without_all_members_scope() {
+        let initial = terms();
+        let mut membership = new_membership();
+        membership
+            .begin_apply(initial.clone(), ack(&initial), 10)
+            .expect("begin applying");
+        membership.accept(11).expect("accept");
+
+        let mut autonomous = initial;
+        autonomous.network_policy_revision = 2;
+        autonomous.exit_contribution = ExitContributionObligation::NotRequired;
+        autonomous.exit_contribution_scope = ExitContributionScope::NotApplicable;
+        autonomous.exit_contribution_mode = ExitContributionMode::Autonomous;
+        membership
+            .observe_current_terms(autonomous, 12)
+            .expect("observe autonomous policy");
+
+        assert!(membership.policy_confirmation_required());
+    }
+
+    #[test]
+    fn privacy_notice_change_requires_confirmation() {
+        let initial = terms();
+        let mut membership = new_membership();
+        membership
+            .begin_apply(initial.clone(), ack(&initial), 10)
+            .expect("begin applying");
+        membership.accept(11).expect("accept");
+
+        let mut privacy_change = initial;
+        privacy_change.network_policy_revision = 2;
+        privacy_change.privacy_policy_revision = 2;
+        membership
+            .observe_current_terms(privacy_change, 12)
+            .expect("observe privacy policy");
+
+        assert!(membership.policy_confirmation_required());
     }
 
     #[test]

@@ -352,6 +352,7 @@ pub struct P2pEngine {
     child_tasks: Arc<StdMutex<Vec<JoinHandle<()>>>>,
     connections: Arc<RwLock<HashMap<String, PeerConnection>>>,
     ip_index: Arc<RwLock<HashMap<IpAddr, Arc<str>>>>,
+    node_index: Arc<RwLock<HashMap<NodeId, Arc<str>>>>,
     receiver_index: Arc<RwLock<ReceiverIndex>>,
     incoming_tx: InboundQueueSender,
     incoming_rx: Arc<Mutex<InboundQueueReceiver>>,
@@ -489,6 +490,7 @@ impl P2pEngine {
         let socket = Arc::new(socket);
         let connections = Arc::new(RwLock::new(HashMap::new()));
         let ip_index = Arc::new(RwLock::new(HashMap::new()));
+        let node_index = Arc::new(RwLock::new(HashMap::new()));
         let receiver_index = Arc::new(RwLock::new(ReceiverIndex::default()));
         let local_ip = Arc::new(RwLock::new(None));
         let local_identity = Arc::new(RwLock::new(None));
@@ -526,6 +528,7 @@ impl P2pEngine {
             child_tasks: Arc::new(StdMutex::new(Vec::new())),
             connections,
             ip_index,
+            node_index,
             receiver_index,
             incoming_tx,
             incoming_rx: Arc::new(Mutex::new(incoming_rx)),
@@ -645,6 +648,7 @@ impl P2pEngine {
     pub async fn add_peer(&self, peer_info: PeerInfo) -> Result<()> {
         let client_id = peer_info.client_id.clone();
         let client_key: Arc<str> = Arc::from(client_id.as_str());
+        let node_id = NodeId::from_public_key(&peer_info.public_key);
         let endpoints = peer_info
             .endpoints
             .iter()
@@ -740,6 +744,11 @@ impl P2pEngine {
             if let Some(v4) = peer_info.virtual_ips.ipv4 {
                 ip_idx.insert(IpAddr::V4(v4), client_key.clone());
             }
+        }
+        {
+            let mut node_idx = self.node_index.write().await;
+            node_idx.retain(|_, mapped| mapped.as_ref() != client_id.as_str());
+            node_idx.insert(node_id.clone(), client_key);
         }
         let receiver_endpoints = connection.endpoints.clone();
         let health = connection.health.clone();
@@ -1300,7 +1309,17 @@ impl P2pEngine {
             .remove(client_id)
             .expect("peer cannot disappear while holding write lock");
         self.receiver_index.write().await.remove_client(client_id);
+        let node_id = NodeId::from_public_key(&conn.peer_info.public_key);
         let primary_ip = conn.peer_info.virtual_ips.primary_ip();
+        {
+            let mut node_idx = self.node_index.write().await;
+            if node_idx
+                .get(&node_id)
+                .is_some_and(|mapped| mapped.as_ref() == client_id)
+            {
+                node_idx.remove(&node_id);
+            }
+        }
         {
             let mut ip_idx = self.ip_index.write().await;
             for ip in peer_ips(&conn.peer_info) {
@@ -1396,6 +1415,18 @@ impl P2pEngine {
             .await
             .get(target)
             .map(|connection| connection.peer_info.virtual_ip)
+    }
+
+    /// Resolve an administrator-selected Exit by its stable NodeId. The index
+    /// is maintained with peer registration/removal so packet routing never
+    /// scans every connection to enforce an Exit policy.
+    pub(crate) async fn resolve_exit_peer_by_node_id(&self, node_id: &NodeId) -> Option<Ipv6Addr> {
+        let client_id = self.node_index.read().await.get(node_id).cloned()?;
+        let connections = self.connections.read().await;
+        let peer = connections
+            .get(client_id.as_ref())
+            .filter(|peer| NodeId::from_public_key(&peer.peer_info.public_key) == *node_id)?;
+        Some(peer.peer_info.virtual_ip)
     }
 
     /// Resolve a registered peer by either its IPv4 or IPv6 virtual address.
@@ -1760,6 +1791,7 @@ impl P2pEngine {
 
         self.connections.write().await.clear();
         self.ip_index.write().await.clear();
+        self.node_index.write().await.clear();
         *self.receiver_index.write().await = ReceiverIndex::default();
         self.quic_mesh.write().await.take();
         self.socket.lock().expect("P2P socket slot poisoned").take();
@@ -3461,6 +3493,20 @@ mod tests {
                 .await,
             Some(*removed_ipv6)
         );
+        let removed_node_id = {
+            let connections = engine.connections.read().await;
+            NodeId::from_public_key(
+                &connections
+                    .get(removed_id.as_str())
+                    .unwrap()
+                    .peer_info
+                    .public_key,
+            )
+        };
+        assert_eq!(
+            engine.resolve_exit_peer_by_node_id(&removed_node_id).await,
+            Some(*removed_ipv6)
+        );
 
         let removed = engine
             .remove_peer_by_id(removed_id)
@@ -3469,6 +3515,10 @@ mod tests {
         assert_eq!(removed.client_id, *removed_id);
         assert_eq!(removed.virtual_ip, *removed_ipv6);
         assert_eq!(removed.virtual_ips.ipv4, Some(*removed_ipv4));
+        assert_eq!(
+            engine.resolve_exit_peer_by_node_id(&removed_node_id).await,
+            None
+        );
         assert!(
             !engine
                 .receiver_index

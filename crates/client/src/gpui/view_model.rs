@@ -6,6 +6,7 @@ use fuckipv6_common::domain::JoinRequestReviewAction;
 use fuckipv6_common::domain::{
     parse_policy_test_input, ActivityCategory, ActivityEntry, ActivitySeverity,
     ApplicationIdentity, AuditOutcome, CapabilityKind, CapabilityState, ContentHash,
+    ExitAvailabilitySource, ExitAvailabilityState, ExitContributionAvailability,
     ExitContributionMode, ExitContributionObligation, ExitContributionScope, InvitationCode,
     InvitationId, InvitationRedeemRequest, MemberLifecycleAction, MembershipRole, NetworkId,
     NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
@@ -16,7 +17,7 @@ use fuckipv6_common::domain::{
     TrafficRoutingRuleActivityEffect, TrafficRoutingRuleImpactView, TrafficRoutingTarget,
     TrafficRoutingTargetKind, TrafficRoutingTargetRef, TrafficRoutingWorkflowState,
 };
-use fuckipv6_common::i18n::{t, tr, Locale};
+use fuckipv6_common::i18n::{format_integer, t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
 use fuckipv6_common::NetworkMode;
 
@@ -783,6 +784,232 @@ pub fn topology_presentation(
     }
 }
 
+pub const MEMBER_EXIT_AVAILABILITY_MAX_AGE_MS: u64 = 90_000;
+
+const EXIT_AVAILABILITY_REASON_CODES: [&str; 11] = [
+    "exit.availability.available_but_not_declared",
+    "exit.availability.cleaning",
+    "exit.availability.declared_but_unavailable",
+    "exit.availability.draining",
+    "exit.availability.forwarder_unhealthy",
+    "exit.availability.health_checking",
+    "exit.availability.network_not_allowed",
+    "exit.availability.not_observed",
+    "exit.availability.owner_disabled",
+    "exit.availability.stale",
+    "exit.availability.waiting_for_network_authorization",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberExitFreshness {
+    Fresh,
+    Stale,
+    NotObserved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedMemberExitAvailability {
+    pub state: ExitAvailabilityState,
+    pub source: ExitAvailabilitySource,
+    pub declared_available: Option<bool>,
+    pub observed_at_unix_ms: Option<u64>,
+    pub freshness: MemberExitFreshness,
+    pub reason_code: Option<&'static str>,
+}
+
+fn allowed_exit_availability_reason(code: Option<&str>) -> Option<&'static str> {
+    let code = code?;
+    EXIT_AVAILABILITY_REASON_CODES
+        .iter()
+        .copied()
+        .find(|allowed| *allowed == code)
+}
+
+/// Fail closed: missing, stale, or contradictory evidence never becomes healthy.
+pub fn normalize_member_exit_availability(
+    availability: Option<&ExitContributionAvailability>,
+    now_unix_ms: u64,
+) -> NormalizedMemberExitAvailability {
+    let Some(availability) = availability else {
+        return NormalizedMemberExitAvailability {
+            state: ExitAvailabilityState::Unknown,
+            source: ExitAvailabilitySource::NotObserved,
+            declared_available: None,
+            observed_at_unix_ms: None,
+            freshness: MemberExitFreshness::NotObserved,
+            reason_code: Some("exit.availability.not_observed"),
+        };
+    };
+
+    let supplied_reason = allowed_exit_availability_reason(availability.reason_code.as_deref());
+    let Some(observed_at_unix_ms) = availability.observed_at_unix_ms else {
+        let not_observed = availability.source == ExitAvailabilitySource::NotObserved
+            && availability.state == ExitAvailabilityState::Unknown;
+        return NormalizedMemberExitAvailability {
+            state: ExitAvailabilityState::Unknown,
+            source: availability.source,
+            declared_available: availability.declared_available,
+            observed_at_unix_ms: None,
+            freshness: if not_observed {
+                MemberExitFreshness::NotObserved
+            } else {
+                MemberExitFreshness::Stale
+            },
+            reason_code: supplied_reason.or(Some(if not_observed {
+                "exit.availability.not_observed"
+            } else {
+                "exit.availability.stale"
+            })),
+        };
+    };
+
+    if now_unix_ms > observed_at_unix_ms.saturating_add(MEMBER_EXIT_AVAILABILITY_MAX_AGE_MS) {
+        return NormalizedMemberExitAvailability {
+            state: ExitAvailabilityState::Unknown,
+            source: availability.source,
+            declared_available: availability.declared_available,
+            observed_at_unix_ms: Some(observed_at_unix_ms),
+            freshness: MemberExitFreshness::Stale,
+            reason_code: Some("exit.availability.stale"),
+        };
+    }
+
+    let contradictory_availability = availability.state == ExitAvailabilityState::Available
+        && availability.declared_available == Some(false);
+    NormalizedMemberExitAvailability {
+        state: if contradictory_availability {
+            ExitAvailabilityState::Degraded
+        } else {
+            availability.state
+        },
+        source: availability.source,
+        declared_available: availability.declared_available,
+        observed_at_unix_ms: Some(observed_at_unix_ms),
+        freshness: MemberExitFreshness::Fresh,
+        reason_code: if contradictory_availability {
+            Some("exit.availability.available_but_not_declared")
+        } else {
+            supplied_reason
+        },
+    }
+}
+
+fn member_exit_state_key(state: ExitAvailabilityState) -> &'static str {
+    match state {
+        ExitAvailabilityState::Unknown => "member_directory.exit.state.unknown",
+        ExitAvailabilityState::Available => "member_directory.exit.state.available",
+        ExitAvailabilityState::Degraded => "member_directory.exit.state.degraded",
+        ExitAvailabilityState::Unavailable => "member_directory.exit.state.unavailable",
+    }
+}
+
+fn member_exit_source_key(source: ExitAvailabilitySource) -> &'static str {
+    match source {
+        ExitAvailabilitySource::NotObserved => "member_directory.exit.source.not_observed",
+        ExitAvailabilitySource::LocalRuntime => "member_directory.exit.source.local_runtime",
+        ExitAvailabilitySource::CoordinatorHealth => {
+            "member_directory.exit.source.coordinator_health"
+        }
+        ExitAvailabilitySource::RemotePeerReport => {
+            "member_directory.exit.source.remote_peer_report"
+        }
+    }
+}
+
+pub fn member_exit_state_text(
+    locale: Locale,
+    availability: Option<&ExitContributionAvailability>,
+    now_unix_ms: u64,
+) -> String {
+    let normalized = normalize_member_exit_availability(availability, now_unix_ms);
+    t(locale, member_exit_state_key(normalized.state)).to_string()
+}
+
+pub fn member_exit_source_text(
+    locale: Locale,
+    availability: Option<&ExitContributionAvailability>,
+    now_unix_ms: u64,
+) -> String {
+    let normalized = normalize_member_exit_availability(availability, now_unix_ms);
+    t(locale, member_exit_source_key(normalized.source)).to_string()
+}
+
+pub fn member_exit_declared_text(
+    locale: Locale,
+    availability: Option<&ExitContributionAvailability>,
+    now_unix_ms: u64,
+) -> String {
+    let normalized = normalize_member_exit_availability(availability, now_unix_ms);
+    let key = match normalized.declared_available {
+        Some(true) => "member_directory.exit.declared.available",
+        Some(false) => "member_directory.exit.declared.unavailable",
+        None => "member_directory.exit.declared.unknown",
+    };
+    t(locale, key).to_string()
+}
+
+pub fn member_exit_freshness_text(
+    locale: Locale,
+    availability: Option<&ExitContributionAvailability>,
+    now_unix_ms: u64,
+) -> String {
+    let normalized = normalize_member_exit_availability(availability, now_unix_ms);
+    match normalized.freshness {
+        MemberExitFreshness::NotObserved => {
+            t(locale, "member_directory.exit.freshness.not_observed").to_string()
+        }
+        MemberExitFreshness::Stale => {
+            t(locale, "member_directory.exit.freshness.stale").to_string()
+        }
+        MemberExitFreshness::Fresh => {
+            let Some(observed_at_unix_ms) = normalized.observed_at_unix_ms else {
+                return t(locale, "common.unknown").to_string();
+            };
+            let elapsed_seconds = now_unix_ms.saturating_sub(observed_at_unix_ms) / 1_000;
+            if elapsed_seconds < 60 {
+                return t(locale, "member_directory.freshness.just_now").to_string();
+            }
+            let minutes = elapsed_seconds / 60;
+            if minutes < 60 {
+                return tr(
+                    locale,
+                    "member_directory.freshness.minutes",
+                    &[("count", &format_integer(locale, minutes as i64))],
+                );
+            }
+            let hours = minutes / 60;
+            if hours < 24 {
+                return tr(
+                    locale,
+                    "member_directory.freshness.hours",
+                    &[("count", &format_integer(locale, hours as i64))],
+                );
+            }
+            tr(
+                locale,
+                "member_directory.freshness.days",
+                &[("count", &format_integer(locale, (hours / 24) as i64))],
+            )
+        }
+    }
+}
+
+pub fn member_exit_reason_text(
+    locale: Locale,
+    availability: Option<&ExitContributionAvailability>,
+    now_unix_ms: u64,
+) -> String {
+    let normalized = normalize_member_exit_availability(availability, now_unix_ms);
+    let Some(reason_code) = normalized.reason_code else {
+        return t(locale, "common.unknown").to_string();
+    };
+    let key = reason_code
+        .strip_prefix("exit.availability.")
+        .map(|reason| format!("member_directory.exit.reason.{reason}"));
+    key.map(|key| t(locale, &key).to_string())
+        .unwrap_or_else(|| t(locale, "common.unknown").to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopologyNodeDetailModel {
     pub node_id: String,
@@ -793,6 +1020,12 @@ pub struct TopologyNodeDetailModel {
     pub status: String,
     pub presence: String,
     pub networks: String,
+    pub exit_state: String,
+    pub exit_source: String,
+    pub exit_declared: String,
+    pub exit_observed_at_unix_ms: Option<u64>,
+    pub exit_freshness: String,
+    pub exit_reason: String,
 }
 
 pub fn topology_member_actions(
@@ -834,6 +1067,7 @@ pub fn topology_node_detail(
     network_id: Option<&str>,
     directory_member: Option<&NetworkMember>,
     locale: Locale,
+    generated_at_unix_ms: u64,
 ) -> TopologyNodeDetailModel {
     let membership = network_id.and_then(|network_id| {
         node.networks
@@ -876,6 +1110,9 @@ pub fn topology_node_detail(
         })
         .collect::<Vec<_>>()
         .join(t(locale, "common.list_separator"));
+    let exit_availability = directory_member.map(|member| &member.exit_availability);
+    let normalized_exit =
+        normalize_member_exit_availability(exit_availability, generated_at_unix_ms);
     TopologyNodeDetailModel {
         node_id: node.node_id.to_string(),
         display_name: node
@@ -891,6 +1128,12 @@ pub fn topology_node_detail(
         status: status.to_string(),
         presence: presence.to_string(),
         networks,
+        exit_state: member_exit_state_text(locale, exit_availability, generated_at_unix_ms),
+        exit_source: member_exit_source_text(locale, exit_availability, generated_at_unix_ms),
+        exit_declared: member_exit_declared_text(locale, exit_availability, generated_at_unix_ms),
+        exit_observed_at_unix_ms: normalized_exit.observed_at_unix_ms,
+        exit_freshness: member_exit_freshness_text(locale, exit_availability, generated_at_unix_ms),
+        exit_reason: member_exit_reason_text(locale, exit_availability, generated_at_unix_ms),
     }
 }
 
@@ -9670,18 +9913,25 @@ mod tests {
     fn topology_detail_uses_membership_then_directory_then_unknown() {
         let (topology, alpha, beta, relay) = topology_snapshot_fixture();
         let node = topology.node(&relay).expect("relay node");
-        let directory = topology_directory_member(
+        let mut directory = topology_directory_member(
             &beta,
             &relay,
             NetworkMemberStatus::Suspended,
             NetworkMemberPresence::disconnected(1_700_000_009_900),
             vec![MemberLifecycleAction::Resume],
         );
+        directory.members[0].exit_availability = ExitContributionAvailability::observed(
+            true,
+            true,
+            ExitAvailabilitySource::CoordinatorHealth,
+            1_700_000_009_000,
+        );
         let detail = topology_node_detail(
             node,
             Some(beta.as_str()),
             Some(&directory.members[0]),
             Locale::En,
+            directory.generated_at_unix_ms,
         );
         assert_eq!(detail.display_name, "Trusted relay");
         assert_eq!(
@@ -9701,12 +9951,33 @@ mod tests {
         assert!(detail
             .capabilities
             .contains(t(Locale::En, "capability.exit")));
+        assert_eq!(
+            detail.exit_state,
+            t(Locale::En, "member_directory.exit.state.available")
+        );
+        assert_eq!(
+            detail.exit_source,
+            t(
+                Locale::En,
+                "member_directory.exit.source.coordinator_health"
+            )
+        );
+        assert_eq!(
+            detail.exit_declared,
+            t(Locale::En, "member_directory.exit.declared.available")
+        );
+        assert_eq!(detail.exit_observed_at_unix_ms, Some(1_700_000_009_000));
+        assert_eq!(
+            detail.exit_freshness,
+            t(Locale::En, "member_directory.freshness.just_now")
+        );
 
         let fallback = topology_node_detail(
             node,
             Some(NetworkId::from_public_key(b"foreign-network").as_str()),
             Some(&directory.members[0]),
             Locale::En,
+            directory.generated_at_unix_ms,
         );
         assert_eq!(fallback.role, t(Locale::En, "common.not_available"));
         assert_eq!(
@@ -9718,9 +9989,23 @@ mod tests {
             t(Locale::En, "member_directory.presence.offline")
         );
 
-        let unknown = topology_node_detail(node, None, None, Locale::En);
+        let unknown =
+            topology_node_detail(node, None, None, Locale::En, topology.generated_at_unix_ms);
         assert_eq!(unknown.status, t(Locale::En, "common.unknown"));
         assert_eq!(unknown.presence, t(Locale::En, "common.unknown"));
+        assert_eq!(
+            unknown.exit_state,
+            t(Locale::En, "member_directory.exit.state.unknown")
+        );
+        assert_eq!(
+            unknown.exit_source,
+            t(Locale::En, "member_directory.exit.source.not_observed")
+        );
+        assert_eq!(unknown.exit_observed_at_unix_ms, None);
+        assert_eq!(
+            unknown.exit_freshness,
+            t(Locale::En, "member_directory.exit.freshness.not_observed")
+        );
 
         let viewer = topology
             .node_ids()
@@ -9728,12 +10013,103 @@ mod tests {
             .find(|node_id| node_id != &relay)
             .expect("viewer node");
         let viewer = topology.node(&viewer).expect("viewer node");
-        let viewer_detail = topology_node_detail(viewer, Some(alpha.as_str()), None, Locale::En);
+        let viewer_detail = topology_node_detail(
+            viewer,
+            Some(alpha.as_str()),
+            None,
+            Locale::En,
+            topology.generated_at_unix_ms,
+        );
         assert_eq!(viewer_detail.display_name, viewer.node_id.as_str());
         assert_eq!(
             viewer_detail.capabilities,
             t(Locale::En, "status.capability.unknown")
         );
+    }
+
+    #[test]
+    fn member_exit_availability_fails_closed_and_filters_reason_codes() {
+        let now = 1_700_000_010_000;
+        let missing = normalize_member_exit_availability(None, now);
+        assert_eq!(missing.state, ExitAvailabilityState::Unknown);
+        assert_eq!(missing.source, ExitAvailabilitySource::NotObserved);
+        assert_eq!(missing.freshness, MemberExitFreshness::NotObserved);
+        assert_eq!(missing.reason_code, Some("exit.availability.not_observed"));
+
+        let undeclared = ExitContributionAvailability::observed_with_declaration(
+            None,
+            true,
+            ExitAvailabilitySource::LocalRuntime,
+            now - 1_000,
+        );
+        let normalized = normalize_member_exit_availability(Some(&undeclared), now);
+        assert_eq!(normalized.state, ExitAvailabilityState::Available);
+        assert_eq!(normalized.declared_available, None);
+        assert_eq!(normalized.freshness, MemberExitFreshness::Fresh);
+        assert_eq!(
+            member_exit_declared_text(Locale::En, Some(&undeclared), now),
+            t(Locale::En, "member_directory.exit.declared.unknown")
+        );
+
+        let contradictory = ExitContributionAvailability {
+            state: ExitAvailabilityState::Available,
+            source: ExitAvailabilitySource::RemotePeerReport,
+            observed_at_unix_ms: Some(now - 1_000),
+            declared_available: Some(false),
+            reason_code: Some("exit.availability.private_reason".into()),
+        };
+        let normalized = normalize_member_exit_availability(Some(&contradictory), now);
+        assert_eq!(normalized.state, ExitAvailabilityState::Degraded);
+        assert_eq!(
+            normalized.reason_code,
+            Some("exit.availability.available_but_not_declared")
+        );
+        let reason = member_exit_reason_text(Locale::En, Some(&contradictory), now);
+        assert_eq!(
+            reason,
+            t(
+                Locale::En,
+                "member_directory.exit.reason.available_but_not_declared"
+            )
+        );
+        assert!(!reason.contains("private_reason"));
+
+        let stale = ExitContributionAvailability::observed(
+            true,
+            true,
+            ExitAvailabilitySource::CoordinatorHealth,
+            now - MEMBER_EXIT_AVAILABILITY_MAX_AGE_MS - 1,
+        );
+        let normalized = normalize_member_exit_availability(Some(&stale), now);
+        assert_eq!(normalized.state, ExitAvailabilityState::Unknown);
+        assert_eq!(normalized.freshness, MemberExitFreshness::Stale);
+        assert_eq!(normalized.reason_code, Some("exit.availability.stale"));
+        assert_eq!(
+            member_exit_freshness_text(Locale::En, Some(&stale), now),
+            t(Locale::En, "member_directory.exit.freshness.stale")
+        );
+
+        let missing_timestamp = ExitContributionAvailability {
+            state: ExitAvailabilityState::Available,
+            source: ExitAvailabilitySource::LocalRuntime,
+            observed_at_unix_ms: None,
+            declared_available: Some(true),
+            reason_code: Some("exit.availability.forwarder_unhealthy".into()),
+        };
+        let normalized = normalize_member_exit_availability(Some(&missing_timestamp), now);
+        assert_eq!(normalized.state, ExitAvailabilityState::Unknown);
+        assert_eq!(normalized.freshness, MemberExitFreshness::Stale);
+
+        let unknown_reason = ExitContributionAvailability {
+            state: ExitAvailabilityState::Unavailable,
+            source: ExitAvailabilitySource::LocalRuntime,
+            observed_at_unix_ms: Some(now - 1_000),
+            declared_available: Some(false),
+            reason_code: Some("exit.availability.private_reason".into()),
+        };
+        let reason = member_exit_reason_text(Locale::En, Some(&unknown_reason), now);
+        assert_eq!(reason, t(Locale::En, "common.unknown"));
+        assert!(!reason.contains("private_reason"));
     }
 
     #[test]

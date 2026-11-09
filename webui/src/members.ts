@@ -1,5 +1,8 @@
 import type {
   CapabilityKind,
+  ExitAvailabilitySource,
+  ExitAvailabilityState,
+  ExitContributionAvailability,
   MembershipRole,
   NetworkMember,
   NetworkMemberGroup,
@@ -28,6 +31,219 @@ export const EMPTY_MEMBER_FILTERS: MemberFilters = {
   capability: "all",
   health: "all",
 };
+
+export const EXIT_AVAILABILITY_MAX_AGE_MS = 90_000;
+
+const EXIT_AVAILABILITY_REASON_CODES = [
+  "exit.availability.available_but_not_declared",
+  "exit.availability.cleaning",
+  "exit.availability.declared_but_unavailable",
+  "exit.availability.draining",
+  "exit.availability.forwarder_unhealthy",
+  "exit.availability.health_checking",
+  "exit.availability.network_not_allowed",
+  "exit.availability.not_observed",
+  "exit.availability.owner_disabled",
+  "exit.availability.stale",
+  "exit.availability.waiting_for_network_authorization",
+] as const;
+
+export type ExitAvailabilityReasonCode =
+  (typeof EXIT_AVAILABILITY_REASON_CODES)[number];
+export type ExitAvailabilityFreshness = "fresh" | "stale" | "not_observed";
+
+export type NormalizedExitAvailability = {
+  state: ExitAvailabilityState;
+  source: ExitAvailabilitySource;
+  declaredAvailable: boolean | null;
+  observedAtUnixMs: number | null;
+  freshness: ExitAvailabilityFreshness;
+  reasonCode: ExitAvailabilityReasonCode | null;
+};
+
+function isExitAvailabilityState(
+  value: unknown,
+): value is ExitAvailabilityState {
+  return (
+    value === "unknown" ||
+    value === "available" ||
+    value === "degraded" ||
+    value === "unavailable"
+  );
+}
+
+function isExitAvailabilitySource(
+  value: unknown,
+): value is ExitAvailabilitySource {
+  return (
+    value === "not_observed" ||
+    value === "local_runtime" ||
+    value === "coordinator_health" ||
+    value === "remote_peer_report"
+  );
+}
+
+function allowedExitReason(value: unknown): ExitAvailabilityReasonCode | null {
+  return typeof value === "string" &&
+    (EXIT_AVAILABILITY_REASON_CODES as readonly string[]).includes(value)
+    ? (value as ExitAvailabilityReasonCode)
+    : null;
+}
+
+/** Fail closed: unknown, stale, or contradictory evidence never becomes healthy. */
+export function normalizeExitAvailability(
+  availability: ExitContributionAvailability | null | undefined,
+  nowUnixMs: number,
+): NormalizedExitAvailability {
+  if (!availability) {
+    return {
+      state: "unknown",
+      source: "not_observed",
+      declaredAvailable: null,
+      observedAtUnixMs: null,
+      freshness: "not_observed",
+      reasonCode: "exit.availability.not_observed",
+    };
+  }
+
+  const source = isExitAvailabilitySource(availability.source)
+    ? availability.source
+    : "not_observed";
+  const observedAtUnixMs =
+    typeof availability.observed_at_unix_ms === "number" &&
+    Number.isFinite(availability.observed_at_unix_ms)
+      ? availability.observed_at_unix_ms
+      : null;
+  const declaredAvailable =
+    typeof availability.declared_available === "boolean"
+      ? availability.declared_available
+      : null;
+  const suppliedReason = allowedExitReason(availability.reason_code);
+
+  if (observedAtUnixMs == null) {
+    const notObserved = source === "not_observed" && availability.state === "unknown";
+    return {
+      state: "unknown",
+      source,
+      declaredAvailable,
+      observedAtUnixMs: null,
+      freshness: notObserved ? "not_observed" : "stale",
+      reasonCode:
+        suppliedReason ??
+        (notObserved
+          ? "exit.availability.not_observed"
+          : "exit.availability.stale"),
+    };
+  }
+
+  if (nowUnixMs > observedAtUnixMs + EXIT_AVAILABILITY_MAX_AGE_MS) {
+    return {
+      state: "unknown",
+      source,
+      declaredAvailable,
+      observedAtUnixMs,
+      freshness: "stale",
+      reasonCode: "exit.availability.stale",
+    };
+  }
+
+  const reportedState = isExitAvailabilityState(availability.state)
+    ? availability.state
+    : "unknown";
+  const contradictoryAvailability =
+    reportedState === "available" && declaredAvailable === false;
+  return {
+    state: contradictoryAvailability ? "degraded" : reportedState,
+    source,
+    declaredAvailable,
+    observedAtUnixMs,
+    freshness: "fresh",
+    reasonCode: contradictoryAvailability
+      ? "exit.availability.available_but_not_declared"
+      : suppliedReason,
+  };
+}
+
+export function memberExitStateClass(
+  availability: ExitContributionAvailability | null | undefined,
+  nowUnixMs: number,
+): "good" | "warn" | "bad" | "neutral" {
+  switch (normalizeExitAvailability(availability, nowUnixMs).state) {
+    case "available":
+      return "good";
+    case "degraded":
+      return "warn";
+    case "unavailable":
+      return "bad";
+    default:
+      return "neutral";
+  }
+}
+
+export function memberExitStateText(
+  locale: Locale,
+  availability: ExitContributionAvailability | null | undefined,
+  nowUnixMs: number,
+): string {
+  return label(
+    locale,
+    `member_directory.exit.state.${normalizeExitAvailability(availability, nowUnixMs).state}`,
+  );
+}
+
+export function memberExitSourceText(
+  locale: Locale,
+  availability: ExitContributionAvailability | null | undefined,
+  nowUnixMs: number,
+): string {
+  return label(
+    locale,
+    `member_directory.exit.source.${normalizeExitAvailability(availability, nowUnixMs).source}`,
+  );
+}
+
+export function memberExitDeclaredText(
+  locale: Locale,
+  availability: ExitContributionAvailability | null | undefined,
+  nowUnixMs: number,
+): string {
+  const declared = normalizeExitAvailability(availability, nowUnixMs).declaredAvailable;
+  if (declared == null) return label(locale, "member_directory.exit.declared.unknown");
+  return label(
+    locale,
+    declared
+      ? "member_directory.exit.declared.available"
+      : "member_directory.exit.declared.unavailable",
+  );
+}
+
+export function memberExitFreshnessText(
+  locale: Locale,
+  availability: ExitContributionAvailability | null | undefined,
+  nowUnixMs: number,
+): string {
+  const normalized = normalizeExitAvailability(availability, nowUnixMs);
+  if (normalized.freshness !== "fresh") {
+    return label(
+      locale,
+      `member_directory.exit.freshness.${normalized.freshness}`,
+    );
+  }
+  return memberFreshnessText(locale, normalized.observedAtUnixMs, nowUnixMs);
+}
+
+export function memberExitReasonText(
+  locale: Locale,
+  availability: ExitContributionAvailability | null | undefined,
+  nowUnixMs: number,
+): string {
+  const reason = normalizeExitAvailability(availability, nowUnixMs).reasonCode;
+  if (!reason) return label(locale, "common.unknown");
+  return label(
+    locale,
+    `member_directory.exit.reason.${reason.slice("exit.availability.".length)}`,
+  );
+}
 
 /** Stable presentation order; never depend on response or refresh order. */
 export function sortMembers(members: NetworkMember[]): NetworkMember[] {
@@ -210,6 +426,12 @@ export function exportMemberDirectory(
     "member_directory.observed_at",
     "member_directory.freshness",
     "member_directory.joined_at",
+    "member_directory.exit.state",
+    "member_directory.exit.source",
+    "member_directory.exit.declared",
+    "member_directory.exit.observed_at",
+    "member_directory.exit.freshness",
+    "member_directory.exit.reason",
   ].map((key) => tsvCell(label(locale, key)));
   const rows = sortMembers(members).map((member) => [
     tsvCell(memberDisplayName(member)),
@@ -232,6 +454,17 @@ export function exportMemberDirectory(
       ),
     ),
     tsvCell(memberJoinedAtText(locale, member)),
+    tsvCell(memberExitStateText(locale, member.exit_availability, nowUnixMs)),
+    tsvCell(memberExitSourceText(locale, member.exit_availability, nowUnixMs)),
+    tsvCell(memberExitDeclaredText(locale, member.exit_availability, nowUnixMs)),
+    member.exit_availability?.observed_at_unix_ms == null
+      ? ""
+      : i18n().formatTimestamp(
+          locale,
+          member.exit_availability.observed_at_unix_ms,
+        ),
+    tsvCell(memberExitFreshnessText(locale, member.exit_availability, nowUnixMs)),
+    tsvCell(memberExitReasonText(locale, member.exit_availability, nowUnixMs)),
   ]);
   return [columns, ...rows].map((row) => row.join("\t")).join("\n");
 }

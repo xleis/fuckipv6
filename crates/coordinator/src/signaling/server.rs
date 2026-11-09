@@ -1062,6 +1062,7 @@ async fn handle_join_request_list(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_member_directory_list(
     network_id: NetworkId,
     session_manager: &SessionManager,

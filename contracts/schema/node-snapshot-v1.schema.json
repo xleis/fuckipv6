@@ -2000,7 +2000,7 @@
               "type": "null"
             }
           ],
-          "description": "Signed terms most recently observed from discovery. When these differ\nfrom `terms_hash`, members see a policy-change notice; the separate\nboolean distinguishes notice-only `JoiningMembers` changes from\n`AllMembers` changes that require explicit acknowledgement."
+          "description": "Signed terms most recently observed from discovery. When these differ\nfrom `terms_hash`, members see a policy-change notice; the separate\nboolean distinguishes notice-only metadata changes from Exit disclosure\nor privacy changes that require explicit acknowledgement."
         },
         "current_terms_hash": {
           "type": [

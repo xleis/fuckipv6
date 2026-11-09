@@ -7,8 +7,12 @@ import {
   EMPTY_MEMBER_FILTERS,
   exportMemberDirectory,
   filterMembers,
+  memberExitDeclaredText,
+  memberExitReasonText,
+  memberExitStateText,
   memberFreshnessText,
   memberPresenceText,
+  normalizeExitAvailability,
   resolveNetworkMembershipId,
   retainMemberSelection,
   sortMembers,
@@ -124,6 +128,7 @@ describe("member directory projection", () => {
     const exported = exportMemberDirectory(filtered, "en", now);
     const lines = exported.split("\n");
     expect(lines).toHaveLength(2);
+    expect(lines[0].split("\t")).toHaveLength(18);
     expect(lines[1].split("\t")[1]).toBe("node-z");
     expect(exported).toContain("translated:member_directory.presence.offline");
     expect(exported).not.toContain("node-a");
@@ -163,6 +168,109 @@ describe("member directory projection", () => {
       "translated:member_directory.freshness.hours",
     );
     expect(memberFreshnessText("en", null, now)).toBe("");
+  });
+
+  it("normalizes Exit availability fail closed", () => {
+    expect(normalizeExitAvailability(undefined, now)).toMatchObject({
+      state: "unknown",
+      source: "not_observed",
+      declaredAvailable: null,
+      freshness: "not_observed",
+      reasonCode: "exit.availability.not_observed",
+    });
+    expect(
+      normalizeExitAvailability(
+        {
+          state: "available",
+          source: "remote_peer_report",
+          declared_available: null,
+          observed_at_unix_ms: now - 1_000,
+        },
+        now,
+      ),
+    ).toMatchObject({
+      state: "available",
+      declaredAvailable: null,
+      freshness: "fresh",
+    });
+    expect(
+      normalizeExitAvailability(
+        {
+          state: "available",
+          source: "remote_peer_report",
+          declared_available: false,
+          observed_at_unix_ms: now - 1_000,
+          reason_code: "exit.availability.cleaning",
+        },
+        now,
+      ),
+    ).toMatchObject({
+      state: "degraded",
+      declaredAvailable: false,
+      reasonCode: "exit.availability.available_but_not_declared",
+    });
+    expect(
+      normalizeExitAvailability(
+        {
+          state: "available",
+          source: "coordinator_health",
+          declared_available: true,
+          observed_at_unix_ms: now - 90_001,
+        },
+        now,
+      ),
+    ).toMatchObject({
+      state: "unknown",
+      freshness: "stale",
+      reasonCode: "exit.availability.stale",
+    });
+    expect(
+      normalizeExitAvailability(
+        {
+          state: "degraded",
+          source: "coordinator_health",
+          declared_available: true,
+          observed_at_unix_ms: null,
+        },
+        now,
+      ),
+    ).toMatchObject({
+      state: "unknown",
+      freshness: "stale",
+    });
+    expect(
+      normalizeExitAvailability(
+        {
+          state: "unknown",
+          source: "remote_peer_report",
+          observed_at_unix_ms: now,
+          reason_code: "exit.availability.raw-secret-reason",
+        },
+        now,
+      ).reasonCode,
+    ).toBeNull();
+  });
+
+  it("does not infer a missing Exit declaration as unavailable", () => {
+    const availability = {
+      state: "available" as const,
+      source: "remote_peer_report" as const,
+      declared_available: null,
+      observed_at_unix_ms: now - 1_000,
+    };
+    expect(memberExitDeclaredText("en", availability, now)).toBe(
+      "translated:member_directory.exit.declared.unknown",
+    );
+    expect(memberExitStateText("en", availability, now)).toBe(
+      "translated:member_directory.exit.state.available",
+    );
+    expect(
+      memberExitReasonText(
+        "en",
+        { ...availability, reason_code: "exit.availability.not_a_known_reason" },
+        now,
+      ),
+    ).toBe("translated:common.unknown");
   });
 
   it("resolves the real network id from the joined membership", () => {

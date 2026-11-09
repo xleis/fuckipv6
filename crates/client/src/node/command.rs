@@ -3123,6 +3123,15 @@ fn exit_contribution_obligation_audit_value(
     }
 }
 
+fn exit_contribution_mode_audit_value(mode: ExitContributionMode) -> &'static str {
+    match mode {
+        ExitContributionMode::Autonomous => "autonomous",
+        ExitContributionMode::RequiredOnJoin => "required_on_join",
+        ExitContributionMode::Disabled => "disabled",
+        ExitContributionMode::ApprovalRequired => "approval_required",
+    }
+}
+
 fn exit_contribution_scope_audit_value(scope: ExitContributionScope) -> &'static str {
     match scope {
         ExitContributionScope::NotApplicable => "not_applicable",
@@ -3167,6 +3176,10 @@ fn insert_membership_policy_audit_details(
                 "exit_contribution_scope".into(),
                 exit_contribution_scope_audit_value(command.exit_contribution_scope).into(),
             );
+            details.insert(
+                "exit_contribution_mode".into(),
+                exit_contribution_mode_audit_value(command.exit_contribution_mode).into(),
+            );
             if let Some(NodeCommandResult {
                 outcome: NodeCommandOutcome::NetworkCreated(created),
                 ..
@@ -3190,6 +3203,10 @@ fn insert_membership_policy_audit_details(
             details.insert(
                 "exit_contribution_scope".into(),
                 exit_contribution_scope_audit_value(command.update.exit_contribution_scope).into(),
+            );
+            details.insert(
+                "exit_contribution_mode".into(),
+                exit_contribution_mode_audit_value(command.update.exit_contribution_mode).into(),
             );
             if let Some(NodeCommandResult {
                 outcome: NodeCommandOutcome::NetworkProfileUpdated(updated),
@@ -3354,6 +3371,13 @@ fn insert_membership_policy_audit_details(
         );
         insert_optional_audit_detail(
             details,
+            "exit_contribution_mode",
+            membership
+                .exit_contribution_mode
+                .map(exit_contribution_mode_audit_value),
+        );
+        insert_optional_audit_detail(
+            details,
             "acknowledged_at_unix_ms",
             membership.acknowledged_at_unix_ms,
         );
@@ -3369,6 +3393,7 @@ fn insert_membership_policy_audit_details(
         for (source, target) in [
             ("policy_exit_contribution", "exit_contribution"),
             ("policy_exit_contribution_scope", "exit_contribution_scope"),
+            ("policy_exit_contribution_mode", "exit_contribution_mode"),
             ("policy_network_revision", "network_policy_revision"),
             ("policy_privacy_revision", "privacy_policy_revision"),
             ("policy_terms_hash", "terms_hash"),
@@ -5783,6 +5808,7 @@ mod tests {
         assert_eq!(details["terms_hash"], terms_hash.as_str());
         assert_eq!(details["exit_contribution"], "required");
         assert_eq!(details["exit_contribution_scope"], "all_members");
+        assert_eq!(details["exit_contribution_mode"], "required_on_join");
         assert_eq!(details["local_exit_capability"], "true");
         assert_eq!(details["local_exit_enabled"], "true");
         assert_eq!(details["policy_confirmation_required"], "false");
@@ -5816,6 +5842,7 @@ mod tests {
         let mut problem = NodeProblem::new(NodeProblemCode::Conflict, "policy changed")
             .with_param("policy_exit_contribution", "required")
             .with_param("policy_exit_contribution_scope", "all_members")
+            .with_param("policy_exit_contribution_mode", "required_on_join")
             .with_param("policy_network_revision", "5")
             .with_param("policy_privacy_revision", "2")
             .with_param("policy_terms_hash", terms_hash.as_str())
@@ -5835,6 +5862,7 @@ mod tests {
         assert_eq!(details["exit_contribution_user_consent"], "declined");
         assert_eq!(details["exit_contribution"], "required");
         assert_eq!(details["exit_contribution_scope"], "all_members");
+        assert_eq!(details["exit_contribution_mode"], "required_on_join");
         assert_eq!(details["network_policy_revision"], "5");
         assert_eq!(details["privacy_policy_revision"], "2");
         assert_eq!(details["terms_hash"], terms_hash.as_str());
@@ -5884,6 +5912,7 @@ mod tests {
         assert_eq!(details["privacy_policy_revision"], "2");
         assert_eq!(details["exit_contribution"], "required");
         assert_eq!(details["exit_contribution_scope"], "all_members");
+        assert_eq!(details["exit_contribution_mode"], "required_on_join");
         assert_eq!(details["policy_confirmation_required"], "false");
         assert_eq!(details["local_exit_capability"], "true");
         assert_eq!(details["local_exit_enabled"], "false");

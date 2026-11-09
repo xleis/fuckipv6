@@ -54,6 +54,16 @@ function member(
     revision,
     access_epoch: 4,
     available_actions: availableActions,
+    exit_availability:
+      nodeId === BOB_ID
+        ? {
+            state: "available",
+            source: "remote_peer_report",
+            declared_available: false,
+            observed_at_unix_ms: 1_700_000_095_000,
+            reason_code: "exit.availability.cleaning",
+          }
+        : undefined,
     presence:
       nodeId === BOB_ID
         ? {
@@ -263,6 +273,54 @@ describe("TopologyPage interactions and governance", () => {
     expect(tooltip).toHaveTextContent(translated("topology.health.degraded"));
     expect(tooltip).toHaveTextContent(
       translated("member_directory.presence.offline"),
+    );
+  });
+
+  it("shows normalized Exit availability in topology details", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn(directorySubmit(directory()));
+    render(
+      <TopologyPage
+        topology={snapshot()}
+        locale="zh-CN"
+        actions={governanceActions}
+        onSubmitAction={onSubmit}
+      />,
+    );
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+
+    fireEvent.contextMenu(screen.getByRole("option", { name: /Bob/ }));
+    await user.click(
+      await screen.findByRole("menuitem", {
+        name: translated("topology.menu.open"),
+      }),
+    );
+    const bobDetail = screen.getByTestId("topology-node-detail");
+    expect(bobDetail).toHaveTextContent(
+      translated("member_directory.exit.state.degraded"),
+    );
+    expect(bobDetail).toHaveTextContent(
+      translated("member_directory.exit.reason.available_but_not_declared"),
+    );
+    expect(bobDetail).toHaveTextContent(
+      translated("member_directory.freshness.just_now"),
+    );
+    expect(within(bobDetail).getByTestId("topology-member-exit-state")).toHaveClass(
+      "warn",
+    );
+
+    fireEvent.contextMenu(screen.getByRole("option", { name: /Carol/ }));
+    await user.click(
+      await screen.findByRole("menuitem", {
+        name: translated("topology.menu.open"),
+      }),
+    );
+    const carolDetail = screen.getByTestId("topology-node-detail");
+    expect(carolDetail).toHaveTextContent(
+      translated("member_directory.exit.state.unknown"),
+    );
+    expect(carolDetail).not.toHaveTextContent(
+      translated("member_directory.exit.state.unavailable"),
     );
   });
 

@@ -1,8 +1,10 @@
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use fuckipv6_common::domain::{
+    AuditEntry, AuditId, AuditLog, AuditOutcome, ContentHash,
     ExitContributionAuthorizationSnapshot, ExitContributionMode, ExitContributionRequest,
-    ExitContributionRequestId, ExitContributionReviewAction, NetworkId, NetworkRecord, NodeId,
+    ExitContributionRequestId, ExitContributionRequestState, ExitContributionReviewAction,
+    NetworkId, NetworkRecord, NodeId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -19,6 +21,8 @@ struct ExitContributionRequestFile {
     schema_version: u16,
     #[serde(default)]
     requests: BTreeMap<ExitContributionRequestId, ExitContributionRequest>,
+    #[serde(default)]
+    audit_log: AuditLog,
 }
 
 impl Default for ExitContributionRequestFile {
@@ -26,6 +30,7 @@ impl Default for ExitContributionRequestFile {
         Self {
             schema_version: EXIT_CONTRIBUTION_REQUEST_FILE_SCHEMA_VERSION,
             requests: BTreeMap::new(),
+            audit_log: AuditLog::default(),
         }
     }
 }
@@ -41,22 +46,44 @@ impl ExitContributionRequestFile {
             }
             request.validate()?;
         }
+        for entry in self.audit_log.entries() {
+            entry.validate()?;
+        }
         Ok(())
     }
 
     fn expire_and_reconcile(
         &mut self,
-        policy_revision: u64,
-        terms_hash: &fuckipv6_common::domain::ContentHash,
+        record: &NetworkRecord,
+        terms_hash: &ContentHash,
         now_unix_ms: u64,
     ) -> Result<()> {
+        let audit_log = &mut self.audit_log;
         for request in self.requests.values_mut() {
             if let Some(change) = request.expire(now_unix_ms)? {
+                append_request_audit(
+                    audit_log,
+                    &request.node_id,
+                    "network.exit_contribution.expire",
+                    "exit contribution request expired",
+                    change.previous_state,
+                    &change.request,
+                    now_unix_ms,
+                )?;
                 *request = change.request;
             }
             if let Some(change) =
-                request.reconcile_policy(policy_revision, terms_hash, now_unix_ms)?
+                request.reconcile_policy(record.policy_revision, terms_hash, now_unix_ms)?
             {
+                append_request_audit(
+                    audit_log,
+                    &record.owner,
+                    "network.exit_contribution.supersede",
+                    "exit contribution request superseded",
+                    change.previous_state,
+                    &change.request,
+                    now_unix_ms,
+                )?;
                 *request = change.request;
             }
         }
@@ -141,6 +168,15 @@ impl ExitContributionRequestStore {
                     expected_terms_hash,
                     requested_bandwidth_kbps,
                     requested_traffic_quota_bytes,
+                    now_unix_ms,
+                )?;
+                append_request_audit(
+                    &mut file.audit_log,
+                    requester,
+                    "network.exit_contribution.submit",
+                    "exit contribution request submitted",
+                    ExitContributionRequestState::Pending,
+                    &request,
                     now_unix_ms,
                 )?;
                 file.requests.insert(request_id, request.clone());
@@ -247,6 +283,34 @@ impl ExitContributionRequestStore {
         read_network_record(&self.network_record_path, network_id)
     }
 
+    /// Return the immutable, sanitized contribution governance ledger.
+    pub fn audit_entries(&self) -> Result<Vec<AuditEntry>> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("无法创建 Exit 贡献申请目录: {}", parent.display()))?;
+        }
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("exit contribution request store lock is poisoned"))?;
+        let lock_path = self.path.with_extension("json.lock");
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("无法打开 Exit 贡献申请锁: {}", lock_path.display()))?;
+        lock.lock_exclusive()
+            .with_context(|| format!("无法锁定 Exit 贡献申请存储: {}", lock_path.display()))?;
+        let entries = self
+            .load_unlocked()
+            .map(|file| file.audit_log.entries().to_vec());
+        let _ = FileExt::unlock(&lock);
+        entries
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn review(
         &self,
         network_id: &NetworkId,
@@ -281,6 +345,15 @@ impl ExitContributionRequestStore {
                 decision_reason_code,
                 now_unix_ms,
             )?;
+            append_request_audit(
+                &mut file.audit_log,
+                reviewer,
+                "network.exit_contribution.review",
+                "exit contribution request reviewed",
+                change.previous_state,
+                &change.request,
+                now_unix_ms,
+            )?;
             *request = change.request.clone();
             Ok(change.request)
         })
@@ -303,6 +376,15 @@ impl ExitContributionRequestStore {
                 bail!("exit_contribution.error.request_not_found");
             }
             let change = request.withdraw(actor, expected_revision, now_unix_ms)?;
+            append_request_audit(
+                &mut file.audit_log,
+                actor,
+                "network.exit_contribution.withdraw",
+                "exit contribution request withdrawn",
+                change.previous_state,
+                &change.request,
+                now_unix_ms,
+            )?;
             *request = change.request.clone();
             Ok(change.request)
         })
@@ -357,7 +439,7 @@ impl ExitContributionRequestStore {
             .content_hash()
             .context("Exit 贡献成员条款内容哈希失败")?;
         let mut candidate = self.load_unlocked()?;
-        candidate.expire_and_reconcile(record.policy_revision, &terms_hash, now_unix_ms)?;
+        candidate.expire_and_reconcile(&record, &terms_hash, now_unix_ms)?;
         let result = mutate(&mut candidate, &record, &terms_hash)?;
         candidate.validate()?;
         self.persist(&candidate)?;
@@ -406,6 +488,67 @@ impl ExitContributionRequestStore {
                 .with_context(|| format!("无法同步 Exit 贡献申请目录: {}", parent.display()))?;
         }
         Ok(())
+    }
+}
+
+fn append_request_audit(
+    audit_log: &mut AuditLog,
+    actor: &NodeId,
+    action: &str,
+    summary: &str,
+    previous_state: ExitContributionRequestState,
+    request: &ExitContributionRequest,
+    now_unix_ms: u64,
+) -> Result<()> {
+    let seed = format!(
+        "exit-contribution-audit:{}:{}:{}:{}",
+        request.network_id, request.request_id, action, request.revision
+    );
+    let mut details = BTreeMap::from([
+        ("request_id".into(), request.request_id.to_string()),
+        ("requested_node_id".into(), request.node_id.to_string()),
+        (
+            "policy_revision".into(),
+            request.policy_revision.to_string(),
+        ),
+        ("terms_hash".into(), request.terms_hash.as_str().to_string()),
+        (
+            "previous_state".into(),
+            request_state_code(previous_state).into(),
+        ),
+        ("state".into(), request_state_code(request.state).into()),
+        ("revision".into(), request.revision.to_string()),
+    ]);
+    if let Some(reason) = request.decision_reason_code.as_deref() {
+        details.insert("decision_reason_code".into(), reason.to_string());
+    }
+    audit_log.append(AuditEntry {
+        audit_id: AuditId::from_public_key(seed.as_bytes()),
+        operation_id: None,
+        actor: actor.clone(),
+        network_id: Some(request.network_id.clone()),
+        action: action.into(),
+        resource: format!(
+            "network/{}/exit-contribution/{}",
+            request.network_id, request.request_id
+        ),
+        outcome: AuditOutcome::Succeeded,
+        occurred_at_unix_ms: now_unix_ms,
+        summary: summary.into(),
+        details,
+        sensitive_keys: Default::default(),
+    })?;
+    Ok(())
+}
+
+const fn request_state_code(state: ExitContributionRequestState) -> &'static str {
+    match state {
+        ExitContributionRequestState::Pending => "pending",
+        ExitContributionRequestState::Approved => "approved",
+        ExitContributionRequestState::Rejected => "rejected",
+        ExitContributionRequestState::Withdrawn => "withdrawn",
+        ExitContributionRequestState::Expired => "expired",
+        ExitContributionRequestState::Superseded => "superseded",
     }
 }
 
@@ -685,6 +828,257 @@ mod tests {
         assert_eq!(approved.state, ExitContributionRequestState::Approved);
         assert_eq!(approved.revision, 2);
         assert_eq!(approved.reviewer_node_id.as_ref(), Some(&admin()));
+    }
+
+    #[test]
+    fn lifecycle_audit_is_persisted_sanitized_and_conflict_safe() {
+        let dir = test_dir("lifecycle-audit");
+        let mut record = record(ExitContributionMode::ApprovalRequired);
+        record.members.push(member(b"exit-store-other"));
+        record.updated_at_unix_ms += 1;
+        record.validate().unwrap();
+        let store = store(&dir, &record);
+        let withdrawn = submit(&store, b"exit-store-member", &record, 2_000).unwrap();
+        assert_eq!(store.audit_entries().unwrap().len(), 1);
+        assert_eq!(
+            submit(&store, b"exit-store-member", &record, 2_000).unwrap(),
+            withdrawn
+        );
+        assert_eq!(store.audit_entries().unwrap().len(), 1);
+        store
+            .withdraw(
+                &network_id(),
+                &member(b"exit-store-member"),
+                &withdrawn.request_id,
+                1,
+                2_001,
+            )
+            .unwrap();
+
+        let rejected = store
+            .submit(
+                &record.network_id,
+                &member(b"exit-store-member"),
+                ExitContributionRequestId::from_public_key(b"exit-store-rejected"),
+                record.policy_revision,
+                terms(&record),
+                None,
+                None,
+                2_002,
+            )
+            .unwrap();
+        store
+            .review(
+                &network_id(),
+                &owner(),
+                &rejected.request_id,
+                1,
+                ExitContributionReviewAction::Reject,
+                Some("exit.rejected.policy".into()),
+                2_003,
+            )
+            .unwrap();
+        let approved = store
+            .submit(
+                &record.network_id,
+                &member(b"exit-store-member"),
+                ExitContributionRequestId::from_public_key(b"exit-store-approved"),
+                record.policy_revision,
+                terms(&record),
+                None,
+                None,
+                2_004,
+            )
+            .unwrap();
+        store
+            .review(
+                &network_id(),
+                &admin(),
+                &approved.request_id,
+                1,
+                ExitContributionReviewAction::Approve,
+                Some("exit.approved.standard".into()),
+                2_005,
+            )
+            .unwrap();
+        assert!(store
+            .review(
+                &network_id(),
+                &admin(),
+                &approved.request_id,
+                1,
+                ExitContributionReviewAction::Reject,
+                None,
+                2_006,
+            )
+            .is_err());
+        assert_eq!(store.audit_entries().unwrap().len(), 6);
+
+        assert!(store
+            .submit(
+                &record.network_id,
+                &member(b"exit-store-other"),
+                approved.request_id.clone(),
+                record.policy_revision,
+                terms(&record),
+                None,
+                None,
+                2_006,
+            )
+            .is_err());
+
+        let reopened = ExitContributionRequestStore::new(
+            dir.join("exit_contribution_requests.json"),
+            dir.join("network.json"),
+        );
+        let audits = reopened.audit_entries().unwrap();
+        assert_eq!(audits.len(), 6);
+        assert_eq!(
+            audits
+                .iter()
+                .filter(|entry| entry.action == "network.exit_contribution.submit")
+                .count(),
+            3
+        );
+        assert_eq!(
+            audits
+                .iter()
+                .filter(|entry| entry.action == "network.exit_contribution.review")
+                .count(),
+            2
+        );
+        assert_eq!(
+            audits
+                .iter()
+                .filter(|entry| entry.action == "network.exit_contribution.withdraw")
+                .count(),
+            1
+        );
+        let approval = audits
+            .iter()
+            .find(|entry| {
+                entry.action == "network.exit_contribution.review"
+                    && entry.details.get("state").map(String::as_str) == Some("approved")
+            })
+            .unwrap();
+        assert_eq!(approval.actor, admin());
+        assert_eq!(approval.outcome, AuditOutcome::Succeeded);
+        assert_eq!(
+            approval
+                .details
+                .get("requested_node_id")
+                .map(String::as_str),
+            Some(member(b"exit-store-member").to_string().as_str())
+        );
+        assert_eq!(
+            approval
+                .details
+                .get("decision_reason_code")
+                .map(String::as_str),
+            Some("exit.approved.standard")
+        );
+        assert!(!approval.details.contains_key("requested_bandwidth_kbps"));
+        assert!(!approval
+            .details
+            .contains_key("requested_traffic_quota_bytes"));
+    }
+
+    #[test]
+    fn expiry_and_policy_supersession_append_audit_once() {
+        let dir = test_dir("automatic-audit");
+        let record = record(ExitContributionMode::ApprovalRequired);
+        let store = store(&dir, &record);
+        let expiring = submit(&store, b"exit-store-member", &record, 2_000).unwrap();
+        let expired = store
+            .status(
+                &network_id(),
+                &member(b"exit-store-member"),
+                &expiring.request_id,
+                expiring.expires_at_unix_ms,
+            )
+            .unwrap();
+        assert_eq!(expired.state, ExitContributionRequestState::Expired);
+        store
+            .status(
+                &network_id(),
+                &member(b"exit-store-member"),
+                &expiring.request_id,
+                expiring.expires_at_unix_ms + 1,
+            )
+            .unwrap();
+
+        let approved = store
+            .submit(
+                &record.network_id,
+                &member(b"exit-store-member"),
+                ExitContributionRequestId::from_public_key(b"exit-store-superseded"),
+                record.policy_revision,
+                terms(&record),
+                None,
+                None,
+                expiring.expires_at_unix_ms + 2,
+            )
+            .unwrap();
+        store
+            .review(
+                &network_id(),
+                &admin(),
+                &approved.request_id,
+                1,
+                ExitContributionReviewAction::Approve,
+                None,
+                expiring.expires_at_unix_ms + 3,
+            )
+            .unwrap();
+        let mut changed = record;
+        changed.policy_revision += 1;
+        changed.updated_at_unix_ms += 1;
+        changed.validate().unwrap();
+        write_record(&dir, &changed);
+        store
+            .list(&network_id(), &owner(), expiring.expires_at_unix_ms + 4)
+            .unwrap();
+        store
+            .list(&network_id(), &owner(), expiring.expires_at_unix_ms + 5)
+            .unwrap();
+
+        let reopened = ExitContributionRequestStore::new(
+            dir.join("exit_contribution_requests.json"),
+            dir.join("network.json"),
+        );
+        let audits = reopened.audit_entries().unwrap();
+        assert_eq!(audits.len(), 5);
+        assert_eq!(
+            audits
+                .iter()
+                .filter(|entry| entry.action == "network.exit_contribution.expire")
+                .count(),
+            1
+        );
+        assert_eq!(
+            audits
+                .iter()
+                .filter(|entry| entry.action == "network.exit_contribution.supersede")
+                .count(),
+            1
+        );
+        let expired = audits
+            .iter()
+            .find(|entry| entry.action == "network.exit_contribution.expire")
+            .unwrap();
+        assert_eq!(
+            expired.details.get("state").map(String::as_str),
+            Some("expired")
+        );
+        let superseded = audits
+            .iter()
+            .find(|entry| entry.action == "network.exit_contribution.supersede")
+            .unwrap();
+        assert_eq!(superseded.actor, owner());
+        assert_eq!(
+            superseded.details.get("state").map(String::as_str),
+            Some("superseded")
+        );
     }
 
     #[test]

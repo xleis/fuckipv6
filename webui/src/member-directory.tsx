@@ -42,6 +42,12 @@ import {
   filterMembers,
   memberCapabilitiesText,
   memberDisplayName,
+  memberExitDeclaredText,
+  memberExitFreshnessText,
+  memberExitReasonText,
+  memberExitSourceText,
+  memberExitStateClass,
+  memberExitStateText,
   memberFingerprintText,
   memberFreshnessText,
   memberGroupsText,
@@ -157,6 +163,7 @@ function MemberDetail({
   }
   const observedAt = member.presence.observed_at_unix_ms;
   const freshness = memberFreshnessText(locale, observedAt, generatedAtUnixMs);
+  const exitObservedAt = member.exit_availability?.observed_at_unix_ms ?? null;
   return (
     <section
       className="member-detail"
@@ -246,6 +253,87 @@ function MemberDetail({
           <dd>{memberJoinedAtText(locale, member)}</dd>
         </div>
       </dl>
+      <section
+        className="member-exit-availability"
+        aria-label={label(locale, "member_directory.exit.title")}
+        data-testid="member-exit-availability"
+      >
+        <div className="member-exit-availability-heading">
+          <strong>{label(locale, "member_directory.exit.title")}</strong>
+          <span
+            className={`status-pill ${memberExitStateClass(
+              member.exit_availability,
+              generatedAtUnixMs,
+            )}`}
+          >
+            {memberExitStateText(
+              locale,
+              member.exit_availability,
+              generatedAtUnixMs,
+            )}
+          </span>
+        </div>
+        <dl className="member-detail-grid">
+          <div>
+            <dt>{label(locale, "member_directory.exit.state")}</dt>
+            <dd>
+              {memberExitStateText(
+                locale,
+                member.exit_availability,
+                generatedAtUnixMs,
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "member_directory.exit.source")}</dt>
+            <dd>
+              {memberExitSourceText(
+                locale,
+                member.exit_availability,
+                generatedAtUnixMs,
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "member_directory.exit.declared")}</dt>
+            <dd>
+              {memberExitDeclaredText(
+                locale,
+                member.exit_availability,
+                generatedAtUnixMs,
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "member_directory.exit.observed_at")}</dt>
+            <dd>
+              {exitObservedAt == null
+                ? label(locale, "common.unknown")
+                : i18n().formatTimestamp(locale, exitObservedAt)}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "member_directory.exit.freshness")}</dt>
+            <dd>
+              {memberExitFreshnessText(
+                locale,
+                member.exit_availability,
+                generatedAtUnixMs,
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "member_directory.exit.reason")}</dt>
+            <dd>
+              {memberExitReasonText(
+                locale,
+                member.exit_availability,
+                generatedAtUnixMs,
+              )}
+            </dd>
+          </div>
+        </dl>
+      </section>
     </section>
   );
 }
@@ -611,10 +699,18 @@ export function MemberDirectoryCard({
                     height: `${virtualRow.size}px`,
                     transform: `translateY(${virtualRow.start}px)`,
                   } satisfies CSSProperties;
+                  const exitState = memberExitStateText(
+                    locale,
+                    member.exit_availability,
+                    directory.generated_at_unix_ms,
+                  );
                   const labelText = `${memberDisplayName(member)} · ${memberStatusText(
                     locale,
                     member,
-                  )} · ${memberPresenceText(locale, member)}`;
+                  )} · ${memberPresenceText(locale, member)} · ${label(
+                    locale,
+                    "member_directory.exit.state",
+                  )}: ${exitState}`;
                   return (
                     <button
                       key={virtualRow.key}
@@ -646,6 +742,15 @@ export function MemberDirectoryCard({
                           className={`presence-dot ${member.presence.state}`}
                           aria-label={memberPresenceText(locale, member)}
                         />
+                        <span
+                          className={`status-pill ${memberExitStateClass(
+                            member.exit_availability,
+                            directory.generated_at_unix_ms,
+                          )}`}
+                          data-testid="member-exit-badge"
+                        >
+                          {exitState}
+                        </span>
                       </span>
                     </button>
                   );

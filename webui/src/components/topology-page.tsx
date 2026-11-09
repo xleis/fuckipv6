@@ -17,7 +17,15 @@ import {
   EMPTY_TOPOLOGY_FILTERS,
   retainTopologySelection,
 } from "../topology-actions";
-import { label, outcomeSummary } from "../contract/invariants";
+import { i18n, label, outcomeSummary } from "../contract/invariants";
+import {
+  memberExitDeclaredText,
+  memberExitFreshnessText,
+  memberExitReasonText,
+  memberExitSourceText,
+  memberExitStateClass,
+  memberExitStateText,
+} from "../members";
 import { TopologyGovernancePanel } from "./topology-governance";
 import { TopologyView } from "./topology-view";
 import type { TopologyPresentationSignals } from "../topology-presentation";
@@ -96,11 +104,13 @@ function TopologyNodeDetail({
   locale,
   networkId,
   member,
+  generatedAtUnixMs,
 }: {
   node: TopologyNode | null;
   locale: Locale;
   networkId: string | null;
   member: NetworkMember | null;
+  generatedAtUnixMs: number;
 }) {
   if (!node) {
     return (
@@ -169,6 +179,75 @@ function TopologyNodeDetail({
               : member
                 ? label(locale, `member_directory.presence.${member.presence.state}`)
                 : label(locale, "common.unknown")}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "member_directory.exit.state")}</dt>
+          <dd>
+            <span
+              className={`status-pill ${memberExitStateClass(
+                member?.exit_availability,
+                generatedAtUnixMs,
+              )}`}
+              data-testid="topology-member-exit-state"
+            >
+              {memberExitStateText(
+                locale,
+                member?.exit_availability,
+                generatedAtUnixMs,
+              )}
+            </span>
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "member_directory.exit.source")}</dt>
+          <dd>
+            {memberExitSourceText(
+              locale,
+              member?.exit_availability,
+              generatedAtUnixMs,
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "member_directory.exit.declared")}</dt>
+          <dd>
+            {memberExitDeclaredText(
+              locale,
+              member?.exit_availability,
+              generatedAtUnixMs,
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "member_directory.exit.observed_at")}</dt>
+          <dd>
+            {member?.exit_availability?.observed_at_unix_ms == null
+              ? label(locale, "common.unknown")
+              : i18n().formatTimestamp(
+                  locale,
+                  member.exit_availability.observed_at_unix_ms,
+                )}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "member_directory.exit.freshness")}</dt>
+          <dd>
+            {memberExitFreshnessText(
+              locale,
+              member?.exit_availability,
+              generatedAtUnixMs,
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "member_directory.exit.reason")}</dt>
+          <dd>
+            {memberExitReasonText(
+              locale,
+              member?.exit_availability,
+              generatedAtUnixMs,
+            )}
           </dd>
         </div>
         <div>
@@ -488,6 +567,7 @@ export function TopologyPage({
           member={
             detailNode ? (membersByNodeId.get(detailNode.node_id) ?? null) : null
           }
+          generatedAtUnixMs={topologyGeneratedAtUnixMs}
         />
       </section>
       <TopologyGovernancePanel

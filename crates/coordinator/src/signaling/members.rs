@@ -17,6 +17,7 @@ use super::session::SessionManager;
 /// Assemble the only member projection sent to clients. The Coordinator reads
 /// authoritative roster/request/redemption data and presence observations; no
 /// adapter is allowed to infer status or merge an unfiltered request payload.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn build_member_directory(
     network_id: &NetworkId,
     actor: &NodeId,
@@ -65,6 +66,7 @@ pub(crate) async fn build_member_directory(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn project_members(
     record: &NetworkRecord,
     actor: &NodeId,

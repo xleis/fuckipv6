@@ -9,8 +9,8 @@ use fuckipv6_common::domain::{
     ExitContributionAccessDecision, ExitContributionAccessReason,
     ExitContributionAuthorizationInput, ExitContributionAuthorizationReason,
     ExitContributionAuthorizationSnapshot, ExitContributionMode, ExitContributionQuotaPeriod,
-    ExitContributionRestrictions, ExitContributionUsage, MemberLifecycleStatus, MembershipRole,
-    NetworkId, NetworkMemberDirectory, NodeId, NodeLocalAccessPolicy,
+    ExitContributionRestrictions, ExitContributionUsage, NetworkId, NetworkMemberDirectory, NodeId,
+    NodeLocalAccessPolicy,
 };
 use std::collections::BTreeMap;
 
@@ -191,6 +191,7 @@ impl ExitContributionGate {
     /// authenticated member. Full request bodies never enter the Exit data
     /// plane. Foreign networks and older revisions are ignored rather than
     /// widening this gate's authority.
+    #[cfg(test)]
     pub(crate) fn replace_authorization_snapshot(
         &mut self,
         snapshot: ExitContributionAuthorizationSnapshot,
@@ -208,6 +209,7 @@ impl ExitContributionGate {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn clear_authorization_request(&mut self, requester_node_id: &NodeId) {
         self.authorization_requests.remove(requester_node_id);
     }
@@ -399,8 +401,9 @@ mod tests {
         ContributionKind, ExitContributionMemberScope, ExitContributionQuotaPeriod,
         ExitContributionRequest, ExitContributionRequestId, ExitContributionRequestState,
         ExitContributionReviewAction, ExitContributionTimeWindow, ExitContributionTrafficQuota,
-        NetworkMember, NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberPresence,
-        NetworkMemberStatus, NodeContributionVeto, NodeNetworkScope, SecurityRuleId,
+        MemberLifecycleStatus, MembershipRole, NetworkMember, NetworkMemberGroup,
+        NetworkMemberOnlineState, NetworkMemberPresence, NetworkMemberStatus, NodeContributionVeto,
+        NodeNetworkScope, SecurityRuleId,
     };
 
     const NOW: u64 = 1_700_006_400_000; // 2023-11-15 00:00 UTC, Wednesday.

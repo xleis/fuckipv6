@@ -260,6 +260,60 @@ describe("MemberDirectoryCard", () => {
     );
   });
 
+  it("shows real Exit availability in rows and details without treating unknown as unavailable", async () => {
+    const user = userEvent.setup();
+    const exitAvailable = member({
+      node_id: "node-exit",
+      display_name: "Exit node",
+      capabilities: ["exit"],
+      exit_availability: {
+        state: "available",
+        source: "remote_peer_report",
+        declared_available: true,
+        observed_at_unix_ms: generatedAtUnixMs - 5_000,
+        reason_code: null,
+      },
+    });
+    render(
+      <MemberDirectoryCard
+        directory={directory([exitAvailable, unknownMember])}
+        locale="en"
+      />,
+    );
+
+    const exitOption = await screen.findByRole("option", { name: /Exit node/ });
+    expect(exitOption).toHaveAccessibleName(
+      /translated:member_directory.exit.state.available/,
+    );
+    expect(within(exitOption).getByTestId("member-exit-badge")).toHaveClass("good");
+    await user.click(exitOption);
+    expect(screen.getByTestId("member-exit-availability")).toHaveTextContent(
+      "translated:member_directory.exit.state.available",
+    );
+    expect(screen.getByTestId("member-exit-availability")).toHaveTextContent(
+      "translated:member_directory.exit.declared.available",
+    );
+
+    await user.selectOptions(
+      screen.getByLabelText("translated:member_directory.filter.role"),
+      "member",
+    );
+    const unknownOption = await screen.findByRole("option", {
+      name: /Bravo unknown/,
+    });
+    await user.click(unknownOption);
+    const detail = screen.getByTestId("member-exit-availability");
+    expect(detail).toHaveTextContent(
+      "translated:member_directory.exit.state.unknown",
+    );
+    expect(detail).toHaveTextContent(
+      "translated:member_directory.exit.reason.not_observed",
+    );
+    expect(detail).not.toHaveTextContent(
+      "translated:member_directory.exit.state.unavailable",
+    );
+  });
+
   it("exports exactly the current filtered view as sanitized text", async () => {
     const user = userEvent.setup();
     const writeText = vi.spyOn(navigator.clipboard, "writeText");

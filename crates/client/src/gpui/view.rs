@@ -46,13 +46,14 @@ use super::view_model::build_page_model;
 use super::view_model::{
     action_block_reason, activity_filter_options, build_command,
     build_page_model_with_activity_filters, default_form_values, filter_network_members,
-    member_lifecycle_action_key, member_lifecycle_action_value, membership_role_value,
-    network_membership_id, network_status_key, retain_member_selection, routing_target_search_rows,
-    search_node_snapshot, sort_network_members, topology_member_actions, topology_node_detail,
-    topology_presentation, validate_manifest_bindings, ActionBinding, ActivityFilters,
-    MemberCapabilityFilter, MemberDirectoryFilters, MemberHealthFilter, OverviewModel, PageKind,
-    RowModel, RowNavigation, SearchResult, SectionModel, TopologyPresentationCondition,
-    TopologyPresentationSignals,
+    member_exit_declared_text, member_exit_freshness_text, member_exit_reason_text,
+    member_exit_source_text, member_exit_state_text, member_lifecycle_action_key,
+    member_lifecycle_action_value, membership_role_value, network_membership_id,
+    network_status_key, retain_member_selection, routing_target_search_rows, search_node_snapshot,
+    sort_network_members, topology_member_actions, topology_node_detail, topology_presentation,
+    validate_manifest_bindings, ActionBinding, ActivityFilters, MemberCapabilityFilter,
+    MemberDirectoryFilters, MemberHealthFilter, OverviewModel, PageKind, RowModel, RowNavigation,
+    SearchResult, SectionModel, TopologyPresentationCondition, TopologyPresentationSignals,
 };
 use crate::config_manager::ConfigManager;
 use crate::config_transaction::{
@@ -7405,7 +7406,20 @@ impl GpuiShell {
                 .iter()
                 .find(|member| member.node_id.as_str() == node.node_id.as_str())
         });
-        let detail = topology_node_detail(node, Some(network_id.as_str()), member, self.locale);
+        let generated_at_unix_ms = directory
+            .map(|directory| directory.generated_at_unix_ms)
+            .unwrap_or(topology.generated_at_unix_ms);
+        let detail = topology_node_detail(
+            node,
+            Some(network_id.as_str()),
+            member,
+            self.locale,
+            generated_at_unix_ms,
+        );
+        let exit_observed_at = detail
+            .exit_observed_at_unix_ms
+            .map(|observed| format_diagnostic_timestamp(self.locale, observed))
+            .unwrap_or_else(|| t(self.locale, "common.unknown").to_string());
         let field = |label_key: &'static str, value: String| {
             div()
                 .flex()
@@ -7483,6 +7497,32 @@ impl GpuiShell {
                 field("topology.detail.presence", detail.presence),
                 field("topology.detail.networks", detail.networks),
             ]))
+            .child(
+                div()
+                    .debug_selector(|| "visual-topology-exit-availability".into())
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .p_3()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "member_directory.exit.title").to_string()),
+                    )
+                    .child(div().flex().flex_wrap().gap_4().children([
+                        field("member_directory.exit.state", detail.exit_state),
+                        field("member_directory.exit.source", detail.exit_source),
+                        field("member_directory.exit.declared", detail.exit_declared),
+                        field("member_directory.exit.observed_at", exit_observed_at),
+                        field("member_directory.exit.freshness", detail.exit_freshness),
+                        field("member_directory.exit.reason", detail.exit_reason),
+                    ])),
+            )
             .into_any_element()
     }
 
@@ -7796,6 +7836,10 @@ impl GpuiShell {
             .filter(|node| node.belongs_to(&network_id))
             .cloned()
             .collect::<Vec<_>>();
+        let generated_at_unix_ms = directory
+            .as_ref()
+            .map(|directory| directory.generated_at_unix_ms)
+            .unwrap_or(topology.generated_at_unix_ms);
         let mut node_cards = Vec::new();
         for (index, node) in visible_nodes.iter().enumerate() {
             let member = directory.as_ref().and_then(|directory| {
@@ -7804,7 +7848,13 @@ impl GpuiShell {
                     .iter()
                     .find(|member| member.node_id.as_str() == node.node_id.as_str())
             });
-            let detail = topology_node_detail(node, Some(network_id.as_str()), member, self.locale);
+            let detail = topology_node_detail(
+                node,
+                Some(network_id.as_str()),
+                member,
+                self.locale,
+                generated_at_unix_ms,
+            );
             let selected = self.selected_topology_node_id.as_deref() == Some(node.node_id.as_str());
             let menu_open = self.topology_menu_node_id.as_deref() == Some(node.node_id.as_str());
             let node_id = node.node_id.as_str().to_string();
@@ -9854,6 +9904,7 @@ impl GpuiShell {
             .terms
             .exit_contribution_mode
             .requires_join_commitment();
+        let exit_disclosure_visible = preview.terms.exit_contribution_mode.permits_contribution();
         let local_exit_available = self.snapshot.exit_node_capabilities.supported;
         let can_accept = preview.can_accept
             && preview.state == InvitationState::Active
@@ -10028,7 +10079,7 @@ impl GpuiShell {
                         }),
                 )
             })
-            .when(exit_required, |card| {
+            .when(exit_disclosure_visible, |card| {
                 card.child(
                     div()
                         .debug_selector(|| "visual-invitation-exit-disclosure".into())
@@ -10905,6 +10956,7 @@ impl GpuiShell {
         } else {
             let selected_node_id = self.selected_member_node_id.clone();
             let locale = self.locale;
+            let member_exit_now = directory.generated_at_unix_ms;
             uniform_list(
                 "network-member-list",
                 list_members.len(),
@@ -10922,6 +10974,11 @@ impl GpuiShell {
                                 let presence =
                                     t(locale, member_presence_key(member.presence.state))
                                         .to_string();
+                                let exit_state = member_exit_state_text(
+                                    locale,
+                                    Some(&member.exit_availability),
+                                    member_exit_now,
+                                );
                                 let groups = member_groups_text(locale, member);
                                 let selected = selected_node_id.as_deref()
                                     == Some(node_id.as_str())
@@ -10993,7 +11050,16 @@ impl GpuiShell {
                                             .gap_1()
                                             .child(profile_status_chip(role))
                                             .child(profile_status_chip(status))
-                                            .child(profile_status_chip(presence)),
+                                            .child(profile_status_chip(presence))
+                                            .child(
+                                                profile_status_chip(format!(
+                                                    "{} · {exit_state}",
+                                                    t(locale, "member_directory.exit.title")
+                                                ))
+                                                .debug_selector(move || {
+                                                    format!("visual-member-exit-{index}")
+                                                }),
+                                            ),
                                     )
                             })
                             .collect::<Vec<_>>()
@@ -11158,6 +11224,22 @@ impl GpuiShell {
         )
         .unwrap_or_else(|| t(self.locale, "common.unknown").to_string());
         let joined_at = member_joined_at_text(self.locale, member);
+        let exit_availability = Some(&member.exit_availability);
+        let exit_state =
+            member_exit_state_text(self.locale, exit_availability, generated_at_unix_ms);
+        let exit_source =
+            member_exit_source_text(self.locale, exit_availability, generated_at_unix_ms);
+        let exit_declared =
+            member_exit_declared_text(self.locale, exit_availability, generated_at_unix_ms);
+        let exit_observed_at = member
+            .exit_availability
+            .observed_at_unix_ms
+            .map(|observed| format_diagnostic_timestamp(self.locale, observed))
+            .unwrap_or_else(|| t(self.locale, "common.unknown").to_string());
+        let exit_freshness =
+            member_exit_freshness_text(self.locale, exit_availability, generated_at_unix_ms);
+        let exit_reason =
+            member_exit_reason_text(self.locale, exit_availability, generated_at_unix_ms);
 
         div()
             .debug_selector(|| "visual-member-detail".into())
@@ -11233,6 +11315,70 @@ impl GpuiShell {
                 diagnostic_metadata_row(t(self.locale, "member_directory.joined_at"), joined_at)
                     .into_any_element(),
             ])
+            .child(
+                div()
+                    .debug_selector(|| "visual-member-exit-availability".into())
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgba(COLOR_BORDER))
+                    .p_3()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(
+                                        t(self.locale, "member_directory.exit.title").to_string(),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .debug_selector(|| "visual-member-exit-state".into())
+                                    .child(profile_status_chip(exit_state.clone())),
+                            ),
+                    )
+                    .children([
+                        diagnostic_metadata_row(
+                            t(self.locale, "member_directory.exit.state"),
+                            exit_state,
+                        )
+                        .into_any_element(),
+                        diagnostic_metadata_row(
+                            t(self.locale, "member_directory.exit.source"),
+                            exit_source,
+                        )
+                        .into_any_element(),
+                        diagnostic_metadata_row(
+                            t(self.locale, "member_directory.exit.declared"),
+                            exit_declared,
+                        )
+                        .into_any_element(),
+                        diagnostic_metadata_row(
+                            t(self.locale, "member_directory.exit.observed_at"),
+                            exit_observed_at,
+                        )
+                        .into_any_element(),
+                        diagnostic_metadata_row(
+                            t(self.locale, "member_directory.exit.freshness"),
+                            exit_freshness,
+                        )
+                        .into_any_element(),
+                        diagnostic_metadata_row(
+                            t(self.locale, "member_directory.exit.reason"),
+                            exit_reason,
+                        )
+                        .into_any_element(),
+                    ]),
+            )
             .into_any_element()
     }
 
@@ -11244,6 +11390,33 @@ impl GpuiShell {
         let pending = self.pending_commands > 0;
         let can_join = preview.can_join && !preview.already_member;
         let checked = self.network_join_terms_confirmed;
+        let exit_checked = self.network_join_exit_contribution_confirmed;
+        let exit_consent_required = preview.join_requires_exit_consent;
+        let show_exit_disclosure = preview.exit_contribution_mode.permits_contribution();
+        let exit_purpose =
+            t(self.locale, preview.exit_contribution_purpose_key.as_str()).to_string();
+        let exit_bandwidth = t(
+            self.locale,
+            preview.exit_contribution_bandwidth_impact_key.as_str(),
+        )
+        .to_string();
+        let exit_traffic = t(
+            self.locale,
+            preview.exit_contribution_traffic_impact_key.as_str(),
+        )
+        .to_string();
+        let exit_logging = t(
+            self.locale,
+            preview.exit_contribution_logging_boundary_key.as_str(),
+        )
+        .to_string();
+        let exit_operational_impact = t(
+            self.locale,
+            preview.exit_contribution_operational_impact_key.as_str(),
+        )
+        .to_string();
+        let exit_disable =
+            t(self.locale, preview.exit_contribution_disable_key.as_str()).to_string();
         let blocked_reason = if preview.can_join {
             None
         } else {
@@ -11342,11 +11515,36 @@ impl GpuiShell {
                 cx.notify();
             }
         }));
+        let exit_control = checkbox_control(
+            SharedString::from("join-network-exit-contribution"),
+            t(self.locale, "join.exit.consent"),
+            exit_checked,
+            !can_join || pending,
+        )
+        .debug_selector(|| "visual-join-network-exit-contribution".into())
+        .on_click(cx.listener(|shell, _, _, cx| {
+            if shell.pending_commands > 0 {
+                return;
+            }
+            let can_join = shell
+                .recent_network_join_preview
+                .as_ref()
+                .is_some_and(|preview| {
+                    preview.can_join
+                        && !preview.already_member
+                        && preview.join_requires_exit_consent
+                });
+            if can_join {
+                shell.network_join_exit_contribution_confirmed =
+                    !shell.network_join_exit_contribution_confirmed;
+                cx.notify();
+            }
+        }));
         let confirm = button(
             SharedString::from("join-network-confirm"),
             t(self.locale, "join.confirm"),
             ButtonVariant::Primary,
-            !can_join || !checked || pending,
+            !can_join || !checked || (exit_consent_required && !exit_checked) || pending,
         )
         .debug_selector(|| "visual-join-network-confirm".into())
         .on_click(cx.listener(|shell, _, _, cx| {
@@ -11355,7 +11553,12 @@ impl GpuiShell {
                 && shell
                     .recent_network_join_preview
                     .as_ref()
-                    .is_some_and(|preview| preview.can_join && !preview.already_member)
+                    .is_some_and(|preview| {
+                        preview.can_join
+                            && !preview.already_member
+                            && (!preview.join_requires_exit_consent
+                                || shell.network_join_exit_contribution_confirmed)
+                    })
             {
                 shell.confirm_join_preview(cx);
             }
@@ -11531,7 +11734,50 @@ impl GpuiShell {
                 t(self.locale, "join.local_revocable").to_string(),
                 SemanticState::Info,
             ))
+            .when(show_exit_disclosure, |card| {
+                card.child(
+                    div()
+                        .debug_selector(|| "visual-join-network-exit-disclosure".into())
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgba(COLOR_BORDER))
+                        .p_3()
+                        .text_xs()
+                        .line_height(px(18.0))
+                        .text_color(rgba(COLOR_TEXT_SECONDARY))
+                        .child(exit_purpose)
+                        .child(exit_bandwidth)
+                        .child(exit_traffic)
+                        .child(exit_logging)
+                        .child(exit_operational_impact)
+                        .child(exit_disable)
+                        .child(t(
+                            self.locale,
+                            if preview.local_exit_available {
+                                "join.exit.local_supported"
+                            } else {
+                                "join.exit.local_unsupported"
+                            },
+                        ))
+                        .child(t(
+                            self.locale,
+                            if preview.local_exit_enabled {
+                                "join.exit.local_enabled"
+                            } else {
+                                "join.exit.local_not_enabled"
+                            },
+                        ))
+                        .when(preview.can_join_without_local_exit, |disclosure| {
+                            disclosure
+                                .child(t(self.locale, "join.exit.can_join_without_local_exit"))
+                        }),
+                )
+            })
             .child(terms_control)
+            .when(exit_consent_required, |card| card.child(exit_control))
             .child(
                 div()
                     .flex()
@@ -12861,6 +13107,12 @@ fn export_member_directory(
         "member_directory.observed_at",
         "member_directory.freshness",
         "member_directory.joined_at",
+        "member_directory.exit.state",
+        "member_directory.exit.source",
+        "member_directory.exit.declared",
+        "member_directory.exit.observed_at",
+        "member_directory.exit.freshness",
+        "member_directory.exit.reason",
     ]
     .into_iter()
     .map(|key| tsv_cell(t(locale, key).to_string()))
@@ -12896,6 +13148,36 @@ fn export_member_directory(
                     .unwrap_or_default(),
                 ),
                 tsv_cell(member_joined_at_text(locale, member)),
+                tsv_cell(member_exit_state_text(
+                    locale,
+                    Some(&member.exit_availability),
+                    generated_at_unix_ms,
+                )),
+                tsv_cell(member_exit_source_text(
+                    locale,
+                    Some(&member.exit_availability),
+                    generated_at_unix_ms,
+                )),
+                tsv_cell(member_exit_declared_text(
+                    locale,
+                    Some(&member.exit_availability),
+                    generated_at_unix_ms,
+                )),
+                member
+                    .exit_availability
+                    .observed_at_unix_ms
+                    .map(|observed| format_diagnostic_timestamp(locale, observed))
+                    .unwrap_or_default(),
+                tsv_cell(member_exit_freshness_text(
+                    locale,
+                    Some(&member.exit_availability),
+                    generated_at_unix_ms,
+                )),
+                tsv_cell(member_exit_reason_text(
+                    locale,
+                    Some(&member.exit_availability),
+                    generated_at_unix_ms,
+                )),
             ]
             .join("\t")
         })
@@ -13632,13 +13914,14 @@ mod tests {
     use crate::tun::TunCapabilityReason;
     use fuckipv6_common::crypto::Identity;
     use fuckipv6_common::domain::{
-        DiscoveryTransport, JoinApplicantProfile, JoinRequest, JoinRequestGrantPreview,
-        JoinRequestId, MembershipState, MembershipTerms, NetworkDiscoveryDocument,
-        NetworkDiscoveryRecord, NetworkEndpoint, NetworkId, NetworkMemberPresence, NodeId,
-        Signature, TopologyBoundary, TopologyConnection, TopologyNode, TopologyNodeHealth,
-        TopologyNodeNetwork, TrafficAction, TrafficDefaultConfirmedBy, TrafficDefaultPolicy,
-        TrafficFailurePolicy, TrafficPolicy, TrafficRoutingHardConstraints,
-        TrafficRoutingPageModel, TrafficRoutingTarget, TrafficRoutingWorkflowState, TrafficRule,
+        DiscoveryTransport, ExitAvailabilitySource, ExitContributionAvailability,
+        JoinApplicantProfile, JoinRequest, JoinRequestGrantPreview, JoinRequestId, MembershipState,
+        MembershipTerms, NetworkDiscoveryDocument, NetworkDiscoveryRecord, NetworkEndpoint,
+        NetworkId, NetworkMemberPresence, NodeId, Signature, TopologyBoundary, TopologyConnection,
+        TopologyNode, TopologyNodeHealth, TopologyNodeNetwork, TrafficAction,
+        TrafficDefaultConfirmedBy, TrafficDefaultPolicy, TrafficFailurePolicy, TrafficPolicy,
+        TrafficRoutingHardConstraints, TrafficRoutingPageModel, TrafficRoutingTarget,
+        TrafficRoutingWorkflowState, TrafficRule,
     };
     use gpui::{Modifiers, OwnedMenuItem, TestAppContext, VisualTestContext};
     use serde_json::{json, Map, Value};
@@ -14099,6 +14382,18 @@ mod tests {
                 NetworkMemberPresence::disconnected(1_700_000_002_000),
             ),
         ];
+        members[0].exit_availability = ExitContributionAvailability::observed(
+            true,
+            true,
+            ExitAvailabilitySource::LocalRuntime,
+            1_700_000_009_000,
+        );
+        members[2].exit_availability = ExitContributionAvailability::observed(
+            true,
+            false,
+            ExitAvailabilitySource::RemotePeerReport,
+            1_700_000_009_000,
+        );
         members.extend((0..96).map(|index| {
             directory_member(
                 &format!("synthetic-member-{index:03}"),
@@ -14248,7 +14543,12 @@ mod tests {
                         MemberLifecycleAction::UndoRemove,
                     ],
                     presence: relay_presence,
-                    exit_availability: Default::default(),
+                    exit_availability: ExitContributionAvailability::observed(
+                        true,
+                        true,
+                        ExitAvailabilitySource::CoordinatorHealth,
+                        1_700_000_009_000,
+                    ),
                     joined_at_unix_ms: Some(1_700_000_000_000),
                 },
                 NetworkMember {
@@ -14534,6 +14834,9 @@ mod tests {
         assert!(visible
             .debug_bounds("visual-topology-detail-empty")
             .is_none());
+        assert!(visible
+            .debug_bounds("visual-topology-exit-availability")
+            .is_some());
         assert!(
             visible.debug_bounds("visual-topology-menu").is_none(),
             "opening node details must not also open the object menu"
@@ -14777,8 +15080,13 @@ mod tests {
                 .iter()
                 .find(|node| node.node_id == fixture_node_id(&scenario.expect.detail_node_id))
                 .unwrap_or_else(|| panic!("{} missing detail node", scenario.id));
-            let detail =
-                topology_node_detail(detail_node, Some(network_id.as_str()), None, Locale::En);
+            let detail = topology_node_detail(
+                detail_node,
+                Some(network_id.as_str()),
+                None,
+                Locale::En,
+                topology.generated_at_unix_ms,
+            );
             let mut detail_text = [
                 detail.display_name,
                 detail.node_id,
@@ -15443,6 +15751,7 @@ mod tests {
             "visual-member-directory-filters",
             "visual-member-directory-list",
             "visual-member-first",
+            "visual-member-exit-0",
             "visual-member-directory-export",
         ] {
             assert!(
@@ -15464,6 +15773,10 @@ mod tests {
         visible.run_until_parked();
         assert!(visible.debug_bounds("visual-member-detail").is_some());
         assert!(visible.debug_bounds("visual-member-presence").is_some());
+        assert!(visible
+            .debug_bounds("visual-member-exit-availability")
+            .is_some());
+        assert!(visible.debug_bounds("visual-member-exit-state").is_some());
         assert!(visible.debug_bounds("visual-member-detail-hint").is_none());
         assert_eq!(
             member_presence_key(NetworkMemberOnlineState::Unknown),
@@ -15520,8 +15833,20 @@ mod tests {
             .expect("member directory clipboard export");
 
         assert_eq!(exported.lines().count(), 2);
+        assert_eq!(
+            exported
+                .lines()
+                .next()
+                .expect("member export header")
+                .split('\t')
+                .count(),
+            18
+        );
         assert!(exported.contains("Owner filtered member"));
         assert!(exported.contains(owner.node_id.as_str()));
+        assert!(exported.contains(t(Locale::En, "member_directory.exit.state")));
+        assert!(exported.contains(t(Locale::En, "member_directory.exit.state.available")));
+        assert!(exported.contains(t(Locale::En, "member_directory.exit.source.local_runtime")));
         assert!(!exported.contains("Synthetic member 001"));
         let lowercase = exported.to_ascii_lowercase();
         for forbidden in [
@@ -16103,7 +16428,7 @@ mod tests {
     fn join_preview_requires_explicit_terms_confirmation_before_submitting(
         cx: &mut TestAppContext,
     ) {
-        let window = open_shell_window(cx, 1200.0, 1_000.0);
+        let window = open_shell_window(cx, 1200.0, 4_000.0);
         window
             .update(cx, |shell, _, cx| {
                 shell.manifest = Some(crate::node::node_ui_manifest());
@@ -16121,12 +16446,23 @@ mod tests {
                 shell.open_action("networks", "join_network", cx);
 
                 assert!(!shell.network_join_terms_confirmed);
+                assert!(!shell.network_join_exit_contribution_confirmed);
                 assert_eq!(shell.pending_commands, 0);
                 shell.confirm_join_preview(cx);
                 assert_eq!(shell.pending_commands, 0);
                 assert_eq!(
                     shell.error.as_deref(),
                     Some("Confirm the join terms first.")
+                );
+                shell.error = None;
+                shell.network_join_terms_confirmed = true;
+                shell.confirm_join_preview(cx);
+                assert_eq!(shell.pending_commands, 0);
+                assert_eq!(
+                    shell.error.as_deref(),
+                    Some(
+                        "Separately acknowledge the Exit purpose, bandwidth impact, logging boundary and disable conditions."
+                    )
                 );
             })
             .expect("install join preview fixture");
@@ -16135,7 +16471,9 @@ mod tests {
         visible.run_until_parked();
         for selector in [
             "visual-join-network-preview",
+            "visual-join-network-exit-disclosure",
             "visual-join-network-terms",
+            "visual-join-network-exit-contribution",
             "visual-join-network-confirm",
             "visual-join-network-preview-again",
         ] {
@@ -16144,6 +16482,17 @@ mod tests {
                 "missing join preview element {selector}"
             );
         }
+
+        let exit_control = visible
+            .debug_bounds("visual-join-network-exit-contribution")
+            .expect("join Exit consent control");
+        visible.simulate_click(exit_control.center(), Modifiers::default());
+        visible.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert!(shell.network_join_exit_contribution_confirmed);
+            })
+            .expect("verify join Exit consent");
     }
 
     #[gpui::test]
@@ -16323,6 +16672,43 @@ mod tests {
                 "missing invitation preview element {selector}"
             );
         }
+    }
+
+    #[gpui::test]
+    fn autonomous_invitation_discloses_exit_impact_without_forcing_consent(
+        cx: &mut TestAppContext,
+    ) {
+        let window = open_shell_window(cx, 1200.0, 1_000.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = NodeSnapshot::default();
+                shell.locale = Locale::En;
+                let mut preview = invitation_preview_fixture();
+                preview.terms.exit_contribution = ExitContributionObligation::NotRequired;
+                preview.terms.exit_contribution_scope =
+                    fuckipv6_common::domain::ExitContributionScope::NotApplicable;
+                preview.terms.exit_contribution_mode = ExitContributionMode::Autonomous;
+                preview.terms_hash = preview
+                    .terms
+                    .content_hash()
+                    .expect("autonomous invitation terms hash");
+                preview.preview_digest = preview
+                    .compute_digest()
+                    .expect("autonomous invitation preview digest");
+                shell.recent_invitation_preview = Some(preview);
+                shell.open_action("networks", "preview_invitation", cx);
+            })
+            .expect("install autonomous invitation preview");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        assert!(visible
+            .debug_bounds("visual-invitation-exit-disclosure")
+            .is_some());
+        assert!(visible
+            .debug_bounds("visual-invitation-exit-contribution")
+            .is_none());
     }
 
     #[gpui::test]

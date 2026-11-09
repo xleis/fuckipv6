@@ -7,10 +7,10 @@
 use fuckipv6_common::domain::{
     authorize_exit_contribution, evaluate_exit_contribution_access, ContentHash,
     ExitContributionAccessDecision, ExitContributionAccessReason,
-    ExitContributionAuthorizationInput, ExitContributionAuthorizationReason, ExitContributionMode,
-    ExitContributionQuotaPeriod, ExitContributionRequest, ExitContributionRestrictions,
-    ExitContributionUsage, MemberLifecycleStatus, MembershipRole, NetworkId,
-    NetworkMemberDirectory, NodeId, NodeLocalAccessPolicy,
+    ExitContributionAuthorizationInput, ExitContributionAuthorizationReason,
+    ExitContributionAuthorizationSnapshot, ExitContributionMode, ExitContributionQuotaPeriod,
+    ExitContributionRestrictions, ExitContributionUsage, MemberLifecycleStatus, MembershipRole,
+    NetworkId, NetworkMemberDirectory, NodeId, NodeLocalAccessPolicy,
 };
 use std::collections::BTreeMap;
 
@@ -119,7 +119,7 @@ pub(crate) struct ExitContributionGate {
     policy: Option<NodeLocalAccessPolicy>,
     member_directory: Option<NetworkMemberDirectory>,
     member_directory_received_at_unix_ms: Option<u64>,
-    authorization_requests: BTreeMap<NodeId, ExitContributionRequest>,
+    authorization_requests: BTreeMap<NodeId, ExitContributionAuthorizationSnapshot>,
     usage_period_started_at_unix_ms: u64,
     bytes_forwarded: u64,
     bandwidth_window_started_at_unix_ms: Option<u64>,
@@ -162,7 +162,7 @@ impl ExitContributionGate {
 
     pub(crate) fn clear_network_context(&mut self) {
         self.network_context = None;
-        self.authorization_requests.clear();
+        self.clear_authorization_requests();
     }
 
     pub(crate) fn replace_member_directory(
@@ -187,15 +187,25 @@ impl ExitContributionGate {
         self.member_directory_received_at_unix_ms = None;
     }
 
-    /// Cache the latest Coordinator-reviewed request for the authenticated
-    /// member. Requests from another network are ignored rather than widening
-    /// this gate's authority.
-    pub(crate) fn replace_authorization_request(&mut self, request: ExitContributionRequest) {
-        if self.network_id.as_ref() != Some(&request.network_id) {
+    /// Cache the latest Coordinator-reviewed authorization projection for the
+    /// authenticated member. Full request bodies never enter the Exit data
+    /// plane. Foreign networks and older revisions are ignored rather than
+    /// widening this gate's authority.
+    pub(crate) fn replace_authorization_snapshot(
+        &mut self,
+        snapshot: ExitContributionAuthorizationSnapshot,
+    ) {
+        if self.network_id.as_ref() != Some(&snapshot.network_id) {
             return;
         }
-        self.authorization_requests
-            .insert(request.node_id.clone(), request);
+        let should_replace = self
+            .authorization_requests
+            .get(&snapshot.node_id)
+            .is_none_or(|current| snapshot.revision >= current.revision);
+        if should_replace {
+            self.authorization_requests
+                .insert(snapshot.node_id.clone(), snapshot);
+        }
     }
 
     pub(crate) fn clear_authorization_request(&mut self, requester_node_id: &NodeId) {
@@ -387,10 +397,10 @@ mod tests {
     use super::*;
     use fuckipv6_common::domain::{
         ContributionKind, ExitContributionMemberScope, ExitContributionQuotaPeriod,
-        ExitContributionRequestId, ExitContributionRequestState, ExitContributionReviewAction,
-        ExitContributionTimeWindow, ExitContributionTrafficQuota, NetworkMember,
-        NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberPresence, NetworkMemberStatus,
-        NodeContributionVeto, NodeNetworkScope, SecurityRuleId,
+        ExitContributionRequest, ExitContributionRequestId, ExitContributionRequestState,
+        ExitContributionReviewAction, ExitContributionTimeWindow, ExitContributionTrafficQuota,
+        NetworkMember, NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberPresence,
+        NetworkMemberStatus, NodeContributionVeto, NodeNetworkScope, SecurityRuleId,
     };
 
     const NOW: u64 = 1_700_006_400_000; // 2023-11-15 00:00 UTC, Wednesday.
@@ -845,7 +855,7 @@ mod tests {
             ))
         );
 
-        approval.replace_authorization_request(pending_request());
+        approval.replace_authorization_snapshot(pending_request().authorization_snapshot());
         assert_eq!(
             approval.authorize(&member_node(), NOW + 2),
             Err(ExitContributionRuntimeDenial::AuthorizationDenied(
@@ -853,10 +863,12 @@ mod tests {
             ))
         );
 
-        approval.replace_authorization_request(approved_request());
+        approval.replace_authorization_snapshot(approved_request().authorization_snapshot());
         assert!(approval.authorize(&member_node(), NOW + 2).is_ok());
 
-        approval.replace_authorization_request(rejected_request());
+        let mut rejected = rejected_request();
+        rejected.revision = 3;
+        approval.replace_authorization_snapshot(rejected.authorization_snapshot());
         assert_eq!(
             approval.authorize(&member_node(), NOW + 2),
             Err(ExitContributionRuntimeDenial::AuthorizationDenied(
@@ -866,7 +878,8 @@ mod tests {
 
         let mut expired = pending_request();
         expired.expires_at_unix_ms = NOW + 3;
-        approval.replace_authorization_request(expired);
+        expired.revision = 4;
+        approval.replace_authorization_snapshot(expired.authorization_snapshot());
         assert_eq!(
             approval.authorize(&member_node(), NOW + 4),
             Err(ExitContributionRuntimeDenial::AuthorizationDenied(
@@ -877,7 +890,9 @@ mod tests {
         let mut stale_context = context(ExitContributionMode::ApprovalRequired);
         stale_context.policy_revision += 1;
         approval.replace_network_context(stale_context);
-        approval.replace_authorization_request(approved_request());
+        let mut stale_approval = approved_request();
+        stale_approval.revision = 5;
+        approval.replace_authorization_snapshot(stale_approval.authorization_snapshot());
         assert_eq!(
             approval.authorize(&member_node(), NOW + 2),
             Err(ExitContributionRuntimeDenial::AuthorizationDenied(
@@ -894,7 +909,7 @@ mod tests {
         );
         let mut foreign = approved_request();
         foreign.network_id = other_network();
-        approval.replace_authorization_request(foreign);
+        approval.replace_authorization_snapshot(foreign.authorization_snapshot());
         assert_eq!(
             approval.authorize(&member_node(), NOW + 2),
             Err(ExitContributionRuntimeDenial::AuthorizationDenied(
@@ -902,7 +917,9 @@ mod tests {
             ))
         );
 
-        approval.replace_authorization_request(approved_request());
+        approval.replace_authorization_snapshot(approved_request().authorization_snapshot());
+        assert!(approval.authorize(&member_node(), NOW + 2).is_ok());
+        approval.replace_authorization_snapshot(pending_request().authorization_snapshot());
         assert!(approval.authorize(&member_node(), NOW + 2).is_ok());
         approval.clear_authorization_request(&member_node());
         assert_eq!(

@@ -27,9 +27,10 @@ use tokio::time::{sleep, Duration, Instant};
 use crate::ipc::{self, IpcRequest, IpcResponse};
 use crate::local_ipc::IpcRole;
 use crate::node::{
-    NodeCommand, NodeCommandContext, NodeCommandOutcome, NodeCommandRequest, NodeNetworkSnapshot,
-    NodeNetworkStatus, NodeProbePeerCommand, NodeProblem, NodeProblemCode, NodeSnapshot,
-    NodeStateStore, RuntimeControlError,
+    LocalExitCapabilitySnapshot, LocalExitCapabilityStage, NodeCommand, NodeCommandContext,
+    NodeCommandOutcome, NodeCommandRequest, NodeNetworkSnapshot, NodeNetworkStatus,
+    NodeProbePeerCommand, NodeProblem, NodeProblemCode, NodeSnapshot, NodeStateStore,
+    RuntimeControlError,
 };
 use crate::p2p::buffer_pool::InboundPayload;
 use crate::p2p::connection::{InPlaceSendOutcome, InboundPacket, P2pEngine, PeerRouteInfo};
@@ -75,6 +76,7 @@ const OUTBOUND_QUEUE_CAPACITY: usize = 256;
 const RECOVERY_TRIGGER_QUEUE_CAPACITY: usize = 8;
 const EXIT_CONTRIBUTION_MEMBER_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const EXIT_CONTRIBUTION_DIRECTORY_QUEUE_CAPACITY: usize = 4;
+const EXIT_AVAILABILITY_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 #[cfg(target_os = "linux")]
 const LOCAL_EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(target_os = "linux")]
@@ -561,6 +563,8 @@ pub(crate) struct ClientRuntime {
     pub(crate) local_exit_enabled: bool,
     pub(crate) control_rx: mpsc::UnboundedReceiver<ipc::RuntimeCommand>,
     node_state_updates: Option<watch::Receiver<NodeSnapshot>>,
+    local_exit_snapshot: Option<LocalExitCapabilitySnapshot>,
+    local_exit_availability_report_interval: tokio::time::Interval,
     exit_contribution_member_refresh_task: Option<JoinHandle<()>>,
     exit_contribution_directory_updates: Option<mpsc::Receiver<ExitContributionDirectoryUpdate>>,
     pub(crate) ipc_task: Option<JoinHandle<()>>,
@@ -590,12 +594,15 @@ impl ClientRuntime {
     /// independently so a stale one fails closed without blocking packet flow.
     pub(crate) async fn attach_node_state(&mut self, state: NodeStateStore) {
         let snapshot = state.snapshot().await;
+        self.local_exit_snapshot = Some(snapshot.local_exit.clone());
         self.apply_exit_contribution_snapshot(&snapshot);
 
         let Some(network_id) = self.network_id.clone() else {
             self.node_state_updates = Some(state.subscribe());
             return;
         };
+        self.report_local_exit_availability("initial_registration")
+            .await;
         match (
             state.member_directory(&network_id).await,
             state.member_directory_received_at(&network_id).await,
@@ -626,6 +633,30 @@ impl ClientRuntime {
                 directory_tx,
             )));
         self.node_state_updates = Some(state.subscribe());
+    }
+
+    async fn report_local_exit_availability(&self, trigger: &'static str) {
+        let Some(network_id) = self.network_id.clone() else {
+            return;
+        };
+        let Some(snapshot) = self.local_exit_snapshot.as_ref() else {
+            return;
+        };
+        let (available, reason_code) = local_exit_availability_report(snapshot);
+        match self
+            .signaling
+            .send(SignalingMessage::ExitAvailabilityReport {
+                network_id,
+                available,
+                reason_code: reason_code.map(str::to_owned),
+            }) {
+            Ok(()) => self.stats.record_signaling_sent().await,
+            Err(error) => tracing::warn!(
+                trigger,
+                error = %error,
+                "发送本机 Exit 可用性上报失败"
+            ),
+        }
     }
 
     fn apply_exit_contribution_snapshot(&mut self, snapshot: &NodeSnapshot) {
@@ -953,6 +984,12 @@ pub(crate) async fn prepare_client_runtime_ext(
         local_exit_enabled,
         control_rx,
         node_state_updates: None,
+        local_exit_snapshot: None,
+        local_exit_availability_report_interval: {
+            let mut interval = tokio::time::interval(EXIT_AVAILABILITY_REPORT_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval
+        },
         exit_contribution_member_refresh_task: None,
         exit_contribution_directory_updates: None,
         ipc_task: Some(tasks.ipc_task),
@@ -1524,7 +1561,13 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                 if changed.is_ok() {
                     if let Some(updates) = node_state_updates.as_ref() {
                         let snapshot = updates.borrow().clone();
+                        let local_exit_changed =
+                            runtime.local_exit_snapshot.as_ref() != Some(&snapshot.local_exit);
+                        runtime.local_exit_snapshot = Some(snapshot.local_exit.clone());
                         runtime.apply_exit_contribution_snapshot(&snapshot);
+                        if local_exit_changed {
+                            runtime.report_local_exit_availability("state_changed").await;
+                        }
                     }
                 } else {
                     node_state_updates = None;
@@ -1633,6 +1676,10 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                         runtime.relay_recovery_path = PathRecoveryState::Connected;
                     }
                 }
+            }
+
+            _ = runtime.local_exit_availability_report_interval.tick() => {
+                runtime.report_local_exit_availability("periodic").await;
             }
 
             // 监听停止信号
@@ -1803,6 +1850,46 @@ fn runtime_exit_manager_enabled(runtime: &ClientRuntime) -> bool {
 
 fn local_exit_effective(owner_enabled: bool, network_allowed: bool) -> bool {
     owner_enabled && network_allowed
+}
+
+/// Convert the authoritative local Exit projection into the only availability
+/// evidence the Coordinator may expose. A configured or declared Exit is never
+/// healthy until the data plane is enabled and healthy; reason codes are stable
+/// and contain no host paths, ports, peer identities or diagnostics.
+fn local_exit_availability_report(
+    snapshot: &LocalExitCapabilitySnapshot,
+) -> (bool, Option<&'static str>) {
+    if !snapshot.owner_exit_enabled {
+        return (false, Some("exit.availability.owner_disabled"));
+    }
+    if snapshot.stage == LocalExitCapabilityStage::Draining {
+        return (false, Some("exit.availability.draining"));
+    }
+    if snapshot.stage == LocalExitCapabilityStage::Cleaning {
+        return (false, Some("exit.availability.cleaning"));
+    }
+    if !snapshot.network_allowed {
+        return (false, Some("exit.availability.network_not_allowed"));
+    }
+    if snapshot.stage == LocalExitCapabilityStage::Enabled
+        && snapshot.healthy
+        && snapshot.problem.is_none()
+    {
+        return (true, None);
+    }
+    if matches!(
+        snapshot.stage,
+        LocalExitCapabilityStage::Listening | LocalExitCapabilityStage::HealthChecking
+    ) {
+        return (false, Some("exit.availability.health_checking"));
+    }
+    if snapshot.stage == LocalExitCapabilityStage::WaitingForNetworkAuthorization {
+        return (
+            false,
+            Some("exit.availability.waiting_for_network_authorization"),
+        );
+    }
+    (false, Some("exit.availability.forwarder_unhealthy"))
 }
 
 fn repeated_local_exit_disable_is_noop(
@@ -2666,6 +2753,7 @@ async fn handle_runtime_signaling_event(
     event: SignalingEvent,
 ) -> Result<()> {
     runtime.stats.record_signaling_received().await;
+    let registration_confirmed = matches!(event, SignalingEvent::Registered { .. });
 
     if let SignalingEvent::Registered {
         assigned_ip,
@@ -2733,6 +2821,12 @@ async fn handle_runtime_signaling_event(
             tracing::debug!("已移除节点 {client_id} 的运行时状态");
         }
         SignalingAction::None => {}
+    }
+
+    if registration_confirmed {
+        runtime
+            .report_local_exit_availability("registration_confirmed")
+            .await;
     }
 
     Ok(())
@@ -7160,5 +7254,64 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
             "office"
         );
         assert!(select_probe_network(&NodeSnapshot::default(), "203.0.113.1").is_err());
+    }
+
+    #[test]
+    fn local_exit_availability_requires_the_enabled_healthy_data_plane() {
+        let enabled = LocalExitCapabilitySnapshot {
+            owner_exit_enabled: true,
+            stage: LocalExitCapabilityStage::Enabled,
+            healthy: true,
+            network_allowed: true,
+            ..LocalExitCapabilitySnapshot::default()
+        };
+        assert_eq!(local_exit_availability_report(&enabled), (true, None));
+
+        let owner_disabled = LocalExitCapabilitySnapshot {
+            owner_exit_enabled: false,
+            ..enabled.clone()
+        };
+        assert_eq!(
+            local_exit_availability_report(&owner_disabled),
+            (false, Some("exit.availability.owner_disabled"))
+        );
+
+        let network_disallowed = LocalExitCapabilitySnapshot {
+            network_allowed: false,
+            ..enabled.clone()
+        };
+        assert_eq!(
+            local_exit_availability_report(&network_disallowed),
+            (false, Some("exit.availability.network_not_allowed"))
+        );
+
+        let unhealthy = LocalExitCapabilitySnapshot {
+            healthy: false,
+            ..enabled.clone()
+        };
+        assert_eq!(
+            local_exit_availability_report(&unhealthy),
+            (false, Some("exit.availability.forwarder_unhealthy"))
+        );
+
+        let health_checking = LocalExitCapabilitySnapshot {
+            stage: LocalExitCapabilityStage::HealthChecking,
+            healthy: false,
+            ..enabled.clone()
+        };
+        assert_eq!(
+            local_exit_availability_report(&health_checking),
+            (false, Some("exit.availability.health_checking"))
+        );
+
+        let draining = LocalExitCapabilitySnapshot {
+            stage: LocalExitCapabilityStage::Draining,
+            healthy: false,
+            ..enabled
+        };
+        assert_eq!(
+            local_exit_availability_report(&draining),
+            (false, Some("exit.availability.draining"))
+        );
     }
 }

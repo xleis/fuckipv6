@@ -5,6 +5,7 @@ use fuckipv6_common::{
 };
 use fuckipv6_coordinator::{
     relay::server::RelayServer, signaling::blacklist::CoordinatorConfigBlacklistStore,
+    signaling::exit_contribution::ExitContributionRequestStore,
     signaling::invitations::InvitationStore, signaling::join_requests::JoinRequestStore,
     signaling::member_lifecycle::MemberLifecycleStore, signaling::server::SignalingServer,
     signaling::session::SessionManager,
@@ -186,6 +187,10 @@ impl EmbeddedCoordinator {
             )
             .context("无法初始化成员生命周期存储")?,
         );
+        let exit_contribution_store = Arc::new(ExitContributionRequestStore::new(
+            blacklist_path.with_file_name("exit_contribution_requests.json"),
+            network_record_path.clone(),
+        ));
         let session_manager = Arc::new(
             SessionManager::new_with_allocation(&persisted_allocation)
                 .context("无法初始化内嵌协调器地址池")?,
@@ -205,6 +210,7 @@ impl EmbeddedCoordinator {
                 .with_join_request_store(join_request_store)
                 .with_invitation_store(invitation_store)
                 .with_member_lifecycle_store(member_lifecycle_store)
+                .with_exit_contribution_store(exit_contribution_store)
                 .bind()
                 .await
                 .context("无法绑定内嵌信令服务")?;

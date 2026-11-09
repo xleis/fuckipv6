@@ -2183,6 +2183,7 @@ export type NodeSnapshot = {
   "routing_summaries"?: Array<NodeRoutingSummarySnapshot>;
   "topology"?: TopologySnapshot | null;
   "traffic_routing_page"?: TrafficRoutingPageModel | null;
+  "traffic_session"?: TrafficSessionSnapshot;
   "tun_capabilities"?: TunCapabilities;
   "ui_mode"?: UiModeResolution | null;
 };
@@ -2875,6 +2876,7 @@ export type ProjectedNodeSnapshot = {
   "routing_summaries"?: Array<NodeRoutingSummarySnapshot>;
   "topology"?: TopologySnapshot | null;
   "traffic_routing_page"?: TrafficRoutingPageModel | null;
+  "traffic_session"?: TrafficSessionSnapshot;
   "tun_capabilities"?: TunCapabilities | null;
   "ui_mode"?: UiModeResolution | null;
 };
@@ -2991,7 +2993,7 @@ export type TrafficFailureDecision = {
 
 export type TrafficFailureDecisionReason = "default_fail_closed" | "not_allowed_by_policy" | "explicit_direct_fallback" | "unsafe_failure_class" | "reject_rule" | "fixed_exit" | "fixed_network" | "direct_action_has_no_alternate";
 
-export type TrafficFailureKind = "unknown_application" | "dns_resolution_timeout" | "dns_pollution_detected" | "exit_unavailable" | "network_selection_unavailable" | "connection_timeout" | "partial_connection_failure";
+export type TrafficFailureKind = "unknown_application" | "dns_resolution_timeout" | "dns_pollution_detected" | "exit_unavailable" | "network_selection_unavailable" | "connection_timeout" | "handshake_interrupted" | "runtime_disconnected" | "partial_connection_failure";
 
 export type TrafficFailureOutcome = "fail_closed" | "direct_fallback";
 
@@ -3183,6 +3185,8 @@ export type TrafficPolicyTestInput = {
   "source": TrafficPolicyTestContextSource;
 };
 
+export type TrafficProtectionState = "idle" | "connecting" | "migrating" | "protected" | "fail_closed" | "explicit_direct_fallback";
+
 export type TrafficProtocol = "tcp" | "udp" | "icmp";
 
 export type TrafficRoutingDefaultPolicyView = {
@@ -3357,6 +3361,33 @@ export type TrafficRuleRisk = {
   "priority": number;
   "risks": Array<TrafficMatchRisk>;
   "rule_id": TrafficRuleId;
+};
+
+export type TrafficSessionEvent = {
+  "failure"?: TrafficFailureKind | null;
+  "kind": TrafficSessionEventKind;
+  "occurred_at_unix_ms": number;
+  "reason_code"?: string | null;
+  "state": TrafficProtectionState;
+};
+
+export type TrafficSessionEventKind = "connecting" | "recovery_started" | "migration_started" | "failure_detected" | "protection_established" | "fail_closed" | "direct_fallback";
+
+export type TrafficSessionSnapshot = {
+  "changed_at_unix_ms"?: number;
+  "events"?: Array<TrafficSessionEvent>;
+  "failure"?: TrafficFailureKind | null;
+  "reason_code"?: string | null;
+  "state"?: TrafficProtectionState;
+  "validation"?: TrafficSessionValidation | null;
+};
+
+export type TrafficSessionValidation = {
+  "dns_validated": boolean;
+  "observed_at_unix_ms": number;
+  "reachability_validated": boolean;
+  "routes_validated": boolean;
+  "tun_validated": boolean;
 };
 
 export type TunCapabilities = {

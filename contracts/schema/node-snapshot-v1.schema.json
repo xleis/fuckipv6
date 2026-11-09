@@ -3970,6 +3970,16 @@
           "type": "string"
         },
         {
+          "const": "handshake_interrupted",
+          "description": "The secure handshake with a Relay or Exit was interrupted after it\nstarted. Existing flows may have observed partial authentication state,\nso this class must fail closed.",
+          "type": "string"
+        },
+        {
+          "const": "runtime_disconnected",
+          "description": "The local runtime lost ownership of or disconnected from the data-plane\nprocess. It cannot prove that traffic remained inside the protected\npath, so this class must fail closed.",
+          "type": "string"
+        },
+        {
           "const": "partial_connection_failure",
           "description": "Some attempts completed and others failed, so switching routes would be\nambiguous or could leak an already-established flow.",
           "type": "string"
@@ -4191,6 +4201,41 @@
             "end"
           ],
           "type": "object"
+        }
+      ]
+    },
+    "TrafficProtectionState": {
+      "description": "What the runtime can prove about the local traffic path right now.",
+      "oneOf": [
+        {
+          "const": "idle",
+          "description": "No protected route has been selected yet.",
+          "type": "string"
+        },
+        {
+          "const": "connecting",
+          "description": "A route is being established and has not completed validation.",
+          "type": "string"
+        },
+        {
+          "const": "migrating",
+          "description": "An existing route is being replaced and traffic is fail-closed until\nthe replacement completes validation.",
+          "type": "string"
+        },
+        {
+          "const": "protected",
+          "description": "Fresh TUN, route, DNS and reachability evidence all passed.",
+          "type": "string"
+        },
+        {
+          "const": "fail_closed",
+          "description": "Traffic must be stopped because the selected route cannot be trusted.",
+          "type": "string"
+        },
+        {
+          "const": "explicit_direct_fallback",
+          "description": "The owner/administrator explicitly allowed this exact failure class to\nuse the operating-system route.",
+          "type": "string"
         }
       ]
     },
@@ -4933,6 +4978,138 @@
     "TrafficRuleId": {
       "type": "string"
     },
+    "TrafficSessionEvent": {
+      "additionalProperties": false,
+      "description": "A compact, transport-neutral activity record. It contains stable state and\nreason codes only; Exit identities, addresses, resolver URLs and command\noutput stay outside this projection.",
+      "properties": {
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrafficFailureKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/TrafficSessionEventKind"
+        },
+        "occurred_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/TrafficProtectionState"
+        }
+      },
+      "required": [
+        "kind",
+        "state",
+        "occurred_at_unix_ms"
+      ],
+      "type": "object"
+    },
+    "TrafficSessionEventKind": {
+      "enum": [
+        "connecting",
+        "recovery_started",
+        "migration_started",
+        "failure_detected",
+        "protection_established",
+        "fail_closed",
+        "direct_fallback"
+      ],
+      "type": "string"
+    },
+    "TrafficSessionSnapshot": {
+      "additionalProperties": false,
+      "description": "The single source of truth consumed by GPUI, WebUI and protocol adapters.",
+      "properties": {
+        "changed_at_unix_ms": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "events": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TrafficSessionEvent"
+          },
+          "type": "array"
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrafficFailureKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/TrafficProtectionState",
+          "default": "idle"
+        },
+        "validation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrafficSessionValidation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TrafficSessionValidation": {
+      "additionalProperties": false,
+      "description": "Evidence required before the session may become `Protected`.",
+      "properties": {
+        "dns_validated": {
+          "type": "boolean"
+        },
+        "observed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reachability_validated": {
+          "type": "boolean"
+        },
+        "routes_validated": {
+          "type": "boolean"
+        },
+        "tun_validated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "tun_validated",
+        "routes_validated",
+        "dns_validated",
+        "reachability_validated",
+        "observed_at_unix_ms"
+      ],
+      "type": "object"
+    },
     "TunCapabilities": {
       "description": "Redacted TUN readiness for the current node process. This is deliberately\nderived from capability metadata rather than a real TUN creation probe.",
       "properties": {
@@ -5258,6 +5435,15 @@
         }
       ],
       "description": "The single authoritative traffic-routing editor projection. The node\nruntime builds this from the applied policy, hard constraints and\ncurrent caller permissions; adapters never reconstruct it from legacy\nnetwork configuration. Missing data means the production policy/TUN\nadapter is unavailable, not that an empty policy was applied."
+    },
+    "traffic_session": {
+      "$ref": "#/$defs/TrafficSessionSnapshot",
+      "default": {
+        "changed_at_unix_ms": 0,
+        "events": [],
+        "state": "idle"
+      },
+      "description": "Runtime-authoritative local traffic-protection session. `Protected` is\nemitted only after fresh TUN, route, DNS and reachability validation;\nmigration and failure states are never inferred by UI adapters."
     },
     "tun_capabilities": {
       "$ref": "#/$defs/TunCapabilities",

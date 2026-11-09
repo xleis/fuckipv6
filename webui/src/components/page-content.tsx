@@ -57,6 +57,7 @@ import type {
   NodeNetworkSnapshot,
   NodePeerSnapshot,
   NodeProblem,
+  LocalExitCapabilityStage,
   NodeRoutingDefaultAction,
   NodeRoutingSummarySnapshot,
   NodeRoutingTargetSnapshot,
@@ -128,6 +129,14 @@ type PageContentProps = {
 
 function empty(text: string): JSX.Element {
   return <div className="empty-state">{text}</div>;
+}
+
+function localExitTone(stage: LocalExitCapabilityStage): string {
+  if (stage === "enabled") return "good";
+  if (stage === "failed") return "bad";
+  if (["listening", "health_checking", "draining", "cleaning"].includes(stage))
+    return "warn";
+  return "neutral";
 }
 
 function statusTone(value: string): string {
@@ -2856,6 +2865,10 @@ function CapabilityPage({
   const capability = snapshot.capabilities?.capabilities.find(
     (item) => item.kind === kind,
   );
+  const localExit = kind === "exit" ? snapshot.local_exit : undefined;
+  const localExitStage = localExit?.stage ?? "disabled";
+  const activeClients = localExit?.active_clients ?? 0;
+  const totalClients = localExit?.total_clients ?? 0;
   return (
     <div className="page-stack">
       <section className="surface-card capability-feature">
@@ -2869,6 +2882,109 @@ function CapabilityPage({
           <h2>{capability?.state ?? "unknown"}</h2>
         </div>
       </section>
+      {kind === "exit" && localExit ? (
+        <section
+          className="surface-card"
+          data-testid="local-exit-status"
+          aria-labelledby="local-exit-status-title"
+        >
+          <div className="card-heading">
+            <h3 id="local-exit-status-title">
+              {label(locale, "gpui.section.local_exit_status")}
+            </h3>
+            <span className={`status-pill ${localExitTone(localExitStage)}`}>
+              {label(locale, `gpui.local_exit.stage.${localExitStage}`)}
+            </span>
+          </div>
+          <dl className="detail-list">
+            <div>
+              <dt>{label(locale, "gpui.local_exit.owner_intent")}</dt>
+              <dd>
+                {label(
+                  locale,
+                  localExit.owner_exit_enabled
+                    ? "common.enabled"
+                    : "common.disabled",
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "gpui.local_exit.stage")}</dt>
+              <dd>{label(locale, `gpui.local_exit.stage.${localExitStage}`)}</dd>
+            </div>
+            <div>
+              <dt>{label(locale, "gpui.local_exit.network_authorization")}</dt>
+              <dd>
+                {label(
+                  locale,
+                  localExit.network_allowed
+                    ? "common.enabled"
+                    : "common.disabled",
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "gpui.local_exit.health")}</dt>
+              <dd>
+                {label(
+                  locale,
+                  localExit.healthy
+                    ? "gpui.local_exit.healthy"
+                    : "gpui.local_exit.unhealthy",
+                )}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "gpui.local_exit.clients")}</dt>
+              <dd
+                data-active-clients={activeClients}
+                data-total-clients={totalClients}
+              >
+                {tr(locale, "gpui.local_exit.clients_detail", {
+                  active_clients: String(activeClients),
+                  total_clients: String(totalClients),
+                })}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "gpui.local_exit.last_transition")}</dt>
+              <dd>
+                {localExit.last_transition_at_unix_ms
+                  ? formatTimestamp(
+                      locale,
+                      localExit.last_transition_at_unix_ms,
+                    )
+                  : label(locale, "common.not_available")}
+              </dd>
+            </div>
+          </dl>
+          {localExit.problem ? (
+            <div
+              className="state-notice danger"
+              data-testid="local-exit-problem"
+              role="alert"
+            >
+              <AlertTriangle size={17} aria-hidden="true" />
+              <div>
+                <strong>{label(locale, "gpui.local_exit.problem")}</strong>
+                <p>{localExit.problem.message}</p>
+                <small>
+                  <code>{localExit.problem.code}</code>
+                  {" · "}
+                  <code>{localExit.problem.message_key}</code>
+                  {" · "}
+                  {label(
+                    locale,
+                    localExit.problem.retryable
+                      ? "common.enabled"
+                      : "common.disabled",
+                  )}
+                </small>
+              </div>
+            </div>
+          ) : null}
+        </section>
+      ) : null}
       {kind === "exit" && snapshot.exit_node_capabilities ? (
         <section className="surface-card">
           <div className="card-heading">

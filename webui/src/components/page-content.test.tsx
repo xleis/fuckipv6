@@ -5,6 +5,7 @@ import manifestFixture from "../../../contracts/typescript/fixtures/node-manifes
 import productFixture from "../../../contracts/typescript/fixtures/product-visual-snapshot.json";
 import type {
   ActivityEntry,
+  NodeProblem,
   NodeSnapshot,
   NodeUiManifest,
   NodeUiPage,
@@ -17,6 +18,7 @@ const manifest = manifestFixture as NodeUiManifest;
 const networksPage = manifest.pages.find((page) => page.id === "networks") as NodeUiPage;
 const activityPage = manifest.pages.find((page) => page.id === "activity") as NodeUiPage;
 const settingsPage = manifest.pages.find((page) => page.id === "settings") as NodeUiPage;
+const exitNodePage = manifest.pages.find((page) => page.id === "exit_node") as NodeUiPage;
 const baseSnapshot = productFixture.snapshot as NodeSnapshot;
 const oldTermsHash = "hash_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const currentTermsHash = "hash_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
@@ -140,6 +142,22 @@ function activityElement(
   );
 }
 
+function exitElement(snapshot: NodeSnapshot) {
+  return (
+    <PageContent
+      page={exitNodePage}
+      snapshot={snapshot}
+      locale="zh-CN"
+      selectedNetwork="home"
+      recentDiagnostics={null}
+      onSelectNetwork={() => {}}
+      onNavigate={() => {}}
+      onRequestAction={() => {}}
+      onRunAction={async () => {}}
+    />
+  );
+}
+
 function datetimeLocal(unixMs: number): string {
   const date = new Date(unixMs);
   const pad = (value: number) => String(value).padStart(2, "0");
@@ -153,6 +171,90 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+});
+
+describe("local Exit lifecycle", () => {
+  it("projects the authoritative stage, ownership, authorization, and structured problem", () => {
+    const problem: NodeProblem = {
+      category: "capability",
+      code: "unavailable",
+      message: "local Exit listener is unavailable",
+      message_key: "problem.local_exit.listener_unavailable",
+      retryable: true,
+    };
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      local_exit: {
+        owner_exit_enabled: true,
+        stage: "listening",
+        network_allowed: false,
+        healthy: false,
+        active_clients: 2,
+        total_clients: 7,
+        last_transition_at_unix_ms: Date.UTC(2026, 0, 2, 3, 4, 5),
+        problem,
+      },
+    };
+    const { rerender } = render(exitElement(snapshot));
+    const status = screen.getByTestId("local-exit-status");
+    const value = (key: string) =>
+      within(status).getByText(translated(key)).nextElementSibling;
+
+    expect(status).toHaveTextContent(
+      translated("gpui.section.local_exit_status"),
+    );
+    expect(value("gpui.local_exit.owner_intent")).toHaveTextContent(
+      translated("common.enabled"),
+    );
+    expect(value("gpui.local_exit.stage")).toHaveTextContent(
+      translated("gpui.local_exit.stage.listening"),
+    );
+    expect(value("gpui.local_exit.network_authorization")).toHaveTextContent(
+      translated("common.disabled"),
+    );
+    expect(value("gpui.local_exit.health")).toHaveTextContent(
+      translated("gpui.local_exit.unhealthy"),
+    );
+    expect(value("gpui.local_exit.clients")).toHaveAttribute(
+      "data-active-clients",
+      "2",
+    );
+    expect(value("gpui.local_exit.clients")).toHaveAttribute(
+      "data-total-clients",
+      "7",
+    );
+    expect(value("gpui.local_exit.last_transition")).toHaveTextContent(
+      "2026-01-02T03:04:05.000Z",
+    );
+
+    const problemNotice = within(status).getByTestId("local-exit-problem");
+    expect(problemNotice).toHaveTextContent(problem.message);
+    expect(within(problemNotice).getByText(problem.code)).toBeInTheDocument();
+    expect(
+      within(problemNotice).getByText(problem.message_key),
+    ).toBeInTheDocument();
+    expect(problemNotice).toHaveTextContent(translated("common.enabled"));
+
+    rerender(
+      exitElement({
+        ...snapshot,
+        local_exit: { ...snapshot.local_exit, stage: "health_checking" },
+      }),
+    );
+    expect(value("gpui.local_exit.stage")).toHaveTextContent(
+      translated("gpui.local_exit.stage.health_checking"),
+    );
+
+    rerender(
+      exitElement({
+        ...snapshot,
+        local_exit: { ...snapshot.local_exit, stage: "cleaning" },
+      }),
+    );
+    expect(value("gpui.local_exit.stage")).toHaveTextContent(
+      translated("gpui.local_exit.stage.cleaning"),
+    );
+  });
 });
 
 describe("security and privacy settings", () => {

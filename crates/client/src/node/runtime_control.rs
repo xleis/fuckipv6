@@ -10737,9 +10737,31 @@ mod tests {
             traffic: NodeTrafficSnapshot::default(),
         });
 
+        let now = 1_700_000_000_000;
+        let leak_detection = LeakDetectionSnapshot {
+            generated_at_unix_ms: now,
+            evidence: [
+                LeakDetectionTarget::DnsResolver,
+                LeakDetectionTarget::Ipv4ExternalTarget,
+                LeakDetectionTarget::Ipv6ExternalTarget,
+            ]
+            .into_iter()
+            .map(|target| LeakDetectionEvidence {
+                target,
+                state: LeakDetectionEvidenceState::NotTested,
+                source: LeakDetectionSource::ControlledProbe,
+                observed_at_unix_ms: now,
+                duration_ms: 0,
+                error_code: Some("exit.health.probe_not_executed".into()),
+                isolation_action: None,
+            })
+            .collect(),
+            ..LeakDetectionSnapshot::default()
+        };
+
         let health = build_exit_health_snapshot(
             &snapshot,
-            &LeakDetectionSnapshot::default(),
+            &leak_detection,
             1_700_000_000_000,
             1_700_000_001_000,
         );

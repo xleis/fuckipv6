@@ -7340,6 +7340,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_exit_toggle_preserves_other_capabilities_and_embedded_services() {
+        let harness = TestHarness::new("local-exit-isolation").await;
+        start_fake_network(&harness, "local-exit-isolation").await;
+        set_supported_exit_capabilities(&harness).await;
+        let embedded_service = NodeEmbeddedServiceSnapshot {
+            network_name: "local-exit-isolation".into(),
+            status: NodeEmbeddedServiceStatus::Running,
+            signaling_addr: Some("127.0.0.1:46666".parse().expect("signaling address")),
+            relay_addr: Some("127.0.0.1:46667".parse().expect("relay address")),
+        };
+        harness
+            .state
+            .update(|snapshot| {
+                snapshot.embedded_services = vec![embedded_service.clone()];
+                let network = snapshot
+                    .networks
+                    .iter_mut()
+                    .find(|network| network.name == "local-exit-isolation")
+                    .expect("running network");
+                network.peer_count = 2;
+            })
+            .await;
+        harness
+            .runtime
+            .update_routing(routing_command(
+                "local-exit-isolation",
+                NodeRoutingMode::GlobalProxy,
+                Some("office"),
+                true,
+            ))
+            .await
+            .expect("enable network exit role");
+
+        let before = harness.state.snapshot().await;
+        let before_network = before
+            .networks
+            .iter()
+            .find(|network| network.name == "local-exit-isolation")
+            .expect("running network");
+        assert_eq!(
+            before
+                .capabilities
+                .state(fuckipv6_common::domain::CapabilityKind::Coordinator),
+            fuckipv6_common::domain::CapabilityState::Enabled
+        );
+        assert_eq!(
+            before
+                .capabilities
+                .state(fuckipv6_common::domain::CapabilityKind::Relay),
+            fuckipv6_common::domain::CapabilityState::Enabled
+        );
+
+        harness
+            .runtime
+            .set_local_exit_capability(true)
+            .await
+            .expect("enable local exit");
+        harness
+            .runtime
+            .set_local_exit_capability(false)
+            .await
+            .expect("disable local exit");
+
+        let after = harness.state.snapshot().await;
+        let after_network = after
+            .networks
+            .iter()
+            .find(|network| network.name == "local-exit-isolation")
+            .expect("running network");
+        assert_eq!(after.embedded_services, before.embedded_services);
+        assert_eq!(after.embedded_services, vec![embedded_service]);
+        for capability in [
+            fuckipv6_common::domain::CapabilityKind::Coordinator,
+            fuckipv6_common::domain::CapabilityKind::Relay,
+            fuckipv6_common::domain::CapabilityKind::File,
+        ] {
+            assert_eq!(
+                after.capabilities.state(capability),
+                before.capabilities.state(capability),
+                "local Exit toggle must not change {capability:?}"
+            );
+        }
+        assert_eq!(
+            after
+                .capabilities
+                .state(fuckipv6_common::domain::CapabilityKind::File),
+            fuckipv6_common::domain::CapabilityState::Unsupported
+        );
+        assert_eq!(after_network.roles, before_network.roles);
+        assert_eq!(after_network.peer_count, before_network.peer_count);
+        assert_eq!(harness.fake.launches(), vec!["local-exit-isolation"]);
+        assert_eq!(harness.fake.shutdown_count(), 0);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn local_exit_disable_observes_cleaning_until_runtime_confirms_cleanup() {
         let harness = TestHarness::new("local-exit-drain").await;
         start_fake_network(&harness, "local-exit-drain").await;

@@ -1711,7 +1711,10 @@ pub fn action_block_reason(
         return Some(ActionBlockReason::PermissionDenied);
     }
 
-    if action.id == "set_exit_node_role" {
+    if matches!(
+        action.id.as_str(),
+        "set_exit_node_role" | "set_local_exit_capability"
+    ) {
         let state = snapshot.capabilities.state(CapabilityKind::Exit);
         if state == CapabilityState::Unsupported
             || (state == CapabilityState::Unknown && !snapshot.exit_node_capabilities.supported)
@@ -8693,7 +8696,7 @@ mod tests {
     }
 
     #[test]
-    fn exit_node_capability_blocks_only_exit_role_actions() {
+    fn exit_node_capability_blocks_exit_data_plane_actions() {
         let manifest = node_ui_manifest();
         let exit_page = manifest
             .pages
@@ -8705,6 +8708,12 @@ mod tests {
             .iter()
             .find(|action| action.id == "set_exit_node_role")
             .expect("exit role action")
+            .clone();
+        let local_exit_action = exit_page
+            .actions
+            .iter()
+            .find(|action| action.id == "set_local_exit_capability")
+            .expect("local exit action")
             .clone();
         let relay_action = manifest
             .pages
@@ -8726,6 +8735,10 @@ mod tests {
             Some(ActionBlockReason::ExitNodeUnsupported)
         );
         assert_eq!(
+            action_block_reason(&local_exit_action, &unsupported, Some("home")),
+            Some(ActionBlockReason::ExitNodeUnsupported)
+        );
+        assert_eq!(
             action_block_reason(&relay_action, &unsupported, Some("home")),
             None
         );
@@ -8743,6 +8756,10 @@ mod tests {
         };
         assert_eq!(
             action_block_reason(&exit_action, &supported, Some("home")),
+            None
+        );
+        assert_eq!(
+            action_block_reason(&local_exit_action, &supported, Some("home")),
             None
         );
     }

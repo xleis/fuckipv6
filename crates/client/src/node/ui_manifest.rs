@@ -2228,7 +2228,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         "set_local_exit_capability",
                         "action.set_local_exit_capability",
                         NodeCommandKind::SetLocalExitCapability,
-                        NodeUiBackendStatus::Unavailable,
+                        NodeUiBackendStatus::Implemented,
                         NodePermission::ManageNetworks,
                         NodeUiAvailability::Always,
                         vec![field(
@@ -2238,7 +2238,12 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             true,
                             NodeUiValidation::None,
                         )],
-                        None,
+                        Some(confirmation(
+                            NodeCommandKind::SetLocalExitCapability,
+                            "confirm.set_local_exit_capability.title",
+                            "confirm.set_local_exit_capability.consequence",
+                            false,
+                        )),
                     ),
                     action(
                         "set_exit_node_role",
@@ -3161,6 +3166,10 @@ mod tests {
             HashSet::from([NodeUiBackendStatus::Implemented])
         );
         assert_eq!(
+            status(NodeCommandKind::SetLocalExitCapability),
+            HashSet::from([NodeUiBackendStatus::Implemented])
+        );
+        assert_eq!(
             status(NodeCommandKind::SetNetworkRole),
             HashSet::from([
                 NodeUiBackendStatus::Implemented,
@@ -3193,6 +3202,32 @@ mod tests {
             .confirmation
             .as_ref()
             .is_some_and(|confirmation| confirmation.destructive));
+    }
+
+    #[test]
+    fn local_exit_capability_action_declares_its_owner_boundary() {
+        let manifest = node_ui_manifest();
+        let action = manifest
+            .pages
+            .iter()
+            .flat_map(|page| &page.actions)
+            .find(|action| action.command == NodeCommandKind::SetLocalExitCapability)
+            .expect("local exit capability action");
+        assert_eq!(action.backend_status, NodeUiBackendStatus::Implemented);
+        assert_eq!(action.permission, NodePermission::ManageNetworks);
+        let confirmation = action.confirmation.as_ref().expect("confirmation");
+        assert_eq!(
+            confirmation.title_key,
+            "confirm.set_local_exit_capability.title"
+        );
+        assert_eq!(
+            confirmation.consequence_key,
+            "confirm.set_local_exit_capability.consequence"
+        );
+        assert_eq!(
+            crate::node::audit_for_command(NodeCommandKind::SetLocalExitCapability),
+            NodeUiAudit::record("node.local_exit.set")
+        );
     }
 
     #[test]

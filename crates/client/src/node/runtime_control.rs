@@ -6198,7 +6198,7 @@ mod tests {
     use crate::node::{
         NodeCommand, NodeCommandBusError, NodeCommandOutcome, NodeCommandRequest, NodeEvent,
         NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceSnapshot, NodeInterfaceStatus,
-        NodePeerSnapshot,
+        NodePeerSnapshot, NodeSetLocalExitCapabilityCommand,
     };
     use crate::p2p::connection::P2pEngine;
     use crate::stats::StatsCollector;
@@ -7113,6 +7113,58 @@ mod tests {
         assert!(calls
             .iter()
             .any(|(network, enabled)| { network == "local-exit-toggle" && !*enabled }));
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn command_bus_local_exit_capability_uses_the_live_runtime_actor() {
+        let harness = TestHarness::new("local-exit-command-bus").await;
+        start_fake_network(&harness, "local-exit-command-bus").await;
+        set_supported_exit_capabilities(&harness).await;
+        harness
+            .runtime
+            .update_routing(routing_command(
+                "local-exit-command-bus",
+                NodeRoutingMode::GlobalProxy,
+                Some("office"),
+                true,
+            ))
+            .await
+            .expect("enable network exit role");
+        let bus = crate::node::spawn_command_bus_with_runtime(
+            harness.state.clone(),
+            MultiNetworkRegistry::new(),
+            harness.events.clone(),
+            harness.services.clone(),
+            harness.runtime.clone(),
+            harness.configs.clone(),
+        );
+
+        let result = bus
+            .execute_test(NodeCommandRequest::new(
+                725,
+                NodeCommand::SetLocalExitCapability(NodeSetLocalExitCapabilityCommand {
+                    enabled: true,
+                }),
+            ))
+            .await
+            .expect("local exit command result");
+        assert!(result.is_success());
+        let NodeCommandOutcome::LocalExitCapability(snapshot) = result.outcome else {
+            panic!("unexpected local exit command outcome");
+        };
+        assert!(snapshot.owner_exit_enabled);
+        assert!(snapshot.network_allowed);
+        assert!(snapshot.healthy);
+        assert_eq!(snapshot.stage, LocalExitCapabilityStage::Enabled);
+        assert_eq!(
+            harness.state.snapshot().await.local_exit.stage,
+            LocalExitCapabilityStage::Enabled
+        );
+        assert!(harness.configs.node_local_exit_enabled().unwrap());
+        assert_eq!(harness.fake.launches(), vec!["local-exit-command-bus"]);
+        assert_eq!(harness.fake.shutdown_count(), 0);
 
         harness.shutdown().await;
     }

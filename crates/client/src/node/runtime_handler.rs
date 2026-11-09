@@ -13,7 +13,10 @@ use fuckipv6_common::domain::{
 };
 use fuckipv6_common::{Identity, JoinRequestBatchReviewItem};
 
-use super::runtime_control::{network_setup_problem_code, RestartSummary};
+use super::runtime_control::{
+    local_exit_unsupported_error, network_setup_problem_code, runtime_control_problem,
+    RestartSummary,
+};
 use super::state::{NodeNetworkProfileSnapshot, NodeSignedNetworkProfileSnapshot};
 use super::{NetworkRuntimeManager, RuntimeControlError, StartSummary};
 use super::{
@@ -144,6 +147,7 @@ impl NodeRuntimeHandler {
                         if let Err(error) = refresh_network_memberships(&state, configs).await {
                             tracing::warn!(%error, "刷新本地网络成员关系失败，保留上一份快照");
                         }
+                        refresh_local_exit_owner_intent(&state, configs).await;
                     }
                     let (live_tun_names, runtime_problem) = match runtime.as_ref() {
                         Some(runtime) => match runtime.live_tun_names().await {
@@ -683,19 +687,29 @@ impl NodeRuntimeHandler {
                         }
                     }
                 }
-                super::NodeCommand::SetLocalExitCapability(command) => match runtime {
-                    Some(runtime) => match runtime.set_local_exit_capability(command.enabled).await
-                    {
-                        Ok(snapshot) => NodeCommandResult::completed(
-                            request_id,
-                            NodeCommandOutcome::LocalExitCapability(Box::new(snapshot)),
-                        ),
-                        Err(error) => runtime_rejection(request_id, error),
-                    },
-                    None => {
-                        unavailable(request_id, "本机 Exit 能力启停需要运行中的本机 Exit 控制面")
+                super::NodeCommand::SetLocalExitCapability(command) => {
+                    if command.enabled {
+                        let capabilities = state.snapshot().await.exit_node_capabilities;
+                        if let Some(error) = local_exit_unsupported_error(&capabilities) {
+                            return runtime_rejection(request_id, error);
+                        }
                     }
-                },
+                    match runtime {
+                        Some(runtime) => {
+                            match runtime.set_local_exit_capability(command.enabled).await {
+                                Ok(snapshot) => NodeCommandResult::completed(
+                                    request_id,
+                                    NodeCommandOutcome::LocalExitCapability(Box::new(snapshot)),
+                                ),
+                                Err(error) => runtime_rejection(request_id, error),
+                            }
+                        }
+                        None => unavailable(
+                            request_id,
+                            "本机 Exit 能力启停需要运行中的本机 Exit 控制面",
+                        ),
+                    }
+                }
                 super::NodeCommand::SetNetworkRole(command) => {
                     let capabilities = state.snapshot().await.exit_node_capabilities;
                     if command.role == super::NodeNetworkRole::ExitNode
@@ -846,6 +860,96 @@ async fn refresh_network_profiles(state: &NodeStateStore, configs: &ConfigManage
     if let Ok(profiles) = profiles {
         state.replace_network_profiles(profiles).await;
     }
+}
+
+async fn refresh_local_exit_owner_intent(state: &NodeStateStore, configs: &ConfigManager) {
+    let configs = configs.clone();
+    let intent = tokio::task::spawn_blocking(move || configs.node_local_exit_enabled()).await;
+    let current = state.snapshot().await;
+    let projected = match intent {
+        Ok(Ok(enabled)) => project_local_exit_owner_intent(
+            &current.local_exit,
+            enabled,
+            &current.exit_node_capabilities,
+        ),
+        Ok(Err(error)) => {
+            let error = RuntimeControlError::Persistence(format!(
+                "读取本机 Exit owner intent 失败: {error:#}"
+            ));
+            let mut failed = current.local_exit.clone();
+            failed.stage = super::LocalExitCapabilityStage::Failed;
+            failed.healthy = false;
+            failed.problem = Some(runtime_control_problem(&error));
+            failed
+        }
+        Err(error) => {
+            let error = RuntimeControlError::Persistence(format!(
+                "读取本机 Exit owner intent 的任务异常终止: {error}"
+            ));
+            let mut failed = current.local_exit.clone();
+            failed.stage = super::LocalExitCapabilityStage::Failed;
+            failed.healthy = false;
+            failed.problem = Some(runtime_control_problem(&error));
+            failed
+        }
+    };
+
+    if projected != current.local_exit {
+        state
+            .update(|snapshot| {
+                snapshot.local_exit = projected.clone();
+                snapshot.local_exit.last_transition_at_unix_ms = unix_time_ms();
+            })
+            .await;
+    }
+}
+
+fn project_local_exit_owner_intent(
+    current: &super::LocalExitCapabilitySnapshot,
+    owner_exit_enabled: bool,
+    capabilities: &fuckipv6_common::ExitNodeCapabilities,
+) -> super::LocalExitCapabilitySnapshot {
+    if !owner_exit_enabled {
+        return super::LocalExitCapabilitySnapshot {
+            last_transition_at_unix_ms: current.last_transition_at_unix_ms,
+            ..super::LocalExitCapabilitySnapshot::default()
+        };
+    }
+
+    if let Some(error) = local_exit_unsupported_error(capabilities) {
+        return super::LocalExitCapabilitySnapshot {
+            owner_exit_enabled: true,
+            stage: super::LocalExitCapabilityStage::Failed,
+            problem: Some(runtime_control_problem(&error)),
+            last_transition_at_unix_ms: current.last_transition_at_unix_ms,
+            ..super::LocalExitCapabilitySnapshot::default()
+        };
+    }
+
+    if !current.owner_exit_enabled {
+        return super::LocalExitCapabilitySnapshot {
+            owner_exit_enabled: true,
+            stage: super::LocalExitCapabilityStage::WaitingForNetworkAuthorization,
+            last_transition_at_unix_ms: current.last_transition_at_unix_ms,
+            ..super::LocalExitCapabilitySnapshot::default()
+        };
+    }
+
+    let mut projected = current.clone();
+    projected.owner_exit_enabled = true;
+    if matches!(
+        projected.stage,
+        super::LocalExitCapabilityStage::Disabled
+            | super::LocalExitCapabilityStage::WaitingForNetworkAuthorization
+    ) {
+        projected.stage = if projected.network_allowed {
+            super::LocalExitCapabilityStage::HealthChecking
+        } else {
+            super::LocalExitCapabilityStage::WaitingForNetworkAuthorization
+        };
+        projected.healthy = false;
+    }
+    projected
 }
 
 async fn refresh_network_memberships(
@@ -3908,7 +4012,8 @@ mod tests {
         NodeClientBlacklistCommand, NodeCommand, NodeCommandBus, NodeCreateNetworkCommand,
         NodeEventBus, NodeEventKind, NodeEventReplay, NodeJoinNetworkCommand,
         NodeNetworkAllocation, NodeNetworkRole, NodeProbePeerCommand, NodeRoutingMode,
-        NodeSetNetworkRoleCommand, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
+        NodeSetLocalExitCapabilityCommand, NodeSetNetworkRoleCommand,
+        NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
     };
     use crate::policy_transaction::PolicyChangeAction;
     use crate::symmetric::EmbeddedServiceStartRequest;
@@ -4308,6 +4413,143 @@ mod tests {
             }
             outcome => panic!("unexpected outcome: {outcome:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn get_snapshot_projects_persisted_local_exit_owner_intent_without_runtime_actor() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "fuckipv6-local-exit-owner-projection-{}-{}",
+            std::process::id(),
+            unix_time_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let configs = ConfigManager::new_for_dir(config_dir.clone()).expect("config manager");
+        configs
+            .set_node_local_exit_enabled(true)
+            .expect("persist owner intent");
+        let events = NodeEventBus::default();
+        let state = NodeStateStore::with_events(events.clone());
+        state
+            .update(|snapshot| {
+                snapshot.exit_node_capabilities = ExitNodeCapabilities {
+                    schema_version: EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
+                    platform: ExitNodePlatform::Linux,
+                    supported: true,
+                    ipv4_forwarding: true,
+                    ipv6_forwarding: true,
+                    nat: true,
+                    cleanup: true,
+                    unsupported_reasons: Vec::new(),
+                };
+            })
+            .await;
+        let mut handler = NodeRuntimeHandler::with_services(
+            state.clone(),
+            MultiNetworkRegistry::new(),
+            EmbeddedServiceManager::spawn_with_config(2, configs.clone()),
+        );
+        handler.configs = Some(configs.clone());
+        let bus = NodeCommandBus::spawn_with_state(Arc::new(handler), events, 32, state);
+
+        let result = bus
+            .execute_test(NodeCommandRequest::new(99, NodeCommand::GetSnapshot))
+            .await
+            .expect("snapshot result");
+        let NodeCommandOutcome::Snapshot(snapshot) = result.outcome else {
+            panic!("unexpected snapshot outcome");
+        };
+        assert!(snapshot.local_exit.owner_exit_enabled);
+        assert_eq!(
+            snapshot.local_exit.stage,
+            crate::node::LocalExitCapabilityStage::WaitingForNetworkAuthorization
+        );
+        assert!(!snapshot.local_exit.network_allowed);
+        assert!(snapshot.local_exit.problem.is_none());
+
+        configs
+            .set_node_local_exit_enabled(false)
+            .expect("persist disabled owner intent");
+        let result = bus
+            .execute_test(NodeCommandRequest::new(100, NodeCommand::GetSnapshot))
+            .await
+            .expect("snapshot result");
+        let NodeCommandOutcome::Snapshot(snapshot) = result.outcome else {
+            panic!("unexpected snapshot outcome");
+        };
+        assert!(!snapshot.local_exit.owner_exit_enabled);
+        assert_eq!(
+            snapshot.local_exit.stage,
+            crate::node::LocalExitCapabilityStage::Disabled
+        );
+        assert!(snapshot.local_exit.problem.is_none());
+
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[tokio::test]
+    async fn local_exit_enable_rejects_unsupported_and_privileged_hosts_before_runtime() {
+        let cases = [
+            (
+                ExitNodeCapabilities::for_platform(ExitNodePlatform::Windows),
+                NodeProblemCode::Unsupported,
+            ),
+            (
+                ExitNodeCapabilities {
+                    supported: false,
+                    unsupported_reasons: vec![
+                        fuckipv6_common::ExitNodeUnsupportedReason::PrivilegesRequired,
+                    ],
+                    ..ExitNodeCapabilities::for_platform(ExitNodePlatform::Linux)
+                },
+                NodeProblemCode::PermissionDenied,
+            ),
+        ];
+        for (index, (capabilities, expected_code)) in cases.into_iter().enumerate() {
+            let state = NodeStateStore::new();
+            state
+                .update(|snapshot| snapshot.exit_node_capabilities = capabilities)
+                .await;
+            let bus =
+                spawn_command_bus(state, MultiNetworkRegistry::new(), NodeEventBus::default());
+            let result = bus
+                .execute_test(NodeCommandRequest::new(
+                    101 + index as u64,
+                    NodeCommand::SetLocalExitCapability(NodeSetLocalExitCapabilityCommand {
+                        enabled: true,
+                    }),
+                ))
+                .await
+                .expect("local exit rejection");
+            let NodeCommandOutcome::Rejected(problem) = result.outcome else {
+                panic!("unsupported local exit must be rejected");
+            };
+            assert_problem(&problem, expected_code, false);
+        }
+    }
+
+    #[tokio::test]
+    async fn local_exit_disable_is_not_blocked_by_host_capability_checks() {
+        let state = NodeStateStore::new();
+        state
+            .update(|snapshot| {
+                snapshot.exit_node_capabilities =
+                    ExitNodeCapabilities::for_platform(ExitNodePlatform::Windows);
+            })
+            .await;
+        let bus = spawn_command_bus(state, MultiNetworkRegistry::new(), NodeEventBus::default());
+        let result = bus
+            .execute_test(NodeCommandRequest::new(
+                103,
+                NodeCommand::SetLocalExitCapability(NodeSetLocalExitCapabilityCommand {
+                    enabled: false,
+                }),
+            ))
+            .await
+            .expect("disable command reaches the runtime boundary");
+        let NodeCommandOutcome::Rejected(problem) = result.outcome else {
+            panic!("missing runtime must be rejected after capability checks");
+        };
+        assert_problem(&problem, NodeProblemCode::Unavailable, true);
     }
 
     #[tokio::test]

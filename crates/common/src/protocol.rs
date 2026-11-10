@@ -9,7 +9,7 @@ use crate::domain::{
     InvitationRedemption, InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest,
     JoinRequestId, JoinRequestReviewAction, JoinRequestState, MemberLifecycleChange,
     MemberLifecycleChangeRequest, MemberRemovalPreview, MemberRemovalPreviewRequest, NetworkId,
-    NetworkMemberDirectory, NodeId,
+    NetworkJoinPreview, NetworkJoinPreviewRequest, NetworkMemberDirectory, NodeId,
 };
 use crate::types::{ClientId, NatType, PeerInfo, RouteEntry, VirtualIps};
 
@@ -347,6 +347,16 @@ pub enum SignalingMessage {
     ExitAvailabilityReportAck {
         network_id: NetworkId,
         observed_at_unix_ms: u64,
+    },
+
+    // Direct join disclosure. The request is authenticated and carries only
+    // ticket-derived claims; the acknowledgement is server-originated and
+    // contains the Coordinator's trusted, short-lived network terms.
+    NetworkJoinPreview {
+        request: NetworkJoinPreviewRequest,
+    },
+    NetworkJoinPreviewAck {
+        preview: NetworkJoinPreview,
     },
 }
 

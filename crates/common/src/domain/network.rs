@@ -8,13 +8,18 @@ use serde::{Deserialize, Serialize};
 
 use super::capability::CapabilityKind;
 use super::exit_selection::ExitSelectionPolicy;
-use super::ids::{NetworkId, NodeId, PublicKey, Signature};
+use super::ids::{ContentHash, NetworkId, NodeId, PublicKey, Signature};
 use super::membership::{
     legacy_exit_contribution_scope, validate_exit_contribution_policy, ExitContributionMode,
     ExitContributionObligation, ExitContributionScope, JoinRequestGrantPreview, MembershipRole,
     MembershipTerms,
 };
 use super::{DomainError, DomainResult};
+
+/// Maximum age of a direct join disclosure. The user-visible acceptance time
+/// must fall inside this window and the Coordinator revalidates the authority
+/// record before any mutation.
+pub const NETWORK_JOIN_PREVIEW_VALIDITY_MS: u64 = 5 * 60 * 1000;
 
 /// How much of a network's public profile is discoverable without membership.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -523,6 +528,116 @@ impl NetworkRecord {
             self.updated_at_unix_ms = self.updated_at_unix_ms.max(now_unix_ms);
         }
         self.validate()
+    }
+}
+
+/// Short-lived, authenticated disclosure returned by the Coordinator before a
+/// direct network join. It deliberately contains no roster, endpoint topology,
+/// invitation credential or member activity.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkJoinPreview {
+    pub network_id: NetworkId,
+    pub public_key: PublicKey,
+    pub network_name: String,
+    pub owner: NodeId,
+    pub revision: u64,
+    pub policy_revision: u64,
+    pub privacy_policy_revision: u64,
+    pub join_mode: NetworkJoinMode,
+    pub terms: MembershipTerms,
+    pub terms_hash: ContentHash,
+    pub preview_digest: ContentHash,
+    pub issued_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+}
+
+/// The ticket-derived claims a client sends when asking the Coordinator to
+/// disclose its trusted network record. The Coordinator compares these claims
+/// with the authoritative record; the ticket itself is never sent or echoed.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkJoinPreviewRequest {
+    /// Coordinator host public key embedded in the `fk://` ticket.
+    pub coordinator_public_key: [u8; 32],
+    pub network_name: String,
+}
+
+impl NetworkJoinPreview {
+    pub fn for_record(
+        record: &NetworkRecord,
+        issued_at_unix_ms: u64,
+        expires_at_unix_ms: u64,
+    ) -> DomainResult<Self> {
+        record.validate()?;
+        if issued_at_unix_ms == 0 || issued_at_unix_ms >= expires_at_unix_ms {
+            return Err(DomainError::invalid_value(
+                "network join preview validity window is invalid",
+            ));
+        }
+        let terms = record.membership_terms();
+        let mut preview = Self {
+            network_id: record.network_id.clone(),
+            public_key: record.public_key.clone(),
+            network_name: record.name.clone(),
+            owner: record.owner.clone(),
+            revision: record.revision,
+            policy_revision: record.policy_revision,
+            privacy_policy_revision: record.privacy_policy_revision,
+            join_mode: record.join_mode,
+            terms_hash: terms.content_hash()?,
+            terms,
+            preview_digest: ContentHash::from_bytes(b"network-join-preview-pending"),
+            issued_at_unix_ms,
+            expires_at_unix_ms,
+        };
+        preview.preview_digest = preview.compute_digest()?;
+        Ok(preview)
+    }
+
+    pub fn compute_digest(&self) -> DomainResult<ContentHash> {
+        let mut canonical = self.clone();
+        canonical.preview_digest =
+            ContentHash::from_bytes(b"network-join-preview-digest-placeholder");
+        let bytes = serde_json::to_vec(&canonical)
+            .map_err(|_| DomainError::invalid_value("network join preview cannot be encoded"))?;
+        Ok(ContentHash::from_bytes(&bytes))
+    }
+
+    pub fn is_expired(&self, now_unix_ms: u64) -> bool {
+        now_unix_ms >= self.expires_at_unix_ms
+    }
+
+    pub fn validate_for_record(
+        &self,
+        record: &NetworkRecord,
+        now_unix_ms: u64,
+    ) -> DomainResult<()> {
+        record.validate()?;
+        if self.is_expired(now_unix_ms) {
+            return Err(DomainError::new(
+                "domain.network_join_preview_expired",
+                "network join preview has expired",
+            ));
+        }
+        let expected = Self::for_record(record, self.issued_at_unix_ms, self.expires_at_unix_ms)?;
+        if self.network_id != expected.network_id
+            || self.public_key != expected.public_key
+            || self.network_name != expected.network_name
+            || self.owner != expected.owner
+            || self.revision != expected.revision
+            || self.policy_revision != expected.policy_revision
+            || self.privacy_policy_revision != expected.privacy_policy_revision
+            || self.join_mode != expected.join_mode
+            || self.terms_hash != expected.terms_hash
+            || self.terms != expected.terms
+            || self.preview_digest != expected.preview_digest
+            || self.expires_at_unix_ms != expected.expires_at_unix_ms
+        {
+            return Err(DomainError::new(
+                "domain.network_join_preview_changed",
+                "network join preview no longer matches the trusted record",
+            ));
+        }
+        Ok(())
     }
 }
 

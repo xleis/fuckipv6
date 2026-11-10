@@ -250,6 +250,14 @@ assert_target_peer() {
     ' "$snapshot" >/dev/null || fail "$label does not show a healthy direct P2P peer at $expected_endpoint_prefix"
 }
 
+assert_peer_traffic() {
+    local snapshot=$1 peer_ip=$2 label=$3
+    jq -e --arg ip "$peer_ip" '
+        [.data.peers[]? | select(.virtual_ipv6==$ip)
+          | select(.traffic.p2p_rx_packets > 0 and .traffic.p2p_tx_packets > 0)] | length == 1
+    ' "$snapshot" >/dev/null || fail "$label does not show bidirectional P2P packet traffic"
+}
+
 main() {
     [ "$(id -u)" -eq 0 ] || fail "root is required for network namespaces and TUN devices"
     require_tools
@@ -530,10 +538,22 @@ SH
     grep -q ' 5 received' "$WORK/ping12.log" || fail "node1 -> node2 did not receive all 5 replies"
     grep -q ' 5 received' "$WORK/ping21.log" || fail "node2 -> node1 did not receive all 5 replies"
 
-    snapshot_to "$NODE1_SOCK" "$WORK/node1-after.json"
-    snapshot_to "$NODE2_SOCK" "$WORK/node2-after.json"
-    assert_target_peer "$WORK/node1-after.json" "$IP2" "10.78.2.2:" node1-after
-    assert_target_peer "$WORK/node2-after.json" "$IP1" "10.78.1.2:" node2-after
+    snapshot_to "$NODE1_SOCK" "$WORK/node1-after-immediate.json"
+    snapshot_to "$NODE2_SOCK" "$WORK/node2-after-immediate.json"
+    assert_peer_traffic "$WORK/node1-after-immediate.json" "$IP2" node1-after-immediate
+    assert_peer_traffic "$WORK/node2-after-immediate.json" "$IP1" node2-after-immediate
+
+    info "waiting for P2P health to settle after the traffic burst"
+    wait_for_peer "$NODE1_SOCK" "$WORK/node1-settled.json" "$IP2" 30 || {
+        jq '.data.peers' "$WORK/node1-after-immediate.json" >&2 || true
+        fail "node1 direct P2P peer did not recover to active/healthy"
+    }
+    wait_for_peer "$NODE2_SOCK" "$WORK/node2-settled.json" "$IP1" 30 || {
+        jq '.data.peers' "$WORK/node2-after-immediate.json" >&2 || true
+        fail "node2 direct P2P peer did not recover to active/healthy"
+    }
+    assert_target_peer "$WORK/node1-settled.json" "$IP2" "10.78.2.2:" node1-settled
+    assert_target_peer "$WORK/node2-settled.json" "$IP1" "10.78.1.2:" node2-settled
 
     grep -Eq '10\.78\.1\.2.*> 10\.78\.2\.2|10\.78\.2\.2.*> 10\.78\.1\.2' "$WORK/tcpdump1.log" \
         || { sed -n '1,200p' "$WORK/tcpdump1.log" >&2; fail "veth1 capture did not contain direct private-underlay UDP"; }
@@ -548,9 +568,9 @@ SH
     cmp -s "$WORK/host-default-route.before" "$WORK/host-default-route.after" || fail "host default route changed"
 
     jq --arg ip "$IP2" '.data.peers[]? | select(.virtual_ipv6==$ip) | {virtual_ipv6,online,p2p_active,p2p_healthy,endpoints,traffic}' \
-        "$WORK/node1-after.json" >"$WORK/node1-peer-summary.json"
+        "$WORK/node1-settled.json" >"$WORK/node1-peer-summary.json"
     jq --arg ip "$IP1" '.data.peers[]? | select(.virtual_ipv6==$ip) | {virtual_ipv6,online,p2p_active,p2p_healthy,endpoints,traffic}' \
-        "$WORK/node2-after.json" >"$WORK/node2-peer-summary.json"
+        "$WORK/node2-settled.json" >"$WORK/node2-peer-summary.json"
     printf '[SUMMARY node1 peer]\n'; cat "$WORK/node1-peer-summary.json"
     printf '[SUMMARY node2 peer]\n'; cat "$WORK/node2-peer-summary.json"
     printf '[SUMMARY ping12]\n'; tail -4 "$WORK/ping12.log"

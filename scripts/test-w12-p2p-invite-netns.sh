@@ -4,10 +4,11 @@
 # network through the production invitation flow, then exchange direct UDP P2P
 # traffic and virtual IPv6 ICMP without an Exit Node.
 #
-# The Coordinator runs in the host namespace. Each peer runs in its own netns
-# with a dedicated routed veth underlay. No Exit Node, remote HK egress,
-# router OpenClash policy, host default route or firewall rule is used by this
-# test. The only host networking changes are two private 10.78.x/24 veths.
+# The Coordinator and both peers each run in their own netns with a dedicated
+# routed veth underlay. No Exit Node, remote HK egress, router OpenClash policy,
+# host default route or firewall rule is used by this test. The only host
+# networking changes are three private network namespaces and two 10.78.x/24
+# veth pairs; all TUN, route and policy changes stay inside those namespaces.
 #
 # Run as root:
 #   scripts/test-w12-p2p-invite-netns.sh
@@ -17,6 +18,7 @@ set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release/fuckipv6"
 NETWORK="w12-p2p-invite"
+NSH="w12pinvh"
 NS1="w12pinv1"
 NS2="w12pinv2"
 VH1="w12pi1h"
@@ -87,8 +89,7 @@ cleanup() {
     done
     ip netns delete "$NS1" >/dev/null 2>&1 || true
     ip netns delete "$NS2" >/dev/null 2>&1 || true
-    ip link delete "$VH1" >/dev/null 2>&1 || true
-    ip link delete "$VH2" >/dev/null 2>&1 || true
+    ip netns delete "$NSH" >/dev/null 2>&1 || true
     info "evidence retained at $WORK"
 }
 
@@ -254,8 +255,8 @@ main() {
     require_tools
     [ -x "$BIN" ] || fail "missing release binary: $BIN (run cargo build --release)"
 
-    if ip netns list | grep -Eq "^($NS1|$NS2)([[:space:]]|$)"; then
-        fail "refusing to replace existing netns $NS1/$NS2"
+    if ip netns list | grep -Eq "^($NSH|$NS1|$NS2)([[:space:]]|$)"; then
+        fail "refusing to replace existing netns $NSH/$NS1/$NS2"
     fi
     if ip link show "$VH1" >/dev/null 2>&1 || ip link show "$VH2" >/dev/null 2>&1; then
         fail "refusing to replace existing veth $VH1/$VH2"
@@ -266,20 +267,22 @@ main() {
             fail "host port $port is already in use"
         fi
     done
-    [ "$(sysctl -n net.ipv4.ip_forward)" = 1 ] || fail "net.ipv4.ip_forward must already be 1; this test does not mutate host sysctls"
 
     mkdir -p "$WORK"
     trap cleanup EXIT INT TERM
     info "workdir=$WORK"
     info "binary=$(git -C "$ROOT" rev-parse HEAD) sha256=$(sha256sum "$BIN" | awk '{print $1}')"
-    info "topology: Coordinator host 10.78.1.1:$HOST_PORT; node1 netns 10.78.1.2; node2 netns 10.78.2.2"
+    info "topology: Coordinator netns $NSH 10.78.1.1:$HOST_PORT; node1 netns 10.78.1.2; node2 netns 10.78.2.2"
 
     ip rule show >"$WORK/host-ip-rule.before"
     ip -6 rule show >"$WORK/host-ip6-rule.before"
     ip route show default >"$WORK/host-default-route.before"
 
-    info "creating routed veth underlay and isolated node namespaces"
+    info "creating routed veth underlay and isolated Coordinator/node namespaces"
     local i ns vh vn
+    ip netns add "$NSH"
+    ip netns exec "$NSH" ip link set lo up
+    ip netns exec "$NSH" sysctl -qw net.ipv4.ip_forward=1
     for i in 1 2; do
         ns="w12pinv$i"
         vh="w12pi${i}h"
@@ -287,8 +290,9 @@ main() {
         ip netns add "$ns"
         ip link add "$vh" type veth peer name "$vn"
         ip link set "$vn" netns "$ns"
-        ip addr add "10.78.$i.1/24" dev "$vh"
-        ip link set "$vh" up
+        ip link set "$vh" netns "$NSH"
+        ip netns exec "$NSH" ip addr add "10.78.$i.1/24" dev "$vh"
+        ip netns exec "$NSH" ip link set "$vh" up
         ip netns exec "$ns" ip link set lo up
         ip netns exec "$ns" ip addr add "10.78.$i.2/24" dev "$vn"
         ip netns exec "$ns" ip link set "$vn" up
@@ -323,10 +327,10 @@ exec unshare --mount --propagation private bash -c '
 SH
     chmod +x "$headless_exec"
 
-    info "starting Coordinator in host namespace with auto-connect=false"
-    "$headless_exec" "$headless_state" "${host_env[@]}" RUST_LOG=debug "$BIN" host \
+    info "starting Coordinator in isolated netns with its owner membership active"
+    "$headless_exec" "$headless_state" ip netns exec "$NSH" "${host_env[@]}" RUST_LOG=debug "$BIN" host \
         --name "$NETWORK" --port "$HOST_PORT" --relay-port "$RELAY_PORT" \
-        --external-host 10.78.1.1 --auto-connect=false --headless --webui-port "$WEBUI_HOST" \
+        --external-host 10.78.1.1 --headless --webui-port "$WEBUI_HOST" \
         >"$WORK/host/host.log" 2>&1 &
     HPID=$!
 
@@ -349,6 +353,14 @@ SH
     [ "$(jq -r '.join_mode' "$NETWORK_JSON")" = invite_only ] || fail "acceptance network is not InviteOnly"
     cp "$NETWORK_JSON" "$WORK/network-before.json"
     info "network_id=$NETWORK_ID owner=$HOST_NODE_ID join_mode=invite_only"
+    wait_for_network_online "$HOST_SOCK" "$WORK/host-online.json" 90 || {
+        tail -220 "$WORK/host/host.log" >&2 || true
+        fail "Coordinator owner network did not become online"
+    }
+    jq -e --arg n "$NETWORK" '
+        .data.configuration.networks[]? | select(.network_name==$n)
+        | select(.exit_node == null and .routing_mode == "mesh_only" and .exit_node_enabled == false)
+    ' "$WORK/host-online.json" >/dev/null || fail "Coordinator owner is not running mesh_only without an Exit Node"
 
     info "starting two empty nodes in separate netns"
     "$headless_exec" "$headless_state" ip netns exec "$NS1" "${node1_env[@]}" RUST_LOG=debug "$BIN" --headless --webui-port "$WEBUI1" \
@@ -485,9 +497,9 @@ SH
     ip netns exec "$NS2" ip -6 route get "$IP1"
 
     info "capturing only the private veth underlay during ping"
-    tcpdump -ni "$VH1" -nn -vvv -l 'udp' >"$WORK/tcpdump1.log" 2>&1 &
+    ip netns exec "$NSH" tcpdump -ni "$VH1" -nn -vvv -l 'udp' >"$WORK/tcpdump1.log" 2>&1 &
     TCPDUMP1_PID=$!
-    tcpdump -ni "$VH2" -nn -vvv -l 'udp' >"$WORK/tcpdump2.log" 2>&1 &
+    ip netns exec "$NSH" tcpdump -ni "$VH2" -nn -vvv -l 'udp' >"$WORK/tcpdump2.log" 2>&1 &
     TCPDUMP2_PID=$!
     sleep 1
 

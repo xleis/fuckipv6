@@ -220,44 +220,44 @@ async fn run_http_probe(probe: &HttpLeakProbe, family: Option<IpFamily>) -> Leak
     };
     let parsed = match reqwest::Url::parse(url_text) {
         Ok(url) if matches!(url.scheme(), "http" | "https") => url,
-        _ => return probe_failed(started, "leak_detection.probe_configuration_invalid"),
+        _ => return probe_inconclusive(started, "leak_detection.probe_configuration_invalid"),
     };
     let Some(host) = parsed.host_str().map(str::to_string) else {
-        return probe_failed(started, "leak_detection.probe_configuration_invalid");
+        return probe_inconclusive(started, "leak_detection.probe_configuration_invalid");
     };
     let Some(port) = parsed.port_or_known_default() else {
-        return probe_failed(started, "leak_detection.probe_configuration_invalid");
+        return probe_inconclusive(started, "leak_detection.probe_configuration_invalid");
     };
     let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(LEAK_DETECTION_COMMAND_TIMEOUT);
     if let Some(family) = family {
         let Some(resolved) = resolve_family_address(&host, port, family).await else {
-            return probe_failed(started, "leak_detection.probe_dns_failed");
+            return probe_inconclusive(started, "leak_detection.probe_dns_failed");
         };
         builder = builder.resolve(&host, resolved);
     }
     let client = match builder.build() {
         Ok(client) => client,
-        Err(_) => return probe_failed(started, "leak_detection.probe_client_failed"),
+        Err(_) => return probe_inconclusive(started, "leak_detection.probe_client_failed"),
     };
     let response = match client.get(parsed).send().await {
         Ok(response) => response,
         Err(error) if error.is_timeout() => {
-            return probe_failed(started, "leak_detection.probe_timeout")
+            return probe_inconclusive(started, "leak_detection.probe_timeout")
         }
         Err(error) if error.is_connect() => {
-            return probe_failed(started, "leak_detection.probe_connect_failed")
+            return probe_inconclusive(started, "leak_detection.probe_connect_failed")
         }
-        Err(_) => return probe_failed(started, "leak_detection.probe_request_failed"),
+        Err(_) => return probe_inconclusive(started, "leak_detection.probe_request_failed"),
     };
     if !response.status().is_success() {
-        return probe_failed(started, "leak_detection.probe_http_status");
+        return probe_inconclusive(started, "leak_detection.probe_http_status");
     }
     if let Some(expected_source) = expected_source {
         let body = match bounded_response_body(response).await {
             Some(body) => body,
-            None => return probe_failed(started, "leak_detection.probe_response_invalid"),
+            None => return probe_inconclusive(started, "leak_detection.probe_response_invalid"),
         };
         let observed = body.trim().trim_matches(['[', ']']).parse::<IpAddr>().ok();
         if observed != Some(expected_source) {
@@ -312,6 +312,14 @@ async fn bounded_response_body(mut response: reqwest::Response) -> Option<String
 fn probe_failed(started: Instant, error_code: &'static str) -> LeakProbeOutcome {
     LeakProbeOutcome {
         state: LeakDetectionEvidenceState::Failed,
+        duration_ms: elapsed_ms(started),
+        error_code: Some(error_code.into()),
+    }
+}
+
+fn probe_inconclusive(started: Instant, error_code: &'static str) -> LeakProbeOutcome {
+    LeakProbeOutcome {
+        state: LeakDetectionEvidenceState::NotTested,
         duration_ms: elapsed_ms(started),
         error_code: Some(error_code.into()),
     }
@@ -1216,6 +1224,29 @@ mod tests {
             .await;
         assert_eq!(external.state, LeakDetectionEvidenceState::Passed);
         assert_eq!(external.error_code, None);
+    }
+
+    #[tokio::test]
+    async fn configured_reachability_failure_stays_not_tested() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind closed probe listener");
+        let address = listener
+            .local_addr()
+            .expect("closed probe listener address");
+        drop(listener);
+        let url = format!("http://{address}/");
+        let probes = configured_probe(&url, "127.0.0.1", &url);
+
+        let outcome = probes
+            .probe(LeakDetectionTarget::Ipv4ExternalTarget, NOW)
+            .await;
+
+        assert_eq!(outcome.state, LeakDetectionEvidenceState::NotTested);
+        assert_eq!(
+            outcome.error_code.as_deref(),
+            Some("leak_detection.probe_connect_failed")
+        );
     }
 
     #[tokio::test]

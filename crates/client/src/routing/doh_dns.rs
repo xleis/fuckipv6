@@ -29,8 +29,10 @@ use crate::network_setup::{ensure_stage, NetworkSetupStage};
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.2:53";
 const DEFAULT_UPSTREAMS: &str = "https://1.1.1.1/dns-query,https://8.8.8.8/dns-query";
 const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
+const NSSWITCH_CONF_PATH: &str = "/etc/nsswitch.conf";
 const LOCK_PATH: &str = "/run/fuckipv6-dns.lock";
 const BACKUP_PATH: &str = "/run/fuckipv6-resolv.conf.backup";
+const NSSWITCH_BACKUP_PATH: &str = "/run/fuckipv6-nsswitch.conf.backup";
 const DNS_MESSAGE_LIMIT: usize = 65_535;
 const DNS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -39,11 +41,21 @@ const DNS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// authorized; any other resolver indicates an unsafe fallback.
 pub(crate) fn recovery_snapshot() -> Result<DnsRecoverySnapshot> {
     let managed_resolver = listen_addr_from_env()?.ip();
-    recovery_snapshot_at(Path::new(RESOLV_CONF_PATH), managed_resolver)
+    recovery_snapshot_at(
+        Path::new(RESOLV_CONF_PATH),
+        Path::new(NSSWITCH_CONF_PATH),
+        managed_resolver,
+    )
 }
 
-fn recovery_snapshot_at(path: &Path, managed_resolver: IpAddr) -> Result<DnsRecoverySnapshot> {
-    let contents = std::fs::read_to_string(path).context("读取 DNS 解析配置失败")?;
+fn recovery_snapshot_at(
+    resolv_conf_path: &Path,
+    nsswitch_conf_path: &Path,
+    managed_resolver: IpAddr,
+) -> Result<DnsRecoverySnapshot> {
+    let contents = std::fs::read_to_string(resolv_conf_path).context("读取 DNS 解析配置失败")?;
+    let nsswitch =
+        std::fs::read_to_string(nsswitch_conf_path).context("读取 NSS 主机解析配置失败")?;
     let mut authorized_resolvers = 0usize;
     let mut unsecured_resolvers = 0usize;
     for line in contents.lines() {
@@ -57,22 +69,28 @@ fn recovery_snapshot_at(path: &Path, managed_resolver: IpAddr) -> Result<DnsReco
         }
     }
 
-    let (mode, state, insecure_fallback_detected) =
-        if authorized_resolvers > 0 && unsecured_resolvers == 0 {
-            (DnsRecoveryMode::Doh, RecoveryResourceState::Healthy, false)
-        } else if authorized_resolvers == 0 && unsecured_resolvers == 0 {
-            (
-                DnsRecoveryMode::Disabled,
-                RecoveryResourceState::Missing,
-                false,
-            )
-        } else {
-            (
-                DnsRecoveryMode::SystemResolver,
-                RecoveryResourceState::Degraded,
-                true,
-            )
-        };
+    let nss_bypasses_managed_resolver = nsswitch_hosts_use_resolve(&nsswitch);
+    let (mode, state, insecure_fallback_detected) = if nss_bypasses_managed_resolver {
+        (
+            DnsRecoveryMode::SystemResolver,
+            RecoveryResourceState::Degraded,
+            true,
+        )
+    } else if authorized_resolvers > 0 && unsecured_resolvers == 0 {
+        (DnsRecoveryMode::Doh, RecoveryResourceState::Healthy, false)
+    } else if authorized_resolvers == 0 && unsecured_resolvers == 0 {
+        (
+            DnsRecoveryMode::Disabled,
+            RecoveryResourceState::Missing,
+            false,
+        )
+    } else {
+        (
+            DnsRecoveryMode::SystemResolver,
+            RecoveryResourceState::Degraded,
+            true,
+        )
+    };
 
     Ok(DnsRecoverySnapshot {
         mode,
@@ -87,11 +105,14 @@ fn recovery_snapshot_at(path: &Path, managed_resolver: IpAddr) -> Result<DnsReco
 #[derive(Debug)]
 pub(crate) struct DohDnsGuard {
     previous_resolv_conf: Vec<u8>,
+    previous_nsswitch_conf: Option<Vec<u8>>,
     shutdown: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
     restored: bool,
     resolv_conf_path: PathBuf,
     backup_path: PathBuf,
+    nsswitch_conf_path: PathBuf,
+    nsswitch_backup_path: PathBuf,
     _lock: File,
 }
 
@@ -130,11 +151,38 @@ impl DohDnsGuard {
 
         let previous_resolv_conf =
             std::fs::read(RESOLV_CONF_PATH).context("读取 /etc/resolv.conf 失败")?;
-        save_backup(&previous_resolv_conf)?;
+        let previous_nsswitch_conf =
+            std::fs::read(NSSWITCH_CONF_PATH).context("读取 /etc/nsswitch.conf 失败")?;
         let managed = managed_resolv_conf(&previous_resolv_conf, listen_addr.ip());
-        if let Err(error) = std::fs::write(RESOLV_CONF_PATH, &managed) {
-            let _ = std::fs::remove_file(BACKUP_PATH);
-            return Err(error).context("写入 DoH 本地 DNS 配置失败");
+        let managed_nsswitch = managed_nsswitch_conf(&previous_nsswitch_conf);
+        if let Some(managed_nsswitch) = managed_nsswitch.as_ref() {
+            if let Err(error) =
+                save_backup_at(Path::new(NSSWITCH_BACKUP_PATH), &previous_nsswitch_conf)
+            {
+                let _ = std::fs::remove_file(NSSWITCH_BACKUP_PATH);
+                return Err(error).context("创建 NSS 主机解析配置备份失败");
+            }
+            if let Err(error) = save_backup(&previous_resolv_conf) {
+                let _ = std::fs::remove_file(NSSWITCH_BACKUP_PATH);
+                return Err(error);
+            }
+            if let Err(error) = std::fs::write(RESOLV_CONF_PATH, &managed) {
+                let _ = std::fs::remove_file(BACKUP_PATH);
+                let _ = std::fs::remove_file(NSSWITCH_BACKUP_PATH);
+                return Err(error).context("写入 DoH 本地 DNS 配置失败");
+            }
+            if let Err(error) = std::fs::write(NSSWITCH_CONF_PATH, managed_nsswitch) {
+                let _ = std::fs::write(RESOLV_CONF_PATH, &previous_resolv_conf);
+                let _ = std::fs::remove_file(BACKUP_PATH);
+                let _ = std::fs::remove_file(NSSWITCH_BACKUP_PATH);
+                return Err(error).context("禁用绕过 DoH 的 systemd-resolved NSS 服务失败");
+            }
+        } else {
+            save_backup(&previous_resolv_conf)?;
+            if let Err(error) = std::fs::write(RESOLV_CONF_PATH, &managed) {
+                let _ = std::fs::remove_file(BACKUP_PATH);
+                return Err(error).context("写入 DoH 本地 DNS 配置失败");
+            }
         }
 
         let (shutdown, shutdown_rx) = watch::channel(false);
@@ -156,11 +204,14 @@ impl DohDnsGuard {
 
         Ok(Some(Self {
             previous_resolv_conf,
+            previous_nsswitch_conf: managed_nsswitch.map(|_| previous_nsswitch_conf),
             shutdown,
             tasks,
             restored: false,
             resolv_conf_path: PathBuf::from(RESOLV_CONF_PATH),
             backup_path: PathBuf::from(BACKUP_PATH),
+            nsswitch_conf_path: PathBuf::from(NSSWITCH_CONF_PATH),
+            nsswitch_backup_path: PathBuf::from(NSSWITCH_BACKUP_PATH),
             _lock: lock,
         }))
     }
@@ -208,6 +259,27 @@ impl DohDnsGuard {
         }
 
         if failures.is_empty() {
+            if let Some(previous_nsswitch_conf) = self.previous_nsswitch_conf.as_ref() {
+                let Some(remaining) = remaining_before(deadline) else {
+                    failures.push("恢复 NSS 主机解析配置超过总期限".to_string());
+                    return finish_shutdown(failures);
+                };
+                match timeout(
+                    remaining,
+                    tokio::fs::write(&self.nsswitch_conf_path, previous_nsswitch_conf),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        failures.push(format!("恢复 /etc/nsswitch.conf 失败: {error}"))
+                    }
+                    Err(_) => failures.push("恢复 /etc/nsswitch.conf 超过总期限".to_string()),
+                }
+            }
+        }
+
+        if failures.is_empty() {
             let Some(remaining) = remaining_before(deadline) else {
                 failures.push("恢复 DNS 配置超过总期限".to_string());
                 return finish_shutdown(failures);
@@ -221,6 +293,24 @@ impl DohDnsGuard {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => failures.push(format!("恢复 /etc/resolv.conf 失败: {error}")),
                 Err(_) => failures.push("恢复 /etc/resolv.conf 超过总期限".to_string()),
+            }
+        }
+
+        if failures.is_empty() {
+            let Some(remaining) = remaining_before(deadline) else {
+                failures.push("删除 NSS 配置备份超过总期限".to_string());
+                return finish_shutdown(failures);
+            };
+            match timeout(
+                remaining,
+                tokio::fs::remove_file(&self.nsswitch_backup_path),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Ok(Err(error)) => failures.push(format!("删除 NSS 配置备份失败: {error}")),
+                Err(_) => failures.push("删除 NSS 配置备份超过总期限".to_string()),
             }
         }
 
@@ -259,9 +349,18 @@ impl Drop for DohDnsGuard {
             return;
         }
         self.abort_tasks();
+        let mut restored = true;
+        if let Some(previous_nsswitch_conf) = self.previous_nsswitch_conf.as_ref() {
+            if let Err(error) = std::fs::write(&self.nsswitch_conf_path, previous_nsswitch_conf) {
+                tracing::warn!("恢复 /etc/nsswitch.conf 失败: {error:#}");
+                restored = false;
+            } else {
+                let _ = std::fs::remove_file(&self.nsswitch_backup_path);
+            }
+        }
         if let Err(error) = std::fs::write(&self.resolv_conf_path, &self.previous_resolv_conf) {
             tracing::warn!("恢复 /etc/resolv.conf 失败: {error:#}");
-        } else {
+        } else if restored {
             let _ = std::fs::remove_file(&self.backup_path);
             self.restored = true;
         }
@@ -304,24 +403,38 @@ fn acquire_lock() -> Result<Option<File>> {
 }
 
 fn restore_stale_backup() -> Result<()> {
-    let backup = Path::new(BACKUP_PATH);
+    restore_stale_backup_at(
+        Path::new(NSSWITCH_BACKUP_PATH),
+        Path::new(NSSWITCH_CONF_PATH),
+        "NSS 主机解析",
+    )?;
+    restore_stale_backup_at(Path::new(BACKUP_PATH), Path::new(RESOLV_CONF_PATH), "DNS")?;
+    Ok(())
+}
+
+fn restore_stale_backup_at(backup: &Path, target: &Path, label: &str) -> Result<()> {
     if !backup.exists() {
         return Ok(());
     }
-    let previous = std::fs::read(backup).context("读取残留 DNS 配置备份失败")?;
-    std::fs::write(RESOLV_CONF_PATH, previous).context("恢复残留 DNS 配置失败")?;
-    std::fs::remove_file(backup).context("删除残留 DNS 配置备份失败")?;
-    tracing::warn!("检测到上次异常退出，已先恢复原 DNS 配置");
+    let previous =
+        std::fs::read(backup).with_context(|| format!("读取残留 {label} 配置备份失败"))?;
+    std::fs::write(target, previous).with_context(|| format!("恢复残留 {label} 配置失败"))?;
+    std::fs::remove_file(backup).with_context(|| format!("删除残留 {label} 配置备份失败"))?;
+    tracing::warn!("检测到上次异常退出，已先恢复原 {label} 配置");
     Ok(())
 }
 
 fn save_backup(previous: &[u8]) -> Result<()> {
+    save_backup_at(Path::new(BACKUP_PATH), previous)
+}
+
+fn save_backup_at(path: &Path, previous: &[u8]) -> Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
-        .open(BACKUP_PATH)
+        .open(path)
         .context("创建 DNS 配置备份失败")?;
     file.write_all(previous).context("写入 DNS 配置备份失败")?;
     file.sync_all().context("同步 DNS 配置备份失败")
@@ -376,6 +489,87 @@ fn managed_resolv_conf(previous: &[u8], listen_ip: IpAddr) -> Vec<u8> {
     managed.push_str("# Managed by fuckipv6 while the tunnel is active\n");
     managed.push_str(&format!("nameserver {listen_ip}\n"));
     managed.into_bytes()
+}
+
+fn nsswitch_hosts_use_resolve(contents: &str) -> bool {
+    contents.lines().any(|line| {
+        line.split_once(':').is_some_and(|(key, services)| {
+            key.trim() == "hosts"
+                && services
+                    .split('#')
+                    .next()
+                    .unwrap_or_default()
+                    .split_whitespace()
+                    .any(|service| service == "resolve")
+        })
+    })
+}
+
+fn managed_nsswitch_conf(previous: &[u8]) -> Option<Vec<u8>> {
+    let original = String::from_utf8_lossy(previous);
+    let mut changed = false;
+    let mut managed = String::with_capacity(original.len());
+    for line in original.split_inclusive('\n') {
+        let (body, ending) = if let Some(body) = line.strip_suffix("\r\n") {
+            (body, "\r\n")
+        } else if let Some(body) = line.strip_suffix('\n') {
+            (body, "\n")
+        } else {
+            (line, "")
+        };
+        let rewritten = rewrite_nsswitch_hosts_line(body);
+        if let Some(rewritten) = rewritten {
+            changed = true;
+            managed.push_str(&rewritten);
+        } else {
+            managed.push_str(body);
+        }
+        managed.push_str(ending);
+    }
+    changed.then(|| managed.into_bytes())
+}
+
+fn rewrite_nsswitch_hosts_line(line: &str) -> Option<String> {
+    let (key, services) = line.split_once(':')?;
+    if key.trim() != "hosts" {
+        return None;
+    }
+    let (services, comment) = match services.find('#') {
+        Some(index) => (&services[..index], Some(&services[index..])),
+        None => (services, None),
+    };
+    let mut retained = Vec::new();
+    let mut remove_attached_actions = false;
+    let mut changed = false;
+    for token in services.split_whitespace() {
+        if token == "resolve" {
+            changed = true;
+            remove_attached_actions = true;
+            continue;
+        }
+        if remove_attached_actions && token.starts_with('[') {
+            continue;
+        }
+        remove_attached_actions = false;
+        retained.push(token);
+    }
+    if !changed {
+        return None;
+    }
+    if !retained.contains(&"dns") {
+        retained.push("dns");
+    }
+    if retained.is_empty() {
+        Some(match comment {
+            Some(comment) => format!("{key}: {comment}"),
+            None => format!("{key}:"),
+        })
+    } else {
+        Some(match comment {
+            Some(comment) => format!("{key}: {} {comment}", retained.join(" ")),
+            None => format!("{key}: {}", retained.join(" ")),
+        })
+    }
 }
 
 async fn run_udp(
@@ -542,6 +736,8 @@ mod tests {
         std::fs::create_dir_all(&directory).expect("create test directory");
         let resolv_conf = directory.join("resolv.conf");
         let backup = directory.join("resolv.conf.backup");
+        std::fs::write(directory.join("nsswitch.conf"), b"hosts: files dns\n")
+            .expect("write test nsswitch");
         let lock_path = directory.join("dns.lock");
         let lock = OpenOptions::new()
             .read(true)
@@ -553,6 +749,10 @@ mod tests {
         (directory, resolv_conf, backup, lock_path, lock)
     }
 
+    fn nsswitch_conf_path(resolv_conf: &Path) -> PathBuf {
+        resolv_conf.with_file_name("nsswitch.conf")
+    }
+
     fn pending_guard(
         previous: &[u8],
         resolv_conf: PathBuf,
@@ -562,11 +762,38 @@ mod tests {
         let (shutdown, _) = watch::channel(false);
         DohDnsGuard {
             previous_resolv_conf: previous.to_vec(),
+            previous_nsswitch_conf: None,
+            shutdown,
+            tasks: vec![tokio::spawn(std::future::pending())],
+            restored: false,
+            nsswitch_conf_path: nsswitch_conf_path(&resolv_conf),
+            nsswitch_backup_path: resolv_conf.with_file_name("nsswitch.conf.backup"),
+            resolv_conf_path: resolv_conf,
+            backup_path: backup,
+            _lock: lock,
+        }
+    }
+
+    fn pending_guard_with_nsswitch(
+        previous_resolv: &[u8],
+        previous_nsswitch: &[u8],
+        resolv_conf: PathBuf,
+        backup: PathBuf,
+        nsswitch_conf: PathBuf,
+        nsswitch_backup: PathBuf,
+        lock: File,
+    ) -> DohDnsGuard {
+        let (shutdown, _) = watch::channel(false);
+        DohDnsGuard {
+            previous_resolv_conf: previous_resolv.to_vec(),
+            previous_nsswitch_conf: Some(previous_nsswitch.to_vec()),
             shutdown,
             tasks: vec![tokio::spawn(std::future::pending())],
             restored: false,
             resolv_conf_path: resolv_conf,
             backup_path: backup,
+            nsswitch_conf_path: nsswitch_conf,
+            nsswitch_backup_path: nsswitch_backup,
             _lock: lock,
         }
     }
@@ -584,6 +811,27 @@ mod tests {
     }
 
     #[test]
+    fn managed_nsswitch_conf_removes_resolve_and_preserves_dns() {
+        let previous = b"passwd: files systemd\nhosts: mymachines resolve [!UNAVAIL=return] files myhostname dns # local\nnetworks: files\n";
+
+        let managed = managed_nsswitch_conf(previous).expect("resolve must be managed");
+        let managed = String::from_utf8(managed).expect("managed nsswitch must be UTF-8");
+
+        assert!(managed.contains("hosts: mymachines files myhostname dns # local\n"));
+        assert!(managed.contains("passwd: files systemd\n"));
+        assert!(managed.contains("networks: files\n"));
+        assert!(!managed.contains("resolve"));
+        assert!(!managed.contains("[!UNAVAIL=return]"));
+    }
+
+    #[test]
+    fn managed_nsswitch_conf_leaves_other_hosts_configuration_unchanged() {
+        let previous = b"hosts: files mdns4_minimal [NOTFOUND=return] dns\n";
+
+        assert_eq!(managed_nsswitch_conf(previous), None);
+    }
+
+    #[test]
     fn recovery_snapshot_accepts_only_the_managed_resolver() {
         let (directory, resolv_conf, _backup, _lock_path, _lock) = test_paths("snapshot-managed");
         std::fs::write(
@@ -592,14 +840,44 @@ mod tests {
         )
         .expect("write managed resolver");
 
-        let snapshot = recovery_snapshot_at(&resolv_conf, "127.0.0.2".parse().unwrap())
-            .expect("managed resolver snapshot");
+        let snapshot = recovery_snapshot_at(
+            &resolv_conf,
+            &nsswitch_conf_path(&resolv_conf),
+            "127.0.0.2".parse().unwrap(),
+        )
+        .expect("managed resolver snapshot");
 
         assert_eq!(snapshot.mode, DnsRecoveryMode::Doh);
         assert_eq!(snapshot.state, RecoveryResourceState::Healthy);
         assert_eq!(snapshot.authorized_resolvers, 1);
         assert_eq!(snapshot.unsecured_resolvers, 0);
         assert!(!snapshot.insecure_fallback_detected);
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn recovery_snapshot_marks_nss_resolve_bypass_as_degraded() {
+        let (directory, resolv_conf, _backup, _lock_path, _lock) =
+            test_paths("snapshot-nss-resolve");
+        std::fs::write(&resolv_conf, b"nameserver 127.0.0.2\n").expect("write managed resolver");
+        std::fs::write(
+            nsswitch_conf_path(&resolv_conf),
+            b"hosts: mymachines resolve [!UNAVAIL=return] files dns\n",
+        )
+        .expect("write bypassing nsswitch");
+
+        let snapshot = recovery_snapshot_at(
+            &resolv_conf,
+            &nsswitch_conf_path(&resolv_conf),
+            "127.0.0.2".parse().unwrap(),
+        )
+        .expect("nss bypass snapshot");
+
+        assert_eq!(snapshot.mode, DnsRecoveryMode::SystemResolver);
+        assert_eq!(snapshot.state, RecoveryResourceState::Degraded);
+        assert_eq!(snapshot.authorized_resolvers, 1);
+        assert_eq!(snapshot.unsecured_resolvers, 0);
+        assert!(snapshot.insecure_fallback_detected);
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
@@ -612,8 +890,12 @@ mod tests {
         )
         .expect("write mixed resolver");
 
-        let snapshot = recovery_snapshot_at(&resolv_conf, "127.0.0.2".parse().unwrap())
-            .expect("mixed resolver snapshot");
+        let snapshot = recovery_snapshot_at(
+            &resolv_conf,
+            &nsswitch_conf_path(&resolv_conf),
+            "127.0.0.2".parse().unwrap(),
+        )
+        .expect("mixed resolver snapshot");
 
         assert_eq!(snapshot.mode, DnsRecoveryMode::SystemResolver);
         assert_eq!(snapshot.state, RecoveryResourceState::Degraded);
@@ -628,8 +910,12 @@ mod tests {
         let (directory, resolv_conf, _backup, _lock_path, _lock) = test_paths("snapshot-missing");
         std::fs::write(&resolv_conf, b"search recovery.invalid\n").expect("write empty resolver");
 
-        let snapshot = recovery_snapshot_at(&resolv_conf, "127.0.0.2".parse().unwrap())
-            .expect("missing resolver snapshot");
+        let snapshot = recovery_snapshot_at(
+            &resolv_conf,
+            &nsswitch_conf_path(&resolv_conf),
+            "127.0.0.2".parse().unwrap(),
+        )
+        .expect("missing resolver snapshot");
 
         assert_eq!(snapshot.mode, DnsRecoveryMode::Disabled);
         assert_eq!(snapshot.state, RecoveryResourceState::Missing);
@@ -645,8 +931,12 @@ mod tests {
         std::fs::write(&resolv_conf, b"nameserver not-an-address\n")
             .expect("write malformed resolver");
 
-        let snapshot = recovery_snapshot_at(&resolv_conf, "127.0.0.2".parse().unwrap())
-            .expect("malformed resolver snapshot");
+        let snapshot = recovery_snapshot_at(
+            &resolv_conf,
+            &nsswitch_conf_path(&resolv_conf),
+            "127.0.0.2".parse().unwrap(),
+        )
+        .expect("malformed resolver snapshot");
 
         assert_eq!(snapshot.mode, DnsRecoveryMode::SystemResolver);
         assert_eq!(snapshot.state, RecoveryResourceState::Degraded);
@@ -661,8 +951,12 @@ mod tests {
         let (directory, resolv_conf, _backup, _lock_path, _lock) =
             test_paths("snapshot-unreadable");
 
-        let error = recovery_snapshot_at(&resolv_conf, "127.0.0.2".parse().unwrap())
-            .expect_err("missing resolver file must not be treated as healthy");
+        let error = recovery_snapshot_at(
+            &resolv_conf,
+            &nsswitch_conf_path(&resolv_conf),
+            "127.0.0.2".parse().unwrap(),
+        )
+        .expect_err("missing resolver file must not be treated as healthy");
 
         assert!(error.to_string().contains("读取 DNS 解析配置失败"));
         std::fs::remove_dir_all(directory).expect("remove test directory");
@@ -690,11 +984,25 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_restores_resolver_files_and_joins_aborted_tasks() {
-        let previous = b"nameserver 9.9.9.9\n";
+        let previous_resolv = b"nameserver 9.9.9.9\n";
+        let previous_nsswitch = b"hosts: mymachines resolve [!UNAVAIL=return] files dns\n";
         let (directory, resolv_conf, backup, _lock_path, lock) = test_paths("success");
         std::fs::write(&resolv_conf, b"nameserver 127.0.0.2\n").expect("write managed resolver");
-        std::fs::write(&backup, previous).expect("write resolver backup");
-        let mut guard = pending_guard(previous, resolv_conf.clone(), backup.clone(), lock);
+        std::fs::write(&backup, previous_resolv).expect("write resolver backup");
+        let nsswitch_conf = nsswitch_conf_path(&resolv_conf);
+        let nsswitch_backup = nsswitch_conf.with_file_name("nsswitch.conf.backup");
+        std::fs::write(&nsswitch_conf, b"hosts: mymachines files dns\n")
+            .expect("write managed nsswitch");
+        std::fs::write(&nsswitch_backup, previous_nsswitch).expect("write nsswitch backup");
+        let mut guard = pending_guard_with_nsswitch(
+            previous_resolv,
+            previous_nsswitch,
+            resolv_conf.clone(),
+            backup.clone(),
+            nsswitch_conf.clone(),
+            nsswitch_backup.clone(),
+            lock,
+        );
 
         guard
             .shutdown_with_paths(Duration::from_secs(1))
@@ -703,9 +1011,14 @@ mod tests {
 
         assert_eq!(
             std::fs::read(&resolv_conf).expect("read restored resolver"),
-            previous
+            previous_resolv
+        );
+        assert_eq!(
+            std::fs::read(&nsswitch_conf).expect("read restored nsswitch"),
+            previous_nsswitch
         );
         assert!(!backup.exists());
+        assert!(!nsswitch_backup.exists());
         assert!(guard.tasks.is_empty());
         assert!(guard.restored);
         drop(guard);
@@ -737,6 +1050,80 @@ mod tests {
             std::fs::read(&resolv_conf).expect("read drop-restored resolver"),
             previous
         );
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[tokio::test]
+    async fn drop_restores_resolver_and_nsswitch_files() {
+        let previous_resolv = b"nameserver 9.9.9.9\n";
+        let previous_nsswitch = b"hosts: mymachines resolve [!UNAVAIL=return] files dns\n";
+        let (directory, resolv_conf, backup, _lock_path, lock) = test_paths("drop");
+        std::fs::write(&resolv_conf, b"nameserver 127.0.0.2\n").expect("write managed resolver");
+        std::fs::write(&backup, previous_resolv).expect("write resolver backup");
+        let nsswitch_conf = nsswitch_conf_path(&resolv_conf);
+        let nsswitch_backup = nsswitch_conf.with_file_name("nsswitch.conf.backup");
+        std::fs::write(&nsswitch_conf, b"hosts: files dns\n").expect("write managed nsswitch");
+        std::fs::write(&nsswitch_backup, previous_nsswitch).expect("write nsswitch backup");
+
+        drop(pending_guard_with_nsswitch(
+            previous_resolv,
+            previous_nsswitch,
+            resolv_conf.clone(),
+            backup.clone(),
+            nsswitch_conf.clone(),
+            nsswitch_backup.clone(),
+            lock,
+        ));
+
+        assert_eq!(
+            std::fs::read(&resolv_conf).expect("read drop-restored resolver"),
+            previous_resolv
+        );
+        assert_eq!(
+            std::fs::read(&nsswitch_conf).expect("read drop-restored nsswitch"),
+            previous_nsswitch
+        );
+        assert!(!backup.exists());
+        assert!(!nsswitch_backup.exists());
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn stale_backups_restore_both_resolver_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "fuckipv6-doh-dns-stale-{}-{}",
+            std::process::id(),
+            NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let resolv_conf = directory.join("resolv.conf");
+        let resolv_backup = directory.join("resolv.conf.backup");
+        let nsswitch_conf = directory.join("nsswitch.conf");
+        let nsswitch_backup = directory.join("nsswitch.conf.backup");
+        std::fs::write(&resolv_conf, b"nameserver 127.0.0.2\n").expect("write managed resolver");
+        std::fs::write(&nsswitch_conf, b"hosts: files dns\n").expect("write managed nsswitch");
+        std::fs::write(&resolv_backup, b"nameserver 9.9.9.9\n").expect("write resolver backup");
+        std::fs::write(
+            &nsswitch_backup,
+            b"hosts: mymachines resolve [!UNAVAIL=return] files dns\n",
+        )
+        .expect("write nsswitch backup");
+
+        restore_stale_backup_at(&nsswitch_backup, &nsswitch_conf, "NSS 主机解析")
+            .expect("restore stale nsswitch");
+        restore_stale_backup_at(&resolv_backup, &resolv_conf, "DNS")
+            .expect("restore stale resolver");
+
+        assert_eq!(
+            std::fs::read(&resolv_conf).expect("read restored resolver"),
+            b"nameserver 9.9.9.9\n"
+        );
+        assert_eq!(
+            std::fs::read(&nsswitch_conf).expect("read restored nsswitch"),
+            b"hosts: mymachines resolve [!UNAVAIL=return] files dns\n"
+        );
+        assert!(!resolv_backup.exists());
+        assert!(!nsswitch_backup.exists());
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 }

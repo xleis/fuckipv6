@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use fs2::FileExt;
 use fuckipv6_common::domain::{
     preview_network_profile, AuditEntry, AuditId, AuditLog, AuditOutcome, ContentHash,
-    JoinTermsAck, MembershipTerms, NetworkCreateProfile, NetworkId, NetworkMembership,
-    NetworkProfileApplyResult, NetworkProfileDiffEntry, NetworkProfilePreview,
+    JoinTermsAck, MembershipRole, MembershipTerms, NetworkCreateProfile, NetworkId,
+    NetworkMembership, NetworkProfileApplyResult, NetworkProfileDiffEntry, NetworkProfilePreview,
     NetworkProfileUpdate, NetworkRecord, NodeId as DomainNodeId, OperationId, PublicKey,
     NETWORK_PUBLIC_PROFILE_VALIDITY_MS,
 };
@@ -379,6 +379,50 @@ impl ConfigManager {
         file.memberships.insert(network_id, stored.clone());
         self.persist_joined_membership_file(&file)?;
         Ok((stored, true))
+    }
+
+    /// Persist the creator's accepted membership for an owner-scoped network.
+    ///
+    /// Creating a network is the owner's admission decision. The durable
+    /// membership still carries an acknowledgement of the exact initial terms
+    /// so later policy projections and policy-migration checks have the same
+    /// provenance as an invited member.
+    pub(crate) fn persist_owned_network_membership(
+        &self,
+        record: &NetworkRecord,
+    ) -> Result<JoinedNetworkMembership> {
+        let identity = self.load_node_identity()?;
+        let node_id = DomainNodeId::from_public_key(&identity.public_key_bytes());
+        if record.owner != node_id {
+            anyhow::bail!("网络所有者与当前节点身份不一致");
+        }
+
+        let now_unix_ms = unix_time_ms().max(record.updated_at_unix_ms).max(1);
+        let terms = record.membership_terms();
+        let terms_hash = terms
+            .content_hash()
+            .context("计算网络初始成员条款哈希失败")?;
+        let mut membership = NetworkMembership::new(
+            record.network_id.clone(),
+            node_id,
+            MembershipRole::Owner,
+            now_unix_ms,
+        );
+        membership
+            .begin_apply(
+                terms,
+                JoinTermsAck {
+                    terms_hash,
+                    acknowledged_at_unix_ms: now_unix_ms,
+                },
+                now_unix_ms,
+            )
+            .context("记录网络所有者初始成员条款失败")?;
+        membership
+            .accept(now_unix_ms)
+            .context("接受网络所有者初始成员关系失败")?;
+        let (stored, _) = self.upsert_joined_membership(&record.name, membership)?;
+        Ok(stored)
     }
 
     /// Persist signed policy observations for joined memberships. A single
@@ -1760,6 +1804,35 @@ mod tests {
             reopened.load_network_record("home")?.network_id,
             created.record.network_id
         );
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn persists_accepted_owner_membership_for_created_network() -> anyhow::Result<()> {
+        let dir = temp_config_dir("owner-membership");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        let created = manager.create_owned_network(
+            owned_profile("owned-membership"),
+            "ws://127.0.0.1:6666",
+            true,
+        )?;
+
+        let joined = manager.persist_owned_network_membership(&created.record)?;
+        assert_eq!(joined.network_name, "owned-membership");
+        assert_eq!(joined.membership.network_id, created.record.network_id);
+        assert_eq!(joined.membership.state, MembershipState::Accepted);
+        assert_eq!(joined.membership.role, MembershipRole::Owner);
+        assert_eq!(
+            joined.membership.terms,
+            Some(created.record.membership_terms())
+        );
+        assert_eq!(manager.list_joined_memberships()?, vec![joined.clone()]);
+
+        let reopened = ConfigManager::new_for_dir(dir.clone())?;
+        assert_eq!(reopened.list_joined_memberships()?, vec![joined]);
+
         let _ = std::fs::remove_dir_all(dir);
         Ok(())
     }

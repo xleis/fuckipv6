@@ -3661,7 +3661,7 @@ impl NetworkRuntimeActor {
             }
         };
         match self
-            .start_persisted_plan_until(networks, plan, deadline, &BTreeSet::new())
+            .start_persisted_plan_until(plan, deadline, &BTreeSet::new())
             .await
         {
             Ok(summary) => Ok(summary),
@@ -3671,7 +3671,6 @@ impl NetworkRuntimeActor {
 
     async fn start_persisted_plan_until(
         &mut self,
-        networks: Vec<NetworkConfig>,
         plan: NodeRuntimePlan,
         deadline: Instant,
         skip_networks: &BTreeSet<String>,
@@ -3683,25 +3682,14 @@ impl NetworkRuntimeActor {
             ..StartSummary::default()
         };
 
-        let running_services = self
-            .services
-            .list()
-            .await
-            .map_err(map_service_error)?
-            .into_iter()
-            .map(|service| service.network_name)
+        let selected_names = plan
+            .networks()
+            .iter()
+            .map(|network| network.name.clone())
             .collect::<BTreeSet<_>>();
-        let mut service_failures = HashMap::new();
-        for network in networks.iter().filter(|network| {
-            network.owns_embedded_services && !skip_networks.contains(&network.name)
-        }) {
-            if let Err(error) = self
-                .restore_owned_embedded_service(network, &running_services, deadline)
-                .await
-            {
-                service_failures.insert(network.name.clone(), error.to_string());
-            }
-        }
+        let mut service_failures = self
+            .restore_owned_embedded_services(selected_names, skip_networks, deadline)
+            .await?;
 
         for spec in plan.into_networks() {
             if skip_networks.contains(&spec.name) {
@@ -3750,6 +3738,39 @@ impl NetworkRuntimeActor {
         };
         self.state.set_lifecycle(lifecycle).await;
         Ok(summary)
+    }
+
+    async fn restore_owned_embedded_services(
+        &self,
+        selected_names: BTreeSet<String>,
+        skip_networks: &BTreeSet<String>,
+        deadline: Instant,
+    ) -> Result<HashMap<String, String>, RuntimeControlError> {
+        let networks = self.configs.list_networks().map_err(|error| {
+            RuntimeControlError::Persistence(format!("加载持久化网络列表失败: {error:#}"))
+        })?;
+        let running_services = self
+            .services
+            .list()
+            .await
+            .map_err(map_service_error)?
+            .into_iter()
+            .map(|service| service.network_name)
+            .collect::<BTreeSet<_>>();
+        let mut service_failures = HashMap::new();
+        for network in networks.iter().filter(|network| {
+            selected_names.contains(&network.name)
+                && network.owns_embedded_services
+                && !skip_networks.contains(&network.name)
+        }) {
+            if let Err(error) = self
+                .restore_owned_embedded_service(network, &running_services, deadline)
+                .await
+            {
+                service_failures.insert(network.name.clone(), error.to_string());
+            }
+        }
+        Ok(service_failures)
     }
 
     async fn restore_owned_embedded_service(
@@ -3861,12 +3882,6 @@ impl NetworkRuntimeActor {
 
     async fn restart_node(&mut self) -> Result<RestartSummary, RuntimeControlError> {
         let deadline = Instant::now() + self.timeouts.restart;
-        let networks = self.configs.list_networks().map_err(|error| {
-            RuntimeControlError::Persistence(format!(
-                "restart/{}: 加载持久化网络列表失败，现有运行态未改变: {error:#}",
-                RestartPhase::PersistLoad.as_str()
-            ))
-        })?;
         let plan =
             NodeRuntimePlan::load(&self.configs, NodeNetworkSelection::All).map_err(|error| {
                 RuntimeControlError::Persistence(format!(
@@ -3927,7 +3942,7 @@ impl NetworkRuntimeActor {
         let lifecycle = self.lifecycle.begin_start(plan.len(), Vec::new()).await;
         self.state.set_lifecycle(lifecycle).await;
         let started = match self
-            .start_persisted_plan_until(networks, plan, deadline, &blocked)
+            .start_persisted_plan_until(plan, deadline, &blocked)
             .await
         {
             Ok(summary) => summary,
@@ -3983,9 +3998,31 @@ impl NetworkRuntimeActor {
             ..StartSummary::default()
         };
 
+        let selected_names = plan
+            .networks()
+            .iter()
+            .map(|network| network.name.clone())
+            .collect::<BTreeSet<_>>();
+        let no_skips = BTreeSet::new();
+        let mut service_failures = self
+            .restore_owned_embedded_services(selected_names, &no_skips, deadline)
+            .await?;
+
         for spec in plan.into_networks() {
             if self.sessions.contains_key(&spec.name) {
                 summary.already_running.push(spec.name);
+                continue;
+            }
+            if let Some(message) = service_failures.remove(&spec.name) {
+                let error = RuntimeControlError::Launch(format!(
+                    "内嵌服务恢复失败，未启动数据面: {message}"
+                ));
+                self.record_launch_failure(&spec.name, &error).await;
+                summary.failed.push(StartFailure {
+                    network_name: spec.name,
+                    message: error.to_string(),
+                    stage: error.network_setup_stage(),
+                });
                 continue;
             }
 
@@ -5824,7 +5861,7 @@ impl NetworkRuntimeActor {
 
     async fn record_identity(&self, identity: NodeIdentitySnapshot) {
         if let Some(existing) = self.state.snapshot().await.identity {
-            if existing != identity {
+            if conflicting_identity_binding(&existing, &identity) {
                 tracing::warn!(
                     "节点运行时检测到不同的网络身份，共享节点快照继续使用首次加载的身份"
                 );
@@ -6175,6 +6212,14 @@ impl NetworkRuntimeActor {
             .await;
         self.state.set_lifecycle(lifecycle).await;
     }
+}
+
+fn conflicting_identity_binding(
+    existing: &NodeIdentitySnapshot,
+    incoming: &NodeIdentitySnapshot,
+) -> bool {
+    existing.node_id != incoming.node_id
+        || existing.public_key_fingerprint != incoming.public_key_fingerprint
 }
 
 struct SessionShutdownResult {
@@ -6825,6 +6870,41 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
     use tokio::sync::broadcast;
+
+    fn identity_snapshot(
+        node_id: &str,
+        display_name: Option<&str>,
+        fingerprint: &str,
+        created_at_unix_ms: Option<u64>,
+    ) -> NodeIdentitySnapshot {
+        NodeIdentitySnapshot {
+            node_id: node_id.to_string(),
+            display_name: display_name.map(str::to_string),
+            public_key_fingerprint: fingerprint.to_string(),
+            created_at_unix_ms,
+        }
+    }
+
+    #[test]
+    fn identity_binding_ignores_non_key_metadata_changes() {
+        let existing = identity_snapshot("node-a", Some("old name"), "key-a", Some(10));
+        let incoming = identity_snapshot("node-a", None, "key-a", None);
+
+        assert!(!conflicting_identity_binding(&existing, &incoming));
+    }
+
+    #[test]
+    fn identity_binding_warns_on_node_id_or_public_key_fingerprint_changes() {
+        let existing = identity_snapshot("node-a", None, "key-a", None);
+        let changed_node_id = identity_snapshot("node-b", None, "key-a", None);
+        let changed_fingerprint = identity_snapshot("node-a", None, "key-b", None);
+
+        assert!(conflicting_identity_binding(&existing, &changed_node_id));
+        assert!(conflicting_identity_binding(
+            &existing,
+            &changed_fingerprint
+        ));
+    }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct RoutingCall {
@@ -9864,6 +9944,55 @@ mod tests {
             Some(after[0].signaling_addr.port())
         );
         assert_eq!(persisted_after.relay_port, Some(after[0].relay_addr.port()));
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stop_then_start_selection_restores_owned_embedded_service_endpoints() {
+        let harness = TestHarness::new("selection-lifecycle-owned").await;
+        harness
+            .runtime
+            .create(create_command("selection-owned", false))
+            .await
+            .expect("create detached network");
+
+        let before = harness.services.list().await.expect("list services");
+        assert_eq!(before.len(), 1);
+
+        harness
+            .runtime
+            .stop(vec!["selection-owned".into()], false)
+            .await
+            .expect("stop network and owned service");
+        assert!(harness
+            .services
+            .list()
+            .await
+            .expect("list stopped services")
+            .is_empty());
+
+        let started = harness
+            .runtime
+            .start_selection(NodeNetworkSelection::Named(vec!["selection-owned".into()]))
+            .await
+            .expect("start selected network");
+        assert_eq!(started.started, vec!["selection-owned"]);
+        assert!(started.failed.is_empty());
+
+        let after = harness
+            .services
+            .list()
+            .await
+            .expect("list restored services");
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].signaling_addr, before[0].signaling_addr);
+        assert_eq!(after[0].relay_addr, before[0].relay_addr);
+        assert_eq!(after[0].ticket, before[0].ticket);
+        assert_eq!(
+            harness.state.snapshot().await.networks[0].status,
+            NodeNetworkStatus::Online
+        );
 
         harness.shutdown().await;
     }

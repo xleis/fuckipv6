@@ -4,6 +4,7 @@
 //! timeouts. This module owns connection lifecycle and delegates every command
 //! to the same [`NodeCommandBus`] used by CLI, GPUI and WebUI adapters.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -34,6 +35,7 @@ pub const LIFECYCLE_COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
 const MAX_CONNECTIONS: usize = 64;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
+static NEXT_SNAPSHOT_REFRESH_REQUEST_ID: AtomicU64 = AtomicU64::new(1 << 63);
 
 /// Serve authenticated node commands and ordered events until `shutdown`.
 ///
@@ -225,6 +227,31 @@ async fn serve_connection(
 
         match request.command {
             crate::local_ipc::LocalCommand::Snapshot => {
+                // The local service can outlive any individual adapter. Host
+                // interfaces, runtime networks and persisted projections are
+                // refreshed by GetSnapshot, so a raw cached read would keep
+                // showing a removed TUN after down or a stale membership after
+                // startup. Refresh through the same command bus before taking
+                // the event boundary; failures keep the service available and
+                // return the last authoritative snapshot.
+                let request_id = NEXT_SNAPSHOT_REFRESH_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+                let cached = state.snapshot().await;
+                let context = NodeCommandContext::local_owner_for_snapshot(
+                    &cached,
+                    "local_ipc:snapshot_refresh",
+                );
+                if let Err(error) = commands
+                    .execute(
+                        context,
+                        crate::node::NodeCommandRequest::new(
+                            request_id,
+                            crate::node::NodeCommand::GetSnapshot,
+                        ),
+                    )
+                    .await
+                {
+                    warn!(%error, "刷新本地 IPC 快照失败，返回上一份权威快照");
+                }
                 // Capture the boundary before the snapshot. If a state update
                 // races this read, its event remains after the returned
                 // boundary and the client can safely apply it later.
@@ -771,6 +798,31 @@ mod tests {
 
     impl Fixture {
         async fn new(label: &str, event_capacity: usize) -> Result<Self> {
+            Self::with_handler(label, event_capacity, Arc::new(EchoHandler)).await
+        }
+
+        async fn with_handler<H>(
+            label: &str,
+            event_capacity: usize,
+            handler: Arc<H>,
+        ) -> Result<Self>
+        where
+            H: NodeCommandHandler,
+        {
+            let events = NodeEventBus::new(event_capacity);
+            let state = NodeStateStore::with_events(events.clone());
+            Self::with_state_and_handler(label, state, events, handler).await
+        }
+
+        async fn with_state_and_handler<H>(
+            label: &str,
+            state: NodeStateStore,
+            events: NodeEventBus,
+            handler: Arc<H>,
+        ) -> Result<Self>
+        where
+            H: NodeCommandHandler,
+        {
             let directory = std::env::temp_dir().join(format!(
                 "fuckipv6-local-service-{label}-{}-{}",
                 std::process::id(),
@@ -783,9 +835,7 @@ mod tests {
             std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
 
             let endpoint = LocalEndpoint::Path(directory.join("node.sock"));
-            let events = NodeEventBus::new(event_capacity);
-            let state = NodeStateStore::with_events(events.clone());
-            let commands = NodeCommandBus::spawn(Arc::new(EchoHandler), events.clone(), 8);
+            let commands = NodeCommandBus::spawn(handler, events.clone(), 8);
             let server = LocalServer::bind(endpoint.clone(), EndpointRole::Node).await?;
             let (shutdown, shutdown_rx) = watch::channel(false);
             let service = tokio::spawn(serve_node(
@@ -830,6 +880,78 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct ClearNetworkOnSnapshotHandler {
+        state: NodeStateStore,
+    }
+
+    impl NodeCommandHandler for ClearNetworkOnSnapshotHandler {
+        fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
+            let state = self.state.clone();
+            Box::pin(async move {
+                if matches!(request.command, NodeCommand::GetSnapshot) {
+                    state.update(|snapshot| snapshot.networks.clear()).await;
+                }
+                NodeCommandResult::completed(
+                    request.request_id,
+                    NodeCommandOutcome::Completed {
+                        message: "snapshot refreshed".into(),
+                    },
+                )
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_request_refreshes_the_authoritative_state_before_returning() -> Result<()> {
+        let events = NodeEventBus::new(8);
+        let state = NodeStateStore::with_events(events.clone());
+        let handler = Arc::new(ClearNetworkOnSnapshotHandler {
+            state: state.clone(),
+        });
+        let fixture =
+            Fixture::with_state_and_handler("snapshot-refresh", state, events, handler).await?;
+        fixture
+            .state
+            .update(|snapshot| {
+                snapshot.networks.push(crate::node::NodeNetworkSnapshot {
+                    name: "home".into(),
+                    tun_name: "fk-home".into(),
+                    status: crate::node::NodeNetworkStatus::Online,
+                    assigned_ipv6: None,
+                    assigned_ipv4: None,
+                    p2p_listen_addr: None,
+                    uptime_secs: 1,
+                    roles: vec![crate::node::NodeNetworkRole::Member],
+                    peer_count: 0,
+                    traffic: crate::node::NodeTrafficSnapshot::default(),
+                });
+            })
+            .await;
+        assert_eq!(fixture.state.snapshot().await.networks.len(), 1);
+
+        let response = request(
+            &fixture.endpoint,
+            IpcRole::Cli,
+            &LocalRequest {
+                request_id: 2,
+                command: crate::local_ipc::LocalCommand::Snapshot,
+            },
+        )
+        .await?;
+        match response {
+            LocalResponse::Snapshot { snapshot, .. } => {
+                assert!(
+                    snapshot.networks.is_empty(),
+                    "snapshot IPC must execute GetSnapshot before returning cached state"
+                );
+            }
+            other => panic!("unexpected snapshot response: {other:?}"),
+        }
+
+        fixture.finish().await
+    }
+
     #[tokio::test]
     async fn serves_snapshot_and_executes_shared_commands() -> Result<()> {
         let fixture = Fixture::new("requests", 8).await?;
@@ -850,7 +972,7 @@ mod tests {
                 event_sequence,
             } => {
                 assert_eq!(received.revision, snapshot.revision);
-                assert_eq!(event_sequence, 0);
+                assert_eq!(event_sequence, 1);
             }
             other => panic!("unexpected snapshot response: {other:?}"),
         }

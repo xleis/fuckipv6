@@ -4491,6 +4491,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_snapshot_projects_persisted_membership_before_first_raw_read() {
+        use crate::config_manager::ConfigManager;
+        use fuckipv6_common::domain::{
+            ExitContributionMode, ExitContributionObligation, ExitContributionScope, JoinTermsAck,
+            MembershipRole, MembershipState, MembershipTerms,
+        };
+
+        let config_dir = std::env::temp_dir().join(format!(
+            "fuckipv6-membership-startup-projection-{}-{}",
+            std::process::id(),
+            unix_time_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let configs = ConfigManager::new_for_dir(config_dir.clone()).expect("config manager");
+        let now = unix_time_ms();
+        let network_id = NetworkId::from_public_key(b"persisted-membership-network");
+        let node_id = NodeId::from_public_key(b"persisted-membership-node");
+        let terms = MembershipTerms {
+            network_policy_revision: 4,
+            privacy_policy_revision: 2,
+            exit_contribution: ExitContributionObligation::Required,
+            exit_contribution_scope: ExitContributionScope::AllMembers,
+            exit_contribution_mode: ExitContributionMode::RequiredOnJoin,
+            member_limit: Some(16),
+        };
+        let mut membership = fuckipv6_common::domain::NetworkMembership::new(
+            network_id,
+            node_id,
+            MembershipRole::Member,
+            now.saturating_sub(10),
+        );
+        membership
+            .begin_apply(
+                terms.clone(),
+                JoinTermsAck {
+                    terms_hash: terms.content_hash().expect("terms hash"),
+                    acknowledged_at_unix_ms: now.saturating_sub(10),
+                },
+                now.saturating_sub(10),
+            )
+            .expect("begin apply");
+        membership.accept(now.saturating_sub(9)).expect("accept");
+        configs
+            .upsert_joined_membership("persisted-membership", membership)
+            .expect("persist membership");
+
+        let events = NodeEventBus::default();
+        let state = NodeStateStore::with_events(events.clone());
+        let mut handler = NodeRuntimeHandler::with_services(
+            state.clone(),
+            MultiNetworkRegistry::new(),
+            EmbeddedServiceManager::spawn_with_config(2, configs.clone()),
+        );
+        handler.configs = Some(configs.clone());
+        let bus = NodeCommandBus::spawn_with_state(Arc::new(handler), events, 32, state);
+
+        let result = bus
+            .execute_test(NodeCommandRequest::new(1, NodeCommand::GetSnapshot))
+            .await
+            .expect("snapshot result");
+        let NodeCommandOutcome::Snapshot(snapshot) = result.outcome else {
+            panic!("unexpected snapshot outcome");
+        };
+        let projected = snapshot
+            .memberships
+            .iter()
+            .find(|membership| membership.network_name == "persisted-membership")
+            .expect("first raw snapshot must include persisted membership");
+        assert_eq!(projected.state, MembershipState::Accepted);
+        assert_eq!(projected.role, MembershipRole::Member);
+        assert_eq!(projected.current_terms.as_ref(), Some(&terms));
+
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[tokio::test]
     async fn get_snapshot_projects_persisted_local_exit_owner_intent_without_runtime_actor() {
         let config_dir = std::env::temp_dir().join(format!(
             "fuckipv6-local-exit-owner-projection-{}-{}",

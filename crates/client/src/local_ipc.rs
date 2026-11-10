@@ -32,6 +32,12 @@ pub const PROTOCOL_VERSION: u16 = 3;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Direct node commands may legitimately spend the same bounded time as the
+/// server-side lifecycle deadline (for example, the local Exit drain window).
+/// Keep this above [`crate::local_service::LIFECYCLE_COMMAND_TIMEOUT`] so the
+/// transport does not report a timeout after the node has already committed
+/// the command.
+pub const COMMAND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 const FRAME_MAGIC: [u8; 4] = *b"FKIP";
 const FRAME_HEADER_LEN: usize = 12;
 
@@ -299,7 +305,14 @@ impl LocalConnection {
     }
 
     pub async fn receive<T: for<'de> Deserialize<'de>>(&mut self) -> Result<(FrameKind, T)> {
-        timeout(IO_TIMEOUT, read_frame(&mut self.stream))
+        self.receive_with_timeout(IO_TIMEOUT).await
+    }
+
+    async fn receive_with_timeout<T: for<'de> Deserialize<'de>>(
+        &mut self,
+        wait: Duration,
+    ) -> Result<(FrameKind, T)> {
+        timeout(wait, read_frame(&mut self.stream))
             .await
             .map_err(|_| anyhow::anyhow!("读取本地 IPC 帧超时"))?
     }
@@ -608,9 +621,19 @@ pub async fn request(
     role: IpcRole,
     request: &LocalRequest,
 ) -> Result<LocalResponse> {
+    request_with_timeout(endpoint, role, request, IO_TIMEOUT).await
+}
+
+async fn request_with_timeout(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    request: &LocalRequest,
+    response_timeout: Duration,
+) -> Result<LocalResponse> {
     let mut connection = connect(endpoint, role).await?;
     connection.send(FrameKind::Request, request).await?;
-    let (kind, payload): (FrameKind, serde_json::Value) = connection.receive().await?;
+    let (kind, payload): (FrameKind, serde_json::Value) =
+        connection.receive_with_timeout(response_timeout).await?;
     match kind {
         FrameKind::Response => {
             let response = serde_json::from_value(payload).context("无法解析本地 IPC 响应")?;
@@ -631,13 +654,14 @@ pub async fn execute(
     command_request: NodeCommandRequest,
 ) -> Result<NodeCommandResult> {
     let request_id = command_request.request_id;
-    let response = request(
+    let response = request_with_timeout(
         endpoint,
         role,
         &LocalRequest {
             request_id,
             command: LocalCommand::Execute(command_request),
         },
+        COMMAND_RESPONSE_TIMEOUT,
     )
     .await?;
     match response {
@@ -977,6 +1001,11 @@ fn sanitize_name(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_response_timeout_exceeds_lifecycle_deadline() {
+        assert!(COMMAND_RESPONSE_TIMEOUT > crate::local_service::LIFECYCLE_COMMAND_TIMEOUT);
+    }
     use serde_json::json;
     use tokio::io::duplex;
 

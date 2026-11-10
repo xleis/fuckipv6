@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
-    ExitSessionAction, NetworkId, NetworkMemberDirectory, NodeId, TrafficFailureKind,
-    TrafficProtectionState, TrafficSessionSnapshot,
+    ExitSessionAction, MembershipState, NetworkId, NetworkMemberDirectory, NodeId,
+    TrafficFailureKind, TrafficProtectionState, TrafficSessionSnapshot,
 };
 #[cfg(test)]
 use fuckipv6_common::is_encrypted_config_path;
@@ -695,8 +695,10 @@ impl ClientRuntime {
             }
             _ => {
                 self.exit_contribution_gate.clear_member_directory();
-                self.clear_exit_selection("exit.selection.directory_unavailable")
-                    .await;
+                self.handle_exit_selection_directory_unavailable(
+                    "exit.selection.directory_unavailable",
+                )
+                .await;
             }
         }
 
@@ -789,6 +791,43 @@ impl ClientRuntime {
             reason_code,
         )
         .await;
+    }
+
+    /// A missing Exit directory is not by itself a traffic failure. Mesh-only
+    /// networks never consult Exit authority, and proxy networks without an
+    /// established/pending Exit can remain idle until packet admission asks for
+    /// an authorized target (which then fails closed if evidence is missing).
+    /// Once an Exit session exists, losing its authoritative directory must
+    /// still terminate the session rather than continuing on stale permission.
+    async fn handle_exit_selection_directory_unavailable(&mut self, reason_code: &'static str) {
+        let had_exit_session = self.exit_selection_blocked
+            || self.exit_selection_gate.current_exit().is_some()
+            || self.exit_selection_gate.pending_exit().is_some()
+            || matches!(
+                self.traffic_session.state,
+                TrafficProtectionState::Connecting
+                    | TrafficProtectionState::Migrating
+                    | TrafficProtectionState::Protected
+                    | TrafficProtectionState::ExplicitDirectFallback
+                    | TrafficProtectionState::FailClosed
+            );
+        self.exit_selection_gate.clear_member_directory();
+        if exit_selection_directory_loss_requires_fail_closed(
+            self.route_engine.routing_mode(),
+            had_exit_session,
+        ) {
+            let already_failed_closed = self.traffic_session.state
+                == TrafficProtectionState::FailClosed
+                && self.traffic_session.reason_code.as_deref() == Some(reason_code);
+            if !already_failed_closed {
+                self.enter_fail_closed(
+                    TrafficFailureKind::NetworkSelectionUnavailable,
+                    unix_time_ms(),
+                    reason_code,
+                )
+                .await;
+            }
+        }
     }
 
     fn intended_exit(&self) -> Option<NodeId> {
@@ -937,24 +976,47 @@ impl ClientRuntime {
             return;
         };
         let local_node_id = NodeId::from_public_key(&self.identity.public_key());
-        let membership_has_network_access = snapshot.memberships.iter().any(|membership| {
-            membership.network_id == network_id.as_str()
-                && membership.node_id == local_node_id.as_str()
-                && membership.state.can_access_network_resources()
-        });
-        if !membership_has_network_access {
-            self.clear_exit_selection("exit.selection.authorization_revoked")
-                .await;
-        }
-        match exit_contribution_context_from_snapshot(snapshot, &network_id, &local_node_id) {
-            Some(context) => self.exit_contribution_gate.replace_network_context(context),
-            None => {
+        if local_membership_relationship_is_revoked(snapshot, &network_id, &local_node_id) {
+            self.exit_contribution_gate.clear_network_context();
+            self.exit_contribution_gate.clear_member_directory();
+            let already_revoked = self.traffic_session.state == TrafficProtectionState::FailClosed
+                && self.traffic_session.reason_code.as_deref()
+                    == Some("exit.selection.authorization_revoked");
+            if !already_revoked {
                 tracing::warn!(
                     network_id = %network_id,
-                    "成员关系或网络条款不再授权本机 Exit 贡献，已失败关闭"
+                    "成员关系已明确撤权，终止本机 Exit 授权"
                 );
+                self.clear_exit_selection("exit.selection.authorization_revoked")
+                    .await;
+            }
+            return;
+        }
+
+        match exit_contribution_context_from_snapshot(snapshot, &network_id, &local_node_id) {
+            Some(context) => {
+                let restored = !self.exit_contribution_gate.has_network_context();
+                self.exit_contribution_gate.replace_network_context(context);
+                if restored {
+                    tracing::debug!(
+                        network_id = %network_id,
+                        "本机 Exit 贡献授权上下文已就绪或恢复"
+                    );
+                }
+            }
+            None => {
+                if self.exit_contribution_gate.has_network_context() {
+                    tracing::warn!(
+                        network_id = %network_id,
+                        "本机 Exit 贡献授权证据暂时不可用，已清空贡献上下文"
+                    );
+                } else {
+                    tracing::debug!(
+                        network_id = %network_id,
+                        "本机 Exit 贡献授权上下文尚未就绪"
+                    );
+                }
                 self.exit_contribution_gate.clear_network_context();
-                self.exit_contribution_gate.clear_member_directory();
             }
         }
     }
@@ -977,10 +1039,12 @@ impl ClientRuntime {
             Err(denial) => {
                 tracing::warn!(
                     reason_code = denial.reason_code(),
-                    "成员目录不能用于管理员 Exit 选择授权，已失败关闭"
+                    "成员目录不能用于管理员 Exit 选择授权，已清理 Exit 选择会话"
                 );
-                self.clear_exit_selection("exit.selection.directory_rejected")
-                    .await;
+                self.handle_exit_selection_directory_unavailable(
+                    "exit.selection.directory_rejected",
+                )
+                .await;
             }
         }
     }
@@ -1263,6 +1327,37 @@ fn exit_contribution_context_from_snapshot(
         terms_hash,
         policy_confirmation_required: membership.policy_confirmation_required,
     })
+}
+
+/// Startup and shutdown traverse non-access membership states (`accepted`,
+/// `key_ready`, `connecting`). Missing evidence and those transient states are
+/// not authorization revocations. Only an explicit withdrawal removes the
+/// local authority.
+fn local_membership_relationship_is_revoked(
+    snapshot: &NodeSnapshot,
+    network_id: &NetworkId,
+    local_node_id: &NodeId,
+) -> bool {
+    let membership = snapshot.memberships.iter().find(|membership| {
+        membership.network_id == network_id.as_str() && membership.node_id == local_node_id.as_str()
+    });
+    membership.is_some_and(|membership| {
+        matches!(
+            membership.state,
+            MembershipState::Leaving
+                | MembershipState::Left
+                | MembershipState::Rejected
+                | MembershipState::Suspended
+                | MembershipState::Cancelled
+        )
+    })
+}
+
+fn exit_selection_directory_loss_requires_fail_closed(
+    mode: fuckipv6_common::RoutingMode,
+    had_exit_session: bool,
+) -> bool {
+    mode != fuckipv6_common::RoutingMode::MeshOnly && had_exit_session
 }
 
 pub(crate) async fn prepare_client_runtime_ext(
@@ -2377,8 +2472,11 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                     }
                     Some(_) => {
                         runtime.exit_contribution_gate.clear_member_directory();
-                        runtime.clear_exit_selection("exit.selection.directory_unavailable")
-                        .await;
+                        runtime
+                            .handle_exit_selection_directory_unavailable(
+                                "exit.selection.directory_unavailable",
+                            )
+                            .await;
                     }
                     None => exit_contribution_directory_updates = None,
                 }
@@ -8140,6 +8238,51 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
         assert!(
             exit_contribution_context_from_snapshot(&inactive, &network_id, &node_id).is_none()
         );
+        for state in [
+            MembershipState::Discovered,
+            MembershipState::Applying,
+            MembershipState::PendingApproval,
+            MembershipState::Accepted,
+            MembershipState::KeyReady,
+            MembershipState::Connecting,
+            MembershipState::Active,
+            MembershipState::Degraded,
+        ] {
+            let snapshot = NodeSnapshot {
+                memberships: vec![membership(
+                    &network_id,
+                    &node_id,
+                    state,
+                    Some(terms.clone()),
+                )],
+                ..NodeSnapshot::default()
+            };
+            assert!(
+                !local_membership_relationship_is_revoked(&snapshot, &network_id, &node_id),
+                "{state:?} is a normal lifecycle state, not an authorization revocation"
+            );
+        }
+        for state in [
+            MembershipState::Leaving,
+            MembershipState::Left,
+            MembershipState::Rejected,
+            MembershipState::Suspended,
+            MembershipState::Cancelled,
+        ] {
+            let snapshot = NodeSnapshot {
+                memberships: vec![membership(
+                    &network_id,
+                    &node_id,
+                    state,
+                    Some(terms.clone()),
+                )],
+                ..NodeSnapshot::default()
+            };
+            assert!(
+                local_membership_relationship_is_revoked(&snapshot, &network_id, &node_id),
+                "{state:?} must revoke local network authority"
+            );
+        }
 
         let without_terms = NodeSnapshot {
             memberships: vec![membership(
@@ -8159,6 +8302,38 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
         assert!(
             exit_contribution_context_from_snapshot(&snapshot, &other_network, &node_id).is_none()
         );
+        assert!(!local_membership_relationship_is_revoked(
+            &snapshot,
+            &other_network,
+            &node_id
+        ));
+        assert!(!local_membership_relationship_is_revoked(
+            &NodeSnapshot::default(),
+            &network_id,
+            &node_id
+        ));
+    }
+
+    #[test]
+    fn exit_directory_loss_only_fails_closed_for_active_proxy_sessions() {
+        use fuckipv6_common::RoutingMode;
+
+        assert!(!exit_selection_directory_loss_requires_fail_closed(
+            RoutingMode::MeshOnly,
+            true
+        ));
+        assert!(!exit_selection_directory_loss_requires_fail_closed(
+            RoutingMode::GlobalProxy,
+            false
+        ));
+        assert!(exit_selection_directory_loss_requires_fail_closed(
+            RoutingMode::GlobalProxy,
+            true
+        ));
+        assert!(exit_selection_directory_loss_requires_fail_closed(
+            RoutingMode::BypassMainland,
+            true
+        ));
     }
 
     #[test]

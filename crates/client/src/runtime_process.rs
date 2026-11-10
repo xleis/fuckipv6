@@ -26,7 +26,7 @@ use crate::local_ipc::{
 use crate::local_service::serve_owned_node;
 use crate::logging;
 use crate::multi_network::MultiNetworkSupervisor;
-use crate::node::{NodeCommand, NodeCommandContext, NodeCommandRequest};
+use crate::node::{NodeCommand, NodeCommandBus, NodeCommandContext, NodeCommandRequest};
 
 const CONTROL_ARGUMENT: &str = "__control";
 const NODE_ARGUMENT: &str = "__node";
@@ -349,7 +349,7 @@ async fn run_node(options: InternalOptions) -> Result<()> {
     match timeout(
         NODE_STARTUP_TIMEOUT,
         commands.execute(
-            startup_context,
+            startup_context.clone(),
             NodeCommandRequest::new(u64::MAX - 1, NodeCommand::StartNode),
         ),
     )
@@ -371,6 +371,11 @@ async fn run_node(options: InternalOptions) -> Result<()> {
             );
         }
     }
+    // StartNode restores the data plane, while GetSnapshot is the command that
+    // projects persisted memberships and network profiles into the shared state
+    // store. Run that projection before reporting readiness so an immediate raw
+    // snapshot from the IPC endpoint cannot expose an empty membership list.
+    refresh_node_snapshot_bounded(&commands, startup_context).await;
     refresh_node_state_bounded(&supervisor).await;
 
     println!(
@@ -733,8 +738,8 @@ fn spawn_node_child(options: &InternalOptions) -> Result<Child> {
         .arg(NODE_ARGUMENT)
         .env(OPTIONS_ENV, options.encode()?)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .kill_on_drop(false);
     command.spawn().context("无法启动节点进程")
 }
@@ -759,8 +764,8 @@ fn spawn_detached_control(options: &RuntimeOptions) -> Result<()> {
         .arg(CONTROL_ARGUMENT)
         .env(OPTIONS_ENV, encoded)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -886,6 +891,30 @@ async fn refresh_node_state_bounded(supervisor: &MultiNetworkSupervisor) {
     .await
     {
         tracing::warn!(%error, "节点状态刷新未完成，保留节点 IPC 可用性");
+    }
+}
+
+async fn refresh_node_snapshot_bounded(commands: &NodeCommandBus, context: NodeCommandContext) {
+    let result = complete_with_timeout("节点启动快照投影", NODE_STATE_REFRESH_TIMEOUT, async {
+        commands
+            .execute(
+                context,
+                NodeCommandRequest::new(u64::MAX - 2, NodeCommand::GetSnapshot),
+            )
+            .await
+            .map_err(anyhow::Error::from)
+    })
+    .await;
+    match result {
+        Ok(result) if result.is_success() => {
+            tracing::debug!(?result.outcome, "节点启动快照投影完成");
+        }
+        Ok(result) => {
+            tracing::warn!(?result.outcome, "节点启动快照投影未成功，IPC 保持可用");
+        }
+        Err(error) => {
+            tracing::warn!(%error, "节点启动快照投影未完成，IPC 保持可用");
+        }
     }
 }
 

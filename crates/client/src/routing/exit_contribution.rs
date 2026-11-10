@@ -160,6 +160,10 @@ impl ExitContributionGate {
         self.network_context = Some(context);
     }
 
+    pub(crate) fn has_network_context(&self) -> bool {
+        self.network_context.is_some()
+    }
+
     pub(crate) fn clear_network_context(&mut self) {
         self.network_context = None;
         self.clear_authorization_requests();

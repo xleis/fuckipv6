@@ -375,7 +375,7 @@ impl InvitationStore {
             .as_ref()
             .context("协调器未配置可信 network_record_path，邀请兑换失败关闭")?;
         let network_id = request.network_id.clone();
-        let network_record = read_network_record(record_path, &network_id)?;
+        let network_record = load_trusted_network_record(record_path, Some(&network_id))?;
         if network_record.join_mode != NetworkJoinMode::InviteOnly {
             bail!("invitation.error.network_not_invite_only");
         }
@@ -554,10 +554,7 @@ impl InvitationStore {
         let Some(path) = &self.network_record_path else {
             bail!("协调器未配置可信 network_record_path，邀请操作失败关闭");
         };
-        let lock = lock_profile_shared(path)?;
-        let result = read_network_record(path, expected_network_id);
-        let _ = FileExt::unlock(&lock);
-        result
+        load_trusted_network_record(path, Some(expected_network_id))
     }
 
     fn load_roster(&self, network_id: &NetworkId) -> Result<NetworkRoster> {
@@ -755,13 +752,26 @@ fn lock_profile_shared(path: &Path) -> Result<File> {
     Ok(lock)
 }
 
-fn read_network_record(path: &Path, expected_network_id: &NetworkId) -> Result<NetworkRecord> {
+pub(crate) fn load_trusted_network_record(
+    path: &Path,
+    expected_network_id: Option<&NetworkId>,
+) -> Result<NetworkRecord> {
+    let lock = lock_profile_shared(path)?;
+    let result = read_network_record(path, expected_network_id);
+    let _ = FileExt::unlock(&lock);
+    result
+}
+
+fn read_network_record(
+    path: &Path,
+    expected_network_id: Option<&NetworkId>,
+) -> Result<NetworkRecord> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("无法读取邀请授权网络资料: {}", path.display()))?;
     let record: NetworkRecord = serde_json::from_str(&content)
         .with_context(|| format!("无法解析邀请授权网络资料: {}", path.display()))?;
     record.validate().context("邀请授权网络资料校验失败")?;
-    if record.network_id != *expected_network_id {
+    if expected_network_id.is_some_and(|expected| record.network_id != *expected) {
         bail!("invitation network does not match owner network record");
     }
     Ok(record)

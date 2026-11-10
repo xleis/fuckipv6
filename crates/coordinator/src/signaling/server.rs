@@ -3,8 +3,8 @@ use bytes::Bytes;
 use fuckipv6_common::domain::{
     ExitContributionRequest, ExitContributionRequestId, ExitContributionReviewAction, InvitationId,
     InvitationState, JoinRequest, JoinRequestId, JoinRequestState, MemberLifecycleChange,
-    MemberLifecycleChangeRequest, MemberRemovalPreviewRequest, NetworkId, NetworkMemberPresence,
-    NetworkRecord, NodeId,
+    MemberLifecycleChangeRequest, MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview,
+    NetworkMemberPresence, NetworkRecord, NodeId,
 };
 use fuckipv6_common::{
     codec, validate_signaling_message_len, validate_signaling_relay_payload_len, CoordinatorConfig,
@@ -13,6 +13,7 @@ use fuckipv6_common::{
 };
 use futures::{SinkExt, StreamExt};
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
@@ -24,7 +25,7 @@ use tokio_tungstenite::{
 
 use super::exit_availability::ExitAvailabilityObservationRegistry;
 use super::exit_contribution::ExitContributionRequestStore;
-use super::invitations::InvitationStore;
+use super::invitations::{load_trusted_network_record, InvitationStore};
 use super::join_requests::JoinRequestStore;
 use super::member_lifecycle::MemberLifecycleStore;
 use super::members::build_member_directory;
@@ -64,6 +65,7 @@ pub struct SignalingServer {
     member_lifecycle_store: Option<Arc<MemberLifecycleStore>>,
     exit_contribution_store: Option<Arc<ExitContributionRequestStore>>,
     exit_availability: Arc<ExitAvailabilityObservationRegistry>,
+    network_record_path: Option<PathBuf>,
     listener: Option<TcpListener>,
 }
 
@@ -82,6 +84,7 @@ impl SignalingServer {
             member_lifecycle_store: None,
             exit_contribution_store: None,
             exit_availability: Arc::new(ExitAvailabilityObservationRegistry::default()),
+            network_record_path: None,
             listener: None,
         })
     }
@@ -97,6 +100,7 @@ impl SignalingServer {
             member_lifecycle_store: None,
             exit_contribution_store: None,
             exit_availability: Arc::new(ExitAvailabilityObservationRegistry::default()),
+            network_record_path: None,
             listener: None,
         }
     }
@@ -130,6 +134,13 @@ impl SignalingServer {
         self
     }
 
+    /// Inject the authoritative owner record used for direct join disclosure.
+    /// Without it, network preview requests fail closed.
+    pub fn with_network_record_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.network_record_path = Some(path.into());
+        self
+    }
+
     /// Attach the durable approval store. Without one, approval messages fail
     /// closed while registration and data-plane signaling remain available.
     pub fn with_join_request_store(mut self, store: Arc<JoinRequestStore>) -> Self {
@@ -148,6 +159,7 @@ impl SignalingServer {
             .network_record_path
             .clone()
             .context("审批操作需要可信 network_record_path")?;
+        self.network_record_path = Some(network_record_path.clone());
         let lifecycle = Arc::new(MemberLifecycleStore::new(
             state_dir.as_ref().join("member_lifecycle.json"),
             network_record_path.clone(),
@@ -180,6 +192,7 @@ impl SignalingServer {
             .network_record_path
             .clone()
             .context("邀请兑换需要可信 network_record_path")?;
+        self.network_record_path = Some(network_record_path.clone());
         let lifecycle = Arc::new(MemberLifecycleStore::new(
             state_dir.as_ref().join("member_lifecycle.json"),
             network_record_path.clone(),
@@ -212,6 +225,7 @@ impl SignalingServer {
             .network_record_path
             .clone()
             .context("成员生命周期需要可信 network_record_path")?;
+        self.network_record_path = Some(network_record_path.clone());
         let store = MemberLifecycleStore::new(
             state_dir.as_ref().join("member_lifecycle.json"),
             network_record_path,
@@ -240,6 +254,7 @@ impl SignalingServer {
             .network_record_path
             .clone()
             .context("Exit 贡献治理需要可信 network_record_path")?;
+        self.network_record_path = Some(network_record_path.clone());
         self.exit_contribution_store = Some(Arc::new(ExitContributionRequestStore::new(
             state_dir.as_ref().join("exit_contribution_requests.json"),
             network_record_path,
@@ -274,6 +289,7 @@ impl SignalingServer {
                     let member_lifecycle_store = self.member_lifecycle_store.clone();
                     let exit_contribution_store = self.exit_contribution_store.clone();
                     let exit_availability = self.exit_availability.clone();
+                    let network_record_path = self.network_record_path.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
@@ -287,6 +303,7 @@ impl SignalingServer {
                             member_lifecycle_store,
                             exit_contribution_store,
                             exit_availability,
+                            network_record_path,
                         )
                         .await
                         {
@@ -338,6 +355,7 @@ async fn handle_connection(
     member_lifecycle_store: Option<Arc<MemberLifecycleStore>>,
     exit_contribution_store: Option<Arc<ExitContributionRequestStore>>,
     exit_availability: Arc<ExitAvailabilityObservationRegistry>,
+    network_record_path: Option<PathBuf>,
 ) -> Result<()> {
     let local_addr = stream.local_addr().ok();
     let ws_stream = accept_async_with_config(stream, Some(signaling_websocket_config()))
@@ -365,6 +383,7 @@ async fn handle_connection(
             member_lifecycle_store.as_deref(),
             exit_contribution_store.as_deref(),
             exit_availability.as_ref(),
+            network_record_path.as_deref(),
         )
         .await
         {
@@ -409,6 +428,7 @@ async fn handle_connection_message(
     member_lifecycle_store: Option<&MemberLifecycleStore>,
     exit_contribution_store: Option<&ExitContributionRequestStore>,
     exit_availability: &ExitAvailabilityObservationRegistry,
+    network_record_path: Option<&std::path::Path>,
 ) -> bool {
     match msg {
         Ok(Message::Binary(data)) => {
@@ -426,6 +446,7 @@ async fn handle_connection_message(
                 member_lifecycle_store,
                 exit_contribution_store,
                 exit_availability,
+                network_record_path,
             )
             .await;
             true
@@ -458,6 +479,7 @@ async fn handle_binary_message(
     member_lifecycle_store: Option<&MemberLifecycleStore>,
     exit_contribution_store: Option<&ExitContributionRequestStore>,
     exit_availability: &ExitAvailabilityObservationRegistry,
+    network_record_path: Option<&std::path::Path>,
 ) {
     tracing::debug!("收到二进制消息: {} 字节 (来自 {})", data.len(), addr);
     session_manager.record_signaling_rx(data.len());
@@ -482,6 +504,7 @@ async fn handle_binary_message(
                 member_lifecycle_store,
                 exit_contribution_store,
                 exit_availability,
+                network_record_path,
             )
             .await
             {
@@ -547,6 +570,7 @@ async fn handle_signaling_message(
     member_lifecycle_store: Option<&MemberLifecycleStore>,
     exit_contribution_store: Option<&ExitContributionRequestStore>,
     exit_availability: &ExitAvailabilityObservationRegistry,
+    network_record_path: Option<&std::path::Path>,
 ) -> Result<()> {
     match msg {
         SignalingMessage::Register { .. } => {
@@ -708,6 +732,16 @@ async fn handle_signaling_message(
         SignalingMessage::InvitationRedeem { request } => {
             handle_invitation_redeem(request, session_manager, tx, client_id, invitation_store)
                 .await?;
+        }
+        SignalingMessage::NetworkJoinPreview { request } => {
+            handle_network_join_preview(
+                request,
+                session_manager,
+                tx,
+                client_id,
+                network_record_path,
+            )
+            .await?;
         }
         SignalingMessage::MemberDirectoryList { network_id } => {
             handle_member_directory_list(
@@ -877,7 +911,8 @@ async fn handle_signaling_message(
         | SignalingMessage::ExitContributionWithdrawAck { .. }
         | SignalingMessage::ExitContributionAuthorizationListAck { .. }
         | SignalingMessage::ExitContributionChanged { .. }
-        | SignalingMessage::ExitAvailabilityReportAck { .. } => {
+        | SignalingMessage::ExitAvailabilityReportAck { .. }
+        | SignalingMessage::NetworkJoinPreviewAck { .. } => {
             send_binary(
                 tx,
                 session_manager,
@@ -2048,6 +2083,79 @@ async fn handle_invitation_preview(
         tx,
         session_manager,
         SignalingMessage::InvitationPreviewAck { preview },
+    )
+}
+
+async fn handle_network_join_preview(
+    request: fuckipv6_common::domain::NetworkJoinPreviewRequest,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    network_record_path: Option<&std::path::Path>,
+) -> Result<()> {
+    let Some((_actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let Some(network_record_path) = network_record_path else {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Overloaded,
+                "Network join preview is unavailable",
+            ),
+        )?;
+        return Ok(());
+    };
+    let record = match load_trusted_network_record(network_record_path, None) {
+        Ok(record) => record,
+        Err(error) => {
+            tracing::error!(%error, "读取直接加入预览的可信网络记录失败");
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::protocol_error(
+                    ErrorCode::Overloaded,
+                    "Network join preview is unavailable",
+                ),
+            )?;
+            return Ok(());
+        }
+    };
+    if NodeId::from_public_key(&request.coordinator_public_key) != record.owner {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Forbidden,
+                "Join ticket coordinator key does not belong to this network",
+            ),
+        )?;
+        return Ok(());
+    }
+    if request.network_name != record.name {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::BadRequest,
+                "Join ticket network name does not match the trusted record",
+            ),
+        )?;
+        return Ok(());
+    }
+    let now_unix_ms = unix_time_ms();
+    let preview = NetworkJoinPreview::for_record(
+        &record,
+        now_unix_ms,
+        now_unix_ms.saturating_add(fuckipv6_common::domain::NETWORK_JOIN_PREVIEW_VALIDITY_MS),
+    )?;
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::NetworkJoinPreviewAck { preview },
     )
 }
 

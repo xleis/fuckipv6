@@ -166,6 +166,15 @@ pub struct RecoveryRequest {
     pub expectations: RecoveryExpectations,
     pub probes: Vec<RecoveryProbeTarget>,
     pub hard_timeout_ms: u64,
+    /// False only for the first stage of Exit recovery, where local TUN,
+    /// route and DNS evidence is collected before reachability is delegated to
+    /// the selected Exit over an authenticated Secure Session.
+    #[serde(default = "reachability_required_default")]
+    pub reachability_required: bool,
+}
+
+const fn reachability_required_default() -> bool {
+    true
 }
 
 impl RecoveryRequest {
@@ -181,6 +190,7 @@ impl RecoveryRequest {
             expectations: RecoveryExpectations::default(),
             probes: default_recovery_probes(),
             hard_timeout_ms: DEFAULT_RECOVERY_TIMEOUT_MS,
+            reachability_required: true,
         }
     }
 
@@ -199,8 +209,20 @@ impl RecoveryRequest {
         self
     }
 
+    /// Stage recovery so this pass proves locally owned resources only. The
+    /// caller must complete reachability separately and must not publish a
+    /// `TrafficSessionValidation` from this report.
+    pub(crate) fn local_resources_only(mut self) -> Self {
+        self.probes.clear();
+        self.reachability_required = false;
+        self
+    }
+
     fn validate(&self) -> Result<(), ()> {
-        if self.hard_timeout_ms == 0 || self.probes.is_empty() {
+        if self.hard_timeout_ms == 0 {
+            return Err(());
+        }
+        if self.reachability_required != !self.probes.is_empty() {
             return Err(());
         }
         if self.probes.iter().any(|target| !target.validate()) {
@@ -415,6 +437,17 @@ impl RecoveryStatus {
     }
 }
 
+/// Local resource evidence collected before authenticated Exit reachability is
+/// checked. This is intentionally not a `TrafficSessionValidation`: it can
+/// never claim that the protected path has passed reachability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LocalRecoveryValidation {
+    pub tun_validated: bool,
+    pub routes_validated: bool,
+    pub dns_validated: bool,
+    pub observed_at_unix_ms: u64,
+}
+
 /// Durable, redacted recovery record. It intentionally excludes interface
 /// names, addresses, resolver URLs, command output and target host names.
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -446,6 +479,22 @@ pub struct RecoveryReport {
 impl RecoveryReport {
     pub fn is_success(&self) -> bool {
         self.status == RecoveryStatus::Recovered
+    }
+
+    pub(crate) fn local_resource_validation(
+        &self,
+        expectations: RecoveryExpectations,
+    ) -> Option<LocalRecoveryValidation> {
+        if !self.is_success() {
+            return None;
+        }
+        let after = self.after.as_ref()?;
+        Some(LocalRecoveryValidation {
+            tun_validated: !expectations.tun_required || after.tun.is_healthy(),
+            routes_validated: !expectations.routes_required || after.routes.is_healthy(),
+            dns_validated: !expectations.dns_required || after.dns.is_secure_and_healthy(),
+            observed_at_unix_ms: self.completed_at_unix_ms.max(1),
+        })
     }
 
     fn new(request: &RecoveryRequest, started_at_unix_ms: u64, diagnostic_id: String) -> Self {
@@ -625,6 +674,10 @@ impl RecoveryCoordinator {
         {
             apply_fail_closed(backend, deadline, &request, &mut report, failure).await;
             return report.finish(RecoveryStatus::Failed, Some(error_code));
+        }
+
+        if !request.reachability_required {
+            return report.finish(RecoveryStatus::Recovered, None);
         }
 
         let expected_probe_count = request.probes.len();
@@ -1032,6 +1085,29 @@ mod tests {
                 "probe:youtube",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn local_resource_stage_never_claims_reachability() {
+        let mut backend = FakeBackend::new(healthy_snapshot(), healthy_snapshot());
+        let request = request(RecoveryTrigger::Manual).local_resources_only();
+
+        let report = RecoveryCoordinator.recover(&mut backend, request).await;
+
+        assert_eq!(report.status, RecoveryStatus::Recovered);
+        assert!(report.traffic_session_validation.is_none());
+        assert!(report.probes.is_empty());
+        assert_eq!(
+            backend.calls(),
+            vec!["snapshot", "reconcile:Manual", "snapshot"]
+        );
+        let local = report
+            .local_resource_validation(RecoveryExpectations::default())
+            .expect("local resource evidence");
+        assert!(local.tun_validated);
+        assert!(local.routes_validated);
+        assert!(local.dns_validated);
+        assert!(local.observed_at_unix_ms > 0);
     }
 
     #[test]

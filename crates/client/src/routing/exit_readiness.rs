@@ -98,6 +98,17 @@ impl ExitReadinessFrame {
         }
         Ok(())
     }
+
+    pub(crate) fn all_probes_passed(&self) -> bool {
+        matches!(
+            self,
+            Self::Response { results, .. }
+                if !results.is_empty()
+                    && results
+                        .iter()
+                        .all(|result| result.state == RecoveryProbeState::Passed)
+        )
+    }
 }
 
 pub(crate) fn is_exit_readiness_frame(payload: &[u8]) -> bool {
@@ -300,6 +311,17 @@ mod tests {
             .validate_response(nonce(9), &[RecoveryProbeTarget::Google])
             .is_err());
         assert!(response.validate_response(nonce(9), &defaults()).is_ok());
+        assert!(response.all_probes_passed());
+
+        let failed = ExitReadinessFrame::response(
+            nonce(9),
+            vec![
+                passed(RecoveryProbeTarget::Google),
+                failed(RecoveryProbeTarget::YouTube),
+            ],
+        )
+        .expect("valid failed response");
+        assert!(!failed.all_probes_passed());
     }
 
     #[test]

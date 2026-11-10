@@ -59,8 +59,8 @@ use crate::routing::linux_route::LinuxRouteManager;
 use crate::routing::recovery::RecoveryTrigger;
 #[cfg(target_os = "linux")]
 use crate::routing::recovery::{
-    PathRecoveryState, RecoveryCoordinator, RecoveryExpectations, RecoveryReport, RecoveryRequest,
-    RecoveryStatus,
+    default_recovery_probes, LocalRecoveryValidation, PathRecoveryState, RecoveryCoordinator,
+    RecoveryExpectations, RecoveryProbeTarget, RecoveryReport, RecoveryRequest, RecoveryStatus,
 };
 #[cfg(target_os = "linux")]
 use crate::routing::table::{parse_linux_ip_routes, RouteEntry};
@@ -89,6 +89,8 @@ const EXIT_CONTRIBUTION_MEMBER_REFRESH_INTERVAL: Duration = Duration::from_secs(
 const EXIT_CONTRIBUTION_DIRECTORY_QUEUE_CAPACITY: usize = 4;
 const EXIT_AVAILABILITY_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 const EXIT_CONNECTION_WATCHDOG_INTERVAL: Duration = Duration::from_millis(250);
+#[cfg(target_os = "linux")]
+const EXIT_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "linux")]
 const LOCAL_EXIT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(target_os = "linux")]
@@ -560,6 +562,8 @@ pub(crate) struct ClientRuntime {
     relay_recovery_path: PathRecoveryState,
     #[cfg(target_os = "linux")]
     exit_connection_watchdog: Option<ExitConnectionWatchdog>,
+    #[cfg(target_os = "linux")]
+    pending_exit_readiness: Option<PendingExitReadiness>,
     pub(crate) tun_io: RuntimeTunIo,
     pub(crate) assigned_ip: Ipv6Addr,
     pub(crate) assigned_ips: VirtualIps,
@@ -595,6 +599,16 @@ struct ExitConnectionWatchdog {
     deadline_unix_ms: u64,
     validation_trigger: RecoveryTrigger,
     validation_queued: bool,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+struct PendingExitReadiness {
+    target: NodeId,
+    nonce: [u8; 16],
+    targets: Vec<RecoveryProbeTarget>,
+    deadline: Instant,
+    local_validation: LocalRecoveryValidation,
 }
 
 #[cfg(target_os = "linux")]
@@ -763,6 +777,7 @@ impl ClientRuntime {
         #[cfg(target_os = "linux")]
         {
             self.exit_connection_watchdog = None;
+            self.pending_exit_readiness = None;
         }
         self.exit_selection_gate.set_current_exit(None);
         self.exit_selection_gate.discard_pending_exit();
@@ -888,6 +903,10 @@ impl ClientRuntime {
         now_unix_ms: u64,
         reason_code: &'static str,
     ) {
+        #[cfg(target_os = "linux")]
+        {
+            self.pending_exit_readiness = None;
+        }
         if let Some(pending) = self.exit_selection_gate.pending_exit() {
             if pending != &to {
                 self.enter_fail_closed(
@@ -949,6 +968,10 @@ impl ClientRuntime {
     }
 
     async fn begin_exit_recovery(&mut self, trigger: RecoveryTrigger, now_unix_ms: u64) {
+        #[cfg(target_os = "linux")]
+        {
+            self.pending_exit_readiness = None;
+        }
         self.exit_selection_blocked = true;
         let migrating = self.exit_selection_gate.current_exit().is_some()
             && self.exit_selection_gate.pending_exit().is_some();
@@ -1573,6 +1596,8 @@ pub(crate) async fn prepare_client_runtime_ext(
         relay_recovery_path,
         #[cfg(target_os = "linux")]
         exit_connection_watchdog: None,
+        #[cfg(target_os = "linux")]
+        pending_exit_readiness: None,
         tun_io,
         assigned_ip,
         assigned_ips,
@@ -2265,7 +2290,8 @@ async fn handle_linux_recovery_trigger(runtime: &mut ClientRuntime, trigger: Rec
 
     let mode = runtime.route_engine.routing_mode();
     let route_context = current_linux_recovery_route_context(runtime).await;
-    let request = linux_recovery_request(mode, trigger, route_context.clone());
+    let request =
+        linux_recovery_request(mode, trigger, route_context.clone()).local_resources_only();
     let audit = RecoveryAuditContext {
         config_root: linux_recovery_audit_root(&runtime.config_path),
         actor: NodeId::from_public_key(&runtime.identity.public_key_bytes()),
@@ -2288,11 +2314,8 @@ async fn handle_linux_recovery_trigger(runtime: &mut ClientRuntime, trigger: Rec
     refresh_linux_recovery_paths(runtime).await;
     log_linux_recovery_report(&report);
 
-    let validation = report
-        .traffic_session_validation
-        .clone()
-        .filter(|validation| validation.is_complete());
-    if report.status != RecoveryStatus::Recovered || validation.is_none() {
+    let local_validation = report.local_resource_validation(linux_recovery_expectations(mode));
+    if report.status != RecoveryStatus::Recovered || local_validation.is_none() {
         runtime
             .enter_fail_closed(
                 recovery_failure_kind(trigger, &report),
@@ -2303,48 +2326,123 @@ async fn handle_linux_recovery_trigger(runtime: &mut ClientRuntime, trigger: Rec
         return;
     }
 
-    let pending = runtime.exit_selection_gate.pending_exit().cloned();
-    if let Some(staged) = pending {
-        let committed = runtime.exit_selection_gate.commit_pending_exit();
-        if committed.as_ref() != Some(&staged) || expected_exit.as_ref() != Some(&staged) {
-            runtime
-                .enter_fail_closed(
-                    TrafficFailureKind::ExitUnavailable,
-                    unix_time_ms(),
-                    "recovery.exit_migration.target_mismatch",
-                )
-                .await;
-            return;
-        }
-    } else if runtime.exit_selection_gate.current_exit().cloned() != expected_exit {
+    let Some(target) = expected_exit else {
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::NetworkSelectionUnavailable,
+                unix_time_ms(),
+                "recovery.exit_readiness.target_missing",
+            )
+            .await;
+        return;
+    };
+    if runtime.intended_exit().as_ref() != Some(&target) {
         runtime
             .enter_fail_closed(
                 TrafficFailureKind::ExitUnavailable,
                 unix_time_ms(),
-                "recovery.exit_target_changed_during_validation",
+                "recovery.exit_readiness.target_changed",
             )
             .await;
         return;
     }
 
-    let validation = validation.expect("checked immediately above");
-    if let Err(error) = runtime
-        .traffic_session
-        .mark_protected(validation, unix_time_ms().max(1))
+    let Some(exit_ip) = runtime.p2p.resolve_exit_peer_by_node_id(&target).await else {
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_readiness.peer_missing",
+            )
+            .await;
+        return;
+    };
+    if !runtime
+        .p2p
+        .has_established_session_by_ip(IpAddr::V6(exit_ip))
+        .await
     {
-        tracing::error!(error = %error, "恢复证据无法建立受保护流量会话");
         runtime
             .enter_fail_closed(
                 TrafficFailureKind::ConnectionTimeout,
                 unix_time_ms(),
-                "recovery.validation_application_failed",
+                "recovery.exit_readiness.session_missing",
             )
             .await;
         return;
     }
-    runtime.exit_selection_blocked = false;
-    runtime.exit_connection_watchdog = None;
-    runtime.publish_traffic_session().await;
+
+    let mut nonce = [0u8; 16];
+    if getrandom::fill(&mut nonce).is_err() {
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ConnectionTimeout,
+                unix_time_ms(),
+                "recovery.exit_readiness.nonce_failed",
+            )
+            .await;
+        return;
+    }
+    let targets = default_recovery_probes();
+    let frame = match ExitReadinessFrame::request(nonce, targets.clone()) {
+        Ok(frame) => frame,
+        Err(error) => {
+            tracing::error!(error = %error, "无法构建 Exit readiness 请求");
+            runtime
+                .enter_fail_closed(
+                    TrafficFailureKind::ConnectionTimeout,
+                    unix_time_ms(),
+                    "recovery.exit_readiness.request_invalid",
+                )
+                .await;
+            return;
+        }
+    };
+    let payload = match encode_exit_readiness_frame(&frame) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::error!(error = %error, "无法编码 Exit readiness 请求");
+            runtime
+                .enter_fail_closed(
+                    TrafficFailureKind::ConnectionTimeout,
+                    unix_time_ms(),
+                    "recovery.exit_readiness.encode_failed",
+                )
+                .await;
+            return;
+        }
+    };
+    let deadline = Instant::now() + EXIT_READINESS_TIMEOUT;
+    runtime.pending_exit_readiness = Some(PendingExitReadiness {
+        target: target.clone(),
+        nonce,
+        targets,
+        deadline,
+        local_validation: local_validation.expect("checked immediately above"),
+    });
+    let outbound = OutboundPacket::owned(
+        IpAddr::V6(runtime.assigned_ip),
+        IpAddr::V6(exit_ip),
+        payload,
+    );
+    match runtime.outbound.submit(outbound) {
+        OutboundSubmitOutcome::Queued => {
+            tracing::info!(
+                exit = %target,
+                "本地资源校验完成，已向所选 Exit 发送认证 readiness 请求"
+            );
+        }
+        OutboundSubmitOutcome::QueueFull | OutboundSubmitOutcome::WorkerUnavailable => {
+            runtime.stats.record_p2p_send_error().await;
+            runtime
+                .enter_fail_closed(
+                    TrafficFailureKind::ConnectionTimeout,
+                    unix_time_ms(),
+                    "recovery.exit_readiness.send_failed",
+                )
+                .await;
+        }
+    }
 }
 
 enum RuntimeCommandOutcome {
@@ -2364,6 +2462,8 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
     loop {
         let exit_drain_deadline = local_exit_drain_deadline(runtime);
         let exit_drain = wait_for_local_exit_drain(exit_drain_deadline);
+        let exit_readiness_deadline = pending_exit_readiness_deadline(runtime);
+        let exit_readiness = wait_for_pending_exit_readiness(exit_readiness_deadline);
         tokio::select! {
             // 从TUN设备读取数据包
             Some(packets) = runtime.tun_io.packet_rx().recv() => {
@@ -2538,6 +2638,8 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
             // signalling processing continue while the grace period elapses.
             _ = exit_drain => complete_local_exit_drain(runtime).await,
 
+            _ = exit_readiness => complete_pending_exit_readiness_timeout(runtime).await,
+
             // 定期心跳与 QUIC 中继自愈检测
             _ = runtime.heartbeat_interval.tick() => {
                 if runtime
@@ -2596,6 +2698,48 @@ async fn wait_for_local_exit_drain(deadline: Option<Instant>) {
     match deadline {
         Some(deadline) => sleep(deadline.saturating_duration_since(Instant::now())).await,
         None => std::future::pending::<()>().await,
+    }
+}
+
+fn pending_exit_readiness_deadline(runtime: &ClientRuntime) -> Option<Instant> {
+    #[cfg(target_os = "linux")]
+    {
+        runtime
+            .pending_exit_readiness
+            .as_ref()
+            .map(|pending| pending.deadline)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = runtime;
+        None
+    }
+}
+
+async fn wait_for_pending_exit_readiness(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => sleep(deadline.saturating_duration_since(Instant::now())).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+async fn complete_pending_exit_readiness_timeout(runtime: &mut ClientRuntime) {
+    #[cfg(target_os = "linux")]
+    {
+        if runtime.pending_exit_readiness.is_some() {
+            runtime.pending_exit_readiness = None;
+            runtime
+                .enter_fail_closed(
+                    TrafficFailureKind::ConnectionTimeout,
+                    unix_time_ms(),
+                    "recovery.exit_readiness.timeout",
+                )
+                .await;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = runtime;
     }
 }
 
@@ -3461,12 +3605,8 @@ async fn handle_exit_readiness_frame(
     frame: ExitReadinessFrame,
 ) {
     match frame {
-        ExitReadinessFrame::Response { nonce, .. } => {
-            tracing::debug!(
-                peer = %peer.node_id,
-                nonce = ?nonce,
-                "当前没有待匹配的 Exit readiness 请求，丢弃响应"
-            );
+        ExitReadinessFrame::Response { nonce, results } => {
+            handle_exit_readiness_response(runtime, peer, nonce, results).await;
         }
         ExitReadinessFrame::Request { nonce, targets } => {
             let now_unix_ms = unix_time_ms();
@@ -3522,6 +3662,121 @@ async fn handle_exit_readiness_frame(
             });
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn handle_exit_readiness_response(
+    runtime: &mut ClientRuntime,
+    peer: PeerRouteInfo,
+    nonce: [u8; 16],
+    results: Vec<crate::routing::recovery::RecoveryProbeResult>,
+) {
+    let Some(pending) = runtime.pending_exit_readiness.clone() else {
+        tracing::debug!(
+            peer = %peer.node_id,
+            nonce = ?nonce,
+            "当前没有待匹配的 Exit readiness 请求，丢弃响应"
+        );
+        return;
+    };
+    if peer.node_id != pending.target {
+        tracing::warn!(
+            expected = %pending.target,
+            actual = %peer.node_id,
+            "Exit readiness 响应来源与待验证目标不一致，失败关闭"
+        );
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_readiness.peer_mismatch",
+            )
+            .await;
+        return;
+    }
+
+    let response = ExitReadinessFrame::Response { nonce, results };
+    if response
+        .validate_response(pending.nonce, &pending.targets)
+        .is_err()
+        || !response.all_probes_passed()
+    {
+        tracing::warn!(
+            exit = %pending.target,
+            "Exit readiness 响应不匹配或未通过全部探测，失败关闭"
+        );
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_readiness.failed",
+            )
+            .await;
+        return;
+    }
+    if runtime.intended_exit().as_ref() != Some(&pending.target) {
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_readiness.target_changed",
+            )
+            .await;
+        return;
+    }
+
+    if let Some(staged) = runtime.exit_selection_gate.pending_exit().cloned() {
+        let committed = runtime.exit_selection_gate.commit_pending_exit();
+        if committed.as_ref() != Some(&staged) || staged != pending.target {
+            runtime
+                .enter_fail_closed(
+                    TrafficFailureKind::ExitUnavailable,
+                    unix_time_ms(),
+                    "recovery.exit_migration.target_mismatch",
+                )
+                .await;
+            return;
+        }
+    } else if runtime.exit_selection_gate.current_exit() != Some(&pending.target) {
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_target_changed_during_validation",
+            )
+            .await;
+        return;
+    }
+
+    let validation = fuckipv6_common::domain::TrafficSessionValidation::passed(
+        pending.local_validation.tun_validated,
+        pending.local_validation.routes_validated,
+        pending.local_validation.dns_validated,
+        true,
+        unix_time_ms().max(pending.local_validation.observed_at_unix_ms.max(1)),
+    );
+    if let Err(error) = runtime
+        .traffic_session
+        .mark_protected(validation, unix_time_ms().max(1))
+    {
+        tracing::error!(error = %error, "Exit readiness 证据无法建立受保护流量会话");
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ConnectionTimeout,
+                unix_time_ms(),
+                "recovery.validation_application_failed",
+            )
+            .await;
+        return;
+    }
+    runtime.pending_exit_readiness = None;
+    runtime.exit_selection_blocked = false;
+    runtime.exit_connection_watchdog = None;
+    runtime.publish_traffic_session().await;
+    tracing::info!(
+        exit = %pending.target,
+        "Exit readiness 全部通过，流量会话已进入受保护状态"
+    );
 }
 
 #[cfg(target_os = "linux")]

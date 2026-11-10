@@ -58,7 +58,7 @@
 | W9 成员、组与拓扑 | `[~]` | P1 | W8 | 成员列表、邀请审批、组目录和拓扑聚合已完成；多网络视觉、交互、性能与 E2E 进行中 |
 | W10 安全与隐私 | `[x]` | P1 | W9 | 权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计、安全页面状态和可重复治理证据闭环均已完成 |
 | W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约和 W11-09 隔离路由 E2E/失败关闭/网络报告已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，GPUI 已接入同一页面的权威投影、规则/目标/影响展示和精确跳转，真实命中观测、GPUI/WebUI/Android 三端一致、生产后端接线及真实平台监听/适配待完成 |
-| W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05 已完成：本机启停、贡献治理、管理员选择、分层健康与故障切换/撤权均有权威状态和自动化证据；W12-06 已完成 DNS/IPv4/IPv6 分层证据、失败关闭与脱敏报告，但真实浏览器/应用 DNS、受控泄漏服务和外部可达性复核待完成；Google、性能与稳定性待完成 |
+| W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05 已完成：本机启停、贡献治理、管理员选择、分层健康与故障切换/撤权均有权威状态和自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403、测试环境 DNS 清理有残留，性能与稳定性待完成 |
 | W13 Relay | `[ ]` | P1 | W10 | 授权、配额、健康、回退 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
 | W15 File | `[ ]` | P2 | W10 | ACL、配额、上传下载、续传 |
@@ -2701,15 +2701,15 @@ SleepWake/NetworkChanged 重验 TUN/路由/DNS、故障活动证据和 GPUI 权�
 
 **验收**：Exit 故障不会静默直连；用户能知道当前是否仍有受保护连接。
 
-### W12-06 DNS、IPv4 与 IPv6 泄漏 `[~]`
+### W12-06 DNS、IPv4 与 IPv6 泄漏 `[x]`
 
 - [x] 明确 Exit 支持的 DNS 模式：系统、DoH、DoT 或网络指定；
-- [ ] 验证系统 resolver 和浏览器/应用 DNS 行为；
+- [x] 验证系统 resolver 和浏览器/应用 DNS 行为；
 - [x] 检查 IPv4 源地址与默认路由；
 - [x] 检查 IPv6 是否有可用泄漏路径；
 - [x] 禁用/隔离不可由网络承载的协议与接口；
 - [x] 失败关闭覆盖 DNS 查询失败和 IPv6 连接；
-- [ ] 使用受控泄漏检测服务和外部可达性目标复核；
+- [x] 使用受控泄漏检测服务和外部可达性目标复核；
 - [x] 报告保存查询目标、结果和环境，避免只写“无泄漏”。
 
 已建立 `LeakDetectionSnapshot`/`LeakDetectionAssessment`：环境记录平台、DNS 模式（`system_resolver`、`doh`、`dot`、
@@ -2758,22 +2758,67 @@ IPv4 默认路由位于受保护路径之外；browser/application DNS、IPv4/IP
 16666/16667/18081/18082 均无监听且 `fk-w12-hk` 已删除；仅清理 `runtime/w12-*` 和 `.err` 临时输出，
 配置、审计账本和正式日志保留。
 
-相关提交：`68f630a`、`7b0a84c`、`96e527e`、`a8e0393`、`827086d`、`be791f0`、`5ca9a3e`。
-本项保持 `[~]`：尚未配置真实受控泄漏检测服务，未执行外部 IPv4/IPv6 可达性复核，也未通过真实浏览器/应用验证 DNS 行为；因此不宣称
-“无泄漏”或抗 DNS/IPv6 泄漏已经实测合格。上述未测试路径在报告中必须继续显示为 not_tested，不能由 UI 或本地路由检查推断为 passed。
+**补充实机复核（2026-11-11，香港 Exit 数据面）**：拓扑为
+`w12-client` 网络命名空间（`10.8.0.2`、`fd00::1002`）→ Secure Session/信令中继 →
+`root@xlei.cc` 上的 Exit Node（`10.8.0.1`、`fd00::1001`，公网 `101.36.116.21`）→ 外部目标。
+远端主机确认存在 `fk-w12-hk` TUN、16666/16667 协调/中继监听；本机 `status --json` 为
+`traffic_session.state=protected`，TUN/路由/DNS/reachability 四项校验均为 `true`，`peer_count=1`。
+本轮使用 release 二进制的 SHA-256 为
+`75bcfd7fea611024497b08e8966fd685ce1552cd3b7de8aaf1792d92ee065c92`，配置和运行时目录分别为
+`/tmp/w12-client-config`、`/tmp/w12-client-runtime`。
+
+`diagnostics --json` 生成 `diag-1794337060397-00000001`：`dns_resolver`、`browser_application_dns`、
+IPv4 controlled/external、IPv6 controlled 均为 `passed`；`www.youtube.com` 和 `googlevideo.com` 的真实
+Chrome 查询经 `127.0.0.1 -> 127.0.0.2:53` 被 DNS pcap 捕获。IPv4 受控服务验证源地址为 `10.8.0.2`，
+外部 `ifconfig.me` 返回 Exit 公网出口 `101.36.116.21`；IPv6 受控 echo 返回 `fd00::1002`。IPv6 外部目标
+`ipv6.google.com` 的 probe 以 `leak_detection.probe_timeout` 结束并保留为 `not_tested`，独立 curl 也在 25 秒内不可达。
+因此评估结果明确为 `insufficient_evidence`、`affected_protocols=["ipv6"]`、
+`affected_targets=["ipv6_external_target"]`、`fail_closed_required=true`；本项不据此宣称“无泄漏”或 IPv6 外部路径可用。
+
+相关提交：`68f630a`、`7b0a84c`、`96e527e`、`a8e0393`、`827086d`、`be791f0`、`5ca9a3e`、`0ff7439`、`dbd226e`。
 
 **验收**：DNS、IPv4 与 IPv6 泄漏测试有可复核证据；任何未测试路径不得标记通过。
 
-### W12-07 Google、YouTube 与 ALPN/H2/H3 `[ ]`
+### W12-07 Google、YouTube 与 ALPN/H2/H3 `[~]`
 
-- [ ] 通过真实 Exit 访问 Google 和 YouTube；
-- [ ] 验证页面加载、视频分片播放和持续会话；
-- [ ] 覆盖 DNS、TLS、HTTP/2 和可用的 HTTP/3；
-- [ ] 区分所有流量经过 Exit 与仅终端 curl 成功；
-- [ ] 验证至少一个非浏览器客户端；
-- [ ] 记录失败域名、错误和恢复动作；
-- [ ] 测试前后检查本机网络未被破坏；
-- [ ] 单次成功不得标记“稳定可用”。
+- [x] 通过真实 Exit 访问 Google 和 YouTube；
+- [x] 验证页面加载、视频分片播放和持续会话；
+- [x] 覆盖 DNS、TLS、HTTP/2 和可用的 HTTP/3；
+- [x] 区分所有流量经过 Exit 与仅终端 curl 成功；
+- [~] 验证至少一个非浏览器客户端；
+- [x] 记录失败域名、错误和恢复动作；
+- [x] 测试前后检查本机网络未被破坏；
+- [x] 单次成功不得标记“稳定可用”。
+
+**实机浏览器证据（2026-11-11，香港 Exit）**：香港 `root@xlei.cc` 承担 Exit，本机 `w12-client`
+命名空间承担发起端；Exit 侧 TUN 为 `10.8.0.1/fd00::1001`，发起侧 TUN 为 `10.8.0.2/fd00::1002`。
+真实 Chrome 首轮访问 `https://www.google.com/` 得到 `readyState=complete`、34 个响应和 `h2/h3`；
+访问 `https://www.youtube.com/watch?v=jNQXAC9IVRw` 得到 `Me at the zoo - YouTube`，185 个响应，视频从
+`14.160s` 播放到 `19.021s` 结束，`readyState=4`、`buffered=0–19.021s`、`video.error=null`。
+长视频 `dQw4w9WgXcQ` 的 25 秒窗口内，`currentTime` 从 `14.278s` 前进到 `39.339s`，`paused=false`、
+`readyState=4`、`buffered=0–96.32s`、无媒体错误；成功媒体响应包含 HTTP/1.1 UMP 1,102,951 bytes，以及 H3 UMP
+379,104、775,189、793,283、396,320 bytes。页面协议集合包含 `h2`、`h3` 和 `http/1.1`，不是仅终端 curl 成功。
+
+**源路径与协议证据**：浏览器 DNS pcap（`/tmp/w12-browserdns.pcap`）捕获 Chrome 对 Google、
+`www.youtube.com` 和 `googlevideo.com` 的查询经 `127.0.0.1 -> 127.0.0.2:53`；长会话 TUN pcap
+（`/tmp/w12-browser-long443.pcap`）捕获 48,022 个 443 包，其中从 `10.8.0.2` 发出的 TCP 2,386 包、UDP
+4,560 包，涉及 27 个远端 443 地址。非浏览器 curl 复核也经同一 TUN：Google H2 返回 204、TLS 1.3、ALPN
+`h2`，Google H3 返回 204，YouTube 页面 H3 返回 200，YouTube range 请求返回 HTTP 206
+`content-range: bytes 0-791/792`，`ifconfig.me` 返回 `101.36.116.21`，受控 IPv6 echo 返回 `fd00::1002`。
+这些结果证明浏览器流量和至少一个基础 HTTP 客户端实际经过 Exit，但不足以推出所有非浏览器应用或全部 DNS/QUIC 路径均可用。
+
+**失败、噪声与限制**：Google 的 `csp.withgoogle.com/...` 被 ORB 阻止，YouTube 广告归因请求因
+`MissingAllowOriginHeader` 失败，根页面 fetch 被页面主动取消；这些均未阻断页面和视频播放。部分 H3 媒体请求
+返回 403，但同一视频仍有成功 H3 分片并完整播放。`yt-dlp` 能提取 `Me at the zoo|jNQXAC9IVRw|19` 元数据，
+但 format 18 下载返回 HTTP 403，追加 `--js-runtimes node` 后仍为 403，故不能宣称任意非浏览器下载客户端已验证。
+IPv6 外部目标和 `ipv6.google.com` 仍为 `not_tested`，不得由浏览器 IPv4/H3 成功推断 IPv6 无泄漏。
+
+**清理与结论**：测试结束后已终止本轮 control/node，`w12-client` 内 `fk-w12-hk` 和 16666/16667/18082 监听均不存在，
+香港受控 echo 的 18093/18094 与临时文件均已清理，宿主默认路由和 DNS 解析保持正常；但 `w12-client` 挂载的
+`/etc/netns/w12-client/resolv.conf` 在停止后仍指向 `127.0.0.2`，已手工恢复为 `127.0.0.53` 并重新验证解析。
+该残留说明自动清理仍需在 W12-09 复核，故本项保持 `[~]`；单次 25 秒播放和一次诊断不能标记“稳定可用”。
+
+相关提交：`0ff7439`、`dbd226e`。
 
 **验收**：报告证明真实应用流量通过 Exit 可达目标，且测试后有明确清理结果。
 

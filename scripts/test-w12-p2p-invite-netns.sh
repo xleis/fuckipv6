@@ -420,7 +420,7 @@ SH
         --argjson revision "$revision" --argjson now "$now_ms" \
         '{command:"redeem_invitation",payload:{coordinator_url:$url,request:{network_id:$network,code:$code,invitation_id:$invitation,expected_invitation_revision:$revision,preview_digest:$digest,terms_hash:$terms,acknowledged_at_unix_ms:$now,exit_contribution_acknowledged:true}}}')
     ipc_command "$NODE1_SOCK" "$redeem_command" >"$WORK/node1-redeem.json"
-    jq -e --arg id "$NODE1_ID" '.data.node_id == $id and .data.granted_permanent_membership == true' "$WORK/node1-redeem.json" >/dev/null \
+    jq -e --arg id "$NODE1_ID" '.data.node_id == $id and .data.grants_permanent_membership == false' "$WORK/node1-redeem.json" >/dev/null \
         || fail "node1 redemption did not grant ordinary membership"
 
     info "node2: re-preview after node1 incremented invitation revision, then redeem"
@@ -437,7 +437,7 @@ SH
         --argjson revision "$revision" --argjson now "$now_ms" \
         '{command:"redeem_invitation",payload:{coordinator_url:$url,request:{network_id:$network,code:$code,invitation_id:$invitation,expected_invitation_revision:$revision,preview_digest:$digest,terms_hash:$terms,acknowledged_at_unix_ms:$now,exit_contribution_acknowledged:true}}}')
     ipc_command "$NODE2_SOCK" "$redeem_command" >"$WORK/node2-redeem.json"
-    jq -e --arg id "$NODE2_ID" '.data.node_id == $id and .data.granted_permanent_membership == true' "$WORK/node2-redeem.json" >/dev/null \
+    jq -e --arg id "$NODE2_ID" '.data.node_id == $id and .data.grants_permanent_membership == false' "$WORK/node2-redeem.json" >/dev/null \
         || fail "node2 redemption did not grant ordinary membership"
 
     info "waiting for active networks and authoritative roster admission"

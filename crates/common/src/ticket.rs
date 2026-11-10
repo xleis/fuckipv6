@@ -7,7 +7,7 @@ use std::fmt;
 ///
 /// 格式规范:
 /// `fk://<base64_pubkey>@<host:port>?name=<network_name>&v6=<ipv6_prefix>&v4=<ipv4_prefix>`
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct NetworkTicket {
     /// 协调服务或创建者公钥 (Ed25519, 32字节)
     pub pubkey: [u8; 32],
@@ -19,6 +19,25 @@ pub struct NetworkTicket {
     pub ipv6_prefix: Option<String>,
     /// 分配的虚拟 IPv4 地址段 (如 10.8.0.0/24)
     pub ipv4_prefix: Option<String>,
+}
+
+impl fmt::Debug for NetworkTicket {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NetworkTicket")
+            .field("pubkey", &"[redacted]")
+            .field("endpoint", &self.endpoint)
+            .field("network_name", &self.network_name)
+            .field(
+                "ipv6_prefix",
+                &self.ipv6_prefix.as_ref().map(|_| "[present]"),
+            )
+            .field(
+                "ipv4_prefix",
+                &self.ipv4_prefix.as_ref().map(|_| "[present]"),
+            )
+            .finish()
+    }
 }
 
 impl NetworkTicket {
@@ -205,5 +224,18 @@ mod tests {
         assert_eq!(parsed.endpoint, "1.2.3.4:6666");
         assert_eq!(parsed.network_name, "default");
         assert!(parsed.ipv6_prefix.is_none());
+    }
+
+    #[test]
+    fn ticket_debug_redacts_credential_material() {
+        let ticket = NetworkTicket::new([42_u8; 32], "relay.example:6666", "team-vpn")
+            .with_ipv6("fd00::1000/120")
+            .with_ipv4("10.8.0.0/24");
+        let debug = format!("{ticket:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains(&ticket.pubkey_base64()));
+        assert!(!debug.contains("fd00::1000/120"));
+        assert!(!debug.contains("10.8.0.0/24"));
+        assert!(!debug.contains("fk://"));
     }
 }

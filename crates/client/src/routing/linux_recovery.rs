@@ -22,15 +22,15 @@ use fuckipv6_common::domain::{
 };
 use tokio::net::lookup_host;
 use tokio::process::Command;
-use tokio::time::timeout;
+use tokio::time::{timeout, Instant};
 
 use super::doh_dns;
 use super::linux_route::LinuxRouteManager;
 use super::recovery::{
     DnsRecoverySnapshot, FailureApplication, InvalidatedPath, PathRecoveryState, RecoveryBackend,
-    RecoveryOperationError, RecoveryProbeObservation, RecoveryProbeStage, RecoveryProbeState,
-    RecoveryProbeTarget, RecoveryRepairReport, RecoveryResourceSnapshot, RecoveryResourceState,
-    RecoveryTrigger, RouteRecoverySnapshot, TunRecoverySnapshot,
+    RecoveryOperationError, RecoveryProbeObservation, RecoveryProbeResult, RecoveryProbeStage,
+    RecoveryProbeState, RecoveryProbeTarget, RecoveryRepairReport, RecoveryResourceSnapshot,
+    RecoveryResourceState, RecoveryTrigger, RouteRecoverySnapshot, TunRecoverySnapshot,
 };
 
 const LINK_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -341,6 +341,38 @@ async fn probe_https_host(host: &str) -> Result<RecoveryProbeObservation, Recove
             RecoveryProbeStage::Tls,
             "recovery.probe_tls_failed",
         )),
+    }
+}
+
+/// Probe from the Exit's own physical network stack. The returned structured
+/// evidence travels back to the client over the authenticated Secure Session.
+pub(crate) async fn probe_exit_readiness_target(
+    target: RecoveryProbeTarget,
+) -> RecoveryProbeResult {
+    let started = Instant::now();
+    let Some(host) = probe_host_for_target(&target, &BTreeMap::new()) else {
+        return RecoveryProbeResult {
+            target,
+            state: RecoveryProbeState::Unsupported,
+            failed_stage: None,
+            duration_ms: 0,
+            error_code: Some("recovery.probe_target_unsupported".into()),
+        };
+    };
+    let (state, failed_stage, error_code) = match probe_https_host(&host).await {
+        Ok(observation) => (
+            observation.state,
+            observation.failed_stage,
+            observation.error_code,
+        ),
+        Err(error) => (RecoveryProbeState::Failed, None, Some(error.code)),
+    };
+    RecoveryProbeResult {
+        target,
+        state,
+        failed_stage,
+        duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        error_code,
     }
 }
 

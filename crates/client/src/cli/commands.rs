@@ -42,10 +42,15 @@ use crate::p2p::quic;
 use crate::p2p::relay::QuicRelayClient;
 use crate::remote_node::RemoteNodeSession;
 #[cfg(target_os = "linux")]
+use crate::routing::exit_readiness::encode_exit_readiness_frame;
+use crate::routing::exit_readiness::{
+    decode_exit_readiness_frame, is_exit_readiness_frame, ExitReadinessFrame,
+};
+#[cfg(target_os = "linux")]
 use crate::routing::linux_exit::LinuxExitForwarder;
 #[cfg(target_os = "linux")]
 use crate::routing::linux_recovery::{
-    LinuxRecoveryAdapter, LinuxRecoveryTun, RecoveryAuditContext,
+    probe_exit_readiness_target, LinuxRecoveryAdapter, LinuxRecoveryTun, RecoveryAuditContext,
 };
 #[cfg(target_os = "linux")]
 use crate::routing::linux_recovery_events::{LinuxRecoveryEvent, LinuxRecoveryEventWatcher};
@@ -3448,11 +3453,147 @@ async fn record_p2p_rx_for_peer(stats: &StatsCollector, peer: &PeerRouteInfo, by
         .await;
 }
 
-async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacket, source: &str) {
-    if let Some(payload) = admit_inbound_packet(runtime, packet).await {
-        if let Some(tun) = runtime.tun_io.tun_mut() {
-            write_payload_to_tun(tun, &runtime.stats, &payload, source).await;
+#[cfg(target_os = "linux")]
+async fn handle_exit_readiness_frame(
+    runtime: &mut ClientRuntime,
+    src_ip: IpAddr,
+    peer: PeerRouteInfo,
+    frame: ExitReadinessFrame,
+) {
+    match frame {
+        ExitReadinessFrame::Response { nonce, .. } => {
+            tracing::debug!(
+                peer = %peer.node_id,
+                nonce = ?nonce,
+                "当前没有待匹配的 Exit readiness 请求，丢弃响应"
+            );
         }
+        ExitReadinessFrame::Request { nonce, targets } => {
+            let now_unix_ms = unix_time_ms();
+            if !exit_readiness_request_authorized(runtime, &peer, now_unix_ms) {
+                return;
+            }
+
+            let outbound = runtime.outbound.clone();
+            let stats = runtime.stats.clone();
+            let response_src = IpAddr::V6(runtime.assigned_ip);
+            let response_dst = IpAddr::V6(peer.virtual_ip);
+            tracing::debug!(
+                source = %src_ip,
+                peer = %peer.node_id,
+                "已接受已认证的 Exit readiness 探测请求"
+            );
+            tokio::spawn(async move {
+                let mut results = Vec::with_capacity(targets.len());
+                for target in targets {
+                    results.push(probe_exit_readiness_target(target).await);
+                }
+                let response = match ExitReadinessFrame::response(nonce, results) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        tracing::warn!(
+                            peer = %peer.node_id,
+                            "Exit readiness 探测结果无法构建响应: {error}"
+                        );
+                        return;
+                    }
+                };
+                let payload = match encode_exit_readiness_frame(&response) {
+                    Ok(payload) => payload,
+                    Err(error) => {
+                        tracing::warn!(
+                            peer = %peer.node_id,
+                            "Exit readiness 响应无法编码: {error}"
+                        );
+                        return;
+                    }
+                };
+                let packet = OutboundPacket::owned(response_src, response_dst, payload);
+                match outbound.submit(packet) {
+                    OutboundSubmitOutcome::Queued => {}
+                    OutboundSubmitOutcome::QueueFull | OutboundSubmitOutcome::WorkerUnavailable => {
+                        stats.record_p2p_send_error().await;
+                        tracing::warn!(
+                            peer = %peer.node_id,
+                            "Exit readiness 响应发送队列不可用"
+                        );
+                    }
+                }
+            });
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn exit_readiness_request_authorized(
+    runtime: &ClientRuntime,
+    peer: &PeerRouteInfo,
+    now_unix_ms: u64,
+) -> bool {
+    if !runtime.local_exit_enabled
+        || runtime.local_exit_runtime_problem.is_some()
+        || !runtime.exit_node_manager.is_exit_node()
+    {
+        tracing::debug!("本机未处于可服务的 Exit 状态，拒绝 readiness 探测");
+        return false;
+    }
+    let Some(forwarder) = runtime.exit_forwarder.as_ref() else {
+        tracing::debug!("Exit 转发器尚未安装，拒绝 readiness 探测");
+        return false;
+    };
+    if forwarder.is_draining() {
+        tracing::debug!("Exit 转发器正在排空，拒绝新会话 readiness 探测");
+        return false;
+    }
+    if !runtime
+        .exit_node_manager
+        .is_client_allowed(peer.client_id.as_ref())
+    {
+        tracing::warn!("Exit Node 拒绝未授权客户端的 readiness 探测");
+        return false;
+    }
+    if let Err(denial) = runtime
+        .exit_contribution_gate
+        .authorize(&peer.node_id, now_unix_ms)
+    {
+        tracing::warn!(
+            client = %peer.node_id,
+            reason_code = denial.reason_code(),
+            "Exit Node 拒绝未通过贡献治理授权的 readiness 探测"
+        );
+        return false;
+    }
+    true
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn handle_exit_readiness_frame(
+    _runtime: &mut ClientRuntime,
+    _src_ip: IpAddr,
+    peer: PeerRouteInfo,
+    _frame: ExitReadinessFrame,
+) {
+    tracing::debug!(
+        peer = %peer.node_id,
+        "当前平台没有可用的 Exit readiness 数据面，丢弃控制帧"
+    );
+}
+
+async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacket, source: &str) {
+    match admit_inbound_packet(runtime, packet).await {
+        Some(InboundAdmission::Payload(payload)) => {
+            if let Some(tun) = runtime.tun_io.tun_mut() {
+                write_payload_to_tun(tun, &runtime.stats, &payload, source).await;
+            }
+        }
+        Some(InboundAdmission::ExitReadiness {
+            src_ip,
+            peer,
+            frame,
+        }) => {
+            handle_exit_readiness_frame(runtime, src_ip, peer, frame).await;
+        }
+        None => {}
     }
 }
 
@@ -3463,8 +3604,16 @@ async fn handle_inbound_packet_batch(
 ) {
     let mut payloads = Vec::with_capacity(packets.len());
     for packet in packets {
-        if let Some(payload) = admit_inbound_packet(runtime, packet).await {
-            payloads.push(payload);
+        match admit_inbound_packet(runtime, packet).await {
+            Some(InboundAdmission::Payload(payload)) => payloads.push(payload),
+            Some(InboundAdmission::ExitReadiness {
+                src_ip,
+                peer,
+                frame,
+            }) => {
+                handle_exit_readiness_frame(runtime, src_ip, peer, frame).await;
+            }
+            None => {}
         }
     }
     if let Some(tun) = runtime.tun_io.tun_mut() {
@@ -3472,12 +3621,21 @@ async fn handle_inbound_packet_batch(
     }
 }
 
+enum InboundAdmission {
+    Payload(InboundPayload),
+    ExitReadiness {
+        src_ip: IpAddr,
+        peer: PeerRouteInfo,
+        frame: ExitReadinessFrame,
+    },
+}
+
 /// Authenticate, authorize, and classify one ingress packet without writing it
 /// to TUN. The returned owned payload remains valid until a batch write finishes.
 async fn admit_inbound_packet(
     runtime: &mut ClientRuntime,
     packet: InboundPacket,
-) -> Option<InboundPayload> {
+) -> Option<InboundAdmission> {
     let (src_ip, plain_payload, peer) = match packet {
         InboundPacket::AuthenticatedPlaintext {
             src_ip,
@@ -3513,6 +3671,21 @@ async fn admit_inbound_packet(
         tracing::debug!("丢弃未注册来源 {src_ip} 的入站数据包");
         return None;
     };
+    if is_exit_readiness_frame(&plain_payload) {
+        let frame = match decode_exit_readiness_frame(&plain_payload) {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::debug!("丢弃来自 {} 的无效 Exit readiness 帧: {error}", src_ip);
+                return None;
+            }
+        };
+        record_p2p_rx_for_peer(&runtime.stats, &peer, plain_payload.len()).await;
+        return Some(InboundAdmission::ExitReadiness {
+            src_ip,
+            peer,
+            frame,
+        });
+    }
     // Use one authoritative time sample for all authorization and accounting
     // decisions made while admitting this packet.
     let now_unix_ms = unix_time_ms();
@@ -3629,7 +3802,7 @@ async fn admit_inbound_packet(
     }
 
     record_p2p_rx_for_peer(&runtime.stats, &peer, plain_payload.len()).await;
-    Some(plain_payload)
+    Some(InboundAdmission::Payload(plain_payload))
 }
 
 async fn handle_runtime_signaling_event(
@@ -4289,7 +4462,6 @@ struct OutboundPacket {
 }
 
 impl OutboundPacket {
-    #[cfg(test)]
     fn owned(src_ip: IpAddr, dst_ip: IpAddr, payload: Vec<u8>) -> Self {
         let mut buffer = vec![0u8; DATA_HEADER_LEN + payload.len() + AEAD_TAG_LEN];
         buffer[DATA_HEADER_LEN..DATA_HEADER_LEN + payload.len()].copy_from_slice(&payload);
@@ -4319,7 +4491,6 @@ impl OutboundPacket {
     #[cfg(test)]
     fn payload(&self) -> &[u8] {
         match &self.payload {
-            #[cfg(test)]
             OutboundPacketPayload::Owned(buffer) => {
                 &buffer[DATA_HEADER_LEN..DATA_HEADER_LEN + self.plaintext_len()]
             }
@@ -4333,7 +4504,6 @@ impl OutboundPacket {
 
     fn plaintext_len(&self) -> usize {
         match &self.payload {
-            #[cfg(test)]
             OutboundPacketPayload::Owned(buffer) => buffer.len() - DATA_HEADER_LEN - AEAD_TAG_LEN,
             OutboundPacketPayload::Pooled(packet) => {
                 packet
@@ -4347,7 +4517,6 @@ impl OutboundPacket {
 
     fn buffer_mut(&mut self) -> &mut [u8] {
         match &mut self.payload {
-            #[cfg(test)]
             OutboundPacketPayload::Owned(buffer) => buffer,
             OutboundPacketPayload::Pooled(packet) => packet
                 .packet
@@ -4359,7 +4528,6 @@ impl OutboundPacket {
 
     fn into_encrypted_bytes(self, encoded_len: usize) -> Bytes {
         match self.payload {
-            #[cfg(test)]
             OutboundPacketPayload::Owned(buffer) => Bytes::copy_from_slice(&buffer[..encoded_len]),
             OutboundPacketPayload::Pooled(mut pooled) => {
                 let packet = pooled
@@ -4381,7 +4549,6 @@ impl OutboundPacket {
 
 #[derive(Debug)]
 enum OutboundPacketPayload {
-    #[cfg(test)]
     Owned(Vec<u8>),
     Pooled(PooledOutboundPacket),
 }

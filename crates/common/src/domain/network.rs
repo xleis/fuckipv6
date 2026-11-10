@@ -536,6 +536,53 @@ impl NetworkRecord {
     }
 }
 
+/// Wire-stable membership terms for direct join disclosure. Unlike the legacy
+/// `MembershipTerms` JSON adapter, every field has exactly one binary encoding.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NetworkJoinTerms {
+    pub network_policy_revision: u64,
+    pub privacy_policy_revision: u64,
+    pub exit_contribution: ExitContributionObligation,
+    pub exit_contribution_scope: ExitContributionScope,
+    pub exit_contribution_mode: ExitContributionMode,
+    #[serde(default)]
+    pub member_limit: Option<u32>,
+}
+
+impl NetworkJoinTerms {
+    pub fn validate(&self) -> DomainResult<()> {
+        self.to_membership_terms().validate()
+    }
+
+    pub fn content_hash(&self) -> DomainResult<ContentHash> {
+        self.to_membership_terms().content_hash()
+    }
+
+    fn to_membership_terms(&self) -> MembershipTerms {
+        MembershipTerms {
+            network_policy_revision: self.network_policy_revision,
+            privacy_policy_revision: self.privacy_policy_revision,
+            exit_contribution: self.exit_contribution,
+            exit_contribution_scope: self.exit_contribution_scope,
+            exit_contribution_mode: self.exit_contribution_mode,
+            member_limit: self.member_limit,
+        }
+    }
+}
+
+impl From<MembershipTerms> for NetworkJoinTerms {
+    fn from(terms: MembershipTerms) -> Self {
+        Self {
+            network_policy_revision: terms.network_policy_revision,
+            privacy_policy_revision: terms.privacy_policy_revision,
+            exit_contribution: terms.exit_contribution,
+            exit_contribution_scope: terms.exit_contribution_scope,
+            exit_contribution_mode: terms.exit_contribution_mode,
+            member_limit: terms.member_limit,
+        }
+    }
+}
+
 /// Short-lived, authenticated disclosure returned by the Coordinator before a
 /// direct network join. It deliberately contains no roster, endpoint topology,
 /// invitation credential or member activity.
@@ -549,7 +596,7 @@ pub struct NetworkJoinPreview {
     pub policy_revision: u64,
     pub privacy_policy_revision: u64,
     pub join_mode: NetworkJoinMode,
-    pub terms: MembershipTerms,
+    pub terms: NetworkJoinTerms,
     pub terms_hash: ContentHash,
     pub preview_digest: ContentHash,
     pub issued_at_unix_ms: u64,
@@ -605,7 +652,7 @@ impl NetworkJoinPreview {
                 "network join preview validity window is too long",
             ));
         }
-        let terms = record.membership_terms();
+        let terms = NetworkJoinTerms::from(record.membership_terms());
         let mut preview = Self {
             network_id: record.network_id.clone(),
             public_key: record.public_key.clone(),
@@ -2450,6 +2497,11 @@ mod tests {
             preview.terms.privacy_policy_revision,
             preview.privacy_policy_revision
         );
+        let encoded = crate::codec::encode(&preview).expect("postcard-encode join preview");
+        let decoded: NetworkJoinPreview =
+            crate::codec::decode(&encoded).expect("postcard-decode join preview");
+        assert_eq!(decoded, preview);
+        assert_eq!(decoded.terms.content_hash().unwrap(), preview.terms_hash);
 
         let value = serde_json::to_value(&preview).unwrap();
         let object = value.as_object().unwrap();

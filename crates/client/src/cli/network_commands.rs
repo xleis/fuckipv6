@@ -4,8 +4,10 @@ use crate::node::{
     NodeCommand, NodeCommandOutcome, NodeCreateNetworkCommand, NodeJoinNetworkCommand,
     NodeNetworkSelection, NodeRoutingMode, NodeUpdateRoutingCommand,
 };
+use crate::signaling::client::SignalingClient;
 use anyhow::Result;
-use fuckipv6_common::NetworkTicket;
+use fuckipv6_common::domain::NetworkJoinPreviewRequest;
+use fuckipv6_common::{NatType, NetworkTicket};
 
 /// 一键创建网络并作为对等节点运行（生成邀请票据 fk://...）
 pub async fn host(
@@ -66,8 +68,13 @@ pub async fn join(
 ) -> Result<()> {
     ensure_options_can_apply(auto_start, &options)?;
     let network_name = resolve_join_network_name(server, name)?;
+    preview_join_ticket(server).await?;
     println!("🌐 通过网络控制面加入 [{network_name}]...");
-    println!("服务器地址: {server}");
+    if server.starts_with(NetworkTicket::URI_SCHEME) {
+        println!("目标: 已验签的 fk:// 票据");
+    } else {
+        println!("服务器地址: {server}");
+    }
 
     let session = commands::cli_node_session().await?;
     let outcome = commands::execute_cli_node_command(
@@ -240,6 +247,50 @@ async fn apply_route_options(
         .await?;
         println!("{}", completed_message(outcome)?);
     }
+    Ok(())
+}
+
+async fn preview_join_ticket(server: &str) -> Result<()> {
+    if !server.starts_with(NetworkTicket::URI_SCHEME) {
+        return Ok(());
+    }
+    let ticket = NetworkTicket::parse(server)?;
+    let config_manager = ConfigManager::new()?;
+    let identity = config_manager.load_node_identity()?;
+    let signaling =
+        SignalingClient::connect(&ticket.websocket_url(), identity, 0, NatType::Unknown).await?;
+    let preview = signaling
+        .preview_network_join(NetworkJoinPreviewRequest {
+            coordinator_public_key: ticket.pubkey,
+            network_name: ticket.network_name.clone(),
+        })
+        .await;
+    let close_result = signaling.close().await;
+    let preview = preview?;
+    close_result?;
+
+    println!("📋 已验签加入预览");
+    println!(
+        "    网络: {} ({})",
+        preview.network_name, preview.network_id
+    );
+    println!("    加入模式: {:?}", preview.join_mode);
+    println!(
+        "    Exit 贡献: {:?} / {:?}，加入承诺: {}",
+        preview.terms.exit_contribution_mode,
+        preview.terms.exit_contribution_scope,
+        preview
+            .terms
+            .exit_contribution_mode
+            .requires_join_commitment()
+    );
+    println!(
+        "    策略 revision: {}，隐私 revision: {}",
+        preview.terms.network_policy_revision, preview.terms.privacy_policy_revision
+    );
+    println!("    条款哈希: {}", preview.terms_hash.as_str());
+    println!("    预览摘要: {}", preview.preview_digest.as_str());
+    println!("    有效期至: {} ms", preview.expires_at_unix_ms);
     Ok(())
 }
 

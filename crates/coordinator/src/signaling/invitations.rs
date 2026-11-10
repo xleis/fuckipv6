@@ -1005,7 +1005,7 @@ mod tests {
         assert!(retried.already_redeemed);
         assert_eq!(retried.invitation_revision, first.invitation_revision);
 
-        let roster = read_network_record(&dir.join("network.json"), &network_id()).unwrap();
+        let roster = read_network_record(&dir.join("network.json"), Some(&network_id())).unwrap();
         assert!(roster.members.contains(&invitee));
         assert!(roster.administrators.contains(&invitee));
         let listed = store.list(&network_id(), &owner(), NOW + 4).unwrap();
@@ -1079,7 +1079,7 @@ mod tests {
         assert_eq!(retried.status, MemberLifecycleStatus::Removed);
         assert_eq!(retried.revision, removed.revision);
         assert_eq!(retried.access_epoch, removed.access_epoch);
-        let roster = read_network_record(&dir.join("network.json"), &network_id()).unwrap();
+        let roster = read_network_record(&dir.join("network.json"), Some(&network_id())).unwrap();
         assert!(!roster.members.contains(&invitee));
         assert!(!roster.administrators.contains(&invitee));
     }
@@ -1268,7 +1268,7 @@ mod tests {
             error.to_string(),
             "invitation.error.creator_authority_revoked"
         );
-        let roster = read_network_record(&path, &network_id()).unwrap();
+        let roster = read_network_record(&path, Some(&network_id())).unwrap();
         assert!(!roster.members.contains(&invitee));
     }
 
@@ -1305,7 +1305,7 @@ mod tests {
             )
             .unwrap_err();
         assert!(limit_error.to_string().contains("member limit"));
-        let limited_roster = read_network_record(&limited_path, &network_id()).unwrap();
+        let limited_roster = read_network_record(&limited_path, Some(&network_id())).unwrap();
         assert!(!limited_roster.members.contains(&limited_invitee));
 
         let policy_dir = test_dir("capability-policy-change");
@@ -1344,7 +1344,7 @@ mod tests {
             policy_error.to_string(),
             "invitation.error.capability_policy_changed"
         );
-        let policy_roster = read_network_record(&policy_path, &network_id()).unwrap();
+        let policy_roster = read_network_record(&policy_path, Some(&network_id())).unwrap();
         assert!(!policy_roster.members.contains(&policy_invitee));
     }
 
@@ -1389,7 +1389,7 @@ mod tests {
             .filter_map(|result| result.as_ref().err().map(ToString::to_string))
             .collect::<Vec<_>>();
         assert_eq!(errors, vec!["invitation.error.stale_revision"]);
-        let roster = read_network_record(&dir.join("network.json"), &network_id()).unwrap();
+        let roster = read_network_record(&dir.join("network.json"), Some(&network_id())).unwrap();
         assert_ne!(
             roster.members.contains(&first),
             roster.members.contains(&second)

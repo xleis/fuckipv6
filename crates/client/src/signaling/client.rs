@@ -544,8 +544,6 @@ pub(crate) enum NetworkJoinPreviewControlError {
     TimedOut,
     #[error("加入预览请求被拒绝")]
     Rejected(u16),
-    #[error("加入预览响应无效")]
-    InvalidResponse,
     #[error("加入预览连接尚未就绪")]
     Unavailable,
 }
@@ -656,11 +654,12 @@ fn network_join_preview_ack_matches(
         && expected.network_name == preview.network_name
         && preview.network_id == expected_network_id
         && preview.terms_hash == terms_hash
+        && preview.terms.validate().is_ok()
+        && preview.policy_revision == preview.terms.network_policy_revision
+        && preview.privacy_policy_revision == preview.terms.privacy_policy_revision
         && preview.preview_digest == preview_digest
-        && preview.issued_at_unix_ms > 0
-        && preview.issued_at_unix_ms <= now_unix_ms.saturating_add(60_000)
-        && preview.issued_at_unix_ms < preview.expires_at_unix_ms
-        && !preview.is_expired(now_unix_ms)
+        && preview.validate_freshness(now_unix_ms).is_ok()
+        && preview.signature_is_valid(&expected.coordinator_public_key)
 }
 
 #[derive(Clone)]
@@ -1910,7 +1909,10 @@ pub enum SignalingEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fuckipv6_common::domain::{MembershipRole, NodeId};
+    use fuckipv6_common::domain::{
+        ExitContributionMode, ExitContributionObligation, ExitContributionScope, MembershipRole,
+        NetworkCreateProfile, NetworkJoinMode, NetworkRecord, NetworkVisibility, NodeId, PublicKey,
+    };
     use futures::SinkExt;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::net::TcpListener;
@@ -2146,6 +2148,71 @@ mod tests {
     }
 
     #[test]
+    fn network_join_preview_ack_requires_matching_signed_fresh_terms() -> Result<()> {
+        let coordinator = Identity::generate()?;
+        let owner = NodeId::from_public_key(&coordinator.public_key());
+        let now = current_timestamp_millis();
+        let network = NetworkRecord::create_owned(
+            NetworkCreateProfile {
+                name: "preview-network".into(),
+                purpose: "Exercise signed join preview correlation".into(),
+                icon: "home".into(),
+                language: "zh-CN".into(),
+                region: "HK".into(),
+                tags: Vec::new(),
+                capability_declarations: Vec::new(),
+                visibility: NetworkVisibility::Unlisted,
+                join_mode: NetworkJoinMode::InviteOnly,
+                exit_contribution: ExitContributionObligation::NotRequired,
+                exit_contribution_scope: ExitContributionScope::NotApplicable,
+                exit_contribution_mode: ExitContributionMode::Disabled,
+                exit_selection_policy: Default::default(),
+            },
+            PublicKey::from_bytes([51; 32]),
+            owner,
+            now,
+        )?;
+        let preview = NetworkJoinPreview::for_record(
+            &network,
+            &coordinator,
+            now,
+            now + fuckipv6_common::domain::NETWORK_JOIN_PREVIEW_VALIDITY_MS,
+        )?;
+        let request = NetworkJoinPreviewRequest {
+            coordinator_public_key: coordinator
+                .public_key()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("coordinator key must contain 32 bytes"))?,
+            network_name: network.name.clone(),
+        };
+        assert!(network_join_preview_ack_matches(&request, &preview, now));
+
+        let mut tampered = preview.clone();
+        tampered.network_name = "other-network".into();
+        assert!(!network_join_preview_ack_matches(&request, &tampered, now));
+
+        let wrong_signer = Identity::generate()?;
+        let wrong_request = NetworkJoinPreviewRequest {
+            coordinator_public_key: wrong_signer
+                .public_key()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("coordinator key must contain 32 bytes"))?,
+            network_name: network.name.clone(),
+        };
+        assert!(!network_join_preview_ack_matches(
+            &wrong_request,
+            &preview,
+            now
+        ));
+        assert!(!network_join_preview_ack_matches(
+            &request,
+            &preview,
+            now + fuckipv6_common::domain::NETWORK_JOIN_PREVIEW_VALIDITY_MS
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn invitation_notifications_are_redacted_and_never_include_plaintext_codes() {
         let plaintext = format!("fkinv_{}", "A".repeat(43));
         let event = signaling_message_to_event(SignalingMessage::InvitationChanged {
@@ -2232,6 +2299,7 @@ mod tests {
             known_peers_tx,
             Arc::new(JoinRequestResponseHub::default()),
             Arc::new(InvitationResponseHub::default()),
+            Arc::new(NetworkJoinPreviewResponseHub::default()),
             shutdown_rx,
         ));
 

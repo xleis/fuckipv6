@@ -212,6 +212,7 @@ impl EmbeddedCoordinator {
                 .with_member_lifecycle_store(member_lifecycle_store)
                 .with_exit_contribution_store(exit_contribution_store)
                 .with_network_record_path(network_record_path)
+                .with_node_identity(node_identity)
                 .bind()
                 .await
                 .context("无法绑定内嵌信令服务")?;

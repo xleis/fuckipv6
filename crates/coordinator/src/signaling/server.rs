@@ -66,6 +66,7 @@ pub struct SignalingServer {
     exit_contribution_store: Option<Arc<ExitContributionRequestStore>>,
     exit_availability: Arc<ExitAvailabilityObservationRegistry>,
     network_record_path: Option<PathBuf>,
+    node_identity: Option<Arc<Identity>>,
     listener: Option<TcpListener>,
 }
 
@@ -85,6 +86,7 @@ impl SignalingServer {
             exit_contribution_store: None,
             exit_availability: Arc::new(ExitAvailabilityObservationRegistry::default()),
             network_record_path: None,
+            node_identity: None,
             listener: None,
         })
     }
@@ -101,6 +103,7 @@ impl SignalingServer {
             exit_contribution_store: None,
             exit_availability: Arc::new(ExitAvailabilityObservationRegistry::default()),
             network_record_path: None,
+            node_identity: None,
             listener: None,
         }
     }
@@ -138,6 +141,13 @@ impl SignalingServer {
     /// Without it, network preview requests fail closed.
     pub fn with_network_record_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.network_record_path = Some(path.into());
+        self
+    }
+
+    /// Bind join disclosures to the Coordinator owner identity embedded in join
+    /// tickets. Without this identity, preview requests fail closed.
+    pub fn with_node_identity(mut self, identity: Identity) -> Self {
+        self.node_identity = Some(Arc::new(identity));
         self
     }
 
@@ -290,6 +300,7 @@ impl SignalingServer {
                     let exit_contribution_store = self.exit_contribution_store.clone();
                     let exit_availability = self.exit_availability.clone();
                     let network_record_path = self.network_record_path.clone();
+                    let node_identity = self.node_identity.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
@@ -304,6 +315,7 @@ impl SignalingServer {
                             exit_contribution_store,
                             exit_availability,
                             network_record_path,
+                            node_identity,
                         )
                         .await
                         {
@@ -356,6 +368,7 @@ async fn handle_connection(
     exit_contribution_store: Option<Arc<ExitContributionRequestStore>>,
     exit_availability: Arc<ExitAvailabilityObservationRegistry>,
     network_record_path: Option<PathBuf>,
+    node_identity: Option<Arc<Identity>>,
 ) -> Result<()> {
     let local_addr = stream.local_addr().ok();
     let ws_stream = accept_async_with_config(stream, Some(signaling_websocket_config()))
@@ -384,6 +397,7 @@ async fn handle_connection(
             exit_contribution_store.as_deref(),
             exit_availability.as_ref(),
             network_record_path.as_deref(),
+            node_identity.as_deref(),
         )
         .await
         {
@@ -429,6 +443,7 @@ async fn handle_connection_message(
     exit_contribution_store: Option<&ExitContributionRequestStore>,
     exit_availability: &ExitAvailabilityObservationRegistry,
     network_record_path: Option<&std::path::Path>,
+    node_identity: Option<&Identity>,
 ) -> bool {
     match msg {
         Ok(Message::Binary(data)) => {
@@ -447,6 +462,7 @@ async fn handle_connection_message(
                 exit_contribution_store,
                 exit_availability,
                 network_record_path,
+                node_identity,
             )
             .await;
             true
@@ -480,6 +496,7 @@ async fn handle_binary_message(
     exit_contribution_store: Option<&ExitContributionRequestStore>,
     exit_availability: &ExitAvailabilityObservationRegistry,
     network_record_path: Option<&std::path::Path>,
+    node_identity: Option<&Identity>,
 ) {
     tracing::debug!("收到二进制消息: {} 字节 (来自 {})", data.len(), addr);
     session_manager.record_signaling_rx(data.len());
@@ -505,6 +522,7 @@ async fn handle_binary_message(
                 exit_contribution_store,
                 exit_availability,
                 network_record_path,
+                node_identity,
             )
             .await
             {
@@ -571,6 +589,7 @@ async fn handle_signaling_message(
     exit_contribution_store: Option<&ExitContributionRequestStore>,
     exit_availability: &ExitAvailabilityObservationRegistry,
     network_record_path: Option<&std::path::Path>,
+    node_identity: Option<&Identity>,
 ) -> Result<()> {
     match msg {
         SignalingMessage::Register { .. } => {
@@ -740,6 +759,7 @@ async fn handle_signaling_message(
                 tx,
                 client_id,
                 network_record_path,
+                node_identity,
             )
             .await?;
         }
@@ -2092,6 +2112,7 @@ async fn handle_network_join_preview(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
     network_record_path: Option<&std::path::Path>,
+    node_identity: Option<&Identity>,
 ) -> Result<()> {
     let Some((_actor, _public_key)) =
         authenticated_join_actor(session_manager, tx, client_id).await?
@@ -2099,6 +2120,17 @@ async fn handle_network_join_preview(
         return Ok(());
     };
     let Some(network_record_path) = network_record_path else {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Overloaded,
+                "Network join preview is unavailable",
+            ),
+        )?;
+        return Ok(());
+    };
+    let Some(node_identity) = node_identity else {
         send_binary(
             tx,
             session_manager,
@@ -2135,6 +2167,17 @@ async fn handle_network_join_preview(
         )?;
         return Ok(());
     }
+    if node_identity.public_key() != request.coordinator_public_key {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Forbidden,
+                "Join ticket coordinator key does not match this Coordinator",
+            ),
+        )?;
+        return Ok(());
+    }
     if request.network_name != record.name {
         send_binary(
             tx,
@@ -2149,6 +2192,7 @@ async fn handle_network_join_preview(
     let now_unix_ms = unix_time_ms();
     let preview = NetworkJoinPreview::for_record(
         &record,
+        node_identity,
         now_unix_ms,
         now_unix_ms.saturating_add(fuckipv6_common::domain::NETWORK_JOIN_PREVIEW_VALIDITY_MS),
     )?;

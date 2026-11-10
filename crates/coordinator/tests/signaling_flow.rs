@@ -1,5 +1,10 @@
 use anyhow::{Context, Result};
-use fuckipv6_common::{codec, CoordinatorConfig, Identity, NatType, SignalingMessage};
+use fuckipv6_common::domain::{
+    ExitContributionMode, ExitContributionObligation, ExitContributionScope, NetworkCreateProfile,
+    NetworkJoinMode, NetworkJoinPreviewRequest, NetworkRecord, NetworkVisibility, NodeId,
+    PublicKey,
+};
+use fuckipv6_common::{codec, CoordinatorConfig, ErrorCode, Identity, NatType, SignalingMessage};
 use fuckipv6_coordinator::signaling::blacklist::CoordinatorConfigBlacklistStore;
 use fuckipv6_coordinator::signaling::server::SignalingServer;
 use futures::{SinkExt, StreamExt};
@@ -202,6 +207,112 @@ async fn websocket_duplicate_registration_refreshes_nat_mapping() -> Result<()> 
     Ok(())
 }
 
+#[tokio::test]
+async fn websocket_join_preview_is_signed_and_rejects_ticket_mismatch() -> Result<()> {
+    let bind_addr = free_loopback_addr().await?;
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let config_dir = std::env::temp_dir().join(format!(
+        "fuckipv6-signaling-preview-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&config_dir)?;
+
+    let coordinator_identity = Identity::generate()?;
+    let owner = NodeId::from_public_key(&coordinator_identity.public_key());
+    let network = NetworkRecord::create_owned(
+        NetworkCreateProfile {
+            name: "preview-network".into(),
+            purpose: "Exercise the direct join disclosure contract".into(),
+            icon: "home".into(),
+            language: "zh-CN".into(),
+            region: "CN".into(),
+            tags: Vec::new(),
+            capability_declarations: Vec::new(),
+            visibility: NetworkVisibility::Unlisted,
+            join_mode: NetworkJoinMode::InviteOnly,
+            exit_contribution: ExitContributionObligation::NotRequired,
+            exit_contribution_scope: ExitContributionScope::NotApplicable,
+            exit_contribution_mode: ExitContributionMode::Disabled,
+            exit_selection_policy: Default::default(),
+        },
+        PublicKey::from_bytes([41; 32]),
+        owner,
+        1,
+    )?;
+    let record_path = config_dir.join("network_record.json");
+    std::fs::write(&record_path, serde_json::to_vec(&network)?)?;
+
+    let config_path = config_dir.join("coordinator.toml");
+    CoordinatorConfig::default().save_to_file(&config_path)?;
+    let server = SignalingServer::new(bind_addr.to_string(), "fd00::1000/120")?
+        .with_network_record_path(record_path)
+        .with_node_identity(coordinator_identity.clone());
+    server
+        .session_manager()
+        .attach_blacklist_store(Arc::new(CoordinatorConfigBlacklistStore::new(config_path)))
+        .await?;
+    let server_task = tokio::spawn(server.run());
+
+    let client_identity = Identity::generate()?;
+    let url = format!("ws://{}", bind_addr);
+    let mut ws = connect_with_retry(&url).await?;
+    send_msg(&mut ws, register_message(&client_identity, 18101)).await?;
+    let _ = recv_msg(&mut ws).await?;
+
+    let coordinator_public_key: [u8; 32] = coordinator_identity
+        .public_key()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("coordinator public key must contain exactly 32 bytes"))?;
+    send_msg(
+        &mut ws,
+        SignalingMessage::NetworkJoinPreview {
+            request: NetworkJoinPreviewRequest {
+                coordinator_public_key,
+                network_name: network.name.clone(),
+            },
+        },
+    )
+    .await?;
+    let SignalingMessage::NetworkJoinPreviewAck { preview } = recv_msg(&mut ws).await? else {
+        anyhow::bail!("expected signed network join preview");
+    };
+    preview.validate_for_record(&network, &coordinator_public_key, unix_time_ms())?;
+
+    send_msg(
+        &mut ws,
+        SignalingMessage::NetworkJoinPreview {
+            request: NetworkJoinPreviewRequest {
+                coordinator_public_key,
+                network_name: "wrong-network".into(),
+            },
+        },
+    )
+    .await?;
+    assert_error_code(&mut ws, ErrorCode::BadRequest).await?;
+
+    let wrong_coordinator = Identity::generate()?;
+    send_msg(
+        &mut ws,
+        SignalingMessage::NetworkJoinPreview {
+            request: NetworkJoinPreviewRequest {
+                coordinator_public_key: wrong_coordinator.public_key().try_into().map_err(
+                    |_| anyhow::anyhow!("wrong coordinator public key must contain 32 bytes"),
+                )?,
+                network_name: network.name.clone(),
+            },
+        },
+    )
+    .await?;
+    assert_error_code(&mut ws, ErrorCode::Forbidden).await?;
+
+    server_task.abort();
+    std::fs::remove_dir_all(config_dir)?;
+    Ok(())
+}
+
 static TEST_CONFIG_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 async fn test_signaling_server(bind_addr: SocketAddr) -> Result<(SignalingServer, PathBuf)> {
@@ -298,4 +409,24 @@ where
     };
 
     codec::decode(&data).context("failed to deserialize signaling message")
+}
+
+async fn assert_error_code<S>(ws: &mut S, expected: ErrorCode) -> Result<()>
+where
+    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    let SignalingMessage::Error { code, .. } = recv_msg(ws).await? else {
+        anyhow::bail!("expected signaling error");
+    };
+    assert_eq!(code, expected.as_u16());
+    Ok(())
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }

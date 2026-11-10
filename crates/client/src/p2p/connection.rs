@@ -866,6 +866,10 @@ impl P2pEngine {
                 | fuckipv6_secure_session::wire::ControlMessage::Confirm(_)
                 | fuckipv6_secure_session::wire::ControlMessage::HelloWithCookie(_)
         );
+        let confirmed = matches!(
+            &message,
+            fuckipv6_secure_session::wire::ControlMessage::Confirm(_)
+        );
         let _session = secure.acquire_session_permission().await?;
         let actions = secure
             .handle_control_from_signaling(destination, message)
@@ -873,6 +877,22 @@ impl P2pEngine {
         self.incoming_tx.record_control_frame_bypass();
         if endpoint_authenticated {
             health.record_inbound();
+        }
+        if confirmed {
+            let (commit_destination, packet) = secure
+                .seal(&[])
+                .await
+                .context("无法生成 Secure Session v2 rekey 提交探针")?;
+            send_secure_data_via_signaling(
+                &self.control_signaling,
+                &self.local_ip,
+                commit_destination,
+                &packet,
+            )
+            .await
+            .with_context(|| {
+                format!("无法通过信令向节点 {client_id} 发送 Secure Session v2 rekey 提交探针")
+            })?;
         }
         for action in actions {
             tracing::debug!(
@@ -2058,6 +2078,28 @@ async fn send_secure_control_via_signaling(
     Ok(())
 }
 
+async fn send_secure_data_via_signaling(
+    control_signaling: &Arc<RwLock<Option<Arc<SignalingClient>>>>,
+    local_ip: &Arc<RwLock<Option<IpAddr>>>,
+    destination: SocketAddr,
+    packet: &[u8],
+) -> Result<()> {
+    let signaling = control_signaling
+        .read()
+        .await
+        .clone()
+        .context("signaling transport is not attached")?;
+    let src_ip = (*local_ip.read().await).context("local virtual IP is not configured")?;
+    signaling
+        .send(SignalingMessage::relay_packet(
+            src_ip,
+            destination.ip(),
+            Bytes::copy_from_slice(packet),
+        ))
+        .context("failed to queue Secure Session v2 data frame on signaling")?;
+    Ok(())
+}
+
 /// A dual-stack IPv6 UDP socket requires IPv4 destinations in IPv4-mapped
 /// IPv6 form. Passing a plain `SocketAddrV4` fails on Linux with
 /// `ENETUNREACH`, including inside an otherwise correctly routed namespace.
@@ -2492,6 +2534,10 @@ async fn dispatch_secure_control(
             | fuckipv6_secure_session::wire::ControlMessage::Confirm(_)
             | fuckipv6_secure_session::wire::ControlMessage::HelloWithCookie(_)
     );
+    let confirmed = matches!(
+        &message,
+        fuckipv6_secure_session::wire::ControlMessage::Confirm(_)
+    );
     let _session = match secure.acquire_session_permission().await {
         Ok(permission) => permission,
         Err(super::secure_runtime::SecureRuntimeError::Revoked) => return,
@@ -2507,6 +2553,28 @@ async fn dispatch_secure_control(
             if endpoint_authenticated {
                 update_peer_endpoint(connections, &client_id, addr).await;
                 record_peer_inbound(connections, &client_id).await;
+            }
+            if confirmed {
+                match secure.seal(&[]).await {
+                    Ok((destination, packet)) => {
+                        if let Err(error) = socket
+                            .send_to(&packet, dual_stack_send_endpoint(destination))
+                            .await
+                        {
+                            tracing::debug!(
+                                "无法向节点 {} 发送 Secure Session v2 rekey 提交探针: {}",
+                                client_id,
+                                error
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            "无法生成节点 {} 的 Secure Session v2 rekey 提交探针: {error}",
+                            client_id
+                        );
+                    }
+                }
             }
             for action in actions {
                 tracing::debug!(
@@ -4511,11 +4579,11 @@ mod tests {
         // ACCEPT, and retry CONFIRM until the responder advances to epoch 2.
         wait_for_epoch(responder_engine, responder_id, 2).await?;
 
-        // Authenticated responder traffic is required for the initiator commit.
-        responder_engine
-            .send_to(initiator_ip, responder_ip, b"rekey commit")
-            .await?;
         let initiator_id = if a_is_initiator { "b" } else { "a" };
+
+        // The responder emits an authenticated empty commit probe after it
+        // installs the new generation. No application traffic is required to
+        // finish an otherwise idle rekey.
         wait_for_epoch(initiator_engine, initiator_id, 2).await?;
 
         initiator_engine

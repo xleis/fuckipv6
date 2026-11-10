@@ -5,7 +5,7 @@ use fuckipv6_common::domain::{
     InvitationRedeemRequest, InvitationRedemption, InvitationState, InvitationStatusView,
     IssuedInvitation, JoinRequest, JoinRequestId, JoinRequestState, MemberLifecycleChange,
     MemberLifecycleChangeRequest, MemberRemovalPreview, MemberRemovalPreviewRequest, NetworkId,
-    NetworkMemberDirectory,
+    NetworkJoinPreview, NetworkJoinPreviewRequest, NetworkMemberDirectory, NodeId,
 };
 use fuckipv6_common::{
     codec, validate_signaling_message_len, Identity, JoinRequestBatchReviewItem,
@@ -28,6 +28,7 @@ const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const JOIN_REQUEST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const INVITATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
+const NETWORK_JOIN_PREVIEW_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SignalingCloseError {
@@ -64,6 +65,8 @@ pub struct SignalingClient {
     join_request_gate: Arc<Mutex<()>>,
     invitations: Arc<InvitationResponseHub>,
     invitation_gate: Arc<Mutex<()>>,
+    network_join_previews: Arc<NetworkJoinPreviewResponseHub>,
+    network_join_preview_gate: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -533,6 +536,133 @@ impl InvitationResponseHub {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum NetworkJoinPreviewControlError {
+    #[error("加入预览连接已断开")]
+    Disconnected,
+    #[error("加入预览请求超时")]
+    TimedOut,
+    #[error("加入预览请求被拒绝")]
+    Rejected(u16),
+    #[error("加入预览响应无效")]
+    InvalidResponse,
+    #[error("加入预览连接尚未就绪")]
+    Unavailable,
+}
+
+struct PendingNetworkJoinPreviewResponse {
+    expected: NetworkJoinPreviewRequest,
+    sender:
+        oneshot::Sender<std::result::Result<NetworkJoinPreview, NetworkJoinPreviewControlError>>,
+}
+
+#[derive(Default)]
+struct NetworkJoinPreviewResponseHub {
+    pending: StdMutex<Option<PendingNetworkJoinPreviewResponse>>,
+}
+
+impl NetworkJoinPreviewResponseHub {
+    fn register(
+        &self,
+        expected: NetworkJoinPreviewRequest,
+    ) -> std::result::Result<
+        oneshot::Receiver<std::result::Result<NetworkJoinPreview, NetworkJoinPreviewControlError>>,
+        NetworkJoinPreviewControlError,
+    > {
+        let (sender, receiver) = oneshot::channel();
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.is_some() {
+            return Err(NetworkJoinPreviewControlError::Unavailable);
+        }
+        *pending = Some(PendingNetworkJoinPreviewResponse { expected, sender });
+        Ok(receiver)
+    }
+
+    /// A preview acknowledgement never enters the data-plane event stream.
+    /// Forged or unsolicited acknowledgements are dropped.
+    fn route(&self, message: &SignalingMessage) -> bool {
+        let matches = match message {
+            SignalingMessage::Error { .. } => self.has_pending(),
+            SignalingMessage::NetworkJoinPreviewAck { preview } => self.matches(|expected| {
+                network_join_preview_ack_matches(expected, preview, current_timestamp_millis())
+            }),
+            _ => return false,
+        };
+        if !matches {
+            return matches!(message, SignalingMessage::NetworkJoinPreviewAck { .. });
+        }
+        let result = match message {
+            SignalingMessage::NetworkJoinPreviewAck { preview } => Ok(preview.clone()),
+            SignalingMessage::Error { code, .. } => {
+                Err(NetworkJoinPreviewControlError::Rejected(*code))
+            }
+            _ => unreachable!("network join preview response was checked above"),
+        };
+        self.finish(result)
+    }
+
+    fn has_pending(&self) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+
+    fn matches(&self, predicate: impl FnOnce(&NetworkJoinPreviewRequest) -> bool) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .is_some_and(|pending| predicate(&pending.expected))
+    }
+
+    fn finish(
+        &self,
+        result: std::result::Result<NetworkJoinPreview, NetworkJoinPreviewControlError>,
+    ) -> bool {
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(pending) = pending {
+            let _ = pending.sender.send(result);
+        }
+        true
+    }
+
+    fn fail_pending(&self, error: NetworkJoinPreviewControlError) {
+        let _ = self.finish(Err(error));
+    }
+}
+
+fn network_join_preview_ack_matches(
+    expected: &NetworkJoinPreviewRequest,
+    preview: &NetworkJoinPreview,
+    now_unix_ms: u64,
+) -> bool {
+    let expected_network_id = NetworkId::from_public_key(preview.public_key.as_str().as_bytes());
+    let Ok(terms_hash) = preview.terms.content_hash() else {
+        return false;
+    };
+    let Ok(preview_digest) = preview.compute_digest() else {
+        return false;
+    };
+
+    NodeId::from_public_key(&expected.coordinator_public_key) == preview.owner
+        && expected.network_name == preview.network_name
+        && preview.network_id == expected_network_id
+        && preview.terms_hash == terms_hash
+        && preview.preview_digest == preview_digest
+        && preview.issued_at_unix_ms > 0
+        && preview.issued_at_unix_ms <= now_unix_ms.saturating_add(60_000)
+        && preview.issued_at_unix_ms < preview.expires_at_unix_ms
+        && !preview.is_expired(now_unix_ms)
+}
+
 #[derive(Clone)]
 struct RegistrationIdentity {
     client_id: String,
@@ -567,6 +697,7 @@ struct ConnectionChannels<'a> {
     known_peers_tx: &'a watch::Sender<Vec<PeerInfo>>,
     join_requests: &'a JoinRequestResponseHub,
     invitations: &'a InvitationResponseHub,
+    network_join_previews: &'a NetworkJoinPreviewResponseHub,
 }
 
 struct ConnectionState {
@@ -615,6 +746,7 @@ impl SignalingClient {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let join_requests = Arc::new(JoinRequestResponseHub::default());
         let invitations = Arc::new(InvitationResponseHub::default());
+        let network_join_previews = Arc::new(NetworkJoinPreviewResponseHub::default());
 
         let registration = RegistrationIdentity {
             client_id: identity.client_id().to_string(),
@@ -643,6 +775,7 @@ impl SignalingClient {
             known_peers_tx,
             join_requests.clone(),
             invitations.clone(),
+            network_join_previews.clone(),
             shutdown_rx,
         ));
 
@@ -660,6 +793,8 @@ impl SignalingClient {
             join_request_gate: Arc::new(Mutex::new(())),
             invitations,
             invitation_gate: Arc::new(Mutex::new(())),
+            network_join_previews,
+            network_join_preview_gate: Arc::new(Mutex::new(())),
         };
 
         client.wait_for_initial_registration().await?;
@@ -1026,6 +1161,31 @@ impl SignalingClient {
         }
     }
 
+    pub(crate) async fn preview_network_join(
+        &self,
+        request: NetworkJoinPreviewRequest,
+    ) -> std::result::Result<NetworkJoinPreview, NetworkJoinPreviewControlError> {
+        let _gate = self.network_join_preview_gate.lock().await;
+        let receiver = self.network_join_previews.register(request.clone())?;
+        if self
+            .send(SignalingMessage::NetworkJoinPreview { request })
+            .is_err()
+        {
+            self.network_join_previews
+                .fail_pending(NetworkJoinPreviewControlError::Disconnected);
+            return Err(NetworkJoinPreviewControlError::Unavailable);
+        }
+        match tokio::time::timeout(NETWORK_JOIN_PREVIEW_RESPONSE_TIMEOUT, receiver).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => Err(NetworkJoinPreviewControlError::Disconnected),
+            Err(_) => {
+                self.network_join_previews
+                    .fail_pending(NetworkJoinPreviewControlError::TimedOut);
+                Err(NetworkJoinPreviewControlError::TimedOut)
+            }
+        }
+    }
+
     async fn send_invitation_operation(
         &self,
         message: SignalingMessage,
@@ -1135,6 +1295,7 @@ async fn connection_manager(
     known_peers_tx: watch::Sender<Vec<PeerInfo>>,
     join_requests: Arc<JoinRequestResponseHub>,
     invitations: Arc<InvitationResponseHub>,
+    network_join_previews: Arc<NetworkJoinPreviewResponseHub>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let channels = ConnectionChannels {
@@ -1146,6 +1307,7 @@ async fn connection_manager(
         known_peers_tx: &known_peers_tx,
         join_requests: &join_requests,
         invitations: &invitations,
+        network_join_previews: &network_join_previews,
     };
     let mut pending_outbound = Vec::new();
     let mut state = ConnectionState {
@@ -1246,6 +1408,9 @@ fn notify_disconnected(channels: ConnectionChannels<'_>, reason: String) {
     channels
         .invitations
         .fail_pending(InvitationControlError::Disconnected);
+    channels
+        .network_join_previews
+        .fail_pending(NetworkJoinPreviewControlError::Disconnected);
     let _ = channels.assigned_ip_tx.send(None);
     let _ = channels.relay_endpoint_tx.send(None);
     let _ = channels
@@ -1432,6 +1597,10 @@ fn handle_incoming_message(
         return Ok(());
     }
 
+    if channels.network_join_previews.route(&msg) {
+        return Ok(());
+    }
+
     if let Some(event) = signaling_message_to_event(msg) {
         let _ = channels.event_tx.send(event);
     }
@@ -1526,6 +1695,17 @@ fn current_timestamp_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn current_timestamp_millis() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn signaling_message_to_event(msg: SignalingMessage) -> Option<SignalingEvent> {
@@ -1640,7 +1820,9 @@ fn signaling_message_to_event(msg: SignalingMessage) -> Option<SignalingEvent> {
         | SignalingMessage::InvitationPreview { .. }
         | SignalingMessage::InvitationPreviewAck { .. }
         | SignalingMessage::InvitationRedeem { .. }
-        | SignalingMessage::InvitationRedeemAck { .. } => None,
+        | SignalingMessage::InvitationRedeemAck { .. }
+        | SignalingMessage::NetworkJoinPreview { .. }
+        | SignalingMessage::NetworkJoinPreviewAck { .. } => None,
 
         _ => None,
     }
@@ -1766,6 +1948,8 @@ mod tests {
             join_request_gate: Arc::new(Mutex::new(())),
             invitations: Arc::new(InvitationResponseHub::default()),
             invitation_gate: Arc::new(Mutex::new(())),
+            network_join_previews: Arc::new(NetworkJoinPreviewResponseHub::default()),
+            network_join_preview_gate: Arc::new(Mutex::new(())),
         };
 
         let error = client

@@ -1263,6 +1263,70 @@ pub enum NodeNetworkStatus {
     Failed,
 }
 
+/// Project durable membership admission and live network state into the one
+/// effective membership state consumed by authorization and UI adapters.
+///
+/// Persisted membership records intentionally remain admission records
+/// (`Accepted`). A runtime that is actually online proves key readiness and
+/// connectivity, while stopping or losing the runtime must immediately remove
+/// resource access without rewriting the durable relationship.
+pub(crate) fn effective_membership_state(
+    durable: MembershipState,
+    runtime: Option<NodeNetworkStatus>,
+) -> MembershipState {
+    match runtime {
+        Some(NodeNetworkStatus::Online)
+            if matches!(
+                durable,
+                MembershipState::Accepted
+                    | MembershipState::KeyReady
+                    | MembershipState::Connecting
+                    | MembershipState::Active
+            ) =>
+        {
+            MembershipState::Active
+        }
+        Some(NodeNetworkStatus::Degraded)
+            if matches!(
+                durable,
+                MembershipState::Accepted
+                    | MembershipState::KeyReady
+                    | MembershipState::Connecting
+                    | MembershipState::Active
+                    | MembershipState::Degraded
+            ) =>
+        {
+            MembershipState::Degraded
+        }
+        Some(NodeNetworkStatus::Connecting)
+            if matches!(
+                durable,
+                MembershipState::Accepted | MembershipState::KeyReady | MembershipState::Connecting
+            ) =>
+        {
+            MembershipState::Connecting
+        }
+        Some(NodeNetworkStatus::Stopping)
+            if matches!(
+                durable,
+                MembershipState::Accepted
+                    | MembershipState::KeyReady
+                    | MembershipState::Connecting
+                    | MembershipState::Active
+                    | MembershipState::Degraded
+            ) =>
+        {
+            MembershipState::Leaving
+        }
+        Some(NodeNetworkStatus::Offline | NodeNetworkStatus::Failed)
+            if matches!(durable, MembershipState::Active | MembershipState::Degraded) =>
+        {
+            MembershipState::KeyReady
+        }
+        _ => durable,
+    }
+}
+
 /// One redacted host network interface captured by the node process.
 ///
 /// The snapshot intentionally omits hardware addresses, routes, policy rules
@@ -1979,6 +2043,33 @@ mod tests {
             log_file_configured: false,
             identity_configured: true,
         }
+    }
+
+    #[test]
+    fn effective_membership_state_combines_admission_and_live_runtime() {
+        assert_eq!(
+            effective_membership_state(MembershipState::Accepted, Some(NodeNetworkStatus::Online)),
+            MembershipState::Active
+        );
+        assert_eq!(
+            effective_membership_state(
+                MembershipState::Accepted,
+                Some(NodeNetworkStatus::Degraded)
+            ),
+            MembershipState::Degraded
+        );
+        assert_eq!(
+            effective_membership_state(MembershipState::Accepted, Some(NodeNetworkStatus::Offline)),
+            MembershipState::Accepted
+        );
+        assert_eq!(
+            effective_membership_state(MembershipState::Active, Some(NodeNetworkStatus::Offline)),
+            MembershipState::KeyReady
+        );
+        assert_eq!(
+            effective_membership_state(MembershipState::Suspended, Some(NodeNetworkStatus::Online)),
+            MembershipState::Suspended
+        );
     }
 
     fn embedded_service(name: &str) -> NodeEmbeddedServiceSnapshot {

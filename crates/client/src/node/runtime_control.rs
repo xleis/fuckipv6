@@ -25,6 +25,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout, Instant};
 
+use super::state::effective_membership_state;
 use super::{
     LocalExitCapabilitySnapshot, LocalExitCapabilityStage, NodeCleanupFailureReason,
     NodeCleanupFailureSnapshot, NodeCleanupStepSnapshot, NodeCleanupStepStatus,
@@ -33,15 +34,17 @@ use super::{
     NodeEmbeddedServiceSnapshot, NodeEmbeddedServiceStatus, NodeEventBus, NodeEventKind,
     NodeIdentitySnapshot, NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceStatus,
     NodeJoinNetworkCommand, NodeLifecycle, NodeNetworkConfigSnapshot, NodeNetworkCreationNextStep,
-    NodeNetworkRole, NodeNetworkSelection, NodeNetworkSnapshot, NodeNetworkStatus, NodePhase,
-    NodeProblem, NodeProblemCode, NodeResidualCleanupResult, NodeRoutingDefaultAction,
-    NodeRoutingMode, NodeRoutingSummarySnapshot, NodeRoutingSummaryStatus,
-    NodeRoutingTargetSnapshot, NodeRuntimePlan, NodeRuntimeResidueSnapshot,
-    NodeSetNetworkRoleCommand, NodeSnapshot, NodeStateStore, NodeTrafficSnapshot,
-    NodeUpdateRoutingCommand,
+    NodeNetworkMembershipSnapshot, NodeNetworkRole, NodeNetworkSelection, NodeNetworkSnapshot,
+    NodeNetworkStatus, NodePhase, NodeProblem, NodeProblemCode, NodeResidualCleanupResult,
+    NodeRoutingDefaultAction, NodeRoutingMode, NodeRoutingSummarySnapshot,
+    NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot, NodeRuntimePlan,
+    NodeRuntimeResidueSnapshot, NodeSetNetworkRoleCommand, NodeSnapshot, NodeStateStore,
+    NodeTrafficSnapshot, NodeUpdateRoutingCommand,
 };
 use crate::cli::commands::{self, CleanupStatus, RuntimeCleanupOutcome, RuntimeOptions};
-use crate::config_manager::{ConfigManager, NetworkConfig, NetworkCreationError};
+use crate::config_manager::{
+    ConfigManager, JoinedNetworkMembership, NetworkConfig, NetworkCreationError,
+};
 use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
 use crate::network_setup::{self, NetworkSetupStage};
 use crate::node::runtime_metadata;
@@ -1957,6 +1960,63 @@ fn routing_summary_timestamp() -> u64 {
         .map_or(0, |duration| {
             u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
         })
+}
+
+fn network_membership_snapshot(
+    joined: &JoinedNetworkMembership,
+    runtime: Option<NodeNetworkStatus>,
+) -> NodeNetworkMembershipSnapshot {
+    let membership = &joined.membership;
+    NodeNetworkMembershipSnapshot {
+        network_name: joined.network_name.clone(),
+        network_id: membership.network_id.to_string(),
+        node_id: membership.node_id.to_string(),
+        state: effective_membership_state(membership.state, runtime),
+        role: membership.role,
+        local_policy_revision: membership.local_policy_revision,
+        network_policy_revision: membership
+            .terms
+            .as_ref()
+            .map(|terms| terms.network_policy_revision),
+        privacy_policy_revision: membership
+            .terms
+            .as_ref()
+            .map(|terms| terms.privacy_policy_revision),
+        member_limit: membership
+            .terms
+            .as_ref()
+            .and_then(|terms| terms.member_limit),
+        exit_contribution: membership
+            .terms
+            .as_ref()
+            .map(|terms| terms.exit_contribution),
+        exit_contribution_scope: membership
+            .terms
+            .as_ref()
+            .map(|terms| terms.exit_contribution_scope),
+        exit_contribution_mode: membership
+            .terms
+            .as_ref()
+            .map(|terms| terms.exit_contribution_mode),
+        terms_hash: membership
+            .terms_ack
+            .as_ref()
+            .map(|ack| ack.terms_hash.as_str().to_owned()),
+        current_terms: membership.current_terms.clone(),
+        current_terms_hash: membership
+            .current_terms
+            .as_ref()
+            .and_then(|terms| terms.content_hash().ok())
+            .map(|hash| hash.as_str().to_owned()),
+        policy_confirmation_required: membership.policy_confirmation_required(),
+        acknowledged_at_unix_ms: membership
+            .terms_ack
+            .as_ref()
+            .map(|ack| ack.acknowledged_at_unix_ms),
+        created_at_unix_ms: membership.created_at_unix_ms,
+        updated_at_unix_ms: membership.updated_at_unix_ms,
+        suspension_reason: membership.suspension_reason.clone(),
+    }
 }
 
 fn routing_problem(
@@ -4165,6 +4225,20 @@ impl NetworkRuntimeActor {
                 return Err(map_network_creation_error(&command.name, error));
             }
         };
+        let joined_membership = match self
+            .configs
+            .persist_owned_network_membership(&created.record)
+        {
+            Ok(membership) => membership,
+            Err(error) => {
+                self.rollback_created_network(&command.name).await;
+                return Err(RuntimeControlError::Persistence(format!(
+                    "网络 [{}] 的创建者成员关系持久化失败，已回滚: {error:#}",
+                    command.name
+                )));
+            }
+        };
+        self.record_membership(&joined_membership, None).await;
         let config_file = created.config_path;
         if let Err(error) = self.configs.set_embedded_service_metadata(
             &command.name,
@@ -4209,6 +4283,8 @@ impl NetworkRuntimeActor {
                     command.name
                 )));
             }
+            self.record_membership(&joined_membership, Some(NodeNetworkStatus::Online))
+                .await;
         } else {
             self.record_network(NodeNetworkSnapshot {
                 name: command.name.clone(),
@@ -5662,6 +5738,14 @@ impl NetworkRuntimeActor {
     }
 
     async fn rollback_created_network(&mut self, network_name: &str) {
+        if let Ok(Some(joined)) = self
+            .configs
+            .joined_membership_for_network_name(network_name)
+        {
+            let _ = self
+                .configs
+                .remove_joined_membership(joined.membership.network_id.as_str());
+        }
         let _ = self.configs.delete_network(network_name);
         self.stop_embedded_service(network_name).await;
         self.forget_network(network_name).await;
@@ -5693,6 +5777,9 @@ impl NetworkRuntimeActor {
                     .configuration
                     .networks
                     .retain(|network| network.network_name != network_name);
+                snapshot
+                    .memberships
+                    .retain(|membership| membership.network_name != network_name);
                 snapshot
                     .embedded_services
                     .retain(|service| service.network_name != network_name);
@@ -5985,6 +6072,25 @@ impl NetworkRuntimeActor {
             network_name,
             status,
         });
+    }
+
+    async fn record_membership(
+        &self,
+        joined: &JoinedNetworkMembership,
+        runtime: Option<NodeNetworkStatus>,
+    ) {
+        let membership = network_membership_snapshot(joined, runtime);
+        self.state
+            .update(|snapshot| {
+                snapshot
+                    .memberships
+                    .retain(|existing| existing.network_id != membership.network_id);
+                snapshot.memberships.push(membership);
+                snapshot
+                    .memberships
+                    .sort_by(|left, right| left.network_name.cmp(&right.network_name));
+            })
+            .await;
     }
 
     async fn mark_network_status(&self, network_name: Option<&str>, status: NodeNetworkStatus) {
@@ -9920,6 +10026,16 @@ mod tests {
             .networks
             .iter()
             .any(|network| network.network_name == "detached"));
+        let membership = snapshot
+            .memberships
+            .iter()
+            .find(|membership| membership.network_name == "detached")
+            .expect("owner membership is projected immediately");
+        assert_eq!(
+            membership.state,
+            fuckipv6_common::domain::MembershipState::Accepted
+        );
+        assert_eq!(membership.role, MembershipRole::Owner);
         assert!(snapshot.invariant_violations().is_empty());
 
         harness
@@ -10116,7 +10232,72 @@ mod tests {
             .peers
             .iter()
             .any(|peer| peer.network_name == "broken"));
+        assert!(!snapshot
+            .memberships
+            .iter()
+            .any(|membership| membership.network_name == "broken"));
+        assert!(harness
+            .configs
+            .joined_membership_for_network_name("broken")
+            .expect("load rolled back membership")
+            .is_none());
         assert!(snapshot.invariant_violations().is_empty());
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn owner_created_network_can_authorize_routing_governance() {
+        let harness = TestHarness::new("owner-routing-authorization").await;
+        harness
+            .runtime
+            .create(create_command("owner-routing", true))
+            .await
+            .expect("create connected owner network");
+
+        let snapshot = harness.state.snapshot().await;
+        let membership = snapshot
+            .memberships
+            .iter()
+            .find(|membership| membership.network_name == "owner-routing")
+            .expect("owner membership");
+        assert_eq!(membership.role, MembershipRole::Owner);
+        assert_eq!(
+            membership.state,
+            fuckipv6_common::domain::MembershipState::Active
+        );
+
+        let bus = crate::node::spawn_command_bus_with_runtime(
+            harness.state.clone(),
+            MultiNetworkRegistry::new(),
+            harness.events.clone(),
+            harness.services.clone(),
+            harness.runtime.clone(),
+            harness.configs.clone(),
+        );
+        let context = crate::node::NodeCommandContext::local_owner_for_snapshot(
+            &snapshot,
+            "owner-routing-test",
+        );
+        let result = bus
+            .execute(
+                context,
+                NodeCommandRequest::new(
+                    601,
+                    NodeCommand::UpdateRouting(routing_command(
+                        "owner-routing",
+                        NodeRoutingMode::GlobalProxy,
+                        Some("exit-node"),
+                        false,
+                    )),
+                ),
+            )
+            .await
+            .expect("routing command result");
+        assert!(
+            result.is_success(),
+            "routing command was rejected: {result:?}"
+        );
 
         harness.shutdown().await;
     }

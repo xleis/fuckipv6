@@ -18,12 +18,14 @@ use super::runtime_control::{
     local_exit_unsupported_error, network_setup_problem_code, runtime_control_problem,
     RestartSummary,
 };
-use super::state::{NodeNetworkProfileSnapshot, NodeSignedNetworkProfileSnapshot};
+use super::state::{
+    effective_membership_state, NodeNetworkProfileSnapshot, NodeSignedNetworkProfileSnapshot,
+};
 use super::{NetworkRuntimeManager, RuntimeControlError, StartSummary};
 use super::{
     NodeCommandContext, NodeCommandFuture, NodeCommandHandler, NodeCommandOutcome,
-    NodeCommandRequest, NodeCommandResult, NodeNetworkJoinPreview, NodePeerProbeSnapshot,
-    NodeProblem, NodeProblemCode, NodeStateStore, NodeValidationIssue,
+    NodeCommandRequest, NodeCommandResult, NodeNetworkJoinPreview, NodeNetworkStatus,
+    NodePeerProbeSnapshot, NodeProblem, NodeProblemCode, NodeStateStore, NodeValidationIssue,
 };
 use crate::config_manager::{ConfigManager, NetworkProfileError};
 use crate::config_transaction::{ConfigurationTransactionError, ConfigurationValidationCode};
@@ -968,9 +970,13 @@ async fn refresh_network_memberships(
     state: &NodeStateStore,
     configs: &ConfigManager,
 ) -> Result<(), String> {
-    let current_terms = state
-        .snapshot()
-        .await
+    let snapshot = state.snapshot().await;
+    let runtime_states = snapshot
+        .networks
+        .iter()
+        .map(|network| (network.name.clone(), network.status))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let current_terms = snapshot
         .discovery_index
         .records
         .iter()
@@ -1002,7 +1008,12 @@ async fn refresh_network_memberships(
         Ok::<_, String>(
             memberships
                 .iter()
-                .map(network_membership_snapshot)
+                .map(|joined| {
+                    network_membership_snapshot(
+                        joined,
+                        runtime_states.get(&joined.network_name).copied(),
+                    )
+                })
                 .collect::<Vec<_>>(),
         )
     })
@@ -1014,13 +1025,14 @@ async fn refresh_network_memberships(
 
 fn network_membership_snapshot(
     joined: &crate::config_manager::JoinedNetworkMembership,
+    runtime: Option<NodeNetworkStatus>,
 ) -> super::NodeNetworkMembershipSnapshot {
     let membership = &joined.membership;
     super::NodeNetworkMembershipSnapshot {
         network_name: joined.network_name.clone(),
         network_id: membership.network_id.to_string(),
         node_id: membership.node_id.to_string(),
-        state: membership.state,
+        state: effective_membership_state(membership.state, runtime),
         role: membership.role,
         local_policy_revision: membership.local_policy_revision,
         network_policy_revision: membership
@@ -2888,7 +2900,16 @@ async fn acknowledge_membership_policy(
         .iter()
         .find(|membership| membership.network_id == saved.membership.network_id.as_str())
         .cloned()
-        .unwrap_or_else(|| network_membership_snapshot(&saved));
+        .unwrap_or_else(|| {
+            network_membership_snapshot(
+                &saved,
+                snapshot
+                    .networks
+                    .iter()
+                    .find(|network| network.name == saved.network_name)
+                    .map(|network| network.status),
+            )
+        });
     NodeCommandResult::completed(
         request_id,
         NodeCommandOutcome::MembershipPolicyAcknowledged(Box::new(membership)),
@@ -3494,7 +3515,16 @@ async fn join_runtime_network(
                 .iter()
                 .find(|membership| membership.network_id == joined.membership.network_id.as_str())
                 .cloned()
-                .unwrap_or_else(|| network_membership_snapshot(&joined));
+                .unwrap_or_else(|| {
+                    network_membership_snapshot(
+                        &joined,
+                        snapshot
+                            .networks
+                            .iter()
+                            .find(|network| network.name == joined.network_name)
+                            .map(|network| network.status),
+                    )
+                });
             NodeCommandResult::completed(
                 request_id,
                 NodeCommandOutcome::NetworkJoined(Box::new(super::NodeNetworkJoinResult {

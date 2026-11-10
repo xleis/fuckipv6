@@ -45,6 +45,11 @@ pub async fn host(
     .await?;
     let message = completed_message(outcome)?;
     println!("{message}");
+    // CreateNetwork commits before the event subscriber necessarily observes
+    // the new owner membership. Refresh through GetSnapshot so the immediately
+    // following network-scoped command is authorized against the authoritative
+    // state instead of the pre-create snapshot.
+    commands::refresh_cli_node_snapshot(&session).await?;
     if auto_connect {
         apply_route_options(&session, &[network_name.to_string()], &options).await?;
     }

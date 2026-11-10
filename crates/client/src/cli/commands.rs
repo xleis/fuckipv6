@@ -5103,6 +5103,17 @@ pub(crate) async fn cli_node_session() -> Result<RemoteNodeSession> {
     .await
 }
 
+/// Force the CLI adapter to consume the node's latest authoritative snapshot.
+pub(crate) async fn refresh_cli_node_snapshot(session: &RemoteNodeSession) -> Result<()> {
+    match execute_cli_node_command(session, NodeCommand::GetSnapshot).await? {
+        NodeCommandOutcome::Snapshot(snapshot) => {
+            session.state().replace_authoritative(*snapshot).await;
+            Ok(())
+        }
+        other => anyhow::bail!("获取节点权威快照返回了意外结果: {other:?}"),
+    }
+}
+
 /// Submit one CLI operation through the authenticated node command bus.
 pub(crate) async fn execute_cli_node_command(
     session: &RemoteNodeSession,

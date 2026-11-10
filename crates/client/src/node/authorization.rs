@@ -579,7 +579,6 @@ fn is_network_governance(kind: NodeCommandKind) -> bool {
             | NodeCommandKind::ChangeMemberLifecycle
             | NodeCommandKind::CreateInvitation
             | NodeCommandKind::RevokeInvitation
-            | NodeCommandKind::UpdateRouting
             | NodeCommandKind::SetNetworkRole
             | NodeCommandKind::BanClient
             | NodeCommandKind::UnbanClient
@@ -726,6 +725,7 @@ fn is_local_owner_only(kind: NodeCommandKind) -> bool {
             | NodeCommandKind::GetUiManifest
             | NodeCommandKind::GetDiagnostics
             | NodeCommandKind::RebuildTun
+            | NodeCommandKind::UpdateRouting
             | NodeCommandKind::CreateNetwork
             | NodeCommandKind::PreviewNetworkProfile
             | NodeCommandKind::UpdateNetworkProfile
@@ -2616,6 +2616,62 @@ mod tests {
             ),
             start_home(),
             "permission.default_denied",
+        );
+    }
+
+    #[test]
+    fn update_routing_is_local_owner_authority_not_network_governance() {
+        let home = network_id("home");
+        let snapshot = crate::node::NodeSnapshot {
+            memberships: vec![crate::node::NodeNetworkMembershipSnapshot {
+                network_name: "home".into(),
+                network_id: home.to_string(),
+                node_id: actor().to_string(),
+                state: MembershipState::Active,
+                role: MembershipRole::Member,
+                local_policy_revision: 1,
+                network_policy_revision: Some(1),
+                privacy_policy_revision: Some(1),
+                member_limit: None,
+                exit_contribution: None,
+                exit_contribution_scope: None,
+                exit_contribution_mode: None,
+                terms_hash: None,
+                current_terms: None,
+                current_terms_hash: None,
+                policy_confirmation_required: false,
+                acknowledged_at_unix_ms: None,
+                created_at_unix_ms: 1,
+                updated_at_unix_ms: 1,
+                suspension_reason: None,
+            }],
+            ..Default::default()
+        };
+        let command = NodeCommand::UpdateRouting(crate::node::NodeUpdateRoutingCommand {
+            network_name: "home".into(),
+            mode: crate::node::NodeRoutingMode::GlobalProxy,
+            exit_node: Some("fd00::1001".into()),
+            is_exit_node: false,
+        });
+
+        authorize_command(
+            &NodeCommandContext::local_owner_for_snapshot(&snapshot, "cli"),
+            &command,
+        )
+        .expect("a local owner may choose this node's routing regardless of network role");
+
+        let (local_policy, network_policy) = start_policies();
+        assert_denied(
+            &network_context(
+                NetworkRole::Member,
+                [NodePermission::ChangeRouting],
+                &["home"],
+                MembershipState::Active,
+                local_policy,
+                network_policy,
+            ),
+            command,
+            PermissionDenialCode::LocalOwnerRequired.as_str(),
         );
     }
 

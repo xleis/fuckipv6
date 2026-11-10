@@ -181,7 +181,7 @@ PY
 
 snapshot_to() {
     local socket_path=$1 output=$2
-    ipc_command "$socket_path" '"get_snapshot"' >"$output"
+    ipc_command "$socket_path" '{"command":"get_snapshot"}' >"$output"
 }
 
 wait_for_file() {

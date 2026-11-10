@@ -10,6 +10,7 @@ use std::future::Future;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::time::Duration;
+use std::time::Instant;
 
 use fuckipv6_common::domain::{
     LeakDetectionDnsMode, LeakDetectionEnvironment, LeakDetectionEvidence,
@@ -21,6 +22,15 @@ use tokio::time::timeout;
 
 pub(crate) const LEAK_DETECTION_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const LEAK_DETECTION_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+const LEAK_PROBE_APPLICATION_DNS_URL: &str = "FUCKIPV6_LEAK_PROBE_APPLICATION_DNS_URL";
+const LEAK_PROBE_IPV4_CONTROLLED_URL: &str = "FUCKIPV6_LEAK_PROBE_IPV4_CONTROLLED_URL";
+const LEAK_PROBE_IPV4_EXPECTED_SOURCE: &str = "FUCKIPV6_LEAK_PROBE_IPV4_EXPECTED_SOURCE";
+const LEAK_PROBE_IPV4_EXTERNAL_URL: &str = "FUCKIPV6_LEAK_PROBE_IPV4_EXTERNAL_URL";
+const LEAK_PROBE_IPV6_CONTROLLED_URL: &str = "FUCKIPV6_LEAK_PROBE_IPV6_CONTROLLED_URL";
+const LEAK_PROBE_IPV6_EXPECTED_SOURCE: &str = "FUCKIPV6_LEAK_PROBE_IPV6_EXPECTED_SOURCE";
+const LEAK_PROBE_IPV6_EXTERNAL_URL: &str = "FUCKIPV6_LEAK_PROBE_IPV6_EXTERNAL_URL";
+const LEAK_PROBE_RESPONSE_BODY_LIMIT: usize = 256;
 
 type LeakProbeFuture<'a> = Pin<Box<dyn Future<Output = LeakProbeOutcome> + Send + 'a>>;
 
@@ -74,30 +84,252 @@ pub(crate) trait LeakDetectionProbeRunner: Send + Sync {
     ) -> LeakProbeFuture<'a>;
 }
 
-/// Safe default until a deployment-controlled leak service and an application
-/// DNS behavior probe are explicitly configured.
-#[derive(Debug, Default)]
-pub(crate) struct NoopLeakDetectionProbeRunner;
+#[derive(Debug, Clone)]
+enum HttpLeakProbe {
+    Reachability {
+        url: String,
+    },
+    ExpectedSource {
+        url: String,
+        expected_source: IpAddr,
+    },
+}
 
-impl LeakDetectionProbeRunner for NoopLeakDetectionProbeRunner {
-    fn probe<'a>(
-        &'a self,
-        _target: LeakDetectionTarget,
-        _observed_at_unix_ms: u64,
-    ) -> LeakProbeFuture<'a> {
-        Box::pin(async { LeakProbeOutcome::not_tested("leak_detection.probe_not_configured") })
+/// Deployment-controlled HTTP probes. URLs and expected addresses remain in
+/// process configuration and are never copied into public evidence.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ConfiguredLeakDetectionProbeRunner {
+    probes: BTreeMap<LeakDetectionTarget, HttpLeakProbe>,
+}
+
+impl ConfiguredLeakDetectionProbeRunner {
+    pub(crate) fn from_env() -> Self {
+        Self::from_lookup(|name| std::env::var(name).ok())
+    }
+
+    fn from_lookup(mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
+        let mut probes = BTreeMap::new();
+        if let Some(url) = non_empty(lookup(LEAK_PROBE_APPLICATION_DNS_URL)) {
+            probes.insert(
+                LeakDetectionTarget::BrowserApplicationDns,
+                HttpLeakProbe::Reachability { url },
+            );
+        }
+        insert_controlled_probe(
+            &mut probes,
+            LeakDetectionTarget::Ipv4ControlledLeakService,
+            non_empty(lookup(LEAK_PROBE_IPV4_CONTROLLED_URL)),
+            non_empty(lookup(LEAK_PROBE_IPV4_EXPECTED_SOURCE)),
+            IpFamily::Ipv4,
+        );
+        if let Some(url) = non_empty(lookup(LEAK_PROBE_IPV4_EXTERNAL_URL)) {
+            probes.insert(
+                LeakDetectionTarget::Ipv4ExternalTarget,
+                HttpLeakProbe::Reachability { url },
+            );
+        }
+        insert_controlled_probe(
+            &mut probes,
+            LeakDetectionTarget::Ipv6ControlledLeakService,
+            non_empty(lookup(LEAK_PROBE_IPV6_CONTROLLED_URL)),
+            non_empty(lookup(LEAK_PROBE_IPV6_EXPECTED_SOURCE)),
+            IpFamily::Ipv6,
+        );
+        if let Some(url) = non_empty(lookup(LEAK_PROBE_IPV6_EXTERNAL_URL)) {
+            probes.insert(
+                LeakDetectionTarget::Ipv6ExternalTarget,
+                HttpLeakProbe::Reachability { url },
+            );
+        }
+        Self { probes }
+    }
+
+    async fn run(&self, target: LeakDetectionTarget) -> LeakProbeOutcome {
+        let Some(probe) = self.probes.get(&target) else {
+            return LeakProbeOutcome::not_tested("leak_detection.probe_not_configured");
+        };
+        run_http_probe(probe, target_family(target)).await
     }
 }
 
-/// Collect local evidence with the explicit no-op probe boundary. The resulting
-/// snapshot is expected to remain `InsufficientEvidence` until external and
-/// application checks are actually executed.
+fn target_family(target: LeakDetectionTarget) -> Option<IpFamily> {
+    match target {
+        LeakDetectionTarget::Ipv4Carrier
+        | LeakDetectionTarget::Ipv4SourceAddress
+        | LeakDetectionTarget::Ipv4DefaultRoute
+        | LeakDetectionTarget::Ipv4ControlledLeakService
+        | LeakDetectionTarget::Ipv4ExternalTarget => Some(IpFamily::Ipv4),
+        LeakDetectionTarget::Ipv6Carrier
+        | LeakDetectionTarget::Ipv6SourceAddress
+        | LeakDetectionTarget::Ipv6DefaultRoute
+        | LeakDetectionTarget::Ipv6ControlledLeakService
+        | LeakDetectionTarget::Ipv6ExternalTarget => Some(IpFamily::Ipv6),
+        LeakDetectionTarget::DnsResolver | LeakDetectionTarget::BrowserApplicationDns => None,
+    }
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+fn insert_controlled_probe(
+    probes: &mut BTreeMap<LeakDetectionTarget, HttpLeakProbe>,
+    target: LeakDetectionTarget,
+    url: Option<String>,
+    expected_source: Option<String>,
+    family: IpFamily,
+) {
+    let (Some(url), Some(expected_source)) = (url, expected_source) else {
+        return;
+    };
+    let Ok(expected_source) = expected_source.parse::<IpAddr>() else {
+        return;
+    };
+    if family == IpFamily::Ipv4 && !expected_source.is_ipv4()
+        || family == IpFamily::Ipv6 && !expected_source.is_ipv6()
+    {
+        return;
+    }
+    probes.insert(
+        target,
+        HttpLeakProbe::ExpectedSource {
+            url,
+            expected_source,
+        },
+    );
+}
+
+impl LeakDetectionProbeRunner for ConfiguredLeakDetectionProbeRunner {
+    fn probe<'a>(
+        &'a self,
+        target: LeakDetectionTarget,
+        _observed_at_unix_ms: u64,
+    ) -> LeakProbeFuture<'a> {
+        Box::pin(self.run(target))
+    }
+}
+
+async fn run_http_probe(probe: &HttpLeakProbe, family: Option<IpFamily>) -> LeakProbeOutcome {
+    let started = Instant::now();
+    let (url_text, expected_source) = match probe {
+        HttpLeakProbe::Reachability { url } => (url.as_str(), None),
+        HttpLeakProbe::ExpectedSource {
+            url,
+            expected_source,
+        } => (url.as_str(), Some(*expected_source)),
+    };
+    let parsed = match reqwest::Url::parse(url_text) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") => url,
+        _ => return probe_failed(started, "leak_detection.probe_configuration_invalid"),
+    };
+    let Some(host) = parsed.host_str().map(str::to_string) else {
+        return probe_failed(started, "leak_detection.probe_configuration_invalid");
+    };
+    let Some(port) = parsed.port_or_known_default() else {
+        return probe_failed(started, "leak_detection.probe_configuration_invalid");
+    };
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(LEAK_DETECTION_COMMAND_TIMEOUT);
+    if let Some(family) = family {
+        let Some(resolved) = resolve_family_address(&host, port, family).await else {
+            return probe_failed(started, "leak_detection.probe_dns_failed");
+        };
+        builder = builder.resolve(&host, resolved);
+    }
+    let client = match builder.build() {
+        Ok(client) => client,
+        Err(_) => return probe_failed(started, "leak_detection.probe_client_failed"),
+    };
+    let response = match client.get(parsed).send().await {
+        Ok(response) => response,
+        Err(error) if error.is_timeout() => {
+            return probe_failed(started, "leak_detection.probe_timeout")
+        }
+        Err(error) if error.is_connect() => {
+            return probe_failed(started, "leak_detection.probe_connect_failed")
+        }
+        Err(_) => return probe_failed(started, "leak_detection.probe_request_failed"),
+    };
+    if !response.status().is_success() {
+        return probe_failed(started, "leak_detection.probe_http_status");
+    }
+    if let Some(expected_source) = expected_source {
+        let body = match bounded_response_body(response).await {
+            Some(body) => body,
+            None => return probe_failed(started, "leak_detection.probe_response_invalid"),
+        };
+        let observed = body.trim().trim_matches(['[', ']']).parse::<IpAddr>().ok();
+        if observed != Some(expected_source) {
+            return probe_failed(started, "leak_detection.probe_source_mismatch");
+        }
+    }
+    LeakProbeOutcome {
+        state: LeakDetectionEvidenceState::Passed,
+        duration_ms: elapsed_ms(started),
+        error_code: None,
+    }
+}
+
+async fn resolve_family_address(
+    host: &str,
+    port: u16,
+    family: IpFamily,
+) -> Option<std::net::SocketAddr> {
+    if let Ok(address) = host.parse::<IpAddr>() {
+        return family_matches(address, family).then(|| std::net::SocketAddr::new(address, port));
+    }
+    tokio::net::lookup_host((host, port))
+        .await
+        .ok()?
+        .find(|address| family_matches(address.ip(), family))
+}
+
+fn family_matches(address: IpAddr, family: IpFamily) -> bool {
+    match family {
+        IpFamily::Ipv4 => address.is_ipv4(),
+        IpFamily::Ipv6 => address.is_ipv6(),
+    }
+}
+
+async fn bounded_response_body(mut response: reqwest::Response) -> Option<String> {
+    let mut body = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if body.len().saturating_add(chunk.len()) > LEAK_PROBE_RESPONSE_BODY_LIMIT {
+                    return None;
+                }
+                body.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(_) => return None,
+        }
+    }
+    String::from_utf8(body).ok()
+}
+
+fn probe_failed(started: Instant, error_code: &'static str) -> LeakProbeOutcome {
+    LeakProbeOutcome {
+        state: LeakDetectionEvidenceState::Failed,
+        duration_ms: elapsed_ms(started),
+        error_code: Some(error_code.into()),
+    }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Collect local evidence with deployment-configured probes. Missing probes
+/// remain `NotTested`, so the resulting snapshot cannot be reported as leak-free
+/// until every required path has actual evidence.
 pub(crate) async fn collect_leak_detection(
     context: LeakDetectionContext,
     observed_at_unix_ms: u64,
 ) -> LeakDetectionSnapshot {
-    collect_leak_detection_with_probes(context, observed_at_unix_ms, &NoopLeakDetectionProbeRunner)
-        .await
+    let probes = ConfiguredLeakDetectionProbeRunner::from_env();
+    collect_leak_detection_with_probes(context, observed_at_unix_ms, &probes).await
 }
 
 pub(crate) async fn collect_leak_detection_with_probes(
@@ -841,6 +1073,31 @@ mod tests {
 
     const NOW: u64 = 1_700_000_000_000;
 
+    async fn spawn_http_probe(body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind probe listener");
+        let address = listener.local_addr().expect("probe listener address");
+        let app = axum::Router::new().route("/", axum::routing::get(move || async move { body }));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{address}/")
+    }
+
+    fn configured_probe(
+        ipv4_controlled_url: &str,
+        ipv4_expected_source: &str,
+        ipv4_external_url: &str,
+    ) -> ConfiguredLeakDetectionProbeRunner {
+        ConfiguredLeakDetectionProbeRunner::from_lookup(|name| match name {
+            LEAK_PROBE_IPV4_CONTROLLED_URL => Some(ipv4_controlled_url.to_string()),
+            LEAK_PROBE_IPV4_EXPECTED_SOURCE => Some(ipv4_expected_source.to_string()),
+            LEAK_PROBE_IPV4_EXTERNAL_URL => Some(ipv4_external_url.to_string()),
+            _ => None,
+        })
+    }
+
     fn passing_dns() -> DnsObservation {
         DnsObservation {
             mode: LeakDetectionDnsMode::Doh,
@@ -941,6 +1198,52 @@ mod tests {
         assert_eq!(assessment.state, LeakDetectionState::InsufficientEvidence);
         assert!(assessment.fail_closed_required);
         assert_eq!(assessment.reason_code, "leak_detection.evidence_not_tested");
+    }
+
+    #[tokio::test]
+    async fn configured_http_probes_verify_family_reachability_and_expected_source() {
+        let url = spawn_http_probe("127.0.0.1\n").await;
+        let probes = configured_probe(&url, "127.0.0.1", &url);
+
+        let controlled = probes
+            .probe(LeakDetectionTarget::Ipv4ControlledLeakService, NOW)
+            .await;
+        assert_eq!(controlled.state, LeakDetectionEvidenceState::Passed);
+        assert_eq!(controlled.error_code, None);
+
+        let external = probes
+            .probe(LeakDetectionTarget::Ipv4ExternalTarget, NOW)
+            .await;
+        assert_eq!(external.state, LeakDetectionEvidenceState::Passed);
+        assert_eq!(external.error_code, None);
+    }
+
+    #[tokio::test]
+    async fn configured_controlled_probe_fails_closed_on_source_mismatch() {
+        let url = spawn_http_probe("127.0.0.2\n").await;
+        let probes = configured_probe(&url, "127.0.0.1", &url);
+
+        let outcome = probes
+            .probe(LeakDetectionTarget::Ipv4ControlledLeakService, NOW)
+            .await;
+        assert_eq!(outcome.state, LeakDetectionEvidenceState::Failed);
+        assert_eq!(
+            outcome.error_code.as_deref(),
+            Some("leak_detection.probe_source_mismatch")
+        );
+    }
+
+    #[tokio::test]
+    async fn unconfigured_probe_stays_not_tested() {
+        let probes = ConfiguredLeakDetectionProbeRunner::default();
+        let outcome = probes
+            .probe(LeakDetectionTarget::BrowserApplicationDns, NOW)
+            .await;
+        assert_eq!(outcome.state, LeakDetectionEvidenceState::NotTested);
+        assert_eq!(
+            outcome.error_code.as_deref(),
+            Some("leak_detection.probe_not_configured")
+        );
     }
 
     #[cfg(target_os = "linux")]

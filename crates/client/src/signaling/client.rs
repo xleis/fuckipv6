@@ -1746,6 +1746,16 @@ fn signaling_message_to_event(msg: SignalingMessage) -> Option<SignalingEvent> {
             payload,
         }),
 
+        SignalingMessage::SecureControlPacket {
+            src_ip,
+            dst_ip,
+            payload,
+        } => Some(SignalingEvent::SecureControlPacket {
+            src_ip,
+            dst_ip,
+            payload,
+        }),
+
         SignalingMessage::ConnectInfo { peer } => Some(SignalingEvent::ConnectInfo { peer }),
 
         SignalingMessage::ConnectNotify { peer } => Some(SignalingEvent::ConnectNotify { peer }),
@@ -1849,6 +1859,13 @@ pub enum SignalingEvent {
 
     /// 通过协调服务器中继收到的数据包 (支持 IPv4 / IPv6)
     RelayPacket {
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        payload: Bytes,
+    },
+
+    /// A Secure Session v2 handshake control frame relayed by the Coordinator.
+    SecureControlPacket {
         src_ip: IpAddr,
         dst_ip: IpAddr,
         payload: Bytes,

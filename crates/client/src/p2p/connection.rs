@@ -4,7 +4,7 @@ use fuckipv6_common::crypto::Identity;
 use fuckipv6_common::domain::NodeId;
 use fuckipv6_common::{
     codec, ControlMessage, DataPacket, FallbackThreshold, NatDetectionConfig, NatType, P2pDatagram,
-    PeerInfo, VirtualIps,
+    PeerInfo, SignalingMessage, VirtualIps,
 };
 use fuckipv6_secure_session::cookie::CookieKey;
 use fuckipv6_secure_session::wire::{decode_control, is_data_packet, CONTROL_MAGIC};
@@ -32,6 +32,7 @@ use super::inbound_queue::{
 };
 use super::secure_runtime::{SecureLockMetrics, SecurePeerState};
 use super::udp_batch::{self, UdpBatchMetrics, UdpBatchStats, DEFAULT_UDP_BATCH_SIZE};
+use crate::signaling::client::SignalingClient;
 
 const HEALTH_WINDOW_SIZE: usize = 20;
 const PROBE_RESPONSE_GRACE: Duration = Duration::from_secs(1);
@@ -361,6 +362,7 @@ pub struct P2pEngine {
     udp_batch_stats: Arc<UdpBatchStats>,
     local_ip: Arc<RwLock<Option<IpAddr>>>,
     local_identity: Arc<RwLock<Option<Identity>>>,
+    control_signaling: Arc<RwLock<Option<Arc<SignalingClient>>>>,
     handshake_admission: Arc<HandshakeAdmission>,
     cookie_key: Arc<CookieKey>,
     fallback_threshold: Arc<RwLock<FallbackThreshold>>,
@@ -494,6 +496,7 @@ impl P2pEngine {
         let receiver_index = Arc::new(RwLock::new(ReceiverIndex::default()));
         let local_ip = Arc::new(RwLock::new(None));
         let local_identity = Arc::new(RwLock::new(None));
+        let control_signaling = Arc::new(RwLock::new(None));
         let handshake_admission = HandshakeAdmission::shared_default();
         let cookie_key =
             Arc::new(CookieKey::generate().context("无法生成 Secure Session v2 cookie 密钥")?);
@@ -537,6 +540,7 @@ impl P2pEngine {
             udp_batch_stats,
             local_ip,
             local_identity,
+            control_signaling,
             handshake_admission,
             cookie_key,
             fallback_threshold: Arc::new(RwLock::new(FallbackThreshold::default())),
@@ -551,6 +555,12 @@ impl P2pEngine {
             send_batch_short_return: Arc::new(AtomicUsize::new(usize::MAX)),
             overlay,
         })
+    }
+
+    /// Attach the live signaling client used to relay Secure Session v2
+    /// handshake control frames when direct UDP is unavailable.
+    pub async fn set_control_signaling(&self, signaling: Arc<SignalingClient>) {
+        *self.control_signaling.write().await = Some(signaling);
     }
 
     /// 设置本节点的加密身份，用于自动派生与各对端节点的对称会话秘钥。
@@ -771,8 +781,14 @@ impl P2pEngine {
             .unwrap_or(IpAddr::V6(peer_info.virtual_ip));
         self.start_endpoint_probing(client_id.clone(), primary_ip);
         if secure.is_initiator() {
-            let task =
-                spawn_secure_initiator(self.socket()?, self.connections.clone(), client_id, secure);
+            let task = spawn_secure_initiator(
+                self.socket()?,
+                self.connections.clone(),
+                self.local_ip.clone(),
+                self.control_signaling.clone(),
+                client_id,
+                secure,
+            );
             self.register_child_task(task);
         }
 
@@ -813,6 +829,76 @@ impl P2pEngine {
             .await
             .with_context(|| format!("无法加密发往对等节点 {dst_ip} 的数据包"))?;
         Ok(packet)
+    }
+
+    /// Process one Secure Session v2 handshake frame delivered over signaling.
+    ///
+    /// The synthetic port-zero endpoint binds the cookie challenge to the
+    /// Coordinator-authenticated virtual source without claiming that the peer
+    /// owns a UDP endpoint. All response actions use the same signaling path.
+    pub(crate) async fn handle_secure_control_from_signaling(
+        &self,
+        src_ip: IpAddr,
+        payload: Bytes,
+    ) -> Result<()> {
+        let message = decode_control(payload.as_ref())
+            .context("无法解析信令中继的 Secure Session v2 控制帧")?;
+        let client_id = {
+            let idx = self.ip_index.read().await;
+            idx.get(&src_ip).cloned()
+        }
+        .with_context(|| format!("信令控制帧来自未注册节点 {src_ip}"))?;
+        let (secure, health) = {
+            let connections = self.connections.read().await;
+            let connection = connections
+                .get(client_id.as_ref())
+                .with_context(|| format!("信令控制帧来自未注册节点 {src_ip}"))?;
+            (connection.secure.clone(), connection.health.clone())
+        };
+        if !secure.matches_control(&message).await {
+            anyhow::bail!("信令控制帧与节点 {client_id} 的 Secure Session v2 不匹配");
+        }
+
+        let destination = SocketAddr::new(src_ip, 0);
+        let endpoint_authenticated = matches!(
+            &message,
+            fuckipv6_secure_session::wire::ControlMessage::Accept(_)
+                | fuckipv6_secure_session::wire::ControlMessage::Confirm(_)
+                | fuckipv6_secure_session::wire::ControlMessage::HelloWithCookie(_)
+        );
+        let _session = secure.acquire_session_permission().await?;
+        let actions = secure
+            .handle_control_from_signaling(destination, message)
+            .await?;
+        self.incoming_tx.record_control_frame_bypass();
+        if endpoint_authenticated {
+            health.record_inbound();
+        }
+        for action in actions {
+            tracing::debug!(
+                "通过信令发送 Secure Session v2 {} 到 {} (节点 {})",
+                action.kind,
+                action.destination,
+                client_id
+            );
+            send_secure_control_via_signaling(
+                &self.control_signaling,
+                &self.local_ip,
+                action.destination,
+                &action.frame,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "无法通过信令向节点 {} 发送 Secure Session v2 {}",
+                    client_id, action.kind
+                )
+            })?;
+        }
+        if secure.is_established().await {
+            tracing::info!("Secure Session v2 已通过信令中继与节点 {} 建立", client_id);
+        }
+        Ok(())
     }
 
     /// Decrypt and authenticate a payload received from a registered peer.
@@ -1829,6 +1915,8 @@ async fn wait_for_p2p_task(
 fn spawn_secure_initiator(
     socket: Arc<UdpSocket>,
     connections: Arc<RwLock<HashMap<String, PeerConnection>>>,
+    local_ip: Arc<RwLock<Option<IpAddr>>>,
+    control_signaling: Arc<RwLock<Option<Arc<SignalingClient>>>>,
     client_id: String,
     secure: Arc<SecurePeerState>,
 ) -> JoinHandle<()> {
@@ -1869,6 +1957,31 @@ fn spawn_secure_initiator(
                             );
                         }
                     }
+                    if let Some(destination) = {
+                        let connections = connections.read().await;
+                        connections.get(&client_id).and_then(|connection| {
+                            connection
+                                .peer_info
+                                .virtual_ips
+                                .primary_ip()
+                                .or(Some(IpAddr::V6(connection.peer_info.virtual_ip)))
+                        })
+                    } {
+                        if let Err(error) = send_secure_control_via_signaling(
+                            &control_signaling,
+                            &local_ip,
+                            SocketAddr::new(destination, 0),
+                            &frame,
+                        )
+                        .await
+                        {
+                            tracing::debug!(
+                                "无法通过信令向节点 {} 发送 Secure Session v2 HELLO: {}",
+                                client_id,
+                                error
+                            );
+                        }
+                    }
                 }
                 Ok(None) => {}
                 Err(super::secure_runtime::SecureRuntimeError::Revoked) => return,
@@ -1884,10 +1997,22 @@ fn spawn_secure_initiator(
                         action.destination,
                         client_id
                     );
-                    if let Err(error) = socket
-                        .send_to(&action.frame, dual_stack_send_endpoint(action.destination))
+                    let send_result = if action.destination.port() == 0 {
+                        send_secure_control_via_signaling(
+                            &control_signaling,
+                            &local_ip,
+                            action.destination,
+                            &action.frame,
+                        )
                         .await
-                    {
+                    } else {
+                        socket
+                            .send_to(&action.frame, dual_stack_send_endpoint(action.destination))
+                            .await
+                            .map(|_| ())
+                            .map_err(anyhow::Error::from)
+                    };
+                    if let Err(error) = send_result {
                         tracing::debug!(
                             "无法向节点 {} 重传 Secure Session v2 CONFIRM: {}",
                             client_id,
@@ -1909,6 +2034,28 @@ fn spawn_secure_initiator(
             sleep(SECURE_HANDSHAKE_RETRY_INTERVAL).await;
         }
     })
+}
+
+async fn send_secure_control_via_signaling(
+    control_signaling: &Arc<RwLock<Option<Arc<SignalingClient>>>>,
+    local_ip: &Arc<RwLock<Option<IpAddr>>>,
+    destination: SocketAddr,
+    frame: &[u8],
+) -> Result<()> {
+    let signaling = control_signaling
+        .read()
+        .await
+        .clone()
+        .context("signaling transport is not attached")?;
+    let src_ip = (*local_ip.read().await).context("local virtual IP is not configured")?;
+    signaling
+        .send(SignalingMessage::secure_control_packet(
+            src_ip,
+            destination.ip(),
+            Bytes::copy_from_slice(frame),
+        ))
+        .context("failed to queue Secure Session v2 control frame on signaling")?;
+    Ok(())
 }
 
 /// A dual-stack IPv6 UDP socket requires IPv4 destinations in IPv4-mapped

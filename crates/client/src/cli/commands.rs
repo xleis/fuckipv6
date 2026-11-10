@@ -1384,6 +1384,7 @@ pub(crate) async fn prepare_client_runtime_ext(
     let (p2p, nat_report) = create_p2p_engine(&config).await?;
     p2p.set_identity(identity.clone()).await;
     let signaling = Arc::new(connect_signaling(&config, identity, &p2p, &nat_report).await?);
+    p2p.set_control_signaling(signaling.clone()).await;
     let assigned_ips = wait_for_assigned_ips(&signaling).await?;
     let assigned_ip = assigned_ips.primary_ipv6();
     configure_local_ips(&p2p, &assigned_ips).await;
@@ -3673,7 +3674,9 @@ async fn handle_runtime_signaling_event(
                 }
             }
         }
-        SignalingAction::Reconnected | SignalingAction::RelayedPacket { .. } => {}
+        SignalingAction::Reconnected
+        | SignalingAction::RelayedPacket { .. }
+        | SignalingAction::SecureControlPacket { .. } => {}
         SignalingAction::None => {}
     }
 
@@ -3685,6 +3688,15 @@ async fn handle_runtime_signaling_event(
                 "signaling relay packet",
             )
             .await;
+        }
+        SignalingAction::SecureControlPacket { src_ip, payload } => {
+            if let Err(error) = runtime
+                .p2p
+                .handle_secure_control_from_signaling(src_ip, payload)
+                .await
+            {
+                tracing::debug!("丢弃信令中继的 Secure Session v2 控制帧: {error:#}");
+            }
         }
         SignalingAction::Reconnected => {
             runtime.stats.record_signaling_reconnect().await;
@@ -5001,6 +5013,10 @@ enum SignalingAction {
         src_ip: IpAddr,
         payload: Bytes,
     },
+    SecureControlPacket {
+        src_ip: IpAddr,
+        payload: Bytes,
+    },
 }
 
 async fn handle_signaling_event(
@@ -5063,6 +5079,20 @@ async fn handle_signaling_event(
                 payload.len()
             );
             return SignalingAction::RelayedPacket { src_ip, payload };
+        }
+
+        SignalingEvent::SecureControlPacket {
+            src_ip,
+            dst_ip,
+            payload,
+        } => {
+            tracing::debug!(
+                "收到中继 Secure Session v2 控制帧: {} -> {}, {} bytes",
+                src_ip,
+                dst_ip,
+                payload.len()
+            );
+            return SignalingAction::SecureControlPacket { src_ip, payload };
         }
 
         SignalingEvent::JoinRequestStatus {

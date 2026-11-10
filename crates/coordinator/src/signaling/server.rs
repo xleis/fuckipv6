@@ -618,6 +618,14 @@ async fn handle_signaling_message(
         } => {
             handle_relay_packet(src_ip, dst_ip, payload, session_manager, tx, client_id).await?;
         }
+        SignalingMessage::SecureControlPacket {
+            src_ip,
+            dst_ip,
+            payload,
+        } => {
+            handle_secure_control_packet(src_ip, dst_ip, payload, session_manager, tx, client_id)
+                .await?;
+        }
         SignalingMessage::JoinRequestSubmit { request } => {
             handle_join_request_submit(
                 *request,
@@ -2474,6 +2482,65 @@ async fn handle_heartbeat(
         session_manager,
         SignalingMessage::HeartbeatAck { timestamp },
     )
+}
+
+async fn handle_secure_control_packet(
+    src_ip: std::net::IpAddr,
+    dst_ip: std::net::IpAddr,
+    payload: Bytes,
+    session_manager: &Arc<SessionManager>,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+) -> Result<()> {
+    let Some(client_id) = client_id.as_deref() else {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Unauthorized,
+                "Client must register before relaying a secure control frame",
+            ),
+        )?;
+        return Ok(());
+    };
+
+    let Some(session) = session_manager.get_peer_info(&client_id.to_string()).await else {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Unauthorized,
+                "Secure control source has no active registration",
+            ),
+        )?;
+        return Ok(());
+    };
+    if !session.matches_ip(src_ip) {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Unauthorized,
+                "Secure control source IP is not assigned to this client",
+            ),
+        )?;
+        return Ok(());
+    }
+    if !session_manager.is_data_plane_member(&session.public_key)? {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Forbidden,
+                "Secure control source is not a current data-plane member",
+            ),
+        )?;
+        return Ok(());
+    }
+
+    let packet = SignalingMessage::secure_control_packet(src_ip, dst_ip, payload);
+    session_manager.send_to_virtual_ip(dst_ip, packet).await?;
+    Ok(())
 }
 
 async fn handle_relay_packet(

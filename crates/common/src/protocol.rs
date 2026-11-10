@@ -358,6 +358,17 @@ pub enum SignalingMessage {
     NetworkJoinPreviewAck {
         preview: NetworkJoinPreview,
     },
+
+    /// A Secure Session v2 handshake control frame relayed by the Coordinator.
+    ///
+    /// Control frames are not encrypted data packets and therefore must not be
+    /// carried in `RelayPacket`, whose payload is passed to the AEAD data path.
+    SecureControlPacket {
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        #[serde(with = "serde_bytes_owned")]
+        payload: Bytes,
+    },
 }
 
 /// One CAS-protected item in an atomic batch approval transaction.
@@ -537,6 +548,19 @@ impl SignalingMessage {
         payload: impl Into<Bytes>,
     ) -> Self {
         Self::RelayPacket {
+            src_ip: src_ip.into(),
+            dst_ip: dst_ip.into(),
+            payload: payload.into(),
+        }
+    }
+
+    /// Create a Secure Session v2 control frame relayed by the Coordinator.
+    pub fn secure_control_packet(
+        src_ip: impl Into<IpAddr>,
+        dst_ip: impl Into<IpAddr>,
+        payload: impl Into<Bytes>,
+    ) -> Self {
+        Self::SecureControlPacket {
             src_ip: src_ip.into(),
             dst_ip: dst_ip.into(),
             payload: payload.into(),

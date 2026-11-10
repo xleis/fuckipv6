@@ -776,6 +776,25 @@ impl SecurePeerState {
         source: SocketAddr,
         message: ControlMessage,
     ) -> Result<Vec<SecureControlAction>, SecureRuntimeError> {
+        self.handle_control_inner(source, message, false).await
+    }
+
+    /// Process a v2 control frame whose source IP was authenticated by the
+    /// signaling relay rather than by a UDP packet source address.
+    pub(crate) async fn handle_control_from_signaling(
+        &self,
+        source: SocketAddr,
+        message: ControlMessage,
+    ) -> Result<Vec<SecureControlAction>, SecureRuntimeError> {
+        self.handle_control_inner(source, message, true).await
+    }
+
+    async fn handle_control_inner(
+        &self,
+        source: SocketAddr,
+        message: ControlMessage,
+        signaling_authenticated: bool,
+    ) -> Result<Vec<SecureControlAction>, SecureRuntimeError> {
         let source = canonical_endpoint(source);
         tracing::debug!(
             %source,
@@ -805,7 +824,12 @@ impl SecurePeerState {
             }
             ControlMessage::CookieChallenge(challenge) => {
                 if self.initiator {
-                    return self.accept_cookie_challenge(&mut state, source, challenge);
+                    return self.accept_cookie_challenge(
+                        &mut state,
+                        source,
+                        challenge,
+                        signaling_authenticated,
+                    );
                 }
                 Err(SecureRuntimeError::UnexpectedFrame {
                     expected: "HELLO or CONFIRM",
@@ -969,6 +993,7 @@ impl SecurePeerState {
         state: &mut SecureState,
         source: SocketAddr,
         challenge: CookieChallengeFrame,
+        signaling_authenticated: bool,
     ) -> Result<Vec<SecureControlAction>, SecureRuntimeError> {
         let peer_identity = fuckipv6_secure_session::handshake::identity_id(&self.expected_peer);
         if challenge.responder_identity != peer_identity {
@@ -976,7 +1001,7 @@ impl SecurePeerState {
                 expected: "COOKIE_CHALLENGE for the configured peer",
             });
         }
-        if !self.is_trusted_control_source(state, source) {
+        if !signaling_authenticated && !self.is_trusted_control_source(state, source) {
             return Err(SecureRuntimeError::UntrustedControlSource { actual: source });
         }
         let now = Instant::now();
@@ -2962,6 +2987,96 @@ mod tests {
             .expect("accept challenge from registered endpoint");
         assert_eq!(retry[0].kind, "HELLO_WITH_COOKIE");
         assert_eq!(retry[0].destination, responder_addr);
+    }
+
+    #[tokio::test]
+    async fn signaling_authenticated_cookie_challenge_completes_synthetic_endpoint_handshake() {
+        let (initiator, responder, _, _) = pair();
+        let initiator_signaling = SocketAddr::new(
+            "fd00::2".parse::<IpAddr>().expect("initiator virtual IP"),
+            0,
+        );
+        let responder_signaling = SocketAddr::new(
+            "fd00::1".parse::<IpAddr>().expect("responder virtual IP"),
+            0,
+        );
+
+        let hello = initiator
+            .initiate_frame()
+            .await
+            .expect("create hello")
+            .expect("initiator");
+        let challenge = responder
+            .handle_control_from_signaling(
+                initiator_signaling,
+                fuckipv6_secure_session::wire::decode_control(&hello).expect("decode hello"),
+            )
+            .await
+            .expect("challenge signaling hello");
+        assert_eq!(challenge.len(), 1);
+        assert_eq!(challenge[0].kind, "COOKIE_CHALLENGE");
+
+        assert!(matches!(
+            initiator
+                .handle_control(
+                    responder_signaling,
+                    fuckipv6_secure_session::wire::decode_control(&challenge[0].frame)
+                        .expect("decode challenge"),
+                )
+                .await,
+            Err(SecureRuntimeError::UntrustedControlSource { actual })
+                if actual == responder_signaling
+        ));
+
+        let retry = initiator
+            .handle_control_from_signaling(
+                responder_signaling,
+                fuckipv6_secure_session::wire::decode_control(&challenge[0].frame)
+                    .expect("decode challenge"),
+            )
+            .await
+            .expect("answer signaling challenge");
+        assert_eq!(retry[0].kind, "HELLO_WITH_COOKIE");
+
+        let accept = responder
+            .handle_control_from_signaling(
+                initiator_signaling,
+                fuckipv6_secure_session::wire::decode_control(&retry[0].frame)
+                    .expect("decode retry"),
+            )
+            .await
+            .expect("accept signaling cookie retry");
+        assert_eq!(accept[0].kind, "ACCEPT");
+
+        let confirm = initiator
+            .handle_control_from_signaling(
+                responder_signaling,
+                fuckipv6_secure_session::wire::decode_control(&accept[0].frame)
+                    .expect("decode accept"),
+            )
+            .await
+            .expect("accept signaling response");
+        assert_eq!(confirm[0].kind, "CONFIRM");
+
+        responder
+            .handle_control_from_signaling(
+                initiator_signaling,
+                fuckipv6_secure_session::wire::decode_control(&confirm[0].frame)
+                    .expect("decode confirm"),
+            )
+            .await
+            .expect("complete signaling handshake");
+
+        assert!(initiator.is_established().await);
+        assert!(responder.is_established().await);
+        assert_eq!(
+            initiator.authenticated_peer().await,
+            Some(responder_signaling)
+        );
+        assert_eq!(
+            responder.authenticated_peer().await,
+            Some(initiator_signaling)
+        );
     }
 
     #[tokio::test]

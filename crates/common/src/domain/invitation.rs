@@ -201,9 +201,9 @@ pub struct InvitationRecord {
     pub created_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
     pub revision: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub revoked_at_unix_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub revoked_by: Option<NodeId>,
 }
 
@@ -389,7 +389,7 @@ pub struct InvitationRedeemRequest {
     /// Explicit consent to the current Exit contribution obligation. It is
     /// required when the invited network requires contribution and is never
     /// inferred from accepting the invitation itself.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub exit_contribution_acknowledged: Option<bool>,
 }
 
@@ -438,7 +438,7 @@ pub struct InvitationPreview {
     pub creates_permanent_membership: bool,
     pub requires_recent_reauthentication: bool,
     pub can_accept: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub denial_key: Option<String>,
 }
 

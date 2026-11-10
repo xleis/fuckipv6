@@ -16,7 +16,7 @@ pub struct OnionHopNode {
     /// 节点的 X25519 公钥字节数组 (用于 Diffie-Hellman 协商)
     pub public_key: [u8; 32],
     /// 节点物理端点 (可选)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub endpoint: Option<SocketAddr>,
 }
 

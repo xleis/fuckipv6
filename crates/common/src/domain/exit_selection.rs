@@ -25,14 +25,100 @@ pub const EXIT_SELECTION_MAX_MEMBER_RULES: usize = 4096;
 
 /// Whether administrators pin one Exit or let members select from the final
 /// administrator-authorized set.
-#[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ExitSelectionMode {
     #[default]
     MemberChoice,
     Fixed {
         exit: NodeId,
     },
+}
+
+/// Schemars cannot infer the human-readable shape from the hand-written serde
+/// implementation above. Keep the JSON contract as the original internally
+/// tagged representation while Postcard uses its own positional-safe form.
+#[allow(dead_code)]
+#[derive(JsonSchema)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+enum ExitSelectionModeJson {
+    MemberChoice,
+    Fixed { exit: NodeId },
+}
+
+impl JsonSchema for ExitSelectionMode {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ExitSelectionMode".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        ExitSelectionModeJson::json_schema(generator)
+    }
+}
+
+impl Serialize for ExitSelectionMode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            #[derive(Serialize)]
+            #[serde(tag = "mode", rename_all = "snake_case")]
+            enum HumanReadable<'a> {
+                MemberChoice,
+                Fixed { exit: &'a NodeId },
+            }
+
+            match self {
+                Self::MemberChoice => HumanReadable::MemberChoice.serialize(serializer),
+                Self::Fixed { exit } => HumanReadable::Fixed { exit }.serialize(serializer),
+            }
+        } else {
+            #[derive(Serialize)]
+            #[serde(rename_all = "snake_case")]
+            enum Wire<'a> {
+                MemberChoice,
+                Fixed { exit: &'a NodeId },
+            }
+
+            match self {
+                Self::MemberChoice => Wire::MemberChoice.serialize(serializer),
+                Self::Fixed { exit } => Wire::Fixed { exit }.serialize(serializer),
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ExitSelectionMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        if deserializer.is_human_readable() {
+            #[derive(Deserialize)]
+            #[serde(tag = "mode", rename_all = "snake_case")]
+            enum HumanReadable {
+                MemberChoice,
+                Fixed { exit: NodeId },
+            }
+
+            Ok(match HumanReadable::deserialize(deserializer)? {
+                HumanReadable::MemberChoice => Self::MemberChoice,
+                HumanReadable::Fixed { exit } => Self::Fixed { exit },
+            })
+        } else {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "snake_case")]
+            enum Wire {
+                MemberChoice,
+                Fixed { exit: NodeId },
+            }
+
+            Ok(match Wire::deserialize(deserializer)? {
+                Wire::MemberChoice => Self::MemberChoice,
+                Wire::Fixed { exit } => Self::Fixed { exit },
+            })
+        }
+    }
 }
 
 /// What to do with an already established session when its Exit is no longer
@@ -74,17 +160,70 @@ pub struct ExitSelectionMemberRule {
 /// lists narrow that universe when the subject belongs to a matching group;
 /// member `allow` lists narrow it further. Any matching deny removes an Exit
 /// regardless of allow rules at any scope.
-#[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ExitSelectionPolicy {
     pub mode: ExitSelectionMode,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub default_exit: Option<NodeId>,
     pub available_exits: Vec<NodeId>,
     pub denied_exits: Vec<NodeId>,
     pub groups: Vec<ExitSelectionGroupRule>,
     pub members: Vec<ExitSelectionMemberRule>,
     pub session_transition: ExitSessionTransitionPolicy,
+}
+
+impl Serialize for ExitSelectionPolicy {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if serializer.is_human_readable() {
+            #[derive(Serialize)]
+            struct HumanReadable<'a> {
+                mode: &'a ExitSelectionMode,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                default_exit: &'a Option<NodeId>,
+                available_exits: &'a [NodeId],
+                denied_exits: &'a [NodeId],
+                groups: &'a [ExitSelectionGroupRule],
+                members: &'a [ExitSelectionMemberRule],
+                session_transition: ExitSessionTransitionPolicy,
+            }
+
+            HumanReadable {
+                mode: &self.mode,
+                default_exit: &self.default_exit,
+                available_exits: &self.available_exits,
+                denied_exits: &self.denied_exits,
+                groups: &self.groups,
+                members: &self.members,
+                session_transition: self.session_transition,
+            }
+            .serialize(serializer)
+        } else {
+            #[derive(Serialize)]
+            struct Wire<'a> {
+                mode: &'a ExitSelectionMode,
+                default_exit: &'a Option<NodeId>,
+                available_exits: &'a [NodeId],
+                denied_exits: &'a [NodeId],
+                groups: &'a [ExitSelectionGroupRule],
+                members: &'a [ExitSelectionMemberRule],
+                session_transition: ExitSessionTransitionPolicy,
+            }
+
+            Wire {
+                mode: &self.mode,
+                default_exit: &self.default_exit,
+                available_exits: &self.available_exits,
+                denied_exits: &self.denied_exits,
+                groups: &self.groups,
+                members: &self.members,
+                session_transition: self.session_transition,
+            }
+            .serialize(serializer)
+        }
+    }
 }
 
 /// Where the final decision came from.
@@ -907,5 +1046,29 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn selection_mode_keeps_json_contract_and_postcard_round_trip() {
+        let exit = node("exit");
+        let fixed = ExitSelectionMode::Fixed { exit: exit.clone() };
+
+        assert_eq!(
+            serde_json::to_value(&fixed).unwrap(),
+            serde_json::json!({
+                "mode": "fixed",
+                "exit": exit,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(ExitSelectionMode::MemberChoice).unwrap(),
+            serde_json::json!({"mode": "member_choice"})
+        );
+
+        let encoded = crate::codec::encode(&fixed).unwrap();
+        assert_eq!(
+            crate::codec::decode::<ExitSelectionMode>(&encoded).unwrap(),
+            fixed
+        );
     }
 }

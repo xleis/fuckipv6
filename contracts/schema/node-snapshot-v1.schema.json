@@ -305,12 +305,14 @@
       "description": "Availability projected beside a member's declared capability. Unknown or\nstale evidence is never promoted to `available`.",
       "properties": {
         "declared_available": {
+          "default": null,
           "type": [
             "boolean",
             "null"
           ]
         },
         "observed_at_unix_ms": {
+          "default": null,
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -319,6 +321,7 @@
           ]
         },
         "reason_code": {
+          "default": null,
           "type": [
             "string",
             "null"
@@ -693,7 +696,7 @@
       "type": "object"
     },
     "ExitSelectionMode": {
-      "description": "Whether administrators pin one Exit or let members select from the final\nadministrator-authorized set.",
+      "description": "Schemars cannot infer the human-readable shape from the hand-written serde\nimplementation above. Keep the JSON contract as the original internally\ntagged representation while Postcard uses its own positional-safe form.",
       "oneOf": [
         {
           "properties": {
@@ -744,7 +747,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "default": null
         },
         "denied_exits": {
           "default": [],
@@ -1112,6 +1116,7 @@
           "default": "not_applicable"
         },
         "member_limit": {
+          "default": null,
           "description": "Capacity shown when these terms were acknowledged. Omitted for legacy\nmemberships so their content hash remains stable.",
           "format": "uint32",
           "minimum": 0,
@@ -1490,6 +1495,7 @@
     "NetworkMemberPresence": {
       "properties": {
         "observed_at_unix_ms": {
+          "default": null,
           "format": "uint64",
           "minimum": 0,
           "type": [

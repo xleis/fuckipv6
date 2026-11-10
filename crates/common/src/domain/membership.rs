@@ -155,7 +155,7 @@ pub struct MembershipTerms {
     pub exit_contribution_mode: ExitContributionMode,
     /// Capacity shown when these terms were acknowledged. Omitted for legacy
     /// memberships so their content hash remains stable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub member_limit: Option<u32>,
 }
 
@@ -230,32 +230,54 @@ impl<'de> Deserialize<'de> for MembershipTerms {
     where
         D: serde::Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        struct RawMembershipTerms {
-            network_policy_revision: u64,
-            privacy_policy_revision: u64,
-            exit_contribution: ExitContributionObligation,
-            #[serde(default)]
-            exit_contribution_scope: Option<ExitContributionScope>,
-            #[serde(default)]
-            exit_contribution_mode: Option<ExitContributionMode>,
-            #[serde(default)]
-            member_limit: Option<u32>,
-        }
+        if deserializer.is_human_readable() {
+            #[derive(Deserialize)]
+            struct RawMembershipTerms {
+                network_policy_revision: u64,
+                privacy_policy_revision: u64,
+                exit_contribution: ExitContributionObligation,
+                #[serde(default)]
+                exit_contribution_scope: Option<ExitContributionScope>,
+                #[serde(default)]
+                exit_contribution_mode: Option<ExitContributionMode>,
+                #[serde(default)]
+                member_limit: Option<u32>,
+            }
 
-        let raw = RawMembershipTerms::deserialize(deserializer)?;
-        Ok(Self {
-            network_policy_revision: raw.network_policy_revision,
-            privacy_policy_revision: raw.privacy_policy_revision,
-            exit_contribution: raw.exit_contribution,
-            exit_contribution_scope: raw
-                .exit_contribution_scope
-                .unwrap_or_else(|| legacy_exit_contribution_scope(raw.exit_contribution)),
-            exit_contribution_mode: raw
-                .exit_contribution_mode
-                .unwrap_or_else(|| ExitContributionMode::from_legacy(raw.exit_contribution)),
-            member_limit: raw.member_limit,
-        })
+            let raw = RawMembershipTerms::deserialize(deserializer)?;
+            Ok(Self {
+                network_policy_revision: raw.network_policy_revision,
+                privacy_policy_revision: raw.privacy_policy_revision,
+                exit_contribution: raw.exit_contribution,
+                exit_contribution_scope: raw
+                    .exit_contribution_scope
+                    .unwrap_or_else(|| legacy_exit_contribution_scope(raw.exit_contribution)),
+                exit_contribution_mode: raw
+                    .exit_contribution_mode
+                    .unwrap_or_else(|| ExitContributionMode::from_legacy(raw.exit_contribution)),
+                member_limit: raw.member_limit,
+            })
+        } else {
+            #[derive(Deserialize)]
+            struct WireMembershipTerms {
+                network_policy_revision: u64,
+                privacy_policy_revision: u64,
+                exit_contribution: ExitContributionObligation,
+                exit_contribution_scope: ExitContributionScope,
+                exit_contribution_mode: ExitContributionMode,
+                member_limit: Option<u32>,
+            }
+
+            let wire = WireMembershipTerms::deserialize(deserializer)?;
+            Ok(Self {
+                network_policy_revision: wire.network_policy_revision,
+                privacy_policy_revision: wire.privacy_policy_revision,
+                exit_contribution: wire.exit_contribution,
+                exit_contribution_scope: wire.exit_contribution_scope,
+                exit_contribution_mode: wire.exit_contribution_mode,
+                member_limit: wire.member_limit,
+            })
+        }
     }
 }
 
@@ -369,7 +391,7 @@ pub enum JoinRequestReviewAction {
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct JoinApplicantProfile {
     pub node_id: NodeId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub display_name: Option<String>,
     pub public_key_fingerprint: String,
 }
@@ -420,37 +442,61 @@ impl<'de> Deserialize<'de> for JoinRequestGrantPreview {
     where
         D: serde::Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        struct RawGrantPreview {
-            role: MembershipRole,
-            #[serde(default)]
-            capabilities: Vec<CapabilityKind>,
-            #[serde(default)]
-            exit_contribution: ExitContributionObligation,
-            #[serde(default)]
-            exit_contribution_scope: Option<ExitContributionScope>,
-            #[serde(default)]
-            exit_contribution_mode: Option<ExitContributionMode>,
-            #[serde(default)]
-            file_access: bool,
-            #[serde(default)]
-            grants_data_plane_access: bool,
-        }
+        if deserializer.is_human_readable() {
+            #[derive(Deserialize)]
+            struct RawGrantPreview {
+                role: MembershipRole,
+                #[serde(default)]
+                capabilities: Vec<CapabilityKind>,
+                #[serde(default)]
+                exit_contribution: ExitContributionObligation,
+                #[serde(default)]
+                exit_contribution_scope: Option<ExitContributionScope>,
+                #[serde(default)]
+                exit_contribution_mode: Option<ExitContributionMode>,
+                #[serde(default)]
+                file_access: bool,
+                #[serde(default)]
+                grants_data_plane_access: bool,
+            }
 
-        let raw = RawGrantPreview::deserialize(deserializer)?;
-        Ok(Self {
-            role: raw.role,
-            capabilities: raw.capabilities,
-            exit_contribution: raw.exit_contribution,
-            exit_contribution_scope: raw
-                .exit_contribution_scope
-                .unwrap_or_else(|| legacy_exit_contribution_scope(raw.exit_contribution)),
-            exit_contribution_mode: raw
-                .exit_contribution_mode
-                .unwrap_or_else(|| ExitContributionMode::from_legacy(raw.exit_contribution)),
-            file_access: raw.file_access,
-            grants_data_plane_access: raw.grants_data_plane_access,
-        })
+            let raw = RawGrantPreview::deserialize(deserializer)?;
+            Ok(Self {
+                role: raw.role,
+                capabilities: raw.capabilities,
+                exit_contribution: raw.exit_contribution,
+                exit_contribution_scope: raw
+                    .exit_contribution_scope
+                    .unwrap_or_else(|| legacy_exit_contribution_scope(raw.exit_contribution)),
+                exit_contribution_mode: raw
+                    .exit_contribution_mode
+                    .unwrap_or_else(|| ExitContributionMode::from_legacy(raw.exit_contribution)),
+                file_access: raw.file_access,
+                grants_data_plane_access: raw.grants_data_plane_access,
+            })
+        } else {
+            #[derive(Deserialize)]
+            struct WireGrantPreview {
+                role: MembershipRole,
+                capabilities: Vec<CapabilityKind>,
+                exit_contribution: ExitContributionObligation,
+                exit_contribution_scope: ExitContributionScope,
+                exit_contribution_mode: ExitContributionMode,
+                file_access: bool,
+                grants_data_plane_access: bool,
+            }
+
+            let wire = WireGrantPreview::deserialize(deserializer)?;
+            Ok(Self {
+                role: wire.role,
+                capabilities: wire.capabilities,
+                exit_contribution: wire.exit_contribution,
+                exit_contribution_scope: wire.exit_contribution_scope,
+                exit_contribution_mode: wire.exit_contribution_mode,
+                file_access: wire.file_access,
+                grants_data_plane_access: wire.grants_data_plane_access,
+            })
+        }
     }
 }
 
@@ -492,7 +538,7 @@ pub struct JoinRequest {
     pub request_id: JoinRequestId,
     pub network_id: NetworkId,
     pub applicant: JoinApplicantProfile,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub reason: Option<String>,
     #[serde(default)]
     pub reason_visibility: JoinRequestReasonVisibility,
@@ -505,17 +551,17 @@ pub struct JoinRequest {
     pub created_at_unix_ms: u64,
     pub updated_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub reason_retention_until_unix_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub reviewer_node_id: Option<NodeId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub decided_at_unix_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub information_request: Option<String>,
     /// Exact admission time. `decided_at_unix_ms` is shared by rejection,
     /// withdrawal and expiry and therefore can never be used as join time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub approved_at_unix_ms: Option<u64>,
 }
 
@@ -573,7 +619,7 @@ pub enum NetworkMemberObservationSource {
 pub struct NetworkMemberPresence {
     pub state: NetworkMemberOnlineState,
     pub source: NetworkMemberObservationSource,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub observed_at_unix_ms: Option<u64>,
 }
 
@@ -605,16 +651,16 @@ impl NetworkMemberPresence {
 
 /// One sanitized directory row. Fields that are not authorized or not known are
 /// omitted rather than populated from unrelated network-wide declarations.
-#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Deserialize)]
 pub struct NetworkMember {
     pub node_id: NodeId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub display_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub identity_fingerprint: Option<String>,
     pub role: MembershipRole,
     pub groups: Vec<NetworkMemberGroup>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub capabilities: Option<Vec<CapabilityKind>>,
     pub status: NetworkMemberStatus,
     /// Durable governance state. This is distinct from live connection status
@@ -634,8 +680,96 @@ pub struct NetworkMember {
     /// not an observation, so missing evidence remains `unknown`.
     #[serde(default)]
     pub exit_availability: super::exit_contribution::ExitContributionAvailability,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub joined_at_unix_ms: Option<u64>,
+}
+
+impl Serialize for NetworkMember {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // JSON governance projections intentionally omit hidden optional
+        // fields. Postcard is positional, so every field must still be emitted;
+        // omitting an Option removes its tag and corrupts the next field.
+        if serializer.is_human_readable() {
+            #[derive(Serialize)]
+            struct HumanReadable<'a> {
+                node_id: &'a NodeId,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                display_name: &'a Option<String>,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                identity_fingerprint: &'a Option<String>,
+                role: MembershipRole,
+                groups: &'a [NetworkMemberGroup],
+                #[serde(skip_serializing_if = "Option::is_none")]
+                capabilities: &'a Option<Vec<CapabilityKind>>,
+                status: NetworkMemberStatus,
+                lifecycle_state: MemberLifecycleStatus,
+                revision: u64,
+                access_epoch: u64,
+                available_actions: &'a [MemberLifecycleAction],
+                presence: &'a NetworkMemberPresence,
+                exit_availability: &'a super::exit_contribution::ExitContributionAvailability,
+                #[serde(skip_serializing_if = "Option::is_none")]
+                joined_at_unix_ms: &'a Option<u64>,
+            }
+
+            HumanReadable {
+                node_id: &self.node_id,
+                display_name: &self.display_name,
+                identity_fingerprint: &self.identity_fingerprint,
+                role: self.role,
+                groups: &self.groups,
+                capabilities: &self.capabilities,
+                status: self.status,
+                lifecycle_state: self.lifecycle_state,
+                revision: self.revision,
+                access_epoch: self.access_epoch,
+                available_actions: &self.available_actions,
+                presence: &self.presence,
+                exit_availability: &self.exit_availability,
+                joined_at_unix_ms: &self.joined_at_unix_ms,
+            }
+            .serialize(serializer)
+        } else {
+            #[derive(Serialize)]
+            struct Wire<'a> {
+                node_id: &'a NodeId,
+                display_name: &'a Option<String>,
+                identity_fingerprint: &'a Option<String>,
+                role: MembershipRole,
+                groups: &'a [NetworkMemberGroup],
+                capabilities: &'a Option<Vec<CapabilityKind>>,
+                status: NetworkMemberStatus,
+                lifecycle_state: MemberLifecycleStatus,
+                revision: u64,
+                access_epoch: u64,
+                available_actions: &'a [MemberLifecycleAction],
+                presence: &'a NetworkMemberPresence,
+                exit_availability: &'a super::exit_contribution::ExitContributionAvailability,
+                joined_at_unix_ms: &'a Option<u64>,
+            }
+
+            Wire {
+                node_id: &self.node_id,
+                display_name: &self.display_name,
+                identity_fingerprint: &self.identity_fingerprint,
+                role: self.role,
+                groups: &self.groups,
+                capabilities: &self.capabilities,
+                status: self.status,
+                lifecycle_state: self.lifecycle_state,
+                revision: self.revision,
+                access_epoch: self.access_epoch,
+                available_actions: &self.available_actions,
+                presence: &self.presence,
+                exit_availability: &self.exit_availability,
+                joined_at_unix_ms: &self.joined_at_unix_ms,
+            }
+            .serialize(serializer)
+        }
+    }
 }
 
 /// Server-owned snapshot. A directory never carries endpoints, invitation

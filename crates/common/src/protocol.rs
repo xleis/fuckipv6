@@ -166,7 +166,7 @@ pub enum SignalingMessage {
         request_id: JoinRequestId,
         state: JoinRequestState,
         revision: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         information_request: Option<String>,
     },
     JoinRequestList {
@@ -180,7 +180,7 @@ pub enum SignalingMessage {
         request_id: JoinRequestId,
         expected_revision: u64,
         action: JoinRequestReviewAction,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         note: Option<String>,
     },
     JoinRequestBatchReview {
@@ -341,7 +341,7 @@ pub enum SignalingMessage {
     ExitAvailabilityReport {
         network_id: NetworkId,
         available: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         reason_code: Option<String>,
     },
     ExitAvailabilityReportAck {
@@ -366,7 +366,7 @@ pub struct JoinRequestBatchReviewItem {
     pub request_id: JoinRequestId,
     pub expected_revision: u64,
     pub action: JoinRequestReviewAction,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub note: Option<String>,
 }
 
@@ -978,6 +978,248 @@ mod tests {
 
         let rewritten = endpoint.for_signaling_connection(Some("203.0.113.10:6666".parse()?));
         assert_eq!(rewritten.addr, "203.0.113.10:6667".parse()?);
+        Ok(())
+    }
+
+    fn assert_signaling_round_trip(message: SignalingMessage) -> anyhow::Result<SignalingMessage> {
+        let encoded = crate::codec::encode(&message)?;
+        crate::codec::decode(&encoded)
+    }
+
+    #[test]
+    fn optional_signaling_envelope_fields_are_postcard_safe() -> anyhow::Result<()> {
+        let network_id = NetworkId::from_public_key(b"network");
+        let request_id = JoinRequestId::from_public_key(b"join-request");
+
+        let decoded = assert_signaling_round_trip(SignalingMessage::JoinRequestStatus {
+            request_id: request_id.clone(),
+            state: JoinRequestState::NeedsInformation,
+            revision: 2,
+            information_request: None,
+        })?;
+        assert!(matches!(
+            decoded,
+            SignalingMessage::JoinRequestStatus {
+                information_request: None,
+                ..
+            }
+        ));
+
+        let decoded = assert_signaling_round_trip(SignalingMessage::JoinRequestReview {
+            network_id: network_id.clone(),
+            request_id: request_id.clone(),
+            expected_revision: 2,
+            action: JoinRequestReviewAction::Approve,
+            note: None,
+        })?;
+        assert!(matches!(
+            decoded,
+            SignalingMessage::JoinRequestReview { note: None, .. }
+        ));
+
+        let decoded = assert_signaling_round_trip(SignalingMessage::JoinRequestBatchReview {
+            network_id: network_id.clone(),
+            reviews: vec![JoinRequestBatchReviewItem {
+                request_id: request_id.clone(),
+                expected_revision: 2,
+                action: JoinRequestReviewAction::Reject,
+                note: None,
+            }],
+        })?;
+        let SignalingMessage::JoinRequestBatchReview { reviews, .. } = decoded else {
+            panic!("expected batch review");
+        };
+        assert_eq!(reviews.len(), 1);
+        assert!(reviews[0].note.is_none());
+
+        let decoded = assert_signaling_round_trip(SignalingMessage::ExitAvailabilityReport {
+            network_id,
+            available: true,
+            reason_code: None,
+        })?;
+        assert!(matches!(
+            decoded,
+            SignalingMessage::ExitAvailabilityReport {
+                available: true,
+                reason_code: None,
+                ..
+            }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn nested_join_request_optional_fields_are_postcard_safe() -> anyhow::Result<()> {
+        use crate::domain::{
+            ExitContributionMode, ExitContributionObligation, ExitContributionScope,
+            JoinApplicantProfile, JoinRequestGrantPreview, MembershipRole, MembershipTerms,
+        };
+
+        let request = JoinRequest {
+            schema_version: 1,
+            request_id: JoinRequestId::from_public_key(b"join-request"),
+            network_id: NetworkId::from_public_key(b"network"),
+            applicant: JoinApplicantProfile {
+                node_id: NodeId::from_public_key(b"applicant"),
+                display_name: None,
+                public_key_fingerprint: "fingerprint".into(),
+            },
+            reason: None,
+            reason_visibility: Default::default(),
+            state: JoinRequestState::Pending,
+            revision: 1,
+            terms: MembershipTerms {
+                network_policy_revision: 1,
+                privacy_policy_revision: 1,
+                exit_contribution: ExitContributionObligation::NotRequired,
+                exit_contribution_scope: ExitContributionScope::NotApplicable,
+                exit_contribution_mode: ExitContributionMode::Disabled,
+                member_limit: None,
+            },
+            grant_preview: JoinRequestGrantPreview {
+                role: MembershipRole::Member,
+                capabilities: Vec::new(),
+                exit_contribution: ExitContributionObligation::NotRequired,
+                exit_contribution_scope: ExitContributionScope::NotApplicable,
+                exit_contribution_mode: ExitContributionMode::Disabled,
+                file_access: false,
+                grants_data_plane_access: false,
+            },
+            created_at_unix_ms: 1,
+            updated_at_unix_ms: 1,
+            expires_at_unix_ms: 2,
+            reason_retention_until_unix_ms: None,
+            reviewer_node_id: None,
+            decided_at_unix_ms: None,
+            information_request: None,
+            approved_at_unix_ms: None,
+        };
+
+        let decoded = assert_signaling_round_trip(SignalingMessage::JoinRequestListResponse {
+            requests: vec![request.clone()],
+        })?;
+        let SignalingMessage::JoinRequestListResponse { requests } = decoded else {
+            panic!("expected join request list");
+        };
+        assert_eq!(requests, vec![request]);
+        Ok(())
+    }
+
+    #[test]
+    fn nested_member_directory_optional_fields_are_postcard_safe() -> anyhow::Result<()> {
+        use crate::domain::{
+            ExitContributionAvailability, MemberLifecycleStatus, MembershipRole, NetworkMember,
+            NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberObservationSource,
+            NetworkMemberOnlineState, NetworkMemberPresence, NetworkMemberStatus,
+        };
+
+        let directory = NetworkMemberDirectory {
+            network_id: NetworkId::from_public_key(b"network"),
+            generated_at_unix_ms: 1,
+            viewer_role: MembershipRole::Member,
+            can_manage_members: false,
+            exit_selection_policy: Default::default(),
+            exit_selection_policy_revision: 0,
+            members: vec![NetworkMember {
+                node_id: NodeId::from_public_key(b"member"),
+                display_name: None,
+                identity_fingerprint: None,
+                role: MembershipRole::Member,
+                groups: vec![NetworkMemberGroup::Member],
+                capabilities: None,
+                status: NetworkMemberStatus::Approved,
+                lifecycle_state: MemberLifecycleStatus::Approved,
+                revision: 1,
+                access_epoch: 1,
+                available_actions: Vec::new(),
+                presence: NetworkMemberPresence {
+                    state: NetworkMemberOnlineState::Unknown,
+                    source: NetworkMemberObservationSource::NotObserved,
+                    observed_at_unix_ms: None,
+                },
+                exit_availability: ExitContributionAvailability {
+                    state: crate::domain::ExitAvailabilityState::Unknown,
+                    source: crate::domain::ExitAvailabilitySource::NotObserved,
+                    observed_at_unix_ms: None,
+                    declared_available: None,
+                    reason_code: None,
+                },
+                joined_at_unix_ms: None,
+            }],
+        };
+
+        let decoded = assert_signaling_round_trip(SignalingMessage::MemberDirectoryListAck {
+            directory: directory.clone(),
+        })?;
+        let SignalingMessage::MemberDirectoryListAck { directory: decoded } = decoded else {
+            panic!("expected member directory");
+        };
+        assert_eq!(decoded, directory);
+        Ok(())
+    }
+
+    #[test]
+    fn nested_invitation_and_exit_request_optional_fields_are_postcard_safe() -> anyhow::Result<()>
+    {
+        use crate::domain::{
+            ContentHash, ExitContributionRequest, ExitContributionRequestId, InvitationCode,
+            InvitationRecord, InvitationRedeemRequest, InvitationStatusView, MembershipRole,
+        };
+
+        let record = InvitationRecord::new(
+            crate::domain::InvitationId::from_public_key(b"invitation"),
+            NetworkId::from_public_key(b"network"),
+            NodeId::from_public_key(b"owner"),
+            MembershipRole::Member,
+            Vec::new(),
+            1,
+            1,
+            100,
+        )?;
+        let status = InvitationStatusView::new(record, 2);
+        let decoded = assert_signaling_round_trip(SignalingMessage::InvitationStatusAck {
+            invitation: status.clone(),
+        })?;
+        let SignalingMessage::InvitationStatusAck { invitation } = decoded else {
+            panic!("expected invitation status");
+        };
+        assert_eq!(invitation, status);
+
+        let redeem = InvitationRedeemRequest {
+            network_id: NetworkId::from_public_key(b"network"),
+            code: InvitationCode::generate()?,
+            invitation_id: crate::domain::InvitationId::from_public_key(b"invitation"),
+            expected_invitation_revision: 1,
+            preview_digest: ContentHash::from_bytes(b"preview"),
+            terms_hash: ContentHash::from_bytes(b"terms"),
+            acknowledged_at_unix_ms: 2,
+            exit_contribution_acknowledged: None,
+        };
+        let decoded = assert_signaling_round_trip(SignalingMessage::InvitationRedeem {
+            request: redeem.clone(),
+        })?;
+        let SignalingMessage::InvitationRedeem { request } = decoded else {
+            panic!("expected invitation redeem");
+        };
+        assert_eq!(request, redeem);
+
+        let request = ExitContributionRequest::submit(
+            ExitContributionRequestId::from_public_key(b"exit-request"),
+            NetworkId::from_public_key(b"network"),
+            NodeId::from_public_key(b"exit"),
+            1,
+            ContentHash::from_bytes(b"terms"),
+            None,
+            None,
+            1,
+        )?;
+        let decoded = assert_signaling_round_trip(SignalingMessage::ExitContributionStatusAck {
+            request: request.clone(),
+        })?;
+        let SignalingMessage::ExitContributionStatusAck { request: decoded } = decoded else {
+            panic!("expected exit contribution status");
+        };
+        assert_eq!(decoded, request);
         Ok(())
     }
 

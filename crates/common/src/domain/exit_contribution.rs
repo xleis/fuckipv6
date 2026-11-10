@@ -441,11 +441,11 @@ pub enum ExitAvailabilitySource {
 pub struct ExitContributionAvailability {
     pub state: ExitAvailabilityState,
     pub source: ExitAvailabilitySource,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub observed_at_unix_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub declared_available: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub reason_code: Option<String>,
 }
 
@@ -597,11 +597,11 @@ pub struct ExitContributionRequest {
     pub requested_at_unix_ms: u64,
     pub updated_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub decided_at_unix_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub reviewer_node_id: Option<NodeId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub decision_reason_code: Option<String>,
 }
 

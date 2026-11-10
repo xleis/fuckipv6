@@ -93,7 +93,7 @@ impl fmt::Debug for Distance {
 pub struct DhtContact {
     pub id: NodeId,
     pub virtual_ip: IpAddr,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub endpoints: Vec<SocketAddr>,
     pub last_seen: u64,
 }

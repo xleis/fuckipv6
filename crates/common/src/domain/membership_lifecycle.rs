@@ -360,7 +360,7 @@ pub struct MemberLifecycleChangeRequest {
     pub role: MembershipRole,
     pub expected_revision: u64,
     pub idempotency_key: IdempotencyKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub reason: Option<String>,
 }
 
@@ -411,7 +411,7 @@ pub struct MemberLifecycleChange {
 pub struct MemberRemovalPreview {
     pub network_id: NetworkId,
     pub target_node_id: NodeId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub display_name: Option<String>,
     pub role: MembershipRole,
     pub status: NetworkMemberStatus,
@@ -422,7 +422,7 @@ pub struct MemberRemovalPreview {
     #[serde(default)]
     pub active_capabilities: Vec<CapabilityKind>,
     pub can_remove: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub denial_key: Option<String>,
     pub network_access_revoked: bool,
     pub file_access_revoked: bool,

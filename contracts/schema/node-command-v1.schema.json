@@ -373,7 +373,7 @@
       "type": "object"
     },
     "ExitSelectionMode": {
-      "description": "Whether administrators pin one Exit or let members select from the final\nadministrator-authorized set.",
+      "description": "Schemars cannot infer the human-readable shape from the hand-written serde\nimplementation above. Keep the JSON contract as the original internally\ntagged representation while Postcard uses its own positional-safe form.",
       "oneOf": [
         {
           "properties": {
@@ -424,7 +424,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "default": null
         },
         "denied_exits": {
           "default": [],
@@ -490,6 +491,7 @@
           "$ref": "#/$defs/InvitationCode"
         },
         "exit_contribution_acknowledged": {
+          "default": null,
           "description": "Explicit consent to the current Exit contribution obligation. It is\nrequired when the invited network requires contribution and is never\ninferred from accepting the invitation itself.",
           "type": [
             "boolean",

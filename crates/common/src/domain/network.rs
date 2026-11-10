@@ -21,6 +21,11 @@ use super::{DomainError, DomainResult};
 /// record before any mutation.
 pub const NETWORK_JOIN_PREVIEW_VALIDITY_MS: u64 = 5 * 60 * 1000;
 
+/// Tolerated clock skew when a client validates the preview issue time.
+pub const NETWORK_JOIN_PREVIEW_CLOCK_SKEW_MS: u64 = 60 * 1000;
+
+const NETWORK_JOIN_PREVIEW_SIGNING_DOMAIN: &[u8] = b"fuckipv6/network-join-preview/v1\0";
+
 /// How much of a network's public profile is discoverable without membership.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -549,6 +554,8 @@ pub struct NetworkJoinPreview {
     pub preview_digest: ContentHash,
     pub issued_at_unix_ms: u64,
     pub expires_at_unix_ms: u64,
+    /// Signature by the Coordinator/owner identity embedded in the join ticket.
+    pub signature: Signature,
 }
 
 /// The ticket-derived claims a client sends when asking the Coordinator to
@@ -564,6 +571,26 @@ pub struct NetworkJoinPreviewRequest {
 impl NetworkJoinPreview {
     pub fn for_record(
         record: &NetworkRecord,
+        coordinator_identity: &Identity,
+        issued_at_unix_ms: u64,
+        expires_at_unix_ms: u64,
+    ) -> DomainResult<Self> {
+        let mut preview = Self::unsigned_for_record(record, issued_at_unix_ms, expires_at_unix_ms)?;
+        if NodeId::from_public_key(coordinator_identity.public_key().as_slice()) != record.owner {
+            return Err(DomainError::invalid_value(
+                "join preview signer does not own the trusted network record",
+            ));
+        }
+        preview.signature = Signature::from_bytes(
+            coordinator_identity
+                .sign(&preview.signing_payload()?)
+                .to_bytes(),
+        );
+        Ok(preview)
+    }
+
+    fn unsigned_for_record(
+        record: &NetworkRecord,
         issued_at_unix_ms: u64,
         expires_at_unix_ms: u64,
     ) -> DomainResult<Self> {
@@ -571,6 +598,11 @@ impl NetworkJoinPreview {
         if issued_at_unix_ms == 0 || issued_at_unix_ms >= expires_at_unix_ms {
             return Err(DomainError::invalid_value(
                 "network join preview validity window is invalid",
+            ));
+        }
+        if expires_at_unix_ms.saturating_sub(issued_at_unix_ms) > NETWORK_JOIN_PREVIEW_VALIDITY_MS {
+            return Err(DomainError::invalid_value(
+                "network join preview validity window is too long",
             ));
         }
         let terms = record.membership_terms();
@@ -588,6 +620,7 @@ impl NetworkJoinPreview {
             preview_digest: ContentHash::from_bytes(b"network-join-preview-pending"),
             issued_at_unix_ms,
             expires_at_unix_ms,
+            signature: Signature::from_bytes([0; 64]),
         };
         preview.preview_digest = preview.compute_digest()?;
         Ok(preview)
@@ -597,9 +630,61 @@ impl NetworkJoinPreview {
         let mut canonical = self.clone();
         canonical.preview_digest =
             ContentHash::from_bytes(b"network-join-preview-digest-placeholder");
+        canonical.signature = Signature::from_bytes([0; 64]);
         let bytes = serde_json::to_vec(&canonical)
             .map_err(|_| DomainError::invalid_value("network join preview cannot be encoded"))?;
         Ok(ContentHash::from_bytes(&bytes))
+    }
+
+    /// The signature covers the digest, which in turn covers every preview
+    /// field except the signature itself. The fixed domain separator prevents
+    /// reuse of this signature in another protocol context.
+    pub fn signing_payload(&self) -> DomainResult<Vec<u8>> {
+        let mut payload = Vec::with_capacity(
+            NETWORK_JOIN_PREVIEW_SIGNING_DOMAIN.len() + self.preview_digest.as_str().len(),
+        );
+        payload.extend_from_slice(NETWORK_JOIN_PREVIEW_SIGNING_DOMAIN);
+        payload.extend_from_slice(self.preview_digest.as_str().as_bytes());
+        Ok(payload)
+    }
+
+    pub fn signature_is_valid(&self, coordinator_public_key: &[u8]) -> bool {
+        let Ok(payload) = self.signing_payload() else {
+            return false;
+        };
+        let Ok(signature) = self.signature.to_bytes() else {
+            return false;
+        };
+        Identity::verify(coordinator_public_key, &payload, &signature)
+    }
+
+    pub fn validate_freshness(&self, now_unix_ms: u64) -> DomainResult<()> {
+        if self.issued_at_unix_ms == 0 || self.issued_at_unix_ms >= self.expires_at_unix_ms {
+            return Err(DomainError::invalid_value(
+                "network join preview validity window is invalid",
+            ));
+        }
+        if self
+            .expires_at_unix_ms
+            .saturating_sub(self.issued_at_unix_ms)
+            > NETWORK_JOIN_PREVIEW_VALIDITY_MS
+        {
+            return Err(DomainError::invalid_value(
+                "network join preview validity window is too long",
+            ));
+        }
+        if self.issued_at_unix_ms > now_unix_ms.saturating_add(NETWORK_JOIN_PREVIEW_CLOCK_SKEW_MS) {
+            return Err(DomainError::invalid_value(
+                "network join preview issue time is in the future",
+            ));
+        }
+        if self.is_expired(now_unix_ms) {
+            return Err(DomainError::new(
+                "domain.network_join_preview_expired",
+                "network join preview has expired",
+            ));
+        }
+        Ok(())
     }
 
     pub fn is_expired(&self, now_unix_ms: u64) -> bool {
@@ -609,16 +694,29 @@ impl NetworkJoinPreview {
     pub fn validate_for_record(
         &self,
         record: &NetworkRecord,
+        coordinator_public_key: &[u8],
         now_unix_ms: u64,
     ) -> DomainResult<()> {
-        record.validate()?;
-        if self.is_expired(now_unix_ms) {
-            return Err(DomainError::new(
-                "domain.network_join_preview_expired",
-                "network join preview has expired",
+        self.validate_freshness(now_unix_ms)?;
+        self.terms.validate()?;
+        if self.policy_revision != self.terms.network_policy_revision
+            || self.privacy_policy_revision != self.terms.privacy_policy_revision
+        {
+            return Err(DomainError::invalid_value(
+                "network join preview policy revisions do not match its terms",
             ));
         }
-        let expected = Self::for_record(record, self.issued_at_unix_ms, self.expires_at_unix_ms)?;
+        if NodeId::from_public_key(coordinator_public_key) != record.owner
+            || !self.signature_is_valid(coordinator_public_key)
+        {
+            return Err(DomainError::new(
+                "domain.invalid_signature",
+                "network join preview signature is invalid",
+            ));
+        }
+        record.validate()?;
+        let expected =
+            Self::unsigned_for_record(record, self.issued_at_unix_ms, self.expires_at_unix_ms)?;
         if self.network_id != expected.network_id
             || self.public_key != expected.public_key
             || self.network_name != expected.network_name
@@ -630,6 +728,7 @@ impl NetworkJoinPreview {
             || self.terms_hash != expected.terms_hash
             || self.terms != expected.terms
             || self.preview_digest != expected.preview_digest
+            || self.issued_at_unix_ms != expected.issued_at_unix_ms
             || self.expires_at_unix_ms != expected.expires_at_unix_ms
         {
             return Err(DomainError::new(
@@ -2314,6 +2413,130 @@ mod tests {
             exit_contribution_mode: ExitContributionMode::Disabled,
             exit_selection_policy: ExitSelectionPolicy::default(),
         }
+    }
+
+    fn join_preview_fixture() -> (NetworkRecord, Identity) {
+        let coordinator_identity = Identity::generate().unwrap();
+        let owner = NodeId::from_public_key(&coordinator_identity.public_key());
+        let network = NetworkRecord::create_owned(
+            create_profile(),
+            PublicKey::from_bytes([33; 32]),
+            owner,
+            1_000,
+        )
+        .unwrap();
+        (network, coordinator_identity)
+    }
+
+    #[test]
+    fn network_join_preview_is_signed_private_and_exactly_bound_to_record() {
+        let (network, coordinator_identity) = join_preview_fixture();
+        let issued_at = 10_000;
+        let expires_at = issued_at + NETWORK_JOIN_PREVIEW_VALIDITY_MS;
+        let preview =
+            NetworkJoinPreview::for_record(&network, &coordinator_identity, issued_at, expires_at)
+                .unwrap();
+
+        preview
+            .validate_for_record(&network, &coordinator_identity.public_key(), issued_at + 1)
+            .unwrap();
+        assert!(preview.signature_is_valid(&coordinator_identity.public_key()));
+        assert_eq!(preview.preview_digest, preview.compute_digest().unwrap());
+        assert_eq!(
+            preview.terms.network_policy_revision,
+            preview.policy_revision
+        );
+        assert_eq!(
+            preview.terms.privacy_policy_revision,
+            preview.privacy_policy_revision
+        );
+
+        let value = serde_json::to_value(&preview).unwrap();
+        let object = value.as_object().unwrap();
+        for forbidden in [
+            "members",
+            "administrators",
+            "assigned_ipv4",
+            "assigned_ipv6",
+            "p2p_listen_addr",
+            "endpoints",
+            "tunnel",
+            "topology",
+            "activity",
+            "private_key",
+            "signing_key",
+            "identity",
+            "ticket",
+            "invitation_code",
+        ] {
+            assert!(
+                !object.contains_key(forbidden),
+                "join preview leaked {forbidden}"
+            );
+            assert!(!value.to_string().contains(forbidden));
+        }
+    }
+
+    #[test]
+    fn network_join_preview_rejects_tampering_wrong_signer_and_invalid_time() {
+        let (network, coordinator_identity) = join_preview_fixture();
+        let issued_at = 10_000;
+        let expires_at = issued_at + NETWORK_JOIN_PREVIEW_VALIDITY_MS;
+        let preview =
+            NetworkJoinPreview::for_record(&network, &coordinator_identity, issued_at, expires_at)
+                .unwrap();
+        let coordinator_public_key = coordinator_identity.public_key();
+
+        let mut changed_terms = preview.clone();
+        changed_terms.terms.network_policy_revision = 2;
+        assert!(changed_terms
+            .validate_for_record(&network, &coordinator_public_key, issued_at + 1)
+            .is_err());
+
+        let mut changed_digest = preview.clone();
+        changed_digest.preview_digest = ContentHash::from_bytes(b"tampered");
+        assert!(changed_digest
+            .validate_for_record(&network, &coordinator_public_key, issued_at + 1)
+            .is_err());
+
+        let mut changed_signature = preview.clone();
+        changed_signature.signature = Signature::from_bytes([7; 64]);
+        assert_eq!(
+            changed_signature
+                .validate_for_record(&network, &coordinator_public_key, issued_at + 1)
+                .unwrap_err()
+                .code(),
+            "domain.invalid_signature"
+        );
+
+        let wrong_signer = Identity::generate().unwrap();
+        assert!(preview
+            .validate_for_record(&network, &wrong_signer.public_key(), issued_at + 1)
+            .is_err());
+        assert!(
+            NetworkJoinPreview::for_record(&network, &wrong_signer, issued_at, expires_at).is_err()
+        );
+
+        assert!(preview
+            .validate_for_record(&network, &coordinator_public_key, expires_at)
+            .is_err());
+        let future = NetworkJoinPreview::for_record(
+            &network,
+            &coordinator_identity,
+            issued_at + NETWORK_JOIN_PREVIEW_CLOCK_SKEW_MS + 1,
+            issued_at + NETWORK_JOIN_PREVIEW_CLOCK_SKEW_MS + 2,
+        )
+        .unwrap();
+        assert!(future
+            .validate_for_record(&network, &coordinator_public_key, issued_at)
+            .is_err());
+        assert!(NetworkJoinPreview::for_record(
+            &network,
+            &coordinator_identity,
+            issued_at,
+            expires_at + 1
+        )
+        .is_err());
     }
 
     #[test]

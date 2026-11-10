@@ -2656,7 +2656,7 @@ passed 的证据时，`default_candidate` 才为真；缺失、陈旧、降级�
 `cargo clippy -p fuckipv6-common -p fuckipv6-client --lib -- -D warnings`、`./scripts/generate-contracts.sh`、
 `./scripts/check-contracts.sh`（含 TypeScript/Java 绑定与 Android 契约测试）、`node scripts/test_i18n_runtime.mjs`，
 以及 WebUI `npm run typecheck`、`npm run lint`、`npm test -- --run`（280 passed）、`npm run build`（仅保留现有 i18n 非 module 与
->500 kB chunk 警告）。最终回归 `cargo test --workspace --lib` 为 1713 passed、3 ignored。测试覆盖五层完整性、新鲜度/时钟偏移、未知与陈旧不可选、部分失败目标/协议、探测边界和退避、误报/漏报恢复、
+>500 kB chunk 警告）。最终回归 `cargo test --workspace --lib` 为 1752 passed、3 ignored。测试覆盖五层完整性、新鲜度/时钟偏移、未知与陈旧不可选、部分失败目标/协议、探测边界和退避、误报/漏报恢复、
 取消终态、进程健康但 DNS/互联网未测试，以及 WebUI/GPUI 权威状态和逐层证据展示。
 
 本项证据来自领域、运行时、协议和 UI 自动化测试，不代表已执行真实受控 Exit 探测、真实泄漏服务、浏览器/应用 DNS 行为审查、
@@ -2682,11 +2682,11 @@ Exit 连接 watchdog 将“目标 Exit 已选择但 Secure Session 尚未完成�
 `Protected`。活动快照记录迁移开始、故障、失败关闭/显式直连和最终受保护状态，WebUI/GPUI 消费同一权威状态。Linux suspend/resume、稳定网络
 变化和运行时断开均接入有界恢复事件通道；重启不会沿用旧的受保护声明。
 
-**验证通过（2026-11-10）**：`cargo test --workspace --lib`（1713 passed、3 ignored）、
+**验证通过（2026-11-10）**：`cargo test --workspace --lib`（1752 passed、3 ignored）、
 `cargo test -p fuckipv6-common traffic_session --lib`（8 passed）、
 `cargo test -p fuckipv6-client routing::recovery --lib`（15 passed）、
 `cargo test -p fuckipv6-client cli::commands::tests --lib`（42 passed）、
-`cargo test -p fuckipv6-client node::runtime_control --lib`（72 passed）、
+`cargo test -p fuckipv6-client node::runtime_control --lib`（76 passed）、
 `cargo test -p fuckipv6-client --all-features --lib gpui::view_model::tests:: -- --test-threads=1`（61 passed）、
 `cargo clippy -p fuckipv6-common -p fuckipv6-client --lib -- -D warnings`、`cargo check --workspace`、
 `cargo fmt --all -- --check`、`./scripts/generate-contracts.sh`、`./scripts/check-contracts.sh`、`node scripts/test_i18n_runtime.mjs`，
@@ -2720,15 +2720,43 @@ global 地址、源地址、默认路由和 catch-all 策略表；缺失、陈�
 错误码和公共报告不包含地址、resolver URL、接口名、命令输出或成员身份。受控服务和浏览器/应用行为 probe 已有明确注入边界，
 但生产默认 runner 仍是 noop，因此真实外部检查会保留 `not_tested` 并触发 `fail_closed_required`。
 
-**验证通过（2026-11-10，自动化边界）**：`cargo test --workspace --lib`（1713 passed、3 ignored）、
+**验证通过（2026-11-10，自动化边界）**：`cargo test --workspace --lib`（1752 passed、3 ignored）、
 `cargo test -p fuckipv6-common leak_detection --lib`（6 passed）、
 `cargo test -p fuckipv6-client routing::leak_detection --lib`（6 passed）、
-`cargo test -p fuckipv6-client node::runtime_control --lib`（72 passed，含泄漏证据聚合/投影）、
+`cargo test -p fuckipv6-client node::runtime_control --lib`（76 passed，含泄漏证据聚合/投影）、
 `cargo test -p fuckipv6-client diagnostic --lib`（14 passed）、
 `cargo clippy -p fuckipv6-common -p fuckipv6-client --lib -- -D warnings`、`cargo check --workspace`、
 `cargo fmt --all -- --check`、`./scripts/generate-contracts.sh`（生成资产无变化）、`./scripts/check-contracts.sh`、
 `node scripts/test_i18n_runtime.mjs`，以及 WebUI `npm run typecheck`、`npm run lint`、`npm test -- --run`（280 passed）、
 `npm run build`（仅保留现有 i18n 非 module 与 >500 kB chunk 警告）。
+
+**实机复核（2026-11-10，`root@xlei.cc`，Linux，`w12-hk`）**：部署 release 二进制的 SHA-256 为
+`49efc97f42c40cc4e63fa34ac724cc1e88af983f4fb378756fb82bc0bff73971`，以无头 WebUI
+`127.0.0.1:18081`运行。替换前旧进程运行时，CLI 可稳定复现审计账本跨进程锁错误
+`Resource temporarily unavailable (os error 11)`；替换后在同一 WebUI 运行期间连续 5 次
+`status --json` 均为 rc=0、12–15ms、stderr 为空，再并发 10 次读取全部 rc=0（墙钟 128ms，
+单次 67–105ms、stderr 全空），未再出现审计锁错误。`exit disable`（约 5.1s）与
+`exit enable`（54ms）均 rc=0，raw snapshot 和 `exit status --json` 的 owner intent、stage、
+healthy、network_allowed 一致，覆盖了共享 ledger 的真实写路径。运行日志只有已知的无 TTY
+owner 初始化锁定 WARN；未出现身份绑定误报、postcard/decode、错误撤权或虚假 Protected。
+
+同一实机执行 `down w12-hk`（79ms）后 TUN、16666/16667 监听立即消失，节点 IPC 与 raw snapshot
+仍可用；raw `stop_networks`（111ms）后 lifecycle 为 `active_networks=0`、接口离线、本机 Exit
+进入 waiting/disabled。随后 raw `start_networks`（1666ms）恢复 TUN、`10.8.0.1/24`、
+`fd00::1001/128`、IPv4/IPv6 路由和两项监听，lifecycle 恢复 `active_networks=1`，Exit 恢复
+enabled。`up w12-hk` 也恢复了数据面与地址，但命令在 1627ms 后因既有 WebUI 的独占表面租约返回
+rc=1；这属于“先完成网络变更、再启动第二个 UI 失败”的部分成功风险，本轮未将其计为 CLI 启停通过，
+也不修改既有“子入口启动 UI”的策略。
+
+`diagnostics --json`（28ms）确认当前没有受保护流量且没有 Exit candidate 时，报告不是伪装成功：
+leak assessment 为 `leak_detected`、`fail_closed_required=true`，DNS 为 insecure fallback，
+IPv4 默认路由位于受保护路径之外；browser/application DNS、IPv4/IPv6 受控泄漏服务和外部可达性
+目标全部保留 `not_tested`/`probe_not_configured`，IPv6 默认出口为 `unsupported`。脱敏报告未包含
+真实 IP、TUN 名、resolver URL 或节点身份。WebUI 因远端无 TTY 未能完成 owner 初始化，API 返回
+401，因此没有真实浏览器/应用 DNS 证据；当时 `peer_count=0` 且 `selectable_exits=[]`，也无法执行
+经 Exit 的外部复核。测试结束后已优雅终止顶层 control、detached control/node 与残留测试监听，确认
+16666/16667/18081/18082 均无监听且 `fk-w12-hk` 已删除；仅清理 `runtime/w12-*` 和 `.err` 临时输出，
+配置、审计账本和正式日志保留。
 
 相关提交：`68f630a`、`7b0a84c`、`96e527e`、`a8e0393`、`827086d`、`be791f0`、`5ca9a3e`。
 本项保持 `[~]`：尚未配置真实受控泄漏检测服务，未执行外部 IPv4/IPv6 可达性复核，也未通过真实浏览器/应用验证 DNS 行为；因此不宣称

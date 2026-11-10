@@ -4398,23 +4398,28 @@ impl NetworkRuntimeActor {
                 ))
             })?;
 
-        if let Some(record) = command.discovery_record.as_ref() {
-            if let Err(error) = self.configs.set_network_identity_metadata(
-                &network_name,
-                record.document.network_id.as_str(),
-                &record.document.public_key.to_string(),
-            ) {
-                let rollback = self.rollback_failed_join(&network_name).await;
-                return Err(join_rollback_error(
-                    format!("网络 [{network_name}] 已保存，但写入稳定身份失败: {error:#}"),
-                    rollback.err(),
-                ));
-            }
-        } else if let Some(network_id) = command.network_id.as_deref() {
-            if let Err(error) = self
-                .configs
-                .set_network_id_metadata(&network_name, network_id)
-            {
+        if let Some(network_id) = command.network_id.as_deref() {
+            let network_public_key = command
+                .discovery_record
+                .as_ref()
+                .map(|record| record.document.public_key.to_string())
+                .or_else(|| {
+                    command
+                        .signed_join_preview
+                        .as_ref()
+                        .map(|preview| preview.public_key.to_string())
+                });
+            let metadata_result = match network_public_key.as_deref() {
+                Some(public_key) => self.configs.set_network_identity_metadata(
+                    &network_name,
+                    network_id,
+                    public_key,
+                ),
+                None => self
+                    .configs
+                    .set_network_id_metadata(&network_name, network_id),
+            };
+            if let Err(error) = metadata_result {
                 let rollback = self.rollback_failed_join(&network_name).await;
                 return Err(join_rollback_error(
                     format!("网络 [{network_name}] 已保存，但写入稳定身份失败: {error:#}"),
@@ -4440,7 +4445,8 @@ impl NetworkRuntimeActor {
                 network_id: command
                     .discovery_record
                     .as_ref()
-                    .map(|record| record.document.network_id.to_string()),
+                    .map(|record| record.document.network_id.to_string())
+                    .or_else(|| command.network_id.clone()),
                 config_path: config_file,
                 config,
             };
@@ -4496,7 +4502,17 @@ impl NetworkRuntimeActor {
                 "网络 [{network_name}] 已绑定稳定网络 ID [{existing_id}]，与加入记录 [{expected_id}] 不一致"
             ))),
             None => {
-                let Some(record) = command.discovery_record.as_ref() else {
+                let network_public_key = command
+                    .discovery_record
+                    .as_ref()
+                    .map(|record| record.document.public_key.to_string())
+                    .or_else(|| {
+                        command
+                            .signed_join_preview
+                            .as_ref()
+                            .map(|preview| preview.public_key.to_string())
+                    });
+                let Some(network_public_key) = network_public_key else {
                     return Err(RuntimeControlError::Conflict(format!(
                         "网络 [{network_name}] 缺少稳定身份元数据，不能确认重复加入"
                     )));
@@ -4505,7 +4521,7 @@ impl NetworkRuntimeActor {
                     .set_network_identity_metadata(
                         network_name,
                         expected_id,
-                        &record.document.public_key.to_string(),
+                        &network_public_key,
                     )
                     .map_err(|error| {
                         RuntimeControlError::Persistence(format!(
@@ -10450,6 +10466,7 @@ mod tests {
                 terms_hash: None,
                 acknowledged_at_unix_ms: None,
                 exit_contribution_acknowledged: None,
+                signed_join_preview: None,
             })
             .await
             .expect("join ticket");
@@ -10643,6 +10660,7 @@ mod tests {
                     terms_hash: None,
                     acknowledged_at_unix_ms: None,
                     exit_contribution_acknowledged: None,
+                    signed_join_preview: None,
                 })
                 .await,
             Err(RuntimeControlError::Conflict(_))

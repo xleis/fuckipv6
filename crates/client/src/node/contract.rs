@@ -394,6 +394,7 @@ mod tests {
                 terms_hash: None,
                 acknowledged_at_unix_ms: None,
                 exit_contribution_acknowledged: None,
+                signed_join_preview: None,
             })),
             NodeCommand::SubmitJoinRequest(crate::node::command::NodeSubmitJoinRequestCommand {
                 network_id: fuckipv6_common::domain::NetworkId::from_public_key(

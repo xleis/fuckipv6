@@ -893,6 +893,122 @@
         }
       ]
     },
+    "NetworkJoinPreview": {
+      "description": "Short-lived, authenticated disclosure returned by the Coordinator before a\ndirect network join. It deliberately contains no roster, endpoint topology,\ninvitation credential or member activity.",
+      "properties": {
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "join_mode": {
+          "$ref": "#/$defs/NetworkJoinMode"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "network_name": {
+          "type": "string"
+        },
+        "owner": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "preview_digest": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "privacy_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "public_key": {
+          "$ref": "#/$defs/PublicKey"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signature": {
+          "$ref": "#/$defs/Signature",
+          "description": "Signature by the Coordinator/owner identity embedded in the join ticket."
+        },
+        "terms": {
+          "$ref": "#/$defs/NetworkJoinTerms"
+        },
+        "terms_hash": {
+          "$ref": "#/$defs/ContentHash"
+        }
+      },
+      "required": [
+        "network_id",
+        "public_key",
+        "network_name",
+        "owner",
+        "revision",
+        "policy_revision",
+        "privacy_policy_revision",
+        "join_mode",
+        "terms",
+        "terms_hash",
+        "preview_digest",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "NetworkJoinTerms": {
+      "description": "Wire-stable membership terms for direct join disclosure. Unlike the legacy\n`MembershipTerms` JSON adapter, every field has exactly one binary encoding.",
+      "properties": {
+        "exit_contribution": {
+          "$ref": "#/$defs/ExitContributionObligation"
+        },
+        "exit_contribution_mode": {
+          "$ref": "#/$defs/ExitContributionMode"
+        },
+        "exit_contribution_scope": {
+          "$ref": "#/$defs/ExitContributionScope"
+        },
+        "member_limit": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "network_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "privacy_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "network_policy_revision",
+        "privacy_policy_revision",
+        "exit_contribution",
+        "exit_contribution_scope",
+        "exit_contribution_mode"
+      ],
+      "type": "object"
+    },
     "NetworkMode": {
       "description": "虚拟网络工作模式",
       "oneOf": [
@@ -1407,6 +1523,17 @@
             "integer",
             "null"
           ]
+        },
+        "signed_join_preview": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkJoinPreview"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Signed, short-lived disclosure obtained from the Coordinator before a\ndirect ticket join. The handler revalidates it against the ticket and\nuses it as the consent record that authorizes membership persistence."
         },
         "start": {
           "type": "boolean"

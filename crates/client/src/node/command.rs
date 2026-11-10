@@ -13,10 +13,10 @@ use fuckipv6_common::domain::{
     IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
     LeakDetectionAssessment, LeakDetectionSnapshot, MemberLifecycleAction, MemberLifecycleChange,
     MemberRemovalPreview, MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord,
-    NetworkEndpoint, NetworkId, NetworkJoinMode, NetworkMemberDirectory, NetworkProfileApplyResult,
-    NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility, PermissionDenialCode,
-    PolicyTestInput, PolicyTestResult, TrafficPolicy, TrafficPolicyTestComparison,
-    TrafficPolicyTestInput, TrafficPolicyTestVisibility,
+    NetworkEndpoint, NetworkId, NetworkJoinMode, NetworkJoinPreview, NetworkMemberDirectory,
+    NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility,
+    PermissionDenialCode, PolicyTestInput, PolicyTestResult, TrafficPolicy,
+    TrafficPolicyTestComparison, TrafficPolicyTestInput, TrafficPolicyTestVisibility,
     JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS, JOIN_REQUEST_MAX_REASON_CHARS,
     NETWORK_PROFILE_MAX_TAG_CHARS,
 };
@@ -1432,6 +1432,11 @@ pub struct NodeJoinNetworkCommand {
     /// A network declaration never enables this node's local Exit service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_contribution_acknowledged: Option<bool>,
+    /// Signed, short-lived disclosure obtained from the Coordinator before a
+    /// direct ticket join. The handler revalidates it against the ticket and
+    /// uses it as the consent record that authorizes membership persistence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_join_preview: Option<NetworkJoinPreview>,
 }
 
 impl NodeJoinNetworkCommand {
@@ -4000,6 +4005,7 @@ mod tests {
                 terms_hash: None,
                 acknowledged_at_unix_ms: None,
                 exit_contribution_acknowledged: None,
+                signed_join_preview: None,
             })),
             NodeCommand::SubmitJoinRequest(NodeSubmitJoinRequestCommand {
                 network_id: fuckipv6_common::domain::NetworkId::from_public_key(
@@ -4827,6 +4833,7 @@ mod tests {
                 terms_hash: None,
                 acknowledged_at_unix_ms: None,
                 exit_contribution_acknowledged: None,
+                signed_join_preview: None,
             })),
             NodeCommand::JoinNetwork(Box::new(NodeJoinNetworkCommand {
                 target: "ws://127.0.0.1:6666".into(),
@@ -4840,6 +4847,7 @@ mod tests {
                 terms_hash: None,
                 acknowledged_at_unix_ms: None,
                 exit_contribution_acknowledged: None,
+                signed_join_preview: None,
             })),
             NodeCommand::SubmitJoinRequest(NodeSubmitJoinRequestCommand {
                 network_id: "not-a-network-id".into(),
@@ -5600,6 +5608,7 @@ mod tests {
                         terms_hash: None,
                         acknowledged_at_unix_ms: None,
                         exit_contribution_acknowledged: None,
+                        signed_join_preview: None,
                     })),
                 ),
             )
@@ -5650,6 +5659,7 @@ mod tests {
                 terms_hash: None,
                 acknowledged_at_unix_ms: None,
                 exit_contribution_acknowledged: None,
+                signed_join_preview: None,
             })),
             NodeCommand::ReviewJoinRequest(NodeReviewJoinRequestCommand {
                 network_id: network_id.to_string(),
@@ -5932,6 +5942,7 @@ mod tests {
                 terms_hash: Some(terms_hash.clone()),
                 acknowledged_at_unix_ms: Some(acknowledged_at),
                 exit_contribution_acknowledged: Some(true),
+                signed_join_preview: None,
             })),
         );
         let result = NodeCommandResult::completed(

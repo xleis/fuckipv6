@@ -6,7 +6,7 @@ use crate::node::{
 };
 use crate::signaling::client::SignalingClient;
 use anyhow::Result;
-use fuckipv6_common::domain::NetworkJoinPreviewRequest;
+use fuckipv6_common::domain::{NetworkJoinPreview, NetworkJoinPreviewRequest};
 use fuckipv6_common::{NatType, NetworkTicket};
 
 /// 一键创建网络并作为对等节点运行（生成邀请票据 fk://...）
@@ -68,7 +68,7 @@ pub async fn join(
 ) -> Result<()> {
     ensure_options_can_apply(auto_start, &options)?;
     let network_name = resolve_join_network_name(server, name)?;
-    preview_join_ticket(server).await?;
+    let signed_join_preview = preview_join_ticket(server).await?;
     println!("🌐 通过网络控制面加入 [{network_name}]...");
     if server.starts_with(NetworkTicket::URI_SCHEME) {
         println!("目标: 已验签的 fk:// 票据");
@@ -91,6 +91,7 @@ pub async fn join(
             terms_hash: None,
             acknowledged_at_unix_ms: None,
             exit_contribution_acknowledged: None,
+            signed_join_preview,
         })),
     )
     .await?;
@@ -250,9 +251,9 @@ async fn apply_route_options(
     Ok(())
 }
 
-async fn preview_join_ticket(server: &str) -> Result<()> {
+async fn preview_join_ticket(server: &str) -> Result<Option<NetworkJoinPreview>> {
     if !server.starts_with(NetworkTicket::URI_SCHEME) {
-        return Ok(());
+        return Ok(None);
     }
     let ticket = NetworkTicket::parse(server)?;
     let config_manager = ConfigManager::new()?;
@@ -291,7 +292,7 @@ async fn preview_join_ticket(server: &str) -> Result<()> {
     println!("    条款哈希: {}", preview.terms_hash.as_str());
     println!("    预览摘要: {}", preview.preview_digest.as_str());
     println!("    有效期至: {} ms", preview.expires_at_unix_ms);
-    Ok(())
+    Ok(Some(preview))
 }
 
 fn resolve_join_network_name(server: &str, configured_name: Option<&str>) -> Result<String> {

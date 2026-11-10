@@ -2423,6 +2423,7 @@ pub fn build_command(
                 ))
                 .map(|value| parse_bool(action, "exit_contribution_acknowledged", &value))
                 .transpose()?,
+                signed_join_preview: None,
             })))
         }
         Ok(ActionBinding::SubmitJoinRequest) => Ok(NodeCommand::SubmitJoinRequest(

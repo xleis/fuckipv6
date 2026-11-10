@@ -9,10 +9,11 @@ use fuckipv6_common::domain::{
     InvitationPreview, InvitationRedeemRequest, InvitationRedemption, InvitationState,
     JoinApplicantProfile, JoinRequest, JoinRequestGrantPreview, JoinRequestId, JoinTermsAck,
     MemberLifecycleChangeRequest, MemberRemovalPreviewRequest, MembershipRole, MembershipTerms,
-    NetworkDiscoveryRecord, NetworkId, NetworkMembership, NetworkProfileWarning,
-    NetworkProfileWarningCode, NetworkRecord, NodeId, OperationId, JOIN_REQUEST_DEFAULT_EXPIRY_MS,
+    NetworkDiscoveryRecord, NetworkId, NetworkJoinPreview, NetworkMembership,
+    NetworkProfileWarning, NetworkProfileWarningCode, NetworkRecord, NodeId, OperationId,
+    JOIN_REQUEST_DEFAULT_EXPIRY_MS,
 };
-use fuckipv6_common::{Identity, JoinRequestBatchReviewItem};
+use fuckipv6_common::{Identity, JoinRequestBatchReviewItem, NetworkTicket};
 
 use super::runtime_control::{
     local_exit_unsupported_error, network_setup_problem_code, runtime_control_problem,
@@ -2721,6 +2722,7 @@ async fn redeem_invitation(
         terms_hash: Some(command.request.terms_hash.clone()),
         acknowledged_at_unix_ms: Some(command.request.acknowledged_at_unix_ms),
         exit_contribution_acknowledged: command.request.exit_contribution_acknowledged,
+        signed_join_preview: None,
     };
     if let Err(error) = runtime.join(join_command).await {
         tracing::warn!(
@@ -3352,6 +3354,188 @@ async fn resubmit_join_request(
     }
 }
 
+#[derive(Clone)]
+struct JoinAcceptance {
+    network_name: String,
+    network_id: NetworkId,
+    terms: MembershipTerms,
+    ack: JoinTermsAck,
+}
+
+impl JoinAcceptance {
+    fn from_discovery_record(record: &NetworkDiscoveryRecord, ack: JoinTermsAck) -> Self {
+        Self {
+            network_name: record.document.name.clone(),
+            network_id: record.document.network_id.clone(),
+            terms: MembershipTerms {
+                network_policy_revision: record.document.policy_revision,
+                privacy_policy_revision: record.document.privacy_policy_revision,
+                exit_contribution: record.document.exit_contribution,
+                exit_contribution_scope: record.document.exit_contribution_scope,
+                exit_contribution_mode: record.document.exit_contribution_mode,
+                member_limit: record.document.member_limit,
+            },
+            ack,
+        }
+    }
+
+    fn from_signed_preview(preview: &NetworkJoinPreview, ack: JoinTermsAck) -> Self {
+        Self {
+            network_name: preview.network_name.clone(),
+            network_id: preview.network_id.clone(),
+            terms: MembershipTerms {
+                network_policy_revision: preview.terms.network_policy_revision,
+                privacy_policy_revision: preview.terms.privacy_policy_revision,
+                exit_contribution: preview.terms.exit_contribution,
+                exit_contribution_scope: preview.terms.exit_contribution_scope,
+                exit_contribution_mode: preview.terms.exit_contribution_mode,
+                member_limit: preview.terms.member_limit,
+            },
+            ack,
+        }
+    }
+}
+
+fn signed_ticket_join_rejection(
+    network_name: impl Into<String>,
+    key: &'static str,
+    message: impl Into<String>,
+) -> NodeProblem {
+    NodeProblem::new(NodeProblemCode::InvalidRequest, message)
+        .with_message_key(key)
+        .retryable(false)
+        .for_network(network_name.into())
+}
+
+/// Revalidate the Coordinator-signed disclosure against both the join ticket
+/// and the command fields. The preview is the local consent record, so none of
+/// its security-relevant fields may be trusted merely because the CLI printed it.
+fn validate_signed_ticket_join_preview(
+    command: &super::NodeJoinNetworkCommand,
+    preview: &NetworkJoinPreview,
+    now_unix_ms: u64,
+) -> Result<JoinTermsAck, NodeProblem> {
+    if command.discovery_record.is_some() {
+        return Err(signed_ticket_join_rejection(
+            preview.network_name.clone(),
+            "join.error.preview_conflict",
+            "直接票据加入不能同时提交发现记录",
+        ));
+    }
+    let ticket = NetworkTicket::parse(&command.target).map_err(|_| {
+        signed_ticket_join_rejection(
+            preview.network_name.clone(),
+            "join.error.ticket_invalid",
+            "直接预览加入必须使用有效的 fk:// 票据",
+        )
+    })?;
+    if ticket.network_name != preview.network_name
+        || command
+            .network_name
+            .as_deref()
+            .is_some_and(|name| name != preview.network_name)
+    {
+        return Err(signed_ticket_join_rejection(
+            preview.network_name.clone(),
+            "join.error.name_changed",
+            "加入票据、网络名称与已验签预览不一致",
+        ));
+    }
+    let expected_network_id = NetworkId::from_public_key(preview.public_key.as_str().as_bytes());
+    if preview.network_id != expected_network_id
+        || NodeId::from_public_key(&ticket.pubkey) != preview.owner
+    {
+        return Err(signed_ticket_join_rejection(
+            preview.network_name.clone(),
+            "join.error.signed_preview_identity_mismatch",
+            "已验签预览的网络身份或协调者身份与票据不一致",
+        ));
+    }
+    if preview.terms.validate().is_err()
+        || preview.policy_revision != preview.terms.network_policy_revision
+        || preview.privacy_policy_revision != preview.terms.privacy_policy_revision
+    {
+        return Err(signed_ticket_join_rejection(
+            preview.network_name.clone(),
+            "join.error.signed_preview_invalid",
+            "已验签预览的成员条款不一致",
+        ));
+    }
+    let terms_hash = preview.terms.content_hash().map_err(|_| {
+        signed_ticket_join_rejection(
+            preview.network_name.clone(),
+            "join.error.signed_preview_invalid",
+            "无法计算已验签预览的成员条款哈希",
+        )
+    })?;
+    let preview_digest = preview.compute_digest().map_err(|_| {
+        signed_ticket_join_rejection(
+            preview.network_name.clone(),
+            "join.error.signed_preview_invalid",
+            "无法计算已验签预览摘要",
+        )
+    })?;
+    if terms_hash != preview.terms_hash || preview_digest != preview.preview_digest {
+        return Err(signed_ticket_join_rejection(
+            preview.network_name.clone(),
+            "join.error.signed_preview_changed",
+            "已验签预览条款或摘要已变化",
+        ));
+    }
+    if preview.validate_freshness(now_unix_ms).is_err() {
+        return Err(signed_ticket_join_rejection(
+            preview.network_name.clone(),
+            "join.error.signed_preview_expired",
+            "加入预览已过期，请重新获取票据预览",
+        ));
+    }
+    if !preview.signature_is_valid(&ticket.pubkey) {
+        return Err(signed_ticket_join_rejection(
+            preview.network_name.clone(),
+            "join.error.signed_preview_signature_invalid",
+            "加入预览签名无效",
+        ));
+    }
+    if command
+        .network_id
+        .as_deref()
+        .is_some_and(|network_id| network_id != preview.network_id.as_str())
+        || command
+            .preview_digest
+            .as_deref()
+            .is_some_and(|digest| digest != preview.preview_digest.as_str())
+        || command
+            .network_policy_revision
+            .is_some_and(|revision| revision != preview.terms.network_policy_revision)
+        || command
+            .privacy_policy_revision
+            .is_some_and(|revision| revision != preview.terms.privacy_policy_revision)
+        || command
+            .terms_hash
+            .as_ref()
+            .is_some_and(|hash| hash != &preview.terms_hash)
+    {
+        return Err(signed_ticket_join_rejection(
+            preview.network_name.clone(),
+            "join.error.signed_preview_changed",
+            "加入命令字段与已验签预览不一致",
+        ));
+    }
+    let acknowledged_at_unix_ms = command.acknowledged_at_unix_ms.unwrap_or(now_unix_ms);
+    if acknowledged_at_unix_ms < preview.issued_at_unix_ms || acknowledged_at_unix_ms > now_unix_ms
+    {
+        return Err(signed_ticket_join_rejection(
+            preview.network_name.clone(),
+            "join.error.acknowledgement_time_invalid",
+            "加入条款确认时间无效",
+        ));
+    }
+    Ok(JoinTermsAck {
+        terms_hash: preview.terms_hash.clone(),
+        acknowledged_at_unix_ms,
+    })
+}
+
 async fn join_runtime_network(
     runtime: &NetworkRuntimeManager,
     discovery: Option<&DiscoveryIndexManager>,
@@ -3366,9 +3550,23 @@ async fn join_runtime_network(
     // prevents two UI submissions from racing the member-limit check.
     let _join_guard = join_gate.lock().await;
     let mut confirmed_record = None;
-    let mut terms_ack = None;
+    let mut membership_acceptance = None;
 
-    if let Some(network_id) = command.network_id.as_deref() {
+    if let Some(preview) = command.signed_join_preview.clone() {
+        let ack =
+            match validate_signed_ticket_join_preview(command.as_ref(), &preview, unix_time_ms()) {
+                Ok(ack) => ack,
+                Err(problem) => return NodeCommandResult::rejected(request_id, problem),
+            };
+        command.network_name = Some(preview.network_name.clone());
+        command.network_id = Some(preview.network_id.to_string());
+        command.preview_digest = Some(preview.preview_digest.as_str().to_owned());
+        command.network_policy_revision = Some(preview.terms.network_policy_revision);
+        command.privacy_policy_revision = Some(preview.terms.privacy_policy_revision);
+        command.terms_hash = Some(preview.terms_hash.clone());
+        command.acknowledged_at_unix_ms = Some(ack.acknowledged_at_unix_ms);
+        membership_acceptance = Some(JoinAcceptance::from_signed_preview(&preview, ack));
+    } else if let Some(network_id) = command.network_id.as_deref() {
         let Some(discovery) = discovery else {
             return unavailable(request_id, "加入网络前无法验证持久化签名发现记录");
         };
@@ -3420,7 +3618,7 @@ async fn join_runtime_network(
         };
         command.network_name = Some(record.document.name.clone());
         command.target = target;
-        terms_ack = Some(JoinTermsAck {
+        let ack = JoinTermsAck {
             terms_hash: command
                 .terms_hash
                 .clone()
@@ -3428,8 +3626,9 @@ async fn join_runtime_network(
             acknowledged_at_unix_ms: command
                 .acknowledged_at_unix_ms
                 .expect("validated join command has acknowledgement time"),
-        });
+        };
         command.discovery_record = Some(record.clone());
+        membership_acceptance = Some(JoinAcceptance::from_discovery_record(&record, ack));
         confirmed_record = Some(record);
     } else if let Some(record) = command.discovery_record.take() {
         let Some(discovery) = discovery else {
@@ -3451,33 +3650,42 @@ async fn join_runtime_network(
         ) {
             return NodeCommandResult::rejected(request_id, problem);
         }
+    } else if let Some(acceptance) = membership_acceptance.as_ref() {
+        if let Err(problem) = validate_exit_contribution_admission(
+            &state.snapshot().await,
+            acceptance.terms.exit_contribution,
+            acceptance.terms.exit_contribution_scope,
+            acceptance.terms.exit_contribution_mode,
+            command.exit_contribution_acknowledged,
+            &acceptance.network_name,
+        ) {
+            return NodeCommandResult::rejected(request_id, problem);
+        }
     }
 
     // Persist acceptance before creating configuration or starting a data
     // plane. On any later failure only the record inserted by this operation is
     // rolled back; memberships for other networks are never touched.
-    let persisted = match (confirmed_record.as_ref(), terms_ack) {
-        (Some(record), Some(ack)) => {
-            let Some(configs) = configs else {
-                return unavailable(request_id, "加入网络需要节点配置管理器");
-            };
-            match persist_joined_membership(configs, record, ack).await {
-                Ok(membership) => Some(membership),
-                Err(error) => {
-                    return NodeCommandResult::rejected(
-                        request_id,
-                        NodeProblem::new(
-                            NodeProblemCode::Unavailable,
-                            format!("保存本地成员关系失败: {error}"),
-                        )
-                        .with_param("error_kind", "storage")
-                        .retryable(true)
-                        .for_network(record.document.name.clone()),
-                    );
-                }
+    let persisted = if let Some(acceptance) = membership_acceptance {
+        let Some(configs) = configs else {
+            return unavailable(request_id, "加入网络需要节点配置管理器");
+        };
+        match persist_joined_membership(configs, acceptance).await {
+            Ok(membership) => Some(membership),
+            Err(error) => {
+                return NodeCommandResult::rejected(
+                    request_id,
+                    NodeProblem::new(
+                        NodeProblemCode::Unavailable,
+                        format!("保存本地成员关系失败: {error}"),
+                    )
+                    .with_param("error_kind", "storage")
+                    .retryable(true),
+                );
             }
         }
-        _ => None,
+    } else {
+        None
     };
 
     match runtime.join(*command).await {
@@ -3577,27 +3785,23 @@ async fn join_runtime_network(
 
 async fn persist_joined_membership(
     configs: &ConfigManager,
-    record: &NetworkDiscoveryRecord,
-    ack: JoinTermsAck,
+    acceptance: JoinAcceptance,
 ) -> Result<(crate::config_manager::JoinedNetworkMembership, bool), String> {
     let configs = configs.clone();
-    let record = record.clone();
     tokio::task::spawn_blocking(move || {
+        let JoinAcceptance {
+            network_name,
+            network_id,
+            terms,
+            ack,
+        } = acceptance;
         let now = unix_time_ms().max(ack.acknowledged_at_unix_ms);
-        let terms = MembershipTerms {
-            network_policy_revision: record.document.policy_revision,
-            privacy_policy_revision: record.document.privacy_policy_revision,
-            exit_contribution: record.document.exit_contribution,
-            exit_contribution_scope: record.document.exit_contribution_scope,
-            exit_contribution_mode: record.document.exit_contribution_mode,
-            member_limit: record.document.member_limit,
-        };
         let identity = configs
             .load_node_identity()
             .map_err(|error| error.to_string())?;
         let node_id = NodeId::from_public_key(&identity.public_key_bytes());
         let mut membership = NetworkMembership::new(
-            record.document.network_id.clone(),
+            network_id,
             node_id,
             MembershipRole::Member,
             ack.acknowledged_at_unix_ms,
@@ -3608,7 +3812,7 @@ async fn persist_joined_membership(
             .map_err(|error| error.to_string())?;
         membership.accept(now).map_err(|error| error.to_string())?;
         configs
-            .upsert_joined_membership(&record.document.name, membership)
+            .upsert_joined_membership(&network_name, membership)
             .map_err(|error| error.to_string())
     })
     .await
@@ -5807,6 +6011,7 @@ mod tests {
                 terms_hash: None,
                 acknowledged_at_unix_ms: None,
                 exit_contribution_acknowledged: None,
+                signed_join_preview: None,
             })),
         ];
 
@@ -5864,6 +6069,175 @@ mod tests {
             validate_invitation_preview(&request, &preview, 90_001 + 5 * 60 * 1000).is_err(),
             "consent older than five minutes must be rejected"
         );
+    }
+
+    struct SignedTicketJoinFixture {
+        identity: Identity,
+        command: NodeJoinNetworkCommand,
+    }
+
+    fn signed_ticket_join_fixture(now_unix_ms: u64) -> SignedTicketJoinFixture {
+        use fuckipv6_common::domain::{NetworkCreateProfile, NetworkVisibility, PublicKey};
+
+        let identity = Identity::generate().expect("generate coordinator identity");
+        let public_key = PublicKey::from_bytes(identity.public_key_bytes());
+        let owner = NodeId::from_public_key(&identity.public_key_bytes());
+        let record = NetworkRecord::create_owned(
+            NetworkCreateProfile {
+                name: "direct-ticket".into(),
+                purpose: "Direct ticket join test".into(),
+                icon: "network".into(),
+                language: "en".into(),
+                region: "ZZ".into(),
+                tags: Vec::new(),
+                capability_declarations: Vec::new(),
+                visibility: NetworkVisibility::Private,
+                join_mode: fuckipv6_common::domain::NetworkJoinMode::InviteOnly,
+                exit_contribution: Default::default(),
+                exit_contribution_scope: Default::default(),
+                exit_contribution_mode: Default::default(),
+                exit_selection_policy: Default::default(),
+            },
+            public_key,
+            owner,
+            now_unix_ms.saturating_sub(60_000),
+        )
+        .expect("create network record");
+        let preview = NetworkJoinPreview::for_record(
+            &record,
+            &identity,
+            now_unix_ms.saturating_sub(1_000),
+            now_unix_ms.saturating_add(60_000),
+        )
+        .expect("sign join preview");
+        let target = NetworkTicket::new(
+            identity.public_key_bytes(),
+            "127.0.0.1:16666",
+            record.name.clone(),
+        )
+        .encode();
+        let command = NodeJoinNetworkCommand {
+            target,
+            network_name: None,
+            start: false,
+            discovery_record: None,
+            network_id: None,
+            preview_digest: None,
+            network_policy_revision: None,
+            privacy_policy_revision: None,
+            terms_hash: None,
+            acknowledged_at_unix_ms: Some(now_unix_ms),
+            exit_contribution_acknowledged: None,
+            signed_join_preview: Some(preview),
+        };
+        SignedTicketJoinFixture { identity, command }
+    }
+
+    #[test]
+    fn signed_ticket_join_preview_is_revalidated_and_pins_the_acknowledgement() {
+        let now = 1_800_000_000_000;
+        let fixture = signed_ticket_join_fixture(now);
+        let preview = fixture
+            .command
+            .signed_join_preview
+            .as_ref()
+            .expect("signed preview");
+        let ack = validate_signed_ticket_join_preview(&fixture.command, preview, now)
+            .expect("valid signed preview");
+        assert_eq!(ack.terms_hash, preview.terms_hash);
+        assert_eq!(ack.acknowledged_at_unix_ms, now);
+
+        let mut changed_network = preview.clone();
+        changed_network.network_id = NetworkId::from_public_key(b"another-network");
+        let problem = validate_signed_ticket_join_preview(&fixture.command, &changed_network, now)
+            .expect_err("changed network id must be rejected");
+        assert_eq!(
+            problem.message_key.as_str(),
+            "join.error.signed_preview_identity_mismatch"
+        );
+
+        let mut changed_terms = preview.clone();
+        changed_terms.terms.member_limit = Some(17);
+        let problem = validate_signed_ticket_join_preview(&fixture.command, &changed_terms, now)
+            .expect_err("changed terms must be rejected");
+        assert_eq!(
+            problem.message_key.as_str(),
+            "join.error.signed_preview_changed"
+        );
+
+        let mut changed_signature = preview.clone();
+        changed_signature.signature = fuckipv6_common::domain::Signature::from_bytes([7; 64]);
+        let problem =
+            validate_signed_ticket_join_preview(&fixture.command, &changed_signature, now)
+                .expect_err("changed signature must be rejected");
+        assert_eq!(
+            problem.message_key.as_str(),
+            "join.error.signed_preview_signature_invalid"
+        );
+
+        assert!(validate_signed_ticket_join_preview(
+            &fixture.command,
+            preview,
+            now.saturating_add(120_000),
+        )
+        .is_err());
+
+        let wrong_identity = Identity::generate().expect("generate wrong ticket identity");
+        let mut wrong_ticket = fixture.command.clone();
+        wrong_ticket.target = NetworkTicket::new(
+            wrong_identity.public_key_bytes(),
+            "127.0.0.1:16666",
+            preview.network_name.clone(),
+        )
+        .encode();
+        let problem = validate_signed_ticket_join_preview(&wrong_ticket, preview, now)
+            .expect_err("ticket signed by another owner must be rejected");
+        assert_eq!(
+            problem.message_key.as_str(),
+            "join.error.signed_preview_identity_mismatch"
+        );
+
+        assert!(
+            !preview.signature_is_valid(wrong_identity.public_key().as_slice()),
+            "fixture must not validate under a different key"
+        );
+        assert!(preview.signature_is_valid(&fixture.identity.public_key_bytes()));
+    }
+
+    #[tokio::test]
+    async fn signed_ticket_join_preview_persists_an_accepted_membership() {
+        let now = unix_time_ms();
+        let fixture = signed_ticket_join_fixture(now);
+        let configs = ConfigManager::new_for_dir(std::env::temp_dir().join(format!(
+            "fuckipv6-signed-preview-{}-{now}",
+            std::process::id()
+        )))
+        .expect("config manager");
+        let preview = fixture
+            .command
+            .signed_join_preview
+            .as_ref()
+            .expect("signed preview")
+            .clone();
+        let ack = validate_signed_ticket_join_preview(&fixture.command, &preview, now)
+            .expect("valid signed preview");
+        let (persisted, inserted) =
+            persist_joined_membership(&configs, JoinAcceptance::from_signed_preview(&preview, ack))
+                .await
+                .expect("persist membership");
+        assert!(inserted);
+        assert_eq!(persisted.network_name, preview.network_name);
+        assert_eq!(persisted.membership.network_id, preview.network_id);
+        assert_eq!(persisted.membership.role, MembershipRole::Member);
+        assert_eq!(
+            persisted.membership.state,
+            fuckipv6_common::domain::MembershipState::Accepted
+        );
+        assert_eq!(
+            configs.list_joined_memberships().expect("list memberships"),
+            vec![persisted]
+        );
+        let _ = std::fs::remove_dir_all(configs.config_dir());
     }
 
     #[test]

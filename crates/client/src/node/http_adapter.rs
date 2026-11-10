@@ -4209,6 +4209,7 @@ mod tests {
                     terms_hash: None,
                     acknowledged_at_unix_ms: None,
                     exit_contribution_acknowledged: None,
+                    signed_join_preview: None,
                 })),
             ),
             idempotency_key: Some(IdempotencyKey::from_public_key(b"audit-operation-link")),

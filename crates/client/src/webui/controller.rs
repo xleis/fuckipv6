@@ -614,6 +614,7 @@ impl AppController {
             terms_hash: None,
             acknowledged_at_unix_ms: None,
             exit_contribution_acknowledged: None,
+            signed_join_preview: None,
         })))
         .await?;
 

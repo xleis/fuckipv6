@@ -226,8 +226,10 @@ impl EmbeddedCoordinator {
 
         let actual_relay_addr = relay_server.local_addr();
         let relay_pin = relay_server.certificate().public_key_pin;
+        let advertised_relay_addr =
+            resolve_relay_advertisement(external_host.as_deref(), actual_relay_addr).await?;
         let relay_endpoint = RelayEndpoint {
-            addr: actual_relay_addr,
+            addr: advertised_relay_addr,
             server_name: "fuckipv6.local".to_string(),
             public_key_pin: relay_pin,
         };
@@ -356,6 +358,46 @@ impl EmbeddedCoordinator {
     }
 }
 
+async fn resolve_relay_advertisement(
+    external_host: Option<&str>,
+    bound_addr: SocketAddr,
+) -> Result<SocketAddr> {
+    let Some(host) = external_host else {
+        return Ok(bound_addr);
+    };
+
+    if let Ok(addr) = host.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+
+    let bracketed_ip = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .and_then(|host| host.parse::<IpAddr>().ok());
+    if let Some(ip) = host.parse::<IpAddr>().ok().or(bracketed_ip) {
+        return Ok(SocketAddr::new(ip, bound_addr.port()));
+    }
+
+    let explicit_port = host
+        .rsplit_once(':')
+        .is_some_and(|(_, port)| port.parse::<u16>().is_ok());
+    let addresses = if explicit_port {
+        tokio::net::lookup_host(host)
+            .await
+            .map(|addresses| addresses.collect::<Vec<_>>())
+    } else {
+        tokio::net::lookup_host((host, bound_addr.port()))
+            .await
+            .map(|addresses| addresses.collect::<Vec<_>>())
+    }
+    .with_context(|| format!("无法解析中继外部主机 {host}"))?;
+
+    addresses
+        .into_iter()
+        .next()
+        .with_context(|| format!("中继外部主机 {host} 没有可用地址"))
+}
+
 impl Drop for EmbeddedCoordinator {
     fn drop(&mut self) {
         if let Some(task) = self.signaling_task.take() {
@@ -370,6 +412,29 @@ impl Drop for EmbeddedCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn relay_advertisement_uses_external_ipv4_host() {
+        let bound_addr = "0.0.0.0:16667".parse().expect("bound address");
+        let advertised = resolve_relay_advertisement(Some("101.36.116.21"), bound_addr)
+            .await
+            .expect("resolve external relay host");
+
+        assert_eq!(
+            advertised,
+            "101.36.116.21:16667".parse().expect("advertised address")
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_advertisement_preserves_bind_address_without_external_host() {
+        let bound_addr = "10.7.53.243:16667".parse().expect("bound address");
+        let advertised = resolve_relay_advertisement(None, bound_addr)
+            .await
+            .expect("use bound relay address");
+
+        assert_eq!(advertised, bound_addr);
+    }
 
     #[tokio::test]
     async fn allocation_update_rolls_back_persistence_when_live_lease_blocks_it() {

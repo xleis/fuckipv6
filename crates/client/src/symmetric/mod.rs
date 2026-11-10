@@ -171,6 +171,13 @@ impl EmbeddedCoordinator {
             )
             .context("无法初始化审批请求存储")?,
         );
+        let member_lifecycle_store = Arc::new(
+            MemberLifecycleStore::new(
+                blacklist_path.with_file_name("member_lifecycle.json"),
+                network_record_path.clone(),
+            )
+            .context("无法初始化成员生命周期存储")?,
+        );
         let invitation_store = Arc::new(
             InvitationStore::new(
                 blacklist_path.with_file_name("invitations.json"),
@@ -178,14 +185,8 @@ impl EmbeddedCoordinator {
                 Some(owner_node_id.clone()),
                 Vec::new(),
             )
-            .context("无法初始化私有邀请存储")?,
-        );
-        let member_lifecycle_store = Arc::new(
-            MemberLifecycleStore::new(
-                blacklist_path.with_file_name("member_lifecycle.json"),
-                network_record_path.clone(),
-            )
-            .context("无法初始化成员生命周期存储")?,
+            .context("无法初始化私有邀请存储")?
+            .with_member_lifecycle_store(member_lifecycle_store.clone()),
         );
         let exit_contribution_store = Arc::new(ExitContributionRequestStore::new(
             blacklist_path.with_file_name("exit_contribution_requests.json"),

@@ -3,7 +3,9 @@
 //! The short-lived activity feed is a separate projection. This file is the
 //! long-term evidence store: records remain on disk across restarts and
 //! rotation, carry a global sequence and hash link, and are anchored by an
-//! atomically replaced head checkpoint. Capacity exhaustion fails closed rather
+//! atomically replaced head checkpoint. Writers in different processes are
+//! serialized per append, so the WebUI and CLI can share one ledger without
+//! holding a process-lifetime lock. Capacity exhaustion fails closed rather
 //! than silently deleting old records.
 
 use anyhow::{Context, Result};
@@ -16,7 +18,7 @@ use fuckipv6_common::domain::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,7 +46,6 @@ pub(crate) struct OwnerSecurityAudit {
     state: Mutex<LedgerState>,
     warnings: Mutex<Vec<AuditLedgerWarning>>,
     clock: Box<dyn AuditClock>,
-    _lock: File,
 }
 
 struct LedgerState {
@@ -54,7 +55,9 @@ struct LedgerState {
     previous_hash: String,
     checkpoint: AuditChainCheckpoint,
     last_occurred_at_unix_ms: Option<u64>,
-    writer: Box<dyn AuditLineWriter>,
+    active_file_len: u64,
+    segment_count: usize,
+    writer_override: Option<Box<dyn AuditLineWriter>>,
     poisoned: Option<String>,
 }
 
@@ -196,37 +199,21 @@ impl OwnerSecurityAudit {
         fs::create_dir_all(config_dir).context("无法创建安全审计目录")?;
         secure_directory(config_dir)?;
         let lock = open_lock_file(&config_dir.join(LOCK_FILE))?;
-        lock.try_lock_exclusive()
-            .context("另一个进程正在写入安全审计账本")?;
+        FileExt::lock_exclusive(&lock).context("无法锁定安全审计账本进行初始化")?;
 
         let mut warnings = Vec::new();
         let loaded = initialize_ledger(config_dir, &node_id, policy)?;
         if loaded.recovered_checkpoint {
-            warnings.push(AuditLedgerWarning {
-                code: "audit_checkpoint_recovered".to_string(),
-                occurred_at_unix_ms: unix_time_ms().unwrap_or(1),
-                detail: "从完整审计段恢复了落后或缺失的 head checkpoint".to_string(),
-            });
+            warnings.push(recovered_checkpoint_warning());
         }
-        let writer =
-            open_private_append_file(&ledger_segment_path(config_dir, loaded.active_segment))?;
+        drop(lock);
         Ok(Self {
             node_id,
             directory: config_dir.to_path_buf(),
             policy,
-            state: Mutex::new(LedgerState {
-                active_segment: loaded.active_segment,
-                active_record_count: loaded.active_record_count,
-                next_sequence: loaded.next_sequence,
-                previous_hash: loaded.previous_hash,
-                checkpoint: loaded.checkpoint,
-                last_occurred_at_unix_ms: loaded.last_occurred_at_unix_ms,
-                writer: Box::new(FileLineWriter(writer)),
-                poisoned: None,
-            }),
+            state: Mutex::new(LedgerState::from_loaded(loaded)),
             warnings: Mutex::new(warnings),
             clock,
-            _lock: lock,
         })
     }
 
@@ -288,6 +275,9 @@ impl OwnerSecurityAudit {
             .into());
         }
 
+        let _lock = self.acquire_write_lock()?;
+        self.refresh_state_under_lock(&mut state)?;
+
         if let Some(last_unix_ms) = state.last_occurred_at_unix_ms {
             if now_unix_ms.saturating_add(CLOCK_DRIFT_TOLERANCE_MS) < last_unix_ms {
                 let error = AuditLedgerError::ClockDrift {
@@ -312,11 +302,12 @@ impl OwnerSecurityAudit {
                 return Err(error.into());
             }
             let path = ledger_segment_path(&self.directory, next_segment);
-            let file = create_private_file(&path)?;
+            drop(create_private_file(&path)?);
             sync_directory(&self.directory)?;
-            state.writer = Box::new(FileLineWriter(file));
             state.active_segment = next_segment;
             state.active_record_count = 0;
+            state.active_file_len = 0;
+            state.segment_count = state.segment_count.saturating_add(1);
         }
 
         let sequence = state.next_sequence;
@@ -326,20 +317,33 @@ impl OwnerSecurityAudit {
         let mut line = serde_json::to_vec(&record).context("无法序列化安全审计记录")?;
         line.push(b'\n');
 
-        if let Err(source) = state.writer.write_all(&line) {
-            let error = io_ledger_error("append", source);
-            self.note_warning(&error, now_unix_ms);
-            state.poisoned = Some(error.to_string());
-            return Err(error.into());
-        }
-        if let Err(source) = state.writer.sync_data() {
-            let error = io_ledger_error("sync", source);
-            self.note_warning(&error, now_unix_ms);
-            state.poisoned = Some(error.to_string());
-            return Err(error.into());
-        }
+        let active_path = ledger_segment_path(&self.directory, state.active_segment);
+        let write_result = if let Some(mut writer) = state.writer_override.take() {
+            writer
+                .write_all(&line)
+                .and_then(|_| writer.sync_data())
+                .map(|_| state.active_file_len.saturating_add(line.len() as u64))
+        } else {
+            let file = open_private_append_file(&active_path)?;
+            (|| -> io::Result<u64> {
+                let mut writer = FileLineWriter(file);
+                writer.write_all(&line)?;
+                writer.sync_data()?;
+                writer.0.metadata().map(|metadata| metadata.len())
+            })()
+        };
+        let active_file_len = match write_result {
+            Ok(active_file_len) => active_file_len,
+            Err(source) => {
+                let error = io_ledger_error("append", source);
+                self.note_warning(&error, now_unix_ms);
+                state.poisoned = Some(error.to_string());
+                return Err(error.into());
+            }
+        };
 
         state.active_record_count = state.active_record_count.saturating_add(1);
+        state.active_file_len = active_file_len;
         state.next_sequence = sequence.saturating_add(1);
         state.previous_hash = record.entry_hash.clone();
         state.last_occurred_at_unix_ms = Some(now_unix_ms);
@@ -359,6 +363,34 @@ impl OwnerSecurityAudit {
         Ok(record)
     }
 
+    fn acquire_write_lock(&self) -> Result<File> {
+        let lock = open_lock_file(&self.directory.join(LOCK_FILE))?;
+        FileExt::lock_exclusive(&lock).context("无法锁定安全审计账本进行写入")?;
+        Ok(lock)
+    }
+
+    /// Re-read the shared ledger before every mutation. The fast path consumes
+    /// records appended by another process from the active segment; rotation,
+    /// checkpoint recovery and truncation fall back to full verification.
+    fn refresh_state_under_lock(&self, state: &mut LedgerState) -> Result<()> {
+        if state.poisoned.is_some() {
+            return Ok(());
+        }
+        if refresh_from_active_tail(&self.directory, state)? {
+            return Ok(());
+        }
+        let loaded = initialize_ledger(&self.directory, &self.node_id, self.policy)?;
+        if loaded.recovered_checkpoint {
+            self.note_warning_detail(
+                "audit_checkpoint_recovered",
+                unix_time_ms().unwrap_or(1),
+                "从完整审计段恢复了落后或缺失的 head checkpoint",
+            );
+        }
+        state.replace_from_loaded(loaded);
+        Ok(())
+    }
+
     pub(crate) fn export(&self, filter: &AuditExportFilter) -> Result<AuditExportBundle> {
         filter
             .validate()
@@ -367,10 +399,12 @@ impl OwnerSecurityAudit {
             .clock
             .now_unix_ms()
             .map_err(|error| AuditLedgerError::Clock(format!("{error:#}")))?;
-        let state = self
+        let mut state = self
             .state
             .lock()
             .map_err(|_| AuditLedgerError::Corrupt("安全审计状态锁已损坏".into()))?;
+        let _lock = self.acquire_write_lock()?;
+        self.refresh_state_under_lock(&mut state)?;
         let records = read_all_records(&self.directory)?;
         let verification = state.checkpoint.verify(&records)?;
         let records = records
@@ -396,7 +430,7 @@ impl OwnerSecurityAudit {
     }
 
     pub(crate) fn health(&self) -> AuditLedgerHealth {
-        let state = match self.state.lock() {
+        let mut state = match self.state.lock() {
             Ok(state) => state,
             Err(_) => {
                 return AuditLedgerHealth {
@@ -414,6 +448,18 @@ impl OwnerSecurityAudit {
                 };
             }
         };
+        if state.poisoned.is_none() {
+            let refreshed = self
+                .acquire_write_lock()
+                .and_then(|_lock| self.refresh_state_under_lock(&mut state));
+            if let Err(error) = refreshed {
+                self.note_warning_detail(
+                    "audit_refresh_failed",
+                    unix_time_ms().unwrap_or(1),
+                    format!("刷新安全审计状态失败: {error:#}"),
+                );
+            }
+        }
         let warnings = self
             .warnings
             .lock()
@@ -437,11 +483,20 @@ impl OwnerSecurityAudit {
     }
 
     fn note_warning(&self, error: &AuditLedgerError, now_unix_ms: u64) {
+        self.note_warning_detail(error.warning_code(), now_unix_ms, error.to_string());
+    }
+
+    fn note_warning_detail(
+        &self,
+        code: impl Into<String>,
+        now_unix_ms: u64,
+        detail: impl Into<String>,
+    ) {
         if let Ok(mut warnings) = self.warnings.lock() {
             warnings.push(AuditLedgerWarning {
-                code: error.warning_code().to_string(),
+                code: code.into(),
                 occurred_at_unix_ms: now_unix_ms.max(1),
-                detail: error.to_string(),
+                detail: detail.into(),
             });
             if warnings.len() > MAX_RECORDED_WARNINGS {
                 let excess = warnings.len() - MAX_RECORDED_WARNINGS;
@@ -458,7 +513,7 @@ impl OwnerSecurityAudit {
 
     #[cfg(test)]
     fn replace_writer(&self, writer: Box<dyn AuditLineWriter>) {
-        self.state.lock().expect("audit state").writer = writer;
+        self.state.lock().expect("audit state").writer_override = Some(writer);
     }
 }
 
@@ -469,7 +524,100 @@ struct LoadedLedger {
     previous_hash: String,
     checkpoint: AuditChainCheckpoint,
     last_occurred_at_unix_ms: Option<u64>,
+    active_file_len: u64,
+    segment_count: usize,
     recovered_checkpoint: bool,
+}
+
+impl LedgerState {
+    fn from_loaded(loaded: LoadedLedger) -> Self {
+        Self {
+            active_segment: loaded.active_segment,
+            active_record_count: loaded.active_record_count,
+            next_sequence: loaded.next_sequence,
+            previous_hash: loaded.previous_hash,
+            checkpoint: loaded.checkpoint,
+            last_occurred_at_unix_ms: loaded.last_occurred_at_unix_ms,
+            active_file_len: loaded.active_file_len,
+            segment_count: loaded.segment_count,
+            writer_override: None,
+            poisoned: None,
+        }
+    }
+
+    fn replace_from_loaded(&mut self, loaded: LoadedLedger) {
+        let writer_override = self.writer_override.take();
+        *self = Self::from_loaded(loaded);
+        self.writer_override = writer_override;
+    }
+}
+
+fn recovered_checkpoint_warning() -> AuditLedgerWarning {
+    AuditLedgerWarning {
+        code: "audit_checkpoint_recovered".to_string(),
+        occurred_at_unix_ms: unix_time_ms().unwrap_or(1),
+        detail: "从完整审计段恢复了落后或缺失的 head checkpoint".to_string(),
+    }
+}
+
+/// Consume records appended by another process without re-reading the complete
+/// retained history. Returns false when the active segment rotated, the
+/// checkpoint is behind/ahead in an unexpected way, or a full integrity check
+/// is required.
+fn refresh_from_active_tail(directory: &Path, state: &mut LedgerState) -> Result<bool> {
+    let segments = audit_segment_paths(directory)?;
+    if segments.len() != state.segment_count || state.active_segment as usize + 1 != segments.len()
+    {
+        return Ok(false);
+    }
+    let active_path = &segments[state.active_segment as usize];
+    let metadata = fs::metadata(active_path).context("无法读取安全审计当前分片元数据")?;
+    if metadata.len() < state.active_file_len {
+        return Ok(false);
+    }
+    let checkpoint = read_checkpoint(directory)?;
+    if metadata.len() == state.active_file_len {
+        return Ok(checkpoint == state.checkpoint);
+    }
+
+    let mut file = open_private_read_file(active_path)?;
+    file.seek(SeekFrom::Start(state.active_file_len))
+        .context("无法定位安全审计追加内容")?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail)
+        .context("无法读取安全审计追加内容")?;
+
+    let mut expected_sequence = state.next_sequence;
+    let mut previous_hash = state.previous_hash.clone();
+    let mut appended = 0u64;
+    let mut last_occurred_at_unix_ms = None;
+    for line in tail.split(|byte| *byte == b'\n') {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let record: AuditChainRecord =
+            serde_json::from_slice(line).context("无法解析其他进程追加的安全审计记录")?;
+        record.verify(expected_sequence, &previous_hash)?;
+        expected_sequence = expected_sequence.saturating_add(1);
+        previous_hash = record.entry_hash;
+        last_occurred_at_unix_ms = Some(record.entry.occurred_at_unix_ms);
+        appended = appended.saturating_add(1);
+    }
+    if appended == 0
+        || checkpoint.sequence != expected_sequence.saturating_sub(1)
+        || checkpoint.record_count != expected_sequence.saturating_sub(1)
+        || checkpoint.entry_hash != previous_hash
+    {
+        return Ok(false);
+    }
+
+    state.active_record_count = state.active_record_count.saturating_add(appended);
+    state.active_file_len = metadata.len();
+    state.next_sequence = expected_sequence;
+    state.previous_hash = previous_hash;
+    state.last_occurred_at_unix_ms = last_occurred_at_unix_ms;
+    state.checkpoint = checkpoint;
+    Ok(true)
 }
 
 fn initialize_ledger(
@@ -533,6 +681,10 @@ fn initialize_ledger(
                 last_occurred_at_unix_ms: records
                     .last()
                     .map(|record| record.entry.occurred_at_unix_ms),
+                active_file_len: fs::metadata(&segments[segments.len() - 1])
+                    .context("无法读取安全审计当前分片元数据")?
+                    .len(),
+                segment_count: segments.len(),
                 recovered_checkpoint: true,
             });
         }
@@ -548,6 +700,10 @@ fn initialize_ledger(
         last_occurred_at_unix_ms: records
             .last()
             .map(|record| record.entry.occurred_at_unix_ms),
+        active_file_len: fs::metadata(&segments[segments.len() - 1])
+            .context("无法读取安全审计当前分片元数据")?
+            .len(),
+        segment_count: segments.len(),
         recovered_checkpoint,
     })
 }
@@ -1186,6 +1342,109 @@ mod tests {
             assert_eq!(mode, 0o600);
         }
 
+        #[cfg(unix)]
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn independent_ledger_handles_share_one_chain_without_lifetime_lock() -> Result<()> {
+        let dir = temp_dir("shared-handles");
+        let (webui, _) = test_ledger(&dir, AuditRetentionPolicy::default(), 1_500);
+        let (cli, _) = test_ledger(&dir, AuditRetentionPolicy::default(), 1_500);
+
+        record(&webui, "/webui/start", "success")?;
+        record(&cli, "/cli/status", "success")?;
+        record(&webui, "/webui/owner", "success")?;
+
+        assert_eq!(webui.health().record_count, 3);
+        assert_eq!(cli.health().record_count, 3);
+        let bundle = cli.export(&AuditExportFilter::default())?;
+        assert_eq!(
+            bundle
+                .records
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(bundle.records[1].entry.resource, "/cli/status");
+
+        drop(webui);
+        drop(cli);
+        #[cfg(unix)]
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn stale_checkpoint_recovery_is_not_reported_as_integrity_failure() -> Result<()> {
+        let dir = temp_dir("checkpoint-recovery");
+        let (writer, _) = test_ledger(&dir, AuditRetentionPolicy::default(), 1_550);
+        let (reader, _) = test_ledger(&dir, AuditRetentionPolicy::default(), 1_550);
+        record(&writer, "/one", "success")?;
+        write_checkpoint(&dir, &AuditChainCheckpoint::default())?;
+
+        let health = reader.health();
+        assert_eq!(health.checkpoint_sequence, 1);
+        assert!(health
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "audit_checkpoint_recovered"));
+        assert!(!health
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "audit_integrity_failure"));
+
+        drop(writer);
+        drop(reader);
+        #[cfg(unix)]
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn parallel_ledger_handles_append_an_unbroken_chain() -> Result<()> {
+        let dir = temp_dir("parallel-handles");
+        let (webui, _) = test_ledger(&dir, AuditRetentionPolicy::default(), 1_600);
+        let (cli, _) = test_ledger(&dir, AuditRetentionPolicy::default(), 1_600);
+        let webui = Arc::new(webui);
+        let cli = Arc::new(cli);
+
+        let webui_writer = {
+            let ledger = webui.clone();
+            std::thread::spawn(move || -> Result<()> {
+                for index in 0..8 {
+                    record(&ledger, &format!("/webui/{index}"), "success")?;
+                }
+                Ok(())
+            })
+        };
+        let cli_writer = {
+            let ledger = cli.clone();
+            std::thread::spawn(move || -> Result<()> {
+                for index in 0..8 {
+                    record(&ledger, &format!("/cli/{index}"), "success")?;
+                }
+                Ok(())
+            })
+        };
+        webui_writer.join().expect("webui audit writer")?;
+        cli_writer.join().expect("cli audit writer")?;
+
+        let records = read_all_records(&dir)?;
+        assert_eq!(records.len(), 16);
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            (1..=16).collect::<Vec<_>>()
+        );
+        assert!(verify_audit_chain(&records).is_ok());
+
+        drop(webui);
+        drop(cli);
         #[cfg(unix)]
         std::fs::remove_dir_all(dir)?;
         Ok(())

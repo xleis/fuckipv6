@@ -41,7 +41,7 @@ fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 
 require_tools() {
     local tool
-    for tool in cargo git ip jq perl ping python3 ss tcpdump; do
+    for tool in cargo git ip jq mount perl ping python3 ss tcpdump unshare; do
         command -v "$tool" >/dev/null 2>&1 || fail "missing required tool: $tool"
     done
 }
@@ -305,9 +305,26 @@ main() {
     local rejected_env=("${common_clean_env[@]}" HOME="$WORK/rejected/home" XDG_CONFIG_HOME="$WORK/rejected/xdg"
         FUCKIPV6_RUNTIME_DIR="$WORK/rejected/run" FUCKIPV6_CONFIG_DIR="$WORK/rejected/config")
     mkdir -p "$WORK"/{host,node1,node2,rejected}/{home,xdg,run,config}
+    local headless_state="$WORK/no-desktop"
+    local headless_exec="$headless_state/exec-headless"
+    mkdir -p "$headless_state/run-user" "$headless_state/x11"
+    cat >"$headless_exec" <<'SH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+state=$1
+shift
+exec unshare --mount --propagation private bash -c '
+    set -Eeuo pipefail
+    mount --bind "$1" /run/user
+    mount --bind "$2" /tmp/.X11-unix
+    shift 2
+    exec "$@"
+' bash "$state/run-user" "$state/x11" "$@"
+SH
+    chmod +x "$headless_exec"
 
     info "starting Coordinator in host namespace with auto-connect=false"
-    "${host_env[@]}" RUST_LOG=debug "$BIN" host \
+    "$headless_exec" "$headless_state" "${host_env[@]}" RUST_LOG=debug "$BIN" host \
         --name "$NETWORK" --port "$HOST_PORT" --relay-port "$RELAY_PORT" \
         --external-host 10.78.1.1 --auto-connect=false --headless --webui-port "$WEBUI_HOST" \
         >"$WORK/host/host.log" 2>&1 &
@@ -334,10 +351,10 @@ main() {
     info "network_id=$NETWORK_ID owner=$HOST_NODE_ID join_mode=invite_only"
 
     info "starting two empty nodes in separate netns"
-    ip netns exec "$NS1" "${node1_env[@]}" RUST_LOG=debug "$BIN" --headless --webui-port "$WEBUI1" \
+    "$headless_exec" "$headless_state" ip netns exec "$NS1" "${node1_env[@]}" RUST_LOG=debug "$BIN" --headless --webui-port "$WEBUI1" \
         >"$WORK/node1/node.log" 2>&1 &
     N1PID=$!
-    ip netns exec "$NS2" "${node2_env[@]}" RUST_LOG=debug "$BIN" --headless --webui-port "$WEBUI2" \
+    "$headless_exec" "$headless_state" ip netns exec "$NS2" "${node2_env[@]}" RUST_LOG=debug "$BIN" --headless --webui-port "$WEBUI2" \
         >"$WORK/node2/node.log" 2>&1 &
     N2PID=$!
     NODE1_SOCK="$WORK/node1/run/node.sock"
@@ -354,7 +371,7 @@ main() {
 
     info "negative integration check: fk:// location ticket must not authorize InviteOnly membership"
     set +e
-    timeout --kill-after=5s 60s ip netns exec "$NS1" "${rejected_env[@]}" RUST_LOG=debug "$BIN" join "$TICKET" \
+    timeout --kill-after=5s 60s "$headless_exec" "$headless_state" ip netns exec "$NS1" "${rejected_env[@]}" RUST_LOG=debug "$BIN" join "$TICKET" \
         --name "$NETWORK" --start --headless --webui-port 18983 \
         >"$WORK/rejected/join.log" 2>&1
     REJECT_RC=$?

@@ -32,8 +32,8 @@ use crate::local_ipc::IpcRole;
 use crate::node::{
     LocalExitCapabilitySnapshot, LocalExitCapabilityStage, NodeCommand, NodeCommandContext,
     NodeCommandOutcome, NodeCommandRequest, NodeNetworkSnapshot, NodeNetworkStatus,
-    NodeProbePeerCommand, NodeProblem, NodeProblemCode, NodeSnapshot, NodeStateStore,
-    RuntimeControlError,
+    NodeProbePeerCommand, NodeProblem, NodeProblemCode, NodeSetLocalExitCapabilityCommand,
+    NodeSnapshot, NodeStateStore, RuntimeControlError,
 };
 use crate::p2p::buffer_pool::InboundPayload;
 use crate::p2p::connection::{InPlaceSendOutcome, InboundPacket, P2pEngine, PeerRouteInfo};
@@ -5255,6 +5255,76 @@ pub async fn node_status(json: bool) -> Result<()> {
         println!("最近错误:        {:?}: {}", error.code, error.message);
     }
 
+    session.shutdown();
+    Ok(())
+}
+
+/// Run the layered node diagnostics and print the server-authoritative report.
+///
+/// The default output is the bounded, redacted `sanitized_report` suitable for
+/// sharing. `--json` emits the full diagnostics snapshot for tooling.
+pub async fn node_diagnostics(json: bool) -> Result<()> {
+    let session = cli_node_session().await?;
+    let outcome = execute_cli_node_command(&session, NodeCommand::GetDiagnostics).await?;
+    match outcome {
+        NodeCommandOutcome::Diagnostics(diagnostics) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&diagnostics)?);
+            } else {
+                println!("{}", diagnostics.sanitized_report);
+            }
+        }
+        other => anyhow::bail!("诊断命令返回了意外结果: {other:?}"),
+    }
+    session.shutdown();
+    Ok(())
+}
+
+/// Enable or disable the local owner Exit intent.
+///
+/// This is independent from the network Exit role: the data plane only becomes
+/// effective when the owner intent and the network authorization are both true.
+pub async fn set_local_exit(enabled: bool) -> Result<()> {
+    let session = cli_node_session().await?;
+    let outcome = execute_cli_node_command(
+        &session,
+        NodeCommand::SetLocalExitCapability(NodeSetLocalExitCapabilityCommand { enabled }),
+    )
+    .await?;
+    match outcome {
+        NodeCommandOutcome::LocalExitCapability(snapshot) => {
+            println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        }
+        other => anyhow::bail!("Exit 能力命令返回了意外结果: {other:?}"),
+    }
+    session.shutdown();
+    Ok(())
+}
+
+/// Print the current local Exit capability projection from the node snapshot.
+pub async fn local_exit_status(json: bool) -> Result<()> {
+    let session = cli_node_session().await?;
+    let snapshot = session.state().snapshot().await;
+    let local_exit = snapshot.local_exit;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&local_exit)?);
+        session.shutdown();
+        return Ok(());
+    }
+
+    println!("本机 Exit 能力 (Local Exit Capability)");
+    println!("─────────────────────────────────────");
+    println!("Owner intent:    {}", local_exit.owner_exit_enabled);
+    println!("网络授权:        {}", local_exit.network_allowed);
+    println!("阶段:            {:?}", local_exit.stage);
+    println!("健康:            {}", local_exit.healthy);
+    println!(
+        "客户端:          活动 {} / 累计 {}",
+        local_exit.active_clients, local_exit.total_clients
+    );
+    if let Some(problem) = &local_exit.problem {
+        println!("问题:            {:?}: {}", problem.code, problem.message);
+    }
     session.shutdown();
     Ok(())
 }

@@ -303,6 +303,19 @@ pub enum Commands {
         json: bool,
     },
 
+    /// 采集并输出节点诊断报告（含泄漏探测证据）
+    Diagnostics {
+        /// 输出完整 JSON 诊断快照；默认输出服务端脱敏报告
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// 管理本机 Exit 能力（owner intent，独立于网络 Exit 角色）
+    Exit {
+        #[command(subcommand)]
+        command: ExitCommands,
+    },
+
     /// 查看连接的对等节点
     Peers,
 
@@ -406,6 +419,20 @@ pub enum Commands {
         /// 注册超时秒数
         #[arg(long, default_value = "5")]
         timeout_secs: u64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ExitCommands {
+    /// 开启本机 Exit 能力（owner intent）
+    Enable,
+    /// 关闭本机 Exit 能力（owner intent）
+    Disable,
+    /// 查看当前本机 Exit 能力状态
+    Status {
+        /// 输出机器可读的 JSON 快照
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -830,6 +857,8 @@ async fn run_command(command: Commands, launch_plan: Option<UiLaunchPlan>) -> Re
         | Commands::Default { .. }) => run_network_command(command, launch_plan).await?,
         command @ (Commands::Start { .. }
         | Commands::Status { .. }
+        | Commands::Diagnostics { .. }
+        | Commands::Exit { .. }
         | Commands::Peers
         | Commands::Ping { .. }
         | Commands::Stats
@@ -955,6 +984,18 @@ async fn run_runtime_command(command: Commands, launch_plan: Option<UiLaunchPlan
         Commands::Status { json } => {
             logging::init_default()?;
             commands::node_status(json).await?;
+        }
+        Commands::Diagnostics { json } => {
+            logging::init_default()?;
+            commands::node_diagnostics(json).await?;
+        }
+        Commands::Exit { command } => {
+            logging::init_default()?;
+            match command {
+                ExitCommands::Enable => commands::set_local_exit(true).await?,
+                ExitCommands::Disable => commands::set_local_exit(false).await?,
+                ExitCommands::Status { json } => commands::local_exit_status(json).await?,
+            }
         }
         Commands::Peers => {
             logging::init_default()?;
@@ -1359,6 +1400,39 @@ mod tests {
                 );
             }
             _ => panic!("expected LXT rescue server command"),
+        }
+    }
+
+    #[test]
+    fn parses_diagnostics_and_exit_commands() {
+        let diagnostics = Cli::try_parse_from(["fuckipv6", "diagnostics", "--json"]).unwrap();
+        match diagnostics.command {
+            Some(Commands::Diagnostics { json }) => assert!(json),
+            _ => panic!("expected diagnostics command"),
+        }
+
+        let enable = Cli::try_parse_from(["fuckipv6", "exit", "enable"]).unwrap();
+        assert!(matches!(
+            enable.command,
+            Some(Commands::Exit {
+                command: ExitCommands::Enable
+            })
+        ));
+
+        let disable = Cli::try_parse_from(["fuckipv6", "exit", "disable"]).unwrap();
+        assert!(matches!(
+            disable.command,
+            Some(Commands::Exit {
+                command: ExitCommands::Disable
+            })
+        ));
+
+        let status = Cli::try_parse_from(["fuckipv6", "exit", "status", "--json"]).unwrap();
+        match status.command {
+            Some(Commands::Exit {
+                command: ExitCommands::Status { json },
+            }) => assert!(json),
+            _ => panic!("expected exit status command"),
         }
     }
 

@@ -1307,6 +1307,11 @@ fn is_missing_firewall_resource(error: &anyhow::Error) -> bool {
     message.contains("No chain/target/match")
         || message.contains("Bad rule (does a matching rule exist")
         || message.contains("No such file or directory")
+        // iptables-nft (RHEL/CentOS 9, modern Debian/Ubuntu) reports a missing
+        // user chain as "Chain 'NAME' does not exist" instead of the legacy
+        // "No chain/target/match" wording. Treat it as an already-absent
+        // resource so first-run stale purges and idempotent cleanup succeed.
+        || (message.contains("Chain '") && message.contains("does not exist"))
 }
 
 async fn run_iptables(
@@ -1922,6 +1927,36 @@ mod tests {
         LinuxExitForwarder::purge_stale_with_runner(runner.as_ref(), tun_name)
             .await
             .expect("missing stale firewall resources are already clean");
+    }
+
+    #[tokio::test]
+    async fn stale_purge_accepts_iptables_nft_missing_chain_wording() {
+        let runner = Arc::new(FakeCommandRunner::default());
+        let tun_name = "fip6nft";
+        let forward_chain = chain_name("F", tun_name);
+        let nat_chain = chain_name("N", tun_name);
+        // CentOS Stream 9 / RHEL 9 iptables-nft prints this wording when a user
+        // chain is absent and a jump into it is deleted.
+        runner.fail_async_with(
+            iptables_invocation(
+                "iptables",
+                Some("filter"),
+                &["-D", "FORWARD", "-j", forward_chain.as_str()],
+            ),
+            "iptables v1.8.10 (nf_tables): Chain 'FKV6F-00000000' does not exist",
+        );
+        runner.fail_async_with(
+            iptables_invocation(
+                "ip6tables",
+                Some("nat"),
+                &["-D", "POSTROUTING", "-j", nat_chain.as_str()],
+            ),
+            "ip6tables v1.8.10 (nf_tables): Chain 'FKV6N-00000000' does not exist",
+        );
+
+        LinuxExitForwarder::purge_stale_with_runner(runner.as_ref(), tun_name)
+            .await
+            .expect("nft missing-chain wording is an already-clean resource");
     }
 
     #[tokio::test]

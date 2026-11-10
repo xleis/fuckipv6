@@ -58,7 +58,7 @@
 | W9 成员、组与拓扑 | `[~]` | P1 | W8 | 成员列表、邀请审批、组目录和拓扑聚合已完成；多网络视觉、交互、性能与 E2E 进行中 |
 | W10 安全与隐私 | `[x]` | P1 | W9 | 权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计、安全页面状态和可重复治理证据闭环均已完成 |
 | W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约和 W11-09 隔离路由 E2E/失败关闭/网络报告已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，GPUI 已接入同一页面的权威投影、规则/目标/影响展示和精确跳转，真实命中观测、GPUI/WebUI/Android 三端一致、生产后端接线及真实平台监听/适配待完成 |
-| W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05 已完成：本机启停、贡献治理、管理员选择、分层健康与故障切换/撤权均有权威状态和自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；侧线仅确认香港 egress `101.36.116.21`，虚拟局域网 P2P 的双向 ICMP/TCP/UDP 与 Exit 可达仍待独立 netns 验收；W12-09 的 24 小时稳定性与自动清理复核待完成 |
+| W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05 已完成：本机启停、贡献治理、管理员选择、分层健康与故障切换/撤权均有权威状态和自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，但节点间 TCP、业务 UDP 和两侧 Exit 可达仍待验收；W12-09 的 24 小时稳定性与自动清理复核待完成 |
 | W13 Relay | `[ ]` | P1 | W10 | 授权、配额、健康、回退 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
 | W15 File | `[ ]` | P2 | W10 | ACL、配额、上传下载、续传 |
@@ -2916,9 +2916,27 @@ W12-09 继续保持 `[ ]`。
 转发到外网，不能证明虚拟局域网内节点之间的 P2P 连通。侧线观察时宿主 `fk-w12-hk` 为 `10.8.0.3`，
 `RX=0/TX=482`（主线程复核时 TX 已增至 486），香港 Exit 的 `10.8.0.1` 仍活跃，而 `w12-client` netns
 已清理；此时宿主 ping `10.8.0.1` 不通不能单独判定组网故障，因为当前没有同网发起端，且宿主 TUN 侧从未
-收到有效入站包，不属于有效的 P2P 验收。必须补做两个独立 netns（或两个独立节点）加入同一虚拟网络后的
-双向 ICMP、TCP、UDP 连通，以及两侧分别访问 Exit；通过前不得宣称“组件虚拟局域网达标”，也不能用
-W12-08 的外网性能结果替代组网验收。
+收到有效入站包，不属于有效的 P2P 验收。该侧线观察不能替代独立 netns 验收，也不能用 W12-08 的外网性能
+结果替代组网验收。
+
+**最小 P2P 组网验收（2026-11-11，独立 netns）**：脚本
+`scripts/test-w12-p2p-invite-netns.sh` 在 `w12pinvh`/`w12pinv1`/`w12pinv2` 三个独立 netns 中启动
+Coordinator、node1 和 node2，通过普通 `fk://` location ticket 加入 InviteOnly 网络被正确拒绝；随后通过
+max_uses=2 的正式邀请完成预览与兑换，Coordinator 权威 roster 包含三个节点。网络配置均为
+`routing_mode=mesh_only`、`exit_node=null`、`exit_node_enabled=false`，未使用 Exit、香港机器、路由器
+OpenClash 或宿主默认路由。node1/node2 虚拟地址分别为 `fd00::1003`/`fd00::1004`，双方在私有
+`10.78.0.0/16` veth underlay 上发现直接端点；node1 -> node2 与 node2 -> node1 的 5 个 ICMP 请求均为
+5/5 成功。稳定后双方目标 peer 均为 `online=true`、`p2p_active=true`、`p2p_healthy=true`，traffic 均为
+`p2p_rx_packets=10`、`p2p_tx_packets=10`、`error_count=0`；两侧 tcpdump 均捕获
+`10.78.1.2 <-> 10.78.2.2` 的直接 UDP。tcpdump 的 `bad udp cksum` 来自虚拟网卡校验和卸载呈现，不能单独
+判为路径丢包，实际双向 UDP 与 ICMP 均到达。
+
+证据目录为 `/tmp/w12-p2p-invite.20261110T210219Z.31844`，二进制 SHA-256 为
+`05c13e82db06a6d99404423af432f844f49d081b485922a41a456431d7147740`。测试前后宿主 IPv4/IPv6 policy
+rules 与默认路由逐字节一致；结束后无 `w12pinv*` netns、veth 或测试端口监听残留，OpenClash 未停止或重载。
+该结果定位了此前的失败边界：InviteOnly 授权曾错误接受 `fk://` location ticket，产品修复后正式邀请入册与
+直接 P2P 数据路径均正常；本次只证明双向 ICMP 和 P2P 底层直接 UDP，不证明节点间任意 TCP/业务 UDP 负载、
+两侧 Exit 可达或 24 小时稳定性。相关提交：`c02679f`、`14c8c4c`、`a720ae4`。
 
 **验收**：网速结论有基线和分布；UI 不展示无来源的“高速”宣传值。
 
@@ -2927,7 +2945,8 @@ W12-08 的外网性能结果替代组网验收。
 - [ ] 覆盖高延迟、抖动、丢包、断连、DNS 污染和 MTU 问题；
 - [ ] 覆盖端口阻断、QUIC 降级和 TCP fallback（若支持）；
 - [ ] 覆盖网络切换、休眠、唤醒和长时间空闲；
-- [ ] 两个独立 netns/节点同网后完成双向 ICMP、TCP、UDP，并分别验证 Exit 可达；
+- [x] 两个独立 netns/节点同网后完成双向 ICMP，并捕获直接 P2P UDP；
+- [ ] 同网节点间完成双向 TCP 与业务 UDP 负载，并分别验证 Exit 可达；
 - [ ] 运行 24 小时持续会话并记录失败/恢复；
 - [ ] 监控内存、连接、文件描述符和临时文件增长；
 - [ ] 测试结束自动清理 TUN、路由、DNS 和子进程；

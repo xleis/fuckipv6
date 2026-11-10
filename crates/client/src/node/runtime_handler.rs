@@ -3496,6 +3496,23 @@ fn validate_signed_ticket_join_preview(
             "加入预览签名无效",
         ));
     }
+    match preview.join_mode {
+        fuckipv6_common::domain::NetworkJoinMode::Open => {}
+        fuckipv6_common::domain::NetworkJoinMode::ApprovalRequired => {
+            return Err(signed_ticket_join_rejection(
+                preview.network_name.clone(),
+                "join.error.approval_required",
+                "该网络需要管理员审批；fk:// 票据只用于定位网络，请提交加入申请",
+            ));
+        }
+        fuckipv6_common::domain::NetworkJoinMode::InviteOnly => {
+            return Err(signed_ticket_join_rejection(
+                preview.network_name.clone(),
+                "join.error.invite_only",
+                "该网络仅接受正式邀请；fk:// 票据只用于定位网络，不能作为加入授权",
+            ));
+        }
+    }
     if command
         .network_id
         .as_deref()
@@ -6080,7 +6097,10 @@ mod tests {
         command: NodeJoinNetworkCommand,
     }
 
-    fn signed_ticket_join_fixture(now_unix_ms: u64) -> SignedTicketJoinFixture {
+    fn signed_ticket_join_fixture_with_mode(
+        now_unix_ms: u64,
+        join_mode: fuckipv6_common::domain::NetworkJoinMode,
+    ) -> SignedTicketJoinFixture {
         use fuckipv6_common::domain::{NetworkCreateProfile, NetworkVisibility, PublicKey};
 
         let identity = Identity::generate().expect("generate coordinator identity");
@@ -6096,7 +6116,7 @@ mod tests {
                 tags: Vec::new(),
                 capability_declarations: Vec::new(),
                 visibility: NetworkVisibility::Private,
-                join_mode: fuckipv6_common::domain::NetworkJoinMode::InviteOnly,
+                join_mode,
                 exit_contribution: Default::default(),
                 exit_contribution_scope: Default::default(),
                 exit_contribution_mode: Default::default(),
@@ -6135,6 +6155,37 @@ mod tests {
             signed_join_preview: Some(preview),
         };
         SignedTicketJoinFixture { identity, command }
+    }
+
+    fn signed_ticket_join_fixture(now_unix_ms: u64) -> SignedTicketJoinFixture {
+        signed_ticket_join_fixture_with_mode(
+            now_unix_ms,
+            fuckipv6_common::domain::NetworkJoinMode::Open,
+        )
+    }
+
+    #[test]
+    fn signed_ticket_join_preview_rejects_authorization_join_modes() {
+        use fuckipv6_common::domain::NetworkJoinMode;
+
+        let now = 1_800_000_000_000;
+        for (join_mode, expected_key) in [
+            (NetworkJoinMode::InviteOnly, "join.error.invite_only"),
+            (
+                NetworkJoinMode::ApprovalRequired,
+                "join.error.approval_required",
+            ),
+        ] {
+            let fixture = signed_ticket_join_fixture_with_mode(now, join_mode);
+            let preview = fixture
+                .command
+                .signed_join_preview
+                .as_ref()
+                .expect("signed preview");
+            let problem = validate_signed_ticket_join_preview(&fixture.command, preview, now)
+                .expect_err("authorization join modes must not accept a location ticket");
+            assert_eq!(problem.message_key.as_str(), expected_key);
+        }
     }
 
     #[test]

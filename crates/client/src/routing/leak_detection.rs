@@ -276,7 +276,11 @@ async fn resolve_family_address(
     port: u16,
     family: IpFamily,
 ) -> Option<std::net::SocketAddr> {
-    if let Ok(address) = host.parse::<IpAddr>() {
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(address) = literal.parse::<IpAddr>() {
         return family_matches(address, family).then(|| std::net::SocketAddr::new(address, port));
     }
     tokio::net::lookup_host((host, port))
@@ -1206,6 +1210,17 @@ mod tests {
         assert_eq!(assessment.state, LeakDetectionState::InsufficientEvidence);
         assert!(assessment.fail_closed_required);
         assert_eq!(assessment.reason_code, "leak_detection.evidence_not_tested");
+    }
+
+    #[tokio::test]
+    async fn ipv6_literal_probe_host_is_resolved_without_dns() {
+        let resolved = resolve_family_address("[fd00::1001]", 18094, IpFamily::Ipv6)
+            .await
+            .expect("parse bracketed IPv6 literal");
+        assert_eq!(
+            resolved,
+            std::net::SocketAddr::from(([0xfd00, 0, 0, 0, 0, 0, 0, 0x1001], 18094))
+        );
     }
 
     #[tokio::test]

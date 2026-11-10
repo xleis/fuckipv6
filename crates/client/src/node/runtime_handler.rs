@@ -3521,8 +3521,12 @@ fn validate_signed_ticket_join_preview(
             "加入命令字段与已验签预览不一致",
         ));
     }
-    let acknowledged_at_unix_ms = command.acknowledged_at_unix_ms.unwrap_or(now_unix_ms);
-    if acknowledged_at_unix_ms < preview.issued_at_unix_ms || acknowledged_at_unix_ms > now_unix_ms
+    let latest_valid_acknowledgement = now_unix_ms.max(preview.issued_at_unix_ms);
+    let acknowledged_at_unix_ms = command
+        .acknowledged_at_unix_ms
+        .unwrap_or(latest_valid_acknowledgement);
+    if acknowledged_at_unix_ms < preview.issued_at_unix_ms
+        || acknowledged_at_unix_ms > latest_valid_acknowledgement
     {
         return Err(signed_ticket_join_rejection(
             preview.network_name.clone(),
@@ -4297,7 +4301,7 @@ mod tests {
         ContentHash, InvitationCode, InvitationId, NetworkAcl, NetworkAclGrant, NetworkId,
         NetworkRole, NodeId, NodeLocalAccessPolicy, NodeNetworkScope, PermissionCondition,
         PermissionEffect, PermissionIntent, PermissionRule, PolicyAction, PolicyTestInput,
-        PolicyTestRequest, ResourceKind, SecurityRuleId, SubjectSelector,
+        PolicyTestRequest, ResourceKind, SecurityRuleId, Signature, SubjectSelector,
     };
     use fuckipv6_common::{
         ExitNodeCapabilities, ExitNodePlatform, NetworkMode, EXIT_NODE_CAPABILITY_SCHEMA_VERSION,
@@ -6202,6 +6206,47 @@ mod tests {
             "fixture must not validate under a different key"
         );
         assert!(preview.signature_is_valid(&fixture.identity.public_key_bytes()));
+    }
+
+    #[test]
+    fn signed_ticket_join_default_acknowledgement_tolerates_coordinator_clock_skew() {
+        let now = 1_800_000_000_000;
+        let mut fixture = signed_ticket_join_fixture(now);
+        {
+            let preview = fixture
+                .command
+                .signed_join_preview
+                .as_mut()
+                .expect("signed preview");
+            preview.issued_at_unix_ms = now + 2_000;
+            preview.expires_at_unix_ms = preview.issued_at_unix_ms + 60_000;
+            preview.preview_digest = preview.compute_digest().expect("preview digest");
+            preview.signature = Signature::from_bytes(
+                fixture
+                    .identity
+                    .sign(&preview.signing_payload().expect("signing payload"))
+                    .to_bytes(),
+            );
+        }
+        let preview = fixture
+            .command
+            .signed_join_preview
+            .as_ref()
+            .expect("signed preview")
+            .clone();
+        fixture.command.acknowledged_at_unix_ms = None;
+
+        let ack = validate_signed_ticket_join_preview(&fixture.command, &preview, now)
+            .expect("default acknowledgement must tolerate an accepted future issue time");
+        assert_eq!(ack.acknowledged_at_unix_ms, preview.issued_at_unix_ms);
+
+        fixture.command.acknowledged_at_unix_ms = Some(now);
+        let problem = validate_signed_ticket_join_preview(&fixture.command, &preview, now)
+            .expect_err("an explicit acknowledgement before issuance must still be rejected");
+        assert_eq!(
+            problem.message_key.as_str(),
+            "join.error.acknowledgement_time_invalid"
+        );
     }
 
     #[tokio::test]

@@ -214,7 +214,7 @@ impl NodeSnapshot {
             });
         }
 
-        for prior in previous {
+        for prior in &previous {
             if directories.contains_key(&prior.network_id) {
                 continue;
             }
@@ -223,8 +223,19 @@ impl NodeSnapshot {
                 directory_received_at_unix_ms: prior.directory_received_at_unix_ms,
                 evaluated_at_unix_ms: now_ms,
                 reason_code: Some("exit.selection.directory_unavailable".into()),
-                ..prior
+                ..prior.clone()
             });
+        }
+
+        for entry in &mut projected {
+            if let Some(prior) = previous
+                .iter()
+                .find(|prior| prior.network_id == entry.network_id)
+            {
+                if same_exit_evaluation(entry, prior) {
+                    entry.evaluated_at_unix_ms = prior.evaluated_at_unix_ms;
+                }
+            }
         }
 
         projected.sort_by(|left, right| {
@@ -603,6 +614,19 @@ fn project_topology(
         builder = builder.observe_link(link);
     }
     builder.build().ok()
+}
+
+fn same_exit_evaluation(
+    left: &NodeExitSelectionSnapshot,
+    right: &NodeExitSelectionSnapshot,
+) -> bool {
+    left.network_id == right.network_id
+        && left.policy_revision == right.policy_revision
+        && left.policy == right.policy
+        && left.resolution == right.resolution
+        && left.directory_generated_at_unix_ms == right.directory_generated_at_unix_ms
+        && left.directory_received_at_unix_ms == right.directory_received_at_unix_ms
+        && left.reason_code == right.reason_code
 }
 
 /// Local fallback when no roster is cached: translate this node's own data-plane
@@ -1777,6 +1801,39 @@ impl NodeStateStore {
         published
     }
 
+    /// Apply an update only when it changes authoritative state.
+    ///
+    /// Periodic telemetry refreshes use this path so an unchanged runtime
+    /// projection neither increments the revision nor wakes every adapter.
+    pub async fn update_if_changed<F>(&self, update: F) -> Option<NodeSnapshot>
+    where
+        F: FnOnce(&mut NodeSnapshot),
+    {
+        let evidence = self.directory_evidence().await;
+        let now_ms = unix_time_ms();
+        let mut snapshot = self.snapshot.write().await;
+        let previous = snapshot.clone();
+        update(&mut snapshot);
+        snapshot.refresh_capability_states();
+        snapshot.refresh_topology(&evidence.directories, now_ms);
+        if self.local_directory_evidence_seen.load(Ordering::Acquire) {
+            snapshot.refresh_exit_selections(&evidence.directories, &evidence.received_at, now_ms);
+        }
+        if *snapshot == previous {
+            return None;
+        }
+        snapshot.revision = snapshot.revision.saturating_add(1);
+        let published = snapshot.clone();
+        self.updates.send_replace(published.clone());
+        if let Some(events) = &self.events {
+            events.advance_snapshot_revision(published.revision);
+            events.publish(NodeEventKind::StateChanged {
+                revision: published.revision,
+            });
+        }
+        Some(published)
+    }
+
     pub async fn set_lifecycle(&self, lifecycle: NodeLifecycleSnapshot) -> NodeSnapshot {
         self.update(|snapshot| snapshot.lifecycle = lifecycle).await
     }
@@ -2366,7 +2423,9 @@ mod tests {
 
     #[tokio::test]
     async fn unchanged_interface_capture_does_not_create_revisions() {
-        let state = NodeStateStore::new();
+        let events = NodeEventBus::new(8);
+        let mut event_receiver = events.subscribe();
+        let state = NodeStateStore::with_events(events);
         let capture = super::super::network_interfaces::InterfaceCapture {
             interfaces: vec![NodeInterfaceSnapshot {
                 index: 1,
@@ -2390,6 +2449,46 @@ mod tests {
         assert_eq!(first.revision, 1);
         assert_eq!(second.revision, 1);
         assert_eq!(second.interfaces.len(), 1);
+        assert_eq!(
+            event_receiver.recv().await.expect("state event").kind,
+            NodeEventKind::StateChanged { revision: 1 }
+        );
+        assert!(event_receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn unchanged_periodic_update_does_not_create_revisions_or_events() {
+        let events = NodeEventBus::new(8);
+        let mut event_receiver = events.subscribe();
+        let state = NodeStateStore::with_events(events);
+        let mut updates = state.subscribe();
+
+        state
+            .update(|snapshot| {
+                snapshot.networks.push(NodeNetworkSnapshot {
+                    name: "home".into(),
+                    tun_name: "fk-home".into(),
+                    status: NodeNetworkStatus::Online,
+                    assigned_ipv6: None,
+                    assigned_ipv4: None,
+                    p2p_listen_addr: None,
+                    uptime_secs: 1,
+                    roles: vec![NodeNetworkRole::Member],
+                    peer_count: 0,
+                    traffic: NodeTrafficSnapshot::default(),
+                });
+            })
+            .await;
+        updates.borrow_and_update();
+        assert_eq!(
+            event_receiver.recv().await.expect("state event").kind,
+            NodeEventKind::StateChanged { revision: 1 }
+        );
+
+        assert!(state.update_if_changed(|_| {}).await.is_none());
+        assert!(!updates.has_changed().expect("watch remains open"));
+        assert!(event_receiver.try_recv().is_err());
+        assert_eq!(state.snapshot().await.revision, 1);
     }
 
     #[tokio::test]
@@ -3009,7 +3108,8 @@ mod tests {
 
     #[tokio::test]
     async fn member_directory_updates_republish_the_derived_topology() {
-        let state = NodeStateStore::new();
+        let events = NodeEventBus::new(8);
+        let state = NodeStateStore::with_events(events.clone());
         let viewer = topology_node("viewer");
         let relay = topology_node("relay");
         let network_id = topology_network("alpha");
@@ -3024,6 +3124,7 @@ mod tests {
                 snapshot.memberships = vec![membership_snapshot("alpha", &network_id, &viewer)];
             })
             .await;
+        let mut event_receiver = events.subscribe();
         let before = state.snapshot().await;
         let before_topology = before.topology.clone().expect("topology is projected");
         assert_eq!(before_topology.nodes.len(), 1);
@@ -3062,6 +3163,17 @@ mod tests {
             .await
             .expect("receipt time is cached");
         assert!(received_at > 0);
+
+        assert_eq!(
+            event_receiver.recv().await.expect("state event").kind,
+            NodeEventKind::StateChanged {
+                revision: after.revision
+            }
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let stable_read = state.snapshot().await;
+        assert_eq!(stable_read, after);
+        assert!(event_receiver.try_recv().is_err());
 
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         assert!(

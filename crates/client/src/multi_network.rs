@@ -207,7 +207,7 @@ impl MultiNetworkSupervisor {
         let runtime = ipc::multi_status_snapshot(&self.registry).await;
         let logs = runtime_metadata::recent_log_entries();
         self.state
-            .update(|snapshot| {
+            .update_if_changed(|snapshot| {
                 for network in &runtime.networks {
                     if let Some(existing) = snapshot
                         .networks

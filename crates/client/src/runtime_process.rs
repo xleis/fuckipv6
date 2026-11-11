@@ -21,7 +21,7 @@ use tokio::time::{sleep, timeout, MissedTickBehavior};
 
 use crate::cli::commands::RuntimeOptions;
 use crate::local_ipc::{
-    self, EndpointRole, IpcRole, LocalCommand, LocalRequest, LocalResponse, LocalServer,
+    self, EndpointRole, FrameKind, IpcRole, LocalCommand, LocalRequest, LocalResponse, LocalServer,
 };
 use crate::local_service::serve_owned_node;
 use crate::logging;
@@ -796,18 +796,20 @@ async fn node_ready() -> bool {
     let Ok(endpoint) = local_ipc::endpoint(EndpointRole::Node) else {
         return false;
     };
-    let request = local_ipc::request(
-        &endpoint,
-        IpcRole::Control,
-        &LocalRequest {
-            request_id: 1,
-            command: LocalCommand::Snapshot,
-        },
-    );
     matches!(
-        timeout(Duration::from_secs(1), request).await,
-        Ok(Ok(LocalResponse::Snapshot { .. }))
+        timeout(Duration::from_secs(1), ping_node(&endpoint)).await,
+        Ok(Ok(()))
     )
+}
+
+async fn ping_node(endpoint: &local_ipc::LocalEndpoint) -> Result<()> {
+    let mut connection = local_ipc::connect(endpoint, IpcRole::Control).await?;
+    connection.send(FrameKind::Ping, &()).await?;
+    let (kind, _): (FrameKind, serde_json::Value) = connection.receive().await?;
+    if kind != FrameKind::Pong {
+        bail!("节点 IPC 健康检查收到意外帧: {kind:?}");
+    }
+    Ok(())
 }
 
 async fn stop_managed_node(mut child: Option<Child>) -> Result<()> {

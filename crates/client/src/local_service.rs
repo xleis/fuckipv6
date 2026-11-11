@@ -953,6 +953,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ipc_ping_does_not_execute_the_snapshot_handler() -> Result<()> {
+        let events = NodeEventBus::new(8);
+        let state = NodeStateStore::with_events(events.clone());
+        let handler = Arc::new(ClearNetworkOnSnapshotHandler {
+            state: state.clone(),
+        });
+        let fixture =
+            Fixture::with_state_and_handler("ping-health", state, events, handler).await?;
+        fixture
+            .state
+            .update(|snapshot| {
+                snapshot.networks.push(crate::node::NodeNetworkSnapshot {
+                    name: "home".into(),
+                    tun_name: "fk-home".into(),
+                    status: crate::node::NodeNetworkStatus::Online,
+                    assigned_ipv6: None,
+                    assigned_ipv4: None,
+                    p2p_listen_addr: None,
+                    uptime_secs: 1,
+                    roles: vec![crate::node::NodeNetworkRole::Member],
+                    peer_count: 0,
+                    traffic: crate::node::NodeTrafficSnapshot::default(),
+                });
+            })
+            .await;
+
+        let mut connection = crate::local_ipc::connect(&fixture.endpoint, IpcRole::Control).await?;
+        connection.send(FrameKind::Ping, &()).await?;
+        let (kind, payload): (FrameKind, serde_json::Value) = connection.receive().await?;
+        assert_eq!(kind, FrameKind::Pong);
+        assert_eq!(payload, serde_json::Value::Null);
+        assert_eq!(fixture.state.snapshot().await.networks.len(), 1);
+        drop(connection);
+
+        fixture.finish().await
+    }
+
+    #[tokio::test]
     async fn serves_snapshot_and_executes_shared_commands() -> Result<()> {
         let fixture = Fixture::new("requests", 8).await?;
         let snapshot = fixture.state.snapshot().await;

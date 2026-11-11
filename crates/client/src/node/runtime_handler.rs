@@ -977,7 +977,7 @@ async fn refresh_network_memberships(
         .iter()
         .map(|network| (network.name.clone(), network.status))
         .collect::<std::collections::BTreeMap<_, _>>();
-    let current_terms = snapshot
+    let mut current_terms = snapshot
         .discovery_index
         .records
         .iter()
@@ -999,6 +999,26 @@ async fn refresh_network_memberships(
         .collect::<std::collections::BTreeMap<_, _>>();
     let configs = configs.clone();
     let memberships = tokio::task::spawn_blocking(move || {
+        // Unlisted networks are intentionally absent from the public discovery
+        // index. Their owner still keeps the authoritative signed network
+        // record in the local network directory, so use it to keep the local
+        // membership projection current. Only inspect records referenced by an
+        // existing membership so one unrelated corrupt directory cannot block
+        // every membership refresh.
+        for joined in configs
+            .list_joined_memberships()
+            .map_err(|error| error.to_string())?
+        {
+            let Ok(record) = configs.load_network_record(&joined.network_name) else {
+                continue;
+            };
+            if record.network_id == joined.membership.network_id {
+                current_terms.insert(
+                    record.network_id.as_str().to_owned(),
+                    record.membership_terms(),
+                );
+            }
+        }
         configs
             .observe_joined_membership_policies(&current_terms, unix_time_ms())
             .map_err(|error| error.to_string())?;
@@ -4815,6 +4835,104 @@ mod tests {
         assert_eq!(projected.state, MembershipState::Accepted);
         assert_eq!(projected.role, MembershipRole::Member);
         assert_eq!(projected.current_terms.as_ref(), Some(&terms));
+
+        let _ = std::fs::remove_dir_all(config_dir);
+    }
+
+    #[tokio::test]
+    async fn refresh_uses_local_unlisted_network_record_for_membership_terms() {
+        use crate::config_manager::ConfigManager;
+        use fuckipv6_common::domain::{
+            ExitContributionMode, ExitContributionObligation, ExitContributionScope,
+            NetworkCreateProfile, NetworkJoinMode, NetworkProfileUpdate, NetworkVisibility,
+        };
+
+        let config_dir = std::env::temp_dir().join(format!(
+            "fuckipv6-local-membership-terms-{}-{}",
+            std::process::id(),
+            unix_time_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let configs = ConfigManager::new_for_dir(config_dir.clone()).expect("config manager");
+        let created = configs
+            .create_owned_network(
+                NetworkCreateProfile {
+                    name: "w12e9-local".into(),
+                    purpose: "Local membership refresh test".into(),
+                    icon: "test".into(),
+                    language: "zh-CN".into(),
+                    region: "HK".into(),
+                    tags: Vec::new(),
+                    capability_declarations: Vec::new(),
+                    visibility: NetworkVisibility::Unlisted,
+                    join_mode: NetworkJoinMode::InviteOnly,
+                    exit_contribution: ExitContributionObligation::NotRequired,
+                    exit_contribution_scope: ExitContributionScope::NotApplicable,
+                    exit_contribution_mode: ExitContributionMode::Disabled,
+                    exit_selection_policy: Default::default(),
+                },
+                "ws://127.0.0.1:6666",
+                true,
+            )
+            .expect("create owned network");
+        configs
+            .persist_owned_network_membership(&created.record)
+            .expect("persist owner membership");
+
+        let mut update = NetworkProfileUpdate::from_record(&created.record);
+        update.exit_contribution_mode = ExitContributionMode::Autonomous;
+        configs
+            .update_network_profile(
+                "w12e9-local",
+                created.record.revision,
+                update,
+                created.record.owner.as_str(),
+                "membership-refresh",
+                None,
+            )
+            .expect("update network policy");
+        let current_record = configs
+            .load_network_record("w12e9-local")
+            .expect("load updated network record");
+        assert_eq!(current_record.policy_revision, 2);
+        assert_eq!(
+            current_record.exit_contribution_mode,
+            ExitContributionMode::Autonomous
+        );
+
+        let state = NodeStateStore::new();
+        assert!(state.snapshot().await.discovery_index.records.is_empty());
+        refresh_network_memberships(&state, &configs)
+            .await
+            .expect("refresh local memberships");
+
+        let snapshot = state.snapshot().await;
+        let membership = snapshot
+            .memberships
+            .iter()
+            .find(|membership| membership.network_name == "w12e9-local")
+            .expect("local membership projection");
+        assert_eq!(
+            membership.current_terms.as_ref(),
+            Some(&current_record.membership_terms())
+        );
+        assert_eq!(
+            membership
+                .current_terms
+                .as_ref()
+                .unwrap()
+                .network_policy_revision,
+            2
+        );
+        assert_eq!(
+            membership
+                .current_terms
+                .as_ref()
+                .unwrap()
+                .exit_contribution_mode,
+            ExitContributionMode::Autonomous
+        );
+        assert!(membership.policy_confirmation_required);
 
         let _ = std::fs::remove_dir_all(config_dir);
     }

@@ -247,11 +247,13 @@ struct RegistrationInput {
     requested_ips: Option<VirtualIps>,
     tx: mpsc::UnboundedSender<Message>,
     now: Instant,
+    is_auxiliary_control: bool,
 }
 
 struct RegistrationResult {
     peer_info: PeerInfo,
     is_reconnect: bool,
+    is_auxiliary_control: bool,
 }
 
 impl TrafficCounters {
@@ -877,6 +879,10 @@ impl SessionManager {
             requested_ips,
             tx,
             now: Instant::now(),
+            // Invitation/approval commands use p2p_port=0 because they do not
+            // participate in the data plane. They must be able to authenticate
+            // with the same node identity without replacing the live session.
+            is_auxiliary_control: p2p_port == 0,
         };
         let result = self.register_or_refresh_session(input).await?;
 
@@ -893,16 +899,24 @@ impl SessionManager {
             return Err(error);
         }
 
-        self.set_client_certificate_authorization(
-            &result.peer_info.client_id,
-            &result.peer_info.public_key,
-        );
-        let node_id = NodeId::from_public_key(&result.peer_info.public_key);
-        if let Ok(mut observations) = self.member_observations.write() {
-            observations.remove(&node_id);
+        if !result.is_auxiliary_control {
+            self.set_client_certificate_authorization(
+                &result.peer_info.client_id,
+                &result.peer_info.public_key,
+            );
+            let node_id = NodeId::from_public_key(&result.peer_info.public_key);
+            if let Ok(mut observations) = self.member_observations.write() {
+                observations.remove(&node_id);
+            }
         }
 
-        if result.is_reconnect {
+        if result.is_auxiliary_control {
+            tracing::info!(
+                "辅助控制连接注册成功: {} (复用虚拟IP: {})",
+                result.peer_info.client_id,
+                result.peer_info.virtual_ip
+            );
+        } else if result.is_reconnect {
             tracing::info!(
                 "客户端重新注册成功: {} (虚拟IP: {}, 双栈: {:?}, 真实地址: {})",
                 result.peer_info.client_id,
@@ -920,12 +934,16 @@ impl SessionManager {
             );
         }
 
-        // 首次注册表示上线，重复注册表示 endpoint/NAT 信息刷新。
-        tracing::debug!("准备广播节点信息通知...");
-        if let Err(err) = self.broadcast_peer_online(result.peer_info.clone()).await {
-            tracing::warn!("广播节点信息通知失败: {err:#}");
+        if !result.is_auxiliary_control {
+            // 首次注册表示上线，重复注册表示 endpoint/NAT 信息刷新。Auxiliary
+            // control connections neither change presence nor leak a duplicate
+            // PeerOnline notification.
+            tracing::debug!("准备广播节点信息通知...");
+            if let Err(err) = self.broadcast_peer_online(result.peer_info.clone()).await {
+                tracing::warn!("广播节点信息通知失败: {err:#}");
+            }
+            tracing::debug!("广播完成");
         }
-        tracing::debug!("广播完成");
 
         Ok(result.peer_info.virtual_ips)
     }
@@ -936,11 +954,23 @@ impl SessionManager {
     ) -> Result<RegistrationResult> {
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(&input.client_id) {
+            if input.is_auxiliary_control {
+                tracing::info!(
+                    "客户端 {} 建立辅助控制连接，保留现有数据面会话",
+                    input.client_id
+                );
+                return Ok(RegistrationResult {
+                    peer_info: session.peer_info.clone(),
+                    is_reconnect: true,
+                    is_auxiliary_control: true,
+                });
+            }
             tracing::warn!("客户端 {} 重复注册，更新现有会话", input.client_id);
             refresh_session(session, input);
             return Ok(RegistrationResult {
                 peer_info: session.peer_info.clone(),
                 is_reconnect: true,
+                is_auxiliary_control: false,
             });
         }
 
@@ -972,6 +1002,7 @@ impl SessionManager {
                 Ok(RegistrationResult {
                     peer_info,
                     is_reconnect: false,
+                    is_auxiliary_control: false,
                 })
             }
             Entry::Occupied(mut entry) => {
@@ -981,6 +1012,7 @@ impl SessionManager {
                 Ok(RegistrationResult {
                     peer_info: existing.peer_info.clone(),
                     is_reconnect: true,
+                    is_auxiliary_control: false,
                 })
             }
         }
@@ -2180,6 +2212,94 @@ mod tests {
 
         manager
             .unregister_client_if_sender_matches(&client_id, &new_tx)
+            .await;
+        assert!(manager.get_peer_info(&client_id).await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn auxiliary_control_registration_preserves_live_data_plane_session() -> Result<()> {
+        let manager = SessionManager::new("fd00::1000/120")?;
+        let client_id = "client-a".to_string();
+        let (peer_tx, mut peer_rx) = mpsc::unbounded_channel();
+        let (primary_tx, mut primary_rx) = mpsc::unbounded_channel();
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+
+        manager
+            .register_client(
+                "peer-b".to_string(),
+                vec![9; 32],
+                "192.0.2.30:43000".parse()?,
+                51830,
+                NatType::Open,
+                peer_tx,
+            )
+            .await?;
+        let primary_ips = manager
+            .register_client(
+                client_id.clone(),
+                vec![1; 32],
+                "192.0.2.10:41000".parse()?,
+                51820,
+                NatType::Open,
+                primary_tx.clone(),
+            )
+            .await?;
+
+        // Drain the expected primary-online notification before checking that
+        // the auxiliary registration does not generate another topology event.
+        while peer_rx.try_recv().is_ok() {}
+
+        let control_ips = manager
+            .register_client(
+                client_id.clone(),
+                vec![1; 32],
+                "198.51.100.20:42000".parse()?,
+                0,
+                NatType::Unknown,
+                control_tx.clone(),
+            )
+            .await?;
+
+        assert_eq!(control_ips, primary_ips);
+        assert_eq!(manager.snapshot().await.online_clients, 2);
+        assert!(
+            peer_rx.try_recv().is_err(),
+            "auxiliary registration must not broadcast PeerOnline"
+        );
+        let peer = manager
+            .get_peer_info(&client_id)
+            .await
+            .expect("primary session should remain online");
+        assert_eq!(peer.endpoints, vec!["192.0.2.10:51820".parse()?]);
+        assert_eq!(peer.nat_type, NatType::Open);
+
+        manager
+            .send_to_client(&client_id, SignalingMessage::Heartbeat { timestamp: 42 })
+            .await?;
+        assert!(
+            primary_rx.try_recv().is_ok(),
+            "the authoritative session must keep receiving directed messages"
+        );
+        assert!(
+            control_rx.try_recv().is_err(),
+            "the auxiliary connection must not steal directed messages"
+        );
+
+        manager
+            .unregister_client_if_sender_matches(&client_id, &control_tx)
+            .await;
+        assert!(
+            manager.get_peer_info(&client_id).await.is_some(),
+            "closing the auxiliary connection must not remove the primary session"
+        );
+        assert!(
+            peer_rx.try_recv().is_err(),
+            "closing the auxiliary connection must not broadcast PeerOffline"
+        );
+
+        manager
+            .unregister_client_if_sender_matches(&client_id, &primary_tx)
             .await;
         assert!(manager.get_peer_info(&client_id).await.is_none());
         Ok(())

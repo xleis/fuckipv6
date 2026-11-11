@@ -6,10 +6,15 @@
 //! lifecycle. It deliberately exposes no synchronization, mirroring, or mount
 //! behavior.
 
+mod capability;
 mod error;
 mod root;
 mod temp;
 
+pub use capability::{
+    FileCapabilityError, FileCapabilityPermit, FileCapabilitySnapshot, FileCapabilityState,
+    FileShareCapability,
+};
 pub use error::{FileShareError, FileShareErrorCode, FileShareResult};
 pub use root::{LocalShareRoot, FILE_TEMP_DIRECTORY};
 pub use temp::TemporaryUpload;

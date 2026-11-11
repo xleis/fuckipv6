@@ -138,6 +138,63 @@ impl LocalShareRoot {
         self.symlink_policy
     }
 
+    /// Re-open the configured path to detect removal, replacement, or permission
+    /// changes that an already anchored descriptor would otherwise hide.
+    pub fn probe(&self) -> FileShareResult<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&self.canonical_root)
+                .map_err(|error| {
+                    FileShareError::io(
+                        FileShareErrorCode::RootUnavailable,
+                        "shared root is unavailable",
+                        error,
+                    )
+                })?;
+            let opened = file.metadata().map_err(|error| {
+                FileShareError::io(
+                    FileShareErrorCode::RootUnavailable,
+                    "shared root metadata is unavailable",
+                    error,
+                )
+            })?;
+            let canonical = fs::metadata(&self.canonical_root).map_err(|error| {
+                FileShareError::io(
+                    FileShareErrorCode::RootUnavailable,
+                    "shared root is unavailable",
+                    error,
+                )
+            })?;
+            if opened.dev() != canonical.dev() || opened.ino() != canonical.ino() {
+                return Err(FileShareError::new(
+                    FileShareErrorCode::RootUnavailable,
+                    "shared root changed while being checked",
+                ));
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let metadata = fs::metadata(&self.canonical_root).map_err(|error| {
+                FileShareError::io(
+                    FileShareErrorCode::RootUnavailable,
+                    "shared root is unavailable",
+                    error,
+                )
+            })?;
+            if !metadata.is_dir() {
+                return Err(FileShareError::new(
+                    FileShareErrorCode::RootNotDirectory,
+                    "shared root is no longer a directory",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn open_read(&self, path: &SharedPath) -> FileShareResult<File> {
         self.reject_root_io(path)?;
         match self.symlink_policy {

@@ -811,6 +811,12 @@ impl ClientRuntime {
 
     async fn clear_exit_selection(&mut self, reason_code: &'static str) {
         self.exit_selection_gate.clear_member_directory();
+        // Snapshot refreshes can repeatedly observe the same missing context.
+        // Publishing an identical fail-closed transition would wake the state
+        // subscriber, which observes the new revision and repeats this path.
+        if traffic_session_already_failed_closed(&self.traffic_session, reason_code) {
+            return;
+        }
         self.enter_fail_closed(
             TrafficFailureKind::NetworkSelectionUnavailable,
             unix_time_ms(),
@@ -842,10 +848,7 @@ impl ClientRuntime {
             self.route_engine.routing_mode(),
             had_exit_session,
         ) {
-            let already_failed_closed = self.traffic_session.state
-                == TrafficProtectionState::FailClosed
-                && self.traffic_session.reason_code.as_deref() == Some(reason_code);
-            if !already_failed_closed {
+            if !traffic_session_already_failed_closed(&self.traffic_session, reason_code) {
                 self.enter_fail_closed(
                     TrafficFailureKind::NetworkSelectionUnavailable,
                     unix_time_ms(),
@@ -1392,6 +1395,14 @@ fn exit_selection_directory_loss_requires_fail_closed(
     had_exit_session: bool,
 ) -> bool {
     mode != fuckipv6_common::RoutingMode::MeshOnly && had_exit_session
+}
+
+fn traffic_session_already_failed_closed(
+    session: &TrafficSessionSnapshot,
+    reason_code: &str,
+) -> bool {
+    session.state == TrafficProtectionState::FailClosed
+        && session.reason_code.as_deref() == Some(reason_code)
 }
 
 pub(crate) async fn prepare_client_runtime_ext(
@@ -8793,6 +8804,33 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
             recovery_failure_reason_code(RecoveryTrigger::ExitConnectionTimeout),
             "recovery.connection_timeout.failed_closed"
         );
+    }
+
+    #[test]
+    fn identical_fail_closed_reason_is_already_applied() {
+        let mut session = TrafficSessionSnapshot::default();
+        session
+            .enter_fail_closed(
+                Some(TrafficFailureKind::NetworkSelectionUnavailable),
+                1,
+                "exit.selection.network_context_missing",
+            )
+            .expect("record fail-closed session");
+
+        assert!(traffic_session_already_failed_closed(
+            &session,
+            "exit.selection.network_context_missing"
+        ));
+        assert!(!traffic_session_already_failed_closed(
+            &session,
+            "exit.selection.authorization_revoked"
+        ));
+
+        session.state = TrafficProtectionState::Idle;
+        assert!(!traffic_session_already_failed_closed(
+            &session,
+            "exit.selection.network_context_missing"
+        ));
     }
 
     #[cfg(target_os = "linux")]

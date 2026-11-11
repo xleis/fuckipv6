@@ -1849,8 +1849,13 @@ impl NodeStateStore {
     /// only render this value and must not derive protection from interfaces,
     /// route configuration or a successful CLI command.
     pub async fn set_traffic_session(&self, session: TrafficSessionSnapshot) -> NodeSnapshot {
-        self.update(|snapshot| snapshot.traffic_session = session)
+        match self
+            .update_if_changed(|snapshot| snapshot.traffic_session = session)
             .await
+        {
+            Some(snapshot) => snapshot,
+            None => self.snapshot().await,
+        }
     }
 
     /// Refresh the host-interface projection and reconcile live TUN names.
@@ -2489,6 +2494,35 @@ mod tests {
         assert!(!updates.has_changed().expect("watch remains open"));
         assert!(event_receiver.try_recv().is_err());
         assert_eq!(state.snapshot().await.revision, 1);
+    }
+
+    #[tokio::test]
+    async fn unchanged_traffic_session_does_not_create_revisions_or_events() {
+        let events = NodeEventBus::new(8);
+        let mut event_receiver = events.subscribe();
+        let state = NodeStateStore::with_events(events);
+        let mut updates = state.subscribe();
+        let mut session = TrafficSessionSnapshot::default();
+        session
+            .enter_fail_closed(
+                Some(fuckipv6_common::domain::TrafficFailureKind::NetworkSelectionUnavailable),
+                1,
+                "exit.selection.network_context_missing",
+            )
+            .expect("record fail-closed session");
+
+        let first = state.set_traffic_session(session.clone()).await;
+        updates.borrow_and_update();
+        assert_eq!(first.revision, 1);
+        assert_eq!(
+            event_receiver.recv().await.expect("state event").kind,
+            NodeEventKind::StateChanged { revision: 1 }
+        );
+
+        let second = state.set_traffic_session(session).await;
+        assert_eq!(second.revision, 1);
+        assert!(!updates.has_changed().expect("watch remains open"));
+        assert!(event_receiver.try_recv().is_err());
     }
 
     #[tokio::test]

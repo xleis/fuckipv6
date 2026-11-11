@@ -479,6 +479,16 @@ def summarize(
     records = [json.loads(line) for line in records_path.read_text().splitlines() if line.strip()]
     if not records:
         return {"status": "no_data", "records": 0}
+    events_path = evidence / "events.jsonl"
+    events = (
+        [json.loads(line) for line in events_path.read_text().splitlines() if line.strip()]
+        if events_path.exists()
+        else []
+    )
+    event_counts = {}  # type: Dict[str, int]
+    for event in events:
+        kind = str(event.get("kind", "unknown"))
+        event_counts[kind] = event_counts.get(kind, 0) + 1
     first = records[0]
     last = records[-1]
     probe_values = {}  # type: Dict[str, List[Dict[str, Any]]]
@@ -571,7 +581,9 @@ def summarize(
         "overall_canary_success_rate": canary_success / canary_samples if canary_samples else None,
         "local_routes_present_for_all_records": route_ok,
         "resources": resource_summary,
-        "events_file": str(evidence / "events.jsonl"),
+        "events_file": str(events_path),
+        "unhealthy_event_count": len(events),
+        "unhealthy_event_kinds": event_counts,
     }
     result["verdict"] = (
         "pass"
@@ -580,6 +592,7 @@ def summarize(
         and result["overall_canary_success_rate"] == 1.0
         and status_failures == 0
         and route_ok
+        and not events
         else "review_required"
     )
     return result

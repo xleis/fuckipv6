@@ -913,10 +913,6 @@ pub fn select_relay_candidate(
             Some(RelayAuthorizationDenial::StaleHealth)
         } else if candidate.loop_detected {
             Some(RelayAuthorizationDenial::LoopDetected)
-        } else if !candidate.health.is_usable()
-            || candidate.consecutive_failures > policy.max_consecutive_failures
-        {
-            Some(RelayAuthorizationDenial::Unhealthy)
         } else if candidate
             .last_attempt_at_unix_ms
             .is_some_and(|last_attempt| {
@@ -924,6 +920,10 @@ pub fn select_relay_candidate(
             })
         {
             Some(RelayAuthorizationDenial::Cooldown)
+        } else if !candidate.health.is_usable()
+            || candidate.consecutive_failures > policy.max_consecutive_failures
+        {
+            Some(RelayAuthorizationDenial::Unhealthy)
         } else {
             None
         };

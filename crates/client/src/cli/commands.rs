@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
-    evaluate_effective_access, AccessContext, CapabilityKind, ExitSessionAction, InvitationCode,
-    InvitationRedeemRequest, MembershipRole, MembershipState, NetworkId, NetworkMemberDirectory,
-    NetworkRole, NodeId, PermissionIntent, PermissionRequest, PolicyAction, RelayLimitPolicy,
-    RelayMemberGrant, ResourceKind, ResourceRef, TrafficFailureKind, TrafficProtectionState,
+    evaluate_effective_access, select_relay_candidate, AccessContext, CapabilityKind,
+    ExitSessionAction, InvitationCode, InvitationRedeemRequest, MembershipRole, MembershipState,
+    NetworkId, NetworkMemberDirectory, NetworkRole, NodeId, PermissionIntent, PermissionRequest,
+    PolicyAction, RelayCandidate, RelayHealthStatus, RelayLimitPolicy, RelayMemberGrant,
+    RelaySelectionPolicy, ResourceKind, ResourceRef, TrafficFailureKind, TrafficProtectionState,
     TrafficSessionSnapshot,
 };
 #[cfg(test)]
@@ -97,6 +98,11 @@ const EXIT_AVAILABILITY_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 const RELAY_MEMBER_GRANT_TTL: Duration = Duration::from_secs(15 * 60);
 const RELAY_MEMBER_GRANT_RENEW_AHEAD: Duration = Duration::from_secs(5 * 60);
 const RELAY_AUTHORIZATION_UPDATE_TIMEOUT: Duration = Duration::from_secs(5);
+const RELAY_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
+const RELAY_SELECTION_MAX_ATTEMPTS: u32 = 3;
+const RELAY_SELECTION_HEALTH_MAX_AGE_MS: u64 = 30_000;
+const RELAY_SELECTION_MAX_CONSECUTIVE_FAILURES: u32 = 3;
+const RELAY_SELECTION_SWITCH_COOLDOWN_MS: u64 = 5_000;
 const EXIT_CONNECTION_WATCHDOG_INTERVAL: Duration = Duration::from_millis(250);
 #[cfg(target_os = "linux")]
 const EXIT_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
@@ -556,6 +562,7 @@ pub(crate) struct ClientRuntime {
     pub(crate) identity: Identity,
     pub(crate) network_id: Option<NetworkId>,
     pub(crate) outbound: OutboundDispatcher,
+    relay_selection: Arc<RwLock<RelaySelectionTracker>>,
     #[cfg(target_os = "linux")]
     pub(crate) route_manager: LinuxRouteManager,
     #[cfg(target_os = "linux")]
@@ -1430,6 +1437,7 @@ pub(crate) async fn prepare_client_runtime_ext(
     let assigned_ips = wait_for_assigned_ips(&signaling).await?;
     let assigned_ip = assigned_ips.primary_ipv6();
     configure_local_ips(&p2p, &assigned_ips).await;
+    let relay_selection = Arc::new(RwLock::new(RelaySelectionTracker::default()));
     let initial_node_snapshot = match node_state.as_ref() {
         Some(state) => Some(state.snapshot().await),
         None => None,
@@ -1440,6 +1448,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         assigned_ip,
         network_id.as_ref(),
         initial_node_snapshot.as_ref(),
+        relay_selection.as_ref(),
     )
     .await;
     let tun = create_tun_device(&config, &assigned_ips).await?;
@@ -1507,7 +1516,7 @@ pub(crate) async fn prepare_client_runtime_ext(
             Err(error) => {
                 signaling.shutdown();
                 if let Some(relay) = relay.as_ref() {
-                    relay.close().await;
+                    relay.client.close().await;
                 }
                 let _ = tun.delete().await;
                 return Err(error).context("安装 Linux 代理路由失败");
@@ -1522,7 +1531,7 @@ pub(crate) async fn prepare_client_runtime_ext(
                 let _ = manager.rollback().await;
                 signaling.shutdown();
                 if let Some(relay) = relay.as_ref() {
-                    relay.close().await;
+                    relay.client.close().await;
                 }
                 let _ = tun.delete().await;
                 return Err(error).context("安装节点物理网络旁路失败");
@@ -1541,7 +1550,7 @@ pub(crate) async fn prepare_client_runtime_ext(
                 let _ = manager.rollback().await;
                 signaling.shutdown();
                 if let Some(relay) = relay.as_ref() {
-                    relay.close().await;
+                    relay.client.close().await;
                 }
                 let _ = tun.delete().await;
                 return Err(error).context("准备 Exit Node 内核转发失败");
@@ -1563,7 +1572,7 @@ pub(crate) async fn prepare_client_runtime_ext(
                 let _ = manager.rollback().await;
                 signaling.shutdown();
                 if let Some(relay) = relay.as_ref() {
-                    relay.close().await;
+                    relay.client.close().await;
                 }
                 let _ = tun.delete().await;
                 return Err(error).with_context(|| {
@@ -1584,11 +1593,12 @@ pub(crate) async fn prepare_client_runtime_ext(
             signaling.clone(),
             stats.clone(),
             relay_state.clone(),
+            relay_selection.clone(),
         )),
         relay_state,
     );
     if let Some(relay) = relay {
-        if let Err(relay) = outbound.install_relay(relay).await {
+        if let Err(relay) = outbound.install_relay(relay.client, relay.relay_id).await {
             relay.close().await;
         }
     }
@@ -1630,6 +1640,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         identity: relay_identity,
         network_id,
         outbound,
+        relay_selection,
         #[cfg(target_os = "linux")]
         route_manager,
         #[cfg(target_os = "linux")]
@@ -1920,13 +1931,166 @@ fn spawn_runtime_tasks(
     spawn_runtime_tasks_ext(config_path, config, p2p, stats, assigned_ip, true, None)
 }
 
+#[derive(Debug, Clone)]
+struct RelayAttemptState {
+    health: RelayHealthStatus,
+    consecutive_failures: u32,
+    last_attempt_at_unix_ms: Option<u64>,
+    latency_ms: Option<u32>,
+}
+
+#[derive(Debug, Default)]
+struct RelaySelectionTracker {
+    states: HashMap<String, RelayAttemptState>,
+}
+
+impl RelaySelectionTracker {
+    fn relay_id(endpoint: &RelayEndpoint) -> Option<String> {
+        let provider_node_id = endpoint.provider_node_id.as_ref()?;
+        Some(format!("{provider_node_id}@{}", endpoint.addr))
+    }
+
+    fn candidate(
+        &self,
+        relay_id: &str,
+        now_unix_ms: u64,
+        policy: &RelaySelectionPolicy,
+    ) -> RelayCandidate {
+        let state = self.states.get(relay_id);
+        let mut health = state
+            .map(|state| state.health)
+            .unwrap_or(RelayHealthStatus::Degraded);
+        let mut consecutive_failures = state
+            .map(|state| state.consecutive_failures)
+            .unwrap_or_default();
+        let mut last_attempt_at_unix_ms = state.and_then(|state| state.last_attempt_at_unix_ms);
+
+        // A failed path receives one bounded recovery probe after its cooldown.
+        // Until that probe succeeds it remains degraded, never healthy.
+        if consecutive_failures > 0
+            && last_attempt_at_unix_ms.is_some_and(|last_attempt| {
+                now_unix_ms.saturating_sub(last_attempt) >= policy.switch_cooldown_ms
+            })
+        {
+            health = RelayHealthStatus::Degraded;
+            consecutive_failures = 0;
+            last_attempt_at_unix_ms = None;
+        }
+
+        RelayCandidate {
+            relay_id: relay_id.to_string(),
+            authorized: true,
+            health,
+            // The endpoint list was observed now. The health value remains
+            // conservative and records only connection/forwarding evidence.
+            observed_at_unix_ms: now_unix_ms,
+            // No signed load observation is currently transported with relay
+            // endpoints. Unknown load sorts behind paths that have observable
+            // latency instead of being reported as an idle Relay.
+            load_percent: u8::MAX,
+            latency_ms: state.and_then(|state| state.latency_ms),
+            consecutive_failures,
+            last_attempt_at_unix_ms,
+            loop_detected: false,
+        }
+    }
+
+    fn mark_connected(&mut self, relay_id: &str, latency_ms: u32) {
+        let state = self
+            .states
+            .entry(relay_id.to_string())
+            .or_insert_with(|| RelayAttemptState {
+                health: RelayHealthStatus::Degraded,
+                consecutive_failures: 0,
+                last_attempt_at_unix_ms: None,
+                latency_ms: None,
+            });
+        // Handshake and registration prove reachability and authorization, but
+        // not that overlay packets have been forwarded.
+        state.health = RelayHealthStatus::Degraded;
+        state.consecutive_failures = 0;
+        state.last_attempt_at_unix_ms = None;
+        state.latency_ms = Some(latency_ms);
+    }
+
+    fn mark_forwarding_success(&mut self, relay_id: &str) {
+        let state = self
+            .states
+            .entry(relay_id.to_string())
+            .or_insert_with(|| RelayAttemptState {
+                health: RelayHealthStatus::Healthy,
+                consecutive_failures: 0,
+                last_attempt_at_unix_ms: None,
+                latency_ms: None,
+            });
+        state.health = RelayHealthStatus::Healthy;
+        state.consecutive_failures = 0;
+        state.last_attempt_at_unix_ms = None;
+    }
+
+    fn mark_failure(&mut self, relay_id: &str, now_unix_ms: u64) {
+        let state = self
+            .states
+            .entry(relay_id.to_string())
+            .or_insert_with(|| RelayAttemptState {
+                health: RelayHealthStatus::Unavailable,
+                consecutive_failures: 0,
+                last_attempt_at_unix_ms: None,
+                latency_ms: None,
+            });
+        state.health = RelayHealthStatus::Unavailable;
+        state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+        state.last_attempt_at_unix_ms = Some(now_unix_ms);
+    }
+}
+
+#[derive(Clone)]
+struct RelayConnectCandidate {
+    endpoint: RelayEndpoint,
+    grant: RelayMemberGrant,
+    candidate: RelayCandidate,
+}
+
+struct ConnectedRelay {
+    client: QuicRelayClient,
+    relay_id: String,
+}
+
+fn relay_connect_candidates(
+    tracker: &RelaySelectionTracker,
+    endpoints: &[RelayEndpoint],
+    grants: &[RelayMemberGrant],
+    identity: &Identity,
+    now_unix_ms: u64,
+    policy: &RelaySelectionPolicy,
+) -> Vec<RelayConnectCandidate> {
+    let consumer_node_id = NodeId::from_public_key(&identity.public_key());
+    endpoints
+        .iter()
+        .filter_map(|endpoint| {
+            let grant = relay_grant_for_endpoint(grants, identity, endpoint)?.clone();
+            if grant.consumer_node_id != consumer_node_id {
+                return None;
+            }
+            let relay_id = RelaySelectionTracker::relay_id(endpoint)?;
+            let candidate = tracker.candidate(&relay_id, now_unix_ms, policy);
+            Some(RelayConnectCandidate {
+                endpoint: endpoint.clone(),
+                grant,
+                candidate,
+            })
+        })
+        .collect()
+}
+
 async fn connect_quic_relay(
     signaling: &SignalingClient,
     identity: &Identity,
     assigned_ip: Ipv6Addr,
     network_id: Option<&NetworkId>,
     node_snapshot: Option<&NodeSnapshot>,
-) -> Option<QuicRelayClient> {
+    tracker: &RwLock<RelaySelectionTracker>,
+) -> Option<ConnectedRelay> {
     let endpoints = signaling.relay_endpoints().await;
     if endpoints.is_empty() {
         tracing::debug!("协调端未下发 QUIC 中继 endpoint，使用信令中继 fallback");
@@ -1951,58 +2115,147 @@ async fn connect_quic_relay(
         return None;
     }
 
-    match tokio::time::timeout(
-        Duration::from_secs(5),
-        QuicRelayClient::connect_optimal(&endpoints, identity, assigned_ip, &grants),
-    )
-    .await
-    {
-        Ok(Ok(client)) => return Some(client),
-        Ok(Err(err)) => {
-            tracing::warn!("最优 QUIC 中继连接失败: {err:#}");
-        }
-        Err(_) => {
-            tracing::warn!("最优 QUIC 中继并发探测超时");
-        }
-    }
-
-    let endpoint = signaling.relay_endpoint().await?;
-    let Some(grant) = relay_grant_for_endpoint(&grants, identity, &endpoint) else {
-        tracing::warn!(
-            diagnostic_id = "relay.grant.primary_endpoint_missing",
-            "主 QUIC 中继端点没有匹配的签名授权，使用信令中继 fallback"
+    let policy = RelaySelectionPolicy {
+        max_attempts: RELAY_SELECTION_MAX_ATTEMPTS,
+        max_health_age_ms: RELAY_SELECTION_HEALTH_MAX_AGE_MS,
+        max_consecutive_failures: RELAY_SELECTION_MAX_CONSECUTIVE_FAILURES,
+        allow_fallback: true,
+        switch_cooldown_ms: RELAY_SELECTION_SWITCH_COOLDOWN_MS,
+    };
+    let (connect_candidates, outcome) = {
+        let tracker = tracker.read().await;
+        let connect_candidates = relay_connect_candidates(
+            &tracker,
+            &endpoints,
+            &grants,
+            identity,
+            now_unix_ms,
+            &policy,
         );
-        return None;
+        let outcome = match select_relay_candidate(
+            &connect_candidates
+                .iter()
+                .map(|candidate| candidate.candidate.clone())
+                .collect::<Vec<_>>(),
+            &policy,
+            now_unix_ms,
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                tracing::warn!(
+                    diagnostic_id = "relay.selection.invalid_candidate",
+                    error = %error,
+                    "Relay 候选选择失败，使用信令中继 fallback"
+                );
+                return None;
+            }
+        };
+        (connect_candidates, outcome)
     };
 
-    match tokio::time::timeout(
-        Duration::from_secs(3),
-        QuicRelayClient::connect(
-            endpoint.addr,
-            endpoint.public_key_pin,
-            &endpoint.server_name,
-            identity,
-            assigned_ip,
-            grant,
-        ),
-    )
-    .await
-    {
-        Ok(Ok(client)) => {
-            tracing::info!("已连接 QUIC 中继: {}", endpoint.addr);
-            Some(client)
-        }
-        Ok(Err(err)) => {
-            tracing::warn!("QUIC 中继连接失败，将继续使用信令中继 fallback: {err:#}");
-            None
-        }
-        Err(_) => {
+    if !outcome.is_usable() {
+        let denied = outcome
+            .denied
+            .iter()
+            .map(|denial| format!("{}={:?}", denial.relay_id, denial.reason))
+            .collect::<Vec<_>>()
+            .join(",");
+        tracing::warn!(
+            diagnostic_id = %outcome.reason,
+            denied = %denied,
+            "没有满足授权、健康、冷却和环路约束的 QUIC Relay 候选，使用信令中继 fallback"
+        );
+        return None;
+    }
+
+    let attempts_allowed = outcome.attempts_allowed.max(1) as usize;
+    for (attempt_index, selected) in outcome.candidates.iter().take(attempts_allowed).enumerate() {
+        let Some(connect_candidate) = connect_candidates
+            .iter()
+            .find(|candidate| candidate.candidate.relay_id == selected.relay_id)
+        else {
             tracing::warn!(
-                "QUIC 中继连接超时（可能 UDP 端口被云防火墙拦截），降级使用信令中继 fallback"
+                diagnostic_id = "relay.selection.candidate_mapping_lost",
+                relay_id = %selected.relay_id,
+                "Relay 候选映射失效，停止本次选路并降级"
             );
-            None
+            return None;
+        };
+        let started_at = Instant::now();
+        let result = tokio::time::timeout(
+            RELAY_CONNECT_ATTEMPT_TIMEOUT,
+            QuicRelayClient::connect(
+                connect_candidate.endpoint.addr,
+                connect_candidate.endpoint.public_key_pin,
+                &connect_candidate.endpoint.server_name,
+                identity,
+                assigned_ip,
+                &connect_candidate.grant,
+            ),
+        )
+        .await;
+        let completed_at_unix_ms = unix_time_ms();
+        match result {
+            Ok(Ok(client)) => {
+                let latency_ms =
+                    u32::try_from(started_at.elapsed().as_millis()).unwrap_or(u32::MAX);
+                tracker
+                    .write()
+                    .await
+                    .mark_connected(&selected.relay_id, latency_ms);
+                tracing::info!(
+                    diagnostic_id = "relay.selection.connected",
+                    relay_id = %selected.relay_id,
+                    address = %connect_candidate.endpoint.addr,
+                    attempt = attempt_index + 1,
+                    attempts_allowed,
+                    latency_ms,
+                    "已连接 QUIC 中继；在真实转发验证前保持 degraded"
+                );
+                return Some(ConnectedRelay {
+                    client,
+                    relay_id: selected.relay_id.clone(),
+                });
+            }
+            Ok(Err(error)) => {
+                tracker
+                    .write()
+                    .await
+                    .mark_failure(&selected.relay_id, completed_at_unix_ms);
+                tracing::warn!(
+                    diagnostic_id = "relay.selection.attempt_failed",
+                    relay_id = %selected.relay_id,
+                    address = %connect_candidate.endpoint.addr,
+                    attempt = attempt_index + 1,
+                    attempts_allowed,
+                    error = %error,
+                    "QUIC Relay 连接失败，按显式回退策略尝试下一候选"
+                );
+            }
+            Err(_) => {
+                tracker
+                    .write()
+                    .await
+                    .mark_failure(&selected.relay_id, completed_at_unix_ms);
+                tracing::warn!(
+                    diagnostic_id = "relay.selection.attempt_timeout",
+                    relay_id = %selected.relay_id,
+                    address = %connect_candidate.endpoint.addr,
+                    attempt = attempt_index + 1,
+                    attempts_allowed,
+                    timeout = ?RELAY_CONNECT_ATTEMPT_TIMEOUT,
+                    "QUIC Relay 连接超时，按显式回退策略尝试下一候选"
+                );
+            }
         }
     }
+
+    tracing::warn!(
+        diagnostic_id = "relay.selection.exhausted",
+        attempts_allowed,
+        "QUIC Relay 候选已在有限预算内耗尽，使用信令中继 fallback"
+    );
+    None
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -5203,13 +5456,19 @@ trait FallbackTransport: Send + Sync {
 struct RuntimeFallbackTransport {
     signaling: Arc<SignalingClient>,
     relay_state: RelayState,
+    relay_selection: Arc<RwLock<RelaySelectionTracker>>,
 }
 
 impl RuntimeFallbackTransport {
-    fn new(signaling: Arc<SignalingClient>, relay_state: RelayState) -> Self {
+    fn new(
+        signaling: Arc<SignalingClient>,
+        relay_state: RelayState,
+        relay_selection: Arc<RwLock<RelaySelectionTracker>>,
+    ) -> Self {
         Self {
             signaling,
             relay_state,
+            relay_selection,
         }
     }
 }
@@ -5233,8 +5492,25 @@ impl FallbackTransport for RuntimeFallbackTransport {
             .await;
 
             match result {
-                Ok(Ok(())) => RelayForwardOutcome::Sent,
+                Ok(Ok(())) => {
+                    if !relay.forwarding_verified.swap(true, Ordering::AcqRel) {
+                        self.relay_selection
+                            .write()
+                            .await
+                            .mark_forwarding_success(&relay.relay_id);
+                        tracing::info!(
+                            diagnostic_id = "relay.health.forwarding_verified",
+                            relay_id = %relay.relay_id,
+                            "QUIC Relay 已通过真实转发验证"
+                        );
+                    }
+                    RelayForwardOutcome::Sent
+                }
                 Ok(Err(error)) => {
+                    self.relay_selection
+                        .write()
+                        .await
+                        .mark_failure(&relay.relay_id, unix_time_ms());
                     if let Some(failed) = self
                         .relay_state
                         .clear_relay_with_recovery(relay.generation)
@@ -5245,6 +5521,10 @@ impl FallbackTransport for RuntimeFallbackTransport {
                     RelayForwardOutcome::Failed(error)
                 }
                 Err(_) => {
+                    self.relay_selection
+                        .write()
+                        .await
+                        .mark_failure(&relay.relay_id, unix_time_ms());
                     if let Some(failed) = self
                         .relay_state
                         .clear_relay_with_recovery(relay.generation)
@@ -5273,7 +5553,9 @@ impl FallbackTransport for RuntimeFallbackTransport {
 #[derive(Clone)]
 struct RelayHandle {
     generation: u64,
+    relay_id: String,
     client: QuicRelayClient,
+    forwarding_verified: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Default)]
@@ -5300,6 +5582,7 @@ impl RelayState {
     async fn install_relay(
         &self,
         client: QuicRelayClient,
+        relay_id: String,
     ) -> std::result::Result<Option<RelayHandle>, QuicRelayClient> {
         if self.closing.load(Ordering::Acquire) {
             return Err(client);
@@ -5309,7 +5592,12 @@ impl RelayState {
         if self.closing.load(Ordering::Acquire) {
             return Err(client);
         }
-        Ok(slot.replace(RelayHandle { generation, client }))
+        Ok(slot.replace(RelayHandle {
+            generation,
+            relay_id,
+            client,
+            forwarding_verified: Arc::new(AtomicBool::new(false)),
+        }))
     }
 
     async fn clear_relay(&self, generation: u64) -> Option<RelayHandle> {
@@ -5527,8 +5815,9 @@ impl OutboundDispatcher {
     async fn install_relay(
         &self,
         relay: QuicRelayClient,
+        relay_id: String,
     ) -> std::result::Result<Option<RelayHandle>, QuicRelayClient> {
-        self.relay_state.install_relay(relay).await
+        self.relay_state.install_relay(relay, relay_id).await
     }
 
     async fn clear_relay_with_recovery(&self, generation: u64) -> Option<RelayHandle> {
@@ -5597,10 +5886,15 @@ impl P2pOutboundTransport {
         signaling: Arc<SignalingClient>,
         stats: StatsCollector,
         relay_state: RelayState,
+        relay_selection: Arc<RwLock<RelaySelectionTracker>>,
     ) -> Self {
         Self {
             p2p,
-            fallback: Arc::new(RuntimeFallbackTransport::new(signaling, relay_state)),
+            fallback: Arc::new(RuntimeFallbackTransport::new(
+                signaling,
+                relay_state,
+                relay_selection,
+            )),
             stats,
         }
     }
@@ -5731,6 +6025,7 @@ fn spawn_relay_reconnect(runtime: &ClientRuntime) -> JoinHandle<()> {
     let outbound = runtime.outbound.clone();
     let network_id = runtime.network_id.clone();
     let node_state = runtime.node_state.clone();
+    let relay_selection = runtime.relay_selection.clone();
 
     tokio::spawn(async move {
         let snapshot = match node_state.as_ref() {
@@ -5743,10 +6038,11 @@ fn spawn_relay_reconnect(runtime: &ClientRuntime) -> JoinHandle<()> {
             assigned_ip,
             network_id.as_ref(),
             snapshot.as_ref(),
+            relay_selection.as_ref(),
         )
         .await;
         if let Some(relay) = relay {
-            match outbound.install_relay(relay).await {
+            match outbound.install_relay(relay.client, relay.relay_id).await {
                 Ok(Some(previous)) => previous.client.close().await,
                 Ok(None) => {}
                 Err(relay) => relay.close().await,
@@ -7924,6 +8220,7 @@ fn normalize_service_name(service: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fuckipv6_common::domain::RelayAuthorizationDenial;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::sync::Notify;
@@ -7980,12 +8277,178 @@ mod tests {
         .expect("other provider grant");
 
         assert_eq!(
-            renewed_relay_grant(&[renewed.clone()], &current),
+            renewed_relay_grant(std::slice::from_ref(&renewed), &current),
             Some(&renewed)
         );
-        assert!(renewed_relay_grant(&[current.clone()], &current).is_none());
+        assert!(renewed_relay_grant(std::slice::from_ref(&current), &current).is_none());
         assert!(renewed_relay_grant(&[other_provider_grant], &current).is_none());
         assert_eq!(renewed.consumer_node_id, consumer);
+    }
+
+    fn relay_selection_policy(max_attempts: u32) -> RelaySelectionPolicy {
+        RelaySelectionPolicy {
+            max_attempts,
+            max_health_age_ms: RELAY_SELECTION_HEALTH_MAX_AGE_MS,
+            max_consecutive_failures: RELAY_SELECTION_MAX_CONSECUTIVE_FAILURES,
+            allow_fallback: true,
+            switch_cooldown_ms: RELAY_SELECTION_SWITCH_COOLDOWN_MS,
+        }
+    }
+
+    fn relay_endpoint(provider: &NodeId, port: u16) -> RelayEndpoint {
+        RelayEndpoint {
+            addr: format!("127.0.0.1:{port}").parse().expect("relay address"),
+            server_name: format!("relay-{port}.test"),
+            public_key_pin: [port as u8; 32],
+            provider_node_id: Some(provider.clone()),
+        }
+    }
+
+    fn relay_grant(
+        identity: &Identity,
+        network_id: &NetworkId,
+        provider: &NodeId,
+        nonce: &str,
+    ) -> RelayMemberGrant {
+        RelayMemberGrant::new(
+            network_id.clone(),
+            provider.clone(),
+            identity,
+            nonce,
+            1,
+            1_000,
+            u64::MAX,
+            RelayLimitPolicy::default(),
+        )
+        .expect("relay grant")
+    }
+
+    #[test]
+    fn relay_connect_candidates_require_matching_provider_grants() {
+        let identity = Identity::generate().expect("identity");
+        let network_id = NetworkId::from_public_key(b"relay-selection-network");
+        let provider = NodeId::from_public_key(b"relay-provider-a");
+        let other_provider = NodeId::from_public_key(b"relay-provider-b");
+        let endpoints = vec![
+            relay_endpoint(&provider, 41001),
+            relay_endpoint(&other_provider, 41002),
+        ];
+        let grants = vec![relay_grant(&identity, &network_id, &provider, "provider-a")];
+        let policy = relay_selection_policy(RELAY_SELECTION_MAX_ATTEMPTS);
+        let tracker = RelaySelectionTracker::default();
+
+        let candidates =
+            relay_connect_candidates(&tracker, &endpoints, &grants, &identity, 10_000, &policy);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].endpoint.provider_node_id.as_ref(),
+            Some(&provider)
+        );
+        assert_eq!(candidates[0].candidate.health, RelayHealthStatus::Degraded);
+
+        let outcome = select_relay_candidate(&[candidates[0].candidate.clone()], &policy, 10_000)
+            .expect("selection");
+        assert!(outcome.is_usable());
+        assert_eq!(outcome.attempts_allowed, 1);
+    }
+
+    #[test]
+    fn relay_selection_falls_back_then_revalidates_after_cooldown() {
+        let identity = Identity::generate().expect("identity");
+        let network_id = NetworkId::from_public_key(b"relay-fallback-network");
+        let first_provider = NodeId::from_public_key(b"relay-provider-first");
+        let second_provider = NodeId::from_public_key(b"relay-provider-second");
+        let endpoints = vec![
+            relay_endpoint(&first_provider, 42001),
+            relay_endpoint(&second_provider, 42002),
+        ];
+        let grants = vec![
+            relay_grant(&identity, &network_id, &first_provider, "first"),
+            relay_grant(&identity, &network_id, &second_provider, "second"),
+        ];
+        let policy = relay_selection_policy(2);
+        let mut tracker = RelaySelectionTracker::default();
+        let now = 100_000;
+        let candidates =
+            relay_connect_candidates(&tracker, &endpoints, &grants, &identity, now, &policy);
+        let first_id = candidates[0].candidate.relay_id.clone();
+        let second_id = candidates[1].candidate.relay_id.clone();
+
+        tracker.mark_failure(&first_id, now);
+        let cooled =
+            relay_connect_candidates(&tracker, &endpoints, &grants, &identity, now + 100, &policy);
+        let outcome = select_relay_candidate(
+            &cooled
+                .iter()
+                .map(|candidate| candidate.candidate.clone())
+                .collect::<Vec<_>>(),
+            &policy,
+            now + 100,
+        )
+        .expect("cooldown selection");
+        assert_eq!(
+            outcome.candidates[0].relay_id, second_id,
+            "the failed Relay must not be retried during cooldown"
+        );
+        assert!(outcome.denied.iter().any(|denial| {
+            denial.relay_id == first_id && denial.reason == RelayAuthorizationDenial::Cooldown
+        }));
+
+        let recovering = relay_connect_candidates(
+            &tracker,
+            &endpoints,
+            &grants,
+            &identity,
+            now + RELAY_SELECTION_SWITCH_COOLDOWN_MS,
+            &policy,
+        );
+        let first = recovering
+            .iter()
+            .find(|candidate| candidate.candidate.relay_id == first_id)
+            .expect("recovery candidate");
+        assert_eq!(first.candidate.health, RelayHealthStatus::Degraded);
+        assert_eq!(first.candidate.consecutive_failures, 0);
+
+        tracker.mark_connected(&first_id, 25);
+        tracker.mark_forwarding_success(&first_id);
+        let healthy =
+            tracker.candidate(&first_id, now + RELAY_SELECTION_SWITCH_COOLDOWN_MS, &policy);
+        assert_eq!(healthy.health, RelayHealthStatus::Healthy);
+        assert_eq!(healthy.last_attempt_at_unix_ms, None);
+    }
+
+    #[test]
+    fn relay_selection_attempt_budget_is_hard_bounded() {
+        let identity = Identity::generate().expect("identity");
+        let network_id = NetworkId::from_public_key(b"relay-budget-network");
+        let policy = relay_selection_policy(3);
+        let tracker = RelaySelectionTracker::default();
+        let mut endpoints = Vec::new();
+        let mut grants = Vec::new();
+        for index in 0..8u16 {
+            let provider = NodeId::from_public_key(format!("relay-provider-{index}").as_bytes());
+            endpoints.push(relay_endpoint(&provider, 43_000 + index));
+            grants.push(relay_grant(
+                &identity,
+                &network_id,
+                &provider,
+                &format!("provider-{index}"),
+            ));
+        }
+        let candidates =
+            relay_connect_candidates(&tracker, &endpoints, &grants, &identity, 200_000, &policy);
+        let outcome = select_relay_candidate(
+            &candidates
+                .iter()
+                .map(|candidate| candidate.candidate.clone())
+                .collect::<Vec<_>>(),
+            &policy,
+            200_000,
+        )
+        .expect("bounded selection");
+        assert_eq!(candidates.len(), 8);
+        assert_eq!(outcome.attempts_allowed, 3);
+        assert_eq!(outcome.candidates.len(), 3);
     }
 
     struct RecordingTransport {

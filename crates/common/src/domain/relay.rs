@@ -697,7 +697,9 @@ pub fn select_relay_candidate(
 
 /// Metadata fields that a Relay operator can observe. Encryption protects the
 /// payload but cannot hide packet timing or endpoint relationships.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, JsonSchema, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RelayMetadataField {
     SourceVirtualIp,

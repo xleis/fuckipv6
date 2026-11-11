@@ -15,12 +15,16 @@ use super::access_control::{
     evaluate_effective_access, EffectiveAccess, EffectiveAccessReason, NetworkAcl,
     NodeLocalAccessPolicy,
 };
-use super::ids::{GroupId, NetworkId, NodeId};
+use super::ids::{GroupId, NetworkId, NodeId, PublicKey, SecurityRuleId, Signature};
 use super::permissions::{
-    NetworkRole, PermissionIntent, PermissionRequest, PermissionRule, PolicyAction, ResourceKind,
-    ResourceRef,
+    NetworkRole, PermissionCondition, PermissionEffect, PermissionIntent, PermissionRequest,
+    PermissionRule, PolicyAction, ResourceKind, ResourceRef, SubjectSelector,
 };
 use super::{DomainError, DomainResult};
+use crate::crypto::Identity;
+
+const RELAY_MEMBER_GRANT_SCHEMA_VERSION: u16 = 1;
+const RELAY_MEMBER_GRANT_SIGNING_DOMAIN: &[u8] = b"fuckipv6/relay-member-grant/v1\0";
 
 /// Hard limit set for one Relay direction. When a network policy and a node
 /// policy both define a value, [`RelayLimitPolicy::intersection`] keeps the
@@ -311,6 +315,213 @@ impl RelayHealthSnapshot {
     }
 }
 
+/// A consumer-authored, verifiable grant allowing this node to use Relay from
+/// one provider in one network. Possession of network membership or an entry in
+/// the network ACL is not sufficient: the provider must verify this signature
+/// before treating the member's local layer as allowing Relay.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct RelayMemberGrant {
+    pub schema_version: u16,
+    pub network_id: NetworkId,
+    pub provider_node_id: NodeId,
+    pub consumer_node_id: NodeId,
+    pub consumer_public_key: PublicKey,
+    /// Unique, non-secret value that prevents two grants from being confused
+    /// during import, audit, rotation or revocation.
+    pub nonce: String,
+    pub revision: u64,
+    pub issued_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+    #[serde(default)]
+    pub limits: RelayLimitPolicy,
+    pub signature: Signature,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RelayMemberGrantPayload<'a> {
+    schema_version: u16,
+    network_id: &'a NetworkId,
+    provider_node_id: &'a NodeId,
+    consumer_node_id: &'a NodeId,
+    consumer_public_key: &'a PublicKey,
+    nonce: &'a str,
+    revision: u64,
+    issued_at_unix_ms: u64,
+    expires_at_unix_ms: u64,
+    limits: &'a RelayLimitPolicy,
+}
+
+impl RelayMemberGrant {
+    /// Create and sign a grant using the consumer's durable node identity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        network_id: NetworkId,
+        provider_node_id: NodeId,
+        identity: &Identity,
+        nonce: impl Into<String>,
+        revision: u64,
+        issued_at_unix_ms: u64,
+        expires_at_unix_ms: u64,
+        limits: RelayLimitPolicy,
+    ) -> DomainResult<Self> {
+        let mut grant = Self {
+            schema_version: RELAY_MEMBER_GRANT_SCHEMA_VERSION,
+            network_id,
+            provider_node_id,
+            consumer_node_id: NodeId::from_public_key(&identity.public_key()),
+            consumer_public_key: PublicKey::from_bytes(identity.public_key_bytes()),
+            nonce: nonce.into(),
+            revision,
+            issued_at_unix_ms,
+            expires_at_unix_ms,
+            limits,
+            // Replaced immediately below. Keeping this constructor total avoids
+            // callers having to reproduce the signed representation.
+            signature: Signature::from_bytes([0; 64]),
+        };
+        grant.validate_definition()?;
+        let signature = identity.sign(&grant.signing_payload()?);
+        grant.signature = Signature::from_bytes(signature.to_bytes());
+        Ok(grant)
+    }
+
+    fn payload(&self) -> RelayMemberGrantPayload<'_> {
+        RelayMemberGrantPayload {
+            schema_version: self.schema_version,
+            network_id: &self.network_id,
+            provider_node_id: &self.provider_node_id,
+            consumer_node_id: &self.consumer_node_id,
+            consumer_public_key: &self.consumer_public_key,
+            nonce: &self.nonce,
+            revision: self.revision,
+            issued_at_unix_ms: self.issued_at_unix_ms,
+            expires_at_unix_ms: self.expires_at_unix_ms,
+            limits: &self.limits,
+        }
+    }
+
+    /// Domain-separated canonical JSON covered by the consumer signature.
+    pub fn signing_payload(&self) -> DomainResult<Vec<u8>> {
+        let encoded = serde_json::to_vec(&self.payload()).map_err(|error| {
+            DomainError::invalid_value(format!("Relay member grant is not serializable: {error}"))
+        })?;
+        let mut payload =
+            Vec::with_capacity(RELAY_MEMBER_GRANT_SIGNING_DOMAIN.len() + encoded.len());
+        payload.extend_from_slice(RELAY_MEMBER_GRANT_SIGNING_DOMAIN);
+        payload.extend_from_slice(&encoded);
+        Ok(payload)
+    }
+
+    fn validate_definition(&self) -> DomainResult<()> {
+        if self.schema_version != RELAY_MEMBER_GRANT_SCHEMA_VERSION {
+            return Err(DomainError::invalid_value(
+                "unsupported Relay member grant schema",
+            ));
+        }
+        if self.revision == 0 {
+            return Err(DomainError::invalid_value(
+                "Relay member grant revision must be positive",
+            ));
+        }
+        if self.nonce.is_empty()
+            || self.nonce.len() > 128
+            || self.nonce.chars().any(char::is_control)
+        {
+            return Err(DomainError::invalid_value(
+                "Relay member grant nonce is invalid",
+            ));
+        }
+        if self.issued_at_unix_ms >= self.expires_at_unix_ms {
+            return Err(DomainError::invariant(
+                "Relay member grant validity interval is empty",
+            ));
+        }
+        self.limits.validate()?;
+        let expected_consumer = NodeId::from_public_key(&self.consumer_public_key.to_bytes()?);
+        if expected_consumer != self.consumer_node_id {
+            return Err(DomainError::invariant(
+                "Relay member grant consumer id does not match its public key",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Verify signature, validity and identity binding before importing a grant.
+    pub fn validate_at(&self, now_unix_ms: u64) -> DomainResult<()> {
+        self.validate_definition()?;
+        if now_unix_ms < self.issued_at_unix_ms {
+            return Err(DomainError::new(
+                "domain.relay_member_grant_not_yet_valid",
+                "Relay member grant is not yet valid",
+            ));
+        }
+        if now_unix_ms >= self.expires_at_unix_ms {
+            return Err(DomainError::new(
+                "domain.relay_member_grant_expired",
+                "Relay member grant has expired",
+            ));
+        }
+        let public_key = self.consumer_public_key.to_bytes()?;
+        let signature = self.signature.to_bytes()?;
+        if !Identity::verify(&public_key, &self.signing_payload()?, &signature) {
+            return Err(DomainError::new(
+                "domain.invalid_signature",
+                "Relay member grant signature is invalid",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate the grant for the exact network, provider and consumer being
+    /// authorized. Cross-network and cross-provider replay fails closed.
+    pub fn validate_binding(
+        &self,
+        network_id: &NetworkId,
+        provider_node_id: &NodeId,
+        consumer_node_id: &NodeId,
+        now_unix_ms: u64,
+    ) -> DomainResult<()> {
+        if &self.network_id != network_id {
+            return Err(DomainError::invariant(
+                "Relay member grant belongs to another network",
+            ));
+        }
+        if &self.provider_node_id != provider_node_id {
+            return Err(DomainError::invariant(
+                "Relay member grant belongs to another provider",
+            ));
+        }
+        if &self.consumer_node_id != consumer_node_id {
+            return Err(DomainError::invariant(
+                "Relay member grant belongs to another consumer",
+            ));
+        }
+        self.validate_at(now_unix_ms)
+    }
+
+    /// Local consumer-side allow rule distilled from the signed grant. The
+    /// network ACL and provider local policy still have independent vetoes.
+    pub fn local_rules(&self) -> Vec<PermissionRule> {
+        vec![PermissionRule {
+            rule_id: SecurityRuleId::from_public_key(
+                format!(
+                    "relay-member-grant:{}:{}:{}",
+                    self.network_id, self.provider_node_id, self.nonce
+                )
+                .as_bytes(),
+            ),
+            effect: PermissionEffect::Allow,
+            subjects: vec![SubjectSelector::Node(self.consumer_node_id.clone())],
+            resources: vec![ResourceKind::Relay],
+            actions: vec![PolicyAction::Use],
+            conditions: vec![
+                PermissionCondition::MembershipActive,
+                PermissionCondition::ResourceInNetwork(self.network_id.clone()),
+            ],
+        }]
+    }
+}
+
 /// One member's trusted policy context as resolved by the control plane.
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct RelayMemberPolicyContext {
@@ -323,6 +534,10 @@ pub struct RelayMemberPolicyContext {
     pub local_rules: Vec<PermissionRule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_access_policy: Option<NodeLocalAccessPolicy>,
+    /// Consumer-authored (or, for the provider context, owner-authored)
+    /// resource limits. These are intersected with the policy-wide limits.
+    #[serde(default)]
+    pub limits: RelayLimitPolicy,
 }
 
 impl RelayMemberPolicyContext {
@@ -330,6 +545,7 @@ impl RelayMemberPolicyContext {
         for rule in &self.local_rules {
             rule.validate()?;
         }
+        self.limits.validate()?;
         if let Some(policy) = &self.local_access_policy {
             if &policy.node_id != node_id {
                 return Err(DomainError::invariant(
@@ -378,6 +594,9 @@ pub struct RelayAuthorizationDecision {
     pub consumer: Option<EffectiveAccess>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_reason: Option<EffectiveAccessReason>,
+    /// Stricter of the provider-wide and consumer-authored limits. It is
+    /// present even on denial so diagnostics can explain the effective bound.
+    pub limits: RelayLimitPolicy,
 }
 
 impl RelayAccessPolicy {
@@ -458,6 +677,7 @@ impl RelayAccessPolicy {
                 final_reason: Some(EffectiveAccessReason::DefaultDenied),
                 provider,
                 consumer: None,
+                limits: self.limits.clone(),
             };
         };
 
@@ -489,11 +709,13 @@ impl RelayAccessPolicy {
         } else {
             Some(consumer.reason)
         };
+        let limits = member.limits.intersection(&self.limits).unwrap_or_default();
         RelayAuthorizationDecision {
             allowed,
             provider,
             consumer: Some(consumer),
             final_reason,
+            limits,
         }
     }
 
@@ -867,6 +1089,7 @@ mod tests {
                 recent_reauthentication: true,
                 local_rules: vec![role_rule(&network_id, NetworkRole::Member)],
                 local_access_policy: None,
+                limits: RelayLimitPolicy::default(),
             },
         );
         RelayAccessPolicy {
@@ -879,6 +1102,7 @@ mod tests {
                 recent_reauthentication: true,
                 local_rules: vec![role_rule(&network_id, NetworkRole::Owner)],
                 local_access_policy: None,
+                limits: RelayLimitPolicy::default(),
             },
             existing_session_policy: RelayExistingSessionPolicy::Reauthorize,
             revision: 1,

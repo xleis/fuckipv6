@@ -1660,6 +1660,7 @@ mod tests {
                         recent_reauthentication: true,
                         local_rules: vec![member_rule.clone()],
                         local_access_policy: None,
+                        limits: RelayLimitPolicy::default(),
                     },
                 )
             })
@@ -1674,6 +1675,7 @@ mod tests {
                 recent_reauthentication: true,
                 local_rules: vec![owner_rule.clone()],
                 local_access_policy: None,
+                limits: RelayLimitPolicy::default(),
             },
             existing_session_policy: RelayExistingSessionPolicy::Reauthorize,
             revision: 1,

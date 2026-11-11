@@ -18,8 +18,11 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 use crate::config_manager::ConfigManager;
+use crate::policy_transaction::PolicySnapshot;
+use relay_policy::DurableRelayPolicyAuthority;
 
 mod actor;
+mod relay_policy;
 
 pub use actor::{
     EmbeddedServiceError, EmbeddedServiceManager, EmbeddedServiceSnapshot,
@@ -42,6 +45,7 @@ pub struct EmbeddedCoordinator {
     relay_task: Option<JoinHandle<Result<()>>>,
     relay_bind_port: u16,
     external_host: Option<String>,
+    relay_policy_authority: Arc<DurableRelayPolicyAuthority>,
 }
 
 impl EmbeddedCoordinator {
@@ -256,6 +260,11 @@ impl EmbeddedCoordinator {
         let signaling_task = tokio::spawn(async move { signaling_server.run().await });
 
         let signaling_addr = actual_signaling_addr;
+        let relay_policy_authority = Arc::new(DurableRelayPolicyAuthority::new(
+            config_manager.clone(),
+            network_name,
+            PolicySnapshot::default(),
+        ));
         let mut coordinator = Self {
             ticket,
             signaling_addr,
@@ -268,6 +277,7 @@ impl EmbeddedCoordinator {
             relay_task: None,
             relay_bind_port: request.relay_port,
             external_host: request.external_host.clone(),
+            relay_policy_authority,
         };
 
         if request.relay_enabled {
@@ -305,9 +315,12 @@ impl EmbeddedCoordinator {
         }
 
         let relay_bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.relay_bind_port);
-        let relay_server =
-            RelayServer::bind_with_generated_certificate(relay_bind, self.session_manager.clone())
-                .context("无法启动内嵌 QUIC 中继服务")?;
+        let relay_server = RelayServer::bind_with_generated_certificate(
+            relay_bind,
+            self.session_manager.clone(),
+            self.relay_policy_authority.clone(),
+        )
+        .context("无法启动内嵌 QUIC 中继服务")?;
         let actual_relay_addr = relay_server.local_addr();
         let relay_pin = relay_server.certificate().public_key_pin;
         let advertised_relay_addr =

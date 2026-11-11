@@ -723,8 +723,8 @@ mod tests {
         assert_eq!(classify_disk_status(0, 10), FileCapabilityState::DiskFull);
         assert_eq!(classify_disk_status(10, 10), FileCapabilityState::LowSpace);
         assert_eq!(classify_disk_status(11, 10), FileCapabilityState::Ready);
-        assert_eq!(FileCapabilityState::Disabled.is_enabled(), false);
-        assert_eq!(FileCapabilityState::LowSpace.is_enabled(), true);
+        assert!(!FileCapabilityState::Disabled.is_enabled());
+        assert!(FileCapabilityState::LowSpace.is_enabled());
     }
 
     #[test]

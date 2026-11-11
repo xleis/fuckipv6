@@ -197,8 +197,8 @@ impl NodeUiManifest {
                         action.audit.clone(),
                     ),
                 ) {
-                    // SetNetworkRole is role-scoped: Exit Node is implemented,
-                    // while Discovery and Relay hot toggles remain unavailable.
+                    // SetNetworkRole is role-scoped: Exit Node and Relay hot
+                    // toggles are implemented, while Discovery remains unavailable.
                     let backend_status_is_role_scoped =
                         action.command == NodeCommandKind::SetNetworkRole;
                     if !backend_status_is_role_scoped && backend_status != action.backend_status {
@@ -2338,7 +2338,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                     "set_relay_role",
                     "action.set_relay_role",
                     NodeCommandKind::SetNetworkRole,
-                    NodeUiBackendStatus::Unavailable,
+                    NodeUiBackendStatus::Implemented,
                     NodePermission::ManageRoles,
                     NodeUiAvailability::NetworkSelected,
                     vec![
@@ -3217,10 +3217,7 @@ mod tests {
         );
         assert_eq!(
             status(NodeCommandKind::SetNetworkRole),
-            HashSet::from([
-                NodeUiBackendStatus::Implemented,
-                NodeUiBackendStatus::Unavailable,
-            ])
+            HashSet::from([NodeUiBackendStatus::Implemented])
         );
     }
 

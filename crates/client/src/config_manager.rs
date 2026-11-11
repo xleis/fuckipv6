@@ -1278,6 +1278,33 @@ impl ConfigManager {
         Ok(())
     }
 
+    /// Update only the owner's Relay intent and last bound port.
+    ///
+    /// Relay is independent from the embedded signaling service, so changing
+    /// it must not rewrite unrelated endpoint metadata. Keeping the last bound
+    /// port also allows a later re-enable to restore the same UDP listener.
+    pub fn set_embedded_relay_intent(
+        &self,
+        network_name: &str,
+        relay_enabled: bool,
+        relay_port: Option<u16>,
+    ) -> Result<()> {
+        Self::validate_network_name(network_name)?;
+        let mut list = self.load_network_list()?;
+        let network = list.networks.get_mut(network_name).with_context(|| {
+            format!("无法保存 Relay owner intent：网络 [{network_name}] 不存在")
+        })?;
+        if !network.owns_embedded_services {
+            anyhow::bail!("网络 [{network_name}] 未托管内嵌服务，不能修改 Relay owner intent");
+        }
+        network.relay_enabled = relay_enabled;
+        if relay_port.is_some() {
+            network.relay_port = relay_port;
+        }
+        self.save_network_list(&list)?;
+        Ok(())
+    }
+
     /// 获取网络配置文件路径
     pub fn get_network_config(&self, network_name: &str) -> Result<PathBuf> {
         Self::validate_network_name(network_name)?;
@@ -2186,6 +2213,50 @@ mod tests {
         assert_eq!(legacy.external_host, None);
         assert_eq!(legacy.ip_pool, None);
         assert_eq!(manager.get_default_network()?, Some("legacy".into()));
+
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn relay_intent_update_preserves_unrelated_embedded_service_metadata() -> anyhow::Result<()> {
+        let dir = temp_config_dir("relay-intent");
+        let _ = std::fs::remove_dir_all(&dir);
+        let manager = ConfigManager::new_for_dir(dir.clone())?;
+        manager.create_network("home", "ws://127.0.0.1:6666", true)?;
+        manager.set_embedded_service_metadata(
+            "home",
+            6666,
+            Some(7000),
+            true,
+            Some("relay.example".into()),
+            Some("fd00::1000/120".into()),
+        )?;
+
+        manager.set_embedded_relay_intent("home", false, Some(7000))?;
+        let disabled = manager
+            .list_networks()?
+            .into_iter()
+            .find(|network| network.name == "home")
+            .expect("home network");
+        assert!(!disabled.relay_enabled);
+        assert_eq!(disabled.relay_port, Some(7000));
+        assert_eq!(disabled.signaling_port, Some(6666));
+        assert_eq!(disabled.external_host.as_deref(), Some("relay.example"));
+        assert_eq!(disabled.ip_pool.as_deref(), Some("fd00::1000/120"));
+
+        manager.set_embedded_relay_intent("home", true, None)?;
+        let enabled = manager
+            .list_networks()?
+            .into_iter()
+            .find(|network| network.name == "home")
+            .expect("home network");
+        assert!(enabled.relay_enabled);
+        assert_eq!(
+            enabled.relay_port,
+            Some(7000),
+            "omitting the port must preserve the last bound port"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
         Ok(())

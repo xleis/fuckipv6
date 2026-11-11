@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -4813,12 +4814,13 @@ impl NetworkRuntimeActor {
                     "成员角色是节点网络内的基线能力，不能单独启用或禁用".into(),
                 ));
             }
-            NodeNetworkRole::Discovery | NodeNetworkRole::Relay => {
+            NodeNetworkRole::Discovery => {
                 return Err(RuntimeControlError::Unavailable(format!(
-                    "{:?} 角色目前只能随内嵌 Discovery+Relay 服务整体创建/停止；尚未提供不重启网络即可独立切换该能力的后端，未修改任何状态",
+                    "{:?} 角色目前只能随内嵌协调服务整体创建/停止；尚未提供不重启网络即可独立切换该能力的后端，未修改任何状态",
                     command.role
                 )));
             }
+            NodeNetworkRole::Relay => return self.set_relay_role(command).await,
             NodeNetworkRole::ExitNode => {}
         }
 
@@ -4988,6 +4990,211 @@ impl NetworkRuntimeActor {
             enabled: command.enabled,
             roles: desired_roles,
         })
+    }
+
+    async fn set_relay_role(
+        &mut self,
+        command: NodeSetNetworkRoleCommand,
+    ) -> Result<RoleUpdateResult, RuntimeControlError> {
+        let network_name = command.network_name.clone();
+        if !self.sessions.contains_key(&network_name) {
+            return Err(RuntimeControlError::NotFound(format!(
+                "网络未运行: {network_name}"
+            )));
+        }
+
+        let persisted = self
+            .configs
+            .list_networks()
+            .map_err(|error| {
+                RuntimeControlError::Persistence(format!(
+                    "网络 [{network_name}] 读取 Relay owner intent 失败: {error:#}"
+                ))
+            })?
+            .into_iter()
+            .find(|network| network.name == network_name)
+            .ok_or_else(|| {
+                RuntimeControlError::Persistence(format!(
+                    "网络 [{network_name}] 的持久化元数据缺失，未应用 Relay 角色更新"
+                ))
+            })?;
+        if !persisted.owns_embedded_services {
+            return Err(RuntimeControlError::Unavailable(format!(
+                "网络 [{network_name}] 不由本机托管内嵌服务，不能切换 Relay"
+            )));
+        }
+
+        let services = self.services.list().await.map_err(map_service_error)?;
+        if !services
+            .iter()
+            .any(|service| service.network_name == network_name)
+        {
+            return Err(RuntimeControlError::NotFound(format!(
+                "网络 [{network_name}] 的内嵌服务未运行，无法切换 Relay"
+            )));
+        }
+
+        let before = self.state.snapshot().await;
+        let previous_config = before
+            .configuration
+            .networks
+            .iter()
+            .find(|network| network.network_name == network_name)
+            .cloned()
+            .ok_or_else(|| {
+                RuntimeControlError::Persistence(format!(
+                    "网络 [{network_name}] 的共享配置快照缺失，未应用 Relay 角色更新"
+                ))
+            })?;
+        let previous_roles = before
+            .networks
+            .iter()
+            .find(|network| network.name == network_name)
+            .map(|network| network.roles.clone())
+            .ok_or_else(|| {
+                RuntimeControlError::Persistence(format!(
+                    "网络 [{network_name}] 的共享运行快照缺失，未应用 Relay 角色更新"
+                ))
+            })?;
+        ensure_member_role(&network_name, &previous_roles)?;
+        let previous_relay = before
+            .embedded_services
+            .iter()
+            .find(|service| service.network_name == network_name)
+            .map(|service| (service.relay_status, service.relay_addr))
+            .ok_or_else(|| {
+                RuntimeControlError::Persistence(format!(
+                    "网络 [{network_name}] 的内嵌服务快照缺失，未应用 Relay 角色更新"
+                ))
+            })?;
+
+        let mut desired_roles = previous_roles.clone();
+        set_role_enabled(&mut desired_roles, NodeNetworkRole::Relay, command.enabled);
+
+        let transition_status = if command.enabled {
+            NodeEmbeddedServiceStatus::Starting
+        } else {
+            NodeEmbeddedServiceStatus::Stopping
+        };
+        self.record_embedded_relay_status(&network_name, transition_status, None)
+            .await;
+        let updated = if command.enabled {
+            self.services.enable_relay(&network_name).await
+        } else {
+            self.services.disable_relay(&network_name).await
+        };
+        let updated = match updated {
+            Ok(updated) => updated,
+            Err(error) => {
+                self.record_embedded_relay_status(
+                    &network_name,
+                    previous_relay.0,
+                    previous_relay.1,
+                )
+                .await;
+                return Err(map_service_error(error));
+            }
+        };
+
+        let relay_port = updated
+            .relay_addr
+            .map(|addr| addr.port())
+            .or(previous_relay.1.map(|addr| addr.port()));
+        if let Err(error) =
+            self.configs
+                .set_embedded_relay_intent(&network_name, command.enabled, relay_port)
+        {
+            let rollback = self
+                .rollback_relay_runtime(&network_name, !command.enabled)
+                .await;
+            self.restore_relay_projection(&network_name, previous_relay)
+                .await;
+            return Err(match rollback {
+                Ok(()) => RuntimeControlError::Persistence(format!(
+                    "网络 [{network_name}] 的 Relay owner intent 持久化失败: {error:#}；运行态已回滚"
+                )),
+                Err(rollback_error) => RuntimeControlError::Persistence(format!(
+                    "网络 [{network_name}] 的 Relay owner intent 持久化失败: {error:#}；运行态回滚失败: {rollback_error}"
+                )),
+            });
+        }
+
+        if !self
+            .publish_network_roles(&network_name, desired_roles.clone())
+            .await
+        {
+            let runtime_rollback = self
+                .rollback_relay_runtime(&network_name, !command.enabled)
+                .await;
+            let persistence_rollback = self.configs.set_embedded_relay_intent(
+                &network_name,
+                persisted.relay_enabled,
+                persisted.relay_port,
+            );
+            self.restore_role_projection(previous_config, previous_roles.clone())
+                .await;
+            self.restore_relay_projection(&network_name, previous_relay)
+                .await;
+            return Err(match (runtime_rollback, persistence_rollback) {
+                (Ok(()), Ok(())) => RuntimeControlError::Persistence(format!(
+                    "网络 [{network_name}] 的 Relay 角色共享快照发布失败；运行态、owner intent 和角色已回滚"
+                )),
+                (runtime_result, persistence_result) => RuntimeControlError::Persistence(format!(
+                    "网络 [{network_name}] 的 Relay 角色共享快照发布失败；运行态回滚: {}；owner intent 回滚: {}",
+                    runtime_result
+                        .err()
+                        .map_or_else(|| "成功".into(), |error| error.to_string()),
+                    persistence_result
+                        .err()
+                        .map_or_else(|| "成功".into(), |error| format!("{error:#}"))
+                )),
+            });
+        }
+
+        let relay_status = if command.enabled {
+            NodeEmbeddedServiceStatus::Running
+        } else {
+            NodeEmbeddedServiceStatus::Stopped
+        };
+        self.record_embedded_relay_status(&network_name, relay_status, updated.relay_addr)
+            .await;
+        if desired_roles != previous_roles {
+            self.events.publish(NodeEventKind::RoleChanged {
+                network_name: network_name.clone(),
+                role: NodeNetworkRole::Relay,
+                enabled: command.enabled,
+                roles: desired_roles.clone(),
+            });
+        }
+
+        Ok(RoleUpdateResult {
+            network_name,
+            role: NodeNetworkRole::Relay,
+            enabled: command.enabled,
+            roles: desired_roles,
+        })
+    }
+
+    async fn rollback_relay_runtime(
+        &self,
+        network_name: &str,
+        enabled: bool,
+    ) -> Result<(), RuntimeControlError> {
+        let result = if enabled {
+            self.services.enable_relay(network_name).await.map(|_| ())
+        } else {
+            self.services.disable_relay(network_name).await.map(|_| ())
+        };
+        result.map_err(map_service_error)
+    }
+
+    async fn restore_relay_projection(
+        &self,
+        network_name: &str,
+        relay: (NodeEmbeddedServiceStatus, Option<SocketAddr>),
+    ) {
+        self.record_embedded_relay_status(network_name, relay.0, relay.1)
+            .await;
     }
 
     async fn stop(
@@ -5900,7 +6107,7 @@ impl NetworkRuntimeActor {
     }
 
     async fn record_running_embedded_service(&self, service: &EmbeddedServiceSnapshot) {
-        self.record_embedded_service(NodeEmbeddedServiceSnapshot {
+        let snapshot = NodeEmbeddedServiceSnapshot {
             network_name: service.network_name.clone(),
             status: NodeEmbeddedServiceStatus::Running,
             signaling_addr: Some(service.signaling_addr),
@@ -5910,8 +6117,33 @@ impl NetworkRuntimeActor {
                 NodeEmbeddedServiceStatus::Stopped
             },
             relay_addr: service.relay_addr,
-        })
-        .await;
+        };
+        let network_name = snapshot.network_name.clone();
+        let relay_status = snapshot.relay_status;
+        self.state
+            .update(|state| {
+                if let Some(existing) = state
+                    .embedded_services
+                    .iter_mut()
+                    .find(|existing| existing.network_name == snapshot.network_name)
+                {
+                    *existing = snapshot;
+                } else {
+                    state.embedded_services.push(snapshot);
+                }
+                state
+                    .embedded_services
+                    .sort_by(|left, right| left.network_name.cmp(&right.network_name));
+            })
+            .await;
+        self.events.publish(NodeEventKind::EmbeddedServiceChanged {
+            network_name: network_name.clone(),
+            status: NodeEmbeddedServiceStatus::Running,
+        });
+        self.events.publish(NodeEventKind::RelayChanged {
+            network_name,
+            status: relay_status,
+        });
     }
 
     async fn mark_embedded_service_status(
@@ -5919,49 +6151,75 @@ impl NetworkRuntimeActor {
         network_name: &str,
         status: NodeEmbeddedServiceStatus,
     ) {
-        self.record_embedded_service(NodeEmbeddedServiceSnapshot {
+        let relay_status = match status {
+            NodeEmbeddedServiceStatus::Starting => NodeEmbeddedServiceStatus::Starting,
+            NodeEmbeddedServiceStatus::Stopping => NodeEmbeddedServiceStatus::Stopping,
+            NodeEmbeddedServiceStatus::Failed => NodeEmbeddedServiceStatus::Failed,
+            NodeEmbeddedServiceStatus::Running | NodeEmbeddedServiceStatus::Stopped => status,
+        };
+        let snapshot = NodeEmbeddedServiceSnapshot {
             network_name: network_name.to_string(),
             status,
             signaling_addr: None,
-            relay_status: match status {
-                NodeEmbeddedServiceStatus::Starting => NodeEmbeddedServiceStatus::Starting,
-                NodeEmbeddedServiceStatus::Stopping => NodeEmbeddedServiceStatus::Stopping,
-                NodeEmbeddedServiceStatus::Failed => NodeEmbeddedServiceStatus::Failed,
-                NodeEmbeddedServiceStatus::Running | NodeEmbeddedServiceStatus::Stopped => status,
-            },
+            relay_status,
             relay_addr: None,
-        })
-        .await;
-    }
-
-    async fn record_embedded_service(&self, service: NodeEmbeddedServiceSnapshot) {
-        let network_name = service.network_name.clone();
-        let status = service.status;
-        let relay_status = service.relay_status;
+        };
         self.state
-            .update(|snapshot| {
-                if let Some(existing) = snapshot
+            .update(|state| {
+                if let Some(existing) = state
                     .embedded_services
                     .iter_mut()
-                    .find(|existing| existing.network_name == service.network_name)
+                    .find(|existing| existing.network_name == snapshot.network_name)
                 {
-                    *existing = service;
+                    *existing = snapshot;
                 } else {
-                    snapshot.embedded_services.push(service);
+                    state.embedded_services.push(snapshot);
                 }
-                snapshot
+                state
                     .embedded_services
                     .sort_by(|left, right| left.network_name.cmp(&right.network_name));
             })
             .await;
         self.events.publish(NodeEventKind::EmbeddedServiceChanged {
-            network_name: network_name.clone(),
+            network_name: network_name.to_string(),
             status,
         });
         self.events.publish(NodeEventKind::RelayChanged {
-            network_name,
+            network_name: network_name.to_string(),
             status: relay_status,
         });
+    }
+
+    /// Project only a Relay lifecycle transition. Embedded signaling remains
+    /// independently observable and is deliberately not republished here.
+    async fn record_embedded_relay_status(
+        &self,
+        network_name: &str,
+        status: NodeEmbeddedServiceStatus,
+        relay_addr: Option<SocketAddr>,
+    ) {
+        let mut updated = false;
+        self.state
+            .update(|state| {
+                if let Some(existing) = state
+                    .embedded_services
+                    .iter_mut()
+                    .find(|existing| existing.network_name == network_name)
+                {
+                    existing.relay_status = status;
+                    existing.relay_addr = relay_addr;
+                    updated = true;
+                }
+            })
+            .await;
+        if updated {
+            self.events.publish(NodeEventKind::RelayChanged {
+                network_name: network_name.to_string(),
+                status,
+            });
+        } else {
+            tracing::warn!("网络 [{network_name}] 缺少内嵌服务快照，未发布 Relay 状态事件");
+        }
     }
 
     async fn publish_started_routing(&self, config: &NodeNetworkConfigSnapshot) -> bool {
@@ -6092,6 +6350,25 @@ impl NetworkRuntimeActor {
                     ),
                 );
                 published = true;
+            })
+            .await;
+        published
+    }
+
+    /// Update only the runtime role projection for capabilities whose owner
+    /// intent is not represented by the Exit routing configuration.
+    async fn publish_network_roles(&self, network_name: &str, roles: Vec<NodeNetworkRole>) -> bool {
+        let mut published = false;
+        self.state
+            .update(|snapshot| {
+                if let Some(existing) = snapshot
+                    .networks
+                    .iter_mut()
+                    .find(|network| network.name == network_name)
+                {
+                    existing.roles = roles;
+                    published = true;
+                }
             })
             .await;
         published
@@ -7867,6 +8144,51 @@ mod tests {
         statuses
     }
 
+    fn relay_changed_events(
+        receiver: &mut broadcast::Receiver<NodeEvent>,
+        network_name: &str,
+    ) -> Vec<NodeEmbeddedServiceStatus> {
+        let mut statuses = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            if let NodeEventKind::RelayChanged {
+                network_name: event_network,
+                status,
+            } = event.kind
+            {
+                if event_network == network_name {
+                    statuses.push(status);
+                }
+            }
+        }
+        statuses
+    }
+
+    async fn record_running_embedded_service_for_test(
+        harness: &TestHarness,
+        service: &EmbeddedServiceSnapshot,
+    ) {
+        let snapshot = NodeEmbeddedServiceSnapshot {
+            network_name: service.network_name.clone(),
+            status: NodeEmbeddedServiceStatus::Running,
+            signaling_addr: Some(service.signaling_addr),
+            relay_status: if service.relay_addr.is_some() {
+                NodeEmbeddedServiceStatus::Running
+            } else {
+                NodeEmbeddedServiceStatus::Stopped
+            },
+            relay_addr: service.relay_addr,
+        };
+        harness
+            .state
+            .update(|state| {
+                state
+                    .embedded_services
+                    .retain(|existing| existing.network_name != snapshot.network_name);
+                state.embedded_services.push(snapshot);
+            })
+            .await;
+    }
+
     #[tokio::test]
     async fn local_exit_enable_disable_is_idempotent_and_preserves_network_runtime() {
         let harness = TestHarness::new("local-exit-toggle").await;
@@ -8961,11 +9283,6 @@ mod tests {
                 NodeProblemCode::Unavailable,
                 true,
             ),
-            (
-                role_command("role-rejections", NodeNetworkRole::Relay, true),
-                NodeProblemCode::Unavailable,
-                true,
-            ),
         ];
         for (offset, (command, expected_code, expected_retryable)) in cases.into_iter().enumerate()
         {
@@ -9338,6 +9655,255 @@ mod tests {
             .all(|service| service.network_name != "role-stop"));
         assert_eq!(harness.fake.shutdown_count(), 1);
         assert_eq!(harness.fake.launches(), vec!["role-stop"]);
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn relay_role_toggles_independently_and_preserves_other_network_state() {
+        let harness = TestHarness::new("relay-role-toggle").await;
+        let network_name = "relay-role";
+        start_fake_network(&harness, network_name).await;
+        let started = harness
+            .services
+            .start(
+                EmbeddedServiceStartRequest::new(network_name, 0, 0)
+                    .with_external_host("127.0.0.1")
+                    .with_relay_enabled(false),
+            )
+            .await
+            .expect("start service with relay disabled");
+        harness
+            .configs
+            .set_embedded_service_metadata(
+                network_name,
+                started.signaling_addr.port(),
+                None,
+                false,
+                Some("127.0.0.1".into()),
+                None,
+            )
+            .expect("persist embedded service metadata");
+        record_running_embedded_service_for_test(&harness, &started).await;
+        let before = harness.state.snapshot().await;
+        let before_config = before
+            .configuration
+            .networks
+            .iter()
+            .find(|network| network.network_name == network_name)
+            .cloned()
+            .expect("network configuration");
+        let signaling_addr = started.signaling_addr;
+
+        let mut relay_events = harness.events.subscribe();
+        let mut role_events = harness.events.subscribe();
+        let enabled = harness
+            .runtime
+            .set_network_role(role_command(network_name, NodeNetworkRole::Relay, true))
+            .await
+            .expect("enable relay role");
+        let relay_addr = harness
+            .state
+            .snapshot()
+            .await
+            .embedded_services
+            .iter()
+            .find(|service| service.network_name == network_name)
+            .and_then(|service| service.relay_addr)
+            .expect("running relay address");
+        assert_eq!(
+            enabled.roles,
+            vec![NodeNetworkRole::Member, NodeNetworkRole::Relay]
+        );
+        assert_eq!(
+            relay_changed_events(&mut relay_events, network_name),
+            vec![
+                NodeEmbeddedServiceStatus::Starting,
+                NodeEmbeddedServiceStatus::Running,
+            ]
+        );
+        assert_eq!(
+            role_changed_events(&mut role_events),
+            vec![(
+                network_name.into(),
+                NodeNetworkRole::Relay,
+                true,
+                vec![NodeNetworkRole::Member, NodeNetworkRole::Relay],
+            )]
+        );
+
+        let running = harness.state.snapshot().await;
+        let service = running
+            .embedded_services
+            .iter()
+            .find(|service| service.network_name == network_name)
+            .expect("embedded service");
+        assert_eq!(service.status, NodeEmbeddedServiceStatus::Running);
+        assert_eq!(service.relay_status, NodeEmbeddedServiceStatus::Running);
+        assert_eq!(service.signaling_addr, Some(signaling_addr));
+        assert_eq!(
+            running
+                .configuration
+                .networks
+                .iter()
+                .find(|network| network.network_name == network_name),
+            Some(&before_config),
+            "enabling Relay must not rewrite Exit routing configuration"
+        );
+        let persisted = harness
+            .configs
+            .list_networks()
+            .expect("load network metadata")
+            .into_iter()
+            .find(|network| network.name == network_name)
+            .expect("persisted network");
+        assert!(persisted.relay_enabled);
+        assert_eq!(persisted.relay_port, Some(relay_addr.port()));
+
+        let mut relay_events = harness.events.subscribe();
+        let mut role_events = harness.events.subscribe();
+        let disabled = harness
+            .runtime
+            .set_network_role(role_command(network_name, NodeNetworkRole::Relay, false))
+            .await
+            .expect("disable relay role");
+        assert_eq!(disabled.roles, vec![NodeNetworkRole::Member]);
+        assert_eq!(
+            relay_changed_events(&mut relay_events, network_name),
+            vec![
+                NodeEmbeddedServiceStatus::Stopping,
+                NodeEmbeddedServiceStatus::Stopped,
+            ]
+        );
+        assert_eq!(
+            role_changed_events(&mut role_events),
+            vec![(
+                network_name.into(),
+                NodeNetworkRole::Relay,
+                false,
+                vec![NodeNetworkRole::Member],
+            )]
+        );
+
+        let stopped = harness.state.snapshot().await;
+        let service = stopped
+            .embedded_services
+            .iter()
+            .find(|service| service.network_name == network_name)
+            .expect("embedded service remains");
+        assert_eq!(service.status, NodeEmbeddedServiceStatus::Running);
+        assert_eq!(service.relay_status, NodeEmbeddedServiceStatus::Stopped);
+        assert_eq!(service.signaling_addr, Some(signaling_addr));
+        assert!(service.relay_addr.is_none());
+        assert_eq!(
+            stopped
+                .configuration
+                .networks
+                .iter()
+                .find(|network| network.network_name == network_name),
+            Some(&before_config),
+            "disabling Relay must not stop or rewrite Coordinator/Exit state"
+        );
+        tokio::net::TcpListener::bind(("127.0.0.1", signaling_addr.port()))
+            .await
+            .expect_err("signaling listener must remain active after Relay stops");
+        tokio::net::UdpSocket::bind(("127.0.0.1", relay_addr.port()))
+            .await
+            .expect("relay listener must be released after Relay stops");
+        let persisted = harness
+            .configs
+            .list_networks()
+            .expect("load network metadata")
+            .into_iter()
+            .find(|network| network.name == network_name)
+            .expect("persisted network");
+        assert!(!persisted.relay_enabled);
+        assert_eq!(
+            persisted.relay_port,
+            Some(relay_addr.port()),
+            "disabling Relay must retain the last bound port"
+        );
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn disabled_relay_intent_restores_on_network_restart_and_reuses_port() {
+        let harness = TestHarness::new("relay-role-restart").await;
+        let network_name = "relay-restart";
+        start_fake_network(&harness, network_name).await;
+        let started = harness
+            .services
+            .start(
+                EmbeddedServiceStartRequest::new(network_name, 0, 0)
+                    .with_external_host("127.0.0.1"),
+            )
+            .await
+            .expect("start embedded service");
+        let signaling_port = started.signaling_addr.port();
+        let relay_port = started.relay_addr.expect("initial relay").port();
+        harness
+            .configs
+            .set_embedded_service_metadata(
+                network_name,
+                signaling_port,
+                Some(relay_port),
+                true,
+                Some("127.0.0.1".into()),
+                None,
+            )
+            .expect("persist embedded service metadata");
+        record_running_embedded_service_for_test(&harness, &started).await;
+
+        harness
+            .runtime
+            .set_network_role(role_command(network_name, NodeNetworkRole::Relay, false))
+            .await
+            .expect("disable relay before restart");
+        harness
+            .runtime
+            .stop(vec![network_name.into()], false)
+            .await
+            .expect("stop network and embedded service");
+
+        harness
+            .runtime
+            .start_node()
+            .await
+            .expect("restart node services from owner intent");
+        let restored = harness.state.snapshot().await;
+        let service = restored
+            .embedded_services
+            .iter()
+            .find(|service| service.network_name == network_name)
+            .expect("restored embedded service");
+        assert_eq!(service.status, NodeEmbeddedServiceStatus::Running);
+        assert_eq!(service.relay_status, NodeEmbeddedServiceStatus::Stopped);
+        assert_eq!(
+            service.signaling_addr.map(|addr| addr.port()),
+            Some(signaling_port)
+        );
+        assert!(service.relay_addr.is_none());
+
+        harness
+            .runtime
+            .set_network_role(role_command(network_name, NodeNetworkRole::Relay, true))
+            .await
+            .expect("re-enable relay after restart");
+        let service = harness
+            .state
+            .snapshot()
+            .await
+            .embedded_services
+            .into_iter()
+            .find(|service| service.network_name == network_name)
+            .expect("embedded service after re-enable");
+        assert_eq!(service.relay_status, NodeEmbeddedServiceStatus::Running);
+        assert_eq!(
+            service.relay_addr.map(|addr| addr.port()),
+            Some(relay_port),
+            "re-enable must restore the last persisted Relay port"
+        );
 
         harness.shutdown().await;
     }

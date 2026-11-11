@@ -645,21 +645,12 @@ async fn start_service(
         return Err(EmbeddedServiceError::AlreadyRunning(request.network_name));
     }
 
-    let coordinator = EmbeddedCoordinator::start_with_config_manager(
-        &request.network_name,
-        request.signaling_port,
-        request.relay_port,
-        request.host_public_key,
-        request.external_host,
-        request.ip_pool.as_deref(),
-        configs.clone(),
-        request.relay_enabled,
-    )
-    .await
-    .map_err(|error| EmbeddedServiceError::StartFailed {
-        network_name: request.network_name.clone(),
-        message: format!("{error:#}"),
-    })?;
+    let coordinator = EmbeddedCoordinator::start_with_config_manager(&request, configs.clone())
+        .await
+        .map_err(|error| EmbeddedServiceError::StartFailed {
+            network_name: request.network_name.clone(),
+            message: format!("{error:#}"),
+        })?;
 
     let snapshot = EmbeddedServiceSnapshot::from(&coordinator);
     services.insert(request.network_name, coordinator);

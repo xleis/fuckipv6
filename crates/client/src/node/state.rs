@@ -2660,6 +2660,7 @@ mod tests {
         let updated = state
             .update(|snapshot| {
                 snapshot.embedded_services[0].status = NodeEmbeddedServiceStatus::Running;
+                snapshot.embedded_services[0].relay_status = NodeEmbeddedServiceStatus::Running;
                 snapshot.networks[0].roles = vec![NodeNetworkRole::ExitNode];
                 snapshot.local_exit.owner_exit_enabled = true;
                 snapshot.local_exit.stage = LocalExitCapabilityStage::Enabled;

@@ -1916,6 +1916,11 @@
             "null"
           ]
         },
+        "relay_status": {
+          "$ref": "#/$defs/NodeEmbeddedServiceStatus",
+          "default": "stopped",
+          "description": "Relay is an independently owned capability; it can be stopped while the\nembedded Coordinator keeps running."
+        },
         "signaling_addr": {
           "type": [
             "string",
@@ -1923,7 +1928,8 @@
           ]
         },
         "status": {
-          "$ref": "#/$defs/NodeEmbeddedServiceStatus"
+          "$ref": "#/$defs/NodeEmbeddedServiceStatus",
+          "description": "Coordinator/signaling runtime status."
         }
       },
       "required": [

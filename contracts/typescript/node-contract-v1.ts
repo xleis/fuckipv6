@@ -688,6 +688,32 @@ export type NetworkId = string;
 
 export type NetworkJoinMode = "open" | "approval_required" | "invite_only";
 
+export type NetworkJoinPreview = {
+  "expires_at_unix_ms": number;
+  "issued_at_unix_ms": number;
+  "join_mode": NetworkJoinMode;
+  "network_id": NetworkId;
+  "network_name": string;
+  "owner": NodeId;
+  "policy_revision": number;
+  "preview_digest": ContentHash;
+  "privacy_policy_revision": number;
+  "public_key": PublicKey;
+  "revision": number;
+  "signature": Signature;
+  "terms": NetworkJoinTerms;
+  "terms_hash": ContentHash;
+};
+
+export type NetworkJoinTerms = {
+  "exit_contribution": ExitContributionObligation;
+  "exit_contribution_mode": ExitContributionMode;
+  "exit_contribution_scope": ExitContributionScope;
+  "member_limit"?: number | null;
+  "network_policy_revision": number;
+  "privacy_policy_revision": number;
+};
+
 export type NetworkLocalSecretProjection = {
   "identity_present": boolean;
   "public_key_fingerprint": string;
@@ -1546,6 +1572,7 @@ export type NodeDiscoveryIndexState = "idle" | "pending" | "ready" | "degraded" 
 export type NodeEmbeddedServiceSnapshot = {
   "network_name": string;
   "relay_addr"?: string | null;
+  "relay_status"?: NodeEmbeddedServiceStatus;
   "signaling_addr"?: string | null;
   "status": NodeEmbeddedServiceStatus;
 };
@@ -1582,6 +1609,12 @@ export type NodeEventKind = {
   "status": NodeEmbeddedServiceStatus;
 };
   "type": "embedded_service_changed";
+} | {
+  "data": {
+  "network_name": string;
+  "status": NodeEmbeddedServiceStatus;
+};
+  "type": "relay_changed";
 } | {
   "data": {
   "level": NodeLogLevel;
@@ -1722,6 +1755,7 @@ export type NodeJoinNetworkCommand = {
   "network_policy_revision"?: number | null;
   "preview_digest"?: string | null;
   "privacy_policy_revision"?: number | null;
+  "signed_join_preview"?: NetworkJoinPreview | null;
   "start": boolean;
   "target": string;
   "terms_hash"?: ContentHash | null;
@@ -2777,6 +2811,7 @@ export type ProjectedNodeCommandResult = {
 export type ProjectedNodeEmbeddedServiceSnapshot = {
   "network_name": string;
   "relay_addr"?: string | null;
+  "relay_status"?: NodeEmbeddedServiceStatus;
   "signaling_addr"?: string | null;
   "status": NodeEmbeddedServiceStatus;
 };
@@ -2804,6 +2839,12 @@ export type ProjectedNodeEventKind = {
   "status": NodeEmbeddedServiceStatus;
 };
   "type": "embedded_service_changed";
+} | {
+  "data": {
+  "network_name": string;
+  "status": NodeEmbeddedServiceStatus;
+};
+  "type": "relay_changed";
 } | {
   "data": {
   "level": NodeLogLevel;

@@ -55,17 +55,16 @@ impl EmbeddedCoordinator {
         ip_pool: Option<&str>,
     ) -> Result<Self> {
         let config_manager = ConfigManager::new().context("无法确定节点配置目录")?;
-        Self::start_with_config_manager(
-            network_name,
+        let request = EmbeddedServiceStartRequest {
+            network_name: network_name.to_string(),
             signaling_port,
             relay_port,
+            relay_enabled: true,
             host_public_key,
             external_host,
-            ip_pool,
-            config_manager,
-            true,
-        )
-        .await
+            ip_pool: ip_pool.map(str::to_string),
+        };
+        Self::start_with_config_manager(&request, config_manager).await
     }
 
     /// Start an embedded coordinator using an explicitly isolated config
@@ -82,30 +81,24 @@ impl EmbeddedCoordinator {
     ) -> Result<Self> {
         let config_manager =
             ConfigManager::new_for_dir(config_dir).context("无法初始化内嵌协调端配置目录")?;
-        Self::start_with_config_manager(
-            network_name,
+        let request = EmbeddedServiceStartRequest {
+            network_name: network_name.to_string(),
             signaling_port,
             relay_port,
+            relay_enabled: true,
             host_public_key,
             external_host,
-            ip_pool,
-            config_manager,
-            true,
-        )
-        .await
+            ip_pool: ip_pool.map(str::to_string),
+        };
+        Self::start_with_config_manager(&request, config_manager).await
     }
 
     pub(crate) async fn start_with_config_manager(
-        network_name: &str,
-        signaling_port: u16,
-        relay_port: u16,
-        host_public_key: Option<[u8; 32]>,
-        external_host: Option<String>,
-        ip_pool: Option<&str>,
+        request: &EmbeddedServiceStartRequest,
         config_manager: ConfigManager,
-        relay_enabled: bool,
     ) -> Result<Self> {
-        let pool = ip_pool.unwrap_or("fd00::1000/120");
+        let network_name = request.network_name.as_str();
+        let pool = request.ip_pool.as_deref().unwrap_or("fd00::1000/120");
         let blacklist_path = config_manager
             .coordinator_config_path(network_name)
             .context("无法确定协调端持久化路径")?;
@@ -215,7 +208,7 @@ impl EmbeddedCoordinator {
             .await
             .context("无法加载节点持久黑名单")?;
 
-        let signaling_bind = format!("0.0.0.0:{signaling_port}");
+        let signaling_bind = format!("0.0.0.0:{}", request.signaling_port);
         let signaling_server =
             SignalingServer::new_with_manager(signaling_bind, session_manager.clone())
                 .with_join_request_store(join_request_store)
@@ -234,14 +227,14 @@ impl EmbeddedCoordinator {
         // Runtime-owned services supply the node-wide persisted public key so
         // recreating a service keeps the invitation identity stable. Direct
         // embedders that omit it retain the old ephemeral-ticket behavior.
-        let host_pubkey = match host_public_key {
+        let host_pubkey = match request.host_public_key {
             Some(public_key) => public_key,
             None => Identity::generate()?.public_key_bytes(),
         };
 
         // 确定票据暴露的接入地址
         let actual_signaling_port = actual_signaling_addr.port();
-        let ticket_endpoint = if let Some(host) = external_host.as_deref() {
+        let ticket_endpoint = if let Some(host) = request.external_host.as_deref() {
             if host.contains(':') {
                 host.to_string()
             } else {
@@ -273,11 +266,11 @@ impl EmbeddedCoordinator {
             relay_directory,
             relay_server: None,
             relay_task: None,
-            relay_bind_port: relay_port,
-            external_host,
+            relay_bind_port: request.relay_port,
+            external_host: request.external_host.clone(),
         };
 
-        if relay_enabled {
+        if request.relay_enabled {
             if let Err(error) = coordinator.enable_relay().await {
                 let _ = coordinator.shutdown().await;
                 return Err(error);

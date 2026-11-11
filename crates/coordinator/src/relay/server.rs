@@ -4,8 +4,8 @@ use fuckipv6_common::{
     build_quic_server_config_with_client_certificate_authorizer,
     domain::{
         NodeId, RelayAccessPolicy, RelayAuthorizationDecision, RelayExistingSessionPolicy,
-        RelayHealthSnapshot, RelayLifecycleState, RelayLimitPolicy, RelayMemberGrant,
-        RelayUsageSnapshot,
+        RelayHealthSnapshot, RelayLifecycleState, RelayLimitPolicy, RelayMeasurementState,
+        RelayMemberGrant, RelayReachabilityState, RelayUsageSnapshot,
     },
     export_quic_relay_channel_binding, generate_self_signed_quic_certificate, recv_relay_message,
     send_relay_message, verify_quic_client_identity_binding, ClientId, ErrorCode, Identity,
@@ -199,6 +199,8 @@ struct RelayMetrics {
     rejected_connections: AtomicU64,
     reserved_bytes: AtomicU64,
     forwarding_observed: AtomicBool,
+    last_forwarded_at_unix_ms: AtomicU64,
+    last_forwarding_failure_at_unix_ms: AtomicU64,
     quota_started_at_unix_ms: AtomicU64,
     quota_reset_at_unix_ms: AtomicU64,
 }
@@ -237,6 +239,10 @@ impl QuotaReservation {
             .metrics
             .forwarding_observed
             .store(true, Ordering::Release);
+        self.state
+            .metrics
+            .last_forwarded_at_unix_ms
+            .fetch_max(now_unix_ms(), Ordering::AcqRel);
         self.active = false;
     }
 }
@@ -385,6 +391,14 @@ impl RelayServer {
             oldest_session_age_secs,
             observed_cpu_percent: None,
             observed_memory_bytes: None,
+            cpu_measurement: RelayMeasurementState::Unsupported,
+            memory_measurement: RelayMeasurementState::Unsupported,
+            last_forwarded_at_unix_ms: nonzero_atomic(
+                &self.state.metrics.last_forwarded_at_unix_ms,
+            ),
+            last_forwarding_failure_at_unix_ms: nonzero_atomic(
+                &self.state.metrics.last_forwarding_failure_at_unix_ms,
+            ),
             quota_started_at_unix_ms,
             quota_reset_at_unix_ms,
         }
@@ -406,10 +420,19 @@ impl RelayServer {
         };
         let usage = self.usage_snapshot_inner().await;
         let listener_open = self.state.listener_open.load(Ordering::Acquire);
+        let last_forwarded_at_unix_ms =
+            nonzero_atomic(&self.state.metrics.last_forwarded_at_unix_ms);
         let lifecycle = if listener_open {
             RelayLifecycleState::Running
         } else {
             RelayLifecycleState::Stopped
+        };
+        let network_reachability = if last_forwarded_at_unix_ms.is_some() {
+            // A successful forwarded packet is evidence that the data path was
+            // reachable. Binding a listener alone proves only local socket setup.
+            RelayReachabilityState::Reachable
+        } else {
+            RelayReachabilityState::Unknown
         };
         RelayHealthSnapshot::observe(
             lifecycle,
@@ -419,13 +442,14 @@ impl RelayServer {
                 None
             },
             listener_open,
-            listener_open,
+            network_reachability,
             self.state
                 .metrics
                 .forwarding_observed
                 .load(Ordering::Acquire),
             authorization_valid,
             limits,
+            Vec::new(),
             usage,
             now,
             reason_code,
@@ -579,6 +603,7 @@ impl RelayServer {
                     "QUIC 中继连接任务达到上限，拒绝: {}",
                     incoming.remote_address()
                 );
+                self.record_forwarding_failure();
                 self.session_manager.record_relay_error();
                 continue;
             };
@@ -824,6 +849,7 @@ impl RelayServer {
                 registered.client_id
             );
             self.reject_overloaded_stream(send).await;
+            self.record_forwarding_failure();
             self.session_manager.record_relay_error();
             return true;
         };
@@ -1589,8 +1615,16 @@ impl RelayServer {
         error: RelayMessage,
     ) -> Result<()> {
         send_relay_message(send, stream_id, &error).await?;
+        self.record_forwarding_failure();
         self.session_manager.record_relay_error();
         Ok(())
+    }
+
+    fn record_forwarding_failure(&self) {
+        self.state
+            .metrics
+            .last_forwarding_failure_at_unix_ms
+            .fetch_max(now_unix_ms(), Ordering::AcqRel);
     }
 
     async fn lookup_client(&self, dst_ip: Ipv6Addr) -> Option<RelayClient> {
@@ -1647,18 +1681,22 @@ impl RelayServer {
                 Ok(())
             }
             Ok(Ok((_, RelayMessage::Error { code, message }))) => {
+                self.record_forwarding_failure();
                 self.session_manager.record_relay_error();
                 anyhow::bail!("目标客户端拒绝 relay 包: {code} {message}")
             }
             Ok(Ok((_, other))) => {
+                self.record_forwarding_failure();
                 self.session_manager.record_relay_error();
                 anyhow::bail!("目标客户端返回了非预期 relay 响应: {:?}", other)
             }
             Ok(Err(err)) => {
+                self.record_forwarding_failure();
                 self.session_manager.record_relay_error();
                 Err(err).context("目标客户端 relay 响应读取失败")
             }
             Err(_) => {
+                self.record_forwarding_failure();
                 self.session_manager.record_relay_error();
                 anyhow::bail!("目标客户端 relay 响应超时")
             }
@@ -1727,6 +1765,11 @@ fn now_unix_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
+}
+
+fn nonzero_atomic(value: &AtomicU64) -> Option<u64> {
+    let value = value.load(Ordering::Acquire);
+    (value != 0).then_some(value)
 }
 
 fn relay_rate_bytes_per_sec(limits: &RelayLimitPolicy) -> u64 {
@@ -1811,6 +1854,12 @@ fn reset_metrics(metrics: &RelayMetrics) {
     metrics.rejected_connections.store(0, Ordering::Release);
     metrics.reserved_bytes.store(0, Ordering::Release);
     metrics.forwarding_observed.store(false, Ordering::Release);
+    metrics
+        .last_forwarded_at_unix_ms
+        .store(0, Ordering::Release);
+    metrics
+        .last_forwarding_failure_at_unix_ms
+        .store(0, Ordering::Release);
     metrics.quota_started_at_unix_ms.store(0, Ordering::Release);
     metrics.quota_reset_at_unix_ms.store(0, Ordering::Release);
 }
@@ -1868,7 +1917,8 @@ mod tests {
     use crate::signaling::blacklist::BlacklistStore;
     use fuckipv6_common::domain::{
         NetworkId, NetworkRole, PermissionCondition, PermissionEffect, PermissionRule,
-        PolicyAction, RelayMemberPolicyContext, ResourceKind, SecurityRuleId, SubjectSelector,
+        PolicyAction, RelayHealthIssue, RelayHealthStatus, RelayMemberPolicyContext, ResourceKind,
+        SecurityRuleId, SubjectSelector,
     };
     use fuckipv6_common::relay_client::QuicRelayClient;
     use fuckipv6_common::{
@@ -2649,9 +2699,45 @@ mod tests {
         );
         assert_eq!(traffic.relay_errors, 0);
 
+        let usage = server.usage_snapshot().await;
+        assert!(usage.last_forwarded_at_unix_ms.is_some());
+        assert_eq!(usage.cpu_measurement, RelayMeasurementState::Unsupported);
+        assert_eq!(usage.memory_measurement, RelayMeasurementState::Unsupported);
+        let health = server.health_snapshot().await;
+        assert_eq!(health.status, RelayHealthStatus::Healthy);
+        assert_eq!(
+            health.network_reachability,
+            RelayReachabilityState::Reachable
+        );
+        assert!(health.forwarding_observed);
+
         client_a.close().await;
         client_b.close().await;
         server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bound_listener_does_not_report_network_reachability() -> Result<()> {
+        let identity = Identity::generate()?;
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager,
+            relay_authority(&[&identity]),
+        )?;
+
+        let health = server.health_snapshot().await;
+
+        assert_eq!(health.status, RelayHealthStatus::Unknown);
+        assert_eq!(health.network_reachability, RelayReachabilityState::Unknown);
+        assert!(!health.forwarding_observed);
+        assert!(health
+            .issues
+            .contains(&RelayHealthIssue::NetworkReachabilityUnknown));
+        assert!(health
+            .issues
+            .contains(&RelayHealthIssue::ForwardingNotObserved));
         Ok(())
     }
 
@@ -3190,7 +3276,7 @@ mod tests {
             .await
             .expect_err("revoked destination must not receive relay packets")
             .to_string();
-        assert!(destination_error.contains("403"));
+        assert!(destination_error.contains("403"), "{destination_error}");
 
         session_manager
             .ban_client(identity_a.client_id().to_string())
@@ -3200,7 +3286,7 @@ mod tests {
             .await
             .expect_err("revoked source must not send relay packets")
             .to_string();
-        assert!(source_error.contains("403"));
+        assert!(source_error.contains("403"), "{source_error}");
 
         let traffic = session_manager.snapshot().await.traffic;
         assert_eq!(traffic.relay_packets, 0);

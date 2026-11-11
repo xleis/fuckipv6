@@ -25,6 +25,9 @@ use crate::crypto::Identity;
 
 const RELAY_MEMBER_GRANT_SCHEMA_VERSION: u16 = 1;
 const RELAY_MEMBER_GRANT_SIGNING_DOMAIN: &[u8] = b"fuckipv6/relay-member-grant/v1\0";
+/// A successful forwarding operation is the only built-in evidence that the
+/// Relay path is currently usable. Older evidence is not treated as healthy.
+pub const RELAY_FORWARDING_FRESHNESS_MS: u64 = 30_000;
 
 /// Hard limit set for one Relay direction. When a network policy and a node
 /// policy both define a value, [`RelayLimitPolicy::intersection`] keeps the
@@ -130,10 +133,27 @@ pub struct RelayUsageSnapshot {
     pub oldest_session_age_secs: u64,
     pub observed_cpu_percent: Option<u8>,
     pub observed_memory_bytes: Option<u64>,
+    #[serde(default)]
+    pub cpu_measurement: RelayMeasurementState,
+    #[serde(default)]
+    pub memory_measurement: RelayMeasurementState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_forwarded_at_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_forwarding_failure_at_unix_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_started_at_unix_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_reset_at_unix_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayMeasurementState {
+    Unsupported,
+    #[default]
+    NotMeasured,
+    Measured,
 }
 
 impl RelayUsageSnapshot {
@@ -179,6 +199,14 @@ pub enum RelayLifecycleState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RelayReachabilityState {
+    Unknown,
+    Reachable,
+    Unreachable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RelayHealthStatus {
     Unknown,
     Healthy,
@@ -197,12 +225,24 @@ impl RelayHealthStatus {
 #[serde(rename_all = "snake_case")]
 pub enum RelayHealthIssue {
     ListenerUnavailable,
+    NetworkReachabilityUnknown,
     NetworkUnreachable,
     ProtocolError,
     QuotaExhausted,
     ResourcePressure,
     ForwardingStalled,
+    ForwardingNotObserved,
     AuthorizationExpired,
+    CpuMeasurementUnsupported,
+    MemoryMeasurementUnsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayLimitSource {
+    NetworkAcl,
+    NodeLocal,
+    ProviderDefault,
 }
 
 /// Health is derived from observed state. It cannot be set to healthy by a UI
@@ -214,11 +254,13 @@ pub struct RelayHealthSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen_addr: Option<SocketAddr>,
     pub listener_bound: bool,
-    pub network_reachable: bool,
+    pub network_reachability: RelayReachabilityState,
     pub forwarding_observed: bool,
     pub authorization_valid: bool,
     pub quota_limited: bool,
     pub limits: RelayLimitPolicy,
+    #[serde(default)]
+    pub limit_sources: Vec<RelayLimitSource>,
     pub usage: RelayUsageSnapshot,
     pub issues: Vec<RelayHealthIssue>,
     pub observed_at_unix_ms: u64,
@@ -233,20 +275,46 @@ impl RelayHealthSnapshot {
         lifecycle: RelayLifecycleState,
         listen_addr: Option<SocketAddr>,
         listener_bound: bool,
-        network_reachable: bool,
+        network_reachability: RelayReachabilityState,
         forwarding_observed: bool,
         authorization_valid: bool,
         limits: RelayLimitPolicy,
+        limit_sources: Vec<RelayLimitSource>,
         usage: RelayUsageSnapshot,
         observed_at_unix_ms: u64,
         reason_code: Option<String>,
     ) -> Self {
         let mut issues = Vec::new();
+        let forwarding_is_fresh = forwarding_observed
+            && usage.last_forwarded_at_unix_ms.is_some_and(|forwarded_at| {
+                forwarded_at <= observed_at_unix_ms
+                    && observed_at_unix_ms.saturating_sub(forwarded_at)
+                        <= RELAY_FORWARDING_FRESHNESS_MS
+            });
+        let forwarding_stalled = usage
+            .last_forwarding_failure_at_unix_ms
+            .is_some_and(|failure| {
+                usage
+                    .last_forwarded_at_unix_ms
+                    .is_none_or(|success| failure > success)
+            });
         if !listener_bound || listen_addr.is_none() {
             issues.push(RelayHealthIssue::ListenerUnavailable);
         }
-        if !network_reachable {
-            issues.push(RelayHealthIssue::NetworkUnreachable);
+        match network_reachability {
+            RelayReachabilityState::Unknown => {
+                issues.push(RelayHealthIssue::NetworkReachabilityUnknown)
+            }
+            RelayReachabilityState::Unreachable => {
+                issues.push(RelayHealthIssue::NetworkUnreachable)
+            }
+            RelayReachabilityState::Reachable => {}
+        }
+        if listener_bound && !forwarding_is_fresh {
+            issues.push(RelayHealthIssue::ForwardingNotObserved);
+        }
+        if forwarding_stalled {
+            issues.push(RelayHealthIssue::ForwardingStalled);
         }
         if !authorization_valid {
             issues.push(RelayHealthIssue::AuthorizationExpired);
@@ -254,6 +322,16 @@ impl RelayHealthSnapshot {
         let quota_limited = usage.quota_limited(&limits);
         if quota_limited {
             issues.push(RelayHealthIssue::QuotaExhausted);
+        }
+        if limits.max_cpu_percent.is_some()
+            && usage.cpu_measurement == RelayMeasurementState::Unsupported
+        {
+            issues.push(RelayHealthIssue::CpuMeasurementUnsupported);
+        }
+        if limits.max_memory_bytes.is_some()
+            && usage.memory_measurement == RelayMeasurementState::Unsupported
+        {
+            issues.push(RelayHealthIssue::MemoryMeasurementUnsupported);
         }
         if limits
             .max_connections
@@ -269,10 +347,19 @@ impl RelayHealthSnapshot {
 
         let status = match lifecycle {
             RelayLifecycleState::Running => {
-                if !listener_bound || !network_reachable || !authorization_valid {
+                if !listener_bound
+                    || network_reachability == RelayReachabilityState::Unreachable
+                    || !authorization_valid
+                {
                     RelayHealthStatus::Unavailable
                 } else if quota_limited {
                     RelayHealthStatus::QuotaExhausted
+                } else if forwarding_stalled {
+                    RelayHealthStatus::Degraded
+                } else if network_reachability == RelayReachabilityState::Unknown
+                    || !forwarding_is_fresh
+                {
+                    RelayHealthStatus::Unknown
                 } else if !issues.is_empty() {
                     RelayHealthStatus::Degraded
                 } else {
@@ -292,11 +379,12 @@ impl RelayHealthSnapshot {
             lifecycle,
             listen_addr: listener_bound.then_some(listen_addr).flatten(),
             listener_bound,
-            network_reachable,
-            forwarding_observed,
+            network_reachability,
+            forwarding_observed: forwarding_is_fresh,
             authorization_valid,
             quota_limited,
             limits,
+            limit_sources,
             usage,
             issues,
             observed_at_unix_ms,
@@ -1414,10 +1502,11 @@ mod tests {
             RelayLifecycleState::Running,
             Some("[::1]:4433".parse().unwrap()),
             true,
-            true,
+            RelayReachabilityState::Reachable,
             true,
             true,
             limits,
+            vec![RelayLimitSource::NetworkAcl],
             usage,
             now(),
             None,
@@ -1429,15 +1518,159 @@ mod tests {
             RelayLifecycleState::Failed,
             None,
             false,
-            false,
+            RelayReachabilityState::Unknown,
             false,
             true,
             RelayLimitPolicy::default(),
+            Vec::new(),
             RelayUsageSnapshot::default(),
             now(),
             Some("relay.bind.address_in_use".into()),
         );
         assert_eq!(failed.status, RelayHealthStatus::Unavailable);
+    }
+
+    #[test]
+    fn bound_listener_alone_is_not_healthy() {
+        let health = RelayHealthSnapshot::observe(
+            RelayLifecycleState::Running,
+            Some("[::1]:4433".parse().unwrap()),
+            true,
+            RelayReachabilityState::Unknown,
+            false,
+            true,
+            RelayLimitPolicy::default(),
+            Vec::new(),
+            RelayUsageSnapshot::default(),
+            100_000,
+            None,
+        );
+
+        assert_eq!(health.status, RelayHealthStatus::Unknown);
+        assert!(!health.forwarding_observed);
+        assert!(health
+            .issues
+            .contains(&RelayHealthIssue::NetworkReachabilityUnknown));
+        assert!(health
+            .issues
+            .contains(&RelayHealthIssue::ForwardingNotObserved));
+        assert_ne!(health.status, RelayHealthStatus::Healthy);
+    }
+
+    #[test]
+    fn fresh_forwarding_proves_health() {
+        let usage = RelayUsageSnapshot {
+            last_forwarded_at_unix_ms: Some(99_000),
+            cpu_measurement: RelayMeasurementState::Unsupported,
+            memory_measurement: RelayMeasurementState::Unsupported,
+            ..RelayUsageSnapshot::default()
+        };
+        let health = RelayHealthSnapshot::observe(
+            RelayLifecycleState::Running,
+            Some("[::1]:4433".parse().unwrap()),
+            true,
+            RelayReachabilityState::Reachable,
+            true,
+            true,
+            RelayLimitPolicy::default(),
+            Vec::new(),
+            usage,
+            100_000,
+            None,
+        );
+
+        assert_eq!(health.status, RelayHealthStatus::Healthy);
+        assert!(health.forwarding_observed);
+        assert!(!health
+            .issues
+            .contains(&RelayHealthIssue::ForwardingNotObserved));
+    }
+
+    #[test]
+    fn stale_forwarding_and_newer_failure_are_degraded() {
+        let fresh_limit = 100_000;
+        let stale = RelayUsageSnapshot {
+            last_forwarded_at_unix_ms: Some(fresh_limit - RELAY_FORWARDING_FRESHNESS_MS - 1),
+            ..RelayUsageSnapshot::default()
+        };
+        let health = RelayHealthSnapshot::observe(
+            RelayLifecycleState::Running,
+            Some("[::1]:4433".parse().unwrap()),
+            true,
+            RelayReachabilityState::Reachable,
+            true,
+            true,
+            RelayLimitPolicy::default(),
+            Vec::new(),
+            stale,
+            fresh_limit,
+            None,
+        );
+        assert_eq!(health.status, RelayHealthStatus::Unknown);
+        assert!(health
+            .issues
+            .contains(&RelayHealthIssue::ForwardingNotObserved));
+
+        let stalled = RelayUsageSnapshot {
+            last_forwarded_at_unix_ms: Some(99_000),
+            last_forwarding_failure_at_unix_ms: Some(99_500),
+            ..RelayUsageSnapshot::default()
+        };
+        let health = RelayHealthSnapshot::observe(
+            RelayLifecycleState::Running,
+            Some("[::1]:4433".parse().unwrap()),
+            true,
+            RelayReachabilityState::Reachable,
+            true,
+            true,
+            RelayLimitPolicy::default(),
+            Vec::new(),
+            stalled,
+            100_000,
+            None,
+        );
+        assert_eq!(health.status, RelayHealthStatus::Degraded);
+        assert!(health.forwarding_observed);
+        assert!(health.issues.contains(&RelayHealthIssue::ForwardingStalled));
+    }
+
+    #[test]
+    fn unmeasurable_resource_limits_are_explicitly_unsupported() {
+        let limits = RelayLimitPolicy {
+            max_cpu_percent: Some(80),
+            max_memory_bytes: Some(1024),
+            ..RelayLimitPolicy::default()
+        };
+        let usage = RelayUsageSnapshot {
+            last_forwarded_at_unix_ms: Some(99_000),
+            cpu_measurement: RelayMeasurementState::Unsupported,
+            memory_measurement: RelayMeasurementState::Unsupported,
+            ..RelayUsageSnapshot::default()
+        };
+        let health = RelayHealthSnapshot::observe(
+            RelayLifecycleState::Running,
+            Some("[::1]:4433".parse().unwrap()),
+            true,
+            RelayReachabilityState::Reachable,
+            true,
+            true,
+            limits,
+            vec![
+                RelayLimitSource::NetworkAcl,
+                RelayLimitSource::ProviderDefault,
+            ],
+            usage,
+            100_000,
+            None,
+        );
+
+        assert_eq!(health.status, RelayHealthStatus::Degraded);
+        assert!(health
+            .issues
+            .contains(&RelayHealthIssue::CpuMeasurementUnsupported));
+        assert!(health
+            .issues
+            .contains(&RelayHealthIssue::MemoryMeasurementUnsupported));
     }
 
     #[test]

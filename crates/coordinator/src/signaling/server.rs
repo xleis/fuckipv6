@@ -2714,11 +2714,13 @@ mod tests {
             addr: "127.0.0.1:41000".parse().expect("first relay address"),
             server_name: "fuckipv6.local".into(),
             public_key_pin: [1; 32],
+            provider_node_id: Some(NodeId::from_public_key(b"first-relay-provider")),
         };
         let second = RelayEndpoint {
             addr: "127.0.0.1:41001".parse().expect("second relay address"),
             server_name: "fuckipv6.local".into(),
             public_key_pin: [2; 32],
+            provider_node_id: Some(NodeId::from_public_key(b"second-relay-provider")),
         };
 
         directory.set_primary(Some(first.clone()));
@@ -2734,6 +2736,7 @@ mod tests {
             addr: "127.0.0.1:41002".parse().expect("secondary relay address"),
             server_name: "fuckipv6.local".into(),
             public_key_pin: [3; 32],
+            provider_node_id: Some(NodeId::from_public_key(b"secondary-relay-provider")),
         };
         directory.set_additional(vec![second.clone(), secondary]);
         let (primary, additional) = directory.snapshot();

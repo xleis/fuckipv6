@@ -46,6 +46,7 @@ pub struct EmbeddedCoordinator {
     relay_bind_port: u16,
     external_host: Option<String>,
     relay_policy_authority: Arc<DurableRelayPolicyAuthority>,
+    relay_provider_node_id: NodeId,
 }
 
 impl EmbeddedCoordinator {
@@ -134,7 +135,8 @@ impl EmbeddedCoordinator {
         let node_identity = config_manager
             .load_node_identity()
             .context("无法加载内嵌协调器 owner 身份")?;
-        let owner_node_id = NodeId::from_public_key(&node_identity.public_key()).to_string();
+        let provider_node_id = NodeId::from_public_key(&node_identity.public_key());
+        let owner_node_id = provider_node_id.to_string();
         let mut default_coordinator_config = if blacklist_path.exists() {
             CoordinatorConfig::from_file(&blacklist_path).context("无法加载内嵌协调端持久配置")?
         } else {
@@ -278,6 +280,7 @@ impl EmbeddedCoordinator {
             relay_bind_port: request.relay_port,
             external_host: request.external_host.clone(),
             relay_policy_authority,
+            relay_provider_node_id: provider_node_id,
         };
 
         if request.relay_enabled {
@@ -329,6 +332,7 @@ impl EmbeddedCoordinator {
             addr: advertised_relay_addr,
             server_name: "fuckipv6.local".to_string(),
             public_key_pin: relay_pin,
+            provider_node_id: Some(self.relay_provider_node_id.clone()),
         };
 
         let run_server = relay_server.clone();

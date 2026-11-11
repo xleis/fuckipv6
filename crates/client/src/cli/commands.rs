@@ -95,6 +95,8 @@ const EXIT_CONTRIBUTION_MEMBER_REFRESH_INTERVAL: Duration = Duration::from_secs(
 const EXIT_CONTRIBUTION_DIRECTORY_QUEUE_CAPACITY: usize = 4;
 const EXIT_AVAILABILITY_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 const RELAY_MEMBER_GRANT_TTL: Duration = Duration::from_secs(15 * 60);
+const RELAY_MEMBER_GRANT_RENEW_AHEAD: Duration = Duration::from_secs(5 * 60);
+const RELAY_AUTHORIZATION_UPDATE_TIMEOUT: Duration = Duration::from_secs(5);
 const EXIT_CONNECTION_WATCHDOG_INTERVAL: Duration = Duration::from_millis(250);
 #[cfg(target_os = "linux")]
 const EXIT_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
@@ -599,6 +601,7 @@ pub(crate) struct ClientRuntime {
     pub(crate) ipc_task: Option<JoinHandle<()>>,
     pub(crate) config_reload_task: Option<JoinHandle<()>>,
     pub(crate) relay_reconnect_task: Option<JoinHandle<()>>,
+    pub(crate) relay_grant_renewal_task: Option<JoinHandle<()>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -1299,6 +1302,7 @@ impl Drop for ClientRuntime {
         abort_task(&self.config_reload_task);
         self.tun_io.abort_reader();
         abort_task(&self.relay_reconnect_task);
+        abort_task(&self.relay_grant_renewal_task);
         abort_task(&self.exit_contribution_member_refresh_task);
         self.recovery_events.shutdown();
     }
@@ -1675,6 +1679,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         ipc_task: Some(tasks.ipc_task),
         config_reload_task: Some(tasks.config_reload_task),
         relay_reconnect_task: None,
+        relay_grant_renewal_task: None,
     })
 }
 
@@ -2166,6 +2171,26 @@ fn relay_grant_for_endpoint<'a>(
     let consumer_node_id = NodeId::from_public_key(&identity.public_key());
     grants.iter().find(|grant| {
         &grant.provider_node_id == provider_node_id && grant.consumer_node_id == consumer_node_id
+    })
+}
+
+fn relay_grant_renewal_due(expires_at_unix_ms: u64, now_unix_ms: u64) -> bool {
+    let renew_ahead_ms =
+        u64::try_from(RELAY_MEMBER_GRANT_RENEW_AHEAD.as_millis()).unwrap_or(u64::MAX);
+    now_unix_ms.saturating_add(renew_ahead_ms) >= expires_at_unix_ms
+}
+
+fn renewed_relay_grant<'a>(
+    grants: &'a [RelayMemberGrant],
+    current: &RelayMemberGrant,
+) -> Option<&'a RelayMemberGrant> {
+    grants.iter().find(|grant| {
+        grant.network_id == current.network_id
+            && grant.provider_node_id == current.provider_node_id
+            && grant.consumer_node_id == current.consumer_node_id
+            && grant.issued_at_unix_ms >= current.issued_at_unix_ms
+            && grant.expires_at_unix_ms > current.expires_at_unix_ms
+            && grant.nonce != current.nonce
     })
 }
 
@@ -2894,6 +2919,13 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                     runtime.relay_reconnect_task.take();
                     runtime.outbound.finish_relay_reconnect();
                 }
+                if runtime
+                    .relay_grant_renewal_task
+                    .as_ref()
+                    .is_some_and(JoinHandle::is_finished)
+                {
+                    runtime.relay_grant_renewal_task.take();
+                }
                 if runtime.signaling.send_heartbeat().is_ok() {
                     runtime.stats.record_signaling_sent().await;
                 }
@@ -2905,6 +2937,19 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                     #[cfg(target_os = "linux")]
                     {
                         runtime.relay_recovery_path = PathRecoveryState::Connected;
+                    }
+                }
+                if let Some(relay) = runtime.outbound.relay_handle().await {
+                    let current = relay.client.current_member_grant().await;
+                    let renewal_idle = runtime
+                        .relay_grant_renewal_task
+                        .as_ref()
+                        .is_none_or(JoinHandle::is_finished);
+                    if renewal_idle
+                        && relay_grant_renewal_due(current.expires_at_unix_ms, unix_time_ms())
+                    {
+                        runtime.relay_grant_renewal_task =
+                            Some(spawn_relay_grant_renewal(runtime));
                     }
                 }
             }
@@ -4580,19 +4625,21 @@ async fn shutdown_runtime(runtime: &mut ClientRuntime) -> RuntimeCleanupOutcome 
     runtime.recovery_events.shutdown();
 
     // TUN reader owns a device handle and must be joined before delete(). The
-    // config watcher, private IPC listener and relay reconnect are stopped
-    // under one shared deadline. A task that cannot be joined remains in its
-    // owning Option so a later cleanup retry can still observe it.
-    let (ipc, config_reload, tun_reader, relay_reconnect) = tokio::join!(
+    // config watcher, private IPC listener, relay reconnect and grant renewal
+    // are stopped under one shared deadline. A task that cannot be joined
+    // remains in its owning Option so a later cleanup retry can still observe it.
+    let (ipc, config_reload, tun_reader, relay_reconnect, relay_grant_renewal) = tokio::join!(
         stop_runtime_task(&mut runtime.ipc_task, task_deadline),
         stop_runtime_task(&mut runtime.config_reload_task, task_deadline),
         runtime.tun_io.stop_reader_within(task_deadline),
         stop_runtime_task(&mut runtime.relay_reconnect_task, task_deadline),
+        stop_runtime_task(&mut runtime.relay_grant_renewal_task, task_deadline),
     );
     outcome.record("控制监听任务", ipc);
     outcome.record("配置监听任务", config_reload);
     outcome.record("TUN 读取任务", tun_reader);
     outcome.record("中继重连任务", relay_reconnect);
+    outcome.record("中继授权续签任务", relay_grant_renewal);
 
     let signaling = match phase_timeout(deadline, TASK_STOP_TIMEOUT) {
         Some(timeout) => match runtime.signaling.close_bounded(timeout).await {
@@ -5706,6 +5753,118 @@ fn spawn_relay_reconnect(runtime: &ClientRuntime) -> JoinHandle<()> {
             }
         }
         outbound.finish_relay_reconnect();
+    })
+}
+
+fn spawn_relay_grant_renewal(runtime: &ClientRuntime) -> JoinHandle<()> {
+    let signaling = runtime.signaling.clone();
+    let identity = runtime.identity.clone();
+    let outbound = runtime.outbound.clone();
+    let network_id = runtime.network_id.clone();
+    let node_state = runtime.node_state.clone();
+
+    tokio::spawn(async move {
+        let Some(relay) = outbound.relay_handle().await else {
+            return;
+        };
+        let generation = relay.generation;
+        let current = relay.client.current_member_grant().await;
+
+        let snapshot = match node_state.as_ref() {
+            Some(state) => Some(state.snapshot().await),
+            None => None,
+        };
+        let Some(network_id) = network_id.as_ref() else {
+            tracing::warn!(
+                diagnostic_id = "relay.grant.renewal_context_missing",
+                "缺少网络上下文，无法续签 Relay 使用授权"
+            );
+            if outbound
+                .clear_relay_with_recovery(generation)
+                .await
+                .is_some()
+            {
+                relay.client.close().await;
+            }
+            return;
+        };
+        let Some(snapshot) = snapshot.as_ref() else {
+            tracing::warn!(
+                diagnostic_id = "relay.grant.renewal_context_missing",
+                "缺少可信节点状态，无法续签 Relay 使用授权"
+            );
+            if outbound
+                .clear_relay_with_recovery(generation)
+                .await
+                .is_some()
+            {
+                relay.client.close().await;
+            }
+            return;
+        };
+
+        let endpoints = signaling.relay_endpoints().await;
+        let grants =
+            issue_relay_member_grants(&endpoints, &identity, network_id, snapshot, unix_time_ms());
+        let Some(renewed) = renewed_relay_grant(&grants, &current).cloned() else {
+            tracing::warn!(
+                diagnostic_id = "relay.grant.renewal_denied",
+                provider_node_id = %current.provider_node_id,
+                "没有取得延长有效期的 Relay 使用授权，移除当前失效连接"
+            );
+            if outbound
+                .clear_relay_with_recovery(generation)
+                .await
+                .is_some()
+            {
+                relay.client.close().await;
+            }
+            return;
+        };
+
+        match tokio::time::timeout(
+            RELAY_AUTHORIZATION_UPDATE_TIMEOUT,
+            relay.client.update_authorization(&identity, &renewed),
+        )
+        .await
+        {
+            Ok(Ok(())) => tracing::info!(
+                diagnostic_id = "relay.grant.renewed",
+                provider_node_id = %renewed.provider_node_id,
+                expires_at_unix_ms = renewed.expires_at_unix_ms,
+                "Relay 使用授权已在现有连接上续签"
+            ),
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    diagnostic_id = "relay.grant.renewal_failed",
+                    provider_node_id = %renewed.provider_node_id,
+                    error = %error,
+                    "Relay 使用授权续签被拒绝，移除当前连接并等待自愈重连"
+                );
+                if outbound
+                    .clear_relay_with_recovery(generation)
+                    .await
+                    .is_some()
+                {
+                    relay.client.close().await;
+                }
+            }
+            Err(_) => {
+                tracing::warn!(
+                    diagnostic_id = "relay.grant.renewal_timeout",
+                    provider_node_id = %renewed.provider_node_id,
+                    timeout = ?RELAY_AUTHORIZATION_UPDATE_TIMEOUT,
+                    "Relay 使用授权续签超时，移除当前连接并等待自愈重连"
+                );
+                if outbound
+                    .clear_relay_with_recovery(generation)
+                    .await
+                    .is_some()
+                {
+                    relay.client.close().await;
+                }
+            }
+        }
     })
 }
 
@@ -7768,6 +7927,66 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::sync::Notify;
+
+    #[test]
+    fn relay_grant_renews_only_inside_the_ahead_window() {
+        let now = 1_700_000_000_000;
+        let renew_ahead_ms =
+            u64::try_from(RELAY_MEMBER_GRANT_RENEW_AHEAD.as_millis()).unwrap_or(u64::MAX);
+        assert!(!relay_grant_renewal_due(now + renew_ahead_ms + 1, now));
+        assert!(relay_grant_renewal_due(now + renew_ahead_ms, now));
+        assert!(relay_grant_renewal_due(now.saturating_sub(1), now));
+    }
+
+    #[test]
+    fn renewed_relay_grant_must_extend_the_same_binding() {
+        let identity = Identity::generate().expect("identity");
+        let consumer = NodeId::from_public_key(&identity.public_key());
+        let network = NetworkId::from_public_key(b"renewal-network");
+        let provider = NodeId::from_public_key(b"renewal-provider");
+        let other_provider = NodeId::from_public_key(b"other-provider");
+        let current = RelayMemberGrant::new(
+            network.clone(),
+            provider.clone(),
+            &identity,
+            "current",
+            1,
+            1_000,
+            2_000,
+            RelayLimitPolicy::default(),
+        )
+        .expect("current grant");
+        let renewed = RelayMemberGrant::new(
+            network,
+            provider,
+            &identity,
+            "renewed",
+            2,
+            2_000,
+            3_000,
+            RelayLimitPolicy::default(),
+        )
+        .expect("renewed grant");
+        let other_provider_grant = RelayMemberGrant::new(
+            NetworkId::from_public_key(b"renewal-network"),
+            other_provider,
+            &identity,
+            "other-provider",
+            2,
+            2_000,
+            3_000,
+            RelayLimitPolicy::default(),
+        )
+        .expect("other provider grant");
+
+        assert_eq!(
+            renewed_relay_grant(&[renewed.clone()], &current),
+            Some(&renewed)
+        );
+        assert!(renewed_relay_grant(&[current.clone()], &current).is_none());
+        assert!(renewed_relay_grant(&[other_provider_grant], &current).is_none());
+        assert_eq!(renewed.consumer_node_id, consumer);
+    }
 
     struct RecordingTransport {
         completed_tx: mpsc::UnboundedSender<(IpAddr, Vec<u8>)>,

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use fuckipv6_common::domain::{NetworkRecord, NodeId};
+use fuckipv6_common::domain::{NetworkRecord, NodeId, RelayHealthSnapshot};
 use fuckipv6_common::{
     CoordinatorConfig, Identity, NetworkAllocation, NetworkTicket, RelayEndpoint,
 };
@@ -308,6 +308,16 @@ impl EmbeddedCoordinator {
 
     pub fn relay_addr(&self) -> Option<SocketAddr> {
         self.relay_addr
+    }
+
+    /// Return the Relay server's authoritative health projection. A disabled
+    /// Relay has no health snapshot; callers must not infer health from the
+    /// advertised address or the owner's enable intent.
+    pub async fn relay_health(&self) -> Option<RelayHealthSnapshot> {
+        match self.relay_server.as_ref() {
+            Some(server) => Some(server.health_snapshot().await),
+            None => None,
+        }
     }
 
     /// Start the local Relay independently of signaling and other node

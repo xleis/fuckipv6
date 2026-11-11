@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
+use fuckipv6_common::domain::RelayHealthSnapshot;
 use tokio::sync::{mpsc, oneshot};
 
 use super::EmbeddedCoordinator;
@@ -110,6 +111,7 @@ pub struct EmbeddedServiceSnapshot {
     pub ticket: String,
     pub signaling_addr: SocketAddr,
     pub relay_addr: Option<SocketAddr>,
+    pub relay_health: Option<RelayHealthSnapshot>,
 }
 
 impl From<&EmbeddedCoordinator> for EmbeddedServiceSnapshot {
@@ -119,6 +121,7 @@ impl From<&EmbeddedCoordinator> for EmbeddedServiceSnapshot {
             ticket: coordinator.ticket.to_string(),
             signaling_addr: coordinator.signaling_addr,
             relay_addr: coordinator.relay_addr,
+            relay_health: None,
         }
     }
 }
@@ -176,6 +179,10 @@ enum EmbeddedServiceCommand {
     },
     List {
         reply: oneshot::Sender<Vec<EmbeddedServiceSnapshot>>,
+    },
+    GetRelayStatus {
+        network_name: String,
+        reply: oneshot::Sender<Result<Option<RelayHealthSnapshot>, EmbeddedServiceError>>,
     },
     GetBlacklist {
         network_name: String,
@@ -250,7 +257,7 @@ impl EmbeddedServiceManager {
                         reply,
                     } => {
                         let result = if let Some(mut coordinator) = services.remove(&network_name) {
-                            let snapshot = EmbeddedServiceSnapshot::from(&coordinator);
+                            let snapshot = embedded_service_snapshot(&coordinator).await;
                             match coordinator.shutdown().await {
                                 Ok(()) => Ok(snapshot),
                                 Err(error) => Err(EmbeddedServiceError::StopFailed {
@@ -269,7 +276,7 @@ impl EmbeddedServiceManager {
                     } => {
                         let result = match services.get_mut(&network_name) {
                             Some(coordinator) => match coordinator.enable_relay().await {
-                                Ok(_) => Ok(EmbeddedServiceSnapshot::from(&*coordinator)),
+                                Ok(_) => Ok(embedded_service_snapshot(coordinator).await),
                                 Err(error) => Err(EmbeddedServiceError::OperationFailed {
                                     network_name: network_name.clone(),
                                     message: format!("启用 Relay 失败: {error:#}"),
@@ -285,7 +292,7 @@ impl EmbeddedServiceManager {
                     } => {
                         let result = match services.get_mut(&network_name) {
                             Some(coordinator) => match coordinator.disable_relay().await {
-                                Ok(()) => Ok(EmbeddedServiceSnapshot::from(&*coordinator)),
+                                Ok(()) => Ok(embedded_service_snapshot(coordinator).await),
                                 Err(error) => Err(EmbeddedServiceError::OperationFailed {
                                     network_name: network_name.clone(),
                                     message: format!("停用 Relay 失败: {error:#}"),
@@ -296,12 +303,22 @@ impl EmbeddedServiceManager {
                         let _ = reply.send(result);
                     }
                     EmbeddedServiceCommand::List { reply } => {
-                        let mut snapshots: Vec<_> = services
-                            .values()
-                            .map(EmbeddedServiceSnapshot::from)
-                            .collect();
+                        let mut snapshots = Vec::with_capacity(services.len());
+                        for coordinator in services.values() {
+                            snapshots.push(embedded_service_snapshot(coordinator).await);
+                        }
                         snapshots.sort_by(|a, b| a.network_name.cmp(&b.network_name));
                         let _ = reply.send(snapshots);
+                    }
+                    EmbeddedServiceCommand::GetRelayStatus {
+                        network_name,
+                        reply,
+                    } => {
+                        let result = match services.get(&network_name) {
+                            Some(coordinator) => Ok(coordinator.relay_health().await),
+                            None => Err(EmbeddedServiceError::NotFound(network_name)),
+                        };
+                        let _ = reply.send(result);
                     }
                     EmbeddedServiceCommand::GetBlacklist {
                         network_name,
@@ -520,6 +537,23 @@ impl EmbeddedServiceManager {
             .map_err(|_| EmbeddedServiceError::ActorClosed)
     }
 
+    pub async fn get_relay_status(
+        &self,
+        network_name: impl Into<String>,
+    ) -> Result<Option<RelayHealthSnapshot>, EmbeddedServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(EmbeddedServiceCommand::GetRelayStatus {
+                network_name: network_name.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?;
+        response
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?
+    }
+
     pub async fn get_blacklist(
         &self,
         network_name: impl Into<String>,
@@ -652,9 +686,15 @@ async fn start_service(
             message: format!("{error:#}"),
         })?;
 
-    let snapshot = EmbeddedServiceSnapshot::from(&coordinator);
+    let snapshot = embedded_service_snapshot(&coordinator).await;
     services.insert(request.network_name, coordinator);
     Ok(snapshot)
+}
+
+async fn embedded_service_snapshot(coordinator: &EmbeddedCoordinator) -> EmbeddedServiceSnapshot {
+    let mut snapshot = EmbeddedServiceSnapshot::from(coordinator);
+    snapshot.relay_health = coordinator.relay_health().await;
+    snapshot
 }
 
 #[cfg(test)]
@@ -889,6 +929,12 @@ mod tests {
             .expect("start service with relay disabled");
         let signaling_addr = started.signaling_addr;
         assert!(started.relay_addr.is_none(), "owner disabled startup relay");
+        assert!(started.relay_health.is_none());
+        assert!(manager
+            .get_relay_status("relay-lifecycle")
+            .await
+            .expect("read disabled relay status")
+            .is_none());
 
         let enabled = manager
             .enable_relay("relay-lifecycle")
@@ -896,6 +942,26 @@ mod tests {
             .expect("enable relay independently");
         let relay_addr = enabled.relay_addr.expect("relay address after enable");
         assert_eq!(enabled.signaling_addr, signaling_addr);
+        let health = enabled.relay_health.expect("enabled relay health");
+        assert_ne!(
+            health.status,
+            fuckipv6_common::domain::RelayHealthStatus::Healthy,
+            "binding a listener is not evidence that forwarding works"
+        );
+        assert!(health.listener_bound);
+        assert_eq!(
+            health.network_reachability,
+            fuckipv6_common::domain::RelayReachabilityState::Unknown
+        );
+        let current = manager
+            .get_relay_status("relay-lifecycle")
+            .await
+            .expect("read enabled relay status")
+            .expect("authoritative enabled relay status");
+        assert_eq!(current.lifecycle, health.lifecycle);
+        assert_eq!(current.listen_addr, health.listen_addr);
+        assert_eq!(current.status, health.status);
+        assert_eq!(current.network_reachability, health.network_reachability);
 
         let disabled = manager
             .disable_relay("relay-lifecycle")
@@ -903,6 +969,12 @@ mod tests {
             .expect("disable relay independently");
         assert_eq!(disabled.signaling_addr, signaling_addr);
         assert!(disabled.relay_addr.is_none());
+        assert!(disabled.relay_health.is_none());
+        assert!(manager
+            .get_relay_status("relay-lifecycle")
+            .await
+            .expect("read disabled relay status")
+            .is_none());
         assert_eq!(
             manager.list().await.expect("list services").len(),
             1,

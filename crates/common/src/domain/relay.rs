@@ -224,6 +224,7 @@ pub struct RelayHealthSnapshot {
 
 impl RelayHealthSnapshot {
     /// Build a health snapshot and derive the status from observable evidence.
+    #[allow(clippy::too_many_arguments)]
     pub fn observe(
         lifecycle: RelayLifecycleState,
         listen_addr: Option<SocketAddr>,

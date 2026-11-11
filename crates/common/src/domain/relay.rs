@@ -1383,13 +1383,20 @@ mod tests {
             client_certificate_public_key_pin: [2; 32],
             tls_channel_binding: [3; 32],
             signature: vec![4; 64],
-            member_grant: Some(Box::new(grant)),
+            member_grant: Some(Box::new(grant.clone())),
         };
 
         let encoded = crate::codec::encode(&message)?;
         let decoded: crate::RelayMessage = crate::codec::decode(&encoded)?;
 
         assert_eq!(decoded, message);
+
+        let update = crate::RelayMessage::UpdateAuthorization {
+            member_grant: Box::new(grant),
+        };
+        let encoded = crate::codec::encode(&update)?;
+        let decoded: crate::RelayMessage = crate::codec::decode(&encoded)?;
+        assert_eq!(decoded, update);
         Ok(())
     }
 

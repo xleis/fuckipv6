@@ -731,6 +731,16 @@ pub enum RelayMessage {
         code: u16,
         message: String,
     },
+    /// Replace the signed authorization on an already authenticated Relay
+    /// connection. The update is bound to the same consumer, network, provider
+    /// and QUIC connection as the original registration.
+    UpdateAuthorization {
+        member_grant: Box<RelayMemberGrant>,
+    },
+    AuthorizationAck {
+        accepted: bool,
+        message: String,
+    },
 }
 
 impl RelayMessage {

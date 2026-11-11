@@ -14,12 +14,14 @@ use crate::quic::{
 };
 
 const RELAY_REGISTER_STREAM_ID: u64 = 0;
+const RELAY_AUTHORIZATION_STREAM_ID: u64 = 1;
 
 #[derive(Clone)]
 pub struct QuicRelayClient {
     endpoint: quinn::Endpoint,
     connection: quinn::Connection,
     incoming_rx: Arc<RwLock<mpsc::UnboundedReceiver<RelayPacket>>>,
+    member_grant: Arc<RwLock<RelayMemberGrant>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,7 +104,67 @@ impl QuicRelayClient {
             endpoint,
             connection,
             incoming_rx: Arc::new(RwLock::new(incoming_rx)),
+            member_grant: Arc::new(RwLock::new(member_grant.clone())),
         })
+    }
+
+    /// Return the signed grant currently accepted by the Relay.
+    pub async fn current_member_grant(&self) -> RelayMemberGrant {
+        self.member_grant.read().await.clone()
+    }
+
+    /// Replace the signed authorization on the live connection before the
+    /// current grant expires. A rejected update leaves both the local copy and
+    /// the Relay registration unchanged.
+    pub async fn update_authorization(
+        &self,
+        identity: &Identity,
+        member_grant: &RelayMemberGrant,
+    ) -> Result<()> {
+        validate_member_grant(identity, member_grant)?;
+        let current = self.member_grant.read().await.clone();
+        member_grant
+            .validate_binding(
+                &current.network_id,
+                &current.provider_node_id,
+                &current.consumer_node_id,
+                now_unix_ms(),
+            )
+            .map_err(anyhow::Error::new)?;
+        if member_grant.issued_at_unix_ms < current.issued_at_unix_ms
+            || member_grant.expires_at_unix_ms <= current.expires_at_unix_ms
+            || member_grant.nonce == current.nonce
+        {
+            anyhow::bail!("Relay 授权更新没有延长有效期或复用了 nonce");
+        }
+
+        let update = RelayMessage::UpdateAuthorization {
+            member_grant: Box::new(member_grant.clone()),
+        };
+        let (mut send, mut recv) = self
+            .connection
+            .open_bi()
+            .await
+            .context("无法打开 QUIC relay 授权更新流")?;
+        send_relay_message(&mut send, RELAY_AUTHORIZATION_STREAM_ID, &update)
+            .await
+            .context("无法发送 QUIC relay 授权更新")?;
+        let (_, response) = recv_relay_message(&mut recv)
+            .await
+            .context("无法读取 QUIC relay 授权更新响应")?;
+        match response {
+            RelayMessage::AuthorizationAck { accepted: true, .. } => {
+                *self.member_grant.write().await = member_grant.clone();
+                Ok(())
+            }
+            RelayMessage::AuthorizationAck { message, .. } => {
+                anyhow::bail!("QUIC relay 授权更新被拒绝: {message}")
+            }
+            RelayMessage::Error { code, message } => {
+                anyhow::bail!("QUIC relay 授权更新失败: {code} {message}")
+            }
+            other => anyhow::bail!("QUIC relay 授权更新返回了非预期响应: {:?}", other),
+        }
     }
 
     /// 从多个候选 QUIC 中继节点中并发探测并选择延迟最低的最佳中继

@@ -22,6 +22,7 @@ use crate::signaling::session::SessionManager;
 
 const RELAY_HARD_BANDWIDTH_LIMIT_BPS: u64 = 1_000_000_000;
 const RELAY_REGISTER_STREAM_ID: u64 = 0;
+const RELAY_AUTHORIZATION_STREAM_ID: u64 = 1;
 const MAX_RELAY_CONNECTION_TASKS: usize = 512;
 const MAX_RELAY_STREAM_TASKS: usize = 4096;
 
@@ -104,6 +105,14 @@ struct RelayPacketRequest {
     src_ip: Ipv6Addr,
     dst_ip: Ipv6Addr,
     payload: Bytes,
+}
+
+enum RelayStreamRequest {
+    Packet(RelayPacketRequest),
+    UpdateAuthorization {
+        stream_id: u64,
+        member_grant: Box<RelayMemberGrant>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -713,7 +722,7 @@ impl RelayServer {
             let _permit = permit;
             let _drain = drain;
             if let Err(err) = server
-                .handle_packet_stream(&registered, connection_id, send, recv)
+                .handle_incoming_stream(&registered, connection_id, send, recv)
                 .await
             {
                 tracing::warn!("QUIC 中继数据流处理失败: {err:#}");
@@ -947,18 +956,45 @@ impl RelayServer {
         Ok(())
     }
 
-    async fn handle_packet_stream(
+    async fn handle_incoming_stream(
         &self,
         registered: &RegisteredRelayClient,
         src_connection_id: usize,
         mut send: quinn::SendStream,
         mut recv: quinn::RecvStream,
     ) -> Result<()> {
-        let request = match self.read_packet_request(&mut recv).await? {
+        let request = match self.read_stream_request(&mut recv).await? {
             Ok(request) => request,
             Err((stream_id, error)) => {
                 self.send_relay_error_response(&mut send, stream_id, error)
                     .await?;
+                return Ok(());
+            }
+        };
+        let request = match request {
+            RelayStreamRequest::Packet(request) => request,
+            RelayStreamRequest::UpdateAuthorization {
+                stream_id,
+                member_grant,
+            } => {
+                let ack = match self
+                    .apply_authorization_update(
+                        registered,
+                        src_connection_id,
+                        member_grant.as_ref(),
+                    )
+                    .await
+                {
+                    Ok(()) => RelayMessage::AuthorizationAck {
+                        accepted: true,
+                        message: "authorization updated".into(),
+                    },
+                    Err(error) => RelayMessage::AuthorizationAck {
+                        accepted: false,
+                        message: error.to_string(),
+                    },
+                };
+                send_relay_message(&mut send, stream_id, &ack).await?;
                 return Ok(());
             }
         };
@@ -1009,32 +1045,118 @@ impl RelayServer {
         Ok(())
     }
 
-    async fn read_packet_request(
+    async fn read_stream_request(
         &self,
         recv: &mut quinn::RecvStream,
-    ) -> Result<std::result::Result<RelayPacketRequest, (u64, RelayMessage)>> {
+    ) -> Result<std::result::Result<RelayStreamRequest, (u64, RelayMessage)>> {
         let (stream_id, message) = recv_relay_message(recv)
             .await
-            .context("无法读取 QUIC 中继数据包")?;
+            .context("无法读取 QUIC 中继数据流消息")?;
 
-        let RelayMessage::Packet {
-            src_ip,
-            dst_ip,
-            payload,
-        } = message
-        else {
-            return Ok(Err((
+        match message {
+            RelayMessage::Packet {
+                src_ip,
+                dst_ip,
+                payload,
+            } => Ok(Ok(RelayStreamRequest::Packet(RelayPacketRequest {
                 stream_id,
-                RelayMessage::error(ErrorCode::BadRequest, "expected Packet"),
-            )));
-        };
+                src_ip,
+                dst_ip,
+                payload,
+            }))),
+            RelayMessage::UpdateAuthorization { member_grant }
+                if stream_id == RELAY_AUTHORIZATION_STREAM_ID =>
+            {
+                Ok(Ok(RelayStreamRequest::UpdateAuthorization {
+                    stream_id,
+                    member_grant,
+                }))
+            }
+            RelayMessage::UpdateAuthorization { .. } => Ok(Err((
+                stream_id,
+                RelayMessage::error(
+                    ErrorCode::BadRequest,
+                    "authorization update used an unexpected stream id",
+                ),
+            ))),
+            _ => Ok(Err((
+                stream_id,
+                RelayMessage::error(
+                    ErrorCode::BadRequest,
+                    "expected Packet or authorization update",
+                ),
+            ))),
+        }
+    }
 
-        Ok(Ok(RelayPacketRequest {
-            stream_id,
-            src_ip,
-            dst_ip,
-            payload,
-        }))
+    async fn apply_authorization_update(
+        &self,
+        registered: &RegisteredRelayClient,
+        src_connection_id: usize,
+        member_grant: &RelayMemberGrant,
+    ) -> Result<()> {
+        if member_grant.consumer_node_id != registered.node_id {
+            anyhow::bail!("Relay 授权更新属于其他消费者节点");
+        }
+        let grant_public_key = member_grant
+            .consumer_public_key
+            .to_bytes()
+            .context("Relay 授权更新公钥无效")?;
+        if grant_public_key.as_slice() != registered.public_key.as_slice() {
+            anyhow::bail!("Relay 授权更新公钥与当前连接不一致");
+        }
+
+        let now = now_unix_ms();
+        let (policy, decision) = self
+            .policy_authority
+            .authorize_grant(member_grant, now)
+            .context("Relay 授权更新校验失败")?;
+        if !decision.allowed {
+            anyhow::bail!(
+                "Relay 授权更新未同时获得提供方和使用方授权: {}",
+                decision
+                    .final_reason
+                    .map(|reason| format!("{reason:?}"))
+                    .unwrap_or_else(|| "unknown".into())
+            );
+        }
+
+        let registration = self.state.registration_gate.lock().await;
+        if !self.state.listener_open.load(Ordering::Acquire) {
+            anyhow::bail!("Relay 已停止，拒绝授权更新");
+        }
+        {
+            let mut clients = self.state.clients.write().await;
+            let current = clients
+                .get_mut(&registered.virtual_ip)
+                .ok_or_else(|| anyhow::anyhow!("Relay 连接注册已失效"))?;
+            if current.connection_id != src_connection_id
+                || current.client_id != registered.client_id
+                || current.node_id != registered.node_id
+            {
+                anyhow::bail!("Relay 连接已被替换，拒绝旧连接更新授权");
+            }
+            if member_grant.issued_at_unix_ms < current.member_grant.issued_at_unix_ms
+                || member_grant.expires_at_unix_ms <= current.member_grant.expires_at_unix_ms
+                || member_grant.nonce == current.member_grant.nonce
+            {
+                anyhow::bail!("Relay 授权更新未延长有效期或复用了 nonce");
+            }
+            current.member_grant = member_grant.clone();
+            current.effective_limits = decision.limits.clone();
+            current.policy_revision = policy.revision;
+        }
+        drop(registration);
+
+        self.ensure_rate_buckets(&registered.node_id, &policy.limits, &decision.limits)
+            .await;
+        tracing::info!(
+            client_id = %registered.client_id,
+            revision = policy.revision,
+            expires_at_unix_ms = member_grant.expires_at_unix_ms,
+            "QUIC 中继授权已更新"
+        );
+        Ok(())
     }
 
     async fn ensure_packet_authorized(
@@ -2400,6 +2522,70 @@ mod tests {
 
         client_a.close().await;
         client_b.close().await;
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_renews_authorization_without_reconnecting() -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity = Identity::generate()?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let virtual_ip = session_manager
+            .register_client(
+                identity.client_id().to_string(),
+                identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?
+            .primary_ipv6();
+
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager,
+            relay_authority(&[&identity]),
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+        let client = connect_test_relay(relay_addr, server_pin, &identity, virtual_ip).await?;
+
+        let current = client.current_member_grant().await;
+        let renewed = RelayMemberGrant::new(
+            current.network_id.clone(),
+            current.provider_node_id.clone(),
+            &identity,
+            "renewed-grant-nonce",
+            current.revision + 1,
+            current.issued_at_unix_ms,
+            current.expires_at_unix_ms + 60_000,
+            current.limits.clone(),
+        )?;
+        client.update_authorization(&identity, &renewed).await?;
+
+        assert_eq!(client.current_member_grant().await, renewed);
+        let registered = server
+            .state
+            .clients
+            .read()
+            .await
+            .get(&virtual_ip)
+            .cloned()
+            .context("missing renewed relay registration")?;
+        assert_eq!(registered.member_grant, renewed);
+        assert_eq!(registered.policy_revision, 1);
+        assert!(
+            client
+                .update_authorization(&identity, &registered.member_grant)
+                .await
+                .is_err(),
+            "a replay with the same nonce and expiry must not replace the accepted grant"
+        );
+        assert_eq!(client.current_member_grant().await, registered.member_grant);
+
         server_task.abort();
         Ok(())
     }

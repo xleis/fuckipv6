@@ -94,7 +94,7 @@ def append_jsonl(path: pathlib.Path, value: Any) -> None:
         os.fsync(handle.fileno())
 
 
-def json_from_stdout(completed: subprocess.CompletedProcess[str]) -> Any:
+def json_from_stdout(completed: subprocess.CompletedProcess) -> Any:
     if completed.returncode != 0:
         raise RuntimeError(
             f"command failed ({completed.returncode}): {completed.stderr.strip()}"
@@ -112,7 +112,7 @@ def process_metrics(binary: str) -> Dict[str, Any]:
     result = {}  # type: Dict[str, Any]
     for role, pattern in patterns.items():
         completed = subprocess.run(
-            ["pgrep", "-f", pattern], capture_output=True, text=True, timeout=10
+            ["pgrep", "-f", pattern], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=10
         )
         pids = [int(line) for line in completed.stdout.splitlines() if line.strip()]
         if not pids:
@@ -163,8 +163,9 @@ def socket_metrics(node_pid: int) -> Dict[str, int]:
     for family, key in (("-t", "tcp"), ("-u", "udp")):
         completed = subprocess.run(
             ["ss", "-H", "-a", "-n", "-p", family],
-            capture_output=True,
-            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
             timeout=10,
         )
         for line in completed.stdout.splitlines():
@@ -182,14 +183,16 @@ def socket_metrics(node_pid: int) -> Dict[str, int]:
 def route_metrics(ips: List[str]) -> Dict[str, bool]:
     routes4 = subprocess.run(
         ["ip", "-4", "route", "show", "table", "all"],
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
         timeout=10,
     ).stdout
     routes6 = subprocess.run(
         ["ip", "-6", "route", "show", "table", "all"],
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
         timeout=10,
     ).stdout
     output = routes4 + routes6
@@ -218,8 +221,9 @@ def ping_target(name: str, address: str) -> Dict[str, Any]:
     started = time.monotonic()
     completed = subprocess.run(
         ["ping", family, "-n", "-c", "3", "-W", "2", "-i", "0.2", address],
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
         timeout=15,
     )
     output = completed.stdout + completed.stderr
@@ -264,14 +268,15 @@ def run_ssh(
     *,
     input_text: Optional[str] = None,
     timeout: int = 40,
-) -> subprocess.CompletedProcess[str]:
+) -> subprocess.CompletedProcess:
     environment = os.environ.copy()
     environment["SSHPASS"] = password
     return subprocess.run(
         ssh_command(host, command),
         input=input_text,
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
         timeout=timeout,
         env=environment,
     )
@@ -283,8 +288,9 @@ def run_as_root(
     return subprocess.run(
         ["sudo", "-n", *command],
         input=input_text,
-        capture_output=True,
-        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
         timeout=40,
     )
 

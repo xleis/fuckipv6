@@ -265,7 +265,13 @@ pub struct ContentHash(#[schemars(regex(pattern = "^hash_[A-Za-z0-9_-]{43}$"))] 
 
 impl ContentHash {
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        Self(format!("hash_{}", encode(blake3::hash(bytes).as_bytes())))
+        Self::from_digest_bytes(*blake3::hash(bytes).as_bytes())
+    }
+
+    /// Construct a content hash from an already-computed BLAKE3 digest. This
+    /// lets streaming adapters hash large files without buffering them in RAM.
+    pub fn from_digest_bytes(digest: [u8; HASH_BYTES]) -> Self {
+        Self(format!("hash_{}", encode(&digest)))
     }
 
     pub fn parse(value: impl Into<String>) -> DomainResult<Self> {
@@ -410,6 +416,13 @@ mod tests {
 
         let encoded = serde_json::to_string(&node).unwrap();
         assert_eq!(serde_json::from_str::<NodeId>(&encoded).unwrap(), node);
+
+        let bytes = b"streamed file";
+        let digest = *blake3::hash(bytes).as_bytes();
+        assert_eq!(
+            ContentHash::from_bytes(bytes),
+            ContentHash::from_digest_bytes(digest)
+        );
     }
 
     #[test]

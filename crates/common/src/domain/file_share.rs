@@ -968,6 +968,20 @@ impl TransferSession {
         assembled_bytes: &[u8],
         now_unix_ms: u64,
     ) -> Result<(), FileTransferError> {
+        let content_hash = ContentHash::from_bytes(assembled_bytes);
+        let assembled_bytes = u64::try_from(assembled_bytes.len()).unwrap_or(u64::MAX);
+        self.verify_and_complete_digest(assembled_bytes, &content_hash, now_unix_ms)
+    }
+
+    /// Verify completion from a streaming digest without requiring the adapter
+    /// to hold the entire object in memory. The same chunk, size and digest
+    /// checks as [`Self::verify_and_complete`] still apply.
+    pub fn verify_and_complete_digest(
+        &mut self,
+        assembled_bytes: u64,
+        content_hash: &ContentHash,
+        now_unix_ms: u64,
+    ) -> Result<(), FileTransferError> {
         if self.state != TransferState::Active {
             return Err(FileTransferError::InvalidState);
         }
@@ -975,8 +989,8 @@ impl TransferSession {
             return Err(FileTransferError::Incomplete);
         }
         self.state = TransferState::Verifying;
-        if u64::try_from(assembled_bytes.len()).unwrap_or(u64::MAX) != self.manifest.total_bytes
-            || ContentHash::from_bytes(assembled_bytes) != self.manifest.content_hash
+        if assembled_bytes != self.manifest.total_bytes
+            || content_hash != &self.manifest.content_hash
         {
             self.state = TransferState::Failed;
             self.revision = self.revision.saturating_add(1);

@@ -51,6 +51,8 @@ use crate::routing::exit_readiness::{
 #[cfg(target_os = "linux")]
 use crate::routing::linux_exit::LinuxExitForwarder;
 #[cfg(target_os = "linux")]
+use crate::routing::linux_peer_route::LinuxPeerRouteManager;
+#[cfg(target_os = "linux")]
 use crate::routing::linux_recovery::{
     probe_exit_readiness_target, LinuxRecoveryAdapter, LinuxRecoveryTun, RecoveryAuditContext,
 };
@@ -553,6 +555,8 @@ pub(crate) struct ClientRuntime {
     pub(crate) route_manager: LinuxRouteManager,
     #[cfg(target_os = "linux")]
     pub(crate) exit_forwarder: Option<LinuxExitForwarder>,
+    #[cfg(target_os = "linux")]
+    peer_route_manager: LinuxPeerRouteManager,
     #[cfg(target_os = "linux")]
     pub(crate) exit_drain_deadline: Option<Instant>,
     pub(crate) local_exit_runtime_problem: Option<NodeProblem>,
@@ -1444,7 +1448,7 @@ pub(crate) async fn prepare_client_runtime_ext(
     let exit_node_manager = ExitNodeManager::new(effective_exit_config);
     let configured_exit_node = config.routing.exit_node.clone();
     #[cfg(target_os = "linux")]
-    let (route_manager, exit_forwarder) = {
+    let (route_manager, exit_forwarder, peer_route_manager) = {
         let mut virtual_cidrs = Vec::new();
         if let Some(network) = parse_optional_ipv6_cidr(
             config.network.virtual_network.as_deref(),
@@ -1512,7 +1516,7 @@ pub(crate) async fn prepare_client_runtime_ext(
                 .await
                 .map(|()| None)
         };
-        let exit_forwarder = match exit_forwarder {
+        let mut exit_forwarder = match exit_forwarder {
             Ok(forwarder) => forwarder,
             Err(error) => {
                 let _ = manager.rollback().await;
@@ -1524,7 +1528,31 @@ pub(crate) async fn prepare_client_runtime_ext(
                 return Err(error).context("准备 Exit Node 内核转发失败");
             }
         };
-        (manager, exit_forwarder)
+
+        let mut peer_route_manager = LinuxPeerRouteManager::new(tun.name());
+        for peer in signaling.known_peers().await {
+            if let Err(error) = peer_route_manager
+                .sync_peer(&peer.client_id, &peer.virtual_ips)
+                .await
+            {
+                let _ = peer_route_manager
+                    .rollback_within(Duration::from_secs(2))
+                    .await;
+                if let Some(forwarder) = exit_forwarder.as_mut() {
+                    let _ = forwarder.rollback_within(Duration::from_secs(2)).await;
+                }
+                let _ = manager.rollback().await;
+                signaling.shutdown();
+                if let Some(relay) = relay.as_ref() {
+                    relay.close().await;
+                }
+                let _ = tun.delete().await;
+                return Err(error).with_context(|| {
+                    format!("安装节点 {} 的虚拟地址精确定向路由失败", peer.client_id)
+                });
+            }
+        }
+        (manager, exit_forwarder, peer_route_manager)
     };
 
     // 创建性能统计收集器
@@ -1587,6 +1615,8 @@ pub(crate) async fn prepare_client_runtime_ext(
         route_manager,
         #[cfg(target_os = "linux")]
         exit_forwarder,
+        #[cfg(target_os = "linux")]
+        peer_route_manager,
         #[cfg(target_os = "linux")]
         exit_drain_deadline: None,
         local_exit_runtime_problem: None,
@@ -4091,12 +4121,43 @@ async fn handle_runtime_signaling_event(
                 {
                     tracing::warn!("无法更新节点 {} 的物理网络旁路: {error:#}", peer.client_id);
                 }
+                if let Err(error) = runtime
+                    .peer_route_manager
+                    .sync_peer(&peer.client_id, &peer.virtual_ips)
+                    .await
+                {
+                    tracing::warn!(
+                        "无法更新节点 {} 的虚拟地址精确定向路由: {error:#}",
+                        peer.client_id
+                    );
+                }
             }
             sync_linux_relay_bypasses(runtime).await;
         }
-        SignalingAction::PeerRemoved { client_id, .. } => {
+        SignalingAction::PeerRemoved {
+            client_id,
+            removed_peer: _,
+        } => {
             if let Err(error) = runtime.route_manager.remove_peer_bypasses(client_id).await {
                 tracing::warn!("无法删除节点 {client_id} 的物理网络旁路: {error:#}");
+            }
+            let current_peer = runtime
+                .p2p
+                .get_peers()
+                .await
+                .into_iter()
+                .find(|peer| peer.client_id == *client_id);
+            let route_update = match current_peer {
+                Some(peer) => {
+                    runtime
+                        .peer_route_manager
+                        .sync_peer(&peer.client_id, &peer.virtual_ips)
+                        .await
+                }
+                None => runtime.peer_route_manager.remove_peer(client_id).await,
+            };
+            if let Err(error) = route_update {
+                tracing::warn!("无法更新节点 {client_id} 的虚拟地址精确定向路由: {error:#}");
             }
             if let Some(forwarder) = runtime.exit_forwarder.as_mut() {
                 if let Err(error) = forwarder.remove_client(client_id).await {
@@ -4355,6 +4416,14 @@ async fn shutdown_runtime(runtime: &mut ClientRuntime) -> RuntimeCleanupOutcome 
 
     #[cfg(target_os = "linux")]
     {
+        let peer_routes = match phase_timeout(deadline, TASK_STOP_TIMEOUT) {
+            Some(timeout) => cleanup_status_from_result(
+                runtime.peer_route_manager.rollback_within(timeout).await,
+            ),
+            None => cleanup_deadline_exhausted(),
+        };
+        outcome.record("节点虚拟地址路由", peer_routes);
+
         let exit = match phase_timeout(deadline, TASK_STOP_TIMEOUT) {
             Some(timeout) => match runtime.exit_forwarder.as_mut() {
                 Some(forwarder) => {

@@ -3,6 +3,8 @@ pub mod doh_dns;
 #[cfg(target_os = "linux")]
 pub mod linux_exit;
 #[cfg(target_os = "linux")]
+pub(crate) mod linux_peer_route;
+#[cfg(target_os = "linux")]
 pub mod linux_recovery;
 #[cfg(target_os = "linux")]
 pub mod linux_recovery_events;

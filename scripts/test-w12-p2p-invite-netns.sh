@@ -673,9 +673,24 @@ SH
     wait_for_echo_port "$NS1" "$IP1" "$TCP_ECHO_PORT" node1
 
     info "node1 route to node2:"
-    ip netns exec "$NS1" ip -6 route get "$IP2"
+    ip netns exec "$NS1" ip -6 route get "$IP2" | tee "$WORK/node1-route-ipv6.txt"
     info "node2 route to node1:"
-    ip netns exec "$NS2" ip -6 route get "$IP1"
+    ip netns exec "$NS2" ip -6 route get "$IP1" | tee "$WORK/node2-route-ipv6.txt"
+    ip netns exec "$NS1" ip route get "$IP2_V4" | tee "$WORK/node1-route-ipv4.txt"
+    ip netns exec "$NS2" ip route get "$IP1_V4" | tee "$WORK/node2-route-ipv4.txt"
+
+    ip netns exec "$NS1" ip -6 route show exact "$IP2/128" >"$WORK/node1-exact-ipv6.txt"
+    ip netns exec "$NS2" ip -6 route show exact "$IP1/128" >"$WORK/node2-exact-ipv6.txt"
+    ip netns exec "$NS1" ip route show exact "$IP2_V4/32" >"$WORK/node1-exact-ipv4.txt"
+    ip netns exec "$NS2" ip route show exact "$IP1_V4/32" >"$WORK/node2-exact-ipv4.txt"
+    grep -Eq "dev $TUN1([[:space:]]|$)" "$WORK/node1-exact-ipv6.txt" \
+        || fail "node1 lacks the exact IPv6 peer route through $TUN1"
+    grep -Eq "dev $TUN2([[:space:]]|$)" "$WORK/node2-exact-ipv6.txt" \
+        || fail "node2 lacks the exact IPv6 peer route through $TUN2"
+    grep -Eq "dev $TUN1([[:space:]]|$)" "$WORK/node1-exact-ipv4.txt" \
+        || fail "node1 lacks the exact IPv4 peer route through $TUN1"
+    grep -Eq "dev $TUN2([[:space:]]|$)" "$WORK/node2-exact-ipv4.txt" \
+        || fail "node2 lacks the exact IPv4 peer route through $TUN2"
 
     info "capturing only the private veth underlay during ping"
     ip netns exec "$NSH" tcpdump -ni "$VH1" -nn -vvv -l 'udp' >"$WORK/tcpdump1.log" 2>&1 &

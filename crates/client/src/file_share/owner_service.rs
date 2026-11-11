@@ -12,8 +12,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
     AuditEntry, AuditId, AuditOutcome, CapabilityState, ConcurrentNamePolicy, FileAcl,
-    FileDeletePolicy, FileQuota, FileShare, FileShareId, FileShareMode, NetworkId, NodeId,
-    SymlinkPolicy, FILE_SHARE_SCHEMA_VERSION,
+    FileAclEffect, FileAclRule, FileAction, FileDeletePolicy, FileQuota, FileShare, FileShareId,
+    FileShareMode, NetworkId, NodeId, SharedPath, SubjectSelector, SymlinkPolicy,
+    FILE_SHARE_SCHEMA_VERSION,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -122,6 +123,26 @@ impl FileShareConfiguration {
             concurrent_name_policy: ConcurrentNamePolicy::Reject,
             delete_policy: FileDeletePolicy::default(),
         }
+    }
+
+    /// Grant all active members the minimum read-only actions on the shared
+    /// root. Both ACL layers receive the same narrow rule because File access
+    /// is their intersection and either layer may veto.
+    pub fn allow_active_members_readonly(mut self) -> Self {
+        let rule = FileAclRule {
+            id: "active-members-readonly".into(),
+            subjects: std::collections::BTreeSet::from([SubjectSelector::AnyMember]),
+            path_prefix: SharedPath::root(),
+            actions: std::collections::BTreeSet::from([
+                FileAction::List,
+                FileAction::ReadMetadata,
+                FileAction::Download,
+            ]),
+            effect: FileAclEffect::Allow,
+        };
+        self.network_acl.rules.push(rule.clone());
+        self.local_acl.rules.push(rule);
+        self
     }
 
     fn validate(&self) -> Result<(), FileOwnerServiceError> {
@@ -795,6 +816,7 @@ impl FileOwnerService {
         let current = self.state.snapshot().await.file_capability;
         let projection = NodeFileCapabilitySnapshot {
             state: CapabilityState::Unavailable,
+            network_id: current.network_id,
             access_epoch: current.access_epoch,
             share_revision: current.share_revision,
             available_bytes: None,
@@ -835,6 +857,7 @@ fn projection_from_runtime(runtime: &FileRuntimeSnapshot) -> NodeFileCapabilityS
                 CapabilityState::Unavailable
             }
         },
+        network_id: capability.network_id.clone(),
         access_epoch: capability.access_epoch,
         share_revision: capability.share_revision,
         available_bytes: capability.available_bytes,
@@ -850,6 +873,7 @@ fn unavailable_projection(
 ) -> NodeFileCapabilitySnapshot {
     NodeFileCapabilitySnapshot {
         state: CapabilityState::Unavailable,
+        network_id: share.map(|share| share.network_id.clone()),
         access_epoch: None,
         share_revision: share.map(|share| share.revision),
         available_bytes: None,

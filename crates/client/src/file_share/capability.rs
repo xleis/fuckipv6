@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use fuckipv6_common::domain::{
     AccessContext, AuditEntry, AuditId, AuditLog, AuditOutcome, DomainError, FileAccessDenial,
-    FileAccessRequest, FileAction, FileQuotaError, FileQuotaUsage, FileShare, NodeId,
+    FileAccessRequest, FileAction, FileQuotaError, FileQuotaUsage, FileShare, NetworkId, NodeId,
 };
 use tokio::sync::watch;
 
@@ -22,6 +22,7 @@ pub struct FileShareCapability {
 
 struct Inner {
     state: RwLock<Option<EnabledFileShare>>,
+    last_network_id: RwLock<Option<NetworkId>>,
     epoch_tx: watch::Sender<u64>,
     audit: Mutex<AuditLog>,
     audit_sequence: AtomicU64,
@@ -54,6 +55,7 @@ impl FileShareCapability {
         Self {
             inner: Arc::new(Inner {
                 state: RwLock::new(None),
+                last_network_id: RwLock::new(None),
                 epoch_tx,
                 audit: Mutex::new(AuditLog::default()),
                 audit_sequence: AtomicU64::new(0),
@@ -76,6 +78,7 @@ impl FileShareCapability {
             epoch_tx,
             audit,
             audit_sequence,
+            ..
         } = &*self.inner;
         let mut state = state
             .write()
@@ -155,6 +158,11 @@ impl FileShareCapability {
             share: share.clone(),
             access_epoch,
         });
+        *self
+            .inner
+            .last_network_id
+            .write()
+            .map_err(|_| FileCapabilityError::Unavailable)? = Some(share.network_id.clone());
         epoch_tx.send_replace(access_epoch);
         drop(state);
         Ok(self.snapshot())
@@ -172,6 +180,7 @@ impl FileShareCapability {
             epoch_tx,
             audit,
             audit_sequence,
+            ..
         } = &*self.inner;
         let mut state = state
             .write()
@@ -233,8 +242,15 @@ impl FileShareCapability {
             }
         };
         let Some((root, share)) = enabled else {
+            let network_id = self
+                .inner
+                .last_network_id
+                .read()
+                .ok()
+                .and_then(|network_id| network_id.clone());
             return FileCapabilitySnapshot {
                 state: FileCapabilityState::Disabled,
+                network_id,
                 access_epoch: None,
                 share_revision: None,
                 available_bytes: None,
@@ -242,9 +258,11 @@ impl FileShareCapability {
             };
         };
         let share_revision = Some(share.revision);
+        let network_id = Some(share.network_id.clone());
         if let Err(error) = root.probe() {
             return FileCapabilitySnapshot {
                 state: FileCapabilityState::RootUnavailable,
+                network_id,
                 access_epoch,
                 share_revision,
                 available_bytes: None,
@@ -256,6 +274,7 @@ impl FileShareCapability {
             Err(_error) => {
                 return FileCapabilitySnapshot {
                     state: FileCapabilityState::RootUnavailable,
+                    network_id,
                     access_epoch,
                     share_revision,
                     available_bytes: None,
@@ -266,6 +285,7 @@ impl FileShareCapability {
         let state = classify_disk_status(available_bytes, share.quota.reserve_bytes);
         FileCapabilitySnapshot {
             state,
+            network_id,
             access_epoch,
             share_revision,
             available_bytes: Some(available_bytes),
@@ -422,6 +442,7 @@ impl FileCapabilityState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileCapabilitySnapshot {
     pub state: FileCapabilityState,
+    pub network_id: Option<NetworkId>,
     pub access_epoch: Option<u64>,
     pub share_revision: Option<u64>,
     pub available_bytes: Option<u64>,
@@ -432,6 +453,7 @@ impl FileCapabilitySnapshot {
     fn unavailable() -> Self {
         Self {
             state: FileCapabilityState::RootUnavailable,
+            network_id: None,
             access_epoch: None,
             share_revision: None,
             available_bytes: None,

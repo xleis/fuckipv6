@@ -812,6 +812,11 @@ pub struct NodeCapabilitySnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeFileCapabilitySnapshot {
     pub state: CapabilityState,
+    /// The network this owner-local share is bound to. This is safe to expose
+    /// to authorized snapshot viewers and lets the UI place File state on the
+    /// matching network instead of inventing a global File page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_id: Option<NetworkId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_epoch: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -828,6 +833,7 @@ impl Default for NodeFileCapabilitySnapshot {
     fn default() -> Self {
         Self {
             state: CapabilityState::Disabled,
+            network_id: None,
             access_epoch: None,
             share_revision: None,
             available_bytes: None,

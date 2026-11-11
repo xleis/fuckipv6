@@ -1,5 +1,6 @@
 pub mod components;
 mod configuration_workflow;
+mod file_share_workflow;
 #[allow(dead_code)]
 mod path_picker;
 mod session;
@@ -46,8 +47,10 @@ pub fn run(options: crate::cli::commands::RuntimeOptions) -> Result<()> {
     let state = session.state();
     let commands = session.commands();
     let operations = session.operations();
+    let file_owner = session.file_owner();
     let configs = ConfigManager::new()?;
-    let window_result = view::run_window(state, commands, Some(operations), configs);
+    let window_result =
+        view::run_window(state, commands, Some(operations), Some(file_owner), configs);
     session.shutdown();
     window_result
 }

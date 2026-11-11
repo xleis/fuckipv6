@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
 use crate::cli::commands::RuntimeOptions;
+use crate::file_share::{FileShareConfiguration, FileSharePreview};
 use crate::local_ipc::{
     self, EndpointRole, FrameKind, IpcErrorCode, IpcRole, LocalCommand, LocalError, LocalEvent,
     LocalRequest, LocalResponse,
@@ -32,6 +33,7 @@ const RECONNECT_MAX: Duration = Duration::from_secs(2);
 pub struct RemoteNodeSession {
     runtime: Option<Runtime>,
     operations: RemoteOperationClient,
+    file_owner: RemoteFileOwnerClient,
     state: NodeStateStore,
     commands: NodeCommandBus,
     events: NodeEventBus,
@@ -60,11 +62,17 @@ impl RemoteNodeSession {
         let (endpoint, state, commands, events, cancel, sync) =
             runtime.block_on(Self::connect_parts(options, role.clone()))?;
         let runtime_handle = runtime.handle().clone();
-        let operations = RemoteOperationClient::new(endpoint, role, Some(runtime_handle));
+        let operations = RemoteOperationClient::new(
+            endpoint.clone(),
+            role.clone(),
+            Some(runtime_handle.clone()),
+        );
+        let file_owner = RemoteFileOwnerClient::new(endpoint, role, Some(runtime_handle));
 
         Ok(Self {
             runtime: Some(runtime),
             operations,
+            file_owner,
             state,
             commands,
             events,
@@ -80,7 +88,8 @@ impl RemoteNodeSession {
             Self::connect_parts(options, role.clone()).await?;
         Ok(Self {
             runtime: None,
-            operations: RemoteOperationClient::new(endpoint, role, None),
+            operations: RemoteOperationClient::new(endpoint.clone(), role.clone(), None),
+            file_owner: RemoteFileOwnerClient::new(endpoint, role, None),
             state,
             commands,
             events,
@@ -152,6 +161,13 @@ impl RemoteNodeSession {
     /// Tokio socket I/O.
     pub fn operations(&self) -> RemoteOperationClient {
         self.operations.clone()
+    }
+
+    /// Owner-only File configuration adapter. It is intentionally separate
+    /// from the node command bus and never accepts a root through a manifest
+    /// action or ordinary node command.
+    pub fn file_owner(&self) -> RemoteFileOwnerClient {
+        self.file_owner.clone()
     }
 
     /// Disconnect the UI. The control and node processes deliberately keep
@@ -243,6 +259,78 @@ impl RemoteOperationClient {
 impl Drop for RemoteNodeSession {
     fn drop(&mut self) {
         self.shutdown_inner();
+    }
+}
+
+/// Owner-only adapter for the local File lifecycle. Root references stay on
+/// this same-user local IPC boundary and are never forwarded as node commands.
+#[derive(Clone)]
+pub struct RemoteFileOwnerClient {
+    endpoint: local_ipc::LocalEndpoint,
+    role: IpcRole,
+    runtime: Option<Handle>,
+}
+
+impl RemoteFileOwnerClient {
+    fn new(endpoint: local_ipc::LocalEndpoint, role: IpcRole, runtime: Option<Handle>) -> Self {
+        Self {
+            endpoint,
+            role,
+            runtime,
+        }
+    }
+
+    pub async fn preview(
+        &self,
+        root_reference: &str,
+        configuration: FileShareConfiguration,
+    ) -> Result<FileSharePreview> {
+        let endpoint = self.endpoint.clone();
+        let role = self.role.clone();
+        let root_reference = root_reference.to_owned();
+        let future = async move {
+            local_ipc::preview_file_share(&endpoint, role, &root_reference, configuration).await
+        };
+        match &self.runtime {
+            Some(runtime) => runtime
+                .spawn(future)
+                .await
+                .context("File owner preview task failed")?,
+            None => future.await,
+        }
+    }
+
+    pub async fn configure(
+        &self,
+        root_reference: &str,
+        configuration: FileShareConfiguration,
+    ) -> Result<crate::node::NodeFileCapabilitySnapshot> {
+        let endpoint = self.endpoint.clone();
+        let role = self.role.clone();
+        let root_reference = root_reference.to_owned();
+        let future = async move {
+            local_ipc::configure_file_share(&endpoint, role, &root_reference, configuration).await
+        };
+        match &self.runtime {
+            Some(runtime) => runtime
+                .spawn(future)
+                .await
+                .context("File owner configure task failed")?,
+            None => future.await,
+        }
+    }
+
+    pub async fn disable(&self) -> Result<crate::node::NodeFileCapabilitySnapshot> {
+        let endpoint = self.endpoint.clone();
+        let role = self.role.clone();
+        let future = async move { local_ipc::disable_file_share(&endpoint, role).await };
+        match &self.runtime {
+            Some(runtime) => runtime
+                .spawn(future)
+                .await
+                .context("File owner disable task failed")?,
+            None => future.await,
+        }
     }
 }
 

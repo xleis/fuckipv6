@@ -4,19 +4,19 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Result};
 use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
 use fuckipv6_common::domain::{
-    ActivityCategory, ActivitySeverity, AuditOutcome, CapabilityKind, ExitContributionMode,
-    ExitHealthEvidenceState, ExitHealthLayer, ExitHealthProtocol, ExitHealthSource,
-    ExitHealthState, ExitHealthTarget, IdempotencyKey, InvitationPreview, InvitationState,
-    InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
-    LeakDetectionDnsMode, LeakDetectionEvidenceState, LeakDetectionIsolationAction,
-    LeakDetectionPlatform, LeakDetectionProtocol, LeakDetectionSource, LeakDetectionState,
-    LeakDetectionTarget, MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode,
-    NetworkMember, NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberObservationSource,
-    NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileApplyResult,
-    NetworkProfilePreview, NetworkProfileProjections, NetworkProfileWarningCode,
-    NetworkPublicProfileDocument, NetworkVisibility, OperationError, OperationState,
-    TopologyConnectionState, TopologySnapshot, TrafficProtectionState,
-    JOIN_REQUEST_MAX_REASON_CHARS,
+    ActivityCategory, ActivitySeverity, AuditOutcome, CapabilityKind, CapabilityState,
+    ExitContributionMode, ExitHealthEvidenceState, ExitHealthLayer, ExitHealthProtocol,
+    ExitHealthSource, ExitHealthState, ExitHealthTarget, FileShareMode, IdempotencyKey,
+    InvitationPreview, InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest,
+    JoinRequestReviewAction, JoinRequestState, LeakDetectionDnsMode, LeakDetectionEvidenceState,
+    LeakDetectionIsolationAction, LeakDetectionPlatform, LeakDetectionProtocol,
+    LeakDetectionSource, LeakDetectionState, LeakDetectionTarget, MemberLifecycleAction,
+    MembershipRole, NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberDirectory,
+    NetworkMemberGroup, NetworkMemberObservationSource, NetworkMemberOnlineState,
+    NetworkMemberStatus, NetworkProfileApplyResult, NetworkProfilePreview,
+    NetworkProfileProjections, NetworkProfileWarningCode, NetworkPublicProfileDocument,
+    NetworkVisibility, OperationError, OperationState, SymlinkPolicy, TopologyConnectionState,
+    TopologySnapshot, TrafficProtectionState, JOIN_REQUEST_MAX_REASON_CHARS,
 };
 #[cfg(test)]
 use fuckipv6_common::domain::{
@@ -24,8 +24,8 @@ use fuckipv6_common::domain::{
     LeakDetectionEvidence, LeakDetectionSnapshot,
 };
 use fuckipv6_common::i18n::{
-    detect_system_locale, format_decimal, format_integer, format_timestamp, resolve_language, t,
-    tr, LanguagePreference, Locale,
+    detect_system_locale, format_bytes, format_decimal, format_integer, format_timestamp,
+    resolve_language, t, tr, LanguagePreference, Locale,
 };
 use fuckipv6_common::ui_components::SemanticState;
 use fuckipv6_common::ui_layout::{
@@ -47,6 +47,7 @@ use super::configuration_workflow::{
     is_configuration_action, json_pointer_selection, ConfigurationOperation,
     GpuiConfigurationWorkflow,
 };
+use super::file_share_workflow::{FileShareAccessScope, GpuiFileShareDraft};
 use super::path_picker::{pick_paths, PathPickerMode};
 use super::text_input::{NativeTextInput, TextInputEvent};
 #[cfg(test)]
@@ -84,7 +85,7 @@ use crate::node::{
     NodeUiAction, NodeUiBackendStatus, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage,
     OperationClientError,
 };
-use crate::remote_node::RemoteOperationClient;
+use crate::remote_node::{RemoteFileOwnerClient, RemoteOperationClient};
 
 const WINDOW_WIDTH: f32 = DIMENSIONS.window_default_width_px as f32;
 const WINDOW_HEIGHT: f32 = DIMENSIONS.window_default_height_px as f32;
@@ -292,6 +293,8 @@ impl ActivityTimeWindow {
 struct GpuiShell {
     commands: NodeCommandBus,
     operations: Option<RemoteOperationClient>,
+    file_owner: Option<RemoteFileOwnerClient>,
+    file_share_draft: GpuiFileShareDraft,
     configs: ConfigManager,
     language_preference: LanguagePreference,
     locale: Locale,
@@ -371,6 +374,7 @@ impl GpuiShell {
         state: NodeStateStore,
         commands: NodeCommandBus,
         operations: Option<RemoteOperationClient>,
+        file_owner: Option<RemoteFileOwnerClient>,
         configs: ConfigManager,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -385,6 +389,8 @@ impl GpuiShell {
         let mut shell = Self {
             commands,
             operations,
+            file_owner,
+            file_share_draft: GpuiFileShareDraft::default(),
             configs,
             language_preference,
             locale,
@@ -1033,6 +1039,16 @@ impl GpuiShell {
             snapshot.topology.as_ref(),
         );
         self.snapshot = snapshot;
+        let file_draft_network_exists =
+            self.file_share_draft.network_id.as_ref().is_some_and(|id| {
+                self.snapshot
+                    .memberships
+                    .iter()
+                    .any(|membership| membership.network_id == id.as_str())
+            });
+        if !file_draft_network_exists {
+            self.file_share_draft.clear();
+        }
         let selection_still_exists = self.selected_network.as_deref().is_some_and(|selected| {
             self.snapshot
                 .networks
@@ -7013,6 +7029,629 @@ impl GpuiShell {
             .into_any_element()
     }
 
+    fn open_file_share_setup(
+        &mut self,
+        network_name: &str,
+        network_id: NetworkId,
+        cx: &mut Context<Self>,
+    ) {
+        self.file_share_draft
+            .begin(network_id, network_name.to_owned());
+        self.network_actions_open = None;
+        self.notice = None;
+        cx.notify();
+    }
+
+    fn close_file_share_setup(&mut self, cx: &mut Context<Self>) {
+        self.file_share_draft.clear();
+        cx.notify();
+    }
+
+    fn select_file_share_root(&mut self, cx: &mut Context<Self>) {
+        let Some(expected_network_id) = self.file_share_draft.network_id.clone() else {
+            return;
+        };
+        if !self.file_share_draft.begin_pick_root() {
+            return;
+        }
+        let task = pick_paths(cx, PathPickerMode::Directories { multiple: false });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |shell, cx| {
+                if shell.file_share_draft.network_id.as_ref() != Some(&expected_network_id) {
+                    return;
+                }
+                shell.file_share_draft.finish_pick_root();
+                match result {
+                    Ok(Some(paths)) => match paths.first() {
+                        Some(root) => {
+                            shell.file_share_draft.select_root(root.clone());
+                            shell.request_file_share_preview(cx);
+                        }
+                        None => shell.file_share_draft.set_error(tr(
+                            shell.locale,
+                            "file.error.no_directory",
+                            &[],
+                        )),
+                    },
+                    Ok(None) => {}
+                    Err(error) => shell.file_share_draft.set_error(tr(
+                        shell.locale,
+                        "file.error.picker",
+                        &[("error", &error.to_string())],
+                    )),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn set_file_share_scope(&mut self, access_scope: FileShareAccessScope, cx: &mut Context<Self>) {
+        self.file_share_draft.set_access_scope(access_scope);
+        if self.file_share_draft.root.is_some() {
+            self.request_file_share_preview(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    fn request_file_share_preview(&mut self, cx: &mut Context<Self>) {
+        if !self.file_share_draft.can_preview() {
+            return;
+        }
+        let Some(file_owner) = self.file_owner.clone() else {
+            self.file_share_draft
+                .set_error(t(self.locale, "file.error.owner_unavailable").to_string());
+            cx.notify();
+            return;
+        };
+        let Some(network_id) = self.file_share_draft.network_id.clone() else {
+            return;
+        };
+        let Some(root_reference) = self
+            .file_share_draft
+            .root
+            .as_ref()
+            .and_then(|root| root.to_str())
+            .map(str::to_owned)
+        else {
+            self.file_share_draft
+                .set_error(t(self.locale, "file.error.non_utf8_root").to_string());
+            cx.notify();
+            return;
+        };
+        let Some((generation, _, configuration)) = self.file_share_draft.start_preview() else {
+            return;
+        };
+        cx.notify();
+
+        cx.spawn(async move |weak, cx| {
+            let result = file_owner
+                .preview(&root_reference, configuration)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = weak.update(cx, |shell, cx| {
+                if shell.file_share_draft.network_id.as_ref() != Some(&network_id) {
+                    return;
+                }
+                shell.file_share_draft.finish_preview(generation, result);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn configure_file_share(&mut self, cx: &mut Context<Self>) {
+        if !self.file_share_draft.can_configure() {
+            return;
+        }
+        let Some(file_owner) = self.file_owner.clone() else {
+            self.file_share_draft
+                .set_error(t(self.locale, "file.error.owner_unavailable").to_string());
+            cx.notify();
+            return;
+        };
+        let Some(network_id) = self.file_share_draft.network_id.clone() else {
+            return;
+        };
+        let Some(root_reference) = self
+            .file_share_draft
+            .root
+            .as_ref()
+            .and_then(|root| root.to_str())
+            .map(str::to_owned)
+        else {
+            self.file_share_draft
+                .set_error(t(self.locale, "file.error.non_utf8_root").to_string());
+            cx.notify();
+            return;
+        };
+        let Some((generation, _, configuration)) = self.file_share_draft.start_configure() else {
+            return;
+        };
+        cx.notify();
+
+        cx.spawn(async move |weak, cx| {
+            let result = file_owner.configure(&root_reference, configuration).await;
+            let _ = weak.update(cx, |shell, cx| {
+                if shell.file_share_draft.network_id.as_ref() != Some(&network_id) {
+                    return;
+                }
+                let snapshot = result.as_ref().ok().cloned();
+                shell.file_share_draft.finish_configure(
+                    generation,
+                    result.map(|_| ()).map_err(|error| error.to_string()),
+                );
+                if let Some(snapshot) = snapshot {
+                    shell.snapshot.file_capability = snapshot;
+                    shell.notice = Some(t(shell.locale, "file.notice.enabled").to_string());
+                    shell.file_share_draft.clear();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn disable_file_share(&mut self, cx: &mut Context<Self>) {
+        if self.file_share_draft.network_id.is_none() {
+            return;
+        }
+        let Some(file_owner) = self.file_owner.clone() else {
+            self.file_share_draft
+                .set_error(t(self.locale, "file.error.owner_unavailable").to_string());
+            cx.notify();
+            return;
+        };
+        let Some((generation, network_id)) = self.file_share_draft.start_disable() else {
+            return;
+        };
+        cx.notify();
+
+        cx.spawn(async move |weak, cx| {
+            let result = file_owner.disable().await;
+            let _ = weak.update(cx, |shell, cx| {
+                if shell.file_share_draft.network_id.as_ref() != Some(&network_id) {
+                    return;
+                }
+                let snapshot = result.as_ref().ok().cloned();
+                shell.file_share_draft.finish_disable(
+                    generation,
+                    result.map(|_| ()).map_err(|error| error.to_string()),
+                );
+                if let Some(snapshot) = snapshot {
+                    shell.snapshot.file_capability = snapshot;
+                    shell.notice = Some(t(shell.locale, "file.notice.disabled").to_string());
+                    shell.file_share_draft.clear();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn file_share_section(
+        &mut self,
+        network_name: &str,
+        network_id: &NetworkId,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let capability = &self.snapshot.file_capability;
+        let bound_to_network = capability.network_id.as_ref() == Some(network_id);
+        let bound_elsewhere = capability
+            .network_id
+            .as_ref()
+            .is_some_and(|bound| bound != network_id);
+        let setup_open = self.file_share_draft.network_id.as_ref() == Some(network_id);
+        let semantic = if bound_to_network {
+            file_capability_semantic(capability.state)
+        } else {
+            SemanticState::Neutral
+        };
+        let palette = semantic_palette(semantic);
+        let status = if bound_to_network {
+            t(self.locale, file_capability_state_key(capability.state)).to_string()
+        } else if bound_elsewhere {
+            t(self.locale, "file.status.other_network").to_string()
+        } else {
+            t(self.locale, "file.status.not_configured").to_string()
+        };
+        let detail = if bound_to_network {
+            let available = capability
+                .available_bytes
+                .map(|bytes| format_bytes(self.locale, bytes))
+                .unwrap_or_else(|| t(self.locale, "common.not_available").to_string());
+            tr(
+                self.locale,
+                "file.status.detail",
+                &[
+                    ("available", &available),
+                    (
+                        "transfers",
+                        &format_integer(self.locale, i64::from(capability.active_transfers)),
+                    ),
+                    (
+                        "revision",
+                        &capability
+                            .share_revision
+                            .map(|revision| format_integer(self.locale, revision as i64))
+                            .unwrap_or_else(|| t(self.locale, "common.not_available").to_string()),
+                    ),
+                ],
+            )
+        } else if bound_elsewhere {
+            t(self.locale, "file.status.other_network_detail").to_string()
+        } else {
+            t(self.locale, "file.status.not_configured_detail").to_string()
+        };
+
+        let open_name = network_name.to_owned();
+        let open_id = network_id.clone();
+        let open_label = if setup_open {
+            t(self.locale, "file.action.close_setup").to_string()
+        } else if bound_to_network {
+            t(self.locale, "file.action.reconfigure").to_string()
+        } else {
+            t(self.locale, "file.action.configure").to_string()
+        };
+        let control_unavailable = self.file_owner.is_none()
+            || self.file_share_draft.configure_pending
+            || self.file_share_draft.disable_pending;
+        let toggle_setup = button(
+            SharedString::from(format!("file-share-toggle-{}", network_name)),
+            open_label,
+            ButtonVariant::Ghost,
+            control_unavailable,
+        )
+        .debug_selector({
+            let network_name = network_name.to_owned();
+            move || format!("visual-file-share-toggle-{network_name}")
+        })
+        .on_click(cx.listener(move |shell, _, _, cx| {
+            if shell.file_share_draft.network_id.as_ref() == Some(&open_id) {
+                shell.close_file_share_setup(cx);
+            } else {
+                shell.open_file_share_setup(&open_name, open_id.clone(), cx);
+            }
+        }));
+        let disable =
+            (bound_to_network && capability.state != CapabilityState::Disabled).then(|| {
+                let disable_id = network_id.clone();
+                let disable_name = network_name.to_owned();
+                button(
+                    SharedString::from(format!("file-share-disable-{}", network_name)),
+                    t(self.locale, "file.action.disable").to_string(),
+                    ButtonVariant::Danger,
+                    control_unavailable,
+                )
+                .debug_selector({
+                    let network_name = network_name.to_owned();
+                    move || format!("visual-file-share-disable-{network_name}")
+                })
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.open_file_share_setup(&disable_name, disable_id.clone(), cx);
+                    shell.disable_file_share(cx);
+                }))
+            });
+
+        let mut section = div()
+            .id(SharedString::from(format!("file-share-{}", network_name)))
+            .debug_selector({
+                let network_name = network_name.to_owned();
+                move || format!("visual-file-share-{network_name}")
+            })
+            .mt_2()
+            .pt_3()
+            .border_t_1()
+            .border_color(rgba(COLOR_BORDER))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT_SECONDARY))
+                            .child(t(self.locale, "file.title").to_string()),
+                    )
+                    .child(
+                        div()
+                            .rounded_full()
+                            .px_2()
+                            .py_1()
+                            .border_1()
+                            .border_color(rgba(palette.border.rgba_hex()))
+                            .bg(rgba(palette.background.rgba_hex()))
+                            .text_size(px(10.0))
+                            .text_color(rgba(palette.foreground.rgba_hex()))
+                            .child(status),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .line_height(px(18.0))
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(detail),
+            )
+            .when_some(capability.root_error.clone(), |card, code| {
+                card.child(activity_sync_notice(
+                    "visual-file-share-error",
+                    t(self.locale, "file.status.unavailable").to_string(),
+                    code,
+                    SemanticState::Danger,
+                ))
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(toggle_setup)
+                    .children(disable),
+            );
+        if setup_open {
+            section = section.child(self.file_share_setup_panel(network_id, cx));
+        }
+        section.into_any_element()
+    }
+
+    fn file_share_setup_panel(
+        &mut self,
+        network_id: &NetworkId,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        if self.file_share_draft.network_id.as_ref() != Some(network_id) {
+            return div().into_any_element();
+        }
+        let busy = self.file_share_draft.picking_root
+            || self.file_share_draft.preview_pending
+            || self.file_share_draft.configure_pending
+            || self.file_share_draft.disable_pending;
+        let owner_unavailable = self.file_owner.is_none();
+        let root = self
+            .file_share_draft
+            .root
+            .as_ref()
+            .map(|root| root.display().to_string())
+            .unwrap_or_else(|| t(self.locale, "file.root.none").to_string());
+        let scope_controls = [
+            (
+                FileShareAccessScope::NoMembers,
+                "file.scope.none",
+                self.file_share_draft.access_scope == FileShareAccessScope::NoMembers,
+            ),
+            (
+                FileShareAccessScope::ActiveMembersReadOnly,
+                "file.scope.active_readonly",
+                self.file_share_draft.access_scope == FileShareAccessScope::ActiveMembersReadOnly,
+            ),
+        ]
+        .into_iter()
+        .map(|(scope, key, selected)| {
+            choice_control(
+                SharedString::from(format!("file-share-scope-{}", key)),
+                t(self.locale, key).to_string(),
+                selected,
+            )
+            .on_click(cx.listener(move |shell, _, _, cx| {
+                shell.set_file_share_scope(scope, cx);
+            }))
+            .into_any_element()
+        })
+        .collect::<Vec<_>>();
+
+        let preview = self.file_share_draft.preview.as_ref().map(|preview| {
+            let mode = match preview.mode {
+                FileShareMode::ReadOnly => t(self.locale, "file.mode.readonly"),
+                FileShareMode::ReadWrite => t(self.locale, "file.mode.readwrite"),
+            };
+            let symlink = match preview.symlink_policy {
+                SymlinkPolicy::Reject => t(self.locale, "file.symlink.reject"),
+                SymlinkPolicy::AllowWithinRoot => t(self.locale, "file.symlink.within_root"),
+            };
+            tr(
+                self.locale,
+                "file.preview.detail",
+                &[
+                    ("mode", mode),
+                    (
+                        "available",
+                        &format_bytes(self.locale, preview.available_bytes),
+                    ),
+                    (
+                        "quota",
+                        &format_bytes(self.locale, preview.quota.total_bytes),
+                    ),
+                    (
+                        "directory",
+                        &format_bytes(self.locale, preview.directory_bytes),
+                    ),
+                    (
+                        "entries",
+                        &format_integer(self.locale, preview.directory_entries as i64),
+                    ),
+                    (
+                        "network_rules",
+                        &format_integer(self.locale, i64::from(preview.network_acl_rule_count)),
+                    ),
+                    (
+                        "local_rules",
+                        &format_integer(self.locale, i64::from(preview.local_acl_rule_count)),
+                    ),
+                    ("symlink", symlink),
+                    (
+                        "audit",
+                        t(
+                            self.locale,
+                            if preview.audit_enabled {
+                                "common.enabled"
+                            } else {
+                                "common.disabled"
+                            },
+                        ),
+                    ),
+                    (
+                        "default",
+                        t(
+                            self.locale,
+                            if preview.deny_by_default {
+                                "file.default.deny"
+                            } else {
+                                "file.default.restricted"
+                            },
+                        ),
+                    ),
+                ],
+            )
+        });
+
+        div()
+            .id("file-share-setup")
+            .debug_selector(|| "visual-file-share-setup".into())
+            .mt_2()
+            .p_3()
+            .rounded_md()
+            .border_1()
+            .border_color(rgba(COLOR_BORDER))
+            .bg(rgba(COLOR_PANEL))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "file.setup.title").to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .line_height(px(18.0))
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(t(self.locale, "file.setup.security_note").to_string()),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                    .child(t(self.locale, "file.scope.title").to_string()),
+            )
+            .child(div().flex().flex_wrap().gap_2().children(scope_controls))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(COLOR_TEXT_SECONDARY))
+                            .child(t(self.locale, "file.root.title").to_string()),
+                    )
+                    .child(
+                        div()
+                            .rounded_md()
+                            .bg(rgba(COLOR_PANEL_RAISED))
+                            .px_3()
+                            .py_2()
+                            .font_family("monospace")
+                            .text_xs()
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(root),
+                    ),
+            )
+            .when_some(self.file_share_draft.error.clone(), |panel, error| {
+                panel.child(activity_sync_notice(
+                    "visual-file-share-setup-error",
+                    t(self.locale, "file.error.title").to_string(),
+                    error,
+                    SemanticState::Danger,
+                ))
+            })
+            .when_some(preview, |panel, detail| {
+                panel.child(
+                    div()
+                        .debug_selector(|| "visual-file-share-preview".into())
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgba(COLOR_BORDER))
+                        .bg(rgba(COLOR_PANEL_RAISED))
+                        .px_3()
+                        .py_2()
+                        .text_xs()
+                        .line_height(px(19.0))
+                        .text_color(rgba(COLOR_TEXT_SECONDARY))
+                        .child(detail),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        button(
+                            SharedString::from("file-share-pick-root"),
+                            t(self.locale, "file.action.choose_root").to_string(),
+                            ButtonVariant::Ghost,
+                            busy || owner_unavailable,
+                        )
+                        .on_click(cx.listener(|shell, _, _, cx| {
+                            shell.select_file_share_root(cx);
+                        })),
+                    )
+                    .child(
+                        button(
+                            SharedString::from("file-share-preview"),
+                            t(self.locale, "file.action.preview").to_string(),
+                            ButtonVariant::Ghost,
+                            !self.file_share_draft.can_preview() || owner_unavailable,
+                        )
+                        .on_click(cx.listener(|shell, _, _, cx| {
+                            shell.request_file_share_preview(cx);
+                        })),
+                    )
+                    .child(
+                        button(
+                            SharedString::from("file-share-configure"),
+                            t(self.locale, "file.action.enable").to_string(),
+                            ButtonVariant::Primary,
+                            !self.file_share_draft.can_configure() || owner_unavailable,
+                        )
+                        .debug_selector(|| "visual-file-share-configure".into())
+                        .on_click(cx.listener(|shell, _, _, cx| {
+                            shell.configure_file_share(cx);
+                        })),
+                    ),
+            )
+            .when(busy, |panel| {
+                panel.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(t(self.locale, "file.status.working").to_string()),
+                )
+            })
+            .into_any_element()
+    }
+
     fn networks_content(
         &mut self,
         layout: LayoutClass,
@@ -7037,6 +7676,8 @@ impl GpuiShell {
         let joined_cards = joined_names
             .iter()
             .map(|network_name| {
+                let file_network_id = network_membership_id(&self.snapshot, network_name)
+                    .and_then(|network_id| NetworkId::parse(network_id.to_owned()).ok());
                 let runtime = self
                     .snapshot
                     .networks
@@ -7277,6 +7918,9 @@ impl GpuiShell {
                                 )),
                             ),
                     );
+                }
+                if let Some(network_id) = file_network_id {
+                    card = card.child(self.file_share_section(network_name, &network_id, cx));
                 }
                 card.into_any_element()
             })
@@ -13963,6 +14607,29 @@ fn profile_capability_key(capability: CapabilityKind) -> &'static str {
     }
 }
 
+fn file_capability_state_key(state: CapabilityState) -> &'static str {
+    match state {
+        CapabilityState::Enabled => "status.capability.enabled",
+        CapabilityState::Disabled => "status.capability.disabled",
+        CapabilityState::Degraded => "status.capability.degraded",
+        CapabilityState::Starting => "status.capability.starting",
+        CapabilityState::Unavailable => "status.capability.unavailable",
+        CapabilityState::Unsupported => "status.capability.unsupported",
+        CapabilityState::Unknown => "status.capability.unknown",
+    }
+}
+
+fn file_capability_semantic(state: CapabilityState) -> SemanticState {
+    match state {
+        CapabilityState::Enabled => SemanticState::Success,
+        CapabilityState::Degraded => SemanticState::Warning,
+        CapabilityState::Disabled | CapabilityState::Unknown => SemanticState::Neutral,
+        CapabilityState::Starting => SemanticState::Info,
+        CapabilityState::Unavailable => SemanticState::Danger,
+        CapabilityState::Unsupported => SemanticState::Unsupported,
+    }
+}
+
 fn member_status_key(status: NetworkMemberStatus) -> &'static str {
     match status {
         NetworkMemberStatus::Pending => "member_directory.status.pending",
@@ -14848,6 +15515,7 @@ pub fn run_window(
     state: NodeStateStore,
     commands: NodeCommandBus,
     operations: Option<RemoteOperationClient>,
+    file_owner: Option<RemoteFileOwnerClient>,
     configs: ConfigManager,
 ) -> Result<()> {
     let open_error = Arc::new(Mutex::new(None::<String>));
@@ -14882,6 +15550,7 @@ pub fn run_window(
                         state.clone(),
                         commands.clone(),
                         operations.clone(),
+                        file_owner.clone(),
                         configs.clone(),
                         cx,
                     )
@@ -18337,7 +19006,7 @@ mod tests {
         drop(runtime_guard);
         drop(runtime);
         let window = cx.open_window(size(px(width), px(height)), move |_, cx| {
-            GpuiShell::new(state, bus, None, configs, cx)
+            GpuiShell::new(state, bus, None, None, configs, cx)
         });
         cx.run_until_parked();
         window
@@ -18734,7 +19403,7 @@ mod tests {
         );
         let window = cx
             .open_window(size(px(1440.0), px(900.0)), move |_, cx| {
-                cx.new(|cx| GpuiShell::new(state, bus, None, configs, cx))
+                cx.new(|cx| GpuiShell::new(state, bus, None, None, configs, cx))
             })
             .expect("headless GPUI window");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

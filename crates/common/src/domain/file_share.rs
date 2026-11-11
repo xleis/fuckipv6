@@ -865,6 +865,10 @@ impl TransferSession {
         self.received_chunks.len()
     }
 
+    pub fn has_received_chunk(&self, index: u32) -> bool {
+        self.received_chunks.contains_key(&index)
+    }
+
     pub fn resume(
         &mut self,
         request: &ResumeRequest,
@@ -920,6 +924,22 @@ impl TransferSession {
             return Err(FileTransferError::InvalidState);
         }
         self.transition(TransferState::Cancelled, now_unix_ms);
+        Ok(())
+    }
+
+    pub fn expire(&mut self, now_unix_ms: u64) -> Result<(), FileTransferError> {
+        if self.state.is_terminal() {
+            return Err(FileTransferError::InvalidState);
+        }
+        self.transition(TransferState::Expired, now_unix_ms);
+        Ok(())
+    }
+
+    pub fn fail(&mut self, now_unix_ms: u64) -> Result<(), FileTransferError> {
+        if self.state.is_terminal() {
+            return Err(FileTransferError::InvalidState);
+        }
+        self.transition(TransferState::Failed, now_unix_ms);
         Ok(())
     }
 
@@ -982,6 +1002,19 @@ impl TransferSession {
         content_hash: &ContentHash,
         now_unix_ms: u64,
     ) -> Result<(), FileTransferError> {
+        self.verify_digest(assembled_bytes, content_hash, now_unix_ms)?;
+        self.complete_verified(now_unix_ms)
+    }
+
+    /// Verify a complete staged object and leave the session in `Verifying`.
+    /// The adapter calls this before atomic publication, then promotes the
+    /// session to `Completed` only after publication succeeds.
+    pub fn verify_digest(
+        &mut self,
+        assembled_bytes: u64,
+        content_hash: &ContentHash,
+        now_unix_ms: u64,
+    ) -> Result<(), FileTransferError> {
         if self.state != TransferState::Active {
             return Err(FileTransferError::InvalidState);
         }
@@ -992,10 +1025,17 @@ impl TransferSession {
         if assembled_bytes != self.manifest.total_bytes
             || content_hash != &self.manifest.content_hash
         {
-            self.state = TransferState::Failed;
-            self.revision = self.revision.saturating_add(1);
-            self.updated_at_unix_ms = now_unix_ms;
+            self.transition(TransferState::Failed, now_unix_ms);
             return Err(FileTransferError::IntegrityMismatch);
+        }
+        Ok(())
+    }
+
+    /// Promote a successfully verified transfer after its final destination is
+    /// durable. Calling this before `verify_digest` fails closed.
+    pub fn complete_verified(&mut self, now_unix_ms: u64) -> Result<(), FileTransferError> {
+        if self.state != TransferState::Verifying {
+            return Err(FileTransferError::InvalidState);
         }
         self.transition(TransferState::Completed, now_unix_ms);
         Ok(())
@@ -1348,6 +1388,34 @@ mod tests {
             Err(FileTransferError::IntegrityMismatch)
         );
         assert_eq!(active.state, TransferState::Failed);
+    }
+
+    #[test]
+    fn verification_can_be_confirmed_only_after_successful_publication() {
+        let content = b"abcdefgh";
+        let mut active = session(content, binding("upload.bin", node(2)));
+        active
+            .resume(&request(&active), None, 1, true, 1, 2)
+            .expect("start");
+        active.record_chunk(0, b"abcd", 3).expect("chunk");
+        active.record_chunk(1, b"efgh", 4).expect("chunk");
+
+        active
+            .verify_digest(
+                u64::try_from(content.len()).expect("length"),
+                &ContentHash::from_bytes(content),
+                5,
+            )
+            .expect("verify");
+        assert_eq!(active.state, TransferState::Verifying);
+        assert!(active.has_received_chunk(0));
+        assert!(!active.has_received_chunk(2));
+        active.complete_verified(6).expect("complete");
+        assert_eq!(active.state, TransferState::Completed);
+        assert_eq!(
+            active.complete_verified(7),
+            Err(FileTransferError::InvalidState)
+        );
     }
 
     fn manifest(bytes: &[u8], chunk_size: u64) -> TransferManifest {

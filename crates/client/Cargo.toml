@@ -69,6 +69,7 @@ subtle = "2"
 # disabled instead of reporting a browser-hosted surface as GPUI.
 [dev-dependencies]
 rcgen = { workspace = true }
+tempfile = "3"
 
 [target.'cfg(any(all(target_os = "linux", not(target_env = "musl")), windows, target_os = "macos"))'.dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use std::ffi::{CStr, CString};
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
-use fuckipv6_common::domain::{ShareRoot, SharedPath, SymlinkPolicy};
+use fuckipv6_common::domain::{ContentHash, FileVersion, ShareRoot, SharedPath, SymlinkPolicy};
 
 use super::error::{FileShareError, FileShareErrorCode, FileShareResult};
 use super::quota::{DirectoryUsage, QuotaScanLimits};
@@ -237,6 +237,61 @@ impl LocalShareRoot {
             #[cfg(not(unix))]
             SymlinkPolicy::Reject => self.open_without_symlinks_portable(path),
             SymlinkPolicy::AllowWithinRoot => self.open_following_within_root(path),
+        }
+    }
+
+    /// Hash an opened file without buffering it in memory. `revision_hint` is
+    /// supplied by the durable File metadata store; version equality still
+    /// compares the content digest and size, so a same-revision mutation cannot
+    /// pass a resume check.
+    pub fn file_version(
+        &self,
+        path: &SharedPath,
+        revision_hint: u64,
+    ) -> FileShareResult<FileVersion> {
+        let mut file = self.open_read(path)?;
+        let size = file
+            .metadata()
+            .map_err(|error| {
+                FileShareError::io(
+                    FileShareErrorCode::Io,
+                    "shared file metadata is unavailable",
+                    error,
+                )
+            })?
+            .len();
+        let mut hasher = blake3::Hasher::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer).map_err(|error| {
+                FileShareError::io(
+                    FileShareErrorCode::Io,
+                    "shared file could not be read for version verification",
+                    error,
+                )
+            })?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(FileVersion {
+            content_hash: ContentHash::from_digest_bytes(*hasher.finalize().as_bytes()),
+            size,
+            revision: revision_hint,
+        })
+    }
+
+    /// Fail unless the target name is absent. Publication still uses an atomic
+    /// no-replace operation because another writer can race this check.
+    pub fn ensure_target_absent(&self, path: &SharedPath) -> FileShareResult<()> {
+        match self.open_read(path) {
+            Ok(_) => Err(FileShareError::new(
+                FileShareErrorCode::TargetExists,
+                "shared target already exists",
+            )),
+            Err(error) if error.is_io_kind(io::ErrorKind::NotFound) => Ok(()),
+            Err(error) => Err(error),
         }
     }
 
@@ -1164,6 +1219,31 @@ mod tests {
         let mut content = String::new();
         file.read_to_string(&mut content).expect("read");
         assert_eq!(content, "hello");
+    }
+
+    #[test]
+    fn file_version_streams_content_and_detects_changes() {
+        let (temporary, share) = root();
+        fs::write(temporary.path().join("result.bin"), b"first").expect("file");
+        let path = SharedPath::parse("result.bin").expect("path");
+        let first = share.file_version(&path, 7).expect("version");
+        assert_eq!(first.content_hash, ContentHash::from_bytes(b"first"));
+        assert_eq!(first.size, 5);
+        assert_eq!(first.revision, 7);
+
+        fs::write(temporary.path().join("result.bin"), b"other").expect("replace");
+        let second = share.file_version(&path, 7).expect("version");
+        assert_ne!(first, second);
+        assert_eq!(
+            share.ensure_target_absent(&path).unwrap_err().code(),
+            FileShareErrorCode::TargetExists
+        );
+        assert_eq!(
+            share
+                .ensure_target_absent(&SharedPath::parse("missing.bin").expect("path"))
+                .expect("absent"),
+            ()
+        );
     }
 
     #[cfg(unix)]

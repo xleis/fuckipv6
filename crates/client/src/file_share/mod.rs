@@ -13,8 +13,8 @@ mod root;
 mod temp;
 
 pub use capability::{
-    FileCapabilityError, FileCapabilityPermit, FileCapabilitySnapshot, FileCapabilityState,
-    FileShareCapability,
+    FileCapabilityError, FileCapabilityLease, FileCapabilityPermit, FileCapabilitySnapshot,
+    FileCapabilityState, FileShareCapability,
 };
 pub use error::{FileShareError, FileShareErrorCode, FileShareResult};
 pub use quota::{DirectoryUsage, QuotaScanLimits, UploadQuotaRequest};

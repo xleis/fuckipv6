@@ -293,21 +293,43 @@ impl FileShareCapability {
         network_enabled: bool,
         operation: impl FnOnce(&LocalShareRoot, &FileShare, FileCapabilityPermit) -> FileShareResult<T>,
     ) -> Result<T, FileCapabilityError> {
-        let state = self
-            .inner
-            .state
-            .read()
-            .map_err(|_| FileCapabilityError::Unavailable)?;
-        let enabled = state.as_ref().ok_or(FileCapabilityError::Disabled)?;
-        enabled
-            .share
-            .authorize(request, context, network_enabled)
-            .map_err(FileCapabilityError::AccessDenied)?;
-        let permit = FileCapabilityPermit {
-            access_epoch: enabled.access_epoch,
-            epoch_rx: self.inner.epoch_tx.subscribe(),
+        let (root, share, permit) = self
+            .authorize(request, context, network_enabled)?
+            .into_parts();
+        operation(&root, &share, permit).map_err(FileCapabilityError::Filesystem)
+    }
+
+    /// Resolve one authorized filesystem lease without holding the capability
+    /// state lock for the caller's I/O. The permit must still be rechecked at
+    /// each long-running chunk or resume boundary.
+    pub fn authorize(
+        &self,
+        request: &FileAccessRequest,
+        context: &AccessContext,
+        network_enabled: bool,
+    ) -> Result<FileCapabilityLease, FileCapabilityError> {
+        let (root, share, permit) = {
+            let state = self
+                .inner
+                .state
+                .read()
+                .map_err(|_| FileCapabilityError::Unavailable)?;
+            let enabled = state.as_ref().ok_or(FileCapabilityError::Disabled)?;
+            enabled
+                .share
+                .authorize(request, context, network_enabled)
+                .map_err(FileCapabilityError::AccessDenied)?;
+            let permit = FileCapabilityPermit {
+                access_epoch: enabled.access_epoch,
+                epoch_rx: self.inner.epoch_tx.subscribe(),
+            };
+            (enabled.root.clone(), enabled.share.clone(), permit)
         };
-        operation(&enabled.root, &enabled.share, permit).map_err(FileCapabilityError::Filesystem)
+        Ok(FileCapabilityLease {
+            root,
+            share,
+            permit,
+        })
     }
 
     /// Fail-closed upload admission. The callback-supplied member usage and
@@ -324,29 +346,21 @@ impl FileShareCapability {
                 "uploads require a non-root shared path",
             )));
         }
-        let state = self
-            .inner
-            .state
-            .read()
-            .map_err(|_| FileCapabilityError::Unavailable)?;
-        let enabled = state.as_ref().ok_or(FileCapabilityError::Disabled)?;
-        enabled
-            .share
-            .authorize(
-                &FileAccessRequest {
-                    path: request.path,
-                    action: FileAction::Upload,
-                },
-                context,
-                network_enabled,
-            )
-            .map_err(FileCapabilityError::AccessDenied)?;
-        let usage = enabled
-            .root
+        let lease = self.authorize(
+            &FileAccessRequest {
+                path: request.path,
+                action: FileAction::Upload,
+            },
+            context,
+            network_enabled,
+        )?;
+        let usage = lease
+            .root()
             .directory_usage(request.scan_limits)
             .map_err(FileCapabilityError::Filesystem)?;
+        lease.permit().ensure_current()?;
         quota::check_upload(
-            &enabled.share.quota,
+            &lease.share().quota,
             &usage,
             request.upload_bytes,
             request.replaced_bytes,
@@ -356,24 +370,29 @@ impl FileShareCapability {
         .map_err(FileCapabilityError::Quota)
     }
 
-    /// Start a filesystem operation under a read lease. Disable waits for the
-    /// closure to finish, then advances the access epoch so any long-lived
-    /// transfer permit is revoked.
+    /// Start a filesystem operation under a transfer-scoped permit. The
+    /// capability lock is not held while the closure performs I/O.
     pub fn with_enabled<T>(
         &self,
         operation: impl FnOnce(&LocalShareRoot, &FileShare, FileCapabilityPermit) -> FileShareResult<T>,
     ) -> Result<T, FileCapabilityError> {
-        let state = self
-            .inner
-            .state
-            .read()
-            .map_err(|_| FileCapabilityError::Unavailable)?;
-        let enabled = state.as_ref().ok_or(FileCapabilityError::Disabled)?;
-        let permit = FileCapabilityPermit {
-            access_epoch: enabled.access_epoch,
-            epoch_rx: self.inner.epoch_tx.subscribe(),
+        let (root, share, permit) = {
+            let state = self
+                .inner
+                .state
+                .read()
+                .map_err(|_| FileCapabilityError::Unavailable)?;
+            let enabled = state.as_ref().ok_or(FileCapabilityError::Disabled)?;
+            (
+                enabled.root.clone(),
+                enabled.share.clone(),
+                FileCapabilityPermit {
+                    access_epoch: enabled.access_epoch,
+                    epoch_rx: self.inner.epoch_tx.subscribe(),
+                },
+            )
         };
-        operation(&enabled.root, &enabled.share, permit).map_err(FileCapabilityError::Filesystem)
+        operation(&root, &share, permit).map_err(FileCapabilityError::Filesystem)
     }
 
     pub fn audit_entries(&self) -> Result<Vec<AuditEntry>, FileCapabilityError> {
@@ -427,6 +446,33 @@ impl FileCapabilitySnapshot {
 pub struct FileCapabilityPermit {
     access_epoch: u64,
     epoch_rx: watch::Receiver<u64>,
+}
+
+/// An authorized, transfer-scoped view of the current File share. The
+/// capability state lock is released before this value is returned.
+#[derive(Debug, Clone)]
+pub struct FileCapabilityLease {
+    root: LocalShareRoot,
+    share: FileShare,
+    permit: FileCapabilityPermit,
+}
+
+impl FileCapabilityLease {
+    pub fn root(&self) -> &LocalShareRoot {
+        &self.root
+    }
+
+    pub fn share(&self) -> &FileShare {
+        &self.share
+    }
+
+    pub fn permit(&self) -> &FileCapabilityPermit {
+        &self.permit
+    }
+
+    pub fn into_parts(self) -> (LocalShareRoot, FileShare, FileCapabilityPermit) {
+        (self.root, self.share, self.permit)
+    }
 }
 
 impl FileCapabilityPermit {
@@ -542,6 +588,9 @@ fn record_audit(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     use fuckipv6_common::domain::{
         ConcurrentNamePolicy, FileAcl, FileDeletePolicy, FileQuota, FileShareId, FileShareMode,
         NetworkId, SymlinkPolicy, FILE_SHARE_SCHEMA_VERSION,
@@ -676,5 +725,32 @@ mod tests {
         assert_eq!(classify_disk_status(11, 10), FileCapabilityState::Ready);
         assert_eq!(FileCapabilityState::Disabled.is_enabled(), false);
         assert_eq!(FileCapabilityState::LowSpace.is_enabled(), true);
+    }
+
+    #[test]
+    fn filesystem_work_does_not_hold_the_capability_state_lock() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let capability = FileShareCapability::new();
+        enable(&capability, &temporary, &share(), 10);
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker_capability = capability.clone();
+        let worker = std::thread::spawn(move || {
+            worker_capability
+                .with_enabled(|_, _, _| {
+                    started_tx.send(()).expect("signal start");
+                    release_rx.recv().expect("wait for disable");
+                    Ok(())
+                })
+                .expect("filesystem operation")
+        });
+
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("operation started");
+        capability.disable(&owner(), 20).expect("disable");
+        release_tx.send(()).expect("release operation");
+        worker.join().expect("worker");
     }
 }

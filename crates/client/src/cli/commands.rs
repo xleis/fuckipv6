@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
-    ExitSessionAction, MembershipState, NetworkId, NetworkMemberDirectory, NodeId,
-    TrafficFailureKind, TrafficProtectionState, TrafficSessionSnapshot,
+    CapabilityKind, ExitSessionAction, InvitationCode, InvitationRedeemRequest, MembershipRole,
+    MembershipState, NetworkId, NetworkMemberDirectory, NodeId, TrafficFailureKind,
+    TrafficProtectionState, TrafficSessionSnapshot,
 };
 #[cfg(test)]
 use fuckipv6_common::is_encrypted_config_path;
@@ -31,9 +32,10 @@ use crate::ipc::{self, IpcRequest, IpcResponse};
 use crate::local_ipc::IpcRole;
 use crate::node::{
     LocalExitCapabilitySnapshot, LocalExitCapabilityStage, NodeCommand, NodeCommandContext,
-    NodeCommandOutcome, NodeCommandRequest, NodeNetworkSnapshot, NodeNetworkStatus,
-    NodeProbePeerCommand, NodeProblem, NodeProblemCode, NodeSetLocalExitCapabilityCommand,
-    NodeSnapshot, NodeStateStore, RuntimeControlError,
+    NodeCommandOutcome, NodeCommandRequest, NodeCreateInvitationCommand, NodeNetworkSnapshot,
+    NodeNetworkStatus, NodePreviewInvitationCommand, NodeProbePeerCommand, NodeProblem,
+    NodeProblemCode, NodeRedeemInvitationCommand, NodeSetLocalExitCapabilityCommand, NodeSnapshot,
+    NodeStateStore, RuntimeControlError,
 };
 use crate::p2p::buffer_pool::InboundPayload;
 use crate::p2p::connection::{InPlaceSendOutcome, InboundPacket, P2pEngine, PeerRouteInfo};
@@ -5839,6 +5841,215 @@ pub async fn node_diagnostics(json: bool) -> Result<()> {
     }
     session.shutdown();
     Ok(())
+}
+
+fn invitation_role(role: &str) -> Result<MembershipRole> {
+    match role.trim() {
+        "member" => Ok(MembershipRole::Member),
+        "administrator" | "admin" => Ok(MembershipRole::Administrator),
+        _ => anyhow::bail!("邀请角色必须是 member 或 administrator"),
+    }
+}
+
+fn invitation_capabilities(capabilities: &[String]) -> Result<Vec<CapabilityKind>> {
+    capabilities
+        .iter()
+        .map(|capability| match capability.trim() {
+            "coordinator" => Ok(CapabilityKind::Coordinator),
+            "relay" => Ok(CapabilityKind::Relay),
+            "exit" | "exit_node" | "exit-node" => Ok(CapabilityKind::Exit),
+            "file" => Ok(CapabilityKind::File),
+            _ => anyhow::bail!("未知邀请能力: {capability}"),
+        })
+        .collect()
+}
+
+fn invitation_network_id(network_id: &str) -> Result<NetworkId> {
+    NetworkId::parse(network_id.trim()).context("网络 ID 格式无效")
+}
+
+/// Create a scoped invitation through the running node's authoritative command bus.
+pub async fn create_invitation(
+    network_id: &str,
+    role: &str,
+    capabilities: &[String],
+    max_uses: u32,
+    expires_in_ms: u64,
+    json: bool,
+) -> Result<()> {
+    let command = NodeCreateInvitationCommand {
+        network_id: invitation_network_id(network_id)?,
+        role: invitation_role(role)?,
+        capabilities: invitation_capabilities(capabilities)?,
+        max_uses,
+        expires_in_ms,
+    };
+    let session = cli_node_session().await?;
+    let outcome =
+        execute_cli_node_command(&session, NodeCommand::CreateInvitation(command)).await?;
+    match outcome {
+        NodeCommandOutcome::InvitationCreated(issued) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&issued)?);
+            } else {
+                println!("邀请已创建");
+                println!("网络:       {}", issued.status.invitation.network_id);
+                println!("邀请 ID:    {}", issued.status.invitation.invitation_id);
+                println!("角色:       {:?}", issued.status.invitation.role);
+                println!("剩余次数:   {}", issued.status.remaining_uses);
+                println!(
+                    "过期时间:   {} ms",
+                    issued.status.invitation.expires_at_unix_ms
+                );
+                println!("邀请码:     {}", issued.code.as_str());
+            }
+        }
+        other => anyhow::bail!("创建邀请返回了意外结果: {other:?}"),
+    }
+    session.shutdown();
+    Ok(())
+}
+
+/// Preview the current invitation terms without creating a local membership.
+pub async fn preview_invitation(
+    network_id: &str,
+    coordinator_url: &str,
+    code: &str,
+    json: bool,
+) -> Result<()> {
+    let command = NodePreviewInvitationCommand {
+        network_id: invitation_network_id(network_id)?,
+        coordinator_url: coordinator_url.to_owned(),
+        code: InvitationCode::parse(code.trim()).context("邀请码格式无效")?,
+    };
+    let session = cli_node_session().await?;
+    let outcome =
+        execute_cli_node_command(&session, NodeCommand::PreviewInvitation(command)).await?;
+    match outcome {
+        NodeCommandOutcome::InvitationPreview(preview) => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&preview)?);
+            } else {
+                print_invitation_preview(&preview);
+            }
+        }
+        other => anyhow::bail!("预览邀请返回了意外结果: {other:?}"),
+    }
+    session.shutdown();
+    Ok(())
+}
+
+/// Re-preview and redeem an invitation with an explicit acknowledgement.
+pub async fn redeem_invitation(
+    network_id: &str,
+    coordinator_url: &str,
+    code: &str,
+    accept_exit_contribution: bool,
+    yes: bool,
+    json: bool,
+) -> Result<()> {
+    if !yes {
+        anyhow::bail!("兑换邀请前必须复核条款并显式传入 --yes");
+    }
+    let network_id = invitation_network_id(network_id)?;
+    let code = InvitationCode::parse(code.trim()).context("邀请码格式无效")?;
+    let session = cli_node_session().await?;
+    let preview_outcome = execute_cli_node_command(
+        &session,
+        NodeCommand::PreviewInvitation(NodePreviewInvitationCommand {
+            network_id: network_id.clone(),
+            coordinator_url: coordinator_url.to_owned(),
+            code: code.clone(),
+        }),
+    )
+    .await?;
+    let NodeCommandOutcome::InvitationPreview(preview) = preview_outcome else {
+        anyhow::bail!("复核邀请返回了意外结果: {preview_outcome:?}");
+    };
+    if !preview.can_accept
+        || preview.denial_key.is_some()
+        || !preview.state.is_active()
+        || preview.remaining_uses == 0
+        || preview.expires_at_unix_ms <= unix_time_ms()
+    {
+        anyhow::bail!(
+            "邀请当前不可接受: {}",
+            preview
+                .denial_key
+                .as_deref()
+                .unwrap_or("已过期、撤销或耗尽")
+        );
+    }
+    let requires_exit_contribution = preview
+        .terms
+        .exit_contribution_mode
+        .requires_join_commitment();
+    if requires_exit_contribution && !accept_exit_contribution {
+        anyhow::bail!(
+            "该网络要求加入时贡献 Exit 能力，请复核条款后传入 --accept-exit-contribution"
+        );
+    }
+
+    let acknowledged_at_unix_ms = unix_time_ms();
+    let redeem = NodeRedeemInvitationCommand {
+        coordinator_url: coordinator_url.to_owned(),
+        request: InvitationRedeemRequest {
+            network_id: preview.network_id.clone(),
+            code,
+            invitation_id: preview.invitation_id.clone(),
+            expected_invitation_revision: preview.invitation_revision,
+            preview_digest: preview.preview_digest.clone(),
+            terms_hash: preview.terms_hash.clone(),
+            acknowledged_at_unix_ms,
+            exit_contribution_acknowledged: Some(requires_exit_contribution),
+        },
+    };
+    let outcome = execute_cli_node_command(&session, NodeCommand::RedeemInvitation(redeem)).await?;
+    match outcome {
+        NodeCommandOutcome::InvitationRedeemed(redemption) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "preview": &preview,
+                        "redemption": &redemption,
+                    }))?
+                );
+            } else {
+                print_invitation_preview(&preview);
+                println!();
+                println!("邀请已兑换，网络成员关系已保存");
+                println!("节点 ID:    {}", redemption.node_id);
+                println!("角色:       {:?}", redemption.role);
+                println!("加入时间:   {}", redemption.joined_at_unix_ms);
+            }
+        }
+        other => anyhow::bail!("兑换邀请返回了意外结果: {other:?}"),
+    }
+    session.shutdown();
+    Ok(())
+}
+
+fn print_invitation_preview(preview: &fuckipv6_common::domain::InvitationPreview) {
+    println!("邀请条款预览");
+    println!(
+        "网络:       {} ({})",
+        preview.network_name, preview.network_id
+    );
+    println!("邀请 ID:    {}", preview.invitation_id);
+    println!("角色:       {:?}", preview.role);
+    println!("能力:       {:?}", preview.capabilities);
+    println!("剩余次数:   {}", preview.remaining_uses);
+    println!("过期时间:   {} ms", preview.expires_at_unix_ms);
+    println!("状态:       {:?}", preview.state);
+    println!(
+        "网络条款:   revision={} privacy={}",
+        preview.terms.network_policy_revision, preview.terms.privacy_policy_revision
+    );
+    println!("Exit 义务:  {:?}", preview.terms.exit_contribution_mode);
+    println!("条款哈希:   {}", preview.terms_hash.as_str());
+    println!("预览摘要:   {}", preview.preview_digest.as_str());
+    println!("可接受:     {}", preview.can_accept);
 }
 
 /// Enable or disable the local owner Exit intent.

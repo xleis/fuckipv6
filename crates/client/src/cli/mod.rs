@@ -402,6 +402,12 @@ pub enum Commands {
     /// 查看本地 QUIC 能力和证书 pin
     QuicInfo,
 
+    /// 创建邀请、预览条款或兑换邀请加入网络
+    Invite {
+        #[command(subcommand)]
+        command: InviteCommands,
+    },
+
     /// 检查协调服务器注册流程（不创建TUN设备）
     RegisterCheck {
         /// 协调服务器 WebSocket 地址
@@ -419,6 +425,82 @@ pub enum Commands {
         /// 注册超时秒数
         #[arg(long, default_value = "5")]
         timeout_secs: u64,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum InviteCommands {
+    /// 由网络 owner/administrator 创建一次性邀请码
+    Create {
+        /// 网络 ID
+        #[arg(long)]
+        network_id: String,
+
+        /// 受邀成员角色: member 或 administrator
+        #[arg(long, default_value = "member")]
+        role: String,
+
+        /// 授予的能力，可重复或使用逗号分隔: coordinator, relay, exit, file
+        #[arg(long, value_delimiter = ',')]
+        capabilities: Vec<String>,
+
+        /// 邀请最多可兑换次数
+        #[arg(long, default_value_t = 1)]
+        max_uses: u32,
+
+        /// 邀请有效期（毫秒，范围 1 分钟到 30 天）
+        #[arg(long, default_value_t = 3_600_000)]
+        expires_in_ms: u64,
+
+        /// 输出机器可读的 JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// 在不加入网络的前提下预览邀请条款和校验摘要
+    Preview {
+        /// 邀请所属网络 ID
+        #[arg(long)]
+        network_id: String,
+
+        /// 协调器 WebSocket 地址，例如 ws://host:6666
+        #[arg(long)]
+        coordinator_url: String,
+
+        /// 邀请码
+        #[arg(long)]
+        code: String,
+
+        /// 输出机器可读的 JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// 复核当前邀请条款并兑换邀请，加入网络
+    Redeem {
+        /// 邀请所属网络 ID
+        #[arg(long)]
+        network_id: String,
+
+        /// 协调器 WebSocket 地址，例如 ws://host:6666
+        #[arg(long)]
+        coordinator_url: String,
+
+        /// 邀请码
+        #[arg(long)]
+        code: String,
+
+        /// 网络要求加入时贡献 Exit 能力时，显式接受该义务
+        #[arg(long)]
+        accept_exit_contribution: bool,
+
+        /// 确认已阅读并接受复核时展示的当前邀请条款
+        #[arg(long)]
+        yes: bool,
+
+        /// 输出机器可读的 JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -865,6 +947,7 @@ async fn run_command(command: Commands, launch_plan: Option<UiLaunchPlan>) -> Re
         | Commands::Route { .. }
         | Commands::Logs { .. }
         | Commands::QuicInfo
+        | Commands::Invite { .. }
         | Commands::RegisterCheck { .. }) => run_runtime_command(command, launch_plan).await?,
         command @ Commands::LxtRescue { .. } => run_lxt_rescue_command(command).await?,
         Commands::RecoverOwner => {
@@ -988,6 +1071,56 @@ async fn run_runtime_command(command: Commands, launch_plan: Option<UiLaunchPlan
         Commands::Diagnostics { json } => {
             logging::init_default()?;
             commands::node_diagnostics(json).await?;
+        }
+        Commands::Invite { command } => {
+            logging::init_default()?;
+            match command {
+                InviteCommands::Create {
+                    network_id,
+                    role,
+                    capabilities,
+                    max_uses,
+                    expires_in_ms,
+                    json,
+                } => {
+                    commands::create_invitation(
+                        &network_id,
+                        &role,
+                        &capabilities,
+                        max_uses,
+                        expires_in_ms,
+                        json,
+                    )
+                    .await?;
+                }
+                InviteCommands::Preview {
+                    network_id,
+                    coordinator_url,
+                    code,
+                    json,
+                } => {
+                    commands::preview_invitation(&network_id, &coordinator_url, &code, json)
+                        .await?;
+                }
+                InviteCommands::Redeem {
+                    network_id,
+                    coordinator_url,
+                    code,
+                    accept_exit_contribution,
+                    yes,
+                    json,
+                } => {
+                    commands::redeem_invitation(
+                        &network_id,
+                        &coordinator_url,
+                        &code,
+                        accept_exit_contribution,
+                        yes,
+                        json,
+                    )
+                    .await?;
+                }
+            }
         }
         Commands::Exit { command } => {
             logging::init_default()?;
@@ -1434,6 +1567,92 @@ mod tests {
             }) => assert!(json),
             _ => panic!("expected exit status command"),
         }
+    }
+
+    #[test]
+    fn parses_invitation_create_preview_and_redeem_commands() {
+        let create = Cli::try_parse_from([
+            "fuckipv6",
+            "invite",
+            "create",
+            "--network-id",
+            "net_example",
+            "--role",
+            "administrator",
+            "--capabilities",
+            "relay,file",
+            "--max-uses",
+            "2",
+            "--expires-in-ms",
+            "600000",
+            "--json",
+        ])
+        .unwrap();
+        match create.command {
+            Some(Commands::Invite {
+                command:
+                    InviteCommands::Create {
+                        network_id,
+                        role,
+                        capabilities,
+                        max_uses,
+                        expires_in_ms,
+                        json,
+                    },
+            }) => {
+                assert_eq!(network_id, "net_example");
+                assert_eq!(role, "administrator");
+                assert_eq!(capabilities, ["relay", "file"]);
+                assert_eq!(max_uses, 2);
+                assert_eq!(expires_in_ms, 600_000);
+                assert!(json);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        let preview = Cli::try_parse_from([
+            "fuckipv6",
+            "invite",
+            "preview",
+            "--network-id",
+            "net_example",
+            "--coordinator-url",
+            "ws://127.0.0.1:6666",
+            "--code",
+            "fkinv_example",
+        ])
+        .unwrap();
+        assert!(matches!(
+            preview.command,
+            Some(Commands::Invite {
+                command: InviteCommands::Preview { .. }
+            })
+        ));
+
+        let redeem = Cli::try_parse_from([
+            "fuckipv6",
+            "invite",
+            "redeem",
+            "--network-id",
+            "net_example",
+            "--coordinator-url",
+            "ws://127.0.0.1:6666",
+            "--code",
+            "fkinv_example",
+            "--accept-exit-contribution",
+            "--yes",
+        ])
+        .unwrap();
+        assert!(matches!(
+            redeem.command,
+            Some(Commands::Invite {
+                command: InviteCommands::Redeem {
+                    accept_exit_contribution: true,
+                    yes: true,
+                    ..
+                }
+            })
+        ));
     }
 
     #[test]

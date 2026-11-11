@@ -46,7 +46,7 @@ impl ContributionKind {
 
     pub const fn resource_kind(self) -> ResourceKind {
         match self {
-            Self::Relay => ResourceKind::Capability,
+            Self::Relay => ResourceKind::Relay,
             Self::Exit => ResourceKind::ExitGrant,
             Self::File => ResourceKind::FileShare,
         }

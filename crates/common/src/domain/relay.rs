@@ -353,16 +353,14 @@ pub struct RelayAccessPolicy {
     /// the provider may itself be a consumer, but its contribution permission
     /// must never be inferred as an owner permission.
     pub provider: RelayMemberPolicyContext,
+    #[serde(default)]
+    pub existing_session_policy: RelayExistingSessionPolicy,
     pub revision: u64,
     pub updated_at_unix_ms: u64,
     #[serde(default)]
     pub network_rules: Vec<PermissionRule>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network_acl: Option<NetworkAcl>,
-    #[serde(default)]
-    pub provider_local_rules: Vec<PermissionRule>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_local_policy: Option<NodeLocalAccessPolicy>,
     #[serde(default)]
     pub members: BTreeMap<NodeId, RelayMemberPolicyContext>,
     pub limits: RelayLimitPolicy,
@@ -389,7 +387,7 @@ impl RelayAccessPolicy {
             ));
         }
         self.limits.validate()?;
-        for rule in self.network_rules.iter().chain(&self.provider_local_rules) {
+        for rule in &self.network_rules {
             rule.validate()?;
         }
         if let Some(acl) = &self.network_acl {
@@ -399,14 +397,6 @@ impl RelayAccessPolicy {
                 ));
             }
             acl.validate_at(now_unix_ms)?;
-        }
-        if let Some(policy) = &self.provider_local_policy {
-            if policy.node_id != self.provider_node_id {
-                return Err(DomainError::invariant(
-                    "Relay provider local policy belongs to another node",
-                ));
-            }
-            policy.validate_at(now_unix_ms)?;
         }
         self.provider
             .validate_for(&self.provider_node_id, now_unix_ms)?;
@@ -420,7 +410,7 @@ impl RelayAccessPolicy {
         PermissionRequest {
             action: PolicyAction::Use,
             resource: ResourceRef {
-                kind: ResourceKind::Capability,
+                kind: ResourceKind::Relay,
                 // Replaced by the evaluator with the concrete network.
                 network_id: NetworkId::from_public_key(b"relay-policy-placeholder"),
                 object_id: Some("relay".into()),
@@ -442,10 +432,10 @@ impl RelayAccessPolicy {
             emergency_coordinator: self.provider.role == NetworkRole::TemporaryCoordinator,
         };
         evaluate_effective_access(
-            &self.provider_local_rules,
+            &self.provider.local_rules,
             &self.network_rules,
             self.network_acl.as_ref(),
-            self.provider_local_policy.as_ref(),
+            self.provider.local_access_policy.as_ref(),
             &request,
             &context,
             now_unix_ms,
@@ -859,7 +849,7 @@ mod tests {
             ),
             effect: PermissionEffect::Allow,
             subjects: vec![SubjectSelector::Role(role)],
-            resources: vec![ResourceKind::Capability],
+            resources: vec![ResourceKind::Relay],
             actions: vec![PolicyAction::Use],
             conditions: vec![PermissionCondition::MembershipActive],
         }
@@ -889,6 +879,7 @@ mod tests {
                 local_rules: vec![role_rule(&network_id, NetworkRole::Owner)],
                 local_access_policy: None,
             },
+            existing_session_policy: RelayExistingSessionPolicy::Reauthorize,
             revision: 1,
             updated_at_unix_ms: now() - 1_000,
             network_rules: vec![
@@ -896,8 +887,6 @@ mod tests {
                 role_rule(&network_id, NetworkRole::Member),
             ],
             network_acl: None,
-            provider_local_rules: vec![role_rule(&network_id, NetworkRole::Owner)],
-            provider_local_policy: None,
             members,
             limits: RelayLimitPolicy {
                 max_connections: Some(32),
@@ -947,7 +936,7 @@ mod tests {
         assert!(policy.authorize_member(&member, now()).allowed);
 
         let mut vetoed = policy.clone();
-        vetoed.provider_local_policy = Some(NodeLocalAccessPolicy {
+        vetoed.provider.local_access_policy = Some(NodeLocalAccessPolicy {
             node_id: vetoed.provider_node_id.clone(),
             revision: 1,
             issued_at_unix_ms: now() - 1_000,
@@ -970,6 +959,44 @@ mod tests {
     }
 
     #[test]
+    fn relay_requires_explicit_local_and_network_allows_on_both_sides() {
+        let (network_id, provider, member) = ids();
+        let policy = policy(network_id.clone(), provider, member.clone());
+
+        let mut missing_provider_local = policy.clone();
+        missing_provider_local.provider.local_rules.clear();
+        let denied = missing_provider_local.authorize_member(&member, now());
+        assert!(!denied.allowed);
+        assert_eq!(
+            denied.final_reason,
+            Some(EffectiveAccessReason::DefaultDenied)
+        );
+
+        let mut missing_consumer_local = policy.clone();
+        missing_consumer_local
+            .members
+            .get_mut(&member)
+            .unwrap()
+            .local_rules
+            .clear();
+        let denied = missing_consumer_local.authorize_member(&member, now());
+        assert!(!denied.allowed);
+        assert_eq!(
+            denied.final_reason,
+            Some(EffectiveAccessReason::DefaultDenied)
+        );
+
+        let mut missing_network = policy;
+        missing_network.network_rules.clear();
+        let denied = missing_network.authorize_member(&member, now());
+        assert!(!denied.allowed);
+        assert_eq!(
+            denied.final_reason,
+            Some(EffectiveAccessReason::DefaultDenied)
+        );
+    }
+
+    #[test]
     fn provider_authorization_uses_trusted_member_context() {
         let (network_id, provider, member) = ids();
         let mut policy = policy(network_id.clone(), provider, member.clone());
@@ -979,7 +1006,6 @@ mod tests {
         policy.network_rules = vec![role_rule(&network_id, NetworkRole::Member)];
         policy.provider.role = NetworkRole::Member;
         policy.provider.local_rules = vec![role_rule(&network_id, NetworkRole::Member)];
-        policy.provider_local_rules = vec![role_rule(&network_id, NetworkRole::Member)];
         assert!(policy.authorize_member(&member, now()).allowed);
 
         policy.provider.membership_active = false;
@@ -1004,7 +1030,7 @@ mod tests {
                 rule_id: SecurityRuleId::from_public_key(b"deny-relay"),
                 effect: PermissionEffect::Deny,
                 subjects: vec![SubjectSelector::Node(member.clone())],
-                resources: vec![ResourceKind::Capability],
+                resources: vec![ResourceKind::Relay],
                 actions: vec![PolicyAction::Use],
                 conditions: Vec::new(),
             }],

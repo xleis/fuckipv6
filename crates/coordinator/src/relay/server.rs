@@ -25,6 +25,7 @@ const RELAY_REGISTER_STREAM_ID: u64 = 0;
 const RELAY_AUTHORIZATION_STREAM_ID: u64 = 1;
 const MAX_RELAY_CONNECTION_TASKS: usize = 512;
 const MAX_RELAY_STREAM_TASKS: usize = 4096;
+const RELAY_CONNECTION_LIFECYCLE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Trusted source of the current Relay policy. Production must inject a source
 /// backed by Coordinator-owned files; a missing or invalid source denies every
@@ -617,9 +618,26 @@ impl RelayServer {
         let registered = self
             .register_relay_connection_stream(&connection, connection_id)
             .await?;
+        let mut lifecycle = tokio::time::interval(RELAY_CONNECTION_LIFECYCLE_INTERVAL);
+        lifecycle.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
+                _ = lifecycle.tick() => {
+                    if let Err(error) = self
+                        .enforce_connection_lifecycle(&registered, connection_id)
+                        .await
+                    {
+                        tracing::warn!(
+                            client_id = %registered.client_id,
+                            virtual_ip = %registered.virtual_ip,
+                            error = %error,
+                            "QUIC 中继连接生命周期检查失败，主动关闭连接"
+                        );
+                        connection.close(0u32.into(), b"relay authorization lifecycle");
+                        break;
+                    }
+                }
                 stream = connection.accept_bi() => {
                     if !self.accept_relay_data_stream(stream, &registered, connection_id).await {
                             break;
@@ -634,6 +652,107 @@ impl RelayServer {
 
         self.unregister_if_current(registered.virtual_ip, connection_id)
             .await;
+        Ok(())
+    }
+
+    async fn enforce_connection_lifecycle(
+        &self,
+        registered: &RegisteredRelayClient,
+        connection_id: usize,
+    ) -> Result<()> {
+        let now = now_unix_ms();
+        let client = self
+            .lookup_client(registered.virtual_ip)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("Relay 连接注册已失效"))?;
+        if client.connection_id != connection_id
+            || client.client_id != registered.client_id
+            || client.node_id != registered.node_id
+        {
+            anyhow::bail!("Relay 连接已被替换");
+        }
+
+        client
+            .member_grant
+            .validate_at(now)
+            .context("Relay 使用授权已过期或无效")?;
+        match self
+            .session_manager
+            .is_registration_revoked(&client.client_id, &client.public_key)
+            .await
+        {
+            Ok(false) => {}
+            Ok(true) => anyhow::bail!("Relay 客户端身份已撤销"),
+            Err(error) => {
+                anyhow::bail!("Relay 授权撤销目录查询失败，拒绝保持连接: {error:#}")
+            }
+        }
+        if self
+            .session_manager
+            .is_blacklisted(&client.client_id, &client.public_key)
+            .await
+        {
+            anyhow::bail!("Relay 客户端身份已加入黑名单");
+        }
+        if !self
+            .session_manager
+            .is_data_plane_member(&client.public_key)
+            .context("Relay 数据面成员检查失败")?
+        {
+            anyhow::bail!("Relay 客户端已不是当前数据面成员");
+        }
+
+        let policy = self.load_policy(now).await?;
+        match policy.existing_session_policy {
+            RelayExistingSessionPolicy::Continue => {}
+            RelayExistingSessionPolicy::Reauthorize => {
+                let (authorized_policy, decision) = self
+                    .policy_authority
+                    .authorize_grant(&client.member_grant, now)
+                    .context("Relay 实时授权检查失败")?;
+                if !decision.allowed {
+                    anyhow::bail!(
+                        "Relay 实时授权已拒绝: {}",
+                        decision
+                            .final_reason
+                            .map(|reason| format!("{reason:?}"))
+                            .unwrap_or_else(|| "unknown".into())
+                    );
+                }
+                if authorized_policy.revision != policy.revision
+                    || authorized_policy.network_id != policy.network_id
+                    || authorized_policy.provider_node_id != policy.provider_node_id
+                {
+                    anyhow::bail!("Relay 实时授权上下文与当前策略不一致");
+                }
+                if decision
+                    .limits
+                    .max_session_duration_secs
+                    .is_some_and(|limit| {
+                        client.registered_at.elapsed() >= Duration::from_secs(limit)
+                    })
+                {
+                    anyhow::bail!("Relay 会话时长配额已耗尽");
+                }
+            }
+            RelayExistingSessionPolicy::Migrate | RelayExistingSessionPolicy::Terminate => {
+                if client.policy_revision != policy.revision {
+                    anyhow::bail!(
+                        "Relay 策略 revision 已变化，关闭既有会话以执行 {:?}",
+                        policy.existing_session_policy
+                    );
+                }
+                if client
+                    .effective_limits
+                    .max_session_duration_secs
+                    .is_some_and(|limit| {
+                        client.registered_at.elapsed() >= Duration::from_secs(limit)
+                    })
+                {
+                    anyhow::bail!("Relay 会话时长配额已耗尽");
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1926,13 +2045,23 @@ mod tests {
         virtual_ip: Ipv6Addr,
     ) -> Result<QuicRelayClient> {
         let grant = test_member_grant(identity, RelayLimitPolicy::default());
+        connect_test_relay_with_grant(relay_addr, server_pin, identity, virtual_ip, &grant).await
+    }
+
+    async fn connect_test_relay_with_grant(
+        relay_addr: SocketAddr,
+        server_pin: [u8; 32],
+        identity: &Identity,
+        virtual_ip: Ipv6Addr,
+        grant: &RelayMemberGrant,
+    ) -> Result<QuicRelayClient> {
         QuicRelayClient::connect(
             relay_addr,
             server_pin,
             "fuckipv6.local",
             identity,
             virtual_ip,
-            &grant,
+            grant,
         )
         .await
     }
@@ -2661,6 +2790,289 @@ mod tests {
 
         client_a.close().await;
         client_b.close().await;
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_closes_connection_when_member_grant_expires() -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity = Identity::generate()?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let virtual_ip = session_manager
+            .register_client(
+                identity.client_id().to_string(),
+                identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?
+            .primary_ipv6();
+
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager,
+            relay_authority(&[&identity]),
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+        let now = now_unix_ms();
+        let grant = RelayMemberGrant::new(
+            test_relay_network_id(),
+            test_relay_provider_node_id(),
+            &identity,
+            "expiring-live-grant",
+            1,
+            now.saturating_sub(1_000),
+            now.saturating_add(1_500),
+            RelayLimitPolicy::default(),
+        )?;
+        let client =
+            connect_test_relay_with_grant(relay_addr, server_pin, &identity, virtual_ip, &grant)
+                .await?;
+
+        let closed = tokio::time::timeout(Duration::from_secs(4), client.recv_packet())
+            .await
+            .context("client did not observe expired relay grant")?;
+        assert!(closed.is_none());
+        assert!(server.state.clients.read().await.is_empty());
+        assert_eq!(
+            server
+                .state
+                .metrics
+                .active_connections
+                .load(Ordering::Acquire),
+            0
+        );
+
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_terminates_existing_session_on_policy_change_without_next_packet(
+    ) -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity = Identity::generate()?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let virtual_ip = session_manager
+            .register_client(
+                identity.client_id().to_string(),
+                identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?
+            .primary_ipv6();
+
+        let authority = Arc::new(MemoryRelayPolicyAuthority::for_identities(&[&identity]));
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager,
+            authority.clone(),
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+        let client = connect_test_relay(relay_addr, server_pin, &identity, virtual_ip).await?;
+
+        let mut next_policy = test_relay_policy(&[&identity]);
+        next_policy.existing_session_policy = RelayExistingSessionPolicy::Terminate;
+        next_policy.revision += 1;
+        next_policy.updated_at_unix_ms = now_unix_ms().saturating_sub(1);
+        authority.replace_policy(next_policy);
+
+        let closed = tokio::time::timeout(Duration::from_secs(3), client.recv_packet())
+            .await
+            .context("terminate policy did not close the existing relay connection")?;
+        assert!(closed.is_none());
+        assert!(server.state.clients.read().await.is_empty());
+        assert_eq!(
+            server
+                .state
+                .metrics
+                .active_connections
+                .load(Ordering::Acquire),
+            0
+        );
+
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_reauth_rejects_existing_session_without_next_packet() -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity = Identity::generate()?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let virtual_ip = session_manager
+            .register_client(
+                identity.client_id().to_string(),
+                identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?
+            .primary_ipv6();
+
+        let authority = Arc::new(MemoryRelayPolicyAuthority::for_identities(&[&identity]));
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager,
+            authority.clone(),
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+        let client = connect_test_relay(relay_addr, server_pin, &identity, virtual_ip).await?;
+
+        let mut next_policy = test_relay_policy(&[&identity]);
+        next_policy.members.clear();
+        next_policy.revision += 1;
+        next_policy.updated_at_unix_ms = now_unix_ms().saturating_sub(1);
+        authority.replace_policy(next_policy);
+
+        let closed = tokio::time::timeout(Duration::from_secs(3), client.recv_packet())
+            .await
+            .context("reauthorize policy did not close the revoked relay connection")?;
+        assert!(closed.is_none());
+        assert!(server.state.clients.read().await.is_empty());
+
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_continue_policy_keeps_authorized_existing_session() -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity_a = Identity::generate()?;
+        let identity_b = Identity::generate()?;
+        let (tx_a, _rx_a) = mpsc::unbounded_channel();
+        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        let ip_a = session_manager
+            .register_client(
+                identity_a.client_id().to_string(),
+                identity_a.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx_a,
+            )
+            .await?
+            .primary_ipv6();
+        let ip_b = session_manager
+            .register_client(
+                identity_b.client_id().to_string(),
+                identity_b.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42000),
+                51821,
+                NatType::Open,
+                tx_b,
+            )
+            .await?
+            .primary_ipv6();
+
+        let authority = Arc::new(MemoryRelayPolicyAuthority::for_identities(&[
+            &identity_a,
+            &identity_b,
+        ]));
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager.clone(),
+            authority.clone(),
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+        let client_a = connect_test_relay(relay_addr, server_pin, &identity_a, ip_a).await?;
+        let client_b = connect_test_relay(relay_addr, server_pin, &identity_b, ip_b).await?;
+
+        let mut next_policy = test_relay_policy(&[&identity_b]);
+        next_policy.existing_session_policy = RelayExistingSessionPolicy::Continue;
+        next_policy.revision += 1;
+        next_policy.updated_at_unix_ms = now_unix_ms().saturating_sub(1);
+        authority.replace_policy(next_policy);
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+
+        client_a
+            .send_packet(
+                1,
+                ip_a,
+                ip_b,
+                Bytes::from_static(b"existing session continues"),
+            )
+            .await?;
+        let received = tokio::time::timeout(Duration::from_secs(2), client_b.recv_packet())
+            .await
+            .context("continue session did not receive relayed packet")?
+            .context("continue relay connection closed unexpectedly")?;
+        assert_eq!(
+            received.payload,
+            Bytes::from_static(b"existing session continues")
+        );
+        assert_eq!(server.state.clients.read().await.len(), 2);
+
+        client_a.close().await;
+        client_b.close().await;
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_closes_existing_session_when_duration_quota_is_reached() -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity = Identity::generate()?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let virtual_ip = session_manager
+            .register_client(
+                identity.client_id().to_string(),
+                identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?
+            .primary_ipv6();
+
+        let authority = Arc::new(MemoryRelayPolicyAuthority::for_identities(&[&identity]));
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager,
+            authority.clone(),
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+        let client = connect_test_relay(relay_addr, server_pin, &identity, virtual_ip).await?;
+
+        let mut next_policy = test_relay_policy(&[&identity]);
+        next_policy.limits.max_session_duration_secs = Some(1);
+        next_policy.revision += 1;
+        next_policy.updated_at_unix_ms = now_unix_ms().saturating_sub(1);
+        authority.replace_policy(next_policy);
+
+        let closed = tokio::time::timeout(Duration::from_secs(4), client.recv_packet())
+            .await
+            .context("duration quota did not close the existing relay connection")?;
+        assert!(closed.is_none());
+        assert!(server.state.clients.read().await.is_empty());
+        assert_eq!(
+            server
+                .state
+                .metrics
+                .active_connections
+                .load(Ordering::Acquire),
+            0
+        );
+
         server_task.abort();
         Ok(())
     }

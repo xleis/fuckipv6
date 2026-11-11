@@ -121,6 +121,16 @@ impl PeerHealth {
         }
     }
 
+    /// Start a new health window after the active direct transport changes.
+    /// Cumulative counters remain monotonic, while old UDP losses no longer
+    /// make a newly established TCP path look unhealthy.
+    pub(crate) fn reset_probe_window(&self) {
+        let mut probes = self.probes();
+        probes.samples.clear();
+        probes.rtt_us = None;
+        probes.remote_quality = None;
+    }
+
     pub(crate) fn record_probe_response(&self, timestamp: u64, rtt_us: u64) {
         self.traffic.record_inbound();
         let mut probes = self.probes();

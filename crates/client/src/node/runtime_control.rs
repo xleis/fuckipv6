@@ -3810,7 +3810,8 @@ impl NetworkRuntimeActor {
             network.signaling_port.unwrap_or(0),
             network.relay_port.unwrap_or(0),
         )
-        .with_host_public_key(host_public_key);
+        .with_host_public_key(host_public_key)
+        .with_relay_enabled(network.relay_enabled);
         let request = match network.external_host.clone() {
             Some(host) => request.with_external_host(host),
             None => request.with_external_host("127.0.0.1"),
@@ -3849,7 +3850,11 @@ impl NetworkRuntimeActor {
         if let Err(error) = self.configs.set_embedded_service_metadata(
             &network.name,
             service.signaling_addr.port(),
-            service.relay_addr.port(),
+            service
+                .relay_addr
+                .map(|addr| addr.port())
+                .or(network.relay_port),
+            network.relay_enabled,
             network.external_host.clone(),
             network.ip_pool.clone(),
         ) {
@@ -4280,7 +4285,8 @@ impl NetworkRuntimeActor {
         if let Err(error) = self.configs.set_embedded_service_metadata(
             &command.name,
             service.signaling_addr.port(),
-            service.relay_addr.port(),
+            service.relay_addr.map(|addr| addr.port()),
+            true,
             command.external_host.clone(),
             None,
         ) {
@@ -5898,7 +5904,12 @@ impl NetworkRuntimeActor {
             network_name: service.network_name.clone(),
             status: NodeEmbeddedServiceStatus::Running,
             signaling_addr: Some(service.signaling_addr),
-            relay_addr: Some(service.relay_addr),
+            relay_status: if service.relay_addr.is_some() {
+                NodeEmbeddedServiceStatus::Running
+            } else {
+                NodeEmbeddedServiceStatus::Stopped
+            },
+            relay_addr: service.relay_addr,
         })
         .await;
     }
@@ -5912,6 +5923,12 @@ impl NetworkRuntimeActor {
             network_name: network_name.to_string(),
             status,
             signaling_addr: None,
+            relay_status: match status {
+                NodeEmbeddedServiceStatus::Starting => NodeEmbeddedServiceStatus::Starting,
+                NodeEmbeddedServiceStatus::Stopping => NodeEmbeddedServiceStatus::Stopping,
+                NodeEmbeddedServiceStatus::Failed => NodeEmbeddedServiceStatus::Failed,
+                NodeEmbeddedServiceStatus::Running | NodeEmbeddedServiceStatus::Stopped => status,
+            },
             relay_addr: None,
         })
         .await;
@@ -5920,6 +5937,7 @@ impl NetworkRuntimeActor {
     async fn record_embedded_service(&self, service: NodeEmbeddedServiceSnapshot) {
         let network_name = service.network_name.clone();
         let status = service.status;
+        let relay_status = service.relay_status;
         self.state
             .update(|snapshot| {
                 if let Some(existing) = snapshot
@@ -5937,8 +5955,12 @@ impl NetworkRuntimeActor {
             })
             .await;
         self.events.publish(NodeEventKind::EmbeddedServiceChanged {
-            network_name,
+            network_name: network_name.clone(),
             status,
+        });
+        self.events.publish(NodeEventKind::RelayChanged {
+            network_name,
+            status: relay_status,
         });
     }
 
@@ -7925,6 +7947,7 @@ mod tests {
         let embedded_service = NodeEmbeddedServiceSnapshot {
             network_name: "local-exit-isolation".into(),
             status: NodeEmbeddedServiceStatus::Running,
+            relay_status: NodeEmbeddedServiceStatus::Running,
             signaling_addr: Some("127.0.0.1:46666".parse().expect("signaling address")),
             relay_addr: Some("127.0.0.1:46667".parse().expect("relay address")),
         };
@@ -9875,6 +9898,7 @@ mod tests {
         assert!(persisted.owns_embedded_services);
         assert_eq!(persisted.signaling_port, Some(signaling_addr.port()));
         assert_eq!(persisted.relay_port, Some(relay_addr.port()));
+        assert!(persisted.relay_enabled);
         assert_eq!(persisted.external_host, None);
         assert_eq!(persisted.ip_pool, None);
         assert!(snapshot
@@ -9917,7 +9941,7 @@ mod tests {
         );
         assert_eq!(
             persisted_before.relay_port,
-            Some(before[0].relay_addr.port())
+            before[0].relay_addr.map(|addr| addr.port())
         );
 
         let stopped = harness
@@ -9958,7 +9982,10 @@ mod tests {
             persisted_after.signaling_port,
             Some(after[0].signaling_addr.port())
         );
-        assert_eq!(persisted_after.relay_port, Some(after[0].relay_addr.port()));
+        assert_eq!(
+            persisted_after.relay_port,
+            after[0].relay_addr.map(|addr| addr.port())
+        );
 
         harness.shutdown().await;
     }

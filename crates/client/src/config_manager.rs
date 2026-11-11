@@ -53,10 +53,18 @@ pub struct NetworkConfig {
     pub signaling_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_port: Option<u16>,
+    /// Owner intent for providing Relay service. This is deliberately separate
+    /// from `owns_embedded_services`: disabling Relay must not stop signaling.
+    #[serde(default = "default_relay_enabled")]
+    pub relay_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_host: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ip_pool: Option<String>,
+}
+
+fn default_relay_enabled() -> bool {
+    true
 }
 
 /// 网络配置列表
@@ -1069,6 +1077,7 @@ impl ConfigManager {
                     owns_embedded_services: false,
                     signaling_port: None,
                     relay_port: None,
+                    relay_enabled: true,
                     external_host: None,
                     ip_pool: None,
                 },
@@ -1210,6 +1219,7 @@ impl ConfigManager {
                 owns_embedded_services: false,
                 signaling_port: None,
                 relay_port: None,
+                relay_enabled: true,
                 external_host: None,
                 ip_pool: None,
             },
@@ -1247,7 +1257,8 @@ impl ConfigManager {
         &self,
         network_name: &str,
         signaling_port: u16,
-        relay_port: u16,
+        relay_port: Option<u16>,
+        relay_enabled: bool,
         external_host: Option<String>,
         ip_pool: Option<String>,
     ) -> Result<()> {
@@ -1259,7 +1270,8 @@ impl ConfigManager {
             .with_context(|| format!("无法保存内嵌服务元数据：网络 [{network_name}] 不存在"))?;
         network.owns_embedded_services = true;
         network.signaling_port = Some(signaling_port);
-        network.relay_port = Some(relay_port);
+        network.relay_port = relay_port;
+        network.relay_enabled = relay_enabled;
         network.external_host = external_host;
         network.ip_pool = ip_pool;
         self.save_network_list(&list)?;

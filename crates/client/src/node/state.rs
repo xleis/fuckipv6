@@ -813,17 +813,18 @@ impl NodeCapabilityRegistrySnapshot {
     }
 
     fn from_snapshot(snapshot: &NodeSnapshot) -> Self {
-        let service_state = embedded_service_capability_state(&snapshot.embedded_services);
+        let coordinator_state = embedded_coordinator_capability_state(&snapshot.embedded_services);
+        let relay_state = embedded_relay_capability_state(&snapshot.embedded_services);
         let exit_state = exit_node_capability_state(snapshot);
         Self {
             capabilities: vec![
                 NodeCapabilitySnapshot {
                     kind: CapabilityKind::Coordinator,
-                    state: service_state,
+                    state: coordinator_state,
                 },
                 NodeCapabilitySnapshot {
                     kind: CapabilityKind::Relay,
-                    state: service_state,
+                    state: relay_state,
                 },
                 NodeCapabilitySnapshot {
                     kind: CapabilityKind::Exit,
@@ -854,7 +855,9 @@ impl Default for NodeCapabilityRegistrySnapshot {
     }
 }
 
-fn embedded_service_capability_state(services: &[NodeEmbeddedServiceSnapshot]) -> CapabilityState {
+fn embedded_coordinator_capability_state(
+    services: &[NodeEmbeddedServiceSnapshot],
+) -> CapabilityState {
     if services
         .iter()
         .any(|service| service.status == NodeEmbeddedServiceStatus::Running)
@@ -870,6 +873,29 @@ fn embedded_service_capability_state(services: &[NodeEmbeddedServiceSnapshot]) -
     } else if services
         .iter()
         .any(|service| service.status == NodeEmbeddedServiceStatus::Failed)
+    {
+        CapabilityState::Degraded
+    } else {
+        CapabilityState::Disabled
+    }
+}
+
+fn embedded_relay_capability_state(services: &[NodeEmbeddedServiceSnapshot]) -> CapabilityState {
+    if services
+        .iter()
+        .any(|service| service.relay_status == NodeEmbeddedServiceStatus::Running)
+    {
+        CapabilityState::Enabled
+    } else if services.iter().any(|service| {
+        matches!(
+            service.relay_status,
+            NodeEmbeddedServiceStatus::Starting | NodeEmbeddedServiceStatus::Stopping
+        )
+    }) {
+        CapabilityState::Starting
+    } else if services
+        .iter()
+        .any(|service| service.relay_status == NodeEmbeddedServiceStatus::Failed)
     {
         CapabilityState::Degraded
     } else {
@@ -1023,17 +1049,23 @@ pub struct NodeNetworkConfigSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeEmbeddedServiceSnapshot {
     pub network_name: String,
+    /// Coordinator/signaling runtime status.
     pub status: NodeEmbeddedServiceStatus,
     pub signaling_addr: Option<SocketAddr>,
+    /// Relay is an independently owned capability; it can be stopped while the
+    /// embedded Coordinator keeps running.
+    #[serde(default)]
+    pub relay_status: NodeEmbeddedServiceStatus,
     pub relay_addr: Option<SocketAddr>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeEmbeddedServiceStatus {
     Starting,
     Running,
     Stopping,
+    #[default]
     Stopped,
     Failed,
 }
@@ -2077,6 +2109,7 @@ mod tests {
             network_name: name.into(),
             status: NodeEmbeddedServiceStatus::Stopped,
             signaling_addr: None,
+            relay_status: NodeEmbeddedServiceStatus::Stopped,
             relay_addr: None,
         }
     }

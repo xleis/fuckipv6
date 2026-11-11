@@ -4,10 +4,13 @@ use fuckipv6_common::{
     CoordinatorConfig, Identity, NetworkAllocation, NetworkTicket, RelayEndpoint,
 };
 use fuckipv6_coordinator::{
-    relay::server::RelayServer, signaling::blacklist::CoordinatorConfigBlacklistStore,
+    relay::server::RelayServer,
+    signaling::blacklist::CoordinatorConfigBlacklistStore,
     signaling::exit_contribution::ExitContributionRequestStore,
-    signaling::invitations::InvitationStore, signaling::join_requests::JoinRequestStore,
-    signaling::member_lifecycle::MemberLifecycleStore, signaling::server::SignalingServer,
+    signaling::invitations::InvitationStore,
+    signaling::join_requests::JoinRequestStore,
+    signaling::member_lifecycle::MemberLifecycleStore,
+    signaling::server::{RelayEndpointDirectory, SignalingServer},
     signaling::session::SessionManager,
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -30,11 +33,15 @@ pub use actor::{
 pub struct EmbeddedCoordinator {
     pub ticket: NetworkTicket,
     pub signaling_addr: SocketAddr,
-    pub relay_addr: SocketAddr,
+    pub relay_addr: Option<SocketAddr>,
     pub session_manager: Arc<SessionManager>,
     blacklist_store: Arc<CoordinatorConfigBlacklistStore>,
     signaling_task: Option<JoinHandle<Result<()>>>,
+    relay_directory: RelayEndpointDirectory,
+    relay_server: Option<RelayServer>,
     relay_task: Option<JoinHandle<Result<()>>>,
+    relay_bind_port: u16,
+    external_host: Option<String>,
 }
 
 impl EmbeddedCoordinator {
@@ -56,6 +63,7 @@ impl EmbeddedCoordinator {
             external_host,
             ip_pool,
             config_manager,
+            true,
         )
         .await
     }
@@ -82,6 +90,7 @@ impl EmbeddedCoordinator {
             external_host,
             ip_pool,
             config_manager,
+            true,
         )
         .await
     }
@@ -94,6 +103,7 @@ impl EmbeddedCoordinator {
         external_host: Option<String>,
         ip_pool: Option<&str>,
         config_manager: ConfigManager,
+        relay_enabled: bool,
     ) -> Result<Self> {
         let pool = ip_pool.unwrap_or("fd00::1000/120");
         let blacklist_path = config_manager
@@ -218,23 +228,7 @@ impl EmbeddedCoordinator {
                 .await
                 .context("无法绑定内嵌信令服务")?;
         let actual_signaling_addr = signaling_server.local_addr()?;
-
-        let relay_bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), relay_port);
-        let relay_server =
-            RelayServer::bind_with_generated_certificate(relay_bind, session_manager.clone())
-                .context("无法启动内嵌 QUIC 中继服务")?;
-
-        let actual_relay_addr = relay_server.local_addr();
-        let relay_pin = relay_server.certificate().public_key_pin;
-        let advertised_relay_addr =
-            resolve_relay_advertisement(external_host.as_deref(), actual_relay_addr).await?;
-        let relay_endpoint = RelayEndpoint {
-            addr: advertised_relay_addr,
-            server_name: "fuckipv6.local".to_string(),
-            public_key_pin: relay_pin,
-        };
-
-        let signaling_server = signaling_server.with_relay_endpoint(relay_endpoint);
+        let relay_directory = signaling_server.relay_endpoint_directory();
         signaling_server.spawn_timeout_cleanup(120);
 
         // Runtime-owned services supply the node-wide persisted public key so
@@ -247,9 +241,9 @@ impl EmbeddedCoordinator {
 
         // 确定票据暴露的接入地址
         let actual_signaling_port = actual_signaling_addr.port();
-        let ticket_endpoint = if let Some(host) = external_host {
+        let ticket_endpoint = if let Some(host) = external_host.as_deref() {
             if host.contains(':') {
-                host
+                host.to_string()
             } else {
                 format!("{host}:{actual_signaling_port}")
             }
@@ -268,29 +262,100 @@ impl EmbeddedCoordinator {
 
         let signaling_task = tokio::spawn(async move { signaling_server.run().await });
 
-        let relay_task = tokio::spawn(async move { relay_server.run().await });
-
         let signaling_addr = actual_signaling_addr;
+        let mut coordinator = Self {
+            ticket,
+            signaling_addr,
+            relay_addr: None,
+            session_manager,
+            blacklist_store,
+            signaling_task: Some(signaling_task),
+            relay_directory,
+            relay_server: None,
+            relay_task: None,
+            relay_bind_port: relay_port,
+            external_host,
+        };
+
+        if relay_enabled {
+            if let Err(error) = coordinator.enable_relay().await {
+                let _ = coordinator.shutdown().await;
+                return Err(error);
+            }
+        }
 
         tracing::info!(
             "🚀 内嵌协调 Actor 启动成功: 信令={}, QUIC中继={}",
             signaling_addr,
-            actual_relay_addr
+            coordinator
+                .relay_addr
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|| "已由节点 owner 禁用".to_string())
         );
         tracing::info!(
             "🎫 网络 [{}] 邀请票据已生成（敏感值不写入日志）",
             network_name
         );
 
-        Ok(Self {
-            ticket,
-            signaling_addr,
-            relay_addr: actual_relay_addr,
-            session_manager,
-            blacklist_store,
-            signaling_task: Some(signaling_task),
-            relay_task: Some(relay_task),
-        })
+        Ok(coordinator)
+    }
+
+    pub fn relay_addr(&self) -> Option<SocketAddr> {
+        self.relay_addr
+    }
+
+    /// Start the local Relay independently of signaling and other node
+    /// capabilities. Re-enabling after a stop restores the last bound port.
+    pub async fn enable_relay(&mut self) -> Result<SocketAddr> {
+        if let Some(addr) = self.relay_addr {
+            return Ok(addr);
+        }
+
+        let relay_bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.relay_bind_port);
+        let relay_server =
+            RelayServer::bind_with_generated_certificate(relay_bind, self.session_manager.clone())
+                .context("无法启动内嵌 QUIC 中继服务")?;
+        let actual_relay_addr = relay_server.local_addr();
+        let relay_pin = relay_server.certificate().public_key_pin;
+        let advertised_relay_addr =
+            resolve_relay_advertisement(self.external_host.as_deref(), actual_relay_addr).await?;
+        let relay_endpoint = RelayEndpoint {
+            addr: advertised_relay_addr,
+            server_name: "fuckipv6.local".to_string(),
+            public_key_pin: relay_pin,
+        };
+
+        let run_server = relay_server.clone();
+        let relay_task = tokio::spawn(async move { run_server.run().await });
+        self.relay_directory.set_primary(Some(relay_endpoint));
+        self.relay_server = Some(relay_server);
+        self.relay_task = Some(relay_task);
+        self.relay_addr = Some(actual_relay_addr);
+        self.relay_bind_port = actual_relay_addr.port();
+        Ok(actual_relay_addr)
+    }
+
+    /// Withdraw this node's Relay endpoint, stop accepting new sessions, close
+    /// existing QUIC sessions, and release the listener before returning.
+    pub async fn disable_relay(&mut self) -> Result<()> {
+        self.relay_directory.set_primary(None);
+        let Some(server) = self.relay_server.take() else {
+            self.relay_addr = None;
+            return Ok(());
+        };
+
+        server.shutdown().await;
+        let task_result = match self.relay_task.take() {
+            Some(task) => match task.await {
+                Ok(result) => result,
+                Err(error) if error.is_cancelled() => Ok(()),
+                Err(error) => Err(anyhow::anyhow!("QUIC 中继任务异常退出: {error}")),
+            },
+            None => Ok(()),
+        };
+        drop(server);
+        self.relay_addr = None;
+        task_result
     }
 
     pub async fn persisted_network_allocation(&self) -> Result<NetworkAllocation> {
@@ -331,23 +396,21 @@ impl EmbeddedCoordinator {
         Ok(())
     }
 
-    /// Stop and join both listener tasks so their TCP/UDP ports are released
-    /// before the caller treats the service as stopped.
+    /// Stop Relay independently, then stop signaling. Both listener ports are
+    /// released before the caller treats the embedded service as stopped.
     pub async fn shutdown(&mut self) -> Result<()> {
         let mut failures = Vec::new();
-        for (name, task) in [
-            ("信令", self.signaling_task.take()),
-            ("QUIC 中继", self.relay_task.take()),
-        ] {
-            let Some(task) = task else {
-                continue;
-            };
+        if let Err(error) = self.disable_relay().await {
+            failures.push(format!("QUIC 中继服务关闭失败: {error:#}"));
+        }
+
+        if let Some(task) = self.signaling_task.take() {
             task.abort();
             match task.await {
                 Ok(Ok(())) => {}
-                Ok(Err(error)) => failures.push(format!("{name}服务异常退出: {error:#}")),
+                Ok(Err(error)) => failures.push(format!("信令服务异常退出: {error:#}")),
                 Err(error) if error.is_cancelled() => {}
-                Err(error) => failures.push(format!("{name}服务任务异常: {error}")),
+                Err(error) => failures.push(format!("信令服务任务异常: {error}")),
             }
         }
         if failures.is_empty() {
@@ -403,9 +466,11 @@ impl Drop for EmbeddedCoordinator {
         if let Some(task) = self.signaling_task.take() {
             task.abort();
         }
+        self.relay_directory.set_primary(None);
         if let Some(task) = self.relay_task.take() {
             task.abort();
         }
+        self.relay_server.take();
     }
 }
 
@@ -575,7 +640,13 @@ mod tests {
         assert_eq!(coordinator.ticket.network_name, "test-mesh");
         assert!(coordinator.ticket.to_string().starts_with("fk://"));
         assert_ne!(coordinator.signaling_addr.port(), 0);
-        assert_ne!(coordinator.relay_addr.port(), 0);
+        assert_ne!(
+            coordinator
+                .relay_addr()
+                .expect("relay should be enabled by default")
+                .port(),
+            0
+        );
         coordinator.shutdown().await.expect("shutdown coordinator");
         let _ = std::fs::remove_dir_all(config_dir);
     }

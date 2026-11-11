@@ -200,6 +200,8 @@ pub struct ProjectedNodePeerSnapshot {
 pub struct ProjectedNodeEmbeddedServiceSnapshot {
     pub network_name: String,
     pub status: NodeEmbeddedServiceStatus,
+    #[serde(default)]
+    pub relay_status: NodeEmbeddedServiceStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signaling_addr: Option<SocketAddr>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -317,6 +319,10 @@ pub enum ProjectedNodeEventKind {
         status: NodeNetworkStatus,
     },
     EmbeddedServiceChanged {
+        network_name: String,
+        status: NodeEmbeddedServiceStatus,
+    },
+    RelayChanged {
         network_name: String,
         status: NodeEmbeddedServiceStatus,
     },
@@ -550,6 +556,13 @@ pub fn project_node_event(
             network_name,
             status,
         } => ProjectedNodeEventKind::EmbeddedServiceChanged {
+            network_name: network_name.clone(),
+            status: *status,
+        },
+        NodeEventKind::RelayChanged {
+            network_name,
+            status,
+        } => ProjectedNodeEventKind::RelayChanged {
             network_name: network_name.clone(),
             status: *status,
         },
@@ -905,6 +918,7 @@ impl<'a> SnapshotProjector<'a> {
         Ok(Some(ProjectedNodeEmbeddedServiceSnapshot {
             network_name: service.network_name.clone(),
             status: service.status,
+            relay_status: service.relay_status,
             signaling_addr: endpoints.then_some(service.signaling_addr).flatten(),
             relay_addr: endpoints.then_some(service.relay_addr).flatten(),
         }))
@@ -1485,6 +1499,7 @@ mod tests {
             embedded_services: vec![NodeEmbeddedServiceSnapshot {
                 network_name: "home".into(),
                 status: NodeEmbeddedServiceStatus::Running,
+                relay_status: NodeEmbeddedServiceStatus::Running,
                 signaling_addr: Some("203.0.113.9:443".parse().unwrap()),
                 relay_addr: Some("203.0.113.10:443".parse().unwrap()),
             }],

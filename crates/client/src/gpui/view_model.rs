@@ -8495,6 +8495,7 @@ mod tests {
             .push(NodeEmbeddedServiceSnapshot {
                 network_name: "home".into(),
                 status: NodeEmbeddedServiceStatus::Failed,
+                relay_status: NodeEmbeddedServiceStatus::Failed,
                 signaling_addr: None,
                 relay_addr: None,
             });

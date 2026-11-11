@@ -658,6 +658,14 @@ impl P2pEngine {
             )
         };
 
+        // Authenticate the session before opening a TCP stream. Otherwise a
+        // connect attempt can succeed and immediately leave a half-open peer
+        // connection waiting for a first frame that this side cannot produce.
+        let (_, auth_packet) = secure
+            .seal(&[])
+            .await
+            .context("Secure Session v2 尚未建立，无法启动 TCP 直连")?;
+
         let mut connected = None;
         for endpoint in endpoints {
             match tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(endpoint)).await {
@@ -678,12 +686,6 @@ impl P2pEngine {
             .set_nodelay(true)
             .context("无法设置 P2P TCP_NODELAY")?;
 
-        // An empty Secure Session v2 frame authenticates the stream before any
-        // stream-level Ping/Pong control frame is accepted.
-        let (_, auth_packet) = secure
-            .seal(&[])
-            .await
-            .context("Secure Session v2 尚未建立，无法启动 TCP 直连")?;
         let (reader, writer) = stream.into_split();
         let link = Arc::new(TcpLink {
             remote_addr: endpoint,
@@ -4001,6 +4003,42 @@ mod tests {
         );
         assert!(engine_a.tcp_link("b").await.is_none());
         drop(stream);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tcp_connect_waits_for_secure_session_authentication() -> Result<()> {
+        let engine = P2pEngine::new(0).await?;
+        let local_identity = Identity::generate()?;
+        let peer_identity = Identity::generate()?;
+        let local_ip = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1);
+        let peer_ip = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 2);
+        engine.set_identity(local_identity).await;
+        engine.set_local_ip(local_ip).await;
+
+        let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await?;
+        let endpoint = listener.local_addr()?;
+        engine
+            .add_peer(PeerInfo::new(
+                "unauthenticated-peer".to_string(),
+                peer_ip,
+                peer_identity.public_key(),
+                vec![endpoint],
+                fuckipv6_common::NatType::Open,
+            ))
+            .await?;
+
+        let error = match engine.ensure_tcp_link("unauthenticated-peer").await {
+            Ok(_) => anyhow::bail!("an unauthenticated Secure Session must not open TCP"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("Secure Session v2 尚未建立"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "TCP must not be connected before the secure session authenticates"
+        );
         Ok(())
     }
 

@@ -30,6 +30,8 @@ RELAY_PORT=19667
 WEBUI_HOST=18980
 WEBUI1=18981
 WEBUI2=18982
+TCP_ECHO_PORT=19091
+UDP_ECHO_PORT=19092
 WORK="/tmp/w12-p2p-invite.$(date -u +%Y%m%dT%H%M%SZ).$$"
 
 HPID=""
@@ -37,6 +39,12 @@ N1PID=""
 N2PID=""
 TCPDUMP1_PID=""
 TCPDUMP2_PID=""
+TCPDUMP_TUN1_PID=""
+TCPDUMP_TUN2_PID=""
+TCP_ECHO1_PID=""
+TCP_ECHO2_PID=""
+UDP_ECHO1_PID=""
+UDP_ECHO2_PID=""
 
 info() { printf '[INFO] %s\n' "$*"; }
 fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
@@ -72,6 +80,12 @@ cleanup() {
     info "cleanup: stopping only PIDs created by this run"
     kill_pid_checked "$TCPDUMP1_PID" TERM
     kill_pid_checked "$TCPDUMP2_PID" TERM
+    kill_pid_checked "$TCPDUMP_TUN1_PID" TERM
+    kill_pid_checked "$TCPDUMP_TUN2_PID" TERM
+    kill_pid_checked "$TCP_ECHO1_PID" TERM
+    kill_pid_checked "$TCP_ECHO2_PID" TERM
+    kill_pid_checked "$UDP_ECHO1_PID" TERM
+    kill_pid_checked "$UDP_ECHO2_PID" TERM
     kill_pid_checked "$N1PID" TERM
     kill_pid_checked "$N2PID" TERM
     kill_pid_checked "$HPID" TERM
@@ -81,6 +95,12 @@ cleanup() {
     sleep 2
     kill_pid_checked "$TCPDUMP1_PID" KILL
     kill_pid_checked "$TCPDUMP2_PID" KILL
+    kill_pid_checked "$TCPDUMP_TUN1_PID" KILL
+    kill_pid_checked "$TCPDUMP_TUN2_PID" KILL
+    kill_pid_checked "$TCP_ECHO1_PID" KILL
+    kill_pid_checked "$TCP_ECHO2_PID" KILL
+    kill_pid_checked "$UDP_ECHO1_PID" KILL
+    kill_pid_checked "$UDP_ECHO2_PID" KILL
     kill_pid_checked "$N1PID" KILL
     kill_pid_checked "$N2PID" KILL
     kill_pid_checked "$HPID" KILL
@@ -258,6 +278,41 @@ assert_peer_traffic() {
     ' "$snapshot" >/dev/null || fail "$label does not show bidirectional P2P packet traffic"
 }
 
+run_tcp_echo_test() {
+    local ns=$1 peer_ip=$2 label=$3 payload_bytes=${4:-262144}
+    timeout 30s ip netns exec "$ns" python3 "$WORK/tcp_echo_client.py" "$peer_ip" "$TCP_ECHO_PORT" "$payload_bytes" \
+        >"$WORK/$label-tcp.json"
+    jq -e '.ok == true' "$WORK/$label-tcp.json" >/dev/null || fail "$label TCP echo verification failed"
+}
+
+run_udp_echo_test() {
+    local ns=$1 peer_ip=$2 label=$3 datagrams=${4:-64}
+    timeout 30s ip netns exec "$ns" python3 "$WORK/udp_echo_client.py" "$peer_ip" "$UDP_ECHO_PORT" "$datagrams" \
+        >"$WORK/$label-udp.json"
+    jq -e '.ok == true' "$WORK/$label-udp.json" >/dev/null || fail "$label UDP echo verification failed"
+}
+
+wait_for_echo_port() {
+    local ns=$1 address=$2 port=$3 label=$4 attempts=${5:-30}
+    local i
+    for ((i = 0; i < attempts; i++)); do
+        if ip netns exec "$ns" python3 - "$address" "$port" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+address, port = sys.argv[1], int(sys.argv[2])
+with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as stream:
+    stream.settimeout(1)
+    stream.connect((address, port))
+PY
+        then
+            return 0
+        fi
+        sleep 1
+    done
+    fail "$label echo service did not start on $address:$port"
+}
+
 main() {
     [ "$(id -u)" -eq 0 ] || fail "root is required for network namespaces and TUN devices"
     require_tools
@@ -278,6 +333,106 @@ main() {
 
     mkdir -p "$WORK"
     trap cleanup EXIT INT TERM
+    cat >"$WORK/tcp_echo_server.py" <<'PY'
+import socket
+import sys
+import threading
+
+family = socket.AF_INET6 if sys.argv[1] == "6" else socket.AF_INET
+address, port = sys.argv[2], int(sys.argv[3])
+
+
+def serve_client(connection):
+    with connection:
+        while True:
+            data = connection.recv(65536)
+            if not data:
+                return
+            connection.sendall(data)
+
+
+with socket.socket(family, socket.SOCK_STREAM) as listener:
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if family == socket.AF_INET6:
+        listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+    listener.bind((address, port))
+    listener.listen(16)
+    while True:
+        connection, _ = listener.accept()
+        threading.Thread(target=serve_client, args=(connection,), daemon=True).start()
+PY
+    cat >"$WORK/udp_echo_server.py" <<'PY'
+import socket
+import sys
+
+family = socket.AF_INET6 if sys.argv[1] == "6" else socket.AF_INET
+address, port = sys.argv[2], int(sys.argv[3])
+
+with socket.socket(family, socket.SOCK_DGRAM) as listener:
+    listener.bind((address, port))
+    while True:
+        data, peer = listener.recvfrom(65536)
+        listener.sendto(data, peer)
+PY
+    cat >"$WORK/tcp_echo_client.py" <<'PY'
+import hashlib
+import json
+import socket
+import sys
+import time
+
+address, port, size = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+payload = bytes(range(256)) * (size // 256) + bytes(range(size % 256))
+started = time.monotonic()
+with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as stream:
+    stream.settimeout(10)
+    stream.connect((address, port))
+    stream.sendall(payload)
+    stream.shutdown(socket.SHUT_WR)
+    chunks = []
+    while True:
+        chunk = stream.recv(65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+received = b"".join(chunks)
+result = {
+    "ok": received == payload,
+    "bytes": len(received),
+    "sha256": hashlib.sha256(received).hexdigest(),
+    "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+}
+print(json.dumps(result))
+raise SystemExit(0 if result["ok"] else 1)
+PY
+    cat >"$WORK/udp_echo_client.py" <<'PY'
+import hashlib
+import json
+import socket
+import sys
+import time
+
+address, port, count = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+with socket.socket(socket.AF_INET6, socket.SOCK_DGRAM) as stream:
+    stream.settimeout(2)
+    received = []
+    started = time.monotonic()
+    for sequence in range(count):
+        payload = f"W12-UDP-{sequence:04d}-".encode() + bytes([sequence % 256]) * 1000
+        stream.sendto(payload, (address, port))
+        data, _ = stream.recvfrom(65536)
+        if data != payload:
+            raise RuntimeError(f"UDP reply {sequence} did not match")
+        received.append(sequence)
+result = {
+    "ok": len(received) == count,
+    "datagrams": len(received),
+    "sha256": hashlib.sha256(bytes(received)).hexdigest(),
+    "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+}
+print(json.dumps(result))
+raise SystemExit(0 if result["ok"] else 1)
+PY
     info "workdir=$WORK"
     info "binary=$(git -C "$ROOT" rev-parse HEAD) sha256=$(sha256sum "$BIN" | awk '{print $1}')"
     info "topology: Coordinator netns $NSH 10.78.1.1:$HOST_PORT; node1 netns 10.78.1.2; node2 netns 10.78.2.2"
@@ -475,8 +630,14 @@ SH
 
     IP1=$(jq -r --arg n "$NETWORK" '.data.networks[]? | select(.name==$n) | .assigned_ipv6 // empty' "$WORK/node1-online.json" | head -1)
     IP2=$(jq -r --arg n "$NETWORK" '.data.networks[]? | select(.name==$n) | .assigned_ipv6 // empty' "$WORK/node2-online.json" | head -1)
+    IP1_V4=$(jq -r --arg n "$NETWORK" '.data.networks[]? | select(.name==$n) | .assigned_ipv4 // empty' "$WORK/node1-online.json" | head -1)
+    IP2_V4=$(jq -r --arg n "$NETWORK" '.data.networks[]? | select(.name==$n) | .assigned_ipv4 // empty' "$WORK/node2-online.json" | head -1)
+    TUN1=$(jq -r --arg n "$NETWORK" '.data.networks[]? | select(.name==$n) | .tun_name // empty' "$WORK/node1-online.json" | head -1)
+    TUN2=$(jq -r --arg n "$NETWORK" '.data.networks[]? | select(.name==$n) | .tun_name // empty' "$WORK/node2-online.json" | head -1)
     [ -n "$IP1" ] && [ -n "$IP2" ] && [ "$IP1" != "$IP2" ] || fail "nodes did not receive distinct virtual IPv6 addresses"
-    info "virtual addresses: node1=$IP1 node2=$IP2"
+    [ -n "$IP1_V4" ] && [ -n "$IP2_V4" ] && [ "$IP1_V4" != "$IP2_V4" ] || fail "nodes did not receive distinct virtual IPv4 addresses"
+    [ -n "$TUN1" ] && [ -n "$TUN2" ] || fail "nodes did not expose their TUN interface names"
+    info "virtual addresses: node1=$IP1/$IP1_V4 node2=$IP2/$IP2_V4 tun=$TUN1/$TUN2"
 
     jq -e --arg n "$NETWORK" '
         .data.configuration.networks[]? | select(.network_name==$n)
@@ -499,6 +660,18 @@ SH
     assert_target_peer "$WORK/node1-before-ping.json" "$IP2" "10.78.2.2:" node1
     assert_target_peer "$WORK/node2-before-ping.json" "$IP1" "10.78.1.2:" node2
 
+    info "starting TCP and UDP echo services on both virtual interfaces"
+    ip netns exec "$NS1" python3 "$WORK/tcp_echo_server.py" 6 "$IP1" "$TCP_ECHO_PORT" >"$WORK/tcp-echo1.log" 2>&1 &
+    TCP_ECHO1_PID=$!
+    ip netns exec "$NS1" python3 "$WORK/udp_echo_server.py" 6 "$IP1" "$UDP_ECHO_PORT" >"$WORK/udp-echo1.log" 2>&1 &
+    UDP_ECHO1_PID=$!
+    ip netns exec "$NS2" python3 "$WORK/tcp_echo_server.py" 6 "$IP2" "$TCP_ECHO_PORT" >"$WORK/tcp-echo2.log" 2>&1 &
+    TCP_ECHO2_PID=$!
+    ip netns exec "$NS2" python3 "$WORK/udp_echo_server.py" 6 "$IP2" "$UDP_ECHO_PORT" >"$WORK/udp-echo2.log" 2>&1 &
+    UDP_ECHO2_PID=$!
+    wait_for_echo_port "$NS2" "$IP2" "$TCP_ECHO_PORT" node2
+    wait_for_echo_port "$NS1" "$IP1" "$TCP_ECHO_PORT" node1
+
     info "node1 route to node2:"
     ip netns exec "$NS1" ip -6 route get "$IP2"
     info "node2 route to node1:"
@@ -509,6 +682,10 @@ SH
     TCPDUMP1_PID=$!
     ip netns exec "$NSH" tcpdump -ni "$VH2" -nn -vvv -l 'udp' >"$WORK/tcpdump2.log" 2>&1 &
     TCPDUMP2_PID=$!
+    ip netns exec "$NS1" tcpdump -ni "$TUN1" -nn -vvv -l 'tcp or udp' >"$WORK/tun1.log" 2>&1 &
+    TCPDUMP_TUN1_PID=$!
+    ip netns exec "$NS2" tcpdump -ni "$TUN2" -nn -vvv -l 'tcp or udp' >"$WORK/tun2.log" 2>&1 &
+    TCPDUMP_TUN2_PID=$!
     sleep 1
 
     info "ping node1 -> node2 (5 packets)"
@@ -525,13 +702,40 @@ SH
     set -e
     cat "$WORK/ping21.log"
 
+    info "node1 -> node2 TCP echo: 262144 bytes over virtual IPv6"
+    run_tcp_echo_test "$NS1" "$IP2" node1-to-node2
+    info "node2 -> node1 TCP echo: 262144 bytes over virtual IPv6"
+    run_tcp_echo_test "$NS2" "$IP1" node2-to-node1
+    info "node1 -> node2 UDP echo: 64 datagrams over virtual IPv6"
+    run_udp_echo_test "$NS1" "$IP2" node1-to-node2
+    info "node2 -> node1 UDP echo: 64 datagrams over virtual IPv6"
+    run_udp_echo_test "$NS2" "$IP1" node2-to-node1
+
+    info "MTU boundary checks on the 1280-byte virtual interface"
+    ip netns exec "$NS1" ping -6 -M do -s 1232 -c 1 -W 2 "$IP2" >"$WORK/mtu-ipv6-ok.log" 2>&1 \
+        || fail "IPv6 packet at the 1280-byte MTU boundary failed"
+    if ip netns exec "$NS1" ping -6 -M do -s 1233 -c 1 -W 2 "$IP2" >"$WORK/mtu-ipv6-too-big.log" 2>&1; then
+        fail "IPv6 packet above the virtual MTU unexpectedly succeeded"
+    fi
+    ip netns exec "$NS1" ping -4 -M do -s 1252 -c 1 -W 2 "$IP2_V4" >"$WORK/mtu-ipv4-ok.log" 2>&1 \
+        || fail "IPv4 packet at the 1280-byte MTU boundary failed"
+    if ip netns exec "$NS1" ping -4 -M do -s 1253 -c 1 -W 2 "$IP2_V4" >"$WORK/mtu-ipv4-too-big.log" 2>&1; then
+        fail "IPv4 packet above the virtual MTU unexpectedly succeeded"
+    fi
+
     sleep 2
     kill_pid_checked "$TCPDUMP1_PID" TERM
     kill_pid_checked "$TCPDUMP2_PID" TERM
     wait "$TCPDUMP1_PID" 2>/dev/null || true
     wait "$TCPDUMP2_PID" 2>/dev/null || true
+    kill_pid_checked "$TCPDUMP_TUN1_PID" TERM
+    kill_pid_checked "$TCPDUMP_TUN2_PID" TERM
+    wait "$TCPDUMP_TUN1_PID" 2>/dev/null || true
+    wait "$TCPDUMP_TUN2_PID" 2>/dev/null || true
     TCPDUMP1_PID=""
     TCPDUMP2_PID=""
+    TCPDUMP_TUN1_PID=""
+    TCPDUMP_TUN2_PID=""
 
     [ "$PING12_RC" -eq 0 ] || fail "node1 -> node2 ping failed"
     [ "$PING21_RC" -eq 0 ] || fail "node2 -> node1 ping failed"
@@ -559,6 +763,14 @@ SH
         || { sed -n '1,200p' "$WORK/tcpdump1.log" >&2; fail "veth1 capture did not contain direct private-underlay UDP"; }
     grep -Eq '10\.78\.2\.2.*> 10\.78\.1\.2|10\.78\.1\.2.*> 10\.78\.2\.2' "$WORK/tcpdump2.log" \
         || { sed -n '1,200p' "$WORK/tcpdump2.log" >&2; fail "veth2 capture did not contain direct private-underlay UDP"; }
+    grep -Eq "$IP1\\.[0-9]+ > $IP2\\.$TCP_ECHO_PORT:" "$WORK/tun1.log" \
+        || { sed -n '1,240p' "$WORK/tun1.log" >&2; fail "node1 TUN capture did not contain TCP traffic from node1 to node2"; }
+    grep -Eq "$IP2\\.[0-9]+ > $IP1\\.$TCP_ECHO_PORT:" "$WORK/tun2.log" \
+        || { sed -n '1,240p' "$WORK/tun2.log" >&2; fail "node2 TUN capture did not contain TCP traffic from node2 to node1"; }
+    grep -Eq "$IP1\\.[0-9]+ > $IP2\\.$UDP_ECHO_PORT:" "$WORK/tun1.log" \
+        || { sed -n '1,240p' "$WORK/tun1.log" >&2; fail "node1 TUN capture did not contain UDP traffic from node1 to node2"; }
+    grep -Eq "$IP2\\.[0-9]+ > $IP1\\.$UDP_ECHO_PORT:" "$WORK/tun2.log" \
+        || { sed -n '1,240p' "$WORK/tun2.log" >&2; fail "node2 TUN capture did not contain UDP traffic from node2 to node1"; }
 
     ip rule show >"$WORK/host-ip-rule.after"
     ip -6 rule show >"$WORK/host-ip6-rule.after"
@@ -575,12 +787,19 @@ SH
     printf '[SUMMARY node2 peer]\n'; cat "$WORK/node2-peer-summary.json"
     printf '[SUMMARY ping12]\n'; tail -4 "$WORK/ping12.log"
     printf '[SUMMARY ping21]\n'; tail -4 "$WORK/ping21.log"
+    printf '[SUMMARY node1 -> node2 TCP]\n'; cat "$WORK/node1-to-node2-tcp.json"
+    printf '[SUMMARY node2 -> node1 TCP]\n'; cat "$WORK/node2-to-node1-tcp.json"
+    printf '[SUMMARY node1 -> node2 UDP]\n'; cat "$WORK/node1-to-node2-udp.json"
+    printf '[SUMMARY node2 -> node1 UDP]\n'; cat "$WORK/node2-to-node1-udp.json"
+    printf '[SUMMARY MTU boundary]\n'
+    tail -2 "$WORK/mtu-ipv6-ok.log"
+    tail -2 "$WORK/mtu-ipv4-ok.log"
     printf '[SUMMARY direct UDP samples]\n'
     grep -E '10\.78\.[12]\.2' "$WORK/tcpdump1.log" | head -3 || true
     grep -E '10\.78\.[12]\.2' "$WORK/tcpdump2.log" | head -3 || true
 
-    info "PASS: formal invitations admitted both nodes; direct P2P is healthy; bidirectional ICMP 5/5"
-    info "result: code authorization boundary was the blocker; private veth data path is working"
+    info "PASS: direct P2P carried bidirectional ICMP, TCP and UDP; virtual MTU boundaries are enforced"
+    info "result: formal invitation admission and the private veth data path are working"
 }
 
 main "$@"

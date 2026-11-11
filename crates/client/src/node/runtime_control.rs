@@ -4512,22 +4512,21 @@ impl NetworkRuntimeActor {
                             .as_ref()
                             .map(|preview| preview.public_key.to_string())
                     });
-                let Some(network_public_key) = network_public_key else {
-                    return Err(RuntimeControlError::Conflict(format!(
-                        "网络 [{network_name}] 缺少稳定身份元数据，不能确认重复加入"
-                    )));
-                };
-                self.configs
-                    .set_network_identity_metadata(
+                let metadata_result = match network_public_key.as_deref() {
+                    Some(public_key) => self.configs.set_network_identity_metadata(
                         network_name,
                         expected_id,
-                        &network_public_key,
-                    )
-                    .map_err(|error| {
-                        RuntimeControlError::Persistence(format!(
-                            "网络 [{network_name}] 的稳定身份元数据写入失败: {error:#}"
-                        ))
-                    })
+                        public_key,
+                    ),
+                    None => self
+                        .configs
+                        .set_network_id_metadata(network_name, expected_id),
+                };
+                metadata_result.map_err(|error| {
+                    RuntimeControlError::Persistence(format!(
+                        "网络 [{network_name}] 的稳定身份元数据写入失败: {error:#}"
+                    ))
+                })
             }
         }
     }
@@ -10481,6 +10480,49 @@ mod tests {
             .expect("persisted network config");
         let config = ClientConfig::from_file(config_path).expect("load persisted config");
         assert_eq!(config.coordinator_url, "ws://127.0.0.1:6666");
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn repeated_invitation_join_binds_network_id_without_public_key() {
+        let harness = TestHarness::new("repeat-invitation-join").await;
+        let network_id = NetworkId::from_public_key(b"invitation-only-network");
+        harness
+            .configs
+            .create_network("invited", "ws://127.0.0.1:6666", true)
+            .expect("create legacy config without identity metadata");
+
+        let joined = harness
+            .runtime
+            .join(NodeJoinNetworkCommand {
+                target: "ws://127.0.0.1:6666".into(),
+                network_name: Some("invited".into()),
+                start: false,
+                discovery_record: None,
+                network_id: Some(network_id.to_string()),
+                preview_digest: None,
+                network_policy_revision: None,
+                privacy_policy_revision: None,
+                terms_hash: None,
+                acknowledged_at_unix_ms: None,
+                exit_contribution_acknowledged: None,
+                signed_join_preview: None,
+            })
+            .await
+            .expect("repeat invitation join");
+
+        assert!(!joined.config_saved);
+        assert!(!joined.started);
+        let network = harness
+            .configs
+            .list_networks()
+            .expect("list networks")
+            .into_iter()
+            .find(|network| network.name == "invited")
+            .expect("existing network");
+        assert_eq!(network.network_id.as_deref(), Some(network_id.as_str()));
+        assert!(network.public_key.is_none());
 
         harness.shutdown().await;
     }

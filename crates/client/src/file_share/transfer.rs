@@ -342,8 +342,8 @@ impl UploadTransfer {
             self.permit = lease.permit().clone();
             Ok(())
         })();
-        if result.is_err() {
-            self.abandon(now_unix_ms);
+        if let Err(error) = &result {
+            self.abandon_after_error(now_unix_ms, error);
         }
         result
     }
@@ -367,8 +367,14 @@ impl UploadTransfer {
         }
 
         let digest = ContentHash::from_digest_bytes(*self.hasher.clone().finalize().as_bytes());
-        self.session
-            .verify_digest(self.transferred_bytes, &digest, now_unix_ms)?;
+        if let Err(error) = self
+            .session
+            .verify_digest(self.transferred_bytes, &digest, now_unix_ms)
+        {
+            let _ = self.session.fail(now_unix_ms);
+            self.upload.take();
+            return Err(error.into());
+        }
         self.check_authorization_boundary(now_unix_ms)?;
 
         let upload = self.upload.take().ok_or(FileTransferError::InvalidState)?;
@@ -417,9 +423,13 @@ impl UploadTransfer {
         Ok(())
     }
 
-    fn abandon(&mut self, now_unix_ms: u64) {
+    fn abandon_after_error(&mut self, now_unix_ms: u64, error: &FileTransferAdapterError) {
         if !self.session.state.is_terminal() {
-            let _ = self.session.fail(now_unix_ms);
+            if authorization_was_revoked(error) {
+                let _ = self.session.cancel(now_unix_ms);
+            } else {
+                let _ = self.session.fail(now_unix_ms);
+            }
         }
         self.upload.take();
     }
@@ -549,8 +559,8 @@ impl DownloadTransfer {
             self.file = Some(file);
             Ok(())
         })();
-        if result.is_err() {
-            self.abandon(now_unix_ms);
+        if let Err(error) = &result {
+            self.abandon_after_error(now_unix_ms, error);
         }
         result
     }
@@ -572,8 +582,14 @@ impl DownloadTransfer {
             return Err(FileTransferError::Incomplete.into());
         }
         let digest = ContentHash::from_digest_bytes(*self.hasher.clone().finalize().as_bytes());
-        self.session
-            .verify_and_complete_digest(self.transferred_bytes, &digest, now_unix_ms)?;
+        if let Err(error) =
+            self.session
+                .verify_and_complete_digest(self.transferred_bytes, &digest, now_unix_ms)
+        {
+            let _ = self.session.fail(now_unix_ms);
+            self.file.take();
+            return Err(error.into());
+        }
         self.file.take();
         Ok(self.progress())
     }
@@ -615,12 +631,28 @@ impl DownloadTransfer {
         Ok(())
     }
 
-    fn abandon(&mut self, now_unix_ms: u64) {
+    fn abandon_after_error(&mut self, now_unix_ms: u64, error: &FileTransferAdapterError) {
         if !self.session.state.is_terminal() {
-            let _ = self.session.fail(now_unix_ms);
+            if authorization_was_revoked(error) {
+                let _ = self.session.cancel(now_unix_ms);
+            } else {
+                let _ = self.session.fail(now_unix_ms);
+            }
         }
         self.file.take();
     }
+}
+
+fn authorization_was_revoked(error: &FileTransferAdapterError) -> bool {
+    matches!(
+        error,
+        FileTransferAdapterError::Transfer(FileTransferError::PermissionRevoked)
+            | FileTransferAdapterError::Capability(
+                FileCapabilityError::Disabled
+                    | FileCapabilityError::AccessDenied(_)
+                    | FileCapabilityError::Revoked
+            )
+    )
 }
 
 fn validate_binding(
@@ -1351,5 +1383,138 @@ mod tests {
             .expect_err("changed source must not resume");
         assert_eq!(error.code(), "file_transfer_version_changed");
         assert_eq!(transfer.session().state, TransferState::Failed);
+    }
+
+    #[test]
+    fn upload_content_hash_mismatch_fails_and_cleans_staging() {
+        let (temporary, capability, share) = setup();
+        let adapter = FileTransferAdapter::new(capability);
+        let mut session = upload_session(
+            &share,
+            "bad-hash.txt",
+            b"abcdefgh",
+            4,
+            b"upload-bad-hash",
+            1_000,
+        );
+        session.manifest.content_hash = ContentHash::from_bytes(b"wrong digest");
+        let mut transfer = adapter
+            .begin_upload(
+                session,
+                &context(&share),
+                true,
+                UploadAdmission::default(),
+                10,
+            )
+            .expect("begin upload");
+        transfer.write_chunk(0, b"abcd", 11).expect("first chunk");
+        transfer.write_chunk(1, b"efgh", 12).expect("second chunk");
+
+        let error = transfer
+            .finish(13)
+            .expect_err("incorrect total hash must never publish");
+        assert_eq!(error.code(), "file_transfer_integrity_mismatch");
+        assert_eq!(transfer.session().state, TransferState::Failed);
+        assert_eq!(temp_file_count(&temporary), 0);
+        assert!(!host_path(&temporary, "bad-hash.txt").exists());
+    }
+
+    #[test]
+    fn download_content_hash_mismatch_never_completes() {
+        let (temporary, capability, share) = setup();
+        let content = b"abcdefgh";
+        std::fs::write(host_path(&temporary, "source.txt"), content).expect("source");
+        let adapter = FileTransferAdapter::new(capability);
+        let expected = version(content);
+        let mut transfer = adapter
+            .begin_download(
+                download_session(&share, "source.txt", content, 4, expected, 1_000),
+                &context(&share),
+                true,
+                10,
+            )
+            .expect("begin download");
+        transfer.session.manifest.content_hash = ContentHash::from_bytes(b"wrong digest");
+        assert_eq!(
+            transfer.read_next(11).expect("first"),
+            Some(b"abcd".to_vec())
+        );
+        assert_eq!(
+            transfer.read_next(12).expect("second"),
+            Some(b"efgh".to_vec())
+        );
+
+        let error = transfer
+            .finish(13)
+            .expect_err("incorrect total hash must fail the download");
+        assert_eq!(error.code(), "file_transfer_integrity_mismatch");
+        assert_eq!(transfer.session().state, TransferState::Failed);
+    }
+
+    #[test]
+    fn disabling_capability_cancels_an_active_download() {
+        let (temporary, capability, share) = setup();
+        let content = b"abcdefgh";
+        std::fs::write(host_path(&temporary, "source.txt"), content).expect("source");
+        let adapter = FileTransferAdapter::new(capability.clone());
+        let expected = version(content);
+        let mut transfer = adapter
+            .begin_download(
+                download_session(&share, "source.txt", content, 4, expected, 1_000),
+                &context(&share),
+                true,
+                10,
+            )
+            .expect("begin download");
+        assert_eq!(
+            transfer.read_next(11).expect("first"),
+            Some(b"abcd".to_vec())
+        );
+        capability.disable(&owner(), 12).expect("disable");
+
+        let error = transfer
+            .read_next(13)
+            .expect_err("revoked download must stop");
+        assert_eq!(error.code(), "file_capability_revoked");
+        assert_eq!(transfer.session().state, TransferState::Cancelled);
+        assert_eq!(
+            std::fs::read(host_path(&temporary, "source.txt")).expect("source remains"),
+            content
+        );
+    }
+
+    #[test]
+    fn resume_rejects_a_changed_capability_epoch() {
+        let (temporary, capability, share) = setup();
+        let content = b"abcdefgh";
+        std::fs::write(host_path(&temporary, "source.txt"), content).expect("source");
+        let adapter = FileTransferAdapter::new(capability.clone());
+        let expected = version(content);
+        let mut transfer = adapter
+            .begin_download(
+                download_session(&share, "source.txt", content, 4, expected, 1_000),
+                &context(&share),
+                true,
+                10,
+            )
+            .expect("begin download");
+        transfer.pause(11).expect("pause");
+
+        let mut revised = share.clone();
+        revised.revision = 2;
+        revised.updated_at_unix_ms = 12;
+        capability
+            .enable(
+                &revised,
+                &owner(),
+                temporary.path().to_str().expect("utf8 temp path"),
+                12,
+            )
+            .expect("replace share");
+        let error = transfer
+            .resume(&context(&revised), true, 13)
+            .expect_err("old access epoch must not resume");
+        assert_eq!(error.code(), "file_transfer_permission_revoked");
+        assert_eq!(transfer.session().state, TransferState::Cancelled);
     }
 }

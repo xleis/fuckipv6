@@ -22,13 +22,14 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
+use crate::file_share::{FileOwnerServiceError, FileShareConfiguration, FileSharePreview};
 use crate::node::{
-    NodeCommandRequest, NodeCommandResult, NodeEvent, NodeOperationSnapshot, NodeProblem,
-    NodeSnapshot, OperationSubmitError,
+    NodeCommandRequest, NodeCommandResult, NodeEvent, NodeFileCapabilitySnapshot,
+    NodeOperationSnapshot, NodeProblem, NodeSnapshot, OperationSubmitError,
 };
 use fuckipv6_common::domain::IdempotencyKey;
 
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -38,6 +39,10 @@ pub const IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// transport does not report a timeout after the node has already committed
 /// the command.
 pub const COMMAND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Owner File scans and durable writes have a larger server deadline. Keep the
+/// client alive past that boundary so the service can return its structured
+/// failure instead of the caller observing a transport timeout first.
+pub const FILE_OWNER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(150);
 const FRAME_MAGIC: [u8; 4] = *b"FKIP";
 const FRAME_HEADER_LEN: usize = 12;
 
@@ -100,6 +105,28 @@ pub struct LocalRequest {
     pub command: LocalCommand,
 }
 
+/// An owner-selected absolute directory reference. It is carried only over
+/// same-user local IPC and is redacted from all `Debug` output.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OwnerRootReference(String);
+
+impl OwnerRootReference {
+    pub fn new(reference: impl Into<String>) -> Self {
+        Self(reference.into())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for OwnerRootReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum LocalCommand {
@@ -120,6 +147,18 @@ pub enum LocalCommand {
         operation_id: String,
         source: String,
     },
+    /// Owner-only. Never exposed as a node command or network API.
+    PreviewFileShare {
+        root_reference: OwnerRootReference,
+        configuration: FileShareConfiguration,
+    },
+    /// Owner-only. Never exposed as a node command or network API.
+    ConfigureFileShare {
+        root_reference: OwnerRootReference,
+        configuration: FileShareConfiguration,
+    },
+    /// Owner-only. Never exposed as a node command or network API.
+    DisableFileShare,
     StopNode,
 }
 
@@ -139,6 +178,9 @@ pub enum LocalResponse {
     Accepted {
         message: String,
     },
+    FileSharePreview(Box<FileSharePreview>),
+    FileShareConfigured(Box<NodeFileCapabilitySnapshot>),
+    FileShareDisabled(Box<NodeFileCapabilitySnapshot>),
     Pong,
 }
 
@@ -174,6 +216,15 @@ pub struct LocalError {
     pub operation_error: Option<OperationSubmitError>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<NodeProblem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_share_error: Option<FileShareErrorDetail>,
+}
+
+/// Stable, path-free File configuration failure returned over owner-only IPC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileShareErrorDetail {
+    pub code: String,
+    pub retryable: bool,
 }
 
 impl LocalError {
@@ -184,6 +235,7 @@ impl LocalError {
             retryable: false,
             operation_error: None,
             problem: None,
+            file_share_error: None,
         }
     }
 
@@ -209,6 +261,7 @@ impl LocalError {
             retryable,
             operation_error: Some(error),
             problem: None,
+            file_share_error: None,
         }
     }
 
@@ -232,6 +285,41 @@ impl LocalError {
             retryable,
             operation_error: None,
             problem: Some(problem),
+            file_share_error: None,
+        }
+    }
+
+    pub fn file_share(error: FileOwnerServiceError) -> Self {
+        use FileOwnerServiceError::*;
+        let code = match error {
+            InvalidConfiguration | OwnerRequired => IpcErrorCode::MalformedRequest,
+            RootInvalid | RootSensitive | RootNotDirectory | RootSymlink => {
+                IpcErrorCode::MalformedRequest
+            }
+            RootUnavailable
+            | PersistenceUnavailable
+            | AuditUnavailable
+            | RuntimeUnavailable
+            | Unavailable => IpcErrorCode::BackendUnavailable,
+        };
+        let retryable = matches!(
+            error,
+            RootUnavailable
+                | PersistenceUnavailable
+                | AuditUnavailable
+                | RuntimeUnavailable
+                | Unavailable
+        );
+        Self {
+            code,
+            message: "File 共享配置未完成".into(),
+            retryable,
+            operation_error: None,
+            problem: None,
+            file_share_error: Some(FileShareErrorDetail {
+                code: error.code().into(),
+                retryable,
+            }),
         }
     }
 
@@ -648,6 +736,76 @@ async fn request_with_timeout(
     }
 }
 
+pub async fn preview_file_share(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    root_reference: &str,
+    configuration: FileShareConfiguration,
+) -> Result<FileSharePreview> {
+    let response = request_with_timeout(
+        endpoint,
+        role,
+        &LocalRequest {
+            request_id: 1,
+            command: LocalCommand::PreviewFileShare {
+                root_reference: OwnerRootReference::new(root_reference),
+                configuration,
+            },
+        },
+        FILE_OWNER_RESPONSE_TIMEOUT,
+    )
+    .await?;
+    match response {
+        LocalResponse::FileSharePreview(preview) => Ok(*preview),
+        other => bail!("本地 IPC 返回了意外 File 预览响应: {other:?}"),
+    }
+}
+
+pub async fn configure_file_share(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    root_reference: &str,
+    configuration: FileShareConfiguration,
+) -> Result<NodeFileCapabilitySnapshot> {
+    let response = request_with_timeout(
+        endpoint,
+        role,
+        &LocalRequest {
+            request_id: 1,
+            command: LocalCommand::ConfigureFileShare {
+                root_reference: OwnerRootReference::new(root_reference),
+                configuration,
+            },
+        },
+        FILE_OWNER_RESPONSE_TIMEOUT,
+    )
+    .await?;
+    match response {
+        LocalResponse::FileShareConfigured(snapshot) => Ok(*snapshot),
+        other => bail!("本地 IPC 返回了意外 File 配置响应: {other:?}"),
+    }
+}
+
+pub async fn disable_file_share(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+) -> Result<NodeFileCapabilitySnapshot> {
+    let response = request_with_timeout(
+        endpoint,
+        role,
+        &LocalRequest {
+            request_id: 1,
+            command: LocalCommand::DisableFileShare,
+        },
+        FILE_OWNER_RESPONSE_TIMEOUT,
+    )
+    .await?;
+    match response {
+        LocalResponse::FileShareDisabled(snapshot) => Ok(*snapshot),
+        other => bail!("本地 IPC 返回了意外 File 停用响应: {other:?}"),
+    }
+}
+
 pub async fn execute(
     endpoint: &LocalEndpoint,
     role: IpcRole,
@@ -1005,6 +1163,7 @@ mod tests {
     #[test]
     fn command_response_timeout_exceeds_lifecycle_deadline() {
         assert!(COMMAND_RESPONSE_TIMEOUT > crate::local_service::LIFECYCLE_COMMAND_TIMEOUT);
+        assert!(FILE_OWNER_RESPONSE_TIMEOUT > crate::local_service::FILE_OWNER_COMMAND_TIMEOUT);
     }
     use serde_json::json;
     use tokio::io::duplex;
@@ -1088,8 +1247,27 @@ mod tests {
 
     #[test]
     fn protocol_version_is_explicit() {
-        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(PROTOCOL_VERSION, 4);
         const { assert!(MAX_FRAME_BYTES <= 16 * 1024 * 1024) };
+    }
+
+    #[test]
+    fn owner_root_reference_is_redacted_from_debug() {
+        let reference = OwnerRootReference::new("/home/owner/private-files");
+        assert_eq!(format!("{reference:?}"), "[REDACTED]");
+        let request = LocalRequest {
+            request_id: 1,
+            command: LocalCommand::PreviewFileShare {
+                root_reference: reference,
+                configuration: FileShareConfiguration::readonly(
+                    fuckipv6_common::domain::NetworkId::from_public_key(b"debug-network"),
+                    "Debug share",
+                ),
+            },
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("/home/owner/private-files"));
+        assert!(debug.contains("[REDACTED]"));
     }
 
     #[test]

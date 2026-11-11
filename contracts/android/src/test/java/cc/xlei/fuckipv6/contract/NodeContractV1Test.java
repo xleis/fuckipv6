@@ -47,7 +47,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 279,
+                NodeContractV1.DTO_CLASS_NAMES.length == 282,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -92,9 +92,21 @@ public final class NodeContractV1Test {
         }
 
         for (String field : new String[] {
+            "state",
+            "access_epoch",
+            "share_revision",
+            "available_bytes",
+            "root_error",
+            "active_transfers"
+        }) {
+            NodeContractV1.NodeFileCapabilitySnapshot.class.getDeclaredField(field);
+        }
+
+        for (String field : new String[] {
             "revision",
             "lifecycle",
             "local_exit",
+            "file_capability",
             "identity",
             "configuration",
             "exit_node_capabilities",

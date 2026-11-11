@@ -45,6 +45,10 @@ pub struct NodeSnapshot {
     /// serve after this intent is true.
     #[serde(default)]
     pub local_exit: LocalExitCapabilitySnapshot,
+    /// Local File-share health. This DTO deliberately contains no root path or
+    /// raw filesystem message; owner-only local IPC provides the selected path.
+    #[serde(default)]
+    pub file_capability: NodeFileCapabilitySnapshot,
     /// Unified four-capability projection shared by every UI adapter. Missing
     /// entries deserialize as `Unknown`; they are never inferred as enabled.
     #[serde(default)]
@@ -804,6 +808,35 @@ pub struct NodeCapabilitySnapshot {
     pub state: CapabilityState,
 }
 
+/// Path-free File capability state safe for snapshots, events and UI manifests.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeFileCapabilitySnapshot {
+    pub state: CapabilityState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_epoch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_error: Option<String>,
+    #[serde(default)]
+    pub active_transfers: u32,
+}
+
+impl Default for NodeFileCapabilitySnapshot {
+    fn default() -> Self {
+        Self {
+            state: CapabilityState::Disabled,
+            access_epoch: None,
+            share_revision: None,
+            available_bytes: None,
+            root_error: None,
+            active_transfers: 0,
+        }
+    }
+}
+
 impl NodeCapabilityRegistrySnapshot {
     pub fn state(&self, kind: CapabilityKind) -> CapabilityState {
         self.capabilities
@@ -829,11 +862,9 @@ impl NodeCapabilityRegistrySnapshot {
                     kind: CapabilityKind::Exit,
                     state: exit_state,
                 },
-                // File runtime is not wired in this build. Keeping the state
-                // explicit prevents an empty card from implying support.
                 NodeCapabilitySnapshot {
                     kind: CapabilityKind::File,
-                    state: CapabilityState::Unsupported,
+                    state: snapshot.file_capability.state,
                 },
             ],
         }
@@ -2599,7 +2630,7 @@ mod tests {
         );
         assert_eq!(
             snapshot.capabilities.state(CapabilityKind::File),
-            CapabilityState::Unsupported
+            CapabilityState::Disabled
         );
 
         let exit_network = network("home", NodeNetworkStatus::Online);

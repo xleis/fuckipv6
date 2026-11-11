@@ -1475,6 +1475,7 @@ mod tests {
             configuration: NodeConfigurationSnapshot::default(),
             exit_node_capabilities: ExitNodeCapabilities::default(),
             local_exit: Default::default(),
+            file_capability: Default::default(),
             capabilities: NodeCapabilityRegistrySnapshot::default(),
             permissions: NodePermissionSnapshot::default(),
             access_control: NodeAccessControlSnapshot {

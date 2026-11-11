@@ -7,7 +7,9 @@
 //! behavior.
 
 mod capability;
+mod config;
 mod error;
+mod owner_service;
 mod quota;
 mod root;
 mod runtime;
@@ -19,6 +21,8 @@ pub use capability::{
     FileCapabilityState, FileShareCapability,
 };
 pub use error::{FileShareError, FileShareErrorCode, FileShareResult};
+pub(crate) use owner_service::FileOwnerService;
+pub use owner_service::{FileOwnerServiceError, FileShareConfiguration, FileSharePreview};
 pub use quota::{DirectoryUsage, QuotaScanLimits, UploadQuotaRequest};
 pub use root::{LocalShareRoot, FILE_TEMP_DIRECTORY};
 pub use runtime::{

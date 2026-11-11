@@ -688,6 +688,32 @@ export type NetworkId = string;
 
 export type NetworkJoinMode = "open" | "approval_required" | "invite_only";
 
+export type NetworkJoinPreview = {
+  "expires_at_unix_ms": number;
+  "issued_at_unix_ms": number;
+  "join_mode": NetworkJoinMode;
+  "network_id": NetworkId;
+  "network_name": string;
+  "owner": NodeId;
+  "policy_revision": number;
+  "preview_digest": ContentHash;
+  "privacy_policy_revision": number;
+  "public_key": PublicKey;
+  "revision": number;
+  "signature": Signature;
+  "terms": NetworkJoinTerms;
+  "terms_hash": ContentHash;
+};
+
+export type NetworkJoinTerms = {
+  "exit_contribution": ExitContributionObligation;
+  "exit_contribution_mode": ExitContributionMode;
+  "exit_contribution_scope": ExitContributionScope;
+  "member_limit"?: number | null;
+  "network_policy_revision": number;
+  "privacy_policy_revision": number;
+};
+
 export type NetworkLocalSecretProjection = {
   "identity_present": boolean;
   "public_key_fingerprint": string;
@@ -1632,6 +1658,15 @@ export type NodeExitSelectionSnapshot = {
   "resolution"?: ExitSelectionResolution | null;
 };
 
+export type NodeFileCapabilitySnapshot = {
+  "access_epoch"?: number | null;
+  "active_transfers"?: number;
+  "available_bytes"?: number | null;
+  "root_error"?: string | null;
+  "share_revision"?: number | null;
+  "state": CapabilityState;
+};
+
 export type NodeGetInvitationStatusCommand = {
   "invitation_id": InvitationId;
   "network_id": NetworkId;
@@ -1722,6 +1757,7 @@ export type NodeJoinNetworkCommand = {
   "network_policy_revision"?: number | null;
   "preview_digest"?: string | null;
   "privacy_policy_revision"?: number | null;
+  "signed_join_preview"?: NetworkJoinPreview | null;
   "start": boolean;
   "target": string;
   "terms_hash"?: ContentHash | null;
@@ -2217,6 +2253,7 @@ export type NodeSnapshot = {
   "embedded_services"?: Array<NodeEmbeddedServiceSnapshot>;
   "exit_node_capabilities"?: ExitNodeCapabilities;
   "exit_selections"?: Array<NodeExitSelectionSnapshot>;
+  "file_capability"?: NodeFileCapabilitySnapshot;
   "identity"?: NodeIdentitySnapshot | null;
   "interface_problems"?: Array<NodeProblem>;
   "interfaces"?: Array<NodeInterfaceSnapshot>;

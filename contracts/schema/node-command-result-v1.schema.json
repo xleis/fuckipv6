@@ -5400,6 +5400,54 @@
       ],
       "type": "object"
     },
+    "NodeFileCapabilitySnapshot": {
+      "description": "Path-free File capability state safe for snapshots, events and UI manifests.",
+      "properties": {
+        "access_epoch": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "active_transfers": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "available_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "root_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "share_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/CapabilityState"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
     "NodeId": {
       "type": "string"
     },
@@ -7195,6 +7243,14 @@
             "$ref": "#/$defs/NodeExitSelectionSnapshot"
           },
           "type": "array"
+        },
+        "file_capability": {
+          "$ref": "#/$defs/NodeFileCapabilitySnapshot",
+          "default": {
+            "active_transfers": 0,
+            "state": "disabled"
+          },
+          "description": "Local File-share health. This DTO deliberately contains no root path or\nraw filesystem message; owner-only local IPC provides the selected path."
         },
         "identity": {
           "anyOf": [

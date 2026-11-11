@@ -253,6 +253,7 @@ async fn register_relay_connection(
         client_certificate_public_key_pin,
         tls_channel_binding: registration.tls_channel_binding,
         signature,
+        member_grant: None,
     };
 
     let (mut send, mut recv) = connection

@@ -713,6 +713,7 @@ impl RelayServer {
             client_certificate_public_key_pin,
             tls_channel_binding,
             signature,
+            member_grant: _,
         } = message
         else {
             anyhow::bail!("QUIC 中继首个消息必须是 Register");
@@ -747,7 +748,9 @@ impl RelayServer {
                 return Err(error.context("Relay 策略不可用，拒绝注册"));
             }
         };
-        let decision = policy.authorize_member(&node_id, now);
+        let decision = policy
+            .authorize_member(&node_id, now)
+            .context("Relay 注册授权计算失败")?;
         if !decision.allowed {
             let member_usage = self.member_usage(&node_id).await;
             record_rejected_connection(&self.state, Some(&member_usage));
@@ -1169,8 +1172,26 @@ impl RelayServer {
         match policy.existing_session_policy {
             RelayExistingSessionPolicy::Continue => {}
             RelayExistingSessionPolicy::Reauthorize => {
-                let source_decision = policy.authorize_member(src_node_id, now);
-                let destination_decision = policy.authorize_member(&dst_client.node_id, now);
+                let source_decision = match policy.authorize_member(src_node_id, now) {
+                    Ok(decision) => decision,
+                    Err(error) => {
+                        tracing::error!("Relay 源授权计算失败: {error}");
+                        return Err(reject(RelayMessage::error(
+                            ErrorCode::Internal,
+                            "relay source authorization failed",
+                        )));
+                    }
+                };
+                let destination_decision = match policy.authorize_member(&dst_client.node_id, now) {
+                    Ok(decision) => decision,
+                    Err(error) => {
+                        tracing::error!("Relay 目标授权计算失败: {error}");
+                        return Err(reject(RelayMessage::error(
+                            ErrorCode::Internal,
+                            "relay destination authorization failed",
+                        )));
+                    }
+                };
                 if !source_decision.allowed || !destination_decision.allowed {
                     tracing::warn!(
                         "Relay 实时授权拒绝: source={} destination={} provider_reason={:?} consumer_reason={:?}",
@@ -1747,6 +1768,7 @@ mod tests {
             client_certificate_public_key_pin: registration.client_certificate_public_key_pin,
             tls_channel_binding: registration.tls_channel_binding,
             signature,
+            member_grant: None,
         };
         mutate(&mut message);
 

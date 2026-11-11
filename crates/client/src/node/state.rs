@@ -12,8 +12,9 @@ use fuckipv6_common::domain::{
     ExitSelectionResolution, FieldPrivacyPolicy, MembershipRole, MembershipState, MembershipTerms,
     NetworkAcl, NetworkId, NetworkJoinMode, NetworkMemberDirectory, NetworkMemberPresence,
     NetworkMemberStatus, NetworkVisibility, NodeId, NodeLocalAccessPolicy, OperationRecovery,
-    TopologyBuilder, TopologyLinkObservation, TopologyMemberInput, TopologyNetworkInput,
-    TopologySnapshot, TopologyViewer, TrafficRoutingPageModel, TrafficSessionSnapshot,
+    RelayHealthSnapshot, TopologyBuilder, TopologyLinkObservation, TopologyMemberInput,
+    TopologyNetworkInput, TopologySnapshot, TopologyViewer, TrafficRoutingPageModel,
+    TrafficSessionSnapshot,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -1057,6 +1058,30 @@ pub struct NodeEmbeddedServiceSnapshot {
     #[serde(default)]
     pub relay_status: NodeEmbeddedServiceStatus,
     pub relay_addr: Option<SocketAddr>,
+    /// Authoritative Relay health from the node runtime. Missing means no
+    /// health evidence is available; adapters must not infer health from the
+    /// listener address or lifecycle status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_health: Option<RelayHealthSnapshot>,
+}
+
+impl NodeEmbeddedServiceSnapshot {
+    pub(crate) fn running_from_embedded(
+        service: &crate::symmetric::EmbeddedServiceSnapshot,
+    ) -> Self {
+        Self {
+            network_name: service.network_name.clone(),
+            status: NodeEmbeddedServiceStatus::Running,
+            signaling_addr: Some(service.signaling_addr),
+            relay_status: if service.relay_addr.is_some() {
+                NodeEmbeddedServiceStatus::Running
+            } else {
+                NodeEmbeddedServiceStatus::Stopped
+            },
+            relay_addr: service.relay_addr,
+            relay_health: service.relay_health.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -2111,6 +2136,7 @@ mod tests {
             signaling_addr: None,
             relay_status: NodeEmbeddedServiceStatus::Stopped,
             relay_addr: None,
+            relay_health: None,
         }
     }
 

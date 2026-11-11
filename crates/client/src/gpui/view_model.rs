@@ -8498,6 +8498,7 @@ mod tests {
                 relay_status: NodeEmbeddedServiceStatus::Failed,
                 signaling_addr: None,
                 relay_addr: None,
+                relay_health: None,
             });
 
         let overview = project_overview(&snapshot, Locale::En);

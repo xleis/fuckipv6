@@ -6108,17 +6108,7 @@ impl NetworkRuntimeActor {
     }
 
     async fn record_running_embedded_service(&self, service: &EmbeddedServiceSnapshot) {
-        let snapshot = NodeEmbeddedServiceSnapshot {
-            network_name: service.network_name.clone(),
-            status: NodeEmbeddedServiceStatus::Running,
-            signaling_addr: Some(service.signaling_addr),
-            relay_status: if service.relay_addr.is_some() {
-                NodeEmbeddedServiceStatus::Running
-            } else {
-                NodeEmbeddedServiceStatus::Stopped
-            },
-            relay_addr: service.relay_addr,
-        };
+        let snapshot = NodeEmbeddedServiceSnapshot::running_from_embedded(service);
         let network_name = snapshot.network_name.clone();
         let relay_status = snapshot.relay_status;
         self.state
@@ -6164,6 +6154,7 @@ impl NetworkRuntimeActor {
             signaling_addr: None,
             relay_status,
             relay_addr: None,
+            relay_health: None,
         };
         self.state
             .update(|state| {
@@ -8168,17 +8159,7 @@ mod tests {
         harness: &TestHarness,
         service: &EmbeddedServiceSnapshot,
     ) {
-        let snapshot = NodeEmbeddedServiceSnapshot {
-            network_name: service.network_name.clone(),
-            status: NodeEmbeddedServiceStatus::Running,
-            signaling_addr: Some(service.signaling_addr),
-            relay_status: if service.relay_addr.is_some() {
-                NodeEmbeddedServiceStatus::Running
-            } else {
-                NodeEmbeddedServiceStatus::Stopped
-            },
-            relay_addr: service.relay_addr,
-        };
+        let snapshot = NodeEmbeddedServiceSnapshot::running_from_embedded(service);
         harness
             .state
             .update(|state| {
@@ -8273,6 +8254,7 @@ mod tests {
             relay_status: NodeEmbeddedServiceStatus::Running,
             signaling_addr: Some("127.0.0.1:46666".parse().expect("signaling address")),
             relay_addr: Some("127.0.0.1:46667".parse().expect("relay address")),
+            relay_health: None,
         };
         harness
             .state

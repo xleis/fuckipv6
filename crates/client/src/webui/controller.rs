@@ -474,6 +474,7 @@ impl AppController {
                         relay_status: NodeEmbeddedServiceStatus::Running,
                         signaling_addr: None,
                         relay_addr: None,
+                        relay_health: None,
                     });
             })
             .await;
@@ -1538,6 +1539,7 @@ mod tests {
                 relay_status: NodeEmbeddedServiceStatus::Running,
                 signaling_addr: Some("127.0.0.1:6666".parse().unwrap()),
                 relay_addr: Some("127.0.0.1:6667".parse().unwrap()),
+                relay_health: None,
             }],
             peers: vec![
                 node_peer("office", "peer-office", true),

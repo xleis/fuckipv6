@@ -153,6 +153,7 @@ impl NodeRuntimeHandler {
                         }
                         refresh_local_exit_owner_intent(&state, configs).await;
                     }
+                    refresh_embedded_services(&state, &services).await;
                     let (live_tun_names, runtime_problem) = match runtime.as_ref() {
                         Some(runtime) => match runtime.live_tun_names().await {
                             Ok(names) => (Some(names), None),
@@ -4296,6 +4297,35 @@ fn unavailable(request_id: u64, message: impl Into<String>) -> NodeCommandResult
     )
 }
 
+async fn refresh_embedded_services(state: &NodeStateStore, services: &EmbeddedServiceManager) {
+    let runtime_services = match services.list().await {
+        Ok(services) => services,
+        Err(error) => {
+            tracing::warn!(%error, "刷新内嵌服务状态失败，保留上一份快照");
+            return;
+        }
+    };
+    state
+        .update(|snapshot| {
+            for service in &runtime_services {
+                let projected = super::NodeEmbeddedServiceSnapshot::running_from_embedded(service);
+                if let Some(existing) = snapshot
+                    .embedded_services
+                    .iter_mut()
+                    .find(|existing| existing.network_name == projected.network_name)
+                {
+                    *existing = projected;
+                } else {
+                    snapshot.embedded_services.push(projected);
+                }
+            }
+            snapshot
+                .embedded_services
+                .sort_by(|left, right| left.network_name.cmp(&right.network_name));
+        })
+        .await;
+}
+
 /// Shared command bus backed by a live node runtime.
 pub fn spawn_command_bus(
     state: NodeStateStore,
@@ -4761,6 +4791,58 @@ mod tests {
             }
             outcome => panic!("unexpected outcome: {outcome:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn get_snapshot_refreshes_authoritative_relay_health_from_the_service_owner() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "fuckipv6-runtime-handler-relay-health-{}-{}",
+            std::process::id(),
+            unix_time_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let configs = crate::config_manager::ConfigManager::new_for_dir(config_dir.clone())
+            .expect("config manager");
+        let services = EmbeddedServiceManager::spawn_with_config(2, configs);
+        services
+            .start(
+                EmbeddedServiceStartRequest::new("live-relay", 0, 0)
+                    .with_external_host("127.0.0.1"),
+            )
+            .await
+            .expect("start embedded service");
+        let bus = spawn_command_bus_with_services(
+            NodeStateStore::new(),
+            MultiNetworkRegistry::new(),
+            NodeEventBus::default(),
+            services.clone(),
+        );
+
+        let result = bus
+            .execute_test(NodeCommandRequest::new(26, NodeCommand::GetSnapshot))
+            .await
+            .expect("snapshot result");
+        let NodeCommandOutcome::Snapshot(snapshot) = result.outcome else {
+            panic!("unexpected snapshot outcome");
+        };
+        let service = snapshot
+            .embedded_services
+            .iter()
+            .find(|service| service.network_name == "live-relay")
+            .expect("embedded service projected into node state");
+        let health = service
+            .relay_health
+            .as_ref()
+            .expect("authoritative relay health");
+        assert!(health.listener_bound);
+        assert_ne!(
+            health.status,
+            fuckipv6_common::domain::RelayHealthStatus::Healthy,
+            "a bound listener must not become healthy without forwarding evidence"
+        );
+
+        services.shutdown().await.expect("shutdown services");
+        let _ = std::fs::remove_dir_all(config_dir);
     }
 
     #[tokio::test]

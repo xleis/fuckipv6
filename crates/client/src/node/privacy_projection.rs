@@ -17,8 +17,9 @@ use fuckipv6_common::domain::{
     InvitationStatusView, IssuedInvitation, JoinRequest, MemberLifecycleChange,
     MemberRemovalPreview, MembershipState, NetworkId, NetworkMemberDirectory,
     NetworkProfileApplyResult, NetworkProfilePreview, NodeId, PolicyTestResult, PrivacyField,
-    PrivacyObjectState, PrivacyViewer, ProjectedActivityEntry, TopologyConnection, TopologyNode,
-    TopologySnapshot, TrafficPolicyTestComparison, TrafficRoutingPageModel, TrafficSessionSnapshot,
+    PrivacyObjectState, PrivacyViewer, ProjectedActivityEntry, RelayHealthSnapshot,
+    TopologyConnection, TopologyNode, TopologySnapshot, TrafficPolicyTestComparison,
+    TrafficRoutingPageModel, TrafficSessionSnapshot,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -206,6 +207,10 @@ pub struct ProjectedNodeEmbeddedServiceSnapshot {
     pub signaling_addr: Option<SocketAddr>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_addr: Option<SocketAddr>,
+    /// Relay listener, limits, usage and failure details are owner-visible.
+    /// Ordinary members receive only the non-sensitive lifecycle projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_health: Option<RelayHealthSnapshot>,
 }
 
 /// A member directory that has already passed field projection. The inner
@@ -921,6 +926,10 @@ impl<'a> SnapshotProjector<'a> {
             relay_status: service.relay_status,
             signaling_addr: endpoints.then_some(service.signaling_addr).flatten(),
             relay_addr: endpoints.then_some(service.relay_addr).flatten(),
+            relay_health: viewer
+                .local_owner
+                .then(|| service.relay_health.clone())
+                .flatten(),
         }))
     }
 
@@ -1502,6 +1511,22 @@ mod tests {
                 relay_status: NodeEmbeddedServiceStatus::Running,
                 signaling_addr: Some("203.0.113.9:443".parse().unwrap()),
                 relay_addr: Some("203.0.113.10:443".parse().unwrap()),
+                relay_health: Some(RelayHealthSnapshot::observe(
+                    fuckipv6_common::domain::RelayLifecycleState::Running,
+                    Some("198.51.100.77:443".parse().unwrap()),
+                    true,
+                    fuckipv6_common::domain::RelayReachabilityState::Reachable,
+                    true,
+                    true,
+                    Default::default(),
+                    Vec::new(),
+                    fuckipv6_common::domain::RelayUsageSnapshot {
+                        last_forwarded_at_unix_ms: Some(1_490),
+                        ..Default::default()
+                    },
+                    1_500,
+                    None,
+                )),
             }],
             ui_mode: None,
             tun_capabilities: TunCapabilities::default(),
@@ -1622,6 +1647,7 @@ mod tests {
         assert!(projected.interfaces.is_empty());
         assert!(projected.memberships.is_empty());
         assert!(projected.logs.is_empty());
+        assert!(projected.embedded_services[0].relay_health.is_none());
         assert_eq!(projected.traffic_session, snapshot.traffic_session);
         assert_eq!(json["traffic_session"]["state"], "connecting");
         for key in [
@@ -1669,6 +1695,7 @@ mod tests {
             "203.0.113.8:8443",
             "203.0.113.9:443",
             "203.0.113.10:443",
+            "198.51.100.77:443",
             "198.51.100.9",
             "hidden-detail",
             "hidden-log-target",
@@ -1680,6 +1707,29 @@ mod tests {
                 "hidden value leaked: {secret}"
             );
         }
+    }
+
+    #[test]
+    fn relay_health_is_owner_visible_but_hidden_from_ordinary_members() {
+        let snapshot = full_snapshot();
+        let home = network("home");
+        let member = network_context(
+            home,
+            NetworkRole::Member,
+            MembershipState::Active,
+            snapshot.access_control.field_privacy_policies.clone(),
+        );
+        let member_projection = project_node_snapshot(&snapshot, &member, 1_500).unwrap();
+        assert!(member_projection.embedded_services[0]
+            .relay_health
+            .is_none());
+
+        let owner = NodeCommandContext::local_owner_for_snapshot(&snapshot, "owner-test");
+        let owner_projection = project_node_snapshot(&snapshot, &owner, 1_500).unwrap();
+        assert_eq!(
+            owner_projection.embedded_services[0].relay_health,
+            snapshot.embedded_services[0].relay_health
+        );
     }
 
     #[test]

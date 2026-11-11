@@ -5,13 +5,13 @@
 //! for every decision so revocation and expiry take effect without restarting
 //! the listener.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use fuckipv6_common::domain::{
     NetworkAcl, NetworkRecord, NetworkRole, NodeId, NodeLocalAccessPolicy, RelayAccessPolicy,
-    RelayLimitPolicy, RelayMemberPolicyContext,
+    RelayAuthorizationDecision, RelayLimitPolicy, RelayMemberGrant, RelayMemberPolicyContext,
 };
 use fuckipv6_coordinator::relay::server::RelayPolicyAuthority;
 
@@ -69,82 +69,108 @@ impl DurableRelayPolicyAuthority {
             .map_err(anyhow::Error::new)
             .context("无法加载 Relay 策略事务快照")
     }
+
+    fn load_policy_at(&self, now: u64) -> Result<(NetworkRecord, RelayAccessPolicy)> {
+        let record = self.load_record()?;
+        let snapshot = self.load_snapshot()?;
+        policy_from_snapshot(&self.configs, &record, &snapshot, now)
+    }
 }
 
 impl RelayPolicyAuthority for DurableRelayPolicyAuthority {
     fn current_policy(&self) -> Result<RelayAccessPolicy> {
         let now = now_unix_ms()?;
-        let record = self.load_record()?;
-        let snapshot = self.load_snapshot()?;
-        snapshot
-            .validate_at(now)
-            .context("Relay 策略事务快照无效")?;
-
-        let identity = self
-            .configs
-            .load_node_identity()
-            .context("无法加载 Relay 提供者身份")?;
-        let provider_node_id = NodeId::from_public_key(&identity.public_key());
-        if !record.members.contains(&provider_node_id) {
-            anyhow::bail!("本节点不是该网络的成员，拒绝提供 Relay");
-        }
-
-        let provider_role = network_role(&record, &provider_node_id);
-        let provider_local = snapshot
-            .local_policy
-            .clone()
-            .context("缺少节点 owner 编写的 Relay 本地授权策略")?;
-        if provider_local.node_id != provider_node_id {
-            anyhow::bail!("Relay 本地授权策略属于其他节点");
-        }
-        if !provider_local.network_scope.allows(&record.network_id) {
-            anyhow::bail!("Relay 本地授权策略不允许此网络");
-        }
-        provider_local
-            .validate_at(now)
-            .context("Relay 本地授权策略无效或已过期")?;
-
-        let network_acl = snapshot
-            .network_acls
-            .iter()
-            .find(|acl| acl.network_id == record.network_id)
-            .cloned()
-            .context("缺少网络管理员编写的 Relay ACL")?;
-        network_acl
-            .validate_at(now)
-            .context("Relay 网络 ACL 无效或已过期")?;
-
-        let local_limits = provider_limits(&provider_local, &network_acl)?;
-        let provider = RelayMemberPolicyContext {
-            role: provider_role,
-            groups: Default::default(),
-            membership_active: true,
-            recent_reauthentication: false,
-            local_rules: Vec::new(),
-            local_access_policy: Some(provider_local.clone()),
-            limits: local_limits.clone(),
-        };
-
-        // Member entries are intentionally empty until a consumer presents a
-        // verifiable local grant. Membership or visibility alone is never an
-        // authorization to consume Relay.
-        let members = BTreeMap::new();
-
-        let policy = RelayAccessPolicy {
-            network_id: record.network_id.clone(),
-            provider_node_id: provider_node_id.clone(),
-            provider,
-            existing_session_policy: Default::default(),
-            revision: policy_revision(&record, &snapshot, &network_acl, &provider_local),
-            updated_at_unix_ms: now,
-            network_rules: Vec::new(),
-            network_acl: Some(network_acl),
-            members,
-            limits: local_limits,
-        };
-        policy.validate_at(now).context("组装后的 Relay 策略无效")?;
-        Ok(policy)
+        self.load_policy_at(now).map(|(_, policy)| policy)
     }
+
+    fn authorize_grant(
+        &self,
+        grant: &RelayMemberGrant,
+        now: u64,
+    ) -> Result<(RelayAccessPolicy, RelayAuthorizationDecision)> {
+        let (record, mut policy) = self.load_policy_at(now)?;
+        let membership_active = record.members.contains(&grant.consumer_node_id);
+        let role = network_role(&record, &grant.consumer_node_id);
+        let decision = policy
+            .authorize_signed_grant(grant, role, BTreeSet::new(), membership_active, false, now)
+            .context("Relay 使用方签名授权无效")?;
+        Ok((policy, decision))
+    }
+}
+
+fn policy_from_snapshot(
+    configs: &ConfigManager,
+    record: &NetworkRecord,
+    snapshot: &PolicySnapshot,
+    now: u64,
+) -> Result<(NetworkRecord, RelayAccessPolicy)> {
+    snapshot
+        .validate_at(now)
+        .context("Relay 策略事务快照无效")?;
+
+    let identity = configs
+        .load_node_identity()
+        .context("无法加载 Relay 提供者身份")?;
+    let provider_node_id = NodeId::from_public_key(&identity.public_key());
+    if !record.members.contains(&provider_node_id) {
+        anyhow::bail!("本节点不是该网络的成员，拒绝提供 Relay");
+    }
+
+    let provider_role = network_role(record, &provider_node_id);
+    let provider_local = snapshot
+        .local_policy
+        .clone()
+        .context("缺少节点 owner 编写的 Relay 本地授权策略")?;
+    if provider_local.node_id != provider_node_id {
+        anyhow::bail!("Relay 本地授权策略属于其他节点");
+    }
+    if !provider_local.network_scope.allows(&record.network_id) {
+        anyhow::bail!("Relay 本地授权策略不允许此网络");
+    }
+    provider_local
+        .validate_at(now)
+        .context("Relay 本地授权策略无效或已过期")?;
+
+    let network_acl = snapshot
+        .network_acls
+        .iter()
+        .find(|acl| acl.network_id == record.network_id)
+        .cloned()
+        .context("缺少网络管理员编写的 Relay ACL")?;
+    network_acl
+        .validate_at(now)
+        .context("Relay 网络 ACL 无效或已过期")?;
+
+    let local_limits = provider_limits(&provider_local, &network_acl)?;
+    let provider = RelayMemberPolicyContext {
+        role: provider_role,
+        groups: Default::default(),
+        membership_active: true,
+        recent_reauthentication: false,
+        local_rules: Vec::new(),
+        local_access_policy: Some(provider_local.clone()),
+        limits: local_limits.clone(),
+    };
+
+    // Member entries are intentionally empty until a consumer presents a
+    // verifiable local grant. Membership or visibility alone is never an
+    // authorization to consume Relay.
+    let members = BTreeMap::new();
+
+    let policy = RelayAccessPolicy {
+        network_id: record.network_id.clone(),
+        provider_node_id,
+        provider,
+        existing_session_policy: Default::default(),
+        revision: policy_revision(record, snapshot, &network_acl, &provider_local),
+        updated_at_unix_ms: now,
+        network_rules: Vec::new(),
+        network_acl: Some(network_acl),
+        members,
+        limits: local_limits,
+    };
+    policy.validate_at(now).context("组装后的 Relay 策略无效")?;
+    Ok((record.clone(), policy))
 }
 
 fn provider_limits(local: &NodeLocalAccessPolicy, acl: &NetworkAcl) -> Result<RelayLimitPolicy> {

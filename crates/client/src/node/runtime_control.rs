@@ -772,6 +772,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
                 Some(&request.network_name),
                 request.local_exit_enabled,
                 false,
+                Some(state.clone()),
             )
             .await
             .map_err(|error| {

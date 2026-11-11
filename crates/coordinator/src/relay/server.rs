@@ -3,8 +3,9 @@ use bytes::Bytes;
 use fuckipv6_common::{
     build_quic_server_config_with_client_certificate_authorizer,
     domain::{
-        NodeId, RelayAccessPolicy, RelayExistingSessionPolicy, RelayHealthSnapshot,
-        RelayLifecycleState, RelayLimitPolicy, RelayUsageSnapshot,
+        NodeId, RelayAccessPolicy, RelayAuthorizationDecision, RelayExistingSessionPolicy,
+        RelayHealthSnapshot, RelayLifecycleState, RelayLimitPolicy, RelayMemberGrant,
+        RelayUsageSnapshot,
     },
     export_quic_relay_channel_binding, generate_self_signed_quic_certificate, recv_relay_message,
     send_relay_message, verify_quic_client_identity_binding, ClientId, ErrorCode, Identity,
@@ -30,6 +31,16 @@ const MAX_RELAY_STREAM_TASKS: usize = 4096;
 /// authorization contexts.
 pub trait RelayPolicyAuthority: Send + Sync {
     fn current_policy(&self) -> Result<RelayAccessPolicy>;
+
+    /// Validate a consumer-signed grant and rebuild the trusted consumer
+    /// context from the current roster and policy snapshot. Implementations
+    /// must not trust role, membership or limits outside the signed grant and
+    /// their durable control-plane state.
+    fn authorize_grant(
+        &self,
+        grant: &RelayMemberGrant,
+        now_unix_ms: u64,
+    ) -> Result<(RelayAccessPolicy, RelayAuthorizationDecision)>;
 }
 
 #[derive(Clone)]
@@ -80,6 +91,9 @@ struct RelayClient {
     client_id: ClientId,
     node_id: NodeId,
     public_key: Vec<u8>,
+    member_grant: RelayMemberGrant,
+    effective_limits: RelayLimitPolicy,
+    policy_revision: u64,
     connection: quinn::Connection,
     connection_id: usize,
     registered_at: Instant,
@@ -235,10 +249,11 @@ impl RelayStreamGuard {
     fn acquire(
         state: Arc<RelayState>,
         member: Arc<MemberUsage>,
-        limit: Option<u32>,
+        global_limit: Option<u32>,
+        member_limit: Option<u32>,
     ) -> std::result::Result<Self, ()> {
-        try_increment_bounded(&state.metrics.active_streams, limit).map_err(|_| ())?;
-        if try_increment_bounded(&member.active_streams, limit).is_err() {
+        try_increment_bounded(&state.metrics.active_streams, global_limit).map_err(|_| ())?;
+        if try_increment_bounded(&member.active_streams, member_limit).is_err() {
             saturating_sub(&state.metrics.active_streams, 1);
             return Err(());
         }
@@ -482,16 +497,22 @@ impl RelayServer {
             .clone()
     }
 
-    async fn ensure_rate_buckets(&self, node_id: &NodeId, limits: &RelayLimitPolicy) {
-        let rate_bytes_per_sec = relay_rate_bytes_per_sec(limits);
+    async fn ensure_rate_buckets(
+        &self,
+        node_id: &NodeId,
+        global_limits: &RelayLimitPolicy,
+        member_limits: &RelayLimitPolicy,
+    ) {
+        let global_rate_bytes_per_sec = relay_rate_bytes_per_sec(global_limits);
+        let member_rate_bytes_per_sec = relay_rate_bytes_per_sec(member_limits);
         let mut rate = self.state.rate.write().await;
         rate.global
-            .get_or_insert_with(|| TokenBucket::new(rate_bytes_per_sec))
-            .reconfigure(rate_bytes_per_sec);
+            .get_or_insert_with(|| TokenBucket::new(global_rate_bytes_per_sec))
+            .reconfigure(global_rate_bytes_per_sec);
         rate.members
             .entry(node_id.clone())
-            .or_insert_with(|| TokenBucket::new(rate_bytes_per_sec))
-            .reconfigure(rate_bytes_per_sec);
+            .or_insert_with(|| TokenBucket::new(member_rate_bytes_per_sec))
+            .reconfigure(member_rate_bytes_per_sec);
     }
 
     async fn reserve_packet_bytes(
@@ -499,7 +520,8 @@ impl RelayServer {
         node_id: &NodeId,
         member: Arc<MemberUsage>,
         bytes: usize,
-        limits: &RelayLimitPolicy,
+        global_limits: &RelayLimitPolicy,
+        member_limits: &RelayLimitPolicy,
     ) -> std::result::Result<QuotaReservation, String> {
         let bytes = u64::try_from(bytes).map_err(|_| "relay packet size overflow".to_string())?;
         let _window = self.state.quota_window.lock().await;
@@ -507,17 +529,19 @@ impl RelayServer {
         let global_reserved = self.state.metrics.reserved_bytes.load(Ordering::Acquire);
         let member_forwarded = member.forwarded_bytes.load(Ordering::Acquire);
         let member_reserved = member.reserved_bytes.load(Ordering::Acquire);
-        if !has_byte_capacity(global_forwarded, global_reserved, limits.max_bytes)
-            || !has_byte_capacity(member_forwarded, member_reserved, limits.max_bytes)
-            || limits.max_bytes.is_some_and(|limit| {
+        if !has_byte_capacity(global_forwarded, global_reserved, global_limits.max_bytes)
+            || !has_byte_capacity(member_forwarded, member_reserved, member_limits.max_bytes)
+            || global_limits.max_bytes.is_some_and(|limit| {
                 global_forwarded
                     .saturating_add(global_reserved)
                     .saturating_add(bytes)
                     > limit
-                    || member_forwarded
-                        .saturating_add(member_reserved)
-                        .saturating_add(bytes)
-                        > limit
+            })
+            || member_limits.max_bytes.is_some_and(|limit| {
+                member_forwarded
+                    .saturating_add(member_reserved)
+                    .saturating_add(bytes)
+                    > limit
             })
         {
             return Err(format!("Relay 流量配额已耗尽: node={node_id}"));
@@ -713,7 +737,7 @@ impl RelayServer {
             client_certificate_public_key_pin,
             tls_channel_binding,
             signature,
-            member_grant: _,
+            member_grant,
         } = message
         else {
             anyhow::bail!("QUIC 中继首个消息必须是 Register");
@@ -741,16 +765,28 @@ impl RelayServer {
 
         let node_id = NodeId::from_public_key(&public_key);
         let now = now_unix_ms();
-        let policy = match self.load_policy(now).await {
-            Ok(policy) => policy,
+        let Some(member_grant) = member_grant.map(|grant| *grant) else {
+            let member_usage = self.member_usage(&node_id).await;
+            record_rejected_connection(&self.state, Some(&member_usage));
+            anyhow::bail!("Relay 注册缺少使用方签名授权");
+        };
+        let grant_public_key = member_grant
+            .consumer_public_key
+            .to_bytes()
+            .context("Relay 使用方授权公钥无效")?;
+        if grant_public_key.as_slice() != public_key.as_slice() {
+            let member_usage = self.member_usage(&node_id).await;
+            record_rejected_connection(&self.state, Some(&member_usage));
+            anyhow::bail!("Relay 使用方授权公钥与注册身份不一致");
+        }
+        let (policy, decision) = match self.policy_authority.authorize_grant(&member_grant, now) {
+            Ok(result) => result,
             Err(error) => {
-                record_rejected_connection(&self.state, None);
-                return Err(error.context("Relay 策略不可用，拒绝注册"));
+                let member_usage = self.member_usage(&node_id).await;
+                record_rejected_connection(&self.state, Some(&member_usage));
+                return Err(error.context("Relay 签名授权校验失败，拒绝注册"));
             }
         };
-        let decision = policy
-            .authorize_member(&node_id, now)
-            .context("Relay 注册授权计算失败")?;
         if !decision.allowed {
             let member_usage = self.member_usage(&node_id).await;
             record_rejected_connection(&self.state, Some(&member_usage));
@@ -767,6 +803,9 @@ impl RelayServer {
             client_id: client_id.clone(),
             node_id: node_id.clone(),
             public_key: public_key.clone(),
+            member_grant,
+            effective_limits: decision.limits.clone(),
+            policy_revision: policy.revision,
             connection,
             connection_id,
             registered_at: Instant::now(),
@@ -799,7 +838,7 @@ impl RelayServer {
             .saturating_sub(u32::from(existing_node.as_ref() == Some(&node_id)));
 
         if exceeds_limit(projected_global, policy.limits.max_connections)
-            || exceeds_limit(projected_member, policy.limits.max_connections)
+            || exceeds_limit(projected_member, decision.limits.max_connections)
         {
             record_rejected_connection(&self.state, Some(&member_usage));
             return Err(anyhow::anyhow!("Relay 连接配额已耗尽"));
@@ -811,7 +850,7 @@ impl RelayServer {
         ) || !has_byte_capacity(
             member_usage.forwarded_bytes.load(Ordering::Acquire),
             member_usage.reserved_bytes.load(Ordering::Acquire),
-            policy.limits.max_bytes,
+            decision.limits.max_bytes,
         ) {
             record_rejected_connection(&self.state, Some(&member_usage));
             return Err(anyhow::anyhow!("Relay 流量配额已耗尽"));
@@ -837,7 +876,8 @@ impl RelayServer {
         member_usage
             .active_connections
             .fetch_add(1, Ordering::AcqRel);
-        self.ensure_rate_buckets(&node_id, &policy.limits).await;
+        self.ensure_rate_buckets(&node_id, &policy.limits, &decision.limits)
+            .await;
         drop(registration);
 
         tracing::info!("QUIC 中继客户端注册成功: {} ({})", client_id, virtual_ip);
@@ -1102,15 +1142,6 @@ impl RelayServer {
             )));
         }
 
-        if let Some(max_duration) = policy.limits.max_session_duration_secs {
-            if src_client.registered_at.elapsed() >= Duration::from_secs(max_duration) {
-                return Err(reject(RelayMessage::error(
-                    ErrorCode::Forbidden,
-                    "relay session duration limit exceeded",
-                )));
-            }
-        }
-
         self.ensure_packet_authorized(src_client_id, src_public_key, "source")
             .await
             .inspect_err(|_| {
@@ -1144,15 +1175,6 @@ impl RelayServer {
             )));
         }
 
-        if let Some(max_duration) = policy.limits.max_session_duration_secs {
-            if dst_client.registered_at.elapsed() >= Duration::from_secs(max_duration) {
-                return Err(reject(RelayMessage::error(
-                    ErrorCode::Forbidden,
-                    "destination relay session duration limit exceeded",
-                )));
-            }
-        }
-
         self.ensure_packet_authorized(&dst_client.client_id, &dst_client.public_key, "destination")
             .await
             .inspect_err(|_| {
@@ -1169,11 +1191,39 @@ impl RelayServer {
             )));
         }
 
-        match policy.existing_session_policy {
-            RelayExistingSessionPolicy::Continue => {}
+        let (global_limits, source_limits) = match policy.existing_session_policy {
+            RelayExistingSessionPolicy::Continue => {
+                if let Some(max_duration) = src_client.effective_limits.max_session_duration_secs {
+                    if src_client.registered_at.elapsed() >= Duration::from_secs(max_duration) {
+                        return Err(reject(RelayMessage::error(
+                            ErrorCode::Forbidden,
+                            "relay session duration limit exceeded",
+                        )));
+                    }
+                }
+                if let Some(max_duration) = dst_client.effective_limits.max_session_duration_secs {
+                    if dst_client.registered_at.elapsed() >= Duration::from_secs(max_duration) {
+                        return Err(reject(RelayMessage::error(
+                            ErrorCode::Forbidden,
+                            "destination relay session duration limit exceeded",
+                        )));
+                    }
+                }
+                if src_client.policy_revision != policy.revision {
+                    tracing::info!(
+                        source_revision = src_client.policy_revision,
+                        current_revision = policy.revision,
+                        "Relay 策略已变化，但 Continue 策略保留现有会话"
+                    );
+                }
+                (policy.limits.clone(), src_client.effective_limits.clone())
+            }
             RelayExistingSessionPolicy::Reauthorize => {
-                let source_decision = match policy.authorize_member(src_node_id, now) {
-                    Ok(decision) => decision,
+                let (source_policy, source_decision) = match self
+                    .policy_authority
+                    .authorize_grant(&src_client.member_grant, now)
+                {
+                    Ok(result) => result,
                     Err(error) => {
                         tracing::error!("Relay 源授权计算失败: {error}");
                         return Err(reject(RelayMessage::error(
@@ -1182,8 +1232,11 @@ impl RelayServer {
                         )));
                     }
                 };
-                let destination_decision = match policy.authorize_member(&dst_client.node_id, now) {
-                    Ok(decision) => decision,
+                let (destination_policy, destination_decision) = match self
+                    .policy_authority
+                    .authorize_grant(&dst_client.member_grant, now)
+                {
+                    Ok(result) => result,
                     Err(error) => {
                         tracing::error!("Relay 目标授权计算失败: {error}");
                         return Err(reject(RelayMessage::error(
@@ -1205,6 +1258,31 @@ impl RelayServer {
                         "relay authorization changed",
                     )));
                 }
+                if source_policy.network_id != destination_policy.network_id
+                    || source_policy.provider_node_id != destination_policy.provider_node_id
+                {
+                    return Err(reject(RelayMessage::error(
+                        ErrorCode::Forbidden,
+                        "relay authorization contexts do not share a provider",
+                    )));
+                }
+                if let Some(max_duration) = source_decision.limits.max_session_duration_secs {
+                    if src_client.registered_at.elapsed() >= Duration::from_secs(max_duration) {
+                        return Err(reject(RelayMessage::error(
+                            ErrorCode::Forbidden,
+                            "relay session duration limit exceeded",
+                        )));
+                    }
+                }
+                if let Some(max_duration) = destination_decision.limits.max_session_duration_secs {
+                    if dst_client.registered_at.elapsed() >= Duration::from_secs(max_duration) {
+                        return Err(reject(RelayMessage::error(
+                            ErrorCode::Forbidden,
+                            "destination relay session duration limit exceeded",
+                        )));
+                    }
+                }
+                (source_policy.limits, source_decision.limits)
             }
             RelayExistingSessionPolicy::Migrate | RelayExistingSessionPolicy::Terminate => {
                 return Err(reject(RelayMessage::error(
@@ -1212,12 +1290,13 @@ impl RelayServer {
                     "existing relay session policy requires resumption on another Relay",
                 )));
             }
-        }
+        };
 
         let _stream_guard = match RelayStreamGuard::acquire(
             self.state.clone(),
             src_usage.clone(),
-            policy.limits.max_concurrent_streams,
+            global_limits.max_concurrent_streams,
+            source_limits.max_concurrent_streams,
         ) {
             Ok(guard) => guard,
             Err(()) => {
@@ -1233,7 +1312,8 @@ impl RelayServer {
                 src_node_id,
                 src_usage.clone(),
                 request.payload.len(),
-                &policy.limits,
+                &global_limits,
+                &source_limits,
             )
             .await
         {
@@ -1244,7 +1324,12 @@ impl RelayServer {
         };
 
         if !self
-            .allow_relay(src_node_id, request.payload.len(), &policy.limits)
+            .allow_relay(
+                src_node_id,
+                request.payload.len(),
+                &global_limits,
+                &source_limits,
+            )
             .await
         {
             return Err(reject(RelayMessage::error(
@@ -1271,17 +1356,24 @@ impl RelayServer {
         self.state.clients.read().await.get(&dst_ip).cloned()
     }
 
-    async fn allow_relay(&self, node_id: &NodeId, bytes: usize, limits: &RelayLimitPolicy) -> bool {
-        let rate_bytes_per_sec = relay_rate_bytes_per_sec(limits);
+    async fn allow_relay(
+        &self,
+        node_id: &NodeId,
+        bytes: usize,
+        global_limits: &RelayLimitPolicy,
+        member_limits: &RelayLimitPolicy,
+    ) -> bool {
+        let global_rate_bytes_per_sec = relay_rate_bytes_per_sec(global_limits);
+        let member_rate_bytes_per_sec = relay_rate_bytes_per_sec(member_limits);
         let mut rate = self.state.rate.write().await;
         let RelayRateState { global, members } = &mut *rate;
         global
-            .get_or_insert_with(|| TokenBucket::new(rate_bytes_per_sec))
-            .reconfigure(rate_bytes_per_sec);
+            .get_or_insert_with(|| TokenBucket::new(global_rate_bytes_per_sec))
+            .reconfigure(global_rate_bytes_per_sec);
         members
             .entry(node_id.clone())
-            .or_insert_with(|| TokenBucket::new(rate_bytes_per_sec))
-            .reconfigure(rate_bytes_per_sec);
+            .or_insert_with(|| TokenBucket::new(member_rate_bytes_per_sec))
+            .reconfigure(member_rate_bytes_per_sec);
         let global = global.as_mut().expect("global relay rate bucket");
         let member = members.get_mut(node_id).expect("member relay rate bucket");
         if !global.has_capacity(bytes) || !member.has_capacity(bytes) {
@@ -1648,11 +1740,84 @@ mod tests {
                 .map(|policy| policy.clone())
                 .map_err(|_| anyhow::anyhow!("test relay policy lock poisoned"))
         }
+
+        fn authorize_grant(
+            &self,
+            grant: &RelayMemberGrant,
+            now_unix_ms: u64,
+        ) -> Result<(RelayAccessPolicy, RelayAuthorizationDecision)> {
+            let mut policy = self
+                .policy
+                .lock()
+                .map(|policy| policy.clone())
+                .map_err(|_| anyhow::anyhow!("test relay policy lock poisoned"))?;
+            let context = policy.members.get(&grant.consumer_node_id).cloned();
+            let decision = policy
+                .authorize_signed_grant(
+                    grant,
+                    context
+                        .as_ref()
+                        .map_or(NetworkRole::Member, |context| context.role),
+                    context
+                        .as_ref()
+                        .map_or_else(BTreeSet::new, |context| context.groups.clone()),
+                    context
+                        .as_ref()
+                        .is_some_and(|context| context.membership_active),
+                    context
+                        .as_ref()
+                        .is_some_and(|context| context.recent_reauthentication),
+                    now_unix_ms,
+                )
+                .map_err(anyhow::Error::new)?;
+            Ok((policy, decision))
+        }
+    }
+
+    fn test_relay_network_id() -> NetworkId {
+        NetworkId::from_public_key(b"test-relay-policy-network")
+    }
+
+    fn test_relay_provider_node_id() -> NodeId {
+        NodeId::from_public_key(b"test-relay-provider")
+    }
+
+    fn test_member_grant(identity: &Identity, limits: RelayLimitPolicy) -> RelayMemberGrant {
+        let now = now_unix_ms();
+        RelayMemberGrant::new(
+            test_relay_network_id(),
+            test_relay_provider_node_id(),
+            identity,
+            format!("test-grant-{}", identity.client_id()),
+            1,
+            now.saturating_sub(1_000),
+            now.saturating_add(60_000),
+            limits,
+        )
+        .expect("test relay member grant")
+    }
+
+    async fn connect_test_relay(
+        relay_addr: SocketAddr,
+        server_pin: [u8; 32],
+        identity: &Identity,
+        virtual_ip: Ipv6Addr,
+    ) -> Result<QuicRelayClient> {
+        let grant = test_member_grant(identity, RelayLimitPolicy::default());
+        QuicRelayClient::connect(
+            relay_addr,
+            server_pin,
+            "fuckipv6.local",
+            identity,
+            virtual_ip,
+            &grant,
+        )
+        .await
     }
 
     fn test_relay_policy(identities: &[&Identity]) -> RelayAccessPolicy {
-        let network_id = NetworkId::from_public_key(b"test-relay-policy-network");
-        let provider_node_id = NodeId::from_public_key(b"test-relay-provider");
+        let network_id = test_relay_network_id();
+        let provider_node_id = test_relay_provider_node_id();
         let owner_rule = PermissionRule {
             rule_id: SecurityRuleId::from_public_key(b"test-relay-provider-owner"),
             effect: PermissionEffect::Allow,
@@ -1768,7 +1933,10 @@ mod tests {
             client_certificate_public_key_pin: registration.client_certificate_public_key_pin,
             tls_channel_binding: registration.tls_channel_binding,
             signature,
-            member_grant: None,
+            member_grant: Some(Box::new(test_member_grant(
+                application_identity,
+                RelayLimitPolicy::default(),
+            ))),
         };
         mutate(&mut message);
 
@@ -1877,13 +2045,7 @@ mod tests {
 
         let connect_result = tokio::time::timeout(
             Duration::from_secs(5),
-            QuicRelayClient::connect(
-                relay_addr,
-                server_pin,
-                "fuckipv6.local",
-                &tls_identity,
-                virtual_ip,
-            ),
+            connect_test_relay(relay_addr, server_pin, &tls_identity, virtual_ip),
         )
         .await
         .context("unregistered TLS certificate handshake timed out")?;
@@ -1923,15 +2085,9 @@ mod tests {
         let server_pin = server.certificate().public_key_pin;
         let server_task = tokio::spawn(server.clone().run());
 
-        let first_client = QuicRelayClient::connect(
-            relay_addr,
-            server_pin,
-            "fuckipv6.local",
-            &identity,
-            virtual_ip,
-        )
-        .await
-        .context("registered identity should pass the certificate allowlist")?;
+        let first_client = connect_test_relay(relay_addr, server_pin, &identity, virtual_ip)
+            .await
+            .context("registered identity should pass the certificate allowlist")?;
         first_client.close().await;
 
         session_manager
@@ -1939,13 +2095,7 @@ mod tests {
             .await;
         let reconnect = tokio::time::timeout(
             Duration::from_secs(5),
-            QuicRelayClient::connect(
-                relay_addr,
-                server_pin,
-                "fuckipv6.local",
-                &identity,
-                virtual_ip,
-            ),
+            connect_test_relay(relay_addr, server_pin, &identity, virtual_ip),
         )
         .await
         .context("revoked certificate handshake timed out")?;
@@ -2202,12 +2352,8 @@ mod tests {
         let server_pin = server.certificate().public_key_pin;
         let server_task = tokio::spawn(server.clone().run());
 
-        let client_a =
-            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity_a, ip_a)
-                .await?;
-        let client_b =
-            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity_b, ip_b)
-                .await?;
+        let client_a = connect_test_relay(relay_addr, server_pin, &identity_a, ip_a).await?;
+        let client_b = connect_test_relay(relay_addr, server_pin, &identity_b, ip_b).await?;
 
         {
             let clients = server.state.clients.read().await;
@@ -2300,12 +2446,8 @@ mod tests {
         let relay_addr = server.local_addr();
         let server_pin = server.certificate().public_key_pin;
         let server_task = tokio::spawn(server.clone().run());
-        let client_a =
-            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity_a, ip_a)
-                .await?;
-        let client_b =
-            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity_b, ip_b)
-                .await?;
+        let client_a = connect_test_relay(relay_addr, server_pin, &identity_a, ip_a).await?;
+        let client_b = connect_test_relay(relay_addr, server_pin, &identity_b, ip_b).await?;
 
         let mut next_policy = test_relay_policy(&[&identity_a, &identity_b]);
         next_policy
@@ -2362,14 +2504,7 @@ mod tests {
         let relay_addr = server.local_addr();
         let server_pin = server.certificate().public_key_pin;
         let server_task = tokio::spawn(server.clone().run());
-        let client = QuicRelayClient::connect(
-            relay_addr,
-            server_pin,
-            "fuckipv6.local",
-            &identity,
-            virtual_ip,
-        )
-        .await?;
+        let client = connect_test_relay(relay_addr, server_pin, &identity, virtual_ip).await?;
 
         server.shutdown().await;
         let accept_result = tokio::time::timeout(Duration::from_secs(2), server_task)
@@ -2445,12 +2580,8 @@ mod tests {
         let relay_addr = server.local_addr();
         let server_pin = server.certificate().public_key_pin;
         let server_task = tokio::spawn(server.run());
-        let client_a =
-            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity_a, ip_a)
-                .await?;
-        let client_b =
-            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity_b, ip_b)
-                .await?;
+        let client_a = connect_test_relay(relay_addr, server_pin, &identity_a, ip_a).await?;
+        let client_b = connect_test_relay(relay_addr, server_pin, &identity_b, ip_b).await?;
 
         let revoked_fingerprint = Identity::public_key_fingerprint(&identity_b.public_key());
         session_manager
@@ -2525,12 +2656,8 @@ mod tests {
         let relay_addr = server.local_addr();
         let server_pin = server.certificate().public_key_pin;
         let server_task = tokio::spawn(server.run());
-        let client_a =
-            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity_a, ip_a)
-                .await?;
-        let client_b =
-            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity_b, ip_b)
-                .await?;
+        let client_a = connect_test_relay(relay_addr, server_pin, &identity_a, ip_a).await?;
+        let client_b = connect_test_relay(relay_addr, server_pin, &identity_b, ip_b).await?;
 
         session_manager
             .try_revoke_node(identity_b.client_id(), &identity_b.public_key())
@@ -2615,12 +2742,8 @@ mod tests {
         let relay_addr = server.local_addr();
         let server_pin = server.certificate().public_key_pin;
         let server_task = tokio::spawn(server.run());
-        let client_a =
-            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity_a, ip_a)
-                .await?;
-        let client_b =
-            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity_b, ip_b)
-                .await?;
+        let client_a = connect_test_relay(relay_addr, server_pin, &identity_a, ip_a).await?;
+        let client_b = connect_test_relay(relay_addr, server_pin, &identity_b, ip_b).await?;
 
         store.set_fail_revocation_reads(true);
         let error = client_a
@@ -2667,9 +2790,7 @@ mod tests {
         let relay_addr = server.local_addr();
         let server_pin = server.certificate().public_key_pin;
         let server_task = tokio::spawn(server.clone().run());
-        let client =
-            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity, ip)
-                .await?;
+        let client = connect_test_relay(relay_addr, server_pin, &identity, ip).await?;
 
         let wrong_src = "fd00::ffff".parse()?;
         let response = client
@@ -2720,9 +2841,7 @@ mod tests {
         let relay_addr = server.local_addr();
         let server_pin = server.certificate().public_key_pin;
         let server_task = tokio::spawn(server.run());
-        let client =
-            QuicRelayClient::connect(relay_addr, server_pin, "fuckipv6.local", &identity, ip)
-                .await?;
+        let client = connect_test_relay(relay_addr, server_pin, &identity, ip).await?;
 
         let result = client
             .send_packet(
@@ -2784,14 +2903,7 @@ mod tests {
         let mut tasks = Vec::with_capacity(CLIENTS);
         for (identity, virtual_ip) in identities.into_iter().zip(virtual_ips.iter().copied()) {
             tasks.push(tokio::spawn(async move {
-                QuicRelayClient::connect(
-                    relay_addr,
-                    server_pin,
-                    "fuckipv6.local",
-                    &identity,
-                    virtual_ip,
-                )
-                .await
+                connect_test_relay(relay_addr, server_pin, &identity, virtual_ip).await
             }));
         }
 

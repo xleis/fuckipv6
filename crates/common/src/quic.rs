@@ -715,7 +715,7 @@ pub enum RelayMessage {
         /// Consumer-authored short-lived authorization. It is optional only for
         /// wire compatibility; Relay servers must reject registrations without it.
         #[serde(default)]
-        member_grant: Option<RelayMemberGrant>,
+        member_grant: Option<Box<RelayMemberGrant>>,
     },
     RegisterAck {
         accepted: bool,

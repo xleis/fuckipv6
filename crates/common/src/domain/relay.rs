@@ -31,21 +31,21 @@ const RELAY_MEMBER_GRANT_SIGNING_DOMAIN: &[u8] = b"fuckipv6/relay-member-grant/v
 /// stricter one.
 #[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct RelayLimitPolicy {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub max_connections: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub max_concurrent_streams: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub max_bandwidth_kbps: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub max_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub max_cpu_percent: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub max_memory_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub max_session_duration_secs: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub quota_reset_at_unix_ms: Option<u64>,
 }
 
@@ -724,6 +724,42 @@ impl RelayAccessPolicy {
         })
     }
 
+    /// Authorize the exact member named by a signed consumer grant. The caller
+    /// supplies only identity/role/membership facts sourced from the trusted
+    /// network roster; all grant-authored authorization and limits are copied
+    /// from inside the signed envelope. The grant's local allow never replaces
+    /// the provider local policy or the network ACL veto.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_signed_grant(
+        &mut self,
+        grant: &RelayMemberGrant,
+        role: NetworkRole,
+        groups: BTreeSet<GroupId>,
+        membership_active: bool,
+        recent_reauthentication: bool,
+        now_unix_ms: u64,
+    ) -> DomainResult<RelayAuthorizationDecision> {
+        grant.validate_binding(
+            &self.network_id,
+            &self.provider_node_id,
+            &grant.consumer_node_id,
+            now_unix_ms,
+        )?;
+        self.members.insert(
+            grant.consumer_node_id.clone(),
+            RelayMemberPolicyContext {
+                role,
+                groups,
+                membership_active,
+                recent_reauthentication,
+                local_rules: grant.local_rules(),
+                local_access_policy: None,
+                limits: grant.limits.clone(),
+            },
+        );
+        self.authorize_member(&grant.consumer_node_id, now_unix_ms)
+    }
+
     /// Recompute all member decisions after a live policy change. Existing
     /// sessions can then follow an explicit continue/migrate/terminate policy.
     pub fn authorization_snapshot(
@@ -1312,6 +1348,49 @@ mod tests {
                 .expect("authorization")
                 .allowed
         );
+    }
+
+    #[test]
+    fn relay_register_with_nested_grant_is_postcard_safe() -> anyhow::Result<()> {
+        let consumer = Identity::generate()?;
+        let provider = NodeId::from_public_key(b"postcard-provider");
+        let network = NetworkId::from_public_key(b"postcard-network");
+        let grant = RelayMemberGrant::new(
+            network,
+            provider,
+            &consumer,
+            "postcard-grant",
+            7,
+            now(),
+            now() + 60_000,
+            RelayLimitPolicy {
+                max_connections: Some(4),
+                max_concurrent_streams: None,
+                max_bandwidth_kbps: Some(2_048),
+                max_bytes: None,
+                max_cpu_percent: Some(50),
+                max_memory_bytes: None,
+                max_session_duration_secs: Some(600),
+                quota_reset_at_unix_ms: None,
+            },
+        )?;
+        let message = crate::RelayMessage::Register {
+            client_id: consumer.client_id().to_string(),
+            virtual_ip: "fd00::2".parse()?,
+            public_key: consumer.public_key(),
+            timestamp: now() / 1_000,
+            server_public_key_pin: [1; 32],
+            client_certificate_public_key_pin: [2; 32],
+            tls_channel_binding: [3; 32],
+            signature: vec![4; 64],
+            member_grant: Some(Box::new(grant)),
+        };
+
+        let encoded = crate::codec::encode(&message)?;
+        let decoded: crate::RelayMessage = crate::codec::decode(&encoded)?;
+
+        assert_eq!(decoded, message);
+        Ok(())
     }
 
     #[test]

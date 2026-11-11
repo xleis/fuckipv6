@@ -1,16 +1,18 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
-    CapabilityKind, ExitSessionAction, InvitationCode, InvitationRedeemRequest, MembershipRole,
-    MembershipState, NetworkId, NetworkMemberDirectory, NodeId, TrafficFailureKind,
-    TrafficProtectionState, TrafficSessionSnapshot,
+    evaluate_effective_access, AccessContext, CapabilityKind, ExitSessionAction, InvitationCode,
+    InvitationRedeemRequest, MembershipRole, MembershipState, NetworkId, NetworkMemberDirectory,
+    NetworkRole, NodeId, PermissionIntent, PermissionRequest, PolicyAction, RelayLimitPolicy,
+    RelayMemberGrant, ResourceKind, ResourceRef, TrafficFailureKind, TrafficProtectionState,
+    TrafficSessionSnapshot,
 };
 #[cfg(test)]
 use fuckipv6_common::is_encrypted_config_path;
 use fuckipv6_common::recent_error_log_lines;
 use fuckipv6_common::{
     decrypt_config_file, encrypt_config_file, ClientConfig, Identity, NatType, PeerInfo,
-    RoutingAction, SignalingMessage, SmartRouteEngine, VirtualIps,
+    RelayEndpoint, RoutingAction, SignalingMessage, SmartRouteEngine, VirtualIps,
 };
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use std::collections::HashMap;
@@ -92,6 +94,7 @@ const RECOVERY_TRIGGER_QUEUE_CAPACITY: usize = 8;
 const EXIT_CONTRIBUTION_MEMBER_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const EXIT_CONTRIBUTION_DIRECTORY_QUEUE_CAPACITY: usize = 4;
 const EXIT_AVAILABILITY_REPORT_INTERVAL: Duration = Duration::from_secs(30);
+const RELAY_MEMBER_GRANT_TTL: Duration = Duration::from_secs(15 * 60);
 const EXIT_CONNECTION_WATCHDOG_INTERVAL: Duration = Duration::from_millis(250);
 #[cfg(target_os = "linux")]
 const EXIT_READINESS_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1401,6 +1404,7 @@ pub(crate) async fn prepare_client_runtime_ext(
     network_name: Option<&str>,
     local_exit_enabled: bool,
     enable_ipc: bool,
+    node_state: Option<NodeStateStore>,
 ) -> Result<ClientRuntime> {
     config.tun.name = crate::multi_network::derive_tun_name(network_name, &config.tun.name);
 
@@ -1422,7 +1426,18 @@ pub(crate) async fn prepare_client_runtime_ext(
     let assigned_ips = wait_for_assigned_ips(&signaling).await?;
     let assigned_ip = assigned_ips.primary_ipv6();
     configure_local_ips(&p2p, &assigned_ips).await;
-    let relay = connect_quic_relay(signaling.as_ref(), &relay_identity, assigned_ip).await;
+    let initial_node_snapshot = match node_state.as_ref() {
+        Some(state) => Some(state.snapshot().await),
+        None => None,
+    };
+    let relay = connect_quic_relay(
+        signaling.as_ref(),
+        &relay_identity,
+        assigned_ip,
+        network_id.as_ref(),
+        initial_node_snapshot.as_ref(),
+    )
+    .await;
     let tun = create_tun_device(&config, &assigned_ips).await?;
     #[cfg(target_os = "linux")]
     let mut tun = tun;
@@ -1646,7 +1661,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         config,
         local_exit_enabled,
         control_rx,
-        node_state: None,
+        node_state,
         node_state_updates: None,
         traffic_session: TrafficSessionSnapshot::default(),
         local_exit_snapshot: None,
@@ -1904,27 +1919,54 @@ async fn connect_quic_relay(
     signaling: &SignalingClient,
     identity: &Identity,
     assigned_ip: Ipv6Addr,
+    network_id: Option<&NetworkId>,
+    node_snapshot: Option<&NodeSnapshot>,
 ) -> Option<QuicRelayClient> {
     let endpoints = signaling.relay_endpoints().await;
-    if !endpoints.is_empty() {
-        match tokio::time::timeout(
-            Duration::from_secs(5),
-            QuicRelayClient::connect_optimal(&endpoints, identity, assigned_ip),
-        )
-        .await
-        {
-            Ok(Ok(client)) => return Some(client),
-            Ok(Err(err)) => {
-                tracing::warn!("最优 QUIC 中继连接失败: {err:#}");
-            }
-            Err(_) => {
-                tracing::warn!("最优 QUIC 中继并发探测超时");
-            }
+    if endpoints.is_empty() {
+        tracing::debug!("协调端未下发 QUIC 中继 endpoint，使用信令中继 fallback");
+        return None;
+    }
+
+    let now_unix_ms = unix_time_ms();
+    let grants = match (network_id, node_snapshot) {
+        (Some(network_id), Some(snapshot)) => {
+            issue_relay_member_grants(&endpoints, identity, network_id, snapshot, now_unix_ms)
+        }
+        _ => {
+            tracing::warn!(
+                diagnostic_id = "relay.grant.authorization_context_missing",
+                "缺少可信本地策略或网络上下文，拒绝连接 QUIC 中继"
+            );
+            Vec::new()
+        }
+    };
+    if grants.is_empty() {
+        tracing::debug!("没有可用的 Relay 使用方签名授权，使用信令中继 fallback");
+        return None;
+    }
+
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        QuicRelayClient::connect_optimal(&endpoints, identity, assigned_ip, &grants),
+    )
+    .await
+    {
+        Ok(Ok(client)) => return Some(client),
+        Ok(Err(err)) => {
+            tracing::warn!("最优 QUIC 中继连接失败: {err:#}");
+        }
+        Err(_) => {
+            tracing::warn!("最优 QUIC 中继并发探测超时");
         }
     }
 
-    let Some(endpoint) = signaling.relay_endpoint().await else {
-        tracing::debug!("协调端未下发 QUIC 中继 endpoint，使用信令中继 fallback");
+    let endpoint = signaling.relay_endpoint().await?;
+    let Some(grant) = relay_grant_for_endpoint(&grants, identity, &endpoint) else {
+        tracing::warn!(
+            diagnostic_id = "relay.grant.primary_endpoint_missing",
+            "主 QUIC 中继端点没有匹配的签名授权，使用信令中继 fallback"
+        );
         return None;
     };
 
@@ -1936,6 +1978,7 @@ async fn connect_quic_relay(
             &endpoint.server_name,
             identity,
             assigned_ip,
+            grant,
         ),
     )
     .await
@@ -1955,6 +1998,175 @@ async fn connect_quic_relay(
             None
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RelayGrantAuthorization {
+    role: NetworkRole,
+    revision: u64,
+}
+
+fn relay_grant_authorization(
+    snapshot: &NodeSnapshot,
+    identity: &Identity,
+    network_id: &NetworkId,
+    now_unix_ms: u64,
+) -> Option<RelayGrantAuthorization> {
+    let node_id = NodeId::from_public_key(&identity.public_key());
+    let membership = snapshot.memberships.iter().find(|membership| {
+        membership.network_id == network_id.as_str() && membership.node_id == node_id.as_str()
+    })?;
+    if !membership.state.can_access_network_resources() {
+        tracing::warn!(
+            diagnostic_id = "relay.grant.membership_inactive",
+            state = ?membership.state,
+            "本机成员关系不允许访问网络资源，拒绝签发 Relay 使用授权"
+        );
+        return None;
+    }
+
+    let local_policy = snapshot.access_control.local_policy.as_ref()?;
+    if local_policy.node_id != node_id {
+        tracing::warn!(
+            diagnostic_id = "relay.grant.local_policy_identity_mismatch",
+            "本机 Relay 使用授权策略属于其他节点，拒绝签发"
+        );
+        return None;
+    }
+    if !local_policy.network_scope.allows(network_id) {
+        tracing::warn!(
+            diagnostic_id = "relay.grant.network_out_of_scope",
+            "本机 Relay 使用授权策略不允许当前网络，拒绝签发"
+        );
+        return None;
+    }
+    if let Err(error) = local_policy.validate_at(now_unix_ms) {
+        tracing::warn!(
+            diagnostic_id = "relay.grant.local_policy_invalid",
+            error = %error,
+            "本机 Relay 使用授权策略无效或已过期，拒绝签发"
+        );
+        return None;
+    }
+
+    let request = PermissionRequest {
+        action: PolicyAction::Use,
+        resource: ResourceRef {
+            kind: ResourceKind::Relay,
+            network_id: network_id.clone(),
+            object_id: Some("relay".into()),
+        },
+        intent: PermissionIntent::Mutating,
+    };
+    let context = AccessContext {
+        network_id: network_id.clone(),
+        actor: node_id,
+        role: match membership.role {
+            MembershipRole::Owner => NetworkRole::Owner,
+            MembershipRole::Administrator => NetworkRole::Administrator,
+            MembershipRole::Member => NetworkRole::Member,
+        },
+        groups: Default::default(),
+        membership_active: true,
+        recent_reauthentication: false,
+        emergency_coordinator: false,
+    };
+    let decision = evaluate_effective_access(
+        &[],
+        &[],
+        None,
+        Some(local_policy),
+        &request,
+        &context,
+        now_unix_ms,
+    );
+    if !decision.allowed {
+        tracing::warn!(
+            diagnostic_id = "relay.grant.local_policy_denied",
+            code = ?decision.code,
+            "本机 Relay 使用授权策略未明确允许 Relay Use，拒绝签发"
+        );
+        return None;
+    }
+
+    Some(RelayGrantAuthorization {
+        role: context.role,
+        revision: local_policy
+            .revision
+            .max(membership.local_policy_revision)
+            .max(membership.network_policy_revision.unwrap_or(0))
+            .max(1),
+    })
+}
+
+fn issue_relay_member_grants(
+    endpoints: &[RelayEndpoint],
+    identity: &Identity,
+    network_id: &NetworkId,
+    snapshot: &NodeSnapshot,
+    now_unix_ms: u64,
+) -> Vec<RelayMemberGrant> {
+    let Some(authorization) =
+        relay_grant_authorization(snapshot, identity, network_id, now_unix_ms)
+    else {
+        return Vec::new();
+    };
+    if authorization.role == NetworkRole::TemporaryCoordinator {
+        tracing::warn!(
+            diagnostic_id = "relay.grant.temporary_coordinator_denied",
+            "临时 Coordinator 不能签发扩大既有成员授权的 Relay 使用授权"
+        );
+        return Vec::new();
+    }
+
+    let expires_at_unix_ms = now_unix_ms
+        .saturating_add(u64::try_from(RELAY_MEMBER_GRANT_TTL.as_millis()).unwrap_or(u64::MAX));
+    let mut grants = Vec::new();
+    for endpoint in endpoints {
+        let Some(provider_node_id) = endpoint.provider_node_id.clone() else {
+            tracing::warn!(
+                diagnostic_id = "relay.grant.provider_identity_missing",
+                address = %endpoint.addr,
+                "Relay endpoint 缺少提供方身份，拒绝签发授权"
+            );
+            continue;
+        };
+        let mut nonce = [0u8; 16];
+        if let Err(error) = getrandom::fill(&mut nonce) {
+            tracing::error!(%error, "无法生成 Relay 使用授权 nonce");
+            continue;
+        }
+        match RelayMemberGrant::new(
+            network_id.clone(),
+            provider_node_id,
+            identity,
+            hex_encode(&nonce),
+            authorization.revision,
+            now_unix_ms,
+            expires_at_unix_ms,
+            RelayLimitPolicy::default(),
+        ) {
+            Ok(grant) => grants.push(grant),
+            Err(error) => tracing::warn!(
+                diagnostic_id = "relay.grant.sign_failed",
+                error = %error,
+                "无法签发 Relay 使用授权"
+            ),
+        }
+    }
+    grants
+}
+
+fn relay_grant_for_endpoint<'a>(
+    grants: &'a [RelayMemberGrant],
+    identity: &Identity,
+    endpoint: &RelayEndpoint,
+) -> Option<&'a RelayMemberGrant> {
+    let provider_node_id = endpoint.provider_node_id.as_ref()?;
+    let consumer_node_id = NodeId::from_public_key(&identity.public_key());
+    grants.iter().find(|grant| {
+        &grant.provider_node_id == provider_node_id && grant.consumer_node_id == consumer_node_id
+    })
 }
 
 pub(crate) type DisconnectReply = tokio::sync::oneshot::Sender<std::result::Result<(), String>>;
@@ -5470,9 +5682,22 @@ fn spawn_relay_reconnect(runtime: &ClientRuntime) -> JoinHandle<()> {
     let identity = runtime.identity.clone();
     let assigned_ip = runtime.assigned_ip;
     let outbound = runtime.outbound.clone();
+    let network_id = runtime.network_id.clone();
+    let node_state = runtime.node_state.clone();
 
     tokio::spawn(async move {
-        let relay = connect_quic_relay(signaling.as_ref(), &identity, assigned_ip).await;
+        let snapshot = match node_state.as_ref() {
+            Some(state) => Some(state.snapshot().await),
+            None => None,
+        };
+        let relay = connect_quic_relay(
+            signaling.as_ref(),
+            &identity,
+            assigned_ip,
+            network_id.as_ref(),
+            snapshot.as_ref(),
+        )
+        .await;
         if let Some(relay) = relay {
             match outbound.install_relay(relay).await {
                 Ok(Some(previous)) => previous.client.close().await,

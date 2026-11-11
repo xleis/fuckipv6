@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::crypto::Identity;
+use crate::domain::{NodeId, RelayMemberGrant};
 use crate::protocol::RelayEndpoint;
 use crate::quic::{
     build_pinned_quic_client_config_with_auth, export_quic_relay_channel_binding,
@@ -62,7 +63,9 @@ impl QuicRelayClient {
         server_name: &str,
         identity: &Identity,
         virtual_ip: Ipv6Addr,
+        member_grant: &RelayMemberGrant,
     ) -> Result<Self> {
+        validate_member_grant(identity, member_grant)?;
         let bind_addr = if relay_addr.is_ipv6() {
             SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), 0)
         } else {
@@ -89,6 +92,7 @@ impl QuicRelayClient {
             virtual_ip,
             expected_server_pin,
             client_certificate_public_key_pin,
+            member_grant,
         )
         .await?;
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
@@ -106,29 +110,50 @@ impl QuicRelayClient {
         relays: &[RelayEndpoint],
         identity: &Identity,
         virtual_ip: Ipv6Addr,
+        member_grants: &[RelayMemberGrant],
     ) -> Result<Self> {
         if relays.is_empty() {
             anyhow::bail!("No candidate relay endpoints provided");
         }
         if relays.len() == 1 {
             let ep = &relays[0];
+            let grant = member_grant_for_endpoint(ep, identity, member_grants)?;
             return Self::connect(
                 ep.addr,
                 ep.public_key_pin,
                 &ep.server_name,
                 identity,
                 virtual_ip,
+                grant,
             )
             .await;
         }
 
         let mut tasks = tokio::task::JoinSet::new();
         for ep in relays.iter().cloned() {
+            let grant = match member_grant_for_endpoint(&ep, identity, member_grants) {
+                Ok(grant) => grant.clone(),
+                Err(error) => {
+                    tracing::debug!(
+                        "QUIC 中继 {} ({}) 缺少匹配的签名授权: {error:#}",
+                        ep.server_name,
+                        ep.addr
+                    );
+                    continue;
+                }
+            };
             let id = identity.clone();
             tasks.spawn(async move {
                 let start = std::time::Instant::now();
-                match Self::connect(ep.addr, ep.public_key_pin, &ep.server_name, &id, virtual_ip)
-                    .await
+                match Self::connect(
+                    ep.addr,
+                    ep.public_key_pin,
+                    &ep.server_name,
+                    &id,
+                    virtual_ip,
+                    &grant,
+                )
+                .await
                 {
                     Ok(client) => {
                         let rtt = client.connection.rtt();
@@ -231,6 +256,7 @@ async fn register_relay_connection(
     virtual_ip: Ipv6Addr,
     server_public_key_pin: [u8; 32],
     client_certificate_public_key_pin: [u8; 32],
+    member_grant: &RelayMemberGrant,
 ) -> Result<()> {
     let timestamp = now_secs();
     let public_key = identity.public_key();
@@ -253,7 +279,7 @@ async fn register_relay_connection(
         client_certificate_public_key_pin,
         tls_channel_binding: registration.tls_channel_binding,
         signature,
-        member_grant: None,
+        member_grant: Some(Box::new(member_grant.clone())),
     };
 
     let (mut send, mut recv) = connection
@@ -336,5 +362,48 @@ fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn validate_member_grant(identity: &Identity, grant: &RelayMemberGrant) -> Result<()> {
+    let consumer_node_id = NodeId::from_public_key(&identity.public_key());
+    if grant.consumer_node_id != consumer_node_id {
+        anyhow::bail!("Relay 签名授权属于其他消费者身份");
+    }
+    let grant_public_key = grant
+        .consumer_public_key
+        .to_bytes()
+        .map_err(anyhow::Error::new)?;
+    if grant_public_key != identity.public_key_bytes() {
+        anyhow::bail!("Relay 签名授权公钥与当前身份不一致");
+    }
+    grant.validate_at(now_unix_ms()).map_err(anyhow::Error::new)
+}
+
+fn member_grant_for_endpoint<'a>(
+    endpoint: &RelayEndpoint,
+    identity: &Identity,
+    grants: &'a [RelayMemberGrant],
+) -> Result<&'a RelayMemberGrant> {
+    let provider_node_id = endpoint
+        .provider_node_id
+        .as_ref()
+        .context("Relay endpoint missing provider identity")?;
+    let consumer_node_id = NodeId::from_public_key(&identity.public_key());
+    grants
+        .iter()
+        .find(|grant| {
+            &grant.provider_node_id == provider_node_id
+                && grant.consumer_node_id == consumer_node_id
+        })
+        .context("Relay endpoint has no matching signed member grant")
+}
+
+fn now_unix_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
 }

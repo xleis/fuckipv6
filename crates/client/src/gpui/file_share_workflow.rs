@@ -46,12 +46,18 @@ impl GpuiFileShareDraft {
     }
 
     pub fn select_root(&mut self, root: PathBuf) {
+        if self.operation_pending() {
+            return;
+        }
         self.root = Some(root);
         self.error = None;
         self.invalidate_preview();
     }
 
     pub fn set_access_scope(&mut self, access_scope: FileShareAccessScope) {
+        if self.operation_pending() {
+            return;
+        }
         if self.access_scope != access_scope {
             self.access_scope = access_scope;
             self.error = None;
@@ -154,7 +160,7 @@ impl GpuiFileShareDraft {
     }
 
     pub fn start_disable(&mut self) -> Option<(u64, NetworkId)> {
-        if self.disable_pending || self.picking_root || self.configure_pending {
+        if self.operation_pending() {
             return None;
         }
         let network_id = self.network_id.clone()?;
@@ -204,6 +210,10 @@ impl GpuiFileShareDraft {
         self.preview = None;
         self.preview_pending = false;
         self.generation = self.generation.saturating_add(1).max(1);
+    }
+
+    fn operation_pending(&self) -> bool {
+        self.picking_root || self.preview_pending || self.configure_pending || self.disable_pending
     }
 
     fn reset(&mut self) {
@@ -277,15 +287,15 @@ mod tests {
     }
 
     #[test]
-    fn stale_preview_is_ignored_after_scope_change() {
+    fn scope_change_is_ignored_while_preview_is_pending() {
         let mut draft = GpuiFileShareDraft::default();
         draft.begin(network(), "Studio".into());
         draft.select_root(PathBuf::from("/tmp/share"));
-        let (stale_generation, _, _) = draft.start_preview().expect("preview request");
+        let (generation, _, _) = draft.start_preview().expect("preview request");
         draft.set_access_scope(FileShareAccessScope::ActiveMembersReadOnly);
-        assert!(!draft.finish_preview(stale_generation, Ok(preview())));
-        assert!(draft.preview.is_none());
-        assert!(!draft.preview_pending);
+        assert_eq!(draft.access_scope, FileShareAccessScope::NoMembers);
+        assert!(draft.finish_preview(generation, Ok(preview())));
+        assert_eq!(draft.preview, Some(preview()));
     }
 
     #[test]
@@ -335,5 +345,87 @@ mod tests {
         let configuration = draft.configuration().expect("configuration");
         assert!(configuration.network_acl.rules.is_empty());
         assert!(configuration.local_acl.rules.is_empty());
+    }
+
+    #[test]
+    fn stale_preview_errors_do_not_overwrite_current_state() {
+        let mut draft = GpuiFileShareDraft::default();
+        draft.begin(network(), "Studio".into());
+        draft.select_root(PathBuf::from("/tmp/share"));
+        let (stale_generation, _, _) = draft.start_preview().expect("preview request");
+        draft.clear();
+        assert!(!draft.finish_preview(stale_generation, Err("stale error".into())));
+        assert_eq!(draft.network_id, None);
+        assert_eq!(draft.error, None);
+        assert!(!draft.preview_pending);
+    }
+
+    #[test]
+    fn clearing_the_draft_invalidates_in_flight_preview() {
+        let mut draft = GpuiFileShareDraft::default();
+        draft.begin(network(), "Studio".into());
+        draft.select_root(PathBuf::from("/tmp/share"));
+        let (generation, _, _) = draft.start_preview().expect("preview request");
+        draft.clear();
+        assert!(!draft.finish_preview(generation, Ok(preview())));
+        assert!(draft.preview.is_none());
+        assert!(draft.root.is_none());
+        assert!(!draft.preview_pending);
+    }
+
+    #[test]
+    fn pending_configure_cannot_restart_or_change_inputs() {
+        let mut draft = GpuiFileShareDraft::default();
+        draft.begin(network(), "Studio".into());
+        draft.select_root(PathBuf::from("/tmp/share"));
+        let (preview_generation, _, _) = draft.start_preview().expect("preview request");
+        assert!(draft.finish_preview(preview_generation, Ok(preview())));
+        let (configure_generation, _, _) = draft.start_configure().expect("configure request");
+        assert!(draft.start_configure().is_none());
+        draft.select_root(PathBuf::from("/tmp/other"));
+        draft.set_access_scope(FileShareAccessScope::ActiveMembersReadOnly);
+        assert_eq!(draft.root, Some(PathBuf::from("/tmp/share")));
+        assert_eq!(draft.access_scope, FileShareAccessScope::NoMembers);
+        assert!(draft.finish_configure(configure_generation, Ok(())));
+        assert!(!draft.configure_pending);
+    }
+
+    #[test]
+    fn disable_is_serialized_and_blocks_preview_and_configure() {
+        let mut draft = GpuiFileShareDraft::default();
+        draft.begin(network(), "Studio".into());
+        draft.select_root(PathBuf::from("/tmp/share"));
+        let (preview_generation, _, _) = draft.start_preview().expect("preview request");
+        assert!(draft.finish_preview(preview_generation, Ok(preview())));
+        let (disable_generation, _) = draft.start_disable().expect("disable request");
+        assert!(draft.start_disable().is_none());
+        assert!(!draft.can_preview());
+        assert!(!draft.can_configure());
+        assert!(draft.finish_disable(disable_generation, Ok(())));
+        assert!(!draft.disable_pending);
+    }
+
+    #[test]
+    fn disable_cannot_overlap_an_in_flight_preview() {
+        let mut draft = GpuiFileShareDraft::default();
+        draft.begin(network(), "Studio".into());
+        draft.select_root(PathBuf::from("/tmp/share"));
+        let (preview_generation, _, _) = draft.start_preview().expect("preview request");
+        assert!(draft.start_disable().is_none());
+        assert!(draft.finish_preview(preview_generation, Ok(preview())));
+    }
+
+    #[test]
+    fn successful_configure_clears_pending_state() {
+        let mut draft = GpuiFileShareDraft::default();
+        draft.begin(network(), "Studio".into());
+        draft.select_root(PathBuf::from("/tmp/share"));
+        let (preview_generation, _, _) = draft.start_preview().expect("preview request");
+        assert!(draft.finish_preview(preview_generation, Ok(preview())));
+        let (configure_generation, _, _) = draft.start_configure().expect("configure request");
+        assert!(draft.configure_pending);
+        assert!(draft.finish_configure(configure_generation, Ok(())));
+        assert!(!draft.configure_pending);
+        assert_eq!(draft.error, None);
     }
 }

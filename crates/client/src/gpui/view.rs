@@ -7299,6 +7299,9 @@ impl GpuiShell {
         let control_unavailable = self.file_owner.is_none()
             || self.file_share_draft.configure_pending
             || self.file_share_draft.disable_pending;
+        let disable_unavailable = control_unavailable
+            || self.file_share_draft.picking_root
+            || self.file_share_draft.preview_pending;
         let toggle_setup = button(
             SharedString::from(format!("file-share-toggle-{}", network_name)),
             open_label,
@@ -7324,7 +7327,7 @@ impl GpuiShell {
                     SharedString::from(format!("file-share-disable-{}", network_name)),
                     t(self.locale, "file.action.disable").to_string(),
                     ButtonVariant::Danger,
-                    control_unavailable,
+                    disable_unavailable,
                 )
                 .debug_selector({
                     let network_name = network_name.to_owned();
@@ -7443,6 +7446,8 @@ impl GpuiShell {
                 t(self.locale, key).to_string(),
                 selected,
             )
+            .tab_stop(!busy)
+            .opacity(if busy { 0.62 } else { 1.0 })
             .on_click(cx.listener(move |shell, _, _, cx| {
                 shell.set_file_share_scope(scope, cx);
             }))

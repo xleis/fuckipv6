@@ -5365,6 +5365,12 @@ impl P2pOutboundTransport {
         }
         let destination = packets[0].dst_ip;
         debug_assert!(packets.iter().all(|packet| packet.dst_ip == destination));
+        let stats_peer_ip = self
+            .p2p
+            .peer_route_by_ip(destination)
+            .await
+            .map(|peer| IpAddr::V6(peer.virtual_ip))
+            .unwrap_or(destination);
         let plaintext_lens: Vec<usize> =
             packets.iter().map(OutboundPacket::plaintext_len).collect();
         let mut batch = Vec::with_capacity(packets.len());
@@ -5398,7 +5404,7 @@ impl P2pOutboundTransport {
         {
             match outcome {
                 Ok(InPlaceSendOutcome::Sent) => {
-                    self.stats.record_p2p_tx(packet.dst_ip, plaintext_len).await;
+                    self.stats.record_p2p_tx(stats_peer_ip, plaintext_len).await;
                 }
                 Ok(InPlaceSendOutcome::SealedForFallback { encoded_len, error }) => {
                     self.stats.record_p2p_send_error().await;
@@ -5407,7 +5413,7 @@ impl P2pOutboundTransport {
                         packet.dst_ip,
                         error
                     );
-                    self.send_fallback(packet, encoded_len).await;
+                    self.send_fallback(packet, encoded_len, stats_peer_ip).await;
                 }
                 Err(error) => {
                     self.stats.record_p2p_send_error().await;
@@ -5417,7 +5423,12 @@ impl P2pOutboundTransport {
         }
     }
 
-    async fn send_fallback(&self, packet: OutboundPacket, encoded_len: usize) {
+    async fn send_fallback(
+        &self,
+        packet: OutboundPacket,
+        encoded_len: usize,
+        stats_peer_ip: IpAddr,
+    ) {
         let plaintext_len = packet.plaintext_len();
         let src_ip = packet.src_ip;
         let dst_ip = packet.dst_ip;
@@ -5425,7 +5436,7 @@ impl P2pOutboundTransport {
         if let (IpAddr::V6(src_v6), IpAddr::V6(dst_v6)) = (src_ip, dst_ip) {
             match self.fallback.relay(src_v6, dst_v6, encrypted.clone()).await {
                 RelayForwardOutcome::Sent => {
-                    self.stats.record_p2p_tx(dst_ip, plaintext_len).await;
+                    self.stats.record_p2p_tx(stats_peer_ip, plaintext_len).await;
                     return;
                 }
                 RelayForwardOutcome::Failed(error) => {
@@ -5438,7 +5449,7 @@ impl P2pOutboundTransport {
         match self.fallback.signaling(src_ip, dst_ip, encrypted) {
             Ok(()) => {
                 self.stats.record_signaling_sent().await;
-                self.stats.record_p2p_tx(dst_ip, plaintext_len).await;
+                self.stats.record_p2p_tx(stats_peer_ip, plaintext_len).await;
             }
             Err(error) => {
                 self.stats.record_p2p_send_error().await;
@@ -7625,13 +7636,16 @@ mod tests {
         )
     }
 
-    async fn connected_test_engines() -> Result<(P2pEngine, P2pEngine, Ipv6Addr, Ipv6Addr)> {
+    async fn connected_test_engines_with_ips(
+        virtual_ips_a: VirtualIps,
+        virtual_ips_b: VirtualIps,
+    ) -> Result<(P2pEngine, P2pEngine, Ipv6Addr, Ipv6Addr)> {
         let engine_a = P2pEngine::new(0).await?;
         let engine_b = P2pEngine::new(0).await?;
         let identity_a = Identity::generate()?;
         let identity_b = Identity::generate()?;
-        let ip_a = "fd00::1".parse::<Ipv6Addr>()?;
-        let ip_b = "fd00::2".parse::<Ipv6Addr>()?;
+        let ip_a = virtual_ips_a.primary_ipv6();
+        let ip_b = virtual_ips_b.primary_ipv6();
 
         engine_a.set_identity(identity_a.clone()).await;
         engine_b.set_identity(identity_b.clone()).await;
@@ -7647,18 +7661,18 @@ mod tests {
             engine_b.local_addr().port(),
         );
         engine_a
-            .add_peer(PeerInfo::new(
+            .add_peer(PeerInfo::new_with_ips(
                 "b".to_string(),
-                ip_b,
+                virtual_ips_b,
                 identity_b.public_key(),
                 vec![endpoint_b],
                 NatType::Open,
             ))
             .await?;
         engine_b
-            .add_peer(PeerInfo::new(
+            .add_peer(PeerInfo::new_with_ips(
                 "a".to_string(),
-                ip_a,
+                virtual_ips_a,
                 identity_a.public_key(),
                 vec![endpoint_a],
                 NatType::Open,
@@ -7683,6 +7697,13 @@ mod tests {
         .context("test peers did not establish a secure session")?;
 
         Ok((engine_a, engine_b, ip_a, ip_b))
+    }
+
+    async fn connected_test_engines() -> Result<(P2pEngine, P2pEngine, Ipv6Addr, Ipv6Addr)> {
+        let ip_a = "fd00::1".parse::<Ipv6Addr>()?;
+        let ip_b = "fd00::2".parse::<Ipv6Addr>()?;
+        connected_test_engines_with_ips(VirtualIps::from_ipv6(ip_a), VirtualIps::from_ipv6(ip_b))
+            .await
     }
 
     async fn assert_production_udp_batch(
@@ -7850,6 +7871,64 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn outbound_stats_use_canonical_peer_identity_for_ipv4_destination() -> Result<()> {
+        let virtual_ipv4: Ipv4Addr = "10.8.0.2".parse()?;
+        let virtual_ipv6: Ipv6Addr = "fd00::2".parse()?;
+        let (engine_a, engine_b, ip_a, _) = connected_test_engines_with_ips(
+            VirtualIps::from_ipv6("fd00::1".parse()?),
+            VirtualIps::dual_stack(virtual_ipv4, virtual_ipv6),
+        )
+        .await?;
+        let (relay_tx, _relay_rx) = mpsc::unbounded_channel();
+        let (signaling_tx, _signaling_rx) = mpsc::unbounded_channel();
+        let transport = P2pOutboundTransport::with_fallback(
+            engine_a,
+            Arc::new(MatrixFallbackTransport {
+                relay_mode: RelayMode::Success,
+                relay_tx,
+                signaling_tx,
+            }),
+        );
+        let payload = b"stats must use the peer's canonical IPv6 identity";
+
+        transport
+            .send_packet(OutboundPacket::owned(
+                IpAddr::V6(ip_a),
+                IpAddr::V4(virtual_ipv4),
+                payload.to_vec(),
+            ))
+            .await;
+
+        let inbound = tokio::time::timeout(Duration::from_secs(1), engine_b.recv())
+            .await?
+            .expect("the IPv4 destination must resolve to the authenticated IPv6 peer");
+        let InboundPacket::AuthenticatedPlaintext {
+            src_ip,
+            payload: received,
+            ..
+        } = inbound
+        else {
+            panic!("direct P2P delivery must produce authenticated plaintext")
+        };
+        assert_eq!(src_ip, IpAddr::V6(ip_a));
+        assert_eq!(received.as_slice(), payload);
+
+        let snapshot = transport
+            .stats
+            .get_peer_stat(virtual_ipv6)
+            .await
+            .expect("outbound statistics must use the canonical IPv6 peer key");
+        assert_eq!(snapshot.tx_packets, 1);
+        assert_eq!(snapshot.tx_bytes, payload.len() as u64);
+        assert!(
+            transport.stats.get_peer_stat(virtual_ipv4).await.is_none(),
+            "the IPv4 destination must not create an invisible peer statistics bucket"
+        );
+        assert_eq!(transport.stats.get_global_stats().await.p2p_tx_packets, 1);
         Ok(())
     }
 

@@ -7,9 +7,10 @@ use std::io::{Read, Seek, SeekFrom, Write};
 
 use fuckipv6_common::domain::{
     AccessContext, ConcurrentNamePolicy, ContentHash, FileAccessDenial, FileAccessDenialCode,
-    FileAccessRequest, FileAction, FileQuotaError, FileTransferError, ResumeRequest, SharedPath,
-    TransferDirection, TransferSession, TransferState,
+    FileAccessRequest, FileAction, FileQuotaError, FileTransferError, OperationId, ResumeRequest,
+    SharedPath, TransferDirection, TransferSession, TransferState,
 };
+use tokio::sync::watch;
 
 use super::capability::{
     FileCapabilityError, FileCapabilityLease, FileCapabilityPermit, FileShareCapability,
@@ -38,6 +39,33 @@ pub struct TransferProgress {
     pub total_chunks: u32,
 }
 
+/// Cancellation capability issued by the authenticated operation runtime. The
+/// transfer id, operation id and actor binding still come from
+/// [`TransferSession::binding`]; this token only narrows cancellation to that
+/// exact operation.
+#[derive(Debug)]
+pub struct TransferOperationCancellation {
+    operation_id: OperationId,
+    cancel: watch::Receiver<bool>,
+}
+
+impl TransferOperationCancellation {
+    pub fn new(operation_id: OperationId, cancel: watch::Receiver<bool>) -> Self {
+        Self {
+            operation_id,
+            cancel,
+        }
+    }
+
+    pub fn operation_id(&self) -> &OperationId {
+        &self.operation_id
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        *self.cancel.borrow()
+    }
+}
+
 /// Stable adapter failures. Callers should project `code()` instead of sending
 /// the source error or local filesystem text to peers and UI clients.
 #[derive(Debug, thiserror::Error)]
@@ -58,6 +86,8 @@ pub enum FileTransferAdapterError {
     ConcurrentNamePolicyUnsupported,
     #[error("version-checked replacement uploads are not implemented")]
     ReplacementUnsupported,
+    #[error("the File transfer operation was cancelled")]
+    Cancelled,
 }
 
 impl From<FileQuotaError> for FileTransferAdapterError {
@@ -79,6 +109,7 @@ impl FileTransferAdapterError {
                 "file_transfer_concurrent_name_policy_unsupported"
             }
             Self::ReplacementUnsupported => "file_transfer_replacement_unsupported",
+            Self::Cancelled => "file_transfer_cancelled",
         }
     }
 }
@@ -96,10 +127,48 @@ impl FileTransferAdapter {
 
     pub fn begin_upload(
         &self,
+        session: TransferSession,
+        context: &AccessContext,
+        network_enabled: bool,
+        admission: UploadAdmission,
+        now_unix_ms: u64,
+    ) -> Result<UploadTransfer, FileTransferAdapterError> {
+        self.begin_upload_inner(
+            session,
+            context,
+            network_enabled,
+            admission,
+            None,
+            now_unix_ms,
+        )
+    }
+
+    pub fn begin_upload_cancellable(
+        &self,
+        session: TransferSession,
+        context: &AccessContext,
+        network_enabled: bool,
+        admission: UploadAdmission,
+        cancellation: TransferOperationCancellation,
+        now_unix_ms: u64,
+    ) -> Result<UploadTransfer, FileTransferAdapterError> {
+        self.begin_upload_inner(
+            session,
+            context,
+            network_enabled,
+            admission,
+            Some(cancellation),
+            now_unix_ms,
+        )
+    }
+
+    fn begin_upload_inner(
+        &self,
         mut session: TransferSession,
         context: &AccessContext,
         network_enabled: bool,
         admission: UploadAdmission,
+        cancellation: Option<TransferOperationCancellation>,
         now_unix_ms: u64,
     ) -> Result<UploadTransfer, FileTransferAdapterError> {
         if session.binding.direction != TransferDirection::Upload {
@@ -108,6 +177,7 @@ impl FileTransferAdapter {
         if session.binding.file_version.is_some() {
             return Err(FileTransferAdapterError::ReplacementUnsupported);
         }
+        validate_cancellation_binding(&session, cancellation.as_ref())?;
         let lease = self.authorize(&session, FileAction::Upload, context, network_enabled)?;
         validate_binding(&session, &lease, context)?;
         ensure_upload_destination(lease.root(), lease.share(), &session.binding.path)?;
@@ -132,10 +202,21 @@ impl FileTransferAdapter {
             lease.permit().access_epoch(),
             now_unix_ms,
         )?;
+        if cancellation
+            .as_ref()
+            .is_some_and(TransferOperationCancellation::is_cancelled)
+        {
+            let _ = session.cancel(now_unix_ms);
+            return Err(FileTransferAdapterError::Cancelled);
+        }
         let upload = TemporaryUpload::create(lease.root())?;
         if let Err(error) = lease.permit().ensure_current() {
             let _ = session.cancel(now_unix_ms);
             return Err(error.into());
+        }
+        if cancellation_requested(cancellation.as_ref()) {
+            let _ = session.cancel(now_unix_ms);
+            return Err(FileTransferAdapterError::Cancelled);
         }
 
         Ok(UploadTransfer {
@@ -146,19 +227,49 @@ impl FileTransferAdapter {
             hasher: blake3::Hasher::new(),
             next_chunk: 0,
             transferred_bytes: 0,
+            cancellation,
         })
     }
 
     pub fn begin_download(
         &self,
+        session: TransferSession,
+        context: &AccessContext,
+        network_enabled: bool,
+        now_unix_ms: u64,
+    ) -> Result<DownloadTransfer, FileTransferAdapterError> {
+        self.begin_download_inner(session, context, network_enabled, None, now_unix_ms)
+    }
+
+    pub fn begin_download_cancellable(
+        &self,
+        session: TransferSession,
+        context: &AccessContext,
+        network_enabled: bool,
+        cancellation: TransferOperationCancellation,
+        now_unix_ms: u64,
+    ) -> Result<DownloadTransfer, FileTransferAdapterError> {
+        self.begin_download_inner(
+            session,
+            context,
+            network_enabled,
+            Some(cancellation),
+            now_unix_ms,
+        )
+    }
+
+    fn begin_download_inner(
+        &self,
         mut session: TransferSession,
         context: &AccessContext,
         network_enabled: bool,
+        cancellation: Option<TransferOperationCancellation>,
         now_unix_ms: u64,
     ) -> Result<DownloadTransfer, FileTransferAdapterError> {
         if session.binding.direction != TransferDirection::Download {
             return Err(FileTransferAdapterError::WrongDirection);
         }
+        validate_cancellation_binding(&session, cancellation.as_ref())?;
         let lease = self.authorize(&session, FileAction::Download, context, network_enabled)?;
         validate_binding(&session, &lease, context)?;
         let expected_version = session
@@ -191,9 +302,20 @@ impl FileTransferAdapter {
             lease.permit().access_epoch(),
             now_unix_ms,
         )?;
+        if cancellation
+            .as_ref()
+            .is_some_and(TransferOperationCancellation::is_cancelled)
+        {
+            let _ = session.cancel(now_unix_ms);
+            return Err(FileTransferAdapterError::Cancelled);
+        }
         if let Err(error) = lease.permit().ensure_current() {
             let _ = session.cancel(now_unix_ms);
             return Err(error.into());
+        }
+        if cancellation_requested(cancellation.as_ref()) {
+            let _ = session.cancel(now_unix_ms);
+            return Err(FileTransferAdapterError::Cancelled);
         }
 
         Ok(DownloadTransfer {
@@ -204,6 +326,7 @@ impl FileTransferAdapter {
             hasher: blake3::Hasher::new(),
             next_chunk: 0,
             transferred_bytes: 0,
+            cancellation,
         })
     }
 
@@ -236,6 +359,7 @@ pub struct UploadTransfer {
     hasher: blake3::Hasher,
     next_chunk: u32,
     transferred_bytes: u64,
+    cancellation: Option<TransferOperationCancellation>,
 }
 
 impl UploadTransfer {
@@ -258,7 +382,10 @@ impl UploadTransfer {
         self.ensure_running(now_unix_ms)?;
         if self.session.has_received_chunk(index) {
             match self.session.record_chunk(index, bytes, now_unix_ms) {
-                Ok(()) => return Ok(false),
+                Ok(()) => {
+                    self.check_operation_cancellation(now_unix_ms)?;
+                    return Ok(false);
+                }
                 Err(error) => {
                     let _ = self.session.fail(now_unix_ms);
                     self.upload.take();
@@ -315,6 +442,7 @@ impl UploadTransfer {
         network_enabled: bool,
         now_unix_ms: u64,
     ) -> Result<(), FileTransferAdapterError> {
+        self.check_operation_cancellation(now_unix_ms)?;
         if self.session.state != TransferState::Paused {
             return Err(FileTransferError::InvalidState.into());
         }
@@ -355,6 +483,9 @@ impl UploadTransfer {
         &mut self,
         now_unix_ms: u64,
     ) -> Result<TransferProgress, FileTransferAdapterError> {
+        if self.session.state != TransferState::Completed {
+            self.check_operation_cancellation(now_unix_ms)?;
+        }
         if self.session.state == TransferState::Completed {
             return Ok(self.progress());
         }
@@ -393,6 +524,7 @@ impl UploadTransfer {
     }
 
     fn ensure_running(&mut self, now_unix_ms: u64) -> Result<(), FileTransferAdapterError> {
+        self.check_operation_cancellation(now_unix_ms)?;
         if now_unix_ms >= self.session.binding.expires_at_unix_ms {
             let _ = self.session.expire(now_unix_ms);
             self.upload.take();
@@ -410,6 +542,7 @@ impl UploadTransfer {
         &mut self,
         now_unix_ms: u64,
     ) -> Result<(), FileTransferAdapterError> {
+        self.check_operation_cancellation(now_unix_ms)?;
         if now_unix_ms >= self.session.binding.expires_at_unix_ms {
             let _ = self.session.expire(now_unix_ms);
             self.upload.take();
@@ -419,6 +552,18 @@ impl UploadTransfer {
             let _ = self.session.cancel(now_unix_ms);
             self.upload.take();
             return Err(error.into());
+        }
+        Ok(())
+    }
+
+    fn check_operation_cancellation(
+        &mut self,
+        now_unix_ms: u64,
+    ) -> Result<(), FileTransferAdapterError> {
+        if cancellation_requested(self.cancellation.as_ref()) {
+            let _ = self.session.cancel(now_unix_ms);
+            self.upload.take();
+            return Err(FileTransferAdapterError::Cancelled);
         }
         Ok(())
     }
@@ -446,6 +591,7 @@ pub struct DownloadTransfer {
     hasher: blake3::Hasher,
     next_chunk: u32,
     transferred_bytes: u64,
+    cancellation: Option<TransferOperationCancellation>,
 }
 
 impl DownloadTransfer {
@@ -466,6 +612,7 @@ impl DownloadTransfer {
         self.ensure_running(now_unix_ms)?;
         let index = usize::try_from(self.next_chunk).unwrap_or(usize::MAX);
         let Some(chunk) = self.session.manifest.chunks.get(index).cloned() else {
+            self.check_operation_cancellation(now_unix_ms)?;
             return Ok(None);
         };
         let length =
@@ -519,6 +666,7 @@ impl DownloadTransfer {
         network_enabled: bool,
         now_unix_ms: u64,
     ) -> Result<(), FileTransferAdapterError> {
+        self.check_operation_cancellation(now_unix_ms)?;
         if self.session.state != TransferState::Paused {
             return Err(FileTransferError::InvalidState.into());
         }
@@ -571,6 +719,9 @@ impl DownloadTransfer {
         &mut self,
         now_unix_ms: u64,
     ) -> Result<TransferProgress, FileTransferAdapterError> {
+        if self.session.state != TransferState::Completed {
+            self.check_operation_cancellation(now_unix_ms)?;
+        }
         if self.session.state == TransferState::Completed {
             return Ok(self.progress());
         }
@@ -582,6 +733,7 @@ impl DownloadTransfer {
             return Err(FileTransferError::Incomplete.into());
         }
         let digest = ContentHash::from_digest_bytes(*self.hasher.clone().finalize().as_bytes());
+        self.check_operation_cancellation(now_unix_ms)?;
         if let Err(error) =
             self.session
                 .verify_and_complete_digest(self.transferred_bytes, &digest, now_unix_ms)
@@ -601,6 +753,7 @@ impl DownloadTransfer {
     }
 
     fn ensure_running(&mut self, now_unix_ms: u64) -> Result<(), FileTransferAdapterError> {
+        self.check_operation_cancellation(now_unix_ms)?;
         if now_unix_ms >= self.session.binding.expires_at_unix_ms {
             let _ = self.session.expire(now_unix_ms);
             self.file.take();
@@ -618,6 +771,7 @@ impl DownloadTransfer {
         &mut self,
         now_unix_ms: u64,
     ) -> Result<(), FileTransferAdapterError> {
+        self.check_operation_cancellation(now_unix_ms)?;
         if now_unix_ms >= self.session.binding.expires_at_unix_ms {
             let _ = self.session.expire(now_unix_ms);
             self.file.take();
@@ -627,6 +781,18 @@ impl DownloadTransfer {
             let _ = self.session.cancel(now_unix_ms);
             self.file.take();
             return Err(error.into());
+        }
+        Ok(())
+    }
+
+    fn check_operation_cancellation(
+        &mut self,
+        now_unix_ms: u64,
+    ) -> Result<(), FileTransferAdapterError> {
+        if cancellation_requested(self.cancellation.as_ref()) {
+            let _ = self.session.cancel(now_unix_ms);
+            self.file.take();
+            return Err(FileTransferAdapterError::Cancelled);
         }
         Ok(())
     }
@@ -653,6 +819,22 @@ fn authorization_was_revoked(error: &FileTransferAdapterError) -> bool {
                     | FileCapabilityError::Revoked
             )
     )
+}
+
+fn cancellation_requested(cancellation: Option<&TransferOperationCancellation>) -> bool {
+    cancellation.is_some_and(TransferOperationCancellation::is_cancelled)
+}
+
+fn validate_cancellation_binding(
+    session: &TransferSession,
+    cancellation: Option<&TransferOperationCancellation>,
+) -> Result<(), FileTransferAdapterError> {
+    if cancellation
+        .is_some_and(|cancellation| cancellation.operation_id != session.binding.operation_id)
+    {
+        return Err(FileTransferError::BindingMismatch.into());
+    }
+    Ok(())
 }
 
 fn validate_binding(
@@ -1272,6 +1454,195 @@ mod tests {
         transfer.cancel(12).expect("cancel");
         assert_eq!(temp_file_count(&temporary), 0);
         assert!(!host_path(&temporary, "cancelled.txt").exists());
+    }
+
+    fn operation_cancellation(
+        session: &TransferSession,
+        initially_cancelled: bool,
+    ) -> (
+        TransferOperationCancellation,
+        tokio::sync::watch::Sender<bool>,
+    ) {
+        let (sender, receiver) = tokio::sync::watch::channel(initially_cancelled);
+        (
+            TransferOperationCancellation::new(session.binding.operation_id.clone(), receiver),
+            sender,
+        )
+    }
+
+    #[test]
+    fn cancellation_token_must_match_the_transfer_operation() {
+        let (temporary, capability, share) = setup();
+        let adapter = FileTransferAdapter::new(capability);
+        let session = upload_session(&share, "bound.txt", b"abcd", 4, b"bound", 1_000);
+        let (_sender, receiver) = tokio::sync::watch::channel(false);
+        let cancellation = TransferOperationCancellation::new(
+            OperationId::from_public_key(b"another-operation"),
+            receiver,
+        );
+
+        let error = adapter
+            .begin_upload_cancellable(
+                session,
+                &context(&share),
+                true,
+                UploadAdmission::default(),
+                cancellation,
+                10,
+            )
+            .expect_err("a cancellation token from another operation must be rejected");
+        assert_eq!(error.code(), "file_transfer_binding_mismatch");
+        assert_eq!(temp_file_count(&temporary), 0);
+    }
+
+    #[test]
+    fn pre_cancelled_upload_never_creates_staging() {
+        let (temporary, capability, share) = setup();
+        let adapter = FileTransferAdapter::new(capability);
+        let session = upload_session(
+            &share,
+            "pre-cancelled.txt",
+            b"abcd",
+            4,
+            b"pre-cancel",
+            1_000,
+        );
+        let (cancellation, sender) = operation_cancellation(&session, false);
+        sender.send_replace(true);
+
+        let error = adapter
+            .begin_upload_cancellable(
+                session,
+                &context(&share),
+                true,
+                UploadAdmission::default(),
+                cancellation,
+                10,
+            )
+            .expect_err("a pre-cancelled operation must not start");
+        assert_eq!(error.code(), "file_transfer_cancelled");
+        assert_eq!(temp_file_count(&temporary), 0);
+        assert!(!host_path(&temporary, "pre-cancelled.txt").exists());
+    }
+
+    #[test]
+    fn operation_cancellation_stops_the_next_upload_chunk_and_removes_staging() {
+        let (temporary, capability, share) = setup();
+        let adapter = FileTransferAdapter::new(capability);
+        let session = upload_session(&share, "stop.txt", b"abcdefgh", 4, b"stop-upload", 1_000);
+        let (cancellation, sender) = operation_cancellation(&session, false);
+        let mut transfer = adapter
+            .begin_upload_cancellable(
+                session,
+                &context(&share),
+                true,
+                UploadAdmission::default(),
+                cancellation,
+                10,
+            )
+            .expect("begin upload");
+        transfer.write_chunk(0, b"abcd", 11).expect("first chunk");
+        assert_eq!(temp_file_count(&temporary), 1);
+
+        sender.send_replace(true);
+        let error = transfer
+            .write_chunk(1, b"efgh", 12)
+            .expect_err("the next chunk must observe cancellation");
+        assert_eq!(error.code(), "file_transfer_cancelled");
+        assert_eq!(transfer.session().state, TransferState::Cancelled);
+        assert_eq!(temp_file_count(&temporary), 0);
+        assert!(!host_path(&temporary, "stop.txt").exists());
+        assert_eq!(
+            transfer
+                .finish(13)
+                .expect_err("repeat finish must keep reporting cancellation")
+                .code(),
+            "file_transfer_cancelled"
+        );
+    }
+
+    #[test]
+    fn operation_cancellation_before_upload_finish_never_publishes() {
+        let (temporary, capability, share) = setup();
+        let adapter = FileTransferAdapter::new(capability);
+        let session = upload_session(&share, "close.txt", b"abcdefgh", 4, b"close-upload", 1_000);
+        let (cancellation, sender) = operation_cancellation(&session, false);
+        let mut transfer = adapter
+            .begin_upload_cancellable(
+                session,
+                &context(&share),
+                true,
+                UploadAdmission::default(),
+                cancellation,
+                10,
+            )
+            .expect("begin upload");
+        transfer.write_chunk(0, b"abcd", 11).expect("first chunk");
+        transfer.write_chunk(1, b"efgh", 12).expect("second chunk");
+
+        sender.send_replace(true);
+        let error = transfer
+            .finish(13)
+            .expect_err("cancelled upload must not publish");
+        assert_eq!(error.code(), "file_transfer_cancelled");
+        assert_eq!(transfer.session().state, TransferState::Cancelled);
+        assert_eq!(temp_file_count(&temporary), 0);
+        assert!(!host_path(&temporary, "close.txt").exists());
+    }
+
+    #[test]
+    fn operation_cancellation_stops_download_chunks_and_finish() {
+        let (temporary, capability, share) = setup();
+        let content = b"abcdefgh";
+        std::fs::write(host_path(&temporary, "source.txt"), content).expect("source");
+        let adapter = FileTransferAdapter::new(capability);
+
+        let expected = version(content);
+        let session = download_session(&share, "source.txt", content, 4, expected, 1_000);
+        let (cancellation, sender) = operation_cancellation(&session, false);
+        let mut transfer = adapter
+            .begin_download_cancellable(session, &context(&share), true, cancellation, 10)
+            .expect("begin download");
+        assert_eq!(
+            transfer.read_next(11).expect("first"),
+            Some(b"abcd".to_vec())
+        );
+        sender.send_replace(true);
+        let error = transfer
+            .read_next(12)
+            .expect_err("the next download chunk must observe cancellation");
+        assert_eq!(error.code(), "file_transfer_cancelled");
+        assert_eq!(transfer.session().state, TransferState::Cancelled);
+        assert!(transfer.file.is_none());
+        assert_eq!(
+            transfer
+                .finish(13)
+                .expect_err("repeat finish must keep reporting cancellation")
+                .code(),
+            "file_transfer_cancelled"
+        );
+
+        let expected = version(content);
+        let session = download_session(&share, "source.txt", content, 4, expected, 1_000);
+        let (cancellation, sender) = operation_cancellation(&session, false);
+        let mut transfer = adapter
+            .begin_download_cancellable(session, &context(&share), true, cancellation, 20)
+            .expect("begin second download");
+        assert_eq!(
+            transfer.read_next(21).expect("first"),
+            Some(b"abcd".to_vec())
+        );
+        assert_eq!(
+            transfer.read_next(22).expect("second"),
+            Some(b"efgh".to_vec())
+        );
+        sender.send_replace(true);
+        let error = transfer
+            .finish(23)
+            .expect_err("cancelled download must not complete");
+        assert_eq!(error.code(), "file_transfer_cancelled");
+        assert_eq!(transfer.session().state, TransferState::Cancelled);
+        assert!(transfer.file.is_none());
     }
 
     #[test]

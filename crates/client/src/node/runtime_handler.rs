@@ -2326,6 +2326,13 @@ fn invitation_conflict(message: impl Into<String>, network_name: Option<&str>) -
     problem
 }
 
+fn configured_network_conflicts_with_invitation(
+    configured_network_id: Option<&str>,
+    invitation_network_id: &NetworkId,
+) -> bool {
+    configured_network_id.is_some_and(|configured| configured != invitation_network_id.as_str())
+}
+
 fn exit_contribution_obligation_audit_value(
     obligation: ExitContributionObligation,
 ) -> &'static str {
@@ -2657,7 +2664,10 @@ async fn redeem_invitation(
     let conflicting_config = configs.list_networks().ok().and_then(|networks| {
         networks.into_iter().find(|network| {
             network.name == preview.network_name
-                && network.network_id.as_deref() != Some(preview.network_id.as_str())
+                && configured_network_conflicts_with_invitation(
+                    network.network_id.as_deref(),
+                    &preview.network_id,
+                )
         })
     });
     if conflicting_config.is_some() {
@@ -4346,6 +4356,24 @@ mod tests {
             network_acl: None,
             now_unix_ms: 1_000,
         }
+    }
+
+    #[test]
+    fn invitation_binds_legacy_network_config_without_network_id() {
+        let invitation_network_id = NetworkId::from_public_key(b"invitation-network");
+
+        assert!(!configured_network_conflicts_with_invitation(
+            None,
+            &invitation_network_id,
+        ));
+        assert!(!configured_network_conflicts_with_invitation(
+            Some(invitation_network_id.as_str()),
+            &invitation_network_id,
+        ));
+        assert!(configured_network_conflicts_with_invitation(
+            Some("net_different"),
+            &invitation_network_id,
+        ));
     }
 
     fn policy_transaction_network_id() -> NetworkId {

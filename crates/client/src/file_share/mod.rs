@@ -11,6 +11,7 @@ mod error;
 mod quota;
 mod root;
 mod temp;
+mod transfer;
 
 pub use capability::{
     FileCapabilityError, FileCapabilityLease, FileCapabilityPermit, FileCapabilitySnapshot,
@@ -20,3 +21,7 @@ pub use error::{FileShareError, FileShareErrorCode, FileShareResult};
 pub use quota::{DirectoryUsage, QuotaScanLimits, UploadQuotaRequest};
 pub use root::{LocalShareRoot, FILE_TEMP_DIRECTORY};
 pub use temp::TemporaryUpload;
+pub use transfer::{
+    DownloadTransfer, FileTransferAdapter, FileTransferAdapterError, TransferProgress,
+    UploadAdmission, UploadTransfer,
+};

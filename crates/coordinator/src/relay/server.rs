@@ -147,6 +147,16 @@ impl RelayServer {
         &self.certificate
     }
 
+    /// Stop accepting new relay connections and close every registered QUIC
+    /// session. The listener remains held by this handle until all clones are
+    /// dropped, but the socket is no longer accepting traffic after the close.
+    pub async fn shutdown(&self) {
+        self.endpoint.close(0u32.into(), b"relay shutdown");
+        self.endpoint.wait_idle().await;
+        self.state.clients.write().await.clear();
+        self.state.limits.write().await.clear();
+    }
+
     pub async fn run(self) -> Result<()> {
         tracing::info!("QUIC 中继服务器正在监听: {}", self.bind_addr);
 
@@ -1349,6 +1359,72 @@ mod tests {
         client_a.close().await;
         client_b.close().await;
         server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_shutdown_closes_clients_and_releases_udp_port() -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity = Identity::generate()?;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let virtual_ip = session_manager
+            .register_client(
+                identity.client_id().to_string(),
+                identity.public_key(),
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000),
+                51820,
+                NatType::Open,
+                tx,
+            )
+            .await?
+            .primary_ipv6();
+
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager,
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+        let client = QuicRelayClient::connect(
+            relay_addr,
+            server_pin,
+            "fuckipv6.local",
+            &identity,
+            virtual_ip,
+        )
+        .await?;
+
+        server.shutdown().await;
+        let accept_result = tokio::time::timeout(Duration::from_secs(2), server_task)
+            .await
+            .context("relay accept task did not stop after shutdown")??;
+        accept_result.context("relay accept task failed after shutdown")?;
+
+        let closed = tokio::time::timeout(Duration::from_secs(2), client.recv_packet())
+            .await
+            .context("client did not observe relay shutdown")?;
+        assert!(closed.is_none());
+        assert!(server.state.clients.read().await.is_empty());
+        assert!(server.state.limits.read().await.is_empty());
+
+        // The QUIC endpoint owns the UDP socket. The lifecycle owner must drop
+        // its final Arc after the accept task exits before the port is reusable.
+        drop(server);
+        let rebound = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match tokio::net::UdpSocket::bind(relay_addr).await {
+                    Ok(socket) => return Ok::<_, std::io::Error>(socket),
+                    Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        })
+        .await
+        .context("relay UDP port was not released after shutdown")??;
+        drop(rebound);
         Ok(())
     }
 

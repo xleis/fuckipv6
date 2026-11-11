@@ -47,7 +47,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 279,
+                NodeContractV1.DTO_CLASS_NAMES.length == 281,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -98,6 +98,7 @@ public final class NodeContractV1Test {
             "identity",
             "configuration",
             "exit_node_capabilities",
+            "exit_selections",
             "capabilities",
             "permissions",
             "embedded_services",
@@ -110,12 +111,69 @@ public final class NodeContractV1Test {
             "recent_activity",
             "routing_summaries",
             "traffic_routing_page",
+            "traffic_session",
             "logs",
             "last_error",
             "access_control"
         }) {
             NodeContractV1.NodeSnapshot.class.getDeclaredField(field);
         }
+
+        for (String field : new String[] {
+            "directory_generated_at_unix_ms",
+            "directory_received_at_unix_ms",
+            "evaluated_at_unix_ms",
+            "network_id",
+            "policy",
+            "policy_revision",
+            "reason_code",
+            "resolution"
+        }) {
+            NodeContractV1.NodeExitSelectionSnapshot.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "changed_at_unix_ms", "events", "failure", "reason_code", "state", "validation"
+        }) {
+            NodeContractV1.TrafficSessionSnapshot.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "dns_validated",
+            "observed_at_unix_ms",
+            "reachability_validated",
+            "routes_validated",
+            "tun_validated"
+        }) {
+            NodeContractV1.TrafficSessionValidation.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "expires_at_unix_ms",
+            "issued_at_unix_ms",
+            "join_mode",
+            "network_id",
+            "network_name",
+            "owner",
+            "policy_revision",
+            "preview_digest",
+            "privacy_policy_revision",
+            "public_key",
+            "revision",
+            "signature",
+            "terms",
+            "terms_hash"
+        }) {
+            NodeContractV1.NetworkJoinPreview.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "exit_contribution",
+            "exit_contribution_mode",
+            "exit_contribution_scope",
+            "member_limit",
+            "network_policy_revision",
+            "privacy_policy_revision"
+        }) {
+            NodeContractV1.NetworkJoinTerms.class.getDeclaredField(field);
+        }
+        NodeContractV1.NodeJoinNetworkCommand.class.getDeclaredField("signed_join_preview");
 
         for (String field : new String[] {"local_policy", "network_acls"}) {
             NodeContractV1.NodeAccessControlSnapshot.class.getDeclaredField(field);

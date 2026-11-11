@@ -13,11 +13,11 @@ use fuckipv6_common::domain::{
     NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
     NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId,
     TopologyNode, TopologyNodeHealth, TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy,
-    TrafficFlow, TrafficMatch, TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput,
-    TrafficProtectionState, TrafficProtocol, TrafficRoutingHitSample, TrafficRoutingObservation,
-    TrafficRoutingPageModel, TrafficRoutingRuleActivityEffect, TrafficRoutingRuleImpactView,
-    TrafficRoutingTarget, TrafficRoutingTargetKind, TrafficRoutingTargetRef,
-    TrafficRoutingWorkflowState, TrafficSessionEventKind,
+    TrafficFailureKind, TrafficFlow, TrafficMatch, TrafficMatchRisk, TrafficPolicy,
+    TrafficPolicyTestInput, TrafficProtectionState, TrafficProtocol, TrafficRoutingHitSample,
+    TrafficRoutingObservation, TrafficRoutingPageModel, TrafficRoutingRuleActivityEffect,
+    TrafficRoutingRuleImpactView, TrafficRoutingTarget, TrafficRoutingTargetKind,
+    TrafficRoutingTargetRef, TrafficRoutingWorkflowState, TrafficSessionEventKind,
 };
 use fuckipv6_common::i18n::{format_integer, t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
@@ -5785,6 +5785,367 @@ fn exit_selection_rows(
     rows
 }
 
+fn exit_selection_for_network<'a>(
+    snapshot: &'a NodeSnapshot,
+    network_name: &str,
+) -> Option<&'a crate::node::NodeExitSelectionSnapshot> {
+    let network_id = snapshot
+        .memberships
+        .iter()
+        .find(|membership| membership.network_name == network_name)?
+        .network_id
+        .as_str();
+    snapshot
+        .exit_selections
+        .iter()
+        .find(|selection| selection.network_id.as_str() == network_id)
+}
+
+fn selected_exit_id(
+    network: &crate::node::NodeNetworkConfigSnapshot,
+    selection: Option<&crate::node::NodeExitSelectionSnapshot>,
+) -> Option<String> {
+    selection
+        .and_then(|selection| selection.resolution.as_ref())
+        .and_then(|resolution| resolution.selected_default.as_ref())
+        .map(ToString::to_string)
+        .or_else(|| network.exit_node.clone())
+}
+
+fn exit_availability_state_key(state: ExitAvailabilityState) -> &'static str {
+    match state {
+        ExitAvailabilityState::Unknown => "member_directory.exit.state.unknown",
+        ExitAvailabilityState::Available => "member_directory.exit.state.available",
+        ExitAvailabilityState::Degraded => "member_directory.exit.state.degraded",
+        ExitAvailabilityState::Unavailable => "member_directory.exit.state.unavailable",
+    }
+}
+
+fn exit_availability_source_key(source: ExitAvailabilitySource) -> &'static str {
+    match source {
+        ExitAvailabilitySource::NotObserved => "member_directory.exit.source.not_observed",
+        ExitAvailabilitySource::LocalRuntime => "member_directory.exit.source.local_runtime",
+        ExitAvailabilitySource::CoordinatorHealth => {
+            "member_directory.exit.source.coordinator_health"
+        }
+        ExitAvailabilitySource::RemotePeerReport => {
+            "member_directory.exit.source.remote_peer_report"
+        }
+    }
+}
+
+fn traffic_failure_key(failure: TrafficFailureKind) -> &'static str {
+    match failure {
+        TrafficFailureKind::UnknownApplication => "traffic.session.failure.unknown_application",
+        TrafficFailureKind::DnsResolutionTimeout => {
+            "traffic.session.failure.dns_resolution_timeout"
+        }
+        TrafficFailureKind::DnsPollutionDetected => {
+            "traffic.session.failure.dns_pollution_detected"
+        }
+        TrafficFailureKind::ExitUnavailable => "traffic.session.failure.exit_unavailable",
+        TrafficFailureKind::NetworkSelectionUnavailable => {
+            "traffic.session.failure.network_selection_unavailable"
+        }
+        TrafficFailureKind::ConnectionTimeout => "traffic.session.failure.connection_timeout",
+        TrafficFailureKind::HandshakeInterrupted => "traffic.session.failure.handshake_interrupted",
+        TrafficFailureKind::RuntimeDisconnected => "traffic.session.failure.runtime_disconnected",
+        TrafficFailureKind::PartialConnectionFailure => {
+            "traffic.session.failure.partial_connection_failure"
+        }
+    }
+}
+
+fn exit_connection_summary_rows(snapshot: &NodeSnapshot, locale: Locale) -> Vec<RowModel> {
+    let protection = t(
+        locale,
+        traffic_protection_state_key(snapshot.traffic_session.state),
+    );
+    let changed_at = if snapshot.traffic_session.changed_at_unix_ms == 0 {
+        t(locale, "traffic.session.not_observed").to_string()
+    } else {
+        routing_timestamp_label(Some(snapshot.traffic_session.changed_at_unix_ms), locale)
+    };
+    let reason = snapshot
+        .traffic_session
+        .reason_code
+        .as_deref()
+        .unwrap_or_else(|| t(locale, "traffic.session.no_reason"));
+    let failure = snapshot
+        .traffic_session
+        .failure
+        .map(|failure| t(locale, traffic_failure_key(failure)))
+        .unwrap_or_else(|| t(locale, "common.none"));
+
+    vec![row(
+        t(locale, "exit_summary.global_session").to_string(),
+        tr(
+            locale,
+            "exit_summary.global_detail",
+            &[
+                ("protection", protection),
+                ("changed_at", &changed_at),
+                ("reason", reason),
+                ("failure", failure),
+            ],
+        ),
+    )]
+}
+
+fn exit_network_selection_rows(snapshot: &NodeSnapshot, locale: Locale) -> Vec<RowModel> {
+    snapshot
+        .configuration
+        .networks
+        .iter()
+        .map(|network| {
+            let selection = exit_selection_for_network(snapshot, &network.network_name);
+            let resolution = selection.and_then(|selection| selection.resolution.as_ref());
+            let configured_exit = selected_exit_id(network, selection)
+                .unwrap_or_else(|| t(locale, "common.none").to_string());
+            let mode = resolution
+                .map(|resolution| exit_selection_mode_label(locale, &resolution.mode).to_string())
+                .unwrap_or_else(|| t(locale, "common.not_available").to_string());
+            let default_exit = resolution
+                .and_then(|resolution| resolution.default_exit.as_ref())
+                .map_or_else(|| t(locale, "common.none").to_string(), ToString::to_string);
+            let fixed_exit = resolution
+                .and_then(|resolution| resolution.fixed_exit.as_ref())
+                .map_or_else(|| t(locale, "common.none").to_string(), ToString::to_string);
+            let source = resolution
+                .and_then(|resolution| {
+                    resolution
+                        .candidates
+                        .iter()
+                        .find(|candidate| candidate.exit.as_str() == configured_exit)
+                })
+                .map(|candidate| exit_selection_source_label(locale, &candidate.source))
+                .unwrap_or_else(|| t(locale, "common.not_available").to_string());
+            row(
+                network.network_name.clone(),
+                tr(
+                    locale,
+                    "exit_summary.selection_row_detail",
+                    &[
+                        ("configured_exit", &configured_exit),
+                        ("mode", &mode),
+                        ("default_exit", &default_exit),
+                        ("fixed_exit", &fixed_exit),
+                        ("source", &source),
+                    ],
+                ),
+            )
+        })
+        .collect()
+}
+
+fn exit_quality_rows(snapshot: &NodeSnapshot, locale: Locale) -> Vec<RowModel> {
+    let mut rows = Vec::new();
+    for selection in &snapshot.exit_selections {
+        let Some(resolution) = selection.resolution.as_ref() else {
+            continue;
+        };
+        let network_name = snapshot
+            .memberships
+            .iter()
+            .find(|membership| membership.network_id == selection.network_id.as_str())
+            .map(|membership| membership.network_name.as_str());
+        for candidate in &resolution.candidates {
+            if !candidate.selectable || !resolution.selectable_exits.contains(&candidate.exit) {
+                continue;
+            }
+            let Some(peer) = snapshot.peers.iter().find(|peer| {
+                peer.peer_id == candidate.exit.as_str()
+                    && network_name.is_none_or(|network| peer.network_name == network)
+            }) else {
+                continue;
+            };
+            let availability = t(
+                locale,
+                exit_availability_state_key(candidate.availability.state),
+            );
+            let availability_source = t(
+                locale,
+                exit_availability_source_key(candidate.availability.source),
+            );
+            let observed_at =
+                routing_timestamp_label(candidate.availability.observed_at_unix_ms, locale);
+            let freshness = match candidate.availability.observed_at_unix_ms {
+                None => t(locale, "exit_quality.evidence_not_observed"),
+                Some(observed_at)
+                    if selection.evaluated_at_unix_ms <= observed_at.saturating_add(90_000) =>
+                {
+                    t(locale, "exit_quality.evidence_fresh")
+                }
+                Some(_) => t(locale, "exit_quality.evidence_stale"),
+            };
+            let availability_reason = candidate
+                .availability
+                .reason_code
+                .as_deref()
+                .map(|reason| exit_selection_reason_label(locale, reason))
+                .unwrap_or_else(|| t(locale, "common.none").to_string());
+            let online = t(
+                locale,
+                if peer.online {
+                    "status.peer.online"
+                } else {
+                    "status.peer.offline"
+                },
+            );
+            let transport = t(
+                locale,
+                if peer.p2p_active {
+                    "peer.transport.p2p"
+                } else {
+                    "peer.transport.relay"
+                },
+            );
+            let health = t(
+                locale,
+                if peer.p2p_healthy {
+                    "peer.health.healthy"
+                } else {
+                    "peer.health.unhealthy"
+                },
+            );
+            let rtt = peer
+                .rtt_us
+                .map(|rtt| {
+                    let value = format!("{:.1}", rtt as f64 / 1000.0);
+                    tr(locale, "peer.rtt", &[("value", &value)])
+                })
+                .unwrap_or_else(|| t(locale, "common.not_available").to_string());
+            let loss = {
+                let value = format!("{:.1}", f64::from(peer.loss_rate) * 100.0);
+                tr(locale, "peer.loss", &[("value", &value)])
+            };
+            let title = network_name
+                .map(|network| format!("{network} / {}", candidate.exit.as_str()))
+                .unwrap_or_else(|| candidate.exit.to_string());
+            rows.push(row(
+                title,
+                tr(
+                    locale,
+                    "exit_quality.peer_detail",
+                    &[
+                        ("online", online),
+                        ("health", health),
+                        ("transport", transport),
+                        ("rtt", &rtt),
+                        ("loss", &loss),
+                        ("availability", availability),
+                        ("availability_source", availability_source),
+                        ("freshness", freshness),
+                        ("observed_at", &observed_at),
+                        ("availability_reason", &availability_reason),
+                    ],
+                ),
+            ));
+        }
+    }
+    if rows.is_empty() {
+        rows.push(row(
+            t(locale, "exit_quality.peers"),
+            t(locale, "exit_quality.no_peers"),
+        ));
+    }
+    rows.push(row(
+        t(locale, "exit_quality.throughput"),
+        t(locale, "exit_quality.throughput_unavailable"),
+    ));
+    rows
+}
+
+fn exit_activity_rows(snapshot: &NodeSnapshot, locale: Locale) -> Vec<RowModel> {
+    let mut events = Vec::new();
+    for event in &snapshot.traffic_session.events {
+        let reason = event
+            .reason_code
+            .as_deref()
+            .unwrap_or_else(|| t(locale, "traffic.session.no_reason"));
+        let failure = event
+            .failure
+            .map(|failure| t(locale, traffic_failure_key(failure)))
+            .unwrap_or_else(|| t(locale, "common.none"));
+        let state = t(locale, traffic_protection_state_key(event.state));
+        let occurred_at = routing_timestamp_label(Some(event.occurred_at_unix_ms), locale);
+        let id = format!(
+            "traffic:{}:{:?}:{:?}:{}",
+            event.occurred_at_unix_ms, event.kind, event.state, reason
+        );
+        events.push((
+            id,
+            event.occurred_at_unix_ms,
+            row(
+                t(locale, traffic_session_event_key(event.kind)).to_string(),
+                tr(
+                    locale,
+                    "exit_activity.session_detail",
+                    &[
+                        ("state", state),
+                        ("reason", reason),
+                        ("failure", failure),
+                        ("occurred_at", &occurred_at),
+                    ],
+                ),
+            ),
+        ));
+    }
+
+    let exit_activity_actions = [
+        "network.role.set",
+        "node.local_exit.set",
+        "routing.update",
+        "membership.change",
+        "policy.apply",
+        "policy.rollback",
+    ];
+    for entry in ordered_activity_entries(&snapshot.recent_activity) {
+        if !exit_activity_actions.contains(&entry.action.as_str()) {
+            continue;
+        }
+        let action_key = format!("activity.action.{}", entry.action);
+        let localized = t(locale, &action_key);
+        let title = if localized == action_key {
+            t(locale, "activity.action.node.command").to_string()
+        } else {
+            localized.to_string()
+        };
+        let outcome = t(locale, activity_outcome_key(entry.outcome));
+        let occurred_at = routing_timestamp_label(Some(entry.occurred_at_unix_ms), locale);
+        events.push((
+            entry.audit_id.to_string(),
+            entry.occurred_at_unix_ms,
+            row(
+                title,
+                format!(
+                    "{} · {} · {}",
+                    tr(
+                        locale,
+                        "overview.activity.detail",
+                        &[("outcome", outcome), ("resource", &entry.resource)]
+                    ),
+                    occurred_at,
+                    tr(
+                        locale,
+                        "overview.activity.audit_id",
+                        &[("audit", entry.audit_id.as_str())]
+                    )
+                ),
+            ),
+        ));
+    }
+
+    events.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| right.0.cmp(&left.0)));
+    let mut seen = HashSet::new();
+    events
+        .into_iter()
+        .filter(|(id, _, _)| seen.insert(id.clone()))
+        .take(12)
+        .map(|(_, _, row)| row)
+        .collect()
+}
+
 fn project_exit_node(
     snapshot: &NodeSnapshot,
     locale: Locale,
@@ -5932,6 +6293,10 @@ fn project_exit_node(
         .filter(|network| network.roles.contains(&NodeNetworkRole::ExitNode))
         .map(|network| row(network.name.clone(), t(locale, "gpui.value.exit_role")))
         .collect::<Vec<_>>();
+    let connection_summary_rows = exit_connection_summary_rows(snapshot, locale);
+    let network_selection_rows = exit_network_selection_rows(snapshot, locale);
+    let quality_rows = exit_quality_rows(snapshot, locale);
+    let activity_rows = exit_activity_rows(snapshot, locale);
     (
         vec![
             metric(
@@ -5952,6 +6317,16 @@ fn project_exit_node(
         ],
         vec![
             section(
+                t(locale, "exit_summary.title"),
+                t(locale, "exit_summary.session_unavailable"),
+                connection_summary_rows,
+            ),
+            section(
+                t(locale, "exit_summary.selection_title"),
+                t(locale, "exit_summary.no_network"),
+                network_selection_rows,
+            ),
+            section(
                 t(locale, "gpui.section.local_exit_status"),
                 t(locale, "gpui.empty.local_exit_status"),
                 local_exit_rows,
@@ -5960,6 +6335,16 @@ fn project_exit_node(
                 t(locale, "gpui.section.exit_governance"),
                 t(locale, "gpui.empty.exit_governance"),
                 governance_rows,
+            ),
+            section(
+                t(locale, "exit_quality.title"),
+                t(locale, "exit_quality.no_peers"),
+                quality_rows,
+            ),
+            section(
+                t(locale, "exit_activity.title"),
+                t(locale, "exit_activity.empty"),
+                activity_rows,
             ),
             section(
                 t(locale, "gpui.section.platform_capabilities"),
@@ -10040,6 +10425,200 @@ mod tests {
         assert!(unavailable
             .detail
             .contains("exit.selection.stale_directory"));
+    }
+
+    #[test]
+    fn exit_page_separates_protection_selection_and_exit_activity() {
+        let manifest = node_ui_manifest();
+        let page = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "exit_node")
+            .expect("exit node page");
+        let mut snapshot = populated_snapshot();
+        let subject = NodeId::from_public_key(b"exit-summary-subject");
+        let exit_a = NodeId::from_public_key(b"exit-summary-a");
+        let exit_b = NodeId::from_public_key(b"exit-summary-b");
+        let network_id =
+            fuckipv6_common::domain::NetworkId::from_public_key(b"exit-summary-network");
+        let policy = ExitSelectionPolicy {
+            mode: ExitSelectionMode::Fixed {
+                exit: exit_a.clone(),
+            },
+            default_exit: Some(exit_a.clone()),
+            available_exits: vec![exit_a.clone(), exit_b.clone()],
+            ..ExitSelectionPolicy::default()
+        };
+        let observed_at = 1_700_000_000_000;
+        let resolution = policy
+            .resolve(
+                12,
+                &subject,
+                &BTreeMap::from([
+                    (
+                        exit_a.clone(),
+                        ExitContributionAvailability::observed(
+                            true,
+                            true,
+                            ExitAvailabilitySource::CoordinatorHealth,
+                            observed_at,
+                        ),
+                    ),
+                    (
+                        exit_b.clone(),
+                        ExitContributionAvailability::observed(
+                            true,
+                            true,
+                            ExitAvailabilitySource::CoordinatorHealth,
+                            observed_at,
+                        ),
+                    ),
+                ]),
+            )
+            .expect("selection resolution");
+        snapshot.exit_selections = vec![NodeExitSelectionSnapshot {
+            network_id: network_id.clone(),
+            policy_revision: 12,
+            policy: Some(policy),
+            resolution: Some(resolution),
+            directory_generated_at_unix_ms: Some(observed_at),
+            directory_received_at_unix_ms: Some(observed_at + 1),
+            evaluated_at_unix_ms: observed_at + 2,
+            reason_code: None,
+        }];
+        snapshot.memberships = vec![membership_snapshot("home", network_id.as_str())];
+        snapshot.traffic_session.state = TrafficProtectionState::FailClosed;
+        snapshot.traffic_session.changed_at_unix_ms = 1_700_000_000_500;
+        snapshot.traffic_session.reason_code = Some("traffic.session.exit_lost".into());
+        snapshot.traffic_session.failure = Some(TrafficFailureKind::ExitUnavailable);
+        snapshot.traffic_session.events = vec![
+            fuckipv6_common::domain::TrafficSessionEvent {
+                kind: TrafficSessionEventKind::FailureDetected,
+                state: TrafficProtectionState::FailClosed,
+                occurred_at_unix_ms: 1_700_000_000_300,
+                failure: Some(TrafficFailureKind::ExitUnavailable),
+                reason_code: Some("traffic.session.exit_lost".into()),
+            },
+            fuckipv6_common::domain::TrafficSessionEvent {
+                kind: TrafficSessionEventKind::MigrationStarted,
+                state: TrafficProtectionState::Migrating,
+                occurred_at_unix_ms: 1_700_000_000_400,
+                failure: None,
+                reason_code: Some("traffic.session.switching_exit".into()),
+            },
+            fuckipv6_common::domain::TrafficSessionEvent {
+                kind: TrafficSessionEventKind::ProtectionEstablished,
+                state: TrafficProtectionState::Protected,
+                occurred_at_unix_ms: 1_700_000_000_500,
+                failure: None,
+                reason_code: Some("traffic.session.validation_passed".into()),
+            },
+        ];
+        snapshot.peers.extend([
+            NodePeerSnapshot {
+                peer_id: exit_a.to_string(),
+                network_name: "home".into(),
+                virtual_ipv6: "fd00::a".parse().expect("IPv6"),
+                virtual_ipv4: None,
+                endpoints: Vec::new(),
+                online: true,
+                p2p_active: true,
+                p2p_healthy: true,
+                rtt_us: Some(12_300),
+                loss_rate: 0.125,
+                traffic: NodeTrafficSnapshot::default(),
+            },
+            NodePeerSnapshot {
+                peer_id: exit_b.to_string(),
+                network_name: "home".into(),
+                virtual_ipv6: "fd00::b".parse().expect("IPv6"),
+                virtual_ipv4: None,
+                endpoints: Vec::new(),
+                online: true,
+                p2p_active: true,
+                p2p_healthy: true,
+                rtt_us: Some(55_500),
+                loss_rate: 0.5,
+                traffic: NodeTrafficSnapshot::default(),
+            },
+        ]);
+        let mut revoked = activity_entry(b"exit-policy-revoked", 1_700_000_000_450);
+        revoked.network_id = Some(network_id);
+        revoked.action = "policy.apply".into();
+        revoked.resource = "network:home/policy/12".into();
+        revoked.outcome = AuditOutcome::Denied;
+        snapshot.recent_activity = vec![revoked.clone(), revoked];
+
+        let model =
+            build_page_model_for_page(page, &snapshot, Locale::ZhCn).expect("exit node model");
+        let summary = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "exit_summary.title"))
+            .expect("connection summary");
+        assert_eq!(summary.rows.len(), 1);
+        assert_eq!(
+            summary.rows[0].title,
+            t(Locale::ZhCn, "exit_summary.global_session")
+        );
+        assert!(summary.rows[0]
+            .detail
+            .contains(t(Locale::ZhCn, "traffic.session.state.fail_closed")));
+        assert!(!summary.rows[0].detail.contains(exit_a.as_str()));
+        assert!(!summary.rows[0].detail.contains(exit_b.as_str()));
+
+        let selection_summary = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "exit_summary.selection_title"))
+            .expect("network Exit selection summary");
+        assert_eq!(selection_summary.rows[0].title, "home");
+        assert!(selection_summary.rows[0].detail.contains(exit_a.as_str()));
+        assert!(!selection_summary.rows[0].detail.contains(exit_b.as_str()));
+        assert!(!selection_summary.rows[0]
+            .detail
+            .contains(t(Locale::ZhCn, "traffic.session.state.fail_closed")));
+        assert!(selection_summary.rows[0]
+            .detail
+            .contains(t(Locale::ZhCn, "exit_governance.mode.fixed")));
+        assert!(selection_summary.rows[0]
+            .detail
+            .contains(t(Locale::ZhCn, "exit_governance.source.network")));
+
+        let quality = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "exit_quality.title"))
+            .expect("Exit quality");
+        assert_eq!(quality.rows.len(), 2);
+        assert!(quality.rows[0].title.contains(exit_a.as_str()));
+        assert!(!quality.rows[0].title.contains(exit_b.as_str()));
+        assert!(quality.rows[0].detail.contains("12.3 ms"));
+        assert!(quality.rows[0].detail.contains("12.5%"));
+        assert!(quality.rows[1]
+            .detail
+            .contains(t(Locale::ZhCn, "exit_quality.throughput_unavailable")));
+        assert!(!quality.rows.iter().any(|row| row.detail.contains("Mbps")));
+
+        let activity = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "exit_activity.title"))
+            .expect("Exit activity");
+        assert_eq!(activity.rows.len(), 4);
+        assert!(activity.rows[0].title.contains(t(
+            Locale::ZhCn,
+            "traffic.session.event.protection_established"
+        )));
+        assert!(activity.rows[1]
+            .title
+            .contains(t(Locale::ZhCn, "activity.action.policy.apply")));
+        assert!(activity.rows[2]
+            .title
+            .contains(t(Locale::ZhCn, "traffic.session.event.migration_started")));
+        assert!(activity.rows[3]
+            .title
+            .contains(t(Locale::ZhCn, "traffic.session.event.failure_detected")));
     }
 
     #[test]

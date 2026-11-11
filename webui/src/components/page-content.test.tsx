@@ -5,6 +5,7 @@ import manifestFixture from "../../../contracts/typescript/fixtures/node-manifes
 import productFixture from "../../../contracts/typescript/fixtures/product-visual-snapshot.json";
 import type {
   ActivityEntry,
+  NodeDiagnosticsSnapshot,
   NodeExitSelectionSnapshot,
   NodeProblem,
   NodeSnapshot,
@@ -143,20 +144,80 @@ function activityElement(
   );
 }
 
-function exitElement(snapshot: NodeSnapshot) {
+function exitElement(
+  snapshot: NodeSnapshot,
+  recentDiagnostics: NodeDiagnosticsSnapshot | null = null,
+  onRequestAction = vi.fn(),
+) {
   return (
     <PageContent
       page={exitNodePage}
       snapshot={snapshot}
       locale="zh-CN"
       selectedNetwork="home"
-      recentDiagnostics={null}
+      recentDiagnostics={recentDiagnostics}
       onSelectNetwork={() => {}}
       onNavigate={() => {}}
-      onRequestAction={() => {}}
+      onRequestAction={onRequestAction}
       onRunAction={async () => {}}
     />
   );
+}
+
+function diagnosticsWithEvidence(
+  observedAt: number,
+  maxAgeMs = 60_000,
+): NodeDiagnosticsSnapshot {
+  return {
+    diagnostic_id: "diagnostic-exit-quality",
+    started_at_unix_ms: observedAt - 1_000,
+    completed_at_unix_ms: observedAt,
+    timed_out: false,
+    lifecycle: baseSnapshot.lifecycle,
+    retained_owner_networks: [],
+    cleanup_candidate_networks: [],
+    residue: {
+      sessions_remaining: 0,
+      listeners_remaining: 0,
+      peers_remaining: 0,
+      embedded_services_remaining: 0,
+      configuration_retained: false,
+      residual_networks: [],
+      cleanup_steps: [],
+      issues: [],
+    },
+    checks: [],
+    exit_health: {
+      max_age_ms: maxAgeMs,
+      evidence: [],
+    },
+    exit_health_assessment: {
+      state: "available",
+      default_candidate: true,
+      reason_code: "exit.health.available",
+      affected_layers: [],
+      affected_targets: [],
+      affected_protocols: [],
+      fresh_evidence_count: 1,
+      observed_at_unix_ms: observedAt,
+      source: "controlled_probe",
+    },
+    leak_detection: {
+      generated_at_unix_ms: observedAt,
+      max_age_ms: maxAgeMs,
+      environment: {},
+      evidence: [],
+    },
+    leak_detection_assessment: {
+      state: "leak_free",
+      reason_code: "leak_detection.leak_free",
+      fail_closed_required: false,
+      affected_protocols: [],
+      affected_targets: [],
+    },
+    recovery_actions: [],
+    sanitized_report: "diagnostic_id=diagnostic-exit-quality",
+  };
 }
 
 function datetimeLocal(unixMs: number): string {
@@ -171,6 +232,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -365,6 +427,335 @@ describe("local Exit lifecycle", () => {
     expect(value("gpui.local_exit.stage")).toHaveTextContent(
       translated("gpui.local_exit.stage.cleaning"),
     );
+  });
+});
+
+describe("Exit connection evidence and activity", () => {
+  const networkId = "net_exit_evidence";
+  const selection: NodeExitSelectionSnapshot = {
+    network_id: networkId,
+    policy_revision: 7,
+    policy: {
+      mode: { mode: "fixed", exit: "exit-a" },
+      default_exit: "exit-a",
+      available_exits: ["exit-a", "exit-b"],
+    },
+    resolution: {
+      policy_revision: 7,
+      subject: "node-visual-01",
+      mode: { mode: "fixed", exit: "exit-a" },
+      default_exit: "exit-a",
+      fixed_exit: "exit-a",
+      candidates: [
+        {
+          exit: "exit-a",
+          selectable: true,
+          reason_code: "exit.selection.available",
+          source: { scope: "member" },
+          availability: {
+            state: "available",
+            source: "coordinator_health",
+            observed_at_unix_ms: Date.UTC(2026, 0, 2, 3, 4, 5),
+            declared_available: true,
+            reason_code: null,
+          },
+          is_default: true,
+        },
+      ],
+      selectable_exits: ["exit-a"],
+      selected_default: "exit-a",
+    },
+    evaluated_at_unix_ms: Date.UTC(2026, 0, 2, 3, 4, 6),
+    reason_code: null,
+  };
+  const authoritativeSnapshot: NodeSnapshot = {
+    ...baseSnapshot,
+    memberships: [
+      {
+        ...policySnapshot(false).memberships![0],
+        network_name: "home",
+        network_id: networkId,
+      },
+    ],
+    configuration: {
+      ...baseSnapshot.configuration!,
+      networks: baseSnapshot.configuration!.networks.map((network) =>
+        network.network_name === "home"
+          ? { ...network, exit_node: "config-fallback-exit" }
+          : network,
+      ),
+    },
+    exit_selections: [selection],
+  };
+
+  it("separates network Exit configuration from the authoritative selection source", () => {
+    render(exitElement(authoritativeSnapshot));
+    const summary = screen.getByTestId("exit-connection-summary");
+    const globalSession = within(summary).getByTestId(
+      "exit-global-traffic-session",
+    );
+    const home = within(summary).getByTestId("exit-connection-home");
+    const value = (key: string) =>
+      within(home).getByText(translated(key)).nextElementSibling;
+
+    expect(globalSession).toHaveTextContent(translated("exit_summary.protection"));
+    expect(globalSession).toHaveTextContent(
+      translated("traffic.session.not_observed"),
+    );
+    expect(home).not.toHaveTextContent(translated("exit_summary.protection"));
+    expect(value("exit_summary.configured_exit")).toHaveTextContent("exit-a");
+    expect(value("exit_governance.mode")).toHaveTextContent(
+      translated("exit_governance.mode.fixed"),
+    );
+    expect(value("exit_governance.default_exit")).toHaveTextContent("exit-a");
+    expect(value("exit_governance.fixed_exit")).toHaveTextContent("exit-a");
+    expect(value("exit_summary.selection_source")).toHaveTextContent(
+      translated("exit_governance.source.member"),
+    );
+    expect(home).not.toHaveTextContent("config-fallback-exit");
+  });
+
+  it("renders one authoritative traffic session instead of a state per network", () => {
+    render(
+      exitElement({
+        ...authoritativeSnapshot,
+        traffic_session: {
+          state: "fail_closed",
+          changed_at_unix_ms: 5_000,
+          reason_code: "traffic.session.exit_lost",
+          failure: "exit_unavailable",
+          events: [],
+        },
+      }),
+    );
+
+    const summary = screen.getByTestId("exit-connection-summary");
+    const globalSession = within(summary).getByTestId(
+      "exit-global-traffic-session",
+    );
+    const home = within(summary).getByTestId("exit-connection-home");
+    const studio = within(summary).getByTestId("exit-connection-studio");
+
+    expect(summary.querySelectorAll("[data-traffic-state]")).toHaveLength(1);
+    expect(globalSession).toHaveAttribute("data-traffic-state");
+    expect(globalSession).toHaveTextContent(
+      translated("traffic.session.state.fail_closed"),
+    );
+    for (const network of [home, studio]) {
+      expect(network).not.toHaveTextContent(
+        translated("traffic.session.state.fail_closed"),
+      );
+      expect(network.querySelector("[data-traffic-state]")).toBeNull();
+      expect(network.querySelector("[data-protected]")).toBeNull();
+    }
+  });
+
+  it("pairs repeated Exit node IDs with peers from the same network", () => {
+    const sharedExit = "exit-shared";
+    const homeNetworkId = "net_exit_home";
+    const studioNetworkId = "net_exit_studio";
+    const selectionFor = (
+      networkId: string,
+    ): NodeExitSelectionSnapshot => ({
+      ...selection,
+      network_id: networkId,
+      resolution: {
+        ...selection.resolution!,
+        candidates: selection.resolution!.candidates.map((candidate) => ({
+          ...candidate,
+          exit: sharedExit,
+        })),
+        selectable_exits: [sharedExit],
+        selected_default: sharedExit,
+      },
+    });
+    const membership = policySnapshot(false).memberships![0];
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      memberships: [
+        { ...membership, network_name: "home", network_id: homeNetworkId },
+        {
+          ...membership,
+          network_name: "studio",
+          network_id: studioNetworkId,
+        },
+      ],
+      exit_selections: [
+        selectionFor(homeNetworkId),
+        selectionFor(studioNetworkId),
+      ],
+      peers: [
+        {
+          ...baseSnapshot.peers[0],
+          peer_id: sharedExit,
+          network_name: "studio",
+          rtt_us: 22_000,
+          loss_rate: 0.2,
+        },
+        {
+          ...baseSnapshot.peers[1],
+          peer_id: sharedExit,
+          network_name: "home",
+          rtt_us: 11_000,
+          loss_rate: 0.1,
+        },
+      ],
+    };
+
+    render(exitElement(snapshot));
+    const peers = within(screen.getByTestId("exit-quality")).getAllByTestId(
+      `exit-quality-peer-${sharedExit}`,
+    );
+
+    expect(peers).toHaveLength(2);
+    expect(peers[0]).toHaveTextContent("home / exit-shared");
+    expect(
+      peers[0].querySelector("[data-rtt-us]"),
+    ).toHaveAttribute("data-rtt-us", "11000");
+    expect(
+      peers[0].querySelector("[data-loss-rate]"),
+    ).toHaveAttribute("data-loss-rate", "0.1");
+    expect(peers[1]).toHaveTextContent("studio / exit-shared");
+    expect(
+      peers[1].querySelector("[data-rtt-us]"),
+    ).toHaveAttribute("data-rtt-us", "22000");
+    expect(
+      peers[1].querySelector("[data-loss-rate]"),
+    ).toHaveAttribute("data-loss-rate", "0.2");
+  });
+
+  it("shows an explicit empty state when no network Exit configuration exists", () => {
+    render(
+      exitElement({
+        ...baseSnapshot,
+        configuration: { ...baseSnapshot.configuration!, networks: [] },
+      }),
+    );
+    const summary = screen.getByTestId("exit-connection-summary");
+    expect(summary).toHaveTextContent(translated("exit_summary.no_network"));
+    expect(within(summary).queryByTestId(/^exit-connection-/)).not.toBeInTheDocument();
+  });
+
+  it("does not infer protection or leak freedom without diagnostics", () => {
+    const onRequestAction = vi.fn();
+    render(exitElement(baseSnapshot, null, onRequestAction));
+    const quality = screen.getByTestId("exit-quality");
+
+    expect(quality).toHaveTextContent(translated("exit_quality.not_run"));
+    expect(quality).toHaveTextContent(
+      translated("exit_quality.throughput_unavailable"),
+    );
+    expect(quality).not.toHaveTextContent(
+      translated("diagnostic.leak_detection.state.leak_free"),
+    );
+    expect(quality).not.toHaveTextContent(
+      translated("traffic.session.state.protected"),
+    );
+
+    fireEvent.click(
+      within(quality).getByRole("button", {
+        name: translated("exit_quality.run"),
+      }),
+    );
+    expect(onRequestAction).toHaveBeenCalledWith("get_node_diagnostics");
+  });
+
+  it("distinguishes fresh evidence from stale evidence using server max ages", () => {
+    const now = Date.UTC(2026, 0, 2, 3, 5, 0);
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const { rerender } = render(
+      exitElement(baseSnapshot, diagnosticsWithEvidence(now - 1_000)),
+    );
+
+    let quality = screen.getByTestId("exit-quality-diagnostics");
+    for (const labelText of [
+      translated("exit_quality.health"),
+      translated("exit_quality.leak"),
+    ]) {
+      const term = within(quality).getByText(labelText);
+      expect(term.closest("div")?.querySelector("dd")).toHaveTextContent(
+        translated("exit_quality.evidence_fresh"),
+      );
+    }
+
+    rerender(
+      exitElement(
+        baseSnapshot,
+        diagnosticsWithEvidence(now - 60_001),
+      ),
+    );
+    quality = screen.getByTestId("exit-quality-diagnostics");
+    for (const labelText of [
+      translated("exit_quality.health"),
+      translated("exit_quality.leak"),
+    ]) {
+      const term = within(quality).getByText(labelText);
+      expect(term.closest("div")?.querySelector("dd")).toHaveTextContent(
+        translated("exit_quality.evidence_stale"),
+      );
+    }
+  });
+
+  it("orders Exit activity newest-first, deduplicates audit IDs, and keeps recovery events", () => {
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      traffic_session: {
+        state: "protected",
+        changed_at_unix_ms: 5_000,
+        events: [
+          {
+            kind: "failure_detected",
+            state: "fail_closed",
+            occurred_at_unix_ms: 3_000,
+            reason_code: "exit.unavailable",
+            failure: "handshake_interrupted",
+          },
+          {
+            kind: "protection_established",
+            state: "protected",
+            occurred_at_unix_ms: 5_000,
+            reason_code: "recovery.complete",
+            failure: null,
+          },
+        ],
+      },
+      recent_activity: [
+        activity({
+          audit_id: "audit-exit-role",
+          action: "network.role.set",
+          occurred_at_unix_ms: 4_000,
+        }),
+        activity({
+          audit_id: "audit-exit-role",
+          action: "network.role.set",
+          occurred_at_unix_ms: 4_000,
+        }),
+        activity({
+          audit_id: "audit-unrelated",
+          action: "network.create",
+          occurred_at_unix_ms: 6_000,
+        }),
+      ],
+    };
+
+    render(exitElement(snapshot));
+    const timeline = screen.getByTestId("exit-activity");
+    const titles = Array.from(
+      timeline.querySelectorAll<HTMLElement>(".diagnostic-row strong"),
+    ).map((node) => node.textContent);
+
+    expect(titles).toEqual([
+      translated("traffic.session.event.protection_established"),
+      translated("activity.action.network.role.set"),
+      translated("traffic.session.event.failure_detected"),
+    ]);
+    expect(timeline).toHaveTextContent("recovery.complete");
+    expect(
+      within(timeline).getAllByText(
+        translated("activity.action.network.role.set"),
+      ),
+    ).toHaveLength(1);
   });
 });
 

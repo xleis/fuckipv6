@@ -58,7 +58,7 @@
 | W9 成员、组与拓扑 | `[~]` | P1 | W8 | 成员列表、邀请审批、组目录和拓扑聚合已完成；多网络视觉、交互、性能与 E2E 进行中 |
 | W10 安全与隐私 | `[x]` | P1 | W9 | 权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计、安全页面状态和可重复治理证据闭环均已完成 |
 | W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约和 W11-09 隔离路由 E2E/失败关闭/网络报告已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，GPUI 已接入同一页面的权威投影、规则/目标/影响展示和精确跳转，真实命中观测、GPUI/WebUI/Android 三端一致、生产后端接线及真实平台监听/适配待完成 |
-| W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05 已完成：本机启停、贡献治理、管理员选择、分层健康与故障切换/撤权均有权威状态和自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收，并通过真实增量证明 IPv4 目标流量归入规范 IPv6 Peer 身份且两侧 Peer/网络级 P2P 计数一致；两侧 Exit 可达和 W12-09 的 24 小时稳定性/自动清理仍待完成 |
+| W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05、W12-08 和 W12-10 已完成：本机启停、贡献治理、管理员选择、分层健康、故障切换/撤权及 Exit 页面权威分层均有自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收，并通过真实增量证明 IPv4 目标流量归入规范 IPv6 Peer 身份且两侧 Peer/网络级 P2P 计数一致；W12-07 的非浏览器完整文件下载与自动 DNS 清理、两侧 Exit 可达和 W12-09 的 24 小时稳定性仍待完成 |
 | W13 Relay | `[ ]` | P1 | W10 | 授权、配额、健康、回退 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
 | W15 File | `[ ]` | P2 | W10 | ACL、配额、上传下载、续传 |
@@ -3001,16 +3001,34 @@ IPv4 `/32`、IPv6 `/128` TUN 路由在传输前后保持存在，未创建 IPv4 
 
 **验收**：没有 24 小时稳定性与多场景证据时，不得给出“抗干扰强”或“长期可用”结论。
 
-### W12-10 Exit 页面与活动 `[ ]`
+### W12-10 Exit 页面与活动 `[x]`
 
-- [ ] 本机贡献、网络策略、候选 Exit 和当前连接摘要分层展示；
-- [ ] 默认/固定 Exit 及选择来源清楚；
-- [ ] 健康、吞吐、延迟、泄漏和最近测试结果有新鲜度；
-- [ ] Exit 故障、切换、撤权和恢复活动可追踪；
-- [ ] 普通成员不能看到未授权 Exit 或敏感出口信息；
-- [ ] 所有危险变更展示影响和确认；
-- [ ] GPUI/WebUI/Android 完成视觉和语义一致；
-- [ ] 禁止静态质量图、伪测速和“已连接”占位。
+- [x] 本机贡献、网络策略、候选 Exit 和当前连接摘要分层展示；
+- [x] 默认/固定 Exit 及选择来源清楚；
+- [x] 健康、吞吐、延迟、泄漏和最近测试结果有新鲜度；
+- [x] Exit 故障、切换、撤权和恢复活动可追踪；
+- [x] 普通成员不能看到未授权 Exit 或敏感出口信息；
+- [x] 所有危险变更展示影响和确认；
+- [x] GPUI/WebUI 完成视觉和语义一致，Android 完成契约 DTO 语义覆盖；
+- [x] 禁止静态质量图、伪测速和“已连接”占位。
+
+Exit 页面直接消费 `NodeSnapshot.traffic_session`、`exit_selections`、`local_exit`、peer 健康证据和活动记录，不根据页面内状态自行推断
+“已连接”或“无泄漏”。`traffic_session` 是本机全局单一权威会话，因此 GPUI/WebUI 只渲染一个
+`exit-global-traffic-session` 摘要；每个网络的 Exit 选择、模式、默认/固定 Exit 与选择来源独立展示，避免把全局保护状态错误复制到
+各网络行。未知、陈旧、目录缺失和成员无权查看的策略分别显示为未观测、不可用或隐藏，不把未知解释为可用。
+
+质量区只使用新鲜的候选可用性、P2P 健康、RTT 和丢包证据；没有权威吞吐结果时明确显示不可用，不生成伪测速。活动时间线合并
+`traffic_session.events` 与 Exit 相关审计记录，覆盖故障、迁移、撤权和恢复。local Exit 启停、Exit 角色等危险变更先展示影响并二次确认。
+GPUI 的 Exit 页面同时复用节点运行页的六层诊断卡，WebUI 使用相同的权威诊断投影。
+
+**验证通过（2026-11-12）**：`cargo fmt --all -- --check`、`cargo test -p fuckipv6-client exit_page --lib`（1 passed）、
+`cargo test -p fuckipv6-client exit_node_page --lib`（4 passed）、
+`cargo test -p fuckipv6-client diagnostics_card --lib`（2 passed）、WebUI `npm run typecheck`、`npm run lint`、
+`npm test -- --run`（289 passed）和 `npm run build`；`node scripts/test_i18n_runtime.mjs` 与 `jq empty
+crates/common/assets/i18n.json` 通过。WebUI 测试覆盖权威候选集合/阻断原因/来源、全局流量会话唯一投影、网络选择隔离、
+质量证据新鲜度、故障/切换/撤权活动和危险变更确认；GPUI 测试覆盖同一投影与诊断卡复用。Android 仅有
+`contracts/android` 生成的 DTO 和契约测试，原生 Compose 页面属于 W16，本项不宣称 Android UI 已实现。
+构建仅保留既有 Vite 非 module i18n 提示和大于 500 kB chunk 警告。
 
 **验收**：Exit 的功能、质量证据、权限和 UI 状态使用同一权威来源。
 

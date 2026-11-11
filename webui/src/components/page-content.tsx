@@ -62,6 +62,7 @@ import type {
   NodeDiagnosticLayer,
   NodeDiagnosticState,
   NodeDiagnosticsSnapshot,
+  NodeExitSelectionSnapshot,
   NodeLogEntry,
   NodeNetworkSnapshot,
   NodePeerSnapshot,
@@ -728,8 +729,13 @@ const OVERVIEW_ACTIVITY_ACTIONS = new Set([
   "network.start",
   "network.stop",
   "network.restart",
+  "network.leave",
   "routing.update",
   "network.role.set",
+  "membership.change",
+  "policy.apply",
+  "policy.rollback",
+  "node.local_exit.set",
   "network.blacklist.ban",
   "network.blacklist.unban",
   "network.allocation.update",
@@ -3874,14 +3880,441 @@ function ExitGovernanceCard({
   );
 }
 
+function exitSelectionForNetwork(
+  snapshot: NodeSnapshot,
+  networkName: string,
+): NodeExitSelectionSnapshot | undefined {
+  const networkId = snapshot.memberships?.find(
+    (membership) => membership.network_name === networkName,
+  )?.network_id;
+  return (snapshot.exit_selections ?? []).find(
+    (selection) => selection.network_id === networkId,
+  );
+}
+
+function evidenceFreshnessLabel(
+  locale: Locale,
+  observedAt: number | null | undefined,
+  maxAgeMs: number | null | undefined,
+  now = Date.now(),
+): string {
+  if (!observedAt) return label(locale, "exit_quality.evidence_not_observed");
+  if (maxAgeMs == null || maxAgeMs <= 0)
+    return label(locale, "exit_quality.evidence_stale");
+  return label(
+    locale,
+    now - observedAt <= maxAgeMs
+      ? "exit_quality.evidence_fresh"
+      : "exit_quality.evidence_stale",
+  );
+}
+
+function ExitConnectionSummary({
+  snapshot,
+  locale,
+}: {
+  snapshot: NodeSnapshot;
+  locale: Locale;
+}) {
+  const traffic = trafficProtectionStatus(snapshot, locale);
+  const configs = snapshot.configuration?.networks ?? [];
+  return (
+    <section
+      className="surface-card"
+      data-testid="exit-connection-summary"
+      aria-labelledby="exit-connection-summary-title"
+    >
+      <div className="card-heading">
+        <h3 id="exit-connection-summary-title">
+          {label(locale, "exit_summary.title")}
+        </h3>
+        <span
+          className={`status-pill ${traffic.tone}`}
+        >
+          {traffic.label}
+        </span>
+      </div>
+      <p className="muted-copy">{label(locale, "exit_summary.hint")}</p>
+      <dl
+        className="detail-list"
+        data-testid="exit-global-traffic-session"
+        data-traffic-state={traffic.id}
+      >
+        <div>
+          <dt>{label(locale, "exit_summary.protection")}</dt>
+          <dd data-protected={traffic.id === "protected"}>
+            {traffic.label}
+            {" · "}
+            {traffic.detail}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "traffic.session.changed_at")}</dt>
+          <dd>
+            {snapshot.traffic_session?.changed_at_unix_ms
+              ? formatTimestamp(
+                  locale,
+                  snapshot.traffic_session.changed_at_unix_ms,
+                )
+              : label(locale, "traffic.session.not_observed")}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "traffic.session.reason")}</dt>
+          <dd>
+            {snapshot.traffic_session?.reason_code ??
+              label(locale, "traffic.session.no_reason")}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "traffic.session.failure")}</dt>
+          <dd>
+            {snapshot.traffic_session?.failure
+              ? trafficFailureLabel(locale, snapshot.traffic_session.failure)
+              : label(locale, "common.none")}
+          </dd>
+        </div>
+      </dl>
+      <h4 className="exit-connection-subheading">
+        {label(locale, "exit_summary.network_selections")}
+      </h4>
+      {configs.length === 0 ? (
+        <p className="empty-copy">{label(locale, "exit_summary.no_network")}</p>
+      ) : (
+        <div className="exit-governance-networks">
+          {configs.map((config) => {
+            const selection = exitSelectionForNetwork(
+              snapshot,
+              config.network_name,
+            );
+            const resolution = selection?.resolution;
+            const selectedExit = resolution?.selected_default ?? config.exit_node;
+            const selectedCandidate = resolution?.candidates.find(
+              (candidate) => candidate.exit === selectedExit,
+            );
+            return (
+              <article
+                className="exit-governance-network"
+                data-testid={`exit-connection-${config.network_name}`}
+                key={config.network_name}
+              >
+                <div className="card-heading">
+                  <h4>{config.network_name}</h4>
+                </div>
+                <dl className="detail-list">
+                  <div>
+                    <dt>{label(locale, "exit_summary.configured_exit")}</dt>
+                    <dd>
+                      <code>{selectedExit || label(locale, "common.none")}</code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "exit_governance.mode")}</dt>
+                    <dd>
+                      {resolution
+                        ? label(locale, `exit_governance.mode.${resolution.mode.mode}`)
+                        : label(locale, "common.not_available")}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "exit_governance.default_exit")}</dt>
+                    <dd>
+                      <code>
+                        {resolution?.default_exit ?? label(locale, "common.none")}
+                      </code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "exit_governance.fixed_exit")}</dt>
+                    <dd>
+                      <code>
+                        {resolution?.fixed_exit ?? label(locale, "common.none")}
+                      </code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "exit_summary.selection_source")}</dt>
+                    <dd>
+                      {selectedCandidate
+                        ? exitSelectionSourceLabel(locale, selectedCandidate.source)
+                        : label(locale, "common.not_available")}
+                    </dd>
+                  </div>
+                </dl>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ExitQualityCard({
+  snapshot,
+  locale,
+  diagnostics,
+  onRequestAction,
+}: {
+  snapshot: NodeSnapshot;
+  locale: Locale;
+  diagnostics: NodeDiagnosticsSnapshot | null;
+  onRequestAction(actionId: string): void;
+}) {
+  const peers = (snapshot.exit_selections ?? []).flatMap((selection) => {
+    const networkName = snapshot.memberships?.find(
+      (membership) => membership.network_id === selection.network_id,
+    )?.network_name;
+    const selectableExitIds = new Set(
+      selection.resolution?.selectable_exits ?? [],
+    );
+    const candidates =
+      selection.resolution?.candidates.filter(
+        (candidate) =>
+          networkName != null &&
+          candidate.selectable &&
+          selectableExitIds.has(candidate.exit),
+      ) ?? [];
+    return candidates.flatMap((candidate) => {
+      const peer = snapshot.peers.find(
+        (item) =>
+          item.network_name === networkName &&
+          item.peer_id === candidate.exit,
+      );
+      return peer ? [{ candidate, peer }] : [];
+    });
+  });
+  const health = diagnostics?.exit_health;
+  const healthAssessment = diagnostics?.exit_health_assessment;
+  const leakAssessment = diagnostics?.leak_detection_assessment;
+  const leak = diagnostics?.leak_detection;
+  return (
+    <section
+      className="surface-card"
+      data-testid="exit-quality"
+      aria-labelledby="exit-quality-title"
+    >
+      <div className="card-heading">
+        <h3 id="exit-quality-title">{label(locale, "exit_quality.title")}</h3>
+        <button
+          className="secondary-button"
+          type="button"
+          onClick={() => onRequestAction("get_node_diagnostics")}
+        >
+          {label(locale, diagnostics ? "diagnostic.run" : "exit_quality.run")}
+        </button>
+      </div>
+      {!diagnostics ? (
+        <div className="empty-state" data-testid="exit-quality-not-run">
+          <strong>{label(locale, "exit_quality.not_run")}</strong>
+          <span>{label(locale, "exit_quality.not_run_detail")}</span>
+        </div>
+      ) : (
+        <dl className="detail-list" data-testid="exit-quality-diagnostics">
+          <div>
+            <dt>{label(locale, "exit_quality.completed_at")}</dt>
+            <dd>{formatTimestamp(locale, diagnostics.completed_at_unix_ms)}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "exit_quality.health")}</dt>
+            <dd>
+              {label(
+                locale,
+                `diagnostic.exit_health.state.${healthAssessment?.state ?? "unknown"}`,
+              )}
+              {" · "}
+              {evidenceFreshnessLabel(
+                locale,
+                healthAssessment?.observed_at_unix_ms,
+                health?.max_age_ms,
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "exit_quality.leak")}</dt>
+            <dd>
+              {label(
+                locale,
+                `diagnostic.leak_detection.state.${leakAssessment?.state ?? "insufficient_evidence"}`,
+              )}
+              {" · "}
+              {evidenceFreshnessLabel(
+                locale,
+                leak?.generated_at_unix_ms,
+                leak?.max_age_ms,
+              )}
+            </dd>
+          </div>
+        </dl>
+      )}
+      <div className="exit-governance-candidates">
+        <h5>{label(locale, "exit_quality.peers")}</h5>
+        {peers.length === 0 ? (
+          <p className="empty-copy">{label(locale, "exit_quality.no_peers")}</p>
+        ) : (
+          peers.map(({ candidate, peer }) => (
+            <div
+              className={`exit-governance-candidate ${
+                peer.online && peer.p2p_healthy ? "good" : "bad"
+              }`}
+              data-testid={`exit-quality-peer-${peer.peer_id}`}
+              key={`${peer.network_name}:${peer.peer_id}`}
+            >
+              <div className="exit-governance-candidate-heading">
+                <code>
+                  {peer.network_name} / {peer.peer_id}
+                </code>
+                <span className={`status-pill ${peer.online ? "good" : "bad"}`}>
+                  {label(
+                    locale,
+                    peer.online ? "status.peer.online" : "status.peer.offline",
+                  )}
+                </span>
+              </div>
+              <dl className="detail-list">
+                <div>
+                  <dt>{label(locale, "exit_quality.availability")}</dt>
+                  <dd>
+                    {label(
+                      locale,
+                      `member_directory.exit.state.${candidate.availability.state}`,
+                    )}
+                    {" · "}
+                    {evidenceFreshnessLabel(
+                      locale,
+                      candidate.availability.observed_at_unix_ms,
+                      90_000,
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{label(locale, "exit_quality.p2p_health")}</dt>
+                  <dd>
+                    {label(
+                      locale,
+                      peer.p2p_healthy
+                        ? "peer.health.healthy"
+                        : "peer.health.unhealthy",
+                    )}
+                    {" · "}
+                    {label(
+                      locale,
+                      peer.p2p_active
+                        ? "peer.transport.p2p"
+                        : "peer.transport.relay",
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{label(locale, "exit_quality.latency")}</dt>
+                  <dd data-rtt-us={peer.rtt_us ?? ""}>
+                    {peer.rtt_us == null
+                      ? label(locale, "common.not_available")
+                      : tr(locale, "peer.rtt", {
+                          value: (peer.rtt_us / 1000).toFixed(1),
+                        })}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{label(locale, "exit_quality.loss")}</dt>
+                  <dd data-loss-rate={peer.loss_rate}>
+                    {tr(locale, "peer.loss", {
+                      value: (peer.loss_rate * 100).toFixed(1),
+                    })}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+          ))
+        )}
+        <p className="empty-copy">{label(locale, "exit_quality.throughput_unavailable")}</p>
+      </div>
+    </section>
+  );
+}
+
+function ExitActivityTimeline({
+  snapshot,
+  locale,
+}: {
+  snapshot: NodeSnapshot;
+  locale: Locale;
+}) {
+  const sessionEvents = (snapshot.traffic_session?.events ?? []).map((event) => ({
+    id: `traffic-${event.occurred_at_unix_ms}-${event.kind}`,
+    occurredAt: event.occurred_at_unix_ms,
+    title: label(locale, `traffic.session.event.${event.kind}`),
+    detail: [
+      label(locale, `traffic.session.state.${event.state}`),
+      event.reason_code,
+      event.failure ? trafficFailureLabel(locale, event.failure) : null,
+    ]
+      .filter(Boolean)
+      .join(" · "),
+  }));
+  const exitActivityActions = new Set([
+    "network.role.set",
+    "node.local_exit.set",
+    "routing.update",
+    "membership.change",
+    "policy.apply",
+    "policy.rollback",
+  ]);
+  const auditEvents = orderedActivityEntries(snapshot.recent_activity ?? [])
+    .filter((entry) => exitActivityActions.has(entry.action))
+    .map((entry) => ({
+      id: entry.audit_id,
+      occurredAt: entry.occurred_at_unix_ms,
+      title: activityTitle(entry, locale),
+      detail: tr(locale, "overview.activity.detail", {
+        outcome: label(locale, `activity.outcome.${entry.outcome}`),
+        resource: entry.resource,
+      }),
+    }));
+  const events = [...sessionEvents, ...auditEvents]
+    .sort((left, right) => right.occurredAt - left.occurredAt)
+    .slice(0, 12);
+  return (
+    <section
+      className="surface-card"
+      data-testid="exit-activity"
+      aria-labelledby="exit-activity-title"
+    >
+      <div className="card-heading">
+        <h3 id="exit-activity-title">{label(locale, "exit_activity.title")}</h3>
+        <Activity size={17} />
+      </div>
+      {events.length === 0 ? (
+        <p className="empty-copy">{label(locale, "exit_activity.empty")}</p>
+      ) : (
+        <div className="diagnostic-list">
+          {events.map((event) => (
+            <article className="diagnostic-row" key={event.id}>
+              <div>
+                <strong>{event.title}</strong>
+                <p>{event.detail}</p>
+              </div>
+              <time>{formatTimestamp(locale, event.occurredAt)}</time>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function CapabilityPage({
   snapshot,
   locale,
   kind,
+  recentDiagnostics,
+  onRequestAction,
 }: {
   snapshot: NodeSnapshot;
   locale: Locale;
   kind: "exit" | "relay";
+  recentDiagnostics: NodeDiagnosticsSnapshot | null;
+  onRequestAction(actionId: string): void;
 }) {
   const capability = snapshot.capabilities?.capabilities.find(
     (item) => item.kind === kind,
@@ -4009,7 +4442,17 @@ function CapabilityPage({
         </section>
       ) : null}
       {kind === "exit" ? (
-        <ExitGovernanceCard snapshot={snapshot} locale={locale} />
+        <>
+          <ExitConnectionSummary snapshot={snapshot} locale={locale} />
+          <ExitQualityCard
+            snapshot={snapshot}
+            locale={locale}
+            diagnostics={recentDiagnostics}
+            onRequestAction={onRequestAction}
+          />
+          <ExitGovernanceCard snapshot={snapshot} locale={locale} />
+          <ExitActivityTimeline snapshot={snapshot} locale={locale} />
+        </>
       ) : null}
       {kind === "exit" && snapshot.exit_node_capabilities ? (
         <section className="surface-card">
@@ -4555,12 +4998,24 @@ export function PageContent(props: PageContentProps) {
       break;
     case "exit_node":
       content = (
-        <CapabilityPage snapshot={snapshot} locale={locale} kind="exit" />
+        <CapabilityPage
+          snapshot={snapshot}
+          locale={locale}
+          kind="exit"
+          recentDiagnostics={props.recentDiagnostics}
+          onRequestAction={props.onRequestAction}
+        />
       );
       break;
     case "relay":
       content = (
-        <CapabilityPage snapshot={snapshot} locale={locale} kind="relay" />
+        <CapabilityPage
+          snapshot={snapshot}
+          locale={locale}
+          kind="relay"
+          recentDiagnostics={props.recentDiagnostics}
+          onRequestAction={props.onRequestAction}
+        />
       );
       break;
     case "logs":

@@ -669,16 +669,16 @@ impl RelayAccessPolicy {
         &self,
         node_id: &NodeId,
         now_unix_ms: u64,
-    ) -> RelayAuthorizationDecision {
+    ) -> DomainResult<RelayAuthorizationDecision> {
         let provider = self.provider_decision(now_unix_ms);
         let Some(member) = self.members.get(node_id) else {
-            return RelayAuthorizationDecision {
+            return Ok(RelayAuthorizationDecision {
                 allowed: false,
                 final_reason: Some(EffectiveAccessReason::DefaultDenied),
                 provider,
                 consumer: None,
                 limits: self.limits.clone(),
-            };
+            });
         };
 
         let mut request = Self::request();
@@ -709,14 +709,19 @@ impl RelayAccessPolicy {
         } else {
             Some(consumer.reason)
         };
-        let limits = member.limits.intersection(&self.limits).unwrap_or_default();
-        RelayAuthorizationDecision {
+        let limits = member.limits.intersection(&self.limits).map_err(|error| {
+            DomainError::new(
+                error.code(),
+                format!("Relay effective limit intersection failed: {error}"),
+            )
+        })?;
+        Ok(RelayAuthorizationDecision {
             allowed,
             provider,
             consumer: Some(consumer),
             final_reason,
             limits,
-        }
+        })
     }
 
     /// Recompute all member decisions after a live policy change. Existing
@@ -726,11 +731,13 @@ impl RelayAccessPolicy {
         now_unix_ms: u64,
     ) -> DomainResult<BTreeMap<NodeId, RelayAuthorizationDecision>> {
         self.validate_at(now_unix_ms)?;
-        Ok(self
-            .members
+        self.members
             .keys()
-            .map(|node_id| (node_id.clone(), self.authorize_member(node_id, now_unix_ms)))
-            .collect())
+            .map(|node_id| {
+                self.authorize_member(node_id, now_unix_ms)
+                    .map(|decision| (node_id.clone(), decision))
+            })
+            .collect()
     }
 }
 
@@ -1158,7 +1165,12 @@ mod tests {
     fn authorization_requires_network_and_provider_allows() {
         let (network_id, provider, member) = ids();
         let policy = policy(network_id.clone(), provider, member.clone());
-        assert!(policy.authorize_member(&member, now()).allowed);
+        assert!(
+            policy
+                .authorize_member(&member, now())
+                .expect("authorization")
+                .allowed
+        );
 
         let mut vetoed = policy.clone();
         vetoed.provider.local_access_policy = Some(NodeLocalAccessPolicy {
@@ -1175,7 +1187,9 @@ mod tests {
             exit_contribution: None,
             rules: vec![role_rule(&network_id, NetworkRole::Owner)],
         });
-        let decision = vetoed.authorize_member(&member, now());
+        let decision = vetoed
+            .authorize_member(&member, now())
+            .expect("authorization");
         assert!(!decision.allowed);
         assert_eq!(
             decision.final_reason,
@@ -1190,7 +1204,9 @@ mod tests {
 
         let mut missing_provider_local = policy.clone();
         missing_provider_local.provider.local_rules.clear();
-        let denied = missing_provider_local.authorize_member(&member, now());
+        let denied = missing_provider_local
+            .authorize_member(&member, now())
+            .expect("authorization");
         assert!(!denied.allowed);
         assert_eq!(
             denied.final_reason,
@@ -1204,7 +1220,9 @@ mod tests {
             .unwrap()
             .local_rules
             .clear();
-        let denied = missing_consumer_local.authorize_member(&member, now());
+        let denied = missing_consumer_local
+            .authorize_member(&member, now())
+            .expect("authorization");
         assert!(!denied.allowed);
         assert_eq!(
             denied.final_reason,
@@ -1213,7 +1231,9 @@ mod tests {
 
         let mut missing_network = policy;
         missing_network.network_rules.clear();
-        let denied = missing_network.authorize_member(&member, now());
+        let denied = missing_network
+            .authorize_member(&member, now())
+            .expect("authorization");
         assert!(!denied.allowed);
         assert_eq!(
             denied.final_reason,
@@ -1231,10 +1251,17 @@ mod tests {
         policy.network_rules = vec![role_rule(&network_id, NetworkRole::Member)];
         policy.provider.role = NetworkRole::Member;
         policy.provider.local_rules = vec![role_rule(&network_id, NetworkRole::Member)];
-        assert!(policy.authorize_member(&member, now()).allowed);
+        assert!(
+            policy
+                .authorize_member(&member, now())
+                .expect("authorization")
+                .allowed
+        );
 
         policy.provider.membership_active = false;
-        let denied = policy.authorize_member(&member, now());
+        let denied = policy
+            .authorize_member(&member, now())
+            .expect("authorization");
         assert!(!denied.allowed);
         assert_eq!(
             denied.final_reason,
@@ -1261,7 +1288,9 @@ mod tests {
             }],
             grants: Vec::<NetworkAclGrant>::new(),
         });
-        let decision = policy.authorize_member(&member, now());
+        let decision = policy
+            .authorize_member(&member, now())
+            .expect("authorization");
         assert!(!decision.allowed);
         assert_eq!(
             decision.final_reason,
@@ -1277,7 +1306,12 @@ mod tests {
             .network_rules
             .push(role_rule(&network_id, NetworkRole::TemporaryCoordinator));
         policy.members.get_mut(&member).unwrap().role = NetworkRole::TemporaryCoordinator;
-        assert!(!policy.authorize_member(&member, now()).allowed);
+        assert!(
+            !policy
+                .authorize_member(&member, now())
+                .expect("authorization")
+                .allowed
+        );
     }
 
     #[test]

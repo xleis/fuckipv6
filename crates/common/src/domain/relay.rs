@@ -348,6 +348,11 @@ impl RelayMemberPolicyContext {
 pub struct RelayAccessPolicy {
     pub network_id: NetworkId,
     pub provider_node_id: NodeId,
+    /// Trusted role, membership and local-policy context for the node that
+    /// provides Relay service. This is deliberately separate from `members`:
+    /// the provider may itself be a consumer, but its contribution permission
+    /// must never be inferred as an owner permission.
+    pub provider: RelayMemberPolicyContext,
     pub revision: u64,
     pub updated_at_unix_ms: u64,
     #[serde(default)]
@@ -403,6 +408,8 @@ impl RelayAccessPolicy {
             }
             policy.validate_at(now_unix_ms)?;
         }
+        self.provider
+            .validate_for(&self.provider_node_id, now_unix_ms)?;
         for (node_id, context) in &self.members {
             context.validate_for(node_id, now_unix_ms)?;
         }
@@ -428,11 +435,11 @@ impl RelayAccessPolicy {
         let context = super::permissions::AccessContext {
             network_id: self.network_id.clone(),
             actor: self.provider_node_id.clone(),
-            role: NetworkRole::Owner,
-            groups: BTreeSet::new(),
-            membership_active: true,
-            recent_reauthentication: true,
-            emergency_coordinator: false,
+            role: self.provider.role,
+            groups: self.provider.groups.clone(),
+            membership_active: self.provider.membership_active,
+            recent_reauthentication: self.provider.recent_reauthentication,
+            emergency_coordinator: self.provider.role == NetworkRole::TemporaryCoordinator,
         };
         evaluate_effective_access(
             &self.provider_local_rules,
@@ -539,6 +546,7 @@ pub enum RelayAuthorizationDenial {
     DuplicateCandidate,
     NoCandidate,
     LoopDetected,
+    Cooldown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -552,6 +560,10 @@ pub struct RelayCandidate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u32>,
     pub consecutive_failures: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attempt_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub loop_detected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -590,6 +602,10 @@ impl RelaySelectionPolicy {
 pub struct RelaySelectionOutcome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected: Option<RelayCandidate>,
+    /// Eligible candidates in deterministic attempt order. Never contains more
+    /// than `max_attempts` entries and is empty when selection fails closed.
+    #[serde(default)]
+    pub candidates: Vec<RelayCandidate>,
     pub attempts_allowed: u32,
     pub denied: Vec<RelaySelectionDenial>,
     pub fail_closed: bool,
@@ -639,10 +655,19 @@ pub fn select_relay_candidate(
             Some(RelayAuthorizationDenial::Unauthorized)
         } else if candidate.observed_at_unix_ms > now_unix_ms || age > policy.max_health_age_ms {
             Some(RelayAuthorizationDenial::StaleHealth)
+        } else if candidate.loop_detected {
+            Some(RelayAuthorizationDenial::LoopDetected)
         } else if !candidate.health.is_usable()
             || candidate.consecutive_failures > policy.max_consecutive_failures
         {
             Some(RelayAuthorizationDenial::Unhealthy)
+        } else if candidate
+            .last_attempt_at_unix_ms
+            .is_some_and(|last_attempt| {
+                now_unix_ms.saturating_sub(last_attempt) < policy.switch_cooldown_ms
+            })
+        {
+            Some(RelayAuthorizationDenial::Cooldown)
         } else {
             None
         };
@@ -667,27 +692,22 @@ pub fn select_relay_candidate(
     if eligible.is_empty() {
         return Ok(RelaySelectionOutcome {
             selected: None,
+            candidates: Vec::new(),
             attempts_allowed: 0,
             denied,
             fail_closed: true,
             reason: "relay.selection.no_eligible_candidate".into(),
         });
     }
-    if !policy.allow_fallback && eligible.len() > 1 {
-        // A single explicit candidate is still safe. Multiple candidates require
-        // fallback to be enabled explicitly, otherwise selection is ambiguous.
-        return Ok(RelaySelectionOutcome {
-            selected: None,
-            attempts_allowed: 0,
-            denied,
-            fail_closed: true,
-            reason: "relay.selection.fallback_disabled".into(),
-        });
-    }
-
-    let attempts_allowed = policy.max_attempts.min(eligible.len() as u32);
+    let attempts_allowed = if policy.allow_fallback {
+        policy.max_attempts.min(eligible.len() as u32)
+    } else {
+        1
+    };
+    eligible.truncate(attempts_allowed as usize);
     Ok(RelaySelectionOutcome {
         selected: eligible.first().cloned(),
+        candidates: eligible,
         attempts_allowed,
         denied,
         fail_closed: false,
@@ -861,6 +881,14 @@ mod tests {
         RelayAccessPolicy {
             network_id: network_id.clone(),
             provider_node_id: provider.clone(),
+            provider: RelayMemberPolicyContext {
+                role: NetworkRole::Owner,
+                groups: BTreeSet::new(),
+                membership_active: true,
+                recent_reauthentication: true,
+                local_rules: vec![role_rule(&network_id, NetworkRole::Owner)],
+                local_access_policy: None,
+            },
             revision: 1,
             updated_at_unix_ms: now() - 1_000,
             network_rules: vec![
@@ -938,6 +966,28 @@ mod tests {
         assert_eq!(
             decision.final_reason,
             Some(EffectiveAccessReason::LocalContributionVeto)
+        );
+    }
+
+    #[test]
+    fn provider_authorization_uses_trusted_member_context() {
+        let (network_id, provider, member) = ids();
+        let mut policy = policy(network_id.clone(), provider, member.clone());
+        // A non-owner may provide Relay when both network and node-local rules
+        // explicitly allow that role. The old owner fallback would fail closed
+        // here because no Owner allow exists.
+        policy.network_rules = vec![role_rule(&network_id, NetworkRole::Member)];
+        policy.provider.role = NetworkRole::Member;
+        policy.provider.local_rules = vec![role_rule(&network_id, NetworkRole::Member)];
+        policy.provider_local_rules = vec![role_rule(&network_id, NetworkRole::Member)];
+        assert!(policy.authorize_member(&member, now()).allowed);
+
+        policy.provider.membership_active = false;
+        let denied = policy.authorize_member(&member, now());
+        assert!(!denied.allowed);
+        assert_eq!(
+            denied.final_reason,
+            Some(EffectiveAccessReason::DefaultDenied)
         );
     }
 
@@ -1029,6 +1079,8 @@ mod tests {
             load_percent: 10,
             latency_ms: Some(20),
             consecutive_failures: failures,
+            last_attempt_at_unix_ms: None,
+            loop_detected: false,
         };
         let outcome = select_relay_candidate(
             &[
@@ -1068,6 +1120,73 @@ mod tests {
         .unwrap();
         assert!(none.fail_closed);
         assert!(none.selected.is_none());
+    }
+
+    #[test]
+    fn selection_returns_ordered_attempts_and_honors_cooldown_and_loops() {
+        let candidate = |id: &str,
+                         latency_ms: u32,
+                         last_attempt_at_unix_ms: Option<u64>,
+                         loop_detected: bool| RelayCandidate {
+            relay_id: id.into(),
+            authorized: true,
+            health: RelayHealthStatus::Healthy,
+            observed_at_unix_ms: now() - 1_000,
+            load_percent: 10,
+            latency_ms: Some(latency_ms),
+            consecutive_failures: 0,
+            last_attempt_at_unix_ms,
+            loop_detected,
+        };
+        let outcome = select_relay_candidate(
+            &[
+                candidate("slow", 80, None, false),
+                candidate("fast", 10, None, false),
+                candidate("cooling", 5, Some(now() - 100), false),
+                candidate("loop", 1, None, true),
+            ],
+            &RelaySelectionPolicy {
+                max_attempts: 2,
+                switch_cooldown_ms: 5_000,
+                ..RelaySelectionPolicy::default()
+            },
+            now(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome
+                .candidates
+                .iter()
+                .map(|candidate| candidate.relay_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fast", "slow"]
+        );
+        assert_eq!(outcome.selected.unwrap().relay_id, "fast");
+        assert_eq!(outcome.attempts_allowed, 2);
+        assert!(outcome.denied.iter().any(|denial| {
+            denial.relay_id == "cooling" && denial.reason == RelayAuthorizationDenial::Cooldown
+        }));
+        assert!(outcome.denied.iter().any(|denial| {
+            denial.relay_id == "loop" && denial.reason == RelayAuthorizationDenial::LoopDetected
+        }));
+
+        let no_fallback = select_relay_candidate(
+            &[
+                candidate("first", 20, None, false),
+                candidate("second", 10, None, false),
+            ],
+            &RelaySelectionPolicy {
+                max_attempts: 2,
+                allow_fallback: false,
+                ..RelaySelectionPolicy::default()
+            },
+            now(),
+        )
+        .unwrap();
+        assert_eq!(no_fallback.attempts_allowed, 1);
+        assert_eq!(no_fallback.candidates.len(), 1);
+        assert_eq!(no_fallback.selected.unwrap().relay_id, "second");
     }
 
     #[test]

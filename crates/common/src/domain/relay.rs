@@ -60,7 +60,10 @@ impl RelayLimitPolicy {
                 "Relay limits must be positive when present",
             ));
         }
-        if self.max_cpu_percent.is_some_and(|value| !(1..=100).contains(&value)) {
+        if self
+            .max_cpu_percent
+            .is_some_and(|value| !(1..=100).contains(&value))
+        {
             return Err(DomainError::invalid_value(
                 "Relay CPU percentage must be between 1 and 100",
             ));
@@ -247,12 +250,14 @@ impl RelayHealthSnapshot {
         if quota_limited {
             issues.push(RelayHealthIssue::QuotaExhausted);
         }
-        if limits.max_connections.zip(usage.active_connections).is_some_and(
-            |(limit, active)| active.saturating_mul(10) >= limit.saturating_mul(9),
-        ) || limits
-            .max_concurrent_streams
-            .zip(usage.active_streams)
+        if limits
+            .max_connections
+            .zip(Some(usage.active_connections))
             .is_some_and(|(limit, active)| active.saturating_mul(10) >= limit.saturating_mul(9))
+            || limits
+                .max_concurrent_streams
+                .zip(Some(usage.active_streams))
+                .is_some_and(|(limit, active)| active.saturating_mul(10) >= limit.saturating_mul(9))
         {
             issues.push(RelayHealthIssue::ResourcePressure);
         }
@@ -443,7 +448,11 @@ impl RelayAccessPolicy {
     /// Authorize one member for Relay use. The provider side is checked first;
     /// an expired or denied provider policy fails closed even when the network
     /// would allow the member.
-    pub fn authorize_member(&self, node_id: &NodeId, now_unix_ms: u64) -> RelayAuthorizationDecision {
+    pub fn authorize_member(
+        &self,
+        node_id: &NodeId,
+        now_unix_ms: u64,
+    ) -> RelayAuthorizationDecision {
         let provider = self.provider_decision(now_unix_ms);
         let Some(member) = self.members.get(node_id) else {
             return RelayAuthorizationDecision {
@@ -628,9 +637,7 @@ pub fn select_relay_candidate(
         let age = now_unix_ms.saturating_sub(candidate.observed_at_unix_ms);
         let reason = if !candidate.authorized {
             Some(RelayAuthorizationDenial::Unauthorized)
-        } else if candidate.observed_at_unix_ms > now_unix_ms
-            || age > policy.max_health_age_ms
-        {
+        } else if candidate.observed_at_unix_ms > now_unix_ms || age > policy.max_health_age_ms {
             Some(RelayAuthorizationDenial::StaleHealth)
         } else if !candidate.health.is_usable()
             || candidate.consecutive_failures > policy.max_consecutive_failures
@@ -953,22 +960,20 @@ mod tests {
         });
         let decision = policy.authorize_member(&member, now());
         assert!(!decision.allowed);
-        assert_eq!(decision.final_reason, Some(EffectiveAccessReason::ExplicitDeny));
+        assert_eq!(
+            decision.final_reason,
+            Some(EffectiveAccessReason::ExplicitDeny)
+        );
     }
 
     #[test]
     fn temporary_coordinator_cannot_use_relay() {
         let (network_id, provider, member) = ids();
         let mut policy = policy(network_id.clone(), provider, member.clone());
-        policy.network_rules.push(role_rule(
-            &network_id,
-            NetworkRole::TemporaryCoordinator,
-        ));
         policy
-            .members
-            .get_mut(&member)
-            .unwrap()
-            .role = NetworkRole::TemporaryCoordinator;
+            .network_rules
+            .push(role_rule(&network_id, NetworkRole::TemporaryCoordinator));
+        policy.members.get_mut(&member).unwrap().role = NetworkRole::TemporaryCoordinator;
         assert!(!policy.authorize_member(&member, now()).allowed);
     }
 
@@ -1026,7 +1031,7 @@ mod tests {
         let outcome = select_relay_candidate(
             &[
                 candidate("a", RelayHealthStatus::Healthy, 0),
-                candidate("b", RelayHealthStatus::Unhealthy, 0),
+                candidate("b", RelayHealthStatus::Unavailable, 0),
                 candidate("a", RelayHealthStatus::Healthy, 0),
             ],
             &RelaySelectionPolicy {
@@ -1039,7 +1044,11 @@ mod tests {
         assert_eq!(outcome.selected.unwrap().relay_id, "a");
         assert_eq!(outcome.attempts_allowed, 1);
         assert_eq!(
-            outcome.denied.iter().map(|item| &item.reason).collect::<Vec<_>>(),
+            outcome
+                .denied
+                .iter()
+                .map(|item| &item.reason)
+                .collect::<Vec<_>>(),
             vec![
                 &RelayAuthorizationDenial::Unhealthy,
                 &RelayAuthorizationDenial::DuplicateCandidate

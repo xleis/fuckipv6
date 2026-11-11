@@ -3,11 +3,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use fuckipv6_common::domain::{
-    AuditEntry, AuditId, AuditLog, AuditOutcome, DomainError, FileShare, NodeId,
+    AccessContext, AuditEntry, AuditId, AuditLog, AuditOutcome, DomainError, FileAccessDenial,
+    FileAccessRequest, FileAction, FileQuotaError, FileQuotaUsage, FileShare, NodeId,
 };
 use tokio::sync::watch;
 
 use super::error::{FileShareError, FileShareErrorCode, FileShareResult};
+use super::quota::{self, UploadQuotaRequest};
 use super::root::LocalShareRoot;
 
 /// Local runtime state for one owner-selected File share. Keeping capability,
@@ -281,6 +283,79 @@ impl FileShareCapability {
             .and_then(|state| state.as_ref().map(|enabled| enabled.share.clone()))
     }
 
+    /// Authorize one metadata or transfer operation against the current share
+    /// revision before invoking the filesystem adapter. The returned permit
+    /// must be checked at each long-running chunk or resume boundary.
+    pub fn with_authorized<T>(
+        &self,
+        request: &FileAccessRequest,
+        context: &AccessContext,
+        network_enabled: bool,
+        operation: impl FnOnce(&LocalShareRoot, &FileShare, FileCapabilityPermit) -> FileShareResult<T>,
+    ) -> Result<T, FileCapabilityError> {
+        let state = self
+            .inner
+            .state
+            .read()
+            .map_err(|_| FileCapabilityError::Unavailable)?;
+        let enabled = state.as_ref().ok_or(FileCapabilityError::Disabled)?;
+        enabled
+            .share
+            .authorize(request, context, network_enabled)
+            .map_err(FileCapabilityError::AccessDenied)?;
+        let permit = FileCapabilityPermit {
+            access_epoch: enabled.access_epoch,
+            epoch_rx: self.inner.epoch_tx.subscribe(),
+        };
+        operation(&enabled.root, &enabled.share, permit).map_err(FileCapabilityError::Filesystem)
+    }
+
+    /// Fail-closed upload admission. The callback-supplied member usage and
+    /// active-transfer count must come from authenticated server-side state.
+    pub fn check_upload_quota(
+        &self,
+        request: UploadQuotaRequest,
+        context: &AccessContext,
+        network_enabled: bool,
+    ) -> Result<FileQuotaUsage, FileCapabilityError> {
+        if request.path.is_root() {
+            return Err(FileCapabilityError::Filesystem(FileShareError::new(
+                FileShareErrorCode::PathRejected,
+                "uploads require a non-root shared path",
+            )));
+        }
+        let state = self
+            .inner
+            .state
+            .read()
+            .map_err(|_| FileCapabilityError::Unavailable)?;
+        let enabled = state.as_ref().ok_or(FileCapabilityError::Disabled)?;
+        enabled
+            .share
+            .authorize(
+                &FileAccessRequest {
+                    path: request.path,
+                    action: FileAction::Upload,
+                },
+                context,
+                network_enabled,
+            )
+            .map_err(FileCapabilityError::AccessDenied)?;
+        let usage = enabled
+            .root
+            .directory_usage(request.scan_limits)
+            .map_err(FileCapabilityError::Filesystem)?;
+        quota::check_upload(
+            &enabled.share.quota,
+            &usage,
+            request.upload_bytes,
+            request.replaced_bytes,
+            request.member_bytes,
+            request.concurrent_transfers,
+        )
+        .map_err(FileCapabilityError::Quota)
+    }
+
     /// Start a filesystem operation under a read lease. Disable waits for the
     /// closure to finish, then advances the access epoch so any long-lived
     /// transfer permit is revoked.
@@ -397,6 +472,10 @@ pub enum FileCapabilityError {
     InvalidShare(#[source] DomainError),
     #[error(transparent)]
     Filesystem(FileShareError),
+    #[error("File access was denied")]
+    AccessDenied(FileAccessDenial),
+    #[error("File quota was exceeded")]
+    Quota(FileQuotaError),
     #[error("File capability access was revoked")]
     Revoked,
     #[error("File configuration audit could not be recorded")]

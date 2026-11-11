@@ -17,6 +17,7 @@ pub enum FileShareErrorCode {
     ParentUnavailable,
     TargetExists,
     TempUnavailable,
+    ScanLimitExceeded,
     Io,
 }
 
@@ -34,6 +35,7 @@ impl FileShareErrorCode {
             Self::ParentUnavailable => "file_parent_unavailable",
             Self::TargetExists => "file_target_exists",
             Self::TempUnavailable => "file_temp_unavailable",
+            Self::ScanLimitExceeded => "file_scan_limit_exceeded",
             Self::Io => "file_io_error",
         }
     }

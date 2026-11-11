@@ -1,5 +1,5 @@
 #[cfg(unix)]
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,7 @@ use std::os::unix::fs::MetadataExt;
 use fuckipv6_common::domain::{ShareRoot, SharedPath, SymlinkPolicy};
 
 use super::error::{FileShareError, FileShareErrorCode, FileShareResult};
+use super::quota::{DirectoryUsage, QuotaScanLimits};
 
 pub const FILE_TEMP_DIRECTORY: &str = ".fuckipv6-tmp";
 
@@ -193,6 +194,39 @@ impl LocalShareRoot {
             }
         }
         Ok(())
+    }
+
+    /// Scan local quota usage with bounded depth and entry count. Symbolic
+    /// links and special files are counted as entries but never followed or
+    /// charged as file bytes. The internal staging directory is excluded.
+    pub fn directory_usage(&self, limits: QuotaScanLimits) -> FileShareResult<DirectoryUsage> {
+        const MAX_SCAN_DEPTH: usize = 256;
+        if limits.max_entries == 0 || limits.max_depth > MAX_SCAN_DEPTH {
+            return Err(FileShareError::new(
+                FileShareErrorCode::ScanLimitExceeded,
+                "quota scan limits are invalid",
+            ));
+        }
+
+        #[cfg(unix)]
+        {
+            let root = self.root_file.try_clone().map_err(|error| {
+                FileShareError::io(
+                    FileShareErrorCode::Io,
+                    "shared root handle could not be cloned",
+                    error,
+                )
+            })?;
+            let mut usage = DirectoryUsage::default();
+            scan_directory_unix(root.as_raw_fd(), 0, limits, &mut usage)?;
+            Ok(usage)
+        }
+        #[cfg(not(unix))]
+        {
+            let mut usage = DirectoryUsage::default();
+            scan_directory_portable(&self.canonical_root, 0, limits, &mut usage)?;
+            Ok(usage)
+        }
     }
 
     pub fn open_read(&self, path: &SharedPath) -> FileShareResult<File> {
@@ -760,6 +794,239 @@ impl LocalShareRoot {
 }
 
 #[cfg(unix)]
+struct DirectoryStream(*mut libc::DIR);
+
+#[cfg(unix)]
+impl DirectoryStream {
+    fn open(directory: libc::c_int) -> FileShareResult<Self> {
+        let duplicate = unsafe { libc::fcntl(directory, libc::F_DUPFD_CLOEXEC, 0) };
+        if duplicate < 0 {
+            return Err(FileShareError::io(
+                FileShareErrorCode::Io,
+                "shared directory could not be duplicated for scanning",
+                io::Error::last_os_error(),
+            ));
+        }
+        // `F_DUPFD_CLOEXEC` shares the directory offset with the anchored
+        // descriptor. Rewind before handing it to `fdopendir`; otherwise each
+        // quota scan after the first would begin at EOF.
+        if unsafe { libc::lseek(duplicate, 0, libc::SEEK_SET) } < 0 {
+            let error = io::Error::last_os_error();
+            unsafe {
+                libc::close(duplicate);
+            }
+            return Err(FileShareError::io(
+                FileShareErrorCode::Io,
+                "shared directory could not be rewound for scanning",
+                error,
+            ));
+        }
+        let stream = unsafe { libc::fdopendir(duplicate) };
+        if stream.is_null() {
+            let error = io::Error::last_os_error();
+            unsafe {
+                libc::close(duplicate);
+            }
+            return Err(FileShareError::io(
+                FileShareErrorCode::Io,
+                "shared directory could not be opened for scanning",
+                error,
+            ));
+        }
+        Ok(Self(stream))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for DirectoryStream {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                libc::closedir(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn scan_directory_unix(
+    directory_fd: libc::c_int,
+    depth: usize,
+    limits: QuotaScanLimits,
+    usage: &mut DirectoryUsage,
+) -> FileShareResult<()> {
+    let stream = DirectoryStream::open(directory_fd)?;
+    let directory_fd = unsafe { libc::dirfd(stream.0) };
+    if directory_fd < 0 {
+        return Err(FileShareError::io(
+            FileShareErrorCode::Io,
+            "shared directory descriptor is unavailable",
+            io::Error::last_os_error(),
+        ));
+    }
+
+    loop {
+        clear_errno();
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            if let Some(error) = take_errno_error() {
+                return Err(FileShareError::io(
+                    FileShareErrorCode::Io,
+                    "shared directory could not be scanned",
+                    error,
+                ));
+            }
+            break;
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        let name_bytes = name.to_bytes();
+        if name_bytes == b"." || name_bytes == b".." {
+            continue;
+        }
+        if depth == 0 && name_bytes == FILE_TEMP_DIRECTORY.as_bytes() {
+            continue;
+        }
+        count_scanned_entry(limits, usage)?;
+
+        let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+        let stat_result = unsafe {
+            libc::fstatat(
+                directory_fd,
+                name.as_ptr(),
+                &mut metadata,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if stat_result != 0 {
+            return Err(FileShareError::io(
+                FileShareErrorCode::Io,
+                "shared directory entry could not be inspected safely",
+                io::Error::last_os_error(),
+            ));
+        }
+        match metadata.st_mode & libc::S_IFMT {
+            libc::S_IFLNK => usage.symlinks_skipped = usage.symlinks_skipped.saturating_add(1),
+            libc::S_IFDIR => {
+                if depth >= limits.max_depth {
+                    return Err(FileShareError::new(
+                        FileShareErrorCode::ScanLimitExceeded,
+                        "shared directory scan depth limit was reached",
+                    ));
+                }
+                let child_fd = unsafe {
+                    libc::openat(
+                        directory_fd,
+                        name.as_ptr(),
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                    )
+                };
+                if child_fd < 0 {
+                    return Err(FileShareError::io(
+                        FileShareErrorCode::Io,
+                        "shared directory changed while being scanned",
+                        io::Error::last_os_error(),
+                    ));
+                }
+                let child = unsafe { File::from_raw_fd(child_fd) };
+                scan_directory_unix(child.as_raw_fd(), depth + 1, limits, usage)?;
+            }
+            libc::S_IFREG => {
+                let size = u64::try_from(metadata.st_size).unwrap_or(0);
+                usage.total_bytes = usage.total_bytes.saturating_add(size);
+            }
+            _ => {
+                usage.special_files_skipped = usage.special_files_skipped.saturating_add(1);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn clear_errno() {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe {
+        *libc::__errno_location() = 0;
+    }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    unsafe {
+        *libc::__error() = 0;
+    }
+}
+
+#[cfg(unix)]
+fn take_errno_error() -> Option<io::Error> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let code = unsafe { *libc::__errno_location() };
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let code = unsafe { *libc::__error() };
+    (code != 0).then(|| io::Error::from_raw_os_error(code))
+}
+
+fn count_scanned_entry(limits: QuotaScanLimits, usage: &mut DirectoryUsage) -> FileShareResult<()> {
+    if usage.entries >= limits.max_entries {
+        return Err(FileShareError::new(
+            FileShareErrorCode::ScanLimitExceeded,
+            "shared directory entry limit was reached",
+        ));
+    }
+    usage.entries = usage.entries.saturating_add(1);
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn scan_directory_portable(
+    directory: &Path,
+    depth: usize,
+    limits: QuotaScanLimits,
+    usage: &mut DirectoryUsage,
+) -> FileShareResult<()> {
+    let entries = fs::read_dir(directory).map_err(|error| {
+        FileShareError::io(
+            FileShareErrorCode::Io,
+            "shared directory could not be scanned",
+            error,
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            FileShareError::io(
+                FileShareErrorCode::Io,
+                "shared directory entry could not be read",
+                error,
+            )
+        })?;
+        if depth == 0 && entry.file_name() == FILE_TEMP_DIRECTORY {
+            continue;
+        }
+        count_scanned_entry(limits, usage)?;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|error| {
+            FileShareError::io(
+                FileShareErrorCode::Io,
+                "shared directory entry could not be inspected safely",
+                error,
+            )
+        })?;
+        if metadata.file_type().is_symlink() {
+            usage.symlinks_skipped = usage.symlinks_skipped.saturating_add(1);
+        } else if metadata.is_dir() {
+            if depth >= limits.max_depth {
+                return Err(FileShareError::new(
+                    FileShareErrorCode::ScanLimitExceeded,
+                    "shared directory scan depth limit was reached",
+                ));
+            }
+            scan_directory_portable(&entry.path(), depth + 1, limits, usage)?;
+        } else if metadata.is_file() {
+            usage.total_bytes = usage.total_bytes.saturating_add(metadata.len());
+        } else {
+            usage.special_files_skipped = usage.special_files_skipped.saturating_add(1);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn final_component(path: &SharedPath) -> FileShareResult<CString> {
     path.components()
         .last()
@@ -936,6 +1203,65 @@ mod tests {
             .open_write_new(&path)
             .expect_err("existing file must not be replaced");
         assert_eq!(error.code(), FileShareErrorCode::TargetExists);
+    }
+
+    #[test]
+    fn quota_scan_counts_nested_files_and_excludes_staging() {
+        let (temporary, share) = root();
+        fs::create_dir(temporary.path().join("docs")).expect("directory");
+        fs::write(temporary.path().join("root.txt"), b"root").expect("root file");
+        fs::write(temporary.path().join("docs/readme.md"), b"readme").expect("nested file");
+        let staging = temporary.path().join(FILE_TEMP_DIRECTORY);
+        fs::create_dir(&staging).expect("staging");
+        fs::write(staging.join("partial"), vec![0_u8; 1024]).expect("partial upload");
+
+        let usage = share
+            .directory_usage(QuotaScanLimits::default())
+            .expect("scan");
+        assert_eq!(usage.total_bytes, 10);
+        assert_eq!(usage.entries, 3);
+        assert_eq!(usage.symlinks_skipped, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quota_scan_never_follows_symbolic_links() {
+        let (temporary, share) = root();
+        let outside = tempfile::tempdir().expect("outside");
+        fs::write(outside.path().join("secret"), vec![0_u8; 4096]).expect("outside file");
+        std::os::unix::fs::symlink(outside.path(), temporary.path().join("outside"))
+            .expect("symlink");
+
+        let usage = share
+            .directory_usage(QuotaScanLimits::default())
+            .expect("scan");
+        assert_eq!(usage.total_bytes, 0);
+        assert_eq!(usage.entries, 1);
+        assert_eq!(usage.symlinks_skipped, 1);
+    }
+
+    #[test]
+    fn quota_scan_enforces_entry_and_depth_limits() {
+        let (temporary, share) = root();
+        fs::write(temporary.path().join("one"), b"1").expect("file");
+        fs::write(temporary.path().join("two"), b"2").expect("file");
+        let entry_error = share
+            .directory_usage(QuotaScanLimits {
+                max_depth: 8,
+                max_entries: 1,
+            })
+            .expect_err("entry limit must fail closed");
+        assert_eq!(entry_error.code(), FileShareErrorCode::ScanLimitExceeded);
+
+        fs::create_dir(temporary.path().join("nested")).expect("directory");
+        fs::write(temporary.path().join("nested/three"), b"3").expect("file");
+        let depth_error = share
+            .directory_usage(QuotaScanLimits {
+                max_depth: 0,
+                max_entries: 100,
+            })
+            .expect_err("depth limit must fail closed");
+        assert_eq!(depth_error.code(), FileShareErrorCode::ScanLimitExceeded);
     }
 
     #[test]

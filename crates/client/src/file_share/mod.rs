@@ -8,6 +8,7 @@
 
 mod capability;
 mod error;
+mod quota;
 mod root;
 mod temp;
 
@@ -16,5 +17,6 @@ pub use capability::{
     FileShareCapability,
 };
 pub use error::{FileShareError, FileShareErrorCode, FileShareResult};
+pub use quota::{DirectoryUsage, QuotaScanLimits, UploadQuotaRequest};
 pub use root::{LocalShareRoot, FILE_TEMP_DIRECTORY};
 pub use temp::TemporaryUpload;

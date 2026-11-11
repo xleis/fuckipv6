@@ -10,6 +10,7 @@ mod capability;
 mod error;
 mod quota;
 mod root;
+mod runtime;
 mod temp;
 mod transfer;
 
@@ -20,6 +21,10 @@ pub use capability::{
 pub use error::{FileShareError, FileShareErrorCode, FileShareResult};
 pub use quota::{DirectoryUsage, QuotaScanLimits, UploadQuotaRequest};
 pub use root::{LocalShareRoot, FILE_TEMP_DIRECTORY};
+pub use runtime::{
+    FileRuntime, FileRuntimeError, FileRuntimeSnapshot, RuntimeDownloadTransfer,
+    RuntimeUploadTransfer,
+};
 pub use temp::TemporaryUpload;
 pub use transfer::{
     DownloadTransfer, FileTransferAdapter, FileTransferAdapterError, TransferOperationCancellation,

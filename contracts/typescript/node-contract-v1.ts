@@ -1572,6 +1572,7 @@ export type NodeDiscoveryIndexState = "idle" | "pending" | "ready" | "degraded" 
 export type NodeEmbeddedServiceSnapshot = {
   "network_name": string;
   "relay_addr"?: string | null;
+  "relay_health"?: RelayHealthSnapshot | null;
   "relay_status"?: NodeEmbeddedServiceStatus;
   "signaling_addr"?: string | null;
   "status": NodeEmbeddedServiceStatus;
@@ -2811,6 +2812,7 @@ export type ProjectedNodeCommandResult = {
 export type ProjectedNodeEmbeddedServiceSnapshot = {
   "network_name": string;
   "relay_addr"?: string | null;
+  "relay_health"?: RelayHealthSnapshot | null;
   "relay_status"?: NodeEmbeddedServiceStatus;
   "signaling_addr"?: string | null;
   "status": NodeEmbeddedServiceStatus;
@@ -2975,7 +2977,66 @@ export type ProjectedNodeSnapshot = {
 
 export type PublicKey = string;
 
-export type ResourceKind = "network" | "ownership" | "membership" | "group" | "security_policy" | "traffic_policy" | "capability" | "exit_grant" | "file_share" | "audit" | "coordinator_term" | "keys";
+export type RelayHealthIssue = "listener_unavailable" | "network_reachability_unknown" | "network_unreachable" | "protocol_error" | "quota_exhausted" | "resource_pressure" | "forwarding_stalled" | "forwarding_not_observed" | "authorization_expired" | "cpu_measurement_unsupported" | "memory_measurement_unsupported";
+
+export type RelayHealthSnapshot = {
+  "authorization_valid": boolean;
+  "forwarding_observed": boolean;
+  "issues": Array<RelayHealthIssue>;
+  "lifecycle": RelayLifecycleState;
+  "limit_sources"?: Array<RelayLimitSource>;
+  "limits": RelayLimitPolicy;
+  "listen_addr"?: string | null;
+  "listener_bound": boolean;
+  "network_reachability": RelayReachabilityState;
+  "observed_at_unix_ms": number;
+  "quota_limited": boolean;
+  "reason_code"?: string | null;
+  "status": RelayHealthStatus;
+  "usage": RelayUsageSnapshot;
+};
+
+export type RelayHealthStatus = "unknown" | "healthy" | "degraded" | "unavailable" | "quota_exhausted";
+
+export type RelayLifecycleState = "stopped" | "starting" | "running" | "stopping" | "failed" | "unsupported";
+
+export type RelayLimitPolicy = {
+  "max_bandwidth_kbps"?: number | null;
+  "max_bytes"?: number | null;
+  "max_concurrent_streams"?: number | null;
+  "max_connections"?: number | null;
+  "max_cpu_percent"?: number | null;
+  "max_memory_bytes"?: number | null;
+  "max_session_duration_secs"?: number | null;
+  "quota_reset_at_unix_ms"?: number | null;
+};
+
+export type RelayLimitSource = "network_acl" | "node_local" | "provider_default";
+
+export type RelayMeasurementState = "unsupported" | "not_measured" | "measured";
+
+export type RelayReachabilityState = "unknown" | "reachable" | "unreachable";
+
+export type RelayUsageSnapshot = {
+  "active_connections": number;
+  "active_sessions": number;
+  "active_streams": number;
+  "cpu_measurement"?: RelayMeasurementState;
+  "forwarded_bytes": number;
+  "forwarded_packets": number;
+  "last_forwarded_at_unix_ms"?: number | null;
+  "last_forwarding_failure_at_unix_ms"?: number | null;
+  "memory_measurement"?: RelayMeasurementState;
+  "observed_cpu_percent"?: number | null;
+  "observed_memory_bytes"?: number | null;
+  "oldest_session_age_secs": number;
+  "quota_reset_at_unix_ms"?: number | null;
+  "quota_started_at_unix_ms"?: number | null;
+  "rejected_connections": number;
+  "rejected_packets": number;
+};
+
+export type ResourceKind = "network" | "ownership" | "membership" | "group" | "security_policy" | "traffic_policy" | "capability" | "relay" | "exit_grant" | "file_share" | "audit" | "coordinator_term" | "keys";
 
 export type SecurityRuleId = string;
 

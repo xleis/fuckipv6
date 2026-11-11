@@ -1916,6 +1916,17 @@
             "null"
           ]
         },
+        "relay_health": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RelayHealthSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Authoritative Relay health from the node runtime. Missing means no\nhealth evidence is available; adapters must not infer health from the\nlistener address or lifecycle status."
+        },
         "relay_status": {
           "$ref": "#/$defs/NodeEmbeddedServiceStatus",
           "default": "stopped",
@@ -3520,6 +3531,335 @@
       "description": "Ed25519 public key bytes encoded as URL-safe base64 without padding.",
       "type": "string"
     },
+    "RelayHealthIssue": {
+      "enum": [
+        "listener_unavailable",
+        "network_reachability_unknown",
+        "network_unreachable",
+        "protocol_error",
+        "quota_exhausted",
+        "resource_pressure",
+        "forwarding_stalled",
+        "forwarding_not_observed",
+        "authorization_expired",
+        "cpu_measurement_unsupported",
+        "memory_measurement_unsupported"
+      ],
+      "type": "string"
+    },
+    "RelayHealthSnapshot": {
+      "description": "Health is derived from observed state. It cannot be set to healthy by a UI\nmerely because an owner intent or capability declaration is present.",
+      "properties": {
+        "authorization_valid": {
+          "type": "boolean"
+        },
+        "forwarding_observed": {
+          "type": "boolean"
+        },
+        "issues": {
+          "items": {
+            "$ref": "#/$defs/RelayHealthIssue"
+          },
+          "type": "array"
+        },
+        "lifecycle": {
+          "$ref": "#/$defs/RelayLifecycleState"
+        },
+        "limit_sources": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RelayLimitSource"
+          },
+          "type": "array"
+        },
+        "limits": {
+          "$ref": "#/$defs/RelayLimitPolicy"
+        },
+        "listen_addr": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "listener_bound": {
+          "type": "boolean"
+        },
+        "network_reachability": {
+          "$ref": "#/$defs/RelayReachabilityState"
+        },
+        "observed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "quota_limited": {
+          "type": "boolean"
+        },
+        "reason_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/RelayHealthStatus"
+        },
+        "usage": {
+          "$ref": "#/$defs/RelayUsageSnapshot"
+        }
+      },
+      "required": [
+        "status",
+        "lifecycle",
+        "listener_bound",
+        "network_reachability",
+        "forwarding_observed",
+        "authorization_valid",
+        "quota_limited",
+        "limits",
+        "usage",
+        "issues",
+        "observed_at_unix_ms"
+      ],
+      "type": "object"
+    },
+    "RelayHealthStatus": {
+      "enum": [
+        "unknown",
+        "healthy",
+        "degraded",
+        "unavailable",
+        "quota_exhausted"
+      ],
+      "type": "string"
+    },
+    "RelayLifecycleState": {
+      "enum": [
+        "stopped",
+        "starting",
+        "running",
+        "stopping",
+        "failed",
+        "unsupported"
+      ],
+      "type": "string"
+    },
+    "RelayLimitPolicy": {
+      "description": "Hard limit set for one Relay direction. When a network policy and a node\npolicy both define a value, [`RelayLimitPolicy::intersection`] keeps the\nstricter one.",
+      "properties": {
+        "max_bandwidth_kbps": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_bytes": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_concurrent_streams": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_connections": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_cpu_percent": {
+          "default": null,
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_memory_bytes": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_session_duration_secs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "quota_reset_at_unix_ms": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RelayLimitSource": {
+      "enum": [
+        "network_acl",
+        "node_local",
+        "provider_default"
+      ],
+      "type": "string"
+    },
+    "RelayMeasurementState": {
+      "enum": [
+        "unsupported",
+        "not_measured",
+        "measured"
+      ],
+      "type": "string"
+    },
+    "RelayReachabilityState": {
+      "enum": [
+        "unknown",
+        "reachable",
+        "unreachable"
+      ],
+      "type": "string"
+    },
+    "RelayUsageSnapshot": {
+      "description": "Measured Relay work. This is a projection, not an accounting journal; the\nauthoritative audit remains the append-only audit chain.",
+      "properties": {
+        "active_connections": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "active_sessions": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "active_streams": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cpu_measurement": {
+          "$ref": "#/$defs/RelayMeasurementState",
+          "default": "not_measured"
+        },
+        "forwarded_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "forwarded_packets": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last_forwarded_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "last_forwarding_failure_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "memory_measurement": {
+          "$ref": "#/$defs/RelayMeasurementState",
+          "default": "not_measured"
+        },
+        "observed_cpu_percent": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "observed_memory_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "oldest_session_age_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "quota_reset_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "quota_started_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "rejected_connections": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rejected_packets": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "active_connections",
+        "active_streams",
+        "forwarded_packets",
+        "forwarded_bytes",
+        "rejected_packets",
+        "rejected_connections",
+        "active_sessions",
+        "oldest_session_age_secs"
+      ],
+      "type": "object"
+    },
     "ResourceKind": {
       "enum": [
         "network",
@@ -3529,6 +3869,7 @@
         "security_policy",
         "traffic_policy",
         "capability",
+        "relay",
         "exit_grant",
         "file_share",
         "audit",

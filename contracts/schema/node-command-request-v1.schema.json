@@ -3766,6 +3766,7 @@
         "security_policy",
         "traffic_policy",
         "capability",
+        "relay",
         "exit_grant",
         "file_share",
         "audit",

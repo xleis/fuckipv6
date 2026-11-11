@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "ConfirmedTrafficDirectFallback", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitContributionAvailability", "ExitContributionRestrictions", "ExitContributionTimeWindow", "ExitContributionTrafficQuota", "ExitHealthAssessment", "ExitHealthEvidence", "ExitHealthRetest", "ExitHealthSnapshot", "ExitNodeCapabilities", "ExitSelectionCandidate", "ExitSelectionGroupRule", "ExitSelectionMemberRule", "ExitSelectionPolicy", "ExitSelectionResolution", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "LeakDetectionAssessment", "LeakDetectionEnvironment", "LeakDetectionEvidence", "LeakDetectionSnapshot", "LocalExitCapabilitySnapshot", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkJoinPreview", "NetworkJoinTerms", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeApplyPolicyCommand", "NodeApplyTrafficPolicyCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeExitSelectionSnapshot", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodePreviewPolicyCommand", "NodePreviewPolicyRollbackCommand", "NodePreviewTrafficPolicyCommand", "NodePreviewTrafficPolicyRollbackCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRollbackPolicyCommand", "NodeRollbackTrafficPolicyCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetLocalExitCapabilityCommand", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTestTrafficPolicyCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyAffectedObject", "PolicyApplyResult", "PolicyCurrent", "PolicyDiffEntry", "PolicyHistoryEntry", "PolicyHistorySnapshot", "PolicyPrecedenceExplanation", "PolicyPreview", "PolicyRiskSummary", "PolicyRollbackResult", "PolicyRuleExplanation", "PolicySnapshot", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "PortRange", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TrafficDefaultPolicy", "TrafficFailureDecision", "TrafficFailurePolicy", "TrafficFlow", "TrafficMatch", "TrafficPolicy", "TrafficPolicyAffectedObject", "TrafficPolicyApplyResult", "TrafficPolicyCurrent", "TrafficPolicyDiffEntry", "TrafficPolicyDraft", "TrafficPolicyHistoryEntry", "TrafficPolicyHistorySnapshot", "TrafficPolicyPreview", "TrafficPolicyRollbackResult", "TrafficPolicyTestComparison", "TrafficPolicyTestDelta", "TrafficPolicyTestInput", "TrafficRoutingDefaultPolicyView", "TrafficRoutingHardConstraints", "TrafficRoutingHitSample", "TrafficRoutingMoveAction", "TrafficRoutingNavigation", "TrafficRoutingObservedHit", "TrafficRoutingPageModel", "TrafficRoutingRuleImpact", "TrafficRoutingRuleView", "TrafficRoutingTarget", "TrafficRoutingTargetRef", "TrafficRule", "TrafficRuleRisk", "TrafficSessionEvent", "TrafficSessionSnapshot", "TrafficSessionValidation", "TunCapabilities", "UiModeResolution", "ApplicationIdentity", "ExitContributionMemberScope", "ExitHealthTarget", "ExitSelectionMode", "ExitSelectionSource", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector", "TrafficAction", "TrafficMatchRisk", "TrafficPolicyTestContextSource", "TrafficPolicyTestDecision", "TrafficRoutingObservation", "TrafficRoutingRuleActivityEffect", "TrafficRoutingRuleImpactView", "TrafficRoutingWorkflowState"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "ConfirmedTrafficDirectFallback", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitContributionAvailability", "ExitContributionRestrictions", "ExitContributionTimeWindow", "ExitContributionTrafficQuota", "ExitHealthAssessment", "ExitHealthEvidence", "ExitHealthRetest", "ExitHealthSnapshot", "ExitNodeCapabilities", "ExitSelectionCandidate", "ExitSelectionGroupRule", "ExitSelectionMemberRule", "ExitSelectionPolicy", "ExitSelectionResolution", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "LeakDetectionAssessment", "LeakDetectionEnvironment", "LeakDetectionEvidence", "LeakDetectionSnapshot", "LocalExitCapabilitySnapshot", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkJoinPreview", "NetworkJoinTerms", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeApplyPolicyCommand", "NodeApplyTrafficPolicyCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeExitSelectionSnapshot", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodePreviewPolicyCommand", "NodePreviewPolicyRollbackCommand", "NodePreviewTrafficPolicyCommand", "NodePreviewTrafficPolicyRollbackCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRollbackPolicyCommand", "NodeRollbackTrafficPolicyCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetLocalExitCapabilityCommand", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTestTrafficPolicyCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyAffectedObject", "PolicyApplyResult", "PolicyCurrent", "PolicyDiffEntry", "PolicyHistoryEntry", "PolicyHistorySnapshot", "PolicyPrecedenceExplanation", "PolicyPreview", "PolicyRiskSummary", "PolicyRollbackResult", "PolicyRuleExplanation", "PolicySnapshot", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "PortRange", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "RelayHealthSnapshot", "RelayLimitPolicy", "RelayUsageSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TrafficDefaultPolicy", "TrafficFailureDecision", "TrafficFailurePolicy", "TrafficFlow", "TrafficMatch", "TrafficPolicy", "TrafficPolicyAffectedObject", "TrafficPolicyApplyResult", "TrafficPolicyCurrent", "TrafficPolicyDiffEntry", "TrafficPolicyDraft", "TrafficPolicyHistoryEntry", "TrafficPolicyHistorySnapshot", "TrafficPolicyPreview", "TrafficPolicyRollbackResult", "TrafficPolicyTestComparison", "TrafficPolicyTestDelta", "TrafficPolicyTestInput", "TrafficRoutingDefaultPolicyView", "TrafficRoutingHardConstraints", "TrafficRoutingHitSample", "TrafficRoutingMoveAction", "TrafficRoutingNavigation", "TrafficRoutingObservedHit", "TrafficRoutingPageModel", "TrafficRoutingRuleImpact", "TrafficRoutingRuleView", "TrafficRoutingTarget", "TrafficRoutingTargetRef", "TrafficRule", "TrafficRuleRisk", "TrafficSessionEvent", "TrafficSessionSnapshot", "TrafficSessionValidation", "TunCapabilities", "UiModeResolution", "ApplicationIdentity", "ExitContributionMemberScope", "ExitHealthTarget", "ExitSelectionMode", "ExitSelectionSource", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector", "TrafficAction", "TrafficMatchRisk", "TrafficPolicyTestContextSource", "TrafficPolicyTestDecision", "TrafficRoutingObservation", "TrafficRoutingRuleActivityEffect", "TrafficRoutingRuleImpactView", "TrafficRoutingWorkflowState"
     };
 
     public enum AclAction {
@@ -3105,6 +3105,169 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum RelayHealthIssue {
+        LISTENER_UNAVAILABLE("listener_unavailable"),
+        NETWORK_REACHABILITY_UNKNOWN("network_reachability_unknown"),
+        NETWORK_UNREACHABLE("network_unreachable"),
+        PROTOCOL_ERROR("protocol_error"),
+        QUOTA_EXHAUSTED("quota_exhausted"),
+        RESOURCE_PRESSURE("resource_pressure"),
+        FORWARDING_STALLED("forwarding_stalled"),
+        FORWARDING_NOT_OBSERVED("forwarding_not_observed"),
+        AUTHORIZATION_EXPIRED("authorization_expired"),
+        CPU_MEASUREMENT_UNSUPPORTED("cpu_measurement_unsupported"),
+        MEMORY_MEASUREMENT_UNSUPPORTED("memory_measurement_unsupported");
+
+        private final String wireName;
+
+        RelayHealthIssue(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static RelayHealthIssue fromWireName(String value) {
+            for (RelayHealthIssue candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown RelayHealthIssue wire value: " + value);
+        }
+    }
+
+    public enum RelayHealthStatus {
+        UNKNOWN("unknown"),
+        HEALTHY("healthy"),
+        DEGRADED("degraded"),
+        UNAVAILABLE("unavailable"),
+        QUOTA_EXHAUSTED("quota_exhausted");
+
+        private final String wireName;
+
+        RelayHealthStatus(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static RelayHealthStatus fromWireName(String value) {
+            for (RelayHealthStatus candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown RelayHealthStatus wire value: " + value);
+        }
+    }
+
+    public enum RelayLifecycleState {
+        STOPPED("stopped"),
+        STARTING("starting"),
+        RUNNING("running"),
+        STOPPING("stopping"),
+        FAILED("failed"),
+        UNSUPPORTED("unsupported");
+
+        private final String wireName;
+
+        RelayLifecycleState(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static RelayLifecycleState fromWireName(String value) {
+            for (RelayLifecycleState candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown RelayLifecycleState wire value: " + value);
+        }
+    }
+
+    public enum RelayLimitSource {
+        NETWORK_ACL("network_acl"),
+        NODE_LOCAL("node_local"),
+        PROVIDER_DEFAULT("provider_default");
+
+        private final String wireName;
+
+        RelayLimitSource(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static RelayLimitSource fromWireName(String value) {
+            for (RelayLimitSource candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown RelayLimitSource wire value: " + value);
+        }
+    }
+
+    public enum RelayMeasurementState {
+        UNSUPPORTED("unsupported"),
+        NOT_MEASURED("not_measured"),
+        MEASURED("measured");
+
+        private final String wireName;
+
+        RelayMeasurementState(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static RelayMeasurementState fromWireName(String value) {
+            for (RelayMeasurementState candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown RelayMeasurementState wire value: " + value);
+        }
+    }
+
+    public enum RelayReachabilityState {
+        UNKNOWN("unknown"),
+        REACHABLE("reachable"),
+        UNREACHABLE("unreachable");
+
+        private final String wireName;
+
+        RelayReachabilityState(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static RelayReachabilityState fromWireName(String value) {
+            for (RelayReachabilityState candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown RelayReachabilityState wire value: " + value);
+        }
+    }
+
     public enum ResourceKind {
         NETWORK("network"),
         OWNERSHIP("ownership"),
@@ -3113,6 +3276,7 @@ public final class NodeContractV1 {
         SECURITY_POLICY("security_policy"),
         TRAFFIC_POLICY("traffic_policy"),
         CAPABILITY("capability"),
+        RELAY("relay"),
         EXIT_GRANT("exit_grant"),
         FILE_SHARE("file_share"),
         AUDIT("audit"),
@@ -5704,13 +5868,15 @@ public final class NodeContractV1 {
     public static final class NodeEmbeddedServiceSnapshot {
         public final String network_name;
         public final String relay_addr;
+        public final RelayHealthSnapshot relay_health;
         public final NodeEmbeddedServiceStatus relay_status;
         public final String signaling_addr;
         public final NodeEmbeddedServiceStatus status;
 
-        public NodeEmbeddedServiceSnapshot(String network_name, String relay_addr, NodeEmbeddedServiceStatus relay_status, String signaling_addr, NodeEmbeddedServiceStatus status) {
+        public NodeEmbeddedServiceSnapshot(String network_name, String relay_addr, RelayHealthSnapshot relay_health, NodeEmbeddedServiceStatus relay_status, String signaling_addr, NodeEmbeddedServiceStatus status) {
             this.network_name = network_name;
             this.relay_addr = relay_addr;
+            this.relay_health = relay_health;
             this.relay_status = relay_status;
             this.signaling_addr = signaling_addr;
             this.status = status;
@@ -7562,13 +7728,15 @@ public final class NodeContractV1 {
     public static final class ProjectedNodeEmbeddedServiceSnapshot {
         public final String network_name;
         public final String relay_addr;
+        public final RelayHealthSnapshot relay_health;
         public final NodeEmbeddedServiceStatus relay_status;
         public final String signaling_addr;
         public final NodeEmbeddedServiceStatus status;
 
-        public ProjectedNodeEmbeddedServiceSnapshot(String network_name, String relay_addr, NodeEmbeddedServiceStatus relay_status, String signaling_addr, NodeEmbeddedServiceStatus status) {
+        public ProjectedNodeEmbeddedServiceSnapshot(String network_name, String relay_addr, RelayHealthSnapshot relay_health, NodeEmbeddedServiceStatus relay_status, String signaling_addr, NodeEmbeddedServiceStatus status) {
             this.network_name = network_name;
             this.relay_addr = relay_addr;
+            this.relay_health = relay_health;
             this.relay_status = relay_status;
             this.signaling_addr = signaling_addr;
             this.status = status;
@@ -7774,6 +7942,103 @@ public final class NodeContractV1 {
             this.traffic_session = traffic_session;
             this.tun_capabilities = tun_capabilities;
             this.ui_mode = ui_mode;
+        }
+    }
+
+    /** DTO for RelayHealthSnapshot. */
+    public static final class RelayHealthSnapshot {
+        public final Boolean authorization_valid;
+        public final Boolean forwarding_observed;
+        public final List<RelayHealthIssue> issues;
+        public final RelayLifecycleState lifecycle;
+        public final List<RelayLimitSource> limit_sources;
+        public final RelayLimitPolicy limits;
+        public final String listen_addr;
+        public final Boolean listener_bound;
+        public final RelayReachabilityState network_reachability;
+        public final Long observed_at_unix_ms;
+        public final Boolean quota_limited;
+        public final String reason_code;
+        public final RelayHealthStatus status;
+        public final RelayUsageSnapshot usage;
+
+        public RelayHealthSnapshot(Boolean authorization_valid, Boolean forwarding_observed, List<RelayHealthIssue> issues, RelayLifecycleState lifecycle, List<RelayLimitSource> limit_sources, RelayLimitPolicy limits, String listen_addr, Boolean listener_bound, RelayReachabilityState network_reachability, Long observed_at_unix_ms, Boolean quota_limited, String reason_code, RelayHealthStatus status, RelayUsageSnapshot usage) {
+            this.authorization_valid = authorization_valid;
+            this.forwarding_observed = forwarding_observed;
+            this.issues = issues;
+            this.lifecycle = lifecycle;
+            this.limit_sources = limit_sources;
+            this.limits = limits;
+            this.listen_addr = listen_addr;
+            this.listener_bound = listener_bound;
+            this.network_reachability = network_reachability;
+            this.observed_at_unix_ms = observed_at_unix_ms;
+            this.quota_limited = quota_limited;
+            this.reason_code = reason_code;
+            this.status = status;
+            this.usage = usage;
+        }
+    }
+
+    /** DTO for RelayLimitPolicy. */
+    public static final class RelayLimitPolicy {
+        public final Long max_bandwidth_kbps;
+        public final Long max_bytes;
+        public final Long max_concurrent_streams;
+        public final Long max_connections;
+        public final Integer max_cpu_percent;
+        public final Long max_memory_bytes;
+        public final Long max_session_duration_secs;
+        public final Long quota_reset_at_unix_ms;
+
+        public RelayLimitPolicy(Long max_bandwidth_kbps, Long max_bytes, Long max_concurrent_streams, Long max_connections, Integer max_cpu_percent, Long max_memory_bytes, Long max_session_duration_secs, Long quota_reset_at_unix_ms) {
+            this.max_bandwidth_kbps = max_bandwidth_kbps;
+            this.max_bytes = max_bytes;
+            this.max_concurrent_streams = max_concurrent_streams;
+            this.max_connections = max_connections;
+            this.max_cpu_percent = max_cpu_percent;
+            this.max_memory_bytes = max_memory_bytes;
+            this.max_session_duration_secs = max_session_duration_secs;
+            this.quota_reset_at_unix_ms = quota_reset_at_unix_ms;
+        }
+    }
+
+    /** DTO for RelayUsageSnapshot. */
+    public static final class RelayUsageSnapshot {
+        public final Long active_connections;
+        public final Long active_sessions;
+        public final Long active_streams;
+        public final RelayMeasurementState cpu_measurement;
+        public final Long forwarded_bytes;
+        public final Long forwarded_packets;
+        public final Long last_forwarded_at_unix_ms;
+        public final Long last_forwarding_failure_at_unix_ms;
+        public final RelayMeasurementState memory_measurement;
+        public final Integer observed_cpu_percent;
+        public final Long observed_memory_bytes;
+        public final Long oldest_session_age_secs;
+        public final Long quota_reset_at_unix_ms;
+        public final Long quota_started_at_unix_ms;
+        public final Long rejected_connections;
+        public final Long rejected_packets;
+
+        public RelayUsageSnapshot(Long active_connections, Long active_sessions, Long active_streams, RelayMeasurementState cpu_measurement, Long forwarded_bytes, Long forwarded_packets, Long last_forwarded_at_unix_ms, Long last_forwarding_failure_at_unix_ms, RelayMeasurementState memory_measurement, Integer observed_cpu_percent, Long observed_memory_bytes, Long oldest_session_age_secs, Long quota_reset_at_unix_ms, Long quota_started_at_unix_ms, Long rejected_connections, Long rejected_packets) {
+            this.active_connections = active_connections;
+            this.active_sessions = active_sessions;
+            this.active_streams = active_streams;
+            this.cpu_measurement = cpu_measurement;
+            this.forwarded_bytes = forwarded_bytes;
+            this.forwarded_packets = forwarded_packets;
+            this.last_forwarded_at_unix_ms = last_forwarded_at_unix_ms;
+            this.last_forwarding_failure_at_unix_ms = last_forwarding_failure_at_unix_ms;
+            this.memory_measurement = memory_measurement;
+            this.observed_cpu_percent = observed_cpu_percent;
+            this.observed_memory_bytes = observed_memory_bytes;
+            this.oldest_session_age_secs = oldest_session_age_secs;
+            this.quota_reset_at_unix_ms = quota_reset_at_unix_ms;
+            this.quota_started_at_unix_ms = quota_started_at_unix_ms;
+            this.rejected_connections = rejected_connections;
+            this.rejected_packets = rejected_packets;
         }
     }
 

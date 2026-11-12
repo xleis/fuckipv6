@@ -212,6 +212,116 @@ mod tests {
         assert!(!parked_parent.join("result.txt").exists());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn concurrent_directory_exchange_never_publishes_outside_root() {
+        use std::ffi::CString;
+        use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let (temporary, share) = root();
+        let pivot = temporary.path().join("pivot");
+        let alternate = temporary.path().join("alternate");
+        let outside = tempfile::tempdir().expect("outside");
+        fs::create_dir(&pivot).expect("pivot directory");
+        fs::write(outside.path().join("existing.txt"), b"outside-original").expect("outside file");
+        std::os::unix::fs::symlink(outside.path(), &alternate).expect("outside symlink");
+
+        let pivot_c = CString::new(pivot.to_str().expect("utf8 path")).expect("path without NUL");
+        let alternate_c =
+            CString::new(alternate.to_str().expect("utf8 path")).expect("path without NUL");
+        let stop = Arc::new(AtomicBool::new(false));
+        let swaps = Arc::new(AtomicUsize::new(0));
+        let rename_error = Arc::new(AtomicI32::new(0));
+        let barrier = Arc::new(Barrier::new(2));
+        let attacker = {
+            let stop = stop.clone();
+            let swaps = swaps.clone();
+            let rename_error = rename_error.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                while !stop.load(Ordering::Relaxed) {
+                    let result = unsafe {
+                        libc::renameat2(
+                            libc::AT_FDCWD,
+                            pivot_c.as_ptr(),
+                            libc::AT_FDCWD,
+                            alternate_c.as_ptr(),
+                            libc::RENAME_EXCHANGE,
+                        )
+                    };
+                    if result != 0 {
+                        rename_error.store(
+                            std::io::Error::last_os_error().raw_os_error().unwrap_or(-1),
+                            Ordering::Relaxed,
+                        );
+                        break;
+                    }
+                    swaps.fetch_add(1, Ordering::Relaxed);
+                    thread::yield_now();
+                }
+            })
+        };
+
+        barrier.wait();
+        let mut published = Vec::new();
+        for index in 0..256 {
+            let target_name = format!("pivot/race-{index}.txt");
+            let target = SharedPath::parse(&target_name).expect("target path");
+            let mut upload = TemporaryUpload::create(&share).expect("upload");
+            upload.write_all(b"inside-publish").expect("write");
+            match upload.persist_new(&target) {
+                Ok(()) => published.push(format!("race-{index}.txt")),
+                Err(error) => assert!(matches!(
+                    error.code(),
+                    FileShareErrorCode::SymlinkRejected
+                        | FileShareErrorCode::ParentUnavailable
+                        | FileShareErrorCode::Io
+                )),
+            }
+            thread::yield_now();
+        }
+        stop.store(true, Ordering::Relaxed);
+        attacker.join().expect("attacker thread");
+
+        assert_eq!(
+            rename_error.load(Ordering::Relaxed),
+            0,
+            "rename exchange must be supported"
+        );
+        assert!(swaps.load(Ordering::Relaxed) > 0);
+        assert!(!published.is_empty());
+        assert_eq!(
+            fs::read(outside.path().join("existing.txt")).expect("outside file remains"),
+            b"outside-original"
+        );
+        assert_eq!(
+            fs::read_dir(outside.path())
+                .expect("outside directory")
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name())
+                .collect::<Vec<_>>(),
+            vec![std::ffi::OsString::from("existing.txt")]
+        );
+
+        let inside = if fs::symlink_metadata(&pivot)
+            .expect("pivot metadata")
+            .is_dir()
+        {
+            pivot
+        } else {
+            alternate
+        };
+        for file_name in published {
+            assert_eq!(
+                fs::read(inside.join(file_name)).expect("published file"),
+                b"inside-publish"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn temporary_directory_and_file_are_private() {

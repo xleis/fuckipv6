@@ -3346,7 +3346,12 @@ NUL/控制字符、不可见 Unicode 格式字符（包括双向覆盖字符）�
 `stale_cleanup_removes_only_expired_generated_regular_files` 验证过期清理不跟随链接、不删除用户文件。上述均为 Linux 和 portable
 代码证据。Linux 进程内另由 `download_session_limit_and_cancel_restore_capacity` 读取 `/proc/self/fd`，验证 16 个受全局上限约束的
 下载会话各占用一个临时目录文件句柄，逐个取消后回到同一基线；该结果只覆盖正常取消路径，不证明异常退出、满载隔离或
-macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态及并发重命名语义仍未验收。
+macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态以及 macOS/Windows 并发重命名语义仍未验收。
+
+**补充（2026-11-13，Linux 并发目录交换）**：`concurrent_directory_exchange_never_publishes_outside_root` 使用
+`renameat2(RENAME_EXCHANGE)` 持续原子交换共享根内的真实父目录与指向根外的符号链接，同时连续发布 256 个唯一目标文件。
+成功发布只能落在根内真实目录的锚定句柄中；命中根外链接或目录切换时失败关闭。测试还核对根外目录始终只有预置文件且内容不变；
+连续执行 5 次均通过。该证据只代表 Linux 进程内发布路径，不代表真实网络传输或 macOS/Windows 目录交换语义已验证。
 
 ### W15-06 并发、速率与资源限制 `[~]`
 

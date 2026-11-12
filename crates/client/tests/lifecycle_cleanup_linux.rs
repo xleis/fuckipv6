@@ -10,6 +10,7 @@ use std::time::Duration;
 const TOPOLOGY_ENV: &str = "FUCKIPV6_LIFECYCLE_NETNS_TOPOLOGY";
 const RESOLV_CONF_ENV: &str = "FUCKIPV6_LIFECYCLE_RESOLV_CONF";
 const RULE_FAULT_MARKER_ENV: &str = "FUCKIPV6_LIFECYCLE_RULE_FAULT_MARKER";
+const RULE_FAULT_ARM_ENV: &str = "FUCKIPV6_LIFECYCLE_RULE_FAULT_ARM";
 const TUN_FAULT_MARKER_ENV: &str = "FUCKIPV6_LIFECYCLE_TUN_FAULT_MARKER";
 const TUN_NAME: &str = "fip6clean";
 const BACKUP_PATH: &str = "/run/fuckipv6-resolv.conf.backup";
@@ -68,6 +69,25 @@ fn has_catch_all_rule(rules: &str) -> bool {
         .any(|line| line.split_whitespace().next() == Some("32000:"))
 }
 
+fn has_exit_probe_rule(rules: &str) -> bool {
+    rules.lines().any(|line| {
+        let tokens = line.split_whitespace().collect::<Vec<_>>();
+        tokens.first() == Some(&"900:")
+            && tokens
+                .windows(2)
+                .any(|pair| pair == ["fwmark", "0x46503601"])
+    })
+}
+
+fn table_id_for_interface(interface: &str) -> u32 {
+    let mut hash = 2_166_136_261u32;
+    for byte in interface.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    10_000 + hash % 40_000
+}
+
 #[tokio::test]
 #[ignore = "requires the isolated privileged topology from scripts/test-lifecycle-cleanup-netns.sh"]
 async fn native_cleanup_recovery_restores_dns_routes_and_tun() {
@@ -75,6 +95,7 @@ async fn native_cleanup_recovery_restores_dns_routes_and_tun() {
 
     let resolv_conf = env_path(RESOLV_CONF_ENV);
     let rule_fault_marker = env_path(RULE_FAULT_MARKER_ENV);
+    let rule_fault_arm = env_path(RULE_FAULT_ARM_ENV);
     let tun_fault_marker = env_path(TUN_FAULT_MARKER_ENV);
     let original_resolver =
         std::fs::read(&resolv_conf).expect("read isolated resolver configuration");
@@ -88,6 +109,30 @@ async fn native_cleanup_recovery_restores_dns_routes_and_tun() {
         .expect("create isolated TUN device");
     assert!(link_exists(TUN_NAME));
 
+    let table_id = table_id_for_interface(TUN_NAME).to_string();
+    assert!(
+        ip(&["-4", "rule", "add", "pref", "32000", "lookup", &table_id, "protocol", "99",])
+            .status
+            .success()
+    );
+    assert!(has_catch_all_rule(&ip_stdout(&["-4", "rule", "show"])));
+    assert!(ip(&[
+        "-4",
+        "rule",
+        "add",
+        "pref",
+        "900",
+        "fwmark",
+        "0x46503601",
+        "lookup",
+        &table_id,
+        "protocol",
+        "99",
+    ])
+    .status
+    .success());
+    assert!(has_exit_probe_rule(&ip_stdout(&["-4", "rule", "show"])));
+
     let mut routes = LinuxRouteManager::install(
         RoutingMode::GlobalProxy,
         TUN_NAME,
@@ -97,14 +142,68 @@ async fn native_cleanup_recovery_restores_dns_routes_and_tun() {
         &[],
     )
     .await
-    .expect("install real policy routing and DNS bridge");
-    let table_id = routes.table_id().to_string();
-
-    let managed_resolver = std::fs::read_to_string(&resolv_conf).expect("read managed resolver");
-    assert!(managed_resolver.contains("nameserver 127.0.0.2"));
+    .expect("install real base policy routing");
+    assert_eq!(table_id, routes.table_id().to_string());
+    assert!(!routes.global_proxy_active());
+    assert!(!has_catch_all_rule(&ip_stdout(&["-4", "rule", "show"])));
+    assert!(!has_exit_probe_rule(&ip_stdout(&["-4", "rule", "show"])));
+    assert_eq!(
+        std::fs::read(&resolv_conf).expect("read untouched resolver"),
+        original_resolver
+    );
     assert!(owns_protocol_99_rule(&ip_stdout(&["-4", "rule", "show"])));
     assert!(ip_stdout(&["-4", "route", "show", "table", &table_id]).contains(TUN_NAME));
 
+    std::fs::write(&rule_fault_arm, b"armed").expect("arm probe rule deletion fault");
+    routes
+        .validate_exit_data_path()
+        .await
+        .expect_err("a TUN without a live Exit peer must fail closed");
+    assert!(
+        rule_fault_marker.exists(),
+        "probe rule cleanup fault was not injected"
+    );
+    std::fs::remove_file(&rule_fault_marker).expect("reset the one-shot rule fault marker");
+    let after_failed_probe = ip_stdout(&["-4", "rule", "show"]);
+    assert!(!has_exit_probe_rule(&after_failed_probe));
+    assert!(!has_catch_all_rule(&after_failed_probe));
+    assert!(ip_stdout(&["-4", "route", "show", "table", &table_id]).contains(TUN_NAME));
+    assert_eq!(
+        std::fs::read(&resolv_conf).expect("read resolver after failed probe"),
+        original_resolver,
+        "a failed Exit data-path probe must not change host DNS"
+    );
+
+    routes
+        .activate_global_proxy()
+        .await
+        .expect("activate real policy routing and DNS bridge");
+    assert!(routes.global_proxy_active());
+    let managed_resolver = std::fs::read_to_string(&resolv_conf).expect("read managed resolver");
+    assert!(managed_resolver.contains("nameserver 127.0.0.2"));
+    assert!(has_catch_all_rule(&ip_stdout(&["-4", "rule", "show"])));
+
+    std::fs::write(&rule_fault_arm, b"armed").expect("arm rule deletion fault");
+    routes
+        .deactivate_global_proxy()
+        .await
+        .expect("transient catch-all deletion failure must be retried");
+    assert!(rule_fault_marker.exists(), "route fault was not injected");
+    assert!(!routes.global_proxy_active());
+    assert!(!has_catch_all_rule(&ip_stdout(&["-4", "rule", "show"])));
+    assert_eq!(
+        std::fs::read(&resolv_conf).expect("read restored resolver"),
+        original_resolver,
+        "one transient route cleanup failure must not leave the host DNS redirected"
+    );
+    assert!(!Path::new(BACKUP_PATH).exists());
+    assert!(owns_protocol_99_rule(&ip_stdout(&["-4", "rule", "show"])));
+
+    routes
+        .activate_global_proxy()
+        .await
+        .expect("reactivate global proxy after cleanup retry");
+    std::fs::remove_file(&rule_fault_marker).expect("rearm the one-shot route fault");
     routes
         .rollback()
         .await

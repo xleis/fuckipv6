@@ -16,6 +16,7 @@ use tokio::process::Command;
 use tokio::time::{timeout, Instant};
 
 use super::doh_dns::DohDnsGuard;
+use super::linux_route_probe::{probe_exit_path as probe_marked_exit_path, ProbeFamily};
 use super::recovery::RouteRecoverySnapshot;
 use crate::network_setup::{self, ensure_stage, NetworkSetupError, NetworkSetupStage};
 
@@ -28,6 +29,12 @@ const MAIN_TABLE_ID: u32 = 254;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 const ROLLBACK_TIMEOUT: Duration = Duration::from_secs(4);
 const SYNC_COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
+const HOST_NETWORK_RESTORE_ATTEMPTS: usize = 3;
+const HOST_NETWORK_RESTORE_RETRY_DELAY: Duration = Duration::from_millis(50);
+const EXIT_PATH_PROBE_MARK: u32 = 0x4650_3601;
+const EXIT_PATH_PROBE_PREFERENCE: u32 = 900;
+const EXIT_PATH_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+const PROBE_RULE_REMOVE_ATTEMPTS: usize = 3;
 
 type RouteCommandFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
@@ -84,6 +91,7 @@ impl Family {
 struct RuleSpec {
     family: Family,
     destination: Option<IpNet>,
+    fwmark: Option<u32>,
     lookup: u32,
     preference: u32,
 }
@@ -103,6 +111,7 @@ pub struct LinuxRouteManager {
     tun_name: String,
     table_id: u32,
     active_families: HashSet<Family>,
+    global_proxy_active: bool,
     static_bypasses: BTreeSet<IpNet>,
     installed_rules: Vec<RuleSpec>,
     installed_table_routes: Vec<Family>,
@@ -162,6 +171,7 @@ impl LinuxRouteManager {
             tun_name,
             table_id,
             active_families,
+            global_proxy_active: false,
             static_bypasses: BTreeSet::new(),
             installed_rules: Vec::new(),
             installed_table_routes: Vec::new(),
@@ -199,6 +209,16 @@ impl LinuxRouteManager {
 
         manager.static_bypasses = bypasses.iter().copied().collect();
 
+        // A previous process may have crashed after activating GlobalProxy.
+        // That catch-all points at this TUN's private table and must be removed
+        // before a new runtime can safely regain the host network.
+        if let Err(error) = manager.remove_stale_catch_all_rules().await {
+            return Err(error).context("清理上次异常退出遗留的全局代理兜底路由失败");
+        }
+        if let Err(error) = manager.remove_stale_probe_rules().await {
+            return Err(error).context("清理上次异常退出遗留的 Exit 数据路径探针规则失败");
+        }
+
         let setup_result = async {
             // A table route has no effect until the catch-all rule is installed.
             for family in [Family::V4, Family::V6] {
@@ -220,24 +240,11 @@ impl LinuxRouteManager {
                 let rule = RuleSpec {
                     family,
                     destination: Some(*network),
+                    fwmark: None,
                     lookup: MAIN_TABLE_ID,
                     preference: STATIC_PREFERENCE_START + index as u32,
                 };
                 manager.install_rule(&rule).await?;
-            }
-
-            // This must remain the final rule. Before this point all traffic
-            // still uses the host's existing routing policy.
-            for family in [Family::V4, Family::V6] {
-                if manager.active_families.contains(&family) {
-                    let rule = RuleSpec {
-                        family,
-                        destination: None,
-                        lookup: manager.table_id,
-                        preference: CATCH_ALL_PREFERENCE,
-                    };
-                    manager.install_rule(&rule).await?;
-                }
             }
 
             Ok::<(), anyhow::Error>(())
@@ -249,19 +256,8 @@ impl LinuxRouteManager {
             return Err(error).context("安装代理策略路由失败，已回滚");
         }
 
-        // Install DNS interception only after the catch-all route is active.
-        // If this fails, rollback removes the policy route before returning so
-        // the host never resolves through a bridge that is not running.
-        match DohDnsGuard::install().await {
-            Ok(guard) => manager.dns_guard = guard,
-            Err(error) => {
-                let _ = manager.rollback().await;
-                return Err(error).context("安装 DoH DNS 代理失败，已回滚代理策略路由");
-            }
-        }
-
         tracing::info!(
-            "代理策略路由已安装: table={}, interface={}, bypasses={}, mode={:?}",
+            "代理基础策略路由已安装，等待 Exit 验证后启用: table={}, interface={}, bypasses={}, mode={:?}",
             manager.table_id,
             manager.tun_name,
             manager.static_bypasses.len(),
@@ -276,6 +272,205 @@ impl LinuxRouteManager {
 
     pub fn is_active(&self) -> bool {
         !self.active_families.is_empty()
+    }
+
+    /// Whether this manager currently owns the host-wide catch-all rules and
+    /// resolver override. Base table routes and bypass rules may already exist
+    /// while this is false; they do not intercept ordinary host traffic.
+    pub fn global_proxy_active(&self) -> bool {
+        self.global_proxy_active
+    }
+
+    /// Validate the real client -> TUN -> P2P -> Exit data path without
+    /// changing ordinary host routing. Only sockets carrying the private probe
+    /// mark can match the temporary policy rule.
+    pub async fn validate_exit_data_path(&mut self) -> Result<()> {
+        if !self.is_active() {
+            return Ok(());
+        }
+        if self.global_proxy_active {
+            anyhow::bail!("全局代理已启用，拒绝重复执行未激活状态的数据路径探针");
+        }
+
+        if let Err(error) = self.remove_probe_rules().await {
+            return Err(error).context("开始 Exit 数据路径探针前清理旧探针规则失败");
+        }
+
+        let families = [Family::V4, Family::V6]
+            .into_iter()
+            .filter(|family| self.active_families.contains(family))
+            .map(|family| match family {
+                Family::V4 => ProbeFamily::V4,
+                Family::V6 => ProbeFamily::V6,
+            })
+            .collect::<Vec<_>>();
+        for family in [Family::V4, Family::V6] {
+            if !self.active_families.contains(&family) {
+                continue;
+            }
+            let rule = RuleSpec {
+                family,
+                destination: None,
+                fwmark: Some(EXIT_PATH_PROBE_MARK),
+                lookup: self.table_id,
+                preference: EXIT_PATH_PROBE_PREFERENCE,
+            };
+            if let Err(error) = self.install_rule(&rule).await {
+                let cleanup_error = self.remove_probe_rules().await.err();
+                return match cleanup_error {
+                    Some(cleanup_error) => Err(anyhow::anyhow!(
+                        "安装 Exit 数据路径探针规则失败: {error:#}; 清理探针规则也失败: {cleanup_error:#}"
+                    )),
+                    None => Err(error).context("安装 Exit 数据路径探针规则失败，已清理"),
+                };
+            }
+        }
+
+        let probe_result = match timeout(
+            EXIT_PATH_PROBE_TIMEOUT,
+            probe_marked_exit_path(&families, EXIT_PATH_PROBE_MARK),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!(
+                "Exit 数据路径探针超过 {:?}",
+                EXIT_PATH_PROBE_TIMEOUT
+            )),
+        };
+        let cleanup_result = self.remove_probe_rules().await;
+
+        match (probe_result, cleanup_result) {
+            (Ok(report), Ok(())) => {
+                tracing::info!(
+                    ipv4 = report.ipv4,
+                    ipv6 = report.ipv6,
+                    mark = EXIT_PATH_PROBE_MARK,
+                    table = self.table_id,
+                    "Exit 数据路径实测通过：经 TUN/P2P/Exit 完成 YouTube DNS、TCP 与 TLS 验证"
+                );
+                Ok(())
+            }
+            (Err(probe_error), Ok(())) => Err(probe_error)
+                .context("Exit 数据路径实测失败，探针规则已清理，宿主全局路由未启用"),
+            (Ok(_), Err(cleanup_error)) => {
+                Err(cleanup_error).context("Exit 数据路径实测通过，但探针规则清理失败")
+            }
+            (Err(probe_error), Err(cleanup_error)) => Err(anyhow::anyhow!(
+                "Exit 数据路径实测失败: {probe_error:#}; 探针规则清理也失败: {cleanup_error:#}"
+            )),
+        }
+    }
+
+    /// Enable host-wide proxying after the selected Exit has passed every
+    /// authenticated readiness and local-resource check.
+    pub async fn activate_global_proxy(&mut self) -> Result<()> {
+        if !self.is_active() {
+            return Ok(());
+        }
+        if self.global_proxy_active {
+            return Ok(());
+        }
+
+        for family in [Family::V4, Family::V6] {
+            if !self.active_families.contains(&family) || self.owns_catch_all_rule(family) {
+                continue;
+            }
+            let rule = RuleSpec {
+                family,
+                destination: None,
+                fwmark: None,
+                lookup: self.table_id,
+                preference: CATCH_ALL_PREFERENCE,
+            };
+            if let Err(error) = self.install_rule(&rule).await {
+                let cleanup_error = self.remove_catch_all_rules().await.err();
+                return match cleanup_error {
+                    Some(cleanup_error) => Err(anyhow::anyhow!(
+                        "启用全局代理兜底路由失败: {error:#}; 回滚兜底路由也失败: {cleanup_error:#}"
+                    )),
+                    None => Err(error).context("启用全局代理兜底路由失败，已回滚"),
+                };
+            }
+        }
+
+        // DNS is changed only after every family's catch-all rule is present,
+        // otherwise applications could resolve through the bridge while normal
+        // host traffic is still outside the tunnel.
+        match DohDnsGuard::install().await {
+            Ok(guard) => self.dns_guard = guard,
+            Err(error) => {
+                let cleanup_error = self.remove_catch_all_rules().await.err();
+                return match cleanup_error {
+                    Some(cleanup_error) => Err(anyhow::anyhow!(
+                        "安装 DoH DNS 代理失败: {error:#}; 回滚兜底路由也失败: {cleanup_error:#}"
+                    )),
+                    None => Err(error).context("安装 DoH DNS 代理失败，已回滚兜底路由"),
+                };
+            }
+        }
+
+        self.global_proxy_active = true;
+        tracing::info!(
+            "全局代理已启用: table={}, interface={}",
+            self.table_id,
+            self.tun_name
+        );
+        Ok(())
+    }
+
+    /// Stop intercepting ordinary host traffic before restoring DNS. Base table
+    /// routes and bypass rules remain owned for a later validation retry.
+    ///
+    /// Cleanup is retried a bounded number of times because a transient `ip`
+    /// failure must not leave the host disconnected behind a failed tunnel.
+    /// Each attempt is idempotent: already-removed rules are no longer tracked
+    /// and a still-live DNS guard continues to be the authoritative owner.
+    pub async fn deactivate_global_proxy(&mut self) -> Result<()> {
+        let mut last_error = None;
+        for attempt in 1..=HOST_NETWORK_RESTORE_ATTEMPTS {
+            match self.deactivate_global_proxy_once().await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    tracing::warn!(
+                        attempt,
+                        attempts = HOST_NETWORK_RESTORE_ATTEMPTS,
+                        error = %error,
+                        "恢复宿主网络失败，准备重试"
+                    );
+                    last_error = Some(error);
+                }
+            }
+            if attempt < HOST_NETWORK_RESTORE_ATTEMPTS {
+                tokio::time::sleep(HOST_NETWORK_RESTORE_RETRY_DELAY).await;
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("恢复宿主网络失败")))
+            .context("连续恢复宿主网络失败")
+    }
+
+    async fn deactivate_global_proxy_once(&mut self) -> Result<()> {
+        let catch_all_error = self.remove_catch_all_rules().await.err();
+        if let Some(error) = catch_all_error {
+            self.global_proxy_active = true;
+            return Err(error).context("无法移除全局代理兜底路由，DNS 尚未恢复");
+        }
+        self.global_proxy_active = false;
+        if let Err(error) = self.remove_probe_rules().await {
+            tracing::warn!(
+                error = %error,
+                "宿主兜底路由已移除，但 Exit 数据路径探针规则未能清理；该规则仅匹配专用 mark"
+            );
+        }
+
+        if let Some(guard) = self.dns_guard.as_mut() {
+            guard
+                .shutdown()
+                .await
+                .context("全局代理兜底路由已移除，但恢复 DNS 配置失败")?;
+            self.dns_guard = None;
+        }
+        Ok(())
     }
 
     /// Return the lookup table used by the catch-all proxy rule.
@@ -307,6 +502,7 @@ impl LinuxRouteManager {
             .iter()
             .map(|(client_id, addresses)| (client_id.clone(), addresses.clone()))
             .collect::<Vec<_>>();
+        let was_global_proxy_active = self.global_proxy_active;
 
         if let Err(error) = self.rollback_checked().await {
             return Err(error).context("热切换前无法完整移除旧策略路由，未切换新策略");
@@ -321,13 +517,21 @@ impl LinuxRouteManager {
             control_endpoints: control_endpoints.to_vec(),
         };
 
-        match Self::install_plan_with_peers(new_plan, &preserved_peers).await {
+        match Self::install_plan_with_peers(new_plan, &preserved_peers, was_global_proxy_active)
+            .await
+        {
             Ok(replacement) => {
                 *self = replacement;
                 Ok(())
             }
             Err(update_error) => {
-                match Self::install_plan_with_peers(previous_plan, &preserved_peers).await {
+                match Self::install_plan_with_peers(
+                    previous_plan,
+                    &preserved_peers,
+                    was_global_proxy_active,
+                )
+                .await
+                {
                     Ok(restored) => {
                         *self = restored;
                         Err(update_error).context("热切换策略路由失败，已恢复原策略路由")
@@ -343,6 +547,7 @@ impl LinuxRouteManager {
     async fn install_plan_with_peers(
         plan: RoutePlan,
         peer_bypasses: &[(String, Vec<IpAddr>)],
+        activate_global_proxy: bool,
     ) -> Result<Self> {
         let mut manager = Self::install(
             plan.mode,
@@ -367,6 +572,18 @@ impl LinuxRouteManager {
                     None => Err(error).with_context(|| {
                         format!("恢复节点 {client_id} 的物理网络旁路失败，新策略已回滚")
                     }),
+                };
+            }
+        }
+
+        if activate_global_proxy {
+            if let Err(error) = manager.activate_global_proxy().await {
+                let rollback_error = manager.rollback_checked().await.err();
+                return match rollback_error {
+                    Some(rollback_error) => Err(anyhow::anyhow!(
+                        "重新启用全局代理失败: {error:#}; 回滚新策略也失败: {rollback_error:#}"
+                    )),
+                    None => Err(error).context("重新启用全局代理失败，新策略已回滚"),
                 };
             }
         }
@@ -428,6 +645,7 @@ impl LinuxRouteManager {
             let rule = RuleSpec {
                 family,
                 destination: Some(host),
+                fwmark: None,
                 lookup: MAIN_TABLE_ID,
                 preference,
             };
@@ -604,6 +822,7 @@ impl LinuxRouteManager {
             self.dynamic_references.clear();
             self.peer_bypasses.clear();
             self.active_families.clear();
+            self.global_proxy_active = false;
             self.static_bypasses.clear();
             self.plan = None;
             Ok(())
@@ -619,6 +838,163 @@ impl LinuxRouteManager {
 
     fn family_active(&self, family: Family) -> bool {
         self.active_families.contains(&family)
+    }
+
+    fn owns_catch_all_rule(&self, family: Family) -> bool {
+        self.installed_rules.iter().any(|rule| {
+            rule.family == family
+                && rule.destination.is_none()
+                && rule.lookup == self.table_id
+                && rule.preference == CATCH_ALL_PREFERENCE
+        })
+    }
+
+    async fn remove_stale_catch_all_rules(&self) -> Result<()> {
+        let mut removed = 0usize;
+        for family in [Family::V4, Family::V6] {
+            if !self.family_active(family) {
+                continue;
+            }
+            let rules = run_ip_query(family, &["rule", "show"])
+                .await
+                .context("读取策略路由规则以清理异常退出残留失败")?;
+            let count = parse_policy_rule_snapshot(&rules, self.table_id).catch_all;
+            let rule = RuleSpec {
+                family,
+                destination: None,
+                fwmark: None,
+                lookup: self.table_id,
+                preference: CATCH_ALL_PREFERENCE,
+            };
+            for _ in 0..count {
+                run_ip_rule("del", &rule)
+                    .await
+                    .context("删除异常退出遗留的全局代理兜底路由失败")?;
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            tracing::warn!(
+                removed,
+                table = self.table_id,
+                interface = %self.tun_name,
+                "已清理上次异常退出遗留的全局代理兜底路由"
+            );
+        }
+        Ok(())
+    }
+
+    async fn remove_stale_probe_rules(&self) -> Result<()> {
+        let mut removed = 0usize;
+        for family in [Family::V4, Family::V6] {
+            if !self.family_active(family) {
+                continue;
+            }
+            let rules = run_ip_query(family, &["rule", "show"])
+                .await
+                .context("读取策略路由规则以清理残留 Exit 探针失败")?;
+            let count = parse_policy_rule_snapshot(&rules, self.table_id).probe;
+            let rule = RuleSpec {
+                family,
+                destination: None,
+                fwmark: Some(EXIT_PATH_PROBE_MARK),
+                lookup: self.table_id,
+                preference: EXIT_PATH_PROBE_PREFERENCE,
+            };
+            for _ in 0..count {
+                run_ip_rule("del", &rule)
+                    .await
+                    .context("删除残留 Exit 数据路径探针规则失败")?;
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            tracing::warn!(
+                removed,
+                table = self.table_id,
+                interface = %self.tun_name,
+                "已清理上次异常退出遗留的 Exit 数据路径探针规则"
+            );
+        }
+        Ok(())
+    }
+
+    async fn remove_probe_rules(&mut self) -> Result<()> {
+        let rules = self
+            .installed_rules
+            .iter()
+            .filter(|rule| {
+                rule.fwmark == Some(EXIT_PATH_PROBE_MARK)
+                    && rule.preference == EXIT_PATH_PROBE_PREFERENCE
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut failures = Vec::new();
+        for rule in rules.into_iter().rev() {
+            let mut last_error = None;
+            let mut removed = false;
+            for attempt in 1..=PROBE_RULE_REMOVE_ATTEMPTS {
+                match self.uninstall_rule(&rule).await {
+                    Ok(()) => {
+                        removed = true;
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            attempt,
+                            attempts = PROBE_RULE_REMOVE_ATTEMPTS,
+                            family = ?rule.family,
+                            error = %error,
+                            "删除 Exit 数据路径探针规则失败，准备重试"
+                        );
+                        last_error = Some(error);
+                    }
+                }
+                if attempt < PROBE_RULE_REMOVE_ATTEMPTS {
+                    tokio::time::sleep(HOST_NETWORK_RESTORE_RETRY_DELAY).await;
+                }
+            }
+            if !removed {
+                if let Some(error) = last_error {
+                    failures.push(format!(
+                        "移除 {:?} Exit 数据路径探针规则失败: {error:#}",
+                        rule.family
+                    ));
+                }
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(failures.join("; ")))
+        }
+    }
+
+    async fn remove_catch_all_rules(&mut self) -> Result<()> {
+        let catch_all_rules = self
+            .installed_rules
+            .iter()
+            .filter(|rule| {
+                rule.destination.is_none()
+                    && rule.lookup == self.table_id
+                    && rule.preference == CATCH_ALL_PREFERENCE
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut failures = Vec::new();
+        for rule in catch_all_rules.into_iter().rev() {
+            if let Err(error) = self.uninstall_rule(&rule).await {
+                failures.push(format!(
+                    "移除 {:?} 全局代理兜底路由失败: {error:#}",
+                    rule.family
+                ));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(failures.join("; ")))
+        }
     }
 
     fn next_preference(&mut self, family: Family) -> u32 {
@@ -717,7 +1093,7 @@ impl LinuxRouteManager {
                 .await
                 .context("读取 Linux 策略路由规则失败")?;
             let rule_counts = parse_policy_rule_snapshot(&rules, self.table_id);
-            snapshot.residual_routes += rule_counts.residual;
+            snapshot.residual_routes += rule_counts.residual + rule_counts.probe;
 
             let routes = run_ip_query(family, &["route", "show", "table", &table])
                 .await
@@ -726,12 +1102,24 @@ impl LinuxRouteManager {
             snapshot.residual_routes += route_counts.residual;
             snapshot.stale_interface_routes += route_counts.stale_interface;
 
-            snapshot.duplicate_routes += rule_counts.catch_all.saturating_sub(1);
             snapshot.duplicate_routes += route_counts.matching.saturating_sub(1);
-            if rule_counts.catch_all == 0 || route_counts.matching == 0 {
-                snapshot.missing_routes += 1;
+            if self.global_proxy_active {
+                snapshot.duplicate_routes += rule_counts.catch_all.saturating_sub(1);
+                if rule_counts.catch_all == 0 || route_counts.matching == 0 {
+                    snapshot.missing_routes += 1;
+                } else {
+                    snapshot.installed_routes += 1;
+                }
             } else {
-                snapshot.installed_routes += 1;
+                // Before Exit validation only the private table route and its
+                // bypass rules are expected. A catch-all in this phase is an
+                // unowned takeover and must be removed by recovery.
+                snapshot.residual_routes += rule_counts.catch_all;
+                if route_counts.matching == 0 {
+                    snapshot.missing_routes += 1;
+                } else {
+                    snapshot.installed_routes += 1;
+                }
             }
         }
         Ok(snapshot)
@@ -936,6 +1324,9 @@ async fn run_ip_rule(action: &str, rule: &RuleSpec) -> Result<()> {
     if let Some(destination) = rule.destination {
         command.args(["to", &destination.to_string()]);
     }
+    if let Some(fwmark) = rule.fwmark {
+        command.args(["fwmark", &format!("{fwmark:#x}")]);
+    }
     command.args([
         "lookup",
         &rule.lookup.to_string(),
@@ -955,6 +1346,9 @@ fn run_ip_rule_sync(action: &str, rule: &RuleSpec) -> Result<()> {
     command.args(["rule", action]);
     if let Some(destination) = rule.destination {
         command.args(["to", &destination.to_string()]);
+    }
+    if let Some(fwmark) = rule.fwmark {
+        command.args(["fwmark", &format!("{fwmark:#x}")]);
     }
     command.args([
         "lookup",
@@ -984,6 +1378,7 @@ async fn run_ip_query(family: Family, args: &[&str]) -> Result<String> {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct PolicyRuleRecoveryCounts {
     catch_all: usize,
+    probe: usize,
     residual: usize,
 }
 
@@ -1006,6 +1401,10 @@ fn parse_policy_rule_snapshot(output: &str, table_id: u32) -> PolicyRuleRecovery
         }
         if rule_has_preference(&tokens, CATCH_ALL_PREFERENCE) {
             counts.catch_all += 1;
+        } else if rule_has_preference(&tokens, EXIT_PATH_PROBE_PREFERENCE)
+            && rule_has_fwmark(&tokens, EXIT_PATH_PROBE_MARK)
+        {
+            counts.probe += 1;
         } else {
             counts.residual += 1;
         }
@@ -1041,6 +1440,22 @@ fn rule_has_preference(tokens: &[&str], expected: u32) -> bool {
         .first()
         .and_then(|token| token.trim_end_matches(':').parse::<u32>().ok())
         == Some(expected)
+}
+
+fn rule_has_fwmark(tokens: &[&str], expected: u32) -> bool {
+    tokens.iter().enumerate().any(|(index, token)| {
+        token.eq_ignore_ascii_case("fwmark")
+            && tokens.get(index + 1).and_then(|value| {
+                if let Some(hex) = value
+                    .strip_prefix("0x")
+                    .or_else(|| value.strip_prefix("0X"))
+                {
+                    u32::from_str_radix(hex, 16).ok()
+                } else {
+                    value.parse::<u32>().ok()
+                }
+            }) == Some(expected)
+    })
 }
 
 fn rule_has_recovery_protocol(tokens: &[&str]) -> bool {
@@ -1278,6 +1693,7 @@ mod tests {
         let rule = RuleSpec {
             family: Family::V4,
             destination: Some("203.0.113.0/24".parse().unwrap()),
+            fwmark: None,
             lookup: MAIN_TABLE_ID,
             preference: 20_000,
         };
@@ -1285,6 +1701,7 @@ mod tests {
             tun_name: "fuckipv6".to_string(),
             table_id: 12345,
             active_families: [Family::V4, Family::V6].into_iter().collect(),
+            global_proxy_active: false,
             static_bypasses: ["10.0.0.0/8".parse().unwrap()].into_iter().collect(),
             installed_rules: vec![rule],
             installed_table_routes: vec![Family::V4, Family::V6],
@@ -1398,6 +1815,7 @@ mod tests {
             tun_name: "fuckipv6".to_string(),
             table_id: 12345,
             active_families: [Family::V4, Family::V6].into_iter().collect(),
+            global_proxy_active: false,
             static_bypasses: BTreeSet::new(),
             installed_rules: Vec::new(),
             installed_table_routes: Vec::new(),
@@ -1430,6 +1848,7 @@ mod tests {
             tun_name: "fuckipv6".to_string(),
             table_id: 12345,
             active_families: [Family::V4, Family::V6].into_iter().collect(),
+            global_proxy_active: false,
             static_bypasses: BTreeSet::new(),
             installed_rules: Vec::new(),
             installed_table_routes: Vec::new(),
@@ -1546,11 +1965,13 @@ mod tests {
 32003: from all lookup 10000 proto 98
 32004: from all lookup main proto openr
 32005: from all lookup 10000 proto 99
+900: from all fwmark 0x46503601 lookup 10000 proto 99
 ";
         assert_eq!(
             parse_policy_rule_snapshot(output, 10_000),
             PolicyRuleRecoveryCounts {
                 catch_all: 1,
+                probe: 1,
                 residual: 3,
             }
         );
@@ -1563,6 +1984,7 @@ mod tests {
             parse_policy_rule_snapshot(output, 10_000),
             PolicyRuleRecoveryCounts {
                 catch_all: 1,
+                probe: 0,
                 residual: 0,
             }
         );

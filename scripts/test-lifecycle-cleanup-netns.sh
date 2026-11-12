@@ -15,6 +15,7 @@ INNER_ENV="FUCKIPV6_LIFECYCLE_NETNS_INNER"
 WORK_ENV="FUCKIPV6_LIFECYCLE_NETNS_WORK"
 RESOLV_CONF_ENV="FUCKIPV6_LIFECYCLE_RESOLV_CONF"
 RULE_FAULT_MARKER_ENV="FUCKIPV6_LIFECYCLE_RULE_FAULT_MARKER"
+RULE_FAULT_ARM_ENV="FUCKIPV6_LIFECYCLE_RULE_FAULT_ARM"
 TUN_FAULT_MARKER_ENV="FUCKIPV6_LIFECYCLE_TUN_FAULT_MARKER"
 TUN_NAME="fip6clean"
 
@@ -84,7 +85,7 @@ create_fault_wrapper() {
 #!/usr/bin/env bash
 set -euo pipefail
 arguments=" \$* "
-if [[ "\$arguments" == *" rule del "* && ! -e "${!RULE_FAULT_MARKER_ENV}" ]]; then
+if [[ "\$arguments" == *" rule del "* && -e "${!RULE_FAULT_ARM_ENV}" && ! -e "${!RULE_FAULT_MARKER_ENV}" ]]; then
     : >"${!RULE_FAULT_MARKER_ENV}"
     printf 'injected policy-rule deletion failure\n' >&2
     exit 42
@@ -127,6 +128,7 @@ main() {
         export "${WORK_ENV}=$(mktemp -d /tmp/fuckipv6-lifecycle-netns.XXXXXX)"
         export "${RESOLV_CONF_ENV}=${!WORK_ENV}/resolv.conf"
         export "${RULE_FAULT_MARKER_ENV}=${!WORK_ENV}/rule-delete-failed"
+        export "${RULE_FAULT_ARM_ENV}=${!WORK_ENV}/rule-delete-armed"
         export "${TUN_FAULT_MARKER_ENV}=${!WORK_ENV}/tun-delete-failed"
         touch "${!RESOLV_CONF_ENV}"
     fi

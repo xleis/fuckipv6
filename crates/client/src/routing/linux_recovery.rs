@@ -123,6 +123,7 @@ impl<'a> LinuxRecoveryAdapter<'a> {
             .snapshot()
             .await
             .context("恢复前无法读取 Linux 资源快照")?;
+        let global_proxy_active = self.routes.global_proxy_active();
         let tun_healthy = tun_is_healthy(&before.tun);
         let route_healthy = route_is_healthy(&before.routes);
         let dns_healthy = dns_is_healthy(&before.dns);
@@ -142,7 +143,7 @@ impl<'a> LinuxRecoveryAdapter<'a> {
             repair.tun_recreated = true;
         }
 
-        if repair.tun_recreated || !route_healthy || !dns_healthy {
+        if repair.tun_recreated || !route_healthy || (global_proxy_active && !dns_healthy) {
             self.routes
                 .refresh_plan()
                 .await
@@ -151,11 +152,13 @@ impl<'a> LinuxRecoveryAdapter<'a> {
                 .routes
                 .expected_routes
                 .saturating_sub(before.routes.installed_routes);
-            repair.dns_reconfigured = true;
+            repair.dns_reconfigured = global_proxy_active;
             tracing::warn!(
-                "Linux 网络恢复已协调资源: trigger={trigger:?}, tun_recreated={}, routes_restored={}, dns_reconfigured=true",
+                "Linux 网络恢复已协调资源: trigger={trigger:?}, tun_recreated={}, routes_restored={}, global_proxy_active={}, dns_reconfigured={}",
                 repair.tun_recreated,
-                repair.routes_restored
+                repair.routes_restored,
+                global_proxy_active,
+                repair.dns_reconfigured
             );
         }
 

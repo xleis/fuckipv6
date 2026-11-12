@@ -63,8 +63,8 @@ use crate::routing::linux_route::LinuxRouteManager;
 use crate::routing::recovery::RecoveryTrigger;
 #[cfg(target_os = "linux")]
 use crate::routing::recovery::{
-    default_recovery_probes, LocalRecoveryValidation, PathRecoveryState, RecoveryCoordinator,
-    RecoveryExpectations, RecoveryProbeTarget, RecoveryReport, RecoveryRequest, RecoveryStatus,
+    default_recovery_probes, PathRecoveryState, RecoveryCoordinator, RecoveryExpectations,
+    RecoveryProbeTarget, RecoveryReport, RecoveryRequest, RecoveryStatus,
 };
 #[cfg(target_os = "linux")]
 use crate::routing::table::{parse_linux_ip_routes, RouteEntry};
@@ -614,7 +614,6 @@ struct PendingExitReadiness {
     nonce: [u8; 16],
     targets: Vec<RecoveryProbeTarget>,
     deadline: Instant,
-    local_validation: LocalRecoveryValidation,
 }
 
 #[cfg(target_os = "linux")]
@@ -806,7 +805,21 @@ impl ClientRuntime {
         reason_code: &'static str,
     ) {
         self.block_exit_session(failure, now_unix_ms, reason_code);
+        self.restore_host_network(reason_code).await;
         self.publish_traffic_session().await;
+    }
+
+    async fn restore_host_network(&mut self, reason_code: &'static str) {
+        #[cfg(target_os = "linux")]
+        if let Err(error) = self.route_manager.deactivate_global_proxy().await {
+            tracing::error!(
+                reason_code,
+                error = %error,
+                "失败关闭状态已写入，但恢复宿主网络失败；兜底路由与 DNS 所有权已保留以便重试"
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = reason_code;
     }
 
     async fn clear_exit_selection(&mut self, reason_code: &'static str) {
@@ -815,6 +828,10 @@ impl ClientRuntime {
         // Publishing an identical fail-closed transition would wake the state
         // subscriber, which observes the new revision and repeats this path.
         if traffic_session_already_failed_closed(&self.traffic_session, reason_code) {
+            // A prior route/DNS restoration may have failed transiently. Keep
+            // this idempotent path as a cleanup retry even when the traffic
+            // state itself is already fail-closed.
+            self.restore_host_network(reason_code).await;
             return;
         }
         self.enter_fail_closed(
@@ -847,15 +864,14 @@ impl ClientRuntime {
         if exit_selection_directory_loss_requires_fail_closed(
             self.route_engine.routing_mode(),
             had_exit_session,
-        ) {
-            if !traffic_session_already_failed_closed(&self.traffic_session, reason_code) {
-                self.enter_fail_closed(
-                    TrafficFailureKind::NetworkSelectionUnavailable,
-                    unix_time_ms(),
-                    reason_code,
-                )
-                .await;
-            }
+        ) && !traffic_session_already_failed_closed(&self.traffic_session, reason_code)
+        {
+            self.enter_fail_closed(
+                TrafficFailureKind::NetworkSelectionUnavailable,
+                unix_time_ms(),
+                reason_code,
+            )
+            .await;
         }
     }
 
@@ -938,11 +954,13 @@ impl ClientRuntime {
                         .begin_recovery(true, now_unix_ms.max(1), reason_code)
                 {
                     tracing::error!(error = %error, "无法写入 Exit 迁移状态");
-                    self.block_exit_session(
+                    self.enter_fail_closed(
                         TrafficFailureKind::ExitUnavailable,
                         now_unix_ms,
                         "exit.selection.migration_state_failed",
-                    );
+                    )
+                    .await;
+                    return;
                 }
             }
             self.publish_traffic_session().await;
@@ -964,12 +982,12 @@ impl ClientRuntime {
                 .begin_recovery(true, now_unix_ms.max(1), reason_code)
         {
             tracing::error!(error = %error, "无法写入 Exit 迁移状态");
-            self.block_exit_session(
+            self.enter_fail_closed(
                 TrafficFailureKind::ExitUnavailable,
                 now_unix_ms,
                 "exit.selection.migration_state_failed",
-            );
-            self.publish_traffic_session().await;
+            )
+            .await;
             return;
         }
         self.arm_exit_connection_watchdog(to, now_unix_ms, RecoveryTrigger::ExitMigration);
@@ -990,13 +1008,15 @@ impl ClientRuntime {
             recovery_started_reason_code(trigger),
         ) {
             tracing::error!(error = %error, "无法写入恢复中的流量会话状态");
-            self.block_exit_session(
+            self.enter_fail_closed(
                 trigger
                     .failure_kind()
                     .unwrap_or(TrafficFailureKind::ConnectionTimeout),
                 now_unix_ms,
                 "recovery.state_transition_failed",
-            );
+            )
+            .await;
+            return;
         }
         self.publish_traffic_session().await;
     }
@@ -1248,11 +1268,13 @@ impl ClientRuntime {
                     .set_connecting(now_unix_ms.max(1), "traffic.session.exit_selected")
                 {
                     tracing::error!(error = %error, "无法写入 Exit 连接状态");
-                    self.block_exit_session(
+                    self.enter_fail_closed(
                         TrafficFailureKind::ConnectionTimeout,
                         now_unix_ms,
                         "traffic.session.connecting_state_failed",
-                    );
+                    )
+                    .await;
+                    return None;
                 } else {
                     self.arm_exit_connection_watchdog(
                         selected,
@@ -1414,6 +1436,10 @@ pub(crate) async fn prepare_client_runtime_ext(
     enable_ipc: bool,
 ) -> Result<ClientRuntime> {
     config.tun.name = crate::multi_network::derive_tun_name(network_name, &config.tun.name);
+
+    #[cfg(target_os = "linux")]
+    crate::routing::doh_dns::DohDnsGuard::restore_stale_host_configuration()
+        .context("恢复上次异常退出遗留的 DNS 配置失败")?;
 
     let identity = load_identity(&config)?;
     let exit_contribution_gate = ExitContributionGate::new(
@@ -2170,9 +2196,15 @@ fn linux_recovery_route_context(
 }
 
 #[cfg(target_os = "linux")]
-fn linux_recovery_expectations(mode: fuckipv6_common::RoutingMode) -> RecoveryExpectations {
+fn linux_recovery_expectations(
+    mode: fuckipv6_common::RoutingMode,
+    global_proxy_active: bool,
+) -> RecoveryExpectations {
+    let mesh_only = mode == fuckipv6_common::RoutingMode::MeshOnly;
     RecoveryExpectations {
-        exit_path_required: mode != fuckipv6_common::RoutingMode::MeshOnly,
+        routes_required: !mesh_only,
+        dns_required: !mesh_only && global_proxy_active,
+        exit_path_required: !mesh_only,
         relay_path_required: false,
         ..RecoveryExpectations::default()
     }
@@ -2180,11 +2212,12 @@ fn linux_recovery_expectations(mode: fuckipv6_common::RoutingMode) -> RecoveryEx
 
 fn linux_recovery_request(
     mode: fuckipv6_common::RoutingMode,
+    global_proxy_active: bool,
     trigger: RecoveryTrigger,
     route_context: TrafficFailureRouteContext,
 ) -> RecoveryRequest {
     RecoveryRequest::new(trigger, route_context, TrafficFailurePolicy::fail_closed())
-        .with_expectations(linux_recovery_expectations(mode))
+        .with_expectations(linux_recovery_expectations(mode, global_proxy_active))
 }
 
 #[cfg(target_os = "linux")]
@@ -2294,6 +2327,42 @@ fn recovery_failure_kind(trigger: RecoveryTrigger, report: &RecoveryReport) -> T
 }
 
 #[cfg(target_os = "linux")]
+async fn run_linux_local_resource_recovery(
+    runtime: &mut ClientRuntime,
+    trigger: RecoveryTrigger,
+) -> (RecoveryReport, RecoveryExpectations) {
+    let mode = runtime.route_engine.routing_mode();
+    let global_proxy_active = runtime.route_manager.global_proxy_active();
+    let expectations = linux_recovery_expectations(mode, global_proxy_active);
+    let route_context = current_linux_recovery_route_context(runtime).await;
+    let request = linux_recovery_request(mode, global_proxy_active, trigger, route_context.clone())
+        .with_expectations(expectations)
+        .local_resources_only();
+    let audit = RecoveryAuditContext {
+        config_root: linux_recovery_audit_root(&runtime.config_path),
+        actor: NodeId::from_public_key(&runtime.identity.public_key_bytes()),
+        network_id: runtime.network_id.clone(),
+        route_context,
+    };
+    let exit_path = runtime.exit_recovery_path;
+    let relay_path = runtime.relay_recovery_path;
+    let mut adapter = LinuxRecoveryAdapter::new(
+        &mut runtime.tun_io,
+        &mut runtime.route_manager,
+        exit_path,
+        relay_path,
+        audit,
+        std::collections::BTreeMap::new(),
+    );
+    let report = RecoveryCoordinator.recover(&mut adapter, request).await;
+    drop(adapter);
+
+    refresh_linux_recovery_paths(runtime).await;
+    log_linux_recovery_report(&report);
+    (report, expectations)
+}
+
+#[cfg(target_os = "linux")]
 async fn handle_linux_recovery_trigger(runtime: &mut ClientRuntime, trigger: RecoveryTrigger) {
     invalidate_linux_recovery_path(
         trigger,
@@ -2331,33 +2400,8 @@ async fn handle_linux_recovery_trigger(runtime: &mut ClientRuntime, trigger: Rec
     let expected_exit = runtime.intended_exit();
     runtime.begin_exit_recovery(trigger, unix_time_ms()).await;
 
-    let mode = runtime.route_engine.routing_mode();
-    let route_context = current_linux_recovery_route_context(runtime).await;
-    let request =
-        linux_recovery_request(mode, trigger, route_context.clone()).local_resources_only();
-    let audit = RecoveryAuditContext {
-        config_root: linux_recovery_audit_root(&runtime.config_path),
-        actor: NodeId::from_public_key(&runtime.identity.public_key_bytes()),
-        network_id: runtime.network_id.clone(),
-        route_context,
-    };
-    let exit_path = runtime.exit_recovery_path;
-    let relay_path = runtime.relay_recovery_path;
-    let mut adapter = LinuxRecoveryAdapter::new(
-        &mut runtime.tun_io,
-        &mut runtime.route_manager,
-        exit_path,
-        relay_path,
-        audit,
-        std::collections::BTreeMap::new(),
-    );
-    let report = RecoveryCoordinator.recover(&mut adapter, request).await;
-    drop(adapter);
-
-    refresh_linux_recovery_paths(runtime).await;
-    log_linux_recovery_report(&report);
-
-    let local_validation = report.local_resource_validation(linux_recovery_expectations(mode));
+    let (report, expectations) = run_linux_local_resource_recovery(runtime, trigger).await;
+    let local_validation = report.local_resource_validation(expectations);
     if report.status != RecoveryStatus::Recovered || local_validation.is_none() {
         runtime
             .enter_fail_closed(
@@ -2461,7 +2505,6 @@ async fn handle_linux_recovery_trigger(runtime: &mut ClientRuntime, trigger: Rec
         nonce,
         targets,
         deadline,
-        local_validation: local_validation.expect("checked immediately above"),
     });
     let outbound = OutboundPacket::owned(
         IpAddr::V6(runtime.assigned_ip),
@@ -3791,12 +3834,66 @@ async fn handle_exit_readiness_response(
         return;
     }
 
+    if let Err(error) = runtime.route_manager.validate_exit_data_path().await {
+        tracing::error!(
+            exit = %pending.target,
+            error = %error,
+            "Exit 自身 readiness 通过，但本机经 TUN/P2P/Exit 的 YouTube DNS/TCP/TLS 实测失败；宿主全局路由保持未启用"
+        );
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_readiness.data_path_failed",
+            )
+            .await;
+        return;
+    }
+
+    if let Err(error) = runtime.route_manager.activate_global_proxy().await {
+        tracing::error!(
+            exit = %pending.target,
+            error = %error,
+            "Exit readiness 已通过，但启用全局代理路由/DNS 失败，恢复宿主网络"
+        );
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_readiness.activation_failed",
+            )
+            .await;
+        return;
+    }
+
+    // The pre-activation recovery pass deliberately checked only base routes.
+    // Re-read TUN, catch-all routes and DNS now, so Protected is never based on
+    // evidence collected before host traffic was actually intercepted.
+    let (report, expectations) =
+        run_linux_local_resource_recovery(runtime, RecoveryTrigger::Manual).await;
+    let Some(local_validation) = report.local_resource_validation(expectations) else {
+        tracing::error!(
+            exit = %pending.target,
+            status = ?report.status,
+            error_code = ?report.error_code,
+            "Exit readiness 已通过，但启用后的本地资源复验失败，恢复宿主网络"
+        );
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_readiness.local_resources_failed",
+            )
+            .await;
+        return;
+    };
+
     let validation = fuckipv6_common::domain::TrafficSessionValidation::passed(
-        pending.local_validation.tun_validated,
-        pending.local_validation.routes_validated,
-        pending.local_validation.dns_validated,
+        local_validation.tun_validated,
+        local_validation.routes_validated,
+        local_validation.dns_validated,
         true,
-        unix_time_ms().max(pending.local_validation.observed_at_unix_ms.max(1)),
+        unix_time_ms().max(local_validation.observed_at_unix_ms.max(1)),
     );
     if let Err(error) = runtime
         .traffic_session
@@ -8936,6 +9033,7 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
         assert_eq!(
             linux_recovery_request(
                 fuckipv6_common::RoutingMode::GlobalProxy,
+                true,
                 RecoveryTrigger::ExitDisconnected,
                 context,
             )

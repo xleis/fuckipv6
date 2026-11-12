@@ -10,6 +10,8 @@ pub mod linux_recovery;
 pub mod linux_recovery_events;
 #[cfg(target_os = "linux")]
 pub mod linux_route;
+#[cfg(target_os = "linux")]
+pub(crate) mod linux_route_probe;
 
 mod exit_contribution;
 pub mod exit_node;

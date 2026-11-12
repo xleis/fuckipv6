@@ -555,6 +555,7 @@ impl RecoveryCoordinator {
         }
 
         let deadline = Instant::now() + Duration::from_millis(request.hard_timeout_ms);
+        let mut expectations = request.expectations;
 
         let before = match bounded(deadline, backend.snapshot()).await {
             Ok(snapshot) => snapshot,
@@ -571,6 +572,14 @@ impl RecoveryCoordinator {
             match bounded(deadline, backend.revoke_path(path)).await {
                 Ok(()) => {
                     report.revoked_paths.push(path);
+                    // The trigger has just invalidated this path. Requiring the
+                    // same stale path to become connected again would abort
+                    // recovery before the reachability probe can establish the
+                    // required fail-closed degradation.
+                    match path {
+                        InvalidatedPath::Exit => expectations.exit_path_required = false,
+                        InvalidatedPath::Relay => expectations.relay_path_required = false,
+                    }
                     true
                 }
                 Err(BoundedError::Failed) => false,
@@ -670,8 +679,7 @@ impl RecoveryCoordinator {
         };
         report.after = Some(after.clone());
 
-        if let Some((error_code, failure)) = resource_validation_error(&after, request.expectations)
-        {
+        if let Some((error_code, failure)) = resource_validation_error(&after, expectations) {
             apply_fail_closed(backend, deadline, &request, &mut report, failure).await;
             return report.finish(RecoveryStatus::Failed, Some(error_code));
         }
@@ -770,7 +778,9 @@ fn resource_validation_error(
     snapshot: &RecoveryResourceSnapshot,
     expectations: RecoveryExpectations,
 ) -> Option<(&'static str, TrafficFailureKind)> {
-    if snapshot.dns.insecure_fallback_detected || snapshot.dns.unsecured_resolvers > 0 {
+    if expectations.dns_required
+        && (snapshot.dns.insecure_fallback_detected || snapshot.dns.unsecured_resolvers > 0)
+    {
         return Some((
             "recovery.dns_unsafe_fallback_forbidden",
             TrafficFailureKind::DnsPollutionDetected,

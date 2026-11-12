@@ -128,6 +128,19 @@ impl DohDnsGuard {
             .map_err(|error| ensure_stage(error, NetworkSetupStage::DnsSetup))
     }
 
+    /// Restore resolver files left behind by an abnormal process exit before
+    /// startup performs any network work. The lock distinguishes a stale backup
+    /// from one still owned by a live runtime.
+    pub(crate) fn restore_stale_host_configuration() -> Result<()> {
+        restore_stale_host_configuration_at(
+            Path::new(LOCK_PATH),
+            Path::new(NSSWITCH_BACKUP_PATH),
+            Path::new(NSSWITCH_CONF_PATH),
+            Path::new(BACKUP_PATH),
+            Path::new(RESOLV_CONF_PATH),
+        )
+    }
+
     async fn install_inner() -> Result<Option<Self>> {
         let Some(lock) = acquire_lock()? else {
             return Ok(None);
@@ -383,14 +396,18 @@ fn finish_shutdown(mut failures: Vec<String>) -> Result<()> {
 }
 
 fn acquire_lock() -> Result<Option<File>> {
+    acquire_lock_at(Path::new(LOCK_PATH))
+}
+
+fn acquire_lock_at(path: &Path) -> Result<Option<File>> {
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .open(LOCK_PATH)
-        .with_context(|| format!("打开 DNS 配置锁失败: {LOCK_PATH}"))?;
+        .open(path)
+        .with_context(|| format!("打开 DNS 配置锁失败: {}", path.display()))?;
     let result = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if result == 0 {
         return Ok(Some(lock));
@@ -399,7 +416,21 @@ fn acquire_lock() -> Result<Option<File>> {
     if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
         return Ok(None);
     }
-    Err(error).with_context(|| format!("锁定 DNS 配置文件失败: {LOCK_PATH}"))
+    Err(error).with_context(|| format!("锁定 DNS 配置文件失败: {}", path.display()))
+}
+
+fn restore_stale_host_configuration_at(
+    lock_path: &Path,
+    nsswitch_backup: &Path,
+    nsswitch_conf: &Path,
+    resolv_backup: &Path,
+    resolv_conf: &Path,
+) -> Result<()> {
+    let Some(_lock) = acquire_lock_at(lock_path)? else {
+        return Ok(());
+    };
+    restore_stale_backup_at(nsswitch_backup, nsswitch_conf, "NSS 主机解析")?;
+    restore_stale_backup_at(resolv_backup, resolv_conf, "DNS")
 }
 
 fn restore_stale_backup() -> Result<()> {
@@ -1084,6 +1115,62 @@ mod tests {
             previous_nsswitch
         );
         assert!(!backup.exists());
+        assert!(!nsswitch_backup.exists());
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn startup_restores_stale_resolver_and_nsswitch_backups() {
+        let directory = std::env::temp_dir().join(format!(
+            "fuckipv6-doh-dns-startup-{}-{}",
+            std::process::id(),
+            NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let lock = directory.join("dns.lock");
+        let resolv_conf = directory.join("resolv.conf");
+        let resolv_backup = directory.join("resolv.conf.backup");
+        let nsswitch_conf = directory.join("nsswitch.conf");
+        let nsswitch_backup = directory.join("nsswitch.conf.backup");
+        std::fs::write(
+            &resolv_conf,
+            b"nameserver 127.0.0.2
+",
+        )
+        .expect("write managed resolver");
+        std::fs::write(
+            &nsswitch_conf,
+            b"hosts: files dns
+",
+        )
+        .expect("write managed nsswitch");
+        std::fs::write(
+            &resolv_backup,
+            b"nameserver 9.9.9.9
+",
+        )
+        .expect("write resolver backup");
+        std::fs::write(&nsswitch_backup, b"hosts: files resolve dns\n")
+            .expect("write nsswitch backup");
+
+        restore_stale_host_configuration_at(
+            &lock,
+            &nsswitch_backup,
+            &nsswitch_conf,
+            &resolv_backup,
+            &resolv_conf,
+        )
+        .expect("restore stale startup configuration");
+
+        assert_eq!(
+            std::fs::read(&resolv_conf).expect("read restored resolver"),
+            b"nameserver 9.9.9.9\n"
+        );
+        assert_eq!(
+            std::fs::read(&nsswitch_conf).expect("read restored nsswitch"),
+            b"hosts: files resolve dns\n"
+        );
+        assert!(!resolv_backup.exists());
         assert!(!nsswitch_backup.exists());
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }

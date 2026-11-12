@@ -54,6 +54,7 @@ struct BackendState {
     relay_path: PathRecoveryState,
     probe_mode: ProbeMode,
     applications: Vec<FailureApplication>,
+    global_proxy_active: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -117,6 +118,7 @@ async fn shutdown_routes(state: &mut BackendState) {
         drop(routes);
         force_clear_owned_routes(table_id);
     }
+    state.global_proxy_active = false;
 }
 
 async fn shutdown_tun(state: &mut BackendState) {
@@ -193,7 +195,7 @@ impl RealNetnsBackend {
         let tun = TunDevice::create_dual_stack(TUN_NAME, &assigned_ips(), 24, 64, 1280)
             .await
             .expect("create recovery TUN");
-        let routes = LinuxRouteManager::install(
+        let mut routes = LinuxRouteManager::install(
             RoutingMode::GlobalProxy,
             TUN_NAME,
             &assigned_ips(),
@@ -202,8 +204,20 @@ impl RealNetnsBackend {
             &[],
         )
         .await
-        .expect("install recovery routes and DNS");
+        .expect("install recovery base routes");
         let table_id = routes.table_id();
+        assert!(
+            !routes.global_proxy_active(),
+            "base routes must not intercept traffic before Exit validation"
+        );
+        assert!(
+            !dns_is_managed(&resolv_conf),
+            "DNS must remain untouched before Exit validation"
+        );
+        routes
+            .activate_global_proxy()
+            .await
+            .expect("activate recovery proxy after fake Exit validation");
         let (probe_addr, control_task) = start_control_probe().await;
         let backend = Self {
             state: Mutex::new(BackendState {
@@ -216,6 +230,7 @@ impl RealNetnsBackend {
                 relay_path: PathRecoveryState::Connected,
                 probe_mode: ProbeMode::Tcp,
                 applications: Vec::new(),
+                global_proxy_active: true,
             }),
             resolv_conf,
             audit_path: work.join("recovery-audit.log"),
@@ -302,6 +317,7 @@ impl RecoveryBackend for RealNetnsBackend {
                 && before.routes.residual_routes == 0
                 && before.routes.stale_interface_routes == 0;
             let dns_present = before.dns.state == RecoveryResourceState::Healthy;
+            let global_proxy_active = state.global_proxy_active;
 
             if !tun_present {
                 shutdown_routes(&mut state).await;
@@ -314,13 +330,13 @@ impl RecoveryBackend for RealNetnsBackend {
                 repair.tun_recreated = true;
             }
 
-            if !route_present || !dns_present || repair.tun_recreated {
+            if repair.tun_recreated || !route_present || (global_proxy_active && !dns_present) {
                 if let Some(routes) = state.routes.as_mut() {
                     routes.refresh_plan().await.map_err(|_| {
                         RecoveryOperationError::new("recovery.route_install_failed")
                     })?;
                 } else {
-                    let routes = LinuxRouteManager::install(
+                    let mut routes = LinuxRouteManager::install(
                         RoutingMode::GlobalProxy,
                         TUN_NAME,
                         &assigned_ips(),
@@ -330,11 +346,17 @@ impl RecoveryBackend for RealNetnsBackend {
                     )
                     .await
                     .map_err(|_| RecoveryOperationError::new("recovery.route_install_failed"))?;
+                    if global_proxy_active {
+                        routes.activate_global_proxy().await.map_err(|_| {
+                            RecoveryOperationError::new("recovery.route_activate_failed")
+                        })?;
+                    }
                     state.table_id = routes.table_id();
                     state.routes = Some(routes);
                 }
+                state.global_proxy_active = global_proxy_active;
                 repair.routes_restored = 1;
-                repair.dns_reconfigured = true;
+                repair.dns_reconfigured = global_proxy_active;
             }
 
             let _ = ip(&["link", "set", UPLINK_NAME, "up"]);

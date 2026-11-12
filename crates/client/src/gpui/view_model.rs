@@ -12,11 +12,11 @@ use fuckipv6_common::domain::{
     InvitationCode, InvitationId, InvitationRedeemRequest, MemberLifecycleAction, MembershipRole,
     NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
     NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId,
-    RelayGovernanceAction, RelayGovernanceAuditSnapshot, RelayGovernanceEvent, RelayHealthIssue,
-    RelayHealthSnapshot, RelayHealthStatus, RelayLifecycleState, RelayLimitPolicy,
-    RelayLimitSource, RelayMeasurementState, RelayReachabilityState, TopologyNode,
-    TopologyNodeHealth, TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy, TrafficFlow,
-    TrafficMatch, TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput, TrafficProtectionState,
+    RelayGovernanceAction, RelayGovernanceEvent, RelayHealthIssue, RelayHealthSnapshot,
+    RelayHealthStatus, RelayLifecycleState, RelayLimitPolicy, RelayLimitSource,
+    RelayMeasurementState, RelayReachabilityState, TopologyNode, TopologyNodeHealth,
+    TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy, TrafficFlow, TrafficMatch,
+    TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput, TrafficProtectionState,
     TrafficProtocol, TrafficRoutingHitSample, TrafficRoutingObservation, TrafficRoutingPageModel,
     TrafficRoutingRuleActivityEffect, TrafficRoutingRuleImpactView, TrafficRoutingTarget,
     TrafficRoutingTargetKind, TrafficRoutingTargetRef, TrafficRoutingWorkflowState,
@@ -7663,10 +7663,10 @@ mod tests {
     };
     use fuckipv6_common::domain::{
         ActivityEntry, AuditId, AuditOutcome, DomainSuffix, MembershipState, NetworkMemberPresence,
-        NodeId, PortRange, RelayUsageSnapshot, TopologyBoundary, TopologyConnection,
-        TopologyConnectionState, TopologyNode, TopologyNodeNetwork, TrafficDefaultPolicy,
-        TrafficFailureKind, TrafficFailurePolicy, TrafficMatch, TrafficRoutingHardConstraints,
-        TrafficRoutingObservedHit, TrafficRule, TrafficRuleId,
+        NodeId, PortRange, RelayGovernanceAuditSnapshot, RelayUsageSnapshot, TopologyBoundary,
+        TopologyConnection, TopologyConnectionState, TopologyNode, TopologyNodeNetwork,
+        TrafficDefaultPolicy, TrafficFailureKind, TrafficFailurePolicy, TrafficMatch,
+        TrafficRoutingHardConstraints, TrafficRoutingObservedHit, TrafficRule, TrafficRuleId,
     };
     use serde::Deserialize;
     use std::collections::BTreeMap;

@@ -1253,6 +1253,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn relay_runtime_and_exit_failure_chain_stays_bounded_and_fail_closed() {
+        // This is an in-process failure matrix, not a real three-node topology
+        // test. It proves that consecutive subsystem failures cannot turn into
+        // retry loops or an implicit direct fallback in the coordinator.
+        let mut relay_and_exit_down = healthy_snapshot();
+        relay_and_exit_down.relay_path = PathRecoveryState::Disconnected;
+        relay_and_exit_down.exit_path = PathRecoveryState::Disconnected;
+        let mut backend = FakeBackend::new(healthy_snapshot(), healthy_snapshot());
+        backend.state.lock().unwrap().snapshots.extend([
+            Ok(relay_and_exit_down.clone()),
+            Ok(healthy_snapshot()),
+            Ok(relay_and_exit_down),
+            Ok(healthy_snapshot()),
+        ]);
+        // Direct fallback is enabled only for an unrelated timeout failure. None
+        // of the failures below may be promoted to direct connectivity.
+        let policy = TrafficFailurePolicy::with_direct_fallback(
+            [TrafficFailureKind::ConnectionTimeout],
+            TrafficDefaultConfirmedBy::Owner,
+            1_700_000_000_000,
+        )
+        .unwrap();
+        let request = |trigger| {
+            RecoveryRequest::new(trigger, route_context(), policy.clone())
+                .with_probes(vec![RecoveryProbeTarget::Controlled("matrix".into())])
+                .with_hard_timeout_ms(1_000)
+        };
+
+        let relay = RecoveryCoordinator
+            .recover(&mut backend, request(RecoveryTrigger::RelayDisconnected))
+            .await;
+        let runtime = RecoveryCoordinator
+            .recover(&mut backend, request(RecoveryTrigger::RuntimeDisconnected))
+            .await;
+        let exit = RecoveryCoordinator
+            .recover(&mut backend, request(RecoveryTrigger::ExitDisconnected))
+            .await;
+
+        for report in [&relay, &runtime, &exit] {
+            assert_eq!(report.status, RecoveryStatus::DegradedFailClosed);
+            assert!(report.fail_closed_required);
+            assert!(report.traffic_session_validation.is_none());
+            assert_eq!(report.failure_decisions.len(), 1);
+            assert_eq!(
+                report.failure_decisions[0].outcome,
+                TrafficFailureOutcome::FailClosed
+            );
+            assert!(report.failure_decisions[0].direct_fallback.is_none());
+        }
+        assert_eq!(relay.revoked_paths, vec![InvalidatedPath::Relay]);
+        assert!(runtime.revoked_paths.is_empty());
+        assert_eq!(exit.revoked_paths, vec![InvalidatedPath::Exit]);
+        let before_runtime = runtime.before.as_ref().expect("runtime before snapshot");
+        assert_eq!(before_runtime.relay_path, PathRecoveryState::Disconnected);
+        assert_eq!(before_runtime.exit_path, PathRecoveryState::Disconnected);
+
+        let applications = backend.applications();
+        assert_eq!(
+            applications.len(),
+            3,
+            "each failure gets one bounded decision"
+        );
+        assert_eq!(
+            applications
+                .iter()
+                .map(|application| application.decision.failure)
+                .collect::<Vec<_>>(),
+            vec![
+                TrafficFailureKind::NetworkSelectionUnavailable,
+                TrafficFailureKind::RuntimeDisconnected,
+                TrafficFailureKind::ExitUnavailable,
+            ]
+        );
+        let calls = backend.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.as_str() == "revoke:Relay")
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.as_str() == "revoke:Exit")
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("reconcile:"))
+                .count(),
+            3
+        );
+    }
+
+    #[tokio::test]
     async fn sleep_wake_and_network_change_fail_closed_when_a_required_layer_is_missing() {
         #[derive(Clone, Copy)]
         enum MissingLayer {

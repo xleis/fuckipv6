@@ -44,6 +44,13 @@ pub(crate) const MAX_FILE_NETWORK_FRAGMENT_BYTES: usize = 48 * 1024;
 /// a manifest with checksums for the maximum 1 GiB file still fits in one frame.
 pub(crate) const MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
+/// The network frame length bounds the manifest's chunk list. Keep both the
+/// chunk count and the maximum file size fixed so local callers cannot force an
+/// unbounded manifest allocation by choosing a tiny chunk size for a huge file.
+pub(crate) const MAX_FILE_NETWORK_MANIFEST_CHUNKS: usize = 256;
+pub(crate) const MAX_FILE_NETWORK_TRANSFER_BYTES: u64 =
+    MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64 * MAX_FILE_NETWORK_MANIFEST_CHUNKS as u64;
+
 const MAX_FILE_NETWORK_ERROR_CODE_LEN: usize = 96;
 const MAX_ACTIVE_FILE_NETWORK_SESSIONS: usize = 16;
 const FILE_NETWORK_TRANSFER_TTL_MS: u64 = 30 * 60 * 1_000;
@@ -1240,7 +1247,10 @@ pub(crate) fn validate_network_manifest(
     manifest
         .validate()
         .map_err(|_| FileNetworkError::InvalidManifest)?;
-    if manifest.chunk_size > MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64 {
+    if manifest.chunk_size > MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64
+        || manifest.total_bytes > MAX_FILE_NETWORK_TRANSFER_BYTES
+        || manifest.chunks.len() > MAX_FILE_NETWORK_MANIFEST_CHUNKS
+    {
         return Err(FileNetworkError::InvalidManifest);
     }
     Ok(())
@@ -1650,6 +1660,54 @@ mod tests {
                     manifest: invalid,
                 }
             ),
+            Err(FileNetworkError::InvalidManifest)
+        );
+    }
+
+    #[test]
+    fn remote_manifests_must_fit_the_bounded_file_and_chunk_limits() {
+        let checksum = ContentHash::from_bytes(b"chunk");
+        let chunk_count = MAX_FILE_NETWORK_MANIFEST_CHUNKS + 1;
+        let chunks = (0..chunk_count)
+            .map(|index| FileChunk {
+                index: u32::try_from(index).expect("chunk index"),
+                offset: u64::try_from(index).expect("chunk offset"),
+                length: 1,
+                checksum: checksum.clone(),
+            })
+            .collect();
+        let chunk_limited = TransferManifest {
+            file_id: FileId::from_public_key(b"chunk-limited"),
+            total_bytes: u64::try_from(chunk_count).expect("chunk count"),
+            chunk_size: 1,
+            content_hash: checksum.clone(),
+            chunks,
+        };
+        assert_eq!(
+            validate_network_manifest(&chunk_limited),
+            Err(FileNetworkError::InvalidManifest)
+        );
+
+        let chunk_size = MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64;
+        let chunk_count = MAX_FILE_NETWORK_MANIFEST_CHUNKS + 1;
+        let chunks = (0..chunk_count)
+            .map(|index| FileChunk {
+                index: u32::try_from(index).expect("chunk index"),
+                offset: u64::try_from(index).expect("chunk offset") * chunk_size,
+                length: chunk_size,
+                checksum: checksum.clone(),
+            })
+            .collect();
+        let size_limited = TransferManifest {
+            file_id: FileId::from_public_key(b"size-limited"),
+            total_bytes: u64::try_from(chunk_count).expect("chunk count") * chunk_size,
+            chunk_size,
+            content_hash: checksum,
+            chunks,
+        };
+        assert!(size_limited.total_bytes > MAX_FILE_NETWORK_TRANSFER_BYTES);
+        assert_eq!(
+            validate_network_manifest(&size_limited),
             Err(FileNetworkError::InvalidManifest)
         );
     }

@@ -3361,7 +3361,7 @@ macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态以�
 - [x] 限制目录扫描深度和条目数；
 - [x] 限制事件队列和日志增长；
 - [ ] 满载时不影响 node/control 基本功能；
-- [ ] 压力测试后文件句柄、线程和内存回到基线（Linux 进程内已自动化通过；macOS/Windows 待验收）；
+- [ ] 压力测试后文件句柄、线程和内存回到基线（Linux 进程内及 SIGKILL 恢复已自动化通过；macOS/Windows 待验收）；
 - [x] 报告录明阈值与恢复结果。
 
 **验收**：恶意或误用传输无法耗尽节点资源，File 故障不拖垮数据面。
@@ -3409,8 +3409,14 @@ macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态以�
 不得比前半程峰值增长超过 4 MiB、最终 RSS 不得比预热后基线高超过 4 MiB。连续执行 5 次均通过：基线固定为 5 个句柄、2 个
 线程、约 5.0 MiB RSS；峰值约 5.1 MiB，最终稳定在峰值且较基线仅保留约 208 KiB allocator 驻留内存。
 
-**未测边界**：Linux 进程内已覆盖满载上传/下载的正常完成、丢弃、staging 清理和 OS 资源恢复，但不包括异常退出。
-尚未启动独立 node/control 进程做真实 File 满载隔离测试；macOS/Windows 的线程、RSS 与句柄基线仍需实机采样。
+**补充（2026-11-13，Linux SIGKILL 恢复）**：`file_process_sigkill_staging_is_removed_on_restart` 启动真实测试子进程，
+建立已准入上传并写入 staging 后向子进程发送 `SIGKILL`。父进程确认进程异常退出绕过了 `TemporaryUpload::drop`，未完成目标
+从未发布、owner 既有文件未变化；随后将遗留 staging 的 mtime 回拨到超过陈旧阈值，再以新的 `FileRuntime` 重启共享，验证
+staging 被清理、活动传输为 0 且 capability 恢复为 Ready。该测试确定性地模拟“崩溃发生在部分上传写入后，进程停机时间已超过
+staging 陈旧阈值”。
+
+**未测边界**：Linux 进程内已覆盖满载上传/下载的正常完成、丢弃、staging 清理、OS 资源恢复和测试进程 SIGKILL 后的重启
+清理。尚未启动独立 node/control 进程做真实 File 满载隔离测试；macOS/Windows 的线程、RSS 与句柄基线仍需实机采样。
 大文件、多文件并发和真实网络中断恢复性能也未测试。
 
 ### W15-07 撤权与传输中断 `[~]`
@@ -3433,8 +3439,10 @@ owner 本地共享文件不在失败路径中；owner 下载/上传侧撤权取�
 `disabling_capability_cancels_an_active_download`、`disabling_capability_cancels_an_active_upload_and_cleans_staging` 和
 `operation_cancellation_before_upload_finish_never_publishes` 覆盖。`dropping_the_data_plane_aborts_sessions_and_cleans_staging`
 同时打开上传和下载后直接丢弃网络数据面，验证活动准入降到 0、上传 staging 与未发布目标均被清理；Linux 上还验证上传 staging
-和下载源文件两个句柄都回到基线。该测试模拟运行中数据面突然消失，但仍非真实双节点网络断开。尚未演练真实成员并发撤权和
-节点进程重启，因此 W15-07 继续保持 `[~]`。
+和下载源文件两个句柄都回到基线。该测试模拟运行中数据面突然消失，但仍非真实双节点网络断开。
+`file_process_sigkill_staging_is_removed_on_restart` 进一步让持有活动上传的真实测试进程收到 `SIGKILL`，验证崩溃遗留 staging
+不会发布，并可在 FileRuntime 重启后被清理。该测试覆盖独立测试进程异常退出，不是完整 node 服务重启。尚未演练真实成员并发
+撤权、完整 node 服务重启和真实双节点网络断开，因此 W15-07 继续保持 `[~]`。
 
 ### W15-08 File 非目标与发布证据 `[ ]`
 
@@ -3456,7 +3464,7 @@ owner 本地共享文件不在失败路径中；owner 下载/上传侧撤权取�
 - 当前已有 GPUI owner File 设置流程、本地 owner IPC、持久化、domain ACL、路径边界、临时文件、可恢复传输适配器和资源限制。
 - 当前 WebUI 与 Android 尚无 File 内容浏览/传输表面；不得宣称 GPUI/WebUI/Android 三端 File 语义已经一致。
 - 自动化测试覆盖 Linux 临时目录及 portable 路径规则，但尚未完成 Windows GNU/macOS 实机重解析点、硬链接、目录交换、
-  并发重命名和权限变化测试，也没有真实网络传输链路、撤权中断、节点重启或大文件/多文件性能报告。
+  并发重命名和权限变化测试，也没有真实网络传输链路、撤权中断、完整 node 服务重启或大文件/多文件性能报告。
 - 因此 W15 保持 `[~]`，第二版能力队列中的“W15 File 完成”继续保持 `[ ]`；真实路径安全、跨平台和三端门禁通过前不得发布为完成。
 
 ## 19. W16：Android

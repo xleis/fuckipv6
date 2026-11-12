@@ -1,5 +1,6 @@
 package cc.xlei.fuckipv6.contract;
 
+import java.lang.reflect.Field;
 import java.util.Collections;
 
 import cc.xlei.fuckipv6.contract.NodeContractV1.CommandEnvelope;
@@ -45,9 +46,17 @@ public final class NodeContractV1Test {
         throw new AssertionError(label + " must fail closed");
     }
 
+    private static void assertNoDeclaredField(Class<?> type, String name) {
+        for (Field field : type.getDeclaredFields()) {
+            if (field.getName().equals(name)) {
+                throw new AssertionError(type.getSimpleName() + " must not expose " + name);
+            }
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 284,
+                NodeContractV1.DTO_CLASS_NAMES.length == 286,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -117,9 +126,111 @@ public final class NodeContractV1Test {
             NodeContractV1.NodeSnapshot.class.getDeclaredField(field);
         }
 
+        for (String field : new String[] {
+            "network_name",
+            "relay_addr",
+            "relay_governance",
+            "relay_health",
+            "relay_status",
+            "signaling_addr",
+            "status"
+        }) {
+            NodeContractV1.NodeEmbeddedServiceSnapshot.class.getDeclaredField(field);
+            NodeContractV1.ProjectedNodeEmbeddedServiceSnapshot.class.getDeclaredField(field);
+        }
+
         for (String field : new String[] {"local_policy", "network_acls"}) {
             NodeContractV1.NodeAccessControlSnapshot.class.getDeclaredField(field);
         }
+        for (String field : new String[] {
+            "max_bandwidth_kbps",
+            "max_bytes",
+            "max_concurrent_streams",
+            "max_connections",
+            "max_cpu_percent",
+            "max_memory_bytes",
+            "max_session_duration_secs",
+            "quota_reset_at_unix_ms"
+        }) {
+            NodeContractV1.RelayLimitPolicy.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "active_connections",
+            "active_sessions",
+            "active_streams",
+            "cpu_measurement",
+            "forwarded_bytes",
+            "forwarded_packets",
+            "last_forwarded_at_unix_ms",
+            "last_forwarding_failure_at_unix_ms",
+            "memory_measurement",
+            "observed_cpu_percent",
+            "observed_memory_bytes",
+            "oldest_session_age_secs",
+            "quota_reset_at_unix_ms",
+            "quota_started_at_unix_ms",
+            "rejected_connections",
+            "rejected_packets"
+        }) {
+            NodeContractV1.RelayUsageSnapshot.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "authorization_valid",
+            "forwarding_observed",
+            "issues",
+            "lifecycle",
+            "limit_sources",
+            "limits",
+            "listen_addr",
+            "listener_bound",
+            "network_reachability",
+            "observed_at_unix_ms",
+            "quota_limited",
+            "reason_code",
+            "status",
+            "usage"
+        }) {
+            NodeContractV1.RelayHealthSnapshot.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "action",
+            "limit",
+            "node_id",
+            "observed",
+            "occurred_at_unix_ms",
+            "reason_code",
+            "reset_at_unix_ms"
+        }) {
+            NodeContractV1.RelayGovernanceEvent.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {"dropped_events", "events"}) {
+            NodeContractV1.RelayGovernanceAuditSnapshot.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "payload", "private_key", "session_key", "source_address", "destination_address"
+        }) {
+            assertNoDeclaredField(NodeContractV1.RelayGovernanceEvent.class, field);
+        }
+        assertSame(
+                "session_rejected",
+                NodeContractV1.RelayGovernanceAction.SESSION_REJECTED.wireName(),
+                "Relay governance rejection wire name");
+        assertSame(
+                "quota_exhausted",
+                NodeContractV1.RelayHealthStatus.QUOTA_EXHAUSTED.wireName(),
+                "Relay quota health wire name");
+        assertSame(
+                "network_acl",
+                NodeContractV1.RelayLimitSource.NETWORK_ACL.wireName(),
+                "Relay limit source wire name");
+        assertSame(
+                "unsupported",
+                NodeContractV1.RelayMeasurementState.UNSUPPORTED.wireName(),
+                "Relay measurement state wire name");
+        assertSame(
+                "unreachable",
+                NodeContractV1.RelayReachabilityState.UNREACHABLE.wireName(),
+                "Relay reachability wire name");
         for (String field : new String[] {
             "actor",
             "emergency_coordinator",
@@ -333,7 +444,8 @@ public final class NodeContractV1Test {
             NodeContractV1.PolicyHistoryEntry.class.getDeclaredField(field);
         }
         for (String field : new String[] {
-            "expires_at_unix_ms", "grants", "issued_at_unix_ms", "network_id", "revision", "rules"
+            "expires_at_unix_ms", "grants", "issued_at_unix_ms", "network_id", "relay_limits",
+            "revision", "rules"
         }) {
             NodeContractV1.NetworkAcl.class.getDeclaredField(field);
         }
@@ -346,7 +458,7 @@ public final class NodeContractV1Test {
         }
         for (String field : new String[] {
             "contribution_vetoes", "expires_at_unix_ms", "issued_at_unix_ms", "network_scope",
-            "node_id", "revision", "rules"
+            "node_id", "relay_limits", "revision", "rules"
         }) {
             NodeContractV1.NodeLocalAccessPolicy.class.getDeclaredField(field);
         }

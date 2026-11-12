@@ -3230,7 +3230,7 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 - [ ] 不把整个磁盘或敏感系统目录设为默认共享；
 - [ ] 启用前展示目录、容量、访问范围和最小权限；
 - [ ] File 能力独立于 Relay/Exit/Coordinator；
-- [ ] 关闭能力停止新传输并处理已有传输；
+- [x] 关闭能力停止新传输并处理已有传输；
 - [ ] 目录不可读、权限变化、磁盘满有明确状态；
 - [ ] 不自动创建桌面/下载目录共享；
 - [ ] 所有配置变化有审计。
@@ -3385,7 +3385,8 @@ macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态以�
 | 网络 manifest 分块 | 256 | `MAX_FILE_NETWORK_MANIFEST_CHUNKS`，`Vec` 分配前校验 |
 | 网络单块上限 | 4 MiB | `MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES`，同时限制 manifest 和 fragment offset |
 | 带宽 | 0 = 不限额 | `max_bandwidth_kbps`；启用时按聚合 File 流量计量，桶容量不超过单块上限 |
-| 节点活动/命令审计 | 256 / 256 | `ACTIVITY_RETENTION_LIMIT` / `COMMAND_AUDIT_RETENTION_LIMIT` |
+| 节点活动/命令审计 | 256 / 256 | `RECENT_ACTIVITY_RETENTION_LIMIT` / `COMMAND_AUDIT_RETENTION_LIMIT` |
+| File 网络活动队列 | 256 | `FILE_NETWORK_ACTIVITY_RETENTION_LIMIT`，合并到节点活动时再次按同一上限截断 |
 | File capability 审计 | 256 | `CAPABILITY_AUDIT_RETENTION_LIMIT`；持久化 owner 安全台账不受内存淘汰影响 |
 
 **自动化恢复结果**：`repeated_transfer_lifecycles_return_admission_and_staging_to_baseline` 连续执行 512 次上传生命周期，
@@ -3401,6 +3402,9 @@ macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态以�
 `restored_upload_rejects_source_growth_before_manifest_allocation` 验证响应/owner/恢复入口复用同一边界。
 `download_session_limit_and_cancel_restore_capacity` 在 Linux 上以 `/proc/self/fd` 采样测试临时目录下的文件句柄：开启
 `MAX_ACTIVE_FILE_NETWORK_SESSIONS` 个下载后句柄数增加相同数量，逐个取消并排空会话后恢复测试前基线。
+`file_network_activity_queue_keeps_only_the_latest_256_entries` 连续完成 300 次打开/取消并校验网络活动队列只保留最新 256 条；
+`merge_activity_preserves_producers_deduplicates_and_retains_latest_256` 校验命令与 File 网络活动合并后按 `audit_id` 去重、
+最新优先并再次截断到 256 条。
 
 **补充（2026-11-13，Linux 满载进程资源基线）**：独立集成测试 `file_runtime_stress_restores_linux_process_resources`
 启用共享根后先预热，再连续执行 1,024 批、每批 4 路上传（其中每 32 批完成并发布一组文件，其余路径直接丢弃），随后执行
@@ -3423,12 +3427,12 @@ staging 陈旧阈值”。
 
 - [ ] 撤销 ACL 后立即停止新元数据访问和传输请求；
 - [x] 已有传输在安全边界内终止或完成策略明确；
-- [ ] 成员退出/移除后会话和临时凭据失效；
-- [ ] 节点 owner 关闭共享后所有客户端看到不可用；
+- [x] 成员退出/移除后会话和临时凭据失效；
+- [x] 节点 owner 关闭共享后所有客户端看到不可用；
 - [x] 不删除 owner 本地文件；
-- [ ] 活动记录撤权、中断和清理结果；
+- [x] 活动记录撤权、中断和清理结果；
 - [ ] 覆盖并发上传中撤权、节点重启和网络断开；
-- [ ] 验证无未授权断点续传恢复。
+- [x] 验证无未授权断点续传恢复。
 
 **验收**：撤权快速生效，不留下可继续下载的会话、URL 或临时凭据。
 
@@ -3444,6 +3448,45 @@ owner 本地共享文件不在失败路径中；owner 下载/上传侧撤权取�
 不会发布，并可在 FileRuntime 重启后被清理。该测试覆盖独立测试进程异常退出，不是完整 node 服务重启。尚未演练真实成员并发
 撤权、完整 node 服务重启和真实双节点网络断开，因此 W15-07 继续保持 `[~]`。
 
+**补充（2026-11-13，撤权/中断/清理活动）**：File 网络数据面新增有界活动队列，并在单帧/批量入站处理及下载 pump 结束后
+合并到节点活动。`sessions_are_bound_to_both_member_epoch_and_local_capability_epoch` 校验本地 capability 撤权和成员 epoch
+撤权都会结束会话、清空 staging 与未发布目标，并记录 `file.transfer.authorization_revoked` / `Denied`；
+`explicit_cancel_records_activity_and_cleans_unpublished_upload` 校验显式取消记录
+`file.transfer.cancelled` / `Succeeded` 且不发布上传；`download_fails_closed_on_capability_member_epoch_and_ttl_changes`
+依次覆盖 capability 撤权、成员 epoch 撤权和 TTL 到期，后者记录 `file.transfer.interrupted` / `Failed`。上述断言同时核对稳定
+`reason_code` 与 `cleanup_code`。活动详情只包含 transfer/operation/share ID、方向、稳定原因、actor/network 和结果，不包含
+路径、文件名、文件内容、原始 OS 错误或凭据；序列化断言确认分享根路径和文件名不会进入活动记录。该证据覆盖数据面状态机和
+自动化活动发布，不代表真实双节点撤权或完整 node 服务重启已经演练，故 W15-07 继续保持 `[~]`。
+
+**补充（2026-11-13，无未授权断点续传恢复）**：resume IPC 不再直接使用 journal 中的旧 binding 排队续传，而是在恢复前把
+binding 中的 requester `access_epoch` 与 requester 本地当前成员目录 epoch 比对，并独立验证 owner 仍在线、仍是有效成员且具备
+File capability；requester 与 owner 的成员 epoch 不跨成员比较。每次续传帧及其他 requester 帧实际发送前，pump 还会重复这两项
+独立校验。若成员被移除、capability 不可用或 requester epoch 已变化，传输立即失败关闭，不产生 Resume 请求帧。
+`file_origin_requester_epoch_is_not_compared_with_owner_epoch` 使用 requester epoch 8、owner epoch 9 的目录验证绑定 epoch 7 只与
+requester 当前 epoch 比较，避免不同成员 epoch 偶然相同或不同造成误放行/误拒绝。
+`restored_upload_with_revoked_epoch_fails_closed_without_resume_frame` 验证暂停上传跨进程状态恢复后遇到撤权 epoch 时源文件不变、
+无 outbound 帧且 paused journal 清空；`restored_download_with_revoked_epoch_removes_staging_without_resume_frame` 验证暂停下载恢复后
+遇到撤权 epoch 时删除 staging、不发布目标文件、无 outbound 帧且 journal 清空。两者均确认最终事件为
+`file_transfer_access_revoked`。该自动化证据覆盖 journal 恢复和发送边界，但仍不替代真实双节点撤权演练，因此 W15-07 保持 `[~]`。
+
+**补充（2026-11-13，owner 关闭与 ACL 重配置主动撤权）**：节点事件循环现在订阅本地 File capability epoch；owner 关闭能力或用新
+ACL 替换共享时，会在下一次 peer 帧之前主动调用 `cancel_all_for_authorization_loss`，取消上传和下载会话、释放并发 admission、
+关闭文件句柄并清理未发布 staging。`owner_disable_revokes_all_active_sessions_and_rejects_new_requests` 用两个不同成员的活动下载验证
+一次关闭会同时终止全部会话，两个成员随后发起的新下载都返回 `file_capability_disabled`，owner 源文件保持不变。
+`acl_reconfiguration_revokes_live_transfer_and_rejects_new_requests` 验证 ACL 替换推进 capability epoch 后，在途下载被记录为
+`file.transfer.authorization_revoked` / `Denied` 并完成清理，新下载返回 `file_acl_no_allow`，源文件保留。
+`owner_disable_revokes_concurrent_upload_and_download_without_publishing` 进一步在同一 owner 能力下同时打开上传和下载，关闭能力后
+两者均完成撤权清理：上传 staging 被删除且目标未发布，下载源文件保持原样，两个方向均生成
+`file.transfer.authorization_revoked` / `Denied` 活动。该证据覆盖进程内网络数据面、并发双向传输和多客户端请求路径。
+
+**补充（2026-11-13，成员目录刷新主动撤权）**：节点事件循环把成员目录刷新结果同时用于 File 会话复核，调用
+`cancel_sessions_without_member_access` 重新检查网络、目录新鲜度、成员存在性、生命周期、File capability 和 access epoch；
+成员被移除、退出、失去 File capability、epoch 推进或目录不可用时，会主动取消该 peer 的上传和下载，而不是等待下一帧。
+`member_removal_revokes_concurrent_upload_and_download_without_publishing` 先以仍有效的成员目录确认并发上传和下载不会被误取消，
+再从目录移除该成员，验证两个会话同时终止、上传 staging 删除且目标未发布、下载源文件不变，并分别为两个方向生成
+`file.transfer.authorization_revoked` / `Denied` 和 `file_transfer_cleanup_completed` 活动。因此“成员退出/移除后会话和临时凭据
+失效”已有自动化闭环；真实双节点网络断开、真实双节点成员退出/移除演练及完整 node 服务重启仍未验证。
+
 ### W15-08 File 非目标与发布证据 `[ ]`
 
 - [x] 明确不做自动同步、双向镜像、系统挂载和远程目录替换；
@@ -3452,10 +3495,21 @@ owner 本地共享文件不在失败路径中；owner 下载/上传侧撤权取�
 - [ ] GPUI/WebUI/Android 使用同一文件和权限语义；
 - [x] 移动端 SAF 与桌面目录权限边界清楚；
 - [x] 活动与审计可追溯；
-- [ ] 性能报告包含大文件、多文件和中断恢复；
+- [x] 性能报告包含大文件、多文件和中断恢复；
 - [x] 未通过路径安全测试不得发布。
 
 **验收**：File 第一版范围明确、边界安全、传输闭环，不以同步盘宣传超出实现。
+
+**性能基线（2026-11-13，Linux 本地文件系统）**：新增
+`file_transfer_large_multifile_and_resume_report_linux`。数据集包含一个 64 MiB 单文件上传、一个 64 MiB 单文件下载，两者均在
+第 6 个 4 MiB 分块后暂停并恢复，剩余 40 MiB 只能从下一分块继续；另以 4 个 8 MiB 文件、每文件 1 MiB 分块进行交错并发下载。
+测试逐块计算 BLAKE3，pause/resume 后最终内容哈希必须与数据集一致，同时检查活动传输归零、staging 清空，以及文件描述符和线程
+回到基线。当前环境为 AMD Ryzen 7 5800H、Linux 7.2.14-zen1-1-zen、rustc 1.99.1、16 个逻辑 CPU，基于 `2875448` 加当前
+W15 未提交变更的 debug 测试构建；命令为
+`cargo test -p fuckipv6-client --test file_share_resources_linux file_transfer_large_multifile_and_resume_report_linux -- --nocapture`。
+本次记录：64 MiB 上传 189.57 ms / 337.6 MiB/s，64 MiB 下载 210.19 ms / 304.5 MiB/s，4×8 MiB 交错下载 118.96 ms /
+269.0 MiB/s；文件描述符 5→5，线程 2→2。该数据仅代表本机临时目录和进程内 adapter 路径，不是 QUIC/P2P 实网吞吐、release
+构建基准或跨平台性能结论。
 
 **边界与发布结论（2026-11-12）**：
 
@@ -3464,7 +3518,8 @@ owner 本地共享文件不在失败路径中；owner 下载/上传侧撤权取�
 - 当前已有 GPUI owner File 设置流程、本地 owner IPC、持久化、domain ACL、路径边界、临时文件、可恢复传输适配器和资源限制。
 - 当前 WebUI 与 Android 尚无 File 内容浏览/传输表面；不得宣称 GPUI/WebUI/Android 三端 File 语义已经一致。
 - 自动化测试覆盖 Linux 临时目录及 portable 路径规则，但尚未完成 Windows GNU/macOS 实机重解析点、硬链接、目录交换、
-  并发重命名和权限变化测试，也没有真实网络传输链路、撤权中断、完整 node 服务重启或大文件/多文件性能报告。
+  并发重命名和权限变化测试，也没有真实网络传输链路、撤权中断或完整 node 服务重启演练；已有的大文件/多文件性能基线只覆盖
+  Linux 本地文件系统和 debug 测试构建。
 - 因此 W15 保持 `[~]`，第二版能力队列中的“W15 File 完成”继续保持 `[ ]`；真实路径安全、跨平台和三端门禁通过前不得发布为完成。
 
 ## 19. W16：Android

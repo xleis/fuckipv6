@@ -22,6 +22,8 @@ use crate::discovery_index::NodeDiscoveryIndexSnapshot;
 use crate::tun::TunCapabilities;
 use crate::ui::UiModeResolution;
 
+pub(crate) const RECENT_ACTIVITY_RETENTION_LIMIT: usize = 256;
+
 /// Stable, transport-neutral state rendered by every node UI adapter.
 #[derive(Debug, Clone, Default, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeSnapshot {
@@ -1825,6 +1827,35 @@ impl NodeStateStore {
             .await;
     }
 
+    /// Merge activity from independent producers into the one product feed.
+    /// Stable audit identity deduplicates replay, and a single retention bound
+    /// prevents one producer from replacing or unboundedly growing another.
+    pub async fn merge_recent_activity(&self, activity: impl IntoIterator<Item = ActivityEntry>) {
+        self.update(|snapshot| {
+            for entry in activity {
+                if let Some(index) = snapshot
+                    .recent_activity
+                    .iter()
+                    .position(|existing| existing.audit_id == entry.audit_id)
+                {
+                    snapshot.recent_activity[index] = entry;
+                } else {
+                    snapshot.recent_activity.push(entry);
+                }
+            }
+            snapshot.recent_activity.sort_by(|left, right| {
+                right
+                    .occurred_at_unix_ms
+                    .cmp(&left.occurred_at_unix_ms)
+                    .then_with(|| right.audit_id.cmp(&left.audit_id))
+            });
+            snapshot
+                .recent_activity
+                .truncate(RECENT_ACTIVITY_RETENTION_LIMIT);
+        })
+        .await;
+    }
+
     /// Publish the runtime-authoritative traffic-protection session. Adapters
     /// only render this value and must not derive protection from interfaces,
     /// route configuration or a successful CLI command.
@@ -2035,7 +2066,29 @@ impl Default for NodeStateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fuckipv6_common::domain::{AuditId, AuditOutcome};
     use fuckipv6_common::i18n::{has_key, Locale};
+
+    fn activity(id: &str, occurred_at_unix_ms: u64, action: &str) -> ActivityEntry {
+        ActivityEntry {
+            audit_id: AuditId::from_public_key(id.as_bytes()),
+            operation_id: None,
+            actor: NodeId::from_public_key(b"activity-actor"),
+            network_id: None,
+            action: action.into(),
+            resource: "test:activity".into(),
+            outcome: AuditOutcome::Succeeded,
+            occurred_at_unix_ms,
+            summary: action.into(),
+            category: Default::default(),
+            severity: Default::default(),
+            actor_role: None,
+            object_kind: "test".into(),
+            object_id: Some(id.into()),
+            reason: None,
+            details: BTreeMap::from([("source".into(), id.into())]),
+        }
+    }
 
     fn network(name: &str, status: NodeNetworkStatus) -> NodeNetworkSnapshot {
         NodeNetworkSnapshot {
@@ -2465,6 +2518,68 @@ mod tests {
             receiver.recv().await.expect("state event").kind,
             NodeEventKind::StateChanged { revision: 1 }
         );
+    }
+
+    #[tokio::test]
+    async fn merge_activity_preserves_producers_deduplicates_and_retains_latest_256() {
+        let state = NodeStateStore::new();
+        state
+            .merge_recent_activity([activity("command", 100, "node.start")])
+            .await;
+        state
+            .merge_recent_activity([
+                activity("file-old", 300, "file.transfer.authorization_revoked"),
+                activity("file-new", 200, "file.transfer.cancelled"),
+                activity("file-new", 400, "file.transfer.interrupted"),
+            ])
+            .await;
+
+        let snapshot = state.snapshot().await;
+        assert_eq!(snapshot.recent_activity.len(), 3);
+        assert!(snapshot
+            .recent_activity
+            .iter()
+            .any(|entry| entry.action == "node.start"));
+        assert_eq!(
+            snapshot
+                .recent_activity
+                .iter()
+                .filter(|entry| entry.object_id.as_deref() == Some("file-new"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            snapshot
+                .recent_activity
+                .iter()
+                .find(|entry| entry.object_id.as_deref() == Some("file-new"))
+                .expect("updated file activity")
+                .action,
+            "file.transfer.interrupted"
+        );
+        assert_eq!(snapshot.recent_activity[0].occurred_at_unix_ms, 400);
+
+        state
+            .merge_recent_activity(
+                (0..RECENT_ACTIVITY_RETENTION_LIMIT + 44).map(|index| {
+                    activity(&format!("burst-{index}"), index as u64 + 500, "node.start")
+                }),
+            )
+            .await;
+        let snapshot = state.snapshot().await;
+        assert_eq!(
+            snapshot.recent_activity.len(),
+            RECENT_ACTIVITY_RETENTION_LIMIT
+        );
+        assert!(snapshot
+            .recent_activity
+            .windows(2)
+            .all(|pair| pair[0].occurred_at_unix_ms >= pair[1].occurred_at_unix_ms));
+        assert!(snapshot
+            .recent_activity
+            .iter()
+            .all(|entry| entry.details["source"].starts_with("burst-")));
+        assert_eq!(snapshot.recent_activity[0].occurred_at_unix_ms, 799);
     }
 
     #[tokio::test]

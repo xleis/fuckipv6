@@ -1,9 +1,11 @@
 #![cfg(target_os = "linux")]
 
 use std::collections::BTreeSet;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::Path;
-use std::time::Instant;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use fuckipv6_client::file_share::{
     FileRuntime, FileShareCapability, TransferOperationCancellation, UploadAdmission,
@@ -14,7 +16,7 @@ use fuckipv6_common::domain::{
     FileDeletePolicy, FileId, FileQuota, FileShare, FileShareId, FileShareMode, FileVersion,
     NetworkId, NetworkRole, NodeId, OperationId, SharedPath, SubjectSelector, SymlinkPolicy,
     TransferBinding, TransferDirection, TransferId, TransferManifest, TransferSession,
-    FILE_SHARE_SCHEMA_VERSION,
+    TransferState, FILE_SHARE_SCHEMA_VERSION,
 };
 use tokio::sync::watch;
 
@@ -26,6 +28,20 @@ const COMPLETE_UPLOAD_EVERY: usize = 32;
 const EXPECTED_ACTIVE_DESCRIPTORS: usize = CONCURRENT_TRANSFERS;
 const RSS_RETENTION_LIMIT_KIB: u64 = 4 * 1024;
 const RSS_GROWTH_LIMIT_KIB: u64 = 4 * 1024;
+const PERFORMANCE_LARGE_FILE_BYTES: usize = 64 * 1024 * 1024;
+const PERFORMANCE_LARGE_CHUNK_BYTES: usize = 4 * 1024 * 1024;
+const PERFORMANCE_MULTI_FILE_COUNT: usize = 4;
+const PERFORMANCE_MULTI_FILE_BYTES: usize = 8 * 1024 * 1024;
+const PERFORMANCE_MULTI_FILE_CHUNK_BYTES: usize = 1024 * 1024;
+const PERFORMANCE_PAUSE_AFTER_CHUNKS: usize = 6;
+
+static PROCESS_RESOURCE_PROBE_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_process_resource_probe() -> std::sync::MutexGuard<'static, ()> {
+    PROCESS_RESOURCE_PROBE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[derive(Debug, Clone, Copy)]
 struct ProcessResources {
@@ -161,6 +177,17 @@ fn manifest(content: &[u8], chunk_size: u64) -> TransferManifest {
 }
 
 fn upload_session(share: &FileShare, sequence: u64, path: &str, content: &[u8]) -> TransferSession {
+    let chunk_size = u64::try_from(content.len()).expect("content length");
+    upload_session_with_chunk_size(share, sequence, path, content, chunk_size)
+}
+
+fn upload_session_with_chunk_size(
+    share: &FileShare,
+    sequence: u64,
+    path: &str,
+    content: &[u8],
+    chunk_size: u64,
+) -> TransferSession {
     TransferSession::new(
         TransferBinding {
             transfer_id: transfer(sequence),
@@ -174,10 +201,7 @@ fn upload_session(share: &FileShare, sequence: u64, path: &str, content: &[u8]) 
             share_revision: share.revision,
             expires_at_unix_ms: u64::MAX,
         },
-        manifest(
-            content,
-            u64::try_from(content.len()).expect("content length"),
-        ),
+        manifest(content, chunk_size),
         10,
     )
     .expect("upload session")
@@ -188,6 +212,17 @@ fn download_session(
     sequence: u64,
     path: &str,
     content: &[u8],
+) -> TransferSession {
+    let chunk_size = u64::try_from(content.len()).expect("content length");
+    download_session_with_chunk_size(share, sequence, path, content, chunk_size)
+}
+
+fn download_session_with_chunk_size(
+    share: &FileShare,
+    sequence: u64,
+    path: &str,
+    content: &[u8],
+    chunk_size: u64,
 ) -> TransferSession {
     TransferSession::new(
         TransferBinding {
@@ -206,13 +241,44 @@ fn download_session(
             share_revision: share.revision,
             expires_at_unix_ms: u64::MAX,
         },
-        manifest(
-            content,
-            u64::try_from(content.len()).expect("content length"),
-        ),
+        manifest(content, chunk_size),
         10,
     )
     .expect("download session")
+}
+
+fn patterned_content(seed: u8, length: usize) -> Vec<u8> {
+    let mut block = vec![0_u8; 64 * 1024];
+    for (index, byte) in block.iter_mut().enumerate() {
+        *byte = seed
+            .wrapping_add(u8::try_from(index % 251).expect("block index"))
+            .wrapping_mul(31);
+    }
+    let mut content = Vec::with_capacity(length);
+    while content.len() < length {
+        let remaining = length - content.len();
+        content.extend_from_slice(&block[..remaining.min(block.len())]);
+    }
+    content
+}
+
+fn file_hash(path: &Path) -> ContentHash {
+    let mut file = File::open(path).expect("open hashed file");
+    let mut hasher = blake3::Hasher::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer).expect("read hashed file");
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    ContentHash::from_digest_bytes(*hasher.finalize().as_bytes())
+}
+
+fn mib_per_second(bytes: u64, elapsed: Duration) -> f64 {
+    let mebibytes = bytes as f64 / (1024.0 * 1024.0);
+    mebibytes / elapsed.as_secs_f64().max(f64::EPSILON)
 }
 
 fn staging_entries(root: &Path) -> usize {
@@ -239,6 +305,7 @@ fn assert_restored(runtime: &FileRuntime, root: &Path, baseline: ProcessResource
 
 #[test]
 fn file_runtime_stress_restores_linux_process_resources() {
+    let _resource_probe = lock_process_resource_probe();
     let temporary = tempfile::tempdir().expect("tempdir");
     let source = vec![0x5a_u8; 64 * 1024];
     fs::write(temporary.path().join("source.bin"), &source).expect("source file");
@@ -433,4 +500,238 @@ fn file_runtime_stress_restores_linux_process_resources() {
         second_half_max <= first_half_max + RSS_GROWTH_LIMIT_KIB,
         "RSS kept growing: first-half max={first_half_max} KiB, second-half max={second_half_max} KiB"
     );
+}
+
+#[test]
+fn file_transfer_large_multifile_and_resume_report_linux() {
+    let _resource_probe = lock_process_resource_probe();
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let share = share();
+    let access = context(&share);
+    let runtime = FileRuntime::new(FileShareCapability::new());
+    runtime
+        .enable(
+            &share,
+            &owner(),
+            temporary.path().to_str().expect("utf8 path"),
+            1,
+        )
+        .expect("enable File runtime");
+
+    let baseline = ProcessResources::sample();
+
+    // One large upload pauses after a bounded prefix and resumes at the next
+    // manifest chunk. The final hash proves no chunk was skipped or replayed.
+    let large_upload = patterned_content(0x31, PERFORMANCE_LARGE_FILE_BYTES);
+    let expected_upload_hash = ContentHash::from_bytes(&large_upload);
+    let upload_started = Instant::now();
+    let (_upload_cancel_tx, upload_cancel) = watch::channel(false);
+    let mut upload = runtime
+        .begin_upload_cancellable(
+            upload_session_with_chunk_size(
+                &share,
+                1,
+                "large-upload.bin",
+                &large_upload,
+                u64::try_from(PERFORMANCE_LARGE_CHUNK_BYTES).expect("upload chunk size"),
+            ),
+            &access,
+            true,
+            UploadAdmission::default(),
+            TransferOperationCancellation::new(operation(1), upload_cancel),
+            10,
+        )
+        .expect("begin large upload");
+    for (index, chunk) in large_upload
+        .chunks(PERFORMANCE_LARGE_CHUNK_BYTES)
+        .enumerate()
+    {
+        if index == PERFORMANCE_PAUSE_AFTER_CHUNKS {
+            upload.pause(11).expect("pause large upload");
+            assert_eq!(upload.session().state, TransferState::Paused);
+            upload
+                .resume(&access, true, 12)
+                .expect("resume large upload");
+        }
+        assert!(upload
+            .write_chunk(u32::try_from(index).expect("upload chunk index"), chunk, 13)
+            .expect("stage large upload chunk"));
+    }
+    let upload_progress = upload.finish(14).expect("finish large upload");
+    let upload_elapsed = upload_started.elapsed();
+    assert_eq!(upload_progress.state, TransferState::Completed);
+    assert_eq!(
+        upload_progress.transferred_bytes,
+        u64::try_from(PERFORMANCE_LARGE_FILE_BYTES).expect("large file size")
+    );
+    assert_eq!(
+        file_hash(&temporary.path().join("large-upload.bin")),
+        expected_upload_hash
+    );
+    drop(upload);
+    drop(large_upload);
+    assert_eq!(runtime.active_transfer_count(), 0);
+    assert_eq!(staging_entries(temporary.path()), 0);
+
+    // The download path reopens and reauthorizes the source after pause. Hash
+    // the delivered chunks directly so the test also exercises bounded memory
+    // streaming rather than materializing a second complete file in memory.
+    let large_download = patterned_content(0x72, PERFORMANCE_LARGE_FILE_BYTES);
+    let expected_download_hash = ContentHash::from_bytes(&large_download);
+    fs::write(temporary.path().join("large-source.bin"), &large_download)
+        .expect("large download source");
+    let download_started = Instant::now();
+    let (_download_cancel_tx, download_cancel) = watch::channel(false);
+    let mut download = runtime
+        .begin_download_cancellable(
+            download_session_with_chunk_size(
+                &share,
+                2,
+                "large-source.bin",
+                &large_download,
+                u64::try_from(PERFORMANCE_LARGE_CHUNK_BYTES).expect("download chunk size"),
+            ),
+            &access,
+            true,
+            TransferOperationCancellation::new(operation(2), download_cancel),
+            20,
+        )
+        .expect("begin large download");
+    let mut download_hasher = blake3::Hasher::new();
+    let mut downloaded_chunks = 0_usize;
+    loop {
+        if downloaded_chunks == PERFORMANCE_PAUSE_AFTER_CHUNKS {
+            download.pause(21).expect("pause large download");
+            assert_eq!(download.session().state, TransferState::Paused);
+            download
+                .resume(&access, true, 22)
+                .expect("resume large download");
+        }
+        let Some(chunk) = download.read_next(23).expect("read large download") else {
+            break;
+        };
+        download_hasher.update(&chunk);
+        downloaded_chunks = downloaded_chunks.saturating_add(1);
+    }
+    let download_progress = download.finish(24).expect("finish large download");
+    let download_elapsed = download_started.elapsed();
+    assert_eq!(download_progress.state, TransferState::Completed);
+    assert_eq!(
+        ContentHash::from_digest_bytes(*download_hasher.finalize().as_bytes()),
+        expected_download_hash
+    );
+    assert_eq!(
+        download_progress.transferred_bytes,
+        u64::try_from(PERFORMANCE_LARGE_FILE_BYTES).expect("large file size")
+    );
+    drop(download);
+    drop(large_download);
+    assert_eq!(runtime.active_transfer_count(), 0);
+
+    // Four independent files are advanced round-robin while all admissions
+    // overlap. This exercises multiple handles, manifests and hashers without
+    // serializing the workload into four unrelated single-file tests.
+    let mut multi_file_transfers = Vec::with_capacity(PERFORMANCE_MULTI_FILE_COUNT);
+    let multi_file_started = Instant::now();
+    for index in 0..PERFORMANCE_MULTI_FILE_COUNT {
+        let sequence = u64::try_from(index).expect("multi-file index") + 10;
+        let path = format!("multi-{index}.bin");
+        let content = patterned_content(
+            u8::try_from(index).expect("multi-file seed") + 0x90,
+            PERFORMANCE_MULTI_FILE_BYTES,
+        );
+        fs::write(temporary.path().join(&path), &content).expect("multi-file source");
+        let expected = ContentHash::from_bytes(&content);
+        let (_cancel_tx, cancel) = watch::channel(false);
+        let transfer = runtime
+            .begin_download_cancellable(
+                download_session_with_chunk_size(
+                    &share,
+                    sequence,
+                    &path,
+                    &content,
+                    u64::try_from(PERFORMANCE_MULTI_FILE_CHUNK_BYTES)
+                        .expect("multi-file chunk size"),
+                ),
+                &access,
+                true,
+                TransferOperationCancellation::new(operation(sequence), cancel),
+                30,
+            )
+            .expect("begin multi-file download");
+        multi_file_transfers.push((transfer, expected, blake3::Hasher::new()));
+    }
+    assert_eq!(
+        runtime.active_transfer_count(),
+        u32::try_from(PERFORMANCE_MULTI_FILE_COUNT).expect("multi-file count")
+    );
+    let mut complete = [false; PERFORMANCE_MULTI_FILE_COUNT];
+    let mut completed = 0_usize;
+    while completed < PERFORMANCE_MULTI_FILE_COUNT {
+        for (index, (transfer, expected, hasher)) in multi_file_transfers.iter_mut().enumerate() {
+            if complete[index] {
+                continue;
+            }
+            match transfer.read_next(31).expect("read multi-file chunk") {
+                Some(chunk) => {
+                    hasher.update(&chunk);
+                }
+                None => {
+                    assert_eq!(
+                        ContentHash::from_digest_bytes(*hasher.finalize().as_bytes()),
+                        *expected
+                    );
+                    complete[index] = true;
+                    completed = completed.saturating_add(1);
+                }
+            }
+        }
+    }
+    for (transfer, _, _) in &mut multi_file_transfers {
+        assert_eq!(
+            transfer
+                .finish(32)
+                .expect("finish multi-file download")
+                .state,
+            TransferState::Completed
+        );
+    }
+    let multi_file_elapsed = multi_file_started.elapsed();
+    drop(multi_file_transfers);
+    assert_eq!(runtime.active_transfer_count(), 0);
+    assert_eq!(staging_entries(temporary.path()), 0);
+
+    let restart_resources = ProcessResources::sample();
+    eprintln!(
+        "File performance Linux: large_upload={} MiB in {:?} ({:.1} MiB/s, pause_after={} chunks, resumed_bytes={}); large_download={} MiB in {:?} ({:.1} MiB/s, pause_after={} chunks, resumed_bytes={}); multi_file={}x{} MiB interleaved in {:?} ({:.1} MiB/s); fds {}->{}, threads {}->{}",
+        PERFORMANCE_LARGE_FILE_BYTES / (1024 * 1024),
+        upload_elapsed,
+        mib_per_second(
+            u64::try_from(PERFORMANCE_LARGE_FILE_BYTES).expect("large upload size"),
+            upload_elapsed
+        ),
+        PERFORMANCE_PAUSE_AFTER_CHUNKS,
+        PERFORMANCE_LARGE_FILE_BYTES - PERFORMANCE_PAUSE_AFTER_CHUNKS * PERFORMANCE_LARGE_CHUNK_BYTES,
+        PERFORMANCE_LARGE_FILE_BYTES / (1024 * 1024),
+        download_elapsed,
+        mib_per_second(
+            u64::try_from(PERFORMANCE_LARGE_FILE_BYTES).expect("large download size"),
+            download_elapsed
+        ),
+        PERFORMANCE_PAUSE_AFTER_CHUNKS,
+        PERFORMANCE_LARGE_FILE_BYTES - PERFORMANCE_PAUSE_AFTER_CHUNKS * PERFORMANCE_LARGE_CHUNK_BYTES,
+        PERFORMANCE_MULTI_FILE_COUNT,
+        PERFORMANCE_MULTI_FILE_BYTES / (1024 * 1024),
+        multi_file_elapsed,
+        mib_per_second(
+            u64::try_from(PERFORMANCE_MULTI_FILE_COUNT * PERFORMANCE_MULTI_FILE_BYTES)
+                .expect("multi-file bytes"),
+            multi_file_elapsed
+        ),
+        baseline.descriptors,
+        restart_resources.descriptors,
+        baseline.threads,
+        restart_resources.threads,
+    );
+    assert_restored(&runtime, temporary.path(), baseline);
 }

@@ -10,22 +10,24 @@
 //! file in memory.
 
 use fuckipv6_common::codec::{decode, encode};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::Ipv6Addr;
 use std::sync::Arc;
 
 use fuckipv6_common::domain::{
-    AccessContext, CapabilityKind, ContentHash, FileShareId, MembershipRole, NetworkId,
-    NetworkMemberDirectory, NetworkRole, NodeId, OperationId, ResumeRequest, SharedPath,
-    TransferDirection, TransferId, TransferManifest, TransferSession, TransferState,
+    AccessContext, ActivityEntry, AuditEntry, AuditId, AuditOutcome, CapabilityKind, ContentHash,
+    FileShareId, FileTransferError, MembershipRole, NetworkId, NetworkMemberDirectory, NetworkRole,
+    NodeId, OperationId, ResumeRequest, SharedPath, TransferBinding, TransferDirection, TransferId,
+    TransferManifest, TransferSession, TransferState,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{watch, Notify};
 
 use super::{
-    FileRuntime, FileRuntimeError, RuntimeDownloadTransfer, RuntimeUploadTransfer,
-    TransferOperationCancellation, TransferProgress, UploadAdmission,
+    FileCapabilityError, FileRuntime, FileRuntimeError, FileTransferAdapterError,
+    RuntimeDownloadTransfer, RuntimeUploadTransfer, TransferOperationCancellation,
+    TransferProgress, UploadAdmission,
 };
 
 const FRAME_MAGIC: &[u8; 8] = b"FKFILE01";
@@ -53,6 +55,7 @@ pub(crate) const MAX_FILE_NETWORK_TRANSFER_BYTES: u64 =
 
 const MAX_FILE_NETWORK_ERROR_CODE_LEN: usize = 96;
 const MAX_ACTIVE_FILE_NETWORK_SESSIONS: usize = 16;
+const FILE_NETWORK_ACTIVITY_RETENTION_LIMIT: usize = 256;
 const FILE_NETWORK_TRANSFER_TTL_MS: u64 = 30 * 60 * 1_000;
 const FILE_MEMBER_DIRECTORY_MAX_AGE_MS: u64 = 90_000;
 
@@ -232,6 +235,7 @@ pub(crate) struct FileNetworkDataPlane {
     uploads: BTreeMap<NetworkSessionKey, ActiveUploadSession>,
     downloads: BTreeMap<NetworkSessionKey, ActiveDownloadSession>,
     download_notify: Arc<Notify>,
+    activity: VecDeque<ActivityEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -250,6 +254,7 @@ impl NetworkSessionKey {
 }
 
 struct ActiveUploadSession {
+    network_id: NetworkId,
     cancel: watch::Sender<bool>,
     transfer: RuntimeUploadTransfer,
     assembly: Option<ChunkAssembly>,
@@ -264,6 +269,7 @@ struct ChunkAssembly {
 }
 
 struct ActiveDownloadSession {
+    network_id: NetworkId,
     peer_ip: Ipv6Addr,
     transfer_id: TransferId,
     operation_id: OperationId,
@@ -277,6 +283,54 @@ struct PendingDownloadChunk {
     chunk_index: u32,
     data: Vec<u8>,
     sent_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileTransferInterruptionKind {
+    AuthorizationRevoked,
+    Cancelled,
+    Interrupted,
+}
+
+impl FileTransferInterruptionKind {
+    fn action(self) -> &'static str {
+        match self {
+            Self::AuthorizationRevoked => "file.transfer.authorization_revoked",
+            Self::Cancelled => "file.transfer.cancelled",
+            Self::Interrupted => "file.transfer.interrupted",
+        }
+    }
+
+    fn outcome(self) -> AuditOutcome {
+        match self {
+            Self::AuthorizationRevoked => AuditOutcome::Denied,
+            Self::Cancelled => AuditOutcome::Succeeded,
+            Self::Interrupted => AuditOutcome::Failed,
+        }
+    }
+
+    fn summary(self) -> &'static str {
+        match self {
+            Self::AuthorizationRevoked => "File 传输因授权撤销而终止",
+            Self::Cancelled => "File 传输已取消",
+            Self::Interrupted => "File 传输异常中断",
+        }
+    }
+}
+
+fn interruption_kind_for_adapter_error(
+    error: &FileTransferAdapterError,
+) -> FileTransferInterruptionKind {
+    match error {
+        FileTransferAdapterError::Cancelled => FileTransferInterruptionKind::Cancelled,
+        FileTransferAdapterError::Transfer(FileTransferError::PermissionRevoked)
+        | FileTransferAdapterError::Capability(
+            FileCapabilityError::Disabled
+            | FileCapabilityError::AccessDenied(_)
+            | FileCapabilityError::Revoked,
+        ) => FileTransferInterruptionKind::AuthorizationRevoked,
+        _ => FileTransferInterruptionKind::Interrupted,
+    }
 }
 
 /// One active download that the network pump may continue. It contains no file
@@ -363,11 +417,25 @@ impl FileNetworkDataPlane {
             uploads: BTreeMap::new(),
             downloads: BTreeMap::new(),
             download_notify: Arc::new(Notify::new()),
+            activity: VecDeque::new(),
         }
+    }
+
+    /// Drain product-safe activity records for the node snapshot. The queue is
+    /// bounded so a stalled control plane cannot make File traffic grow memory.
+    pub(crate) fn drain_activity(&mut self) -> Vec<ActivityEntry> {
+        self.activity.drain(..).collect()
     }
 
     pub(crate) fn download_notify(&self) -> Arc<Notify> {
         self.download_notify.clone()
+    }
+
+    /// Observe owner enable/disable/reconfigure generations so the node event
+    /// loop can cancel sessions immediately rather than waiting for the next
+    /// peer frame or download-pump turn.
+    pub(crate) fn subscribe_capability_epoch(&self) -> watch::Receiver<u64> {
+        self.runtime.capability().subscribe_epoch()
     }
 
     pub(crate) fn session_count(&self) -> usize {
@@ -388,6 +456,65 @@ impl FileNetworkDataPlane {
                 operation_id: session.operation_id.clone(),
             })
             .collect()
+    }
+
+    fn record_interruption(
+        &mut self,
+        network_id: NetworkId,
+        binding: &TransferBinding,
+        kind: FileTransferInterruptionKind,
+        reason_code: &str,
+        cleanup_succeeded: bool,
+        now_unix_ms: u64,
+    ) {
+        let direction = match binding.direction {
+            TransferDirection::Upload => "upload",
+            TransferDirection::Download => "download",
+        };
+        let cleanup_code = if cleanup_succeeded {
+            "file_transfer_cleanup_completed"
+        } else {
+            "file_transfer_cleanup_failed"
+        };
+        let mut details = BTreeMap::new();
+        details.insert("transfer_id".into(), binding.transfer_id.to_string());
+        details.insert("operation_id".into(), binding.operation_id.to_string());
+        details.insert("share_id".into(), binding.share_id.to_string());
+        details.insert("direction".into(), direction.into());
+        details.insert("reason_code".into(), reason_code.into());
+        details.insert("cleanup_code".into(), cleanup_code.into());
+        details.insert("object_kind".into(), "file_transfer".into());
+        details.insert("object_id".into(), binding.transfer_id.to_string());
+        let audit_id = AuditId::from_public_key(
+            format!(
+                "file-transfer:{}:{}:{}:{}:{}:{}",
+                binding.transfer_id,
+                binding.operation_id,
+                direction,
+                kind.action(),
+                reason_code,
+                now_unix_ms
+            )
+            .as_bytes(),
+        );
+        let entry = AuditEntry {
+            audit_id,
+            operation_id: Some(binding.operation_id.clone()),
+            actor: binding.actor.clone(),
+            network_id: Some(network_id),
+            action: kind.action().into(),
+            resource: format!("file_transfer:{}", binding.transfer_id),
+            outcome: kind.outcome(),
+            occurred_at_unix_ms: now_unix_ms.max(1),
+            summary: kind.summary().into(),
+            details,
+            sensitive_keys: Default::default(),
+        };
+        let projected = entry.project_activity();
+        self.activity.push_back(projected);
+        while self.activity.len() > FILE_NETWORK_ACTIVITY_RETENTION_LIMIT {
+            self.activity.pop_front();
+        }
     }
 
     /// Handle one authenticated request. The request ID is deliberately not
@@ -498,91 +625,191 @@ impl FileNetworkDataPlane {
     ) -> Result<(bool, FileNetworkProgress), FileNetworkResponse> {
         let key = NetworkSessionKey::new(transfer_id, operation_id);
         self.ensure_session_authorized(&key, actor, member_access_epoch, now_unix_ms)?;
-        let session = self
-            .uploads
-            .get_mut(&key)
-            .ok_or_else(|| network_error("file_transfer_session_unavailable", None))?;
-        if let Err(error) = session.transfer.ensure_authorized(now_unix_ms) {
-            let response = adapter_error(&error);
-            self.uploads.remove(&key);
-            return Err(response);
-        }
-        let manifest = &session.transfer.session().manifest;
-        let Some(expected) = manifest.chunks.get(chunk_index as usize) else {
-            session.cancel.send_replace(true);
-            self.uploads.remove(&key);
-            return Err(network_error("file_transfer_chunk_out_of_range", None));
-        };
-        if expected.index != chunk_index {
-            session.cancel.send_replace(true);
-            self.uploads.remove(&key);
-            return Err(network_error("file_transfer_chunk_out_of_range", None));
-        }
-        let expected_end = expected.offset.saturating_add(expected.length);
-        let incoming_end = offset.saturating_add(data.len() as u64);
-        if incoming_end > expected_end {
-            session.cancel.send_replace(true);
-            self.uploads.remove(&key);
-            return Err(network_error("file_transfer_chunk_corrupt", None));
+        enum ChunkFailure {
+            Adapter(FileTransferAdapterError),
+            Protocol(&'static str),
         }
 
-        let assembly = match session.assembly.as_mut() {
-            Some(assembly) if assembly.chunk_index == chunk_index => {
-                let next_offset = expected.offset.saturating_add(assembly.bytes.len() as u64);
-                if offset != next_offset {
-                    session.cancel.send_replace(true);
-                    self.uploads.remove(&key);
-                    return Err(network_error("file_transfer_chunk_out_of_order", None));
-                }
-                assembly
+        let result = (|| {
+            let session = self
+                .uploads
+                .get_mut(&key)
+                .ok_or(ChunkFailure::Protocol("file_transfer_session_unavailable"))?;
+            session
+                .transfer
+                .ensure_authorized(now_unix_ms)
+                .map_err(ChunkFailure::Adapter)?;
+            let manifest = &session.transfer.session().manifest;
+            let expected = manifest
+                .chunks
+                .get(chunk_index as usize)
+                .ok_or(ChunkFailure::Protocol("file_transfer_chunk_out_of_range"))?;
+            if expected.index != chunk_index {
+                return Err(ChunkFailure::Protocol("file_transfer_chunk_out_of_range"));
             }
-            Some(_) => {
-                session.cancel.send_replace(true);
-                self.uploads.remove(&key);
-                return Err(network_error("file_transfer_chunk_out_of_order", None));
+            let expected_end = expected.offset.saturating_add(expected.length);
+            let incoming_end = offset.saturating_add(data.len() as u64);
+            if incoming_end > expected_end {
+                return Err(ChunkFailure::Protocol("file_transfer_chunk_corrupt"));
             }
-            None => {
-                let received_chunks = session.transfer.session().received_chunk_count();
-                if usize::try_from(chunk_index).ok() != Some(received_chunks)
-                    || offset != expected.offset
-                {
-                    session.cancel.send_replace(true);
-                    self.uploads.remove(&key);
-                    return Err(network_error("file_transfer_chunk_out_of_order", None));
-                }
-                session.assembly.insert(ChunkAssembly {
-                    chunk_index,
-                    expected_offset: expected.offset,
-                    expected_length: expected.length,
-                    expected_checksum: expected.checksum.clone(),
-                    bytes: Vec::with_capacity(usize::try_from(expected.length).unwrap_or_default()),
-                })
-            }
-        };
-        assembly.bytes.extend_from_slice(data);
-        if assembly.bytes.len() as u64 != assembly.expected_length {
-            return Ok((false, session.transfer.progress().into()));
-        }
 
-        let assembly = session.assembly.take().expect("completed chunk assembly");
-        let received_offset = assembly.expected_offset;
-        let checksum = ContentHash::from_bytes(&assembly.bytes);
-        if received_offset != expected.offset || checksum != assembly.expected_checksum {
-            session.cancel.send_replace(true);
-            self.uploads.remove(&key);
-            return Err(network_error("file_transfer_chunk_corrupt", None));
-        }
-        match session
-            .transfer
-            .write_chunk(chunk_index, &assembly.bytes, now_unix_ms)
-        {
-            Ok(advanced) => Ok((advanced, session.transfer.progress().into())),
-            Err(error) => {
+            let assembly = match session.assembly.as_mut() {
+                Some(assembly) if assembly.chunk_index == chunk_index => {
+                    let next_offset = expected.offset.saturating_add(assembly.bytes.len() as u64);
+                    if offset != next_offset {
+                        return Err(ChunkFailure::Protocol("file_transfer_chunk_out_of_order"));
+                    }
+                    assembly
+                }
+                Some(_) => {
+                    return Err(ChunkFailure::Protocol("file_transfer_chunk_out_of_order"));
+                }
+                None => {
+                    let received_chunks = session.transfer.session().received_chunk_count();
+                    if usize::try_from(chunk_index).ok() != Some(received_chunks)
+                        || offset != expected.offset
+                    {
+                        return Err(ChunkFailure::Protocol("file_transfer_chunk_out_of_order"));
+                    }
+                    session.assembly.insert(ChunkAssembly {
+                        chunk_index,
+                        expected_offset: expected.offset,
+                        expected_length: expected.length,
+                        expected_checksum: expected.checksum.clone(),
+                        bytes: Vec::with_capacity(
+                            usize::try_from(expected.length).unwrap_or_default(),
+                        ),
+                    })
+                }
+            };
+            assembly.bytes.extend_from_slice(data);
+            if assembly.bytes.len() as u64 != assembly.expected_length {
+                return Ok((false, session.transfer.progress().into()));
+            }
+
+            let assembly = session.assembly.take().expect("completed chunk assembly");
+            let received_offset = assembly.expected_offset;
+            let checksum = ContentHash::from_bytes(&assembly.bytes);
+            if received_offset != expected.offset || checksum != assembly.expected_checksum {
+                return Err(ChunkFailure::Protocol("file_transfer_chunk_corrupt"));
+            }
+            session
+                .transfer
+                .write_chunk(chunk_index, &assembly.bytes, now_unix_ms)
+                .map(|advanced| (advanced, session.transfer.progress().into()))
+                .map_err(ChunkFailure::Adapter)
+        })();
+
+        match result {
+            Ok(result) => Ok(result),
+            Err(ChunkFailure::Protocol(code)) => {
+                self.cancel_session(
+                    &key,
+                    FileTransferInterruptionKind::Interrupted,
+                    code,
+                    now_unix_ms,
+                );
+                Err(network_error(code, None))
+            }
+            Err(ChunkFailure::Adapter(error)) => {
+                let kind = interruption_kind_for_adapter_error(&error);
+                let code = error.code();
                 let response = adapter_error(&error);
-                self.uploads.remove(&key);
+                self.cancel_session(&key, kind, code, now_unix_ms);
                 Err(response)
             }
         }
+    }
+
+    /// Recheck every admitted peer against one freshly refreshed authoritative
+    /// member directory. Member removal, lifecycle/capability loss, epoch
+    /// advancement, directory staleness and directory loss all revoke the
+    /// session immediately instead of waiting for that peer's next frame.
+    pub(crate) fn cancel_sessions_without_member_access(
+        &mut self,
+        expected_network_id: &NetworkId,
+        directory: Option<&NetworkMemberDirectory>,
+        received_at_unix_ms: Option<u64>,
+        now_unix_ms: u64,
+    ) -> usize {
+        let sessions = self
+            .uploads
+            .iter()
+            .map(|(key, session)| {
+                let binding = &session.transfer.session().binding;
+                (
+                    key.clone(),
+                    session.network_id.clone(),
+                    binding.actor.clone(),
+                    binding.access_epoch,
+                )
+            })
+            .chain(self.downloads.iter().map(|(key, session)| {
+                let binding = &session.transfer.session().binding;
+                (
+                    key.clone(),
+                    session.network_id.clone(),
+                    binding.actor.clone(),
+                    binding.access_epoch,
+                )
+            }))
+            .collect::<Vec<_>>();
+
+        let mut cancelled = 0;
+        for (key, network_id, actor, session_access_epoch) in sessions {
+            let reason_code = if &network_id != expected_network_id {
+                Some("file_member_directory_unavailable".to_owned())
+            } else {
+                match trusted_file_member(
+                    expected_network_id,
+                    directory,
+                    received_at_unix_ms,
+                    &actor,
+                    now_unix_ms,
+                ) {
+                    Ok(member) if member.member_access_epoch == session_access_epoch => None,
+                    Ok(_) => Some("file_transfer_access_revoked".to_owned()),
+                    Err(FileNetworkResponse::Error { code, .. }) => Some(code),
+                    Err(_) => Some("file_member_directory_unavailable".to_owned()),
+                }
+            };
+            if let Some(reason_code) = reason_code {
+                self.cancel_session(
+                    &key,
+                    FileTransferInterruptionKind::AuthorizationRevoked,
+                    &reason_code,
+                    now_unix_ms,
+                );
+                cancelled += 1;
+            }
+        }
+        cancelled
+    }
+
+    /// Cancel every transfer when the owner disables or replaces the local
+    /// capability. This closes the gap between an owner configuration change
+    /// and the next peer-controlled frame, so no idle or paused session keeps
+    /// a file handle, admission slot or staging file alive.
+    pub(crate) fn cancel_all_for_authorization_loss(
+        &mut self,
+        reason_code: &str,
+        now_unix_ms: u64,
+    ) -> usize {
+        let keys = self
+            .uploads
+            .keys()
+            .chain(self.downloads.keys())
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in &keys {
+            self.cancel_session(
+                key,
+                FileTransferInterruptionKind::AuthorizationRevoked,
+                reason_code,
+                now_unix_ms,
+            );
+        }
+        keys.len()
     }
 
     /// Cancel and remove a session after a frame boundary fails directory,
@@ -593,10 +820,16 @@ impl FileNetworkDataPlane {
         &mut self,
         transfer_id: &TransferId,
         operation_id: &OperationId,
+        reason_code: &str,
         now_unix_ms: u64,
     ) {
         let key = NetworkSessionKey::new(transfer_id, operation_id);
-        self.cancel_session(&key, now_unix_ms);
+        self.cancel_session(
+            &key,
+            FileTransferInterruptionKind::AuthorizationRevoked,
+            reason_code,
+            now_unix_ms,
+        );
     }
 
     fn ensure_session_authorized(
@@ -620,29 +853,72 @@ impl FileNetworkDataPlane {
         let session_epoch = binding.binding.access_epoch;
         let expires_at_unix_ms = binding.binding.expires_at_unix_ms;
         let failure = if session_actor != actor {
-            Some("file_transfer_peer_mismatch")
+            Some((
+                "file_transfer_peer_mismatch",
+                FileTransferInterruptionKind::AuthorizationRevoked,
+            ))
         } else if member_access_epoch == 0 || member_access_epoch != session_epoch {
-            Some("file_transfer_access_revoked")
+            Some((
+                "file_transfer_access_revoked",
+                FileTransferInterruptionKind::AuthorizationRevoked,
+            ))
         } else if now_unix_ms >= expires_at_unix_ms {
-            Some("file_transfer_expired")
+            Some((
+                "file_transfer_expired",
+                FileTransferInterruptionKind::Interrupted,
+            ))
         } else {
             None
         };
-        let Some(code) = failure else {
+        let Some((code, kind)) = failure else {
             return Ok(());
         };
-        self.cancel_session(key, now_unix_ms);
+        self.cancel_session(key, kind, code, now_unix_ms);
         Err(network_error(code, None))
     }
 
-    fn cancel_session(&mut self, key: &NetworkSessionKey, now_unix_ms: u64) {
+    fn cancel_session(
+        &mut self,
+        key: &NetworkSessionKey,
+        kind: FileTransferInterruptionKind,
+        reason_code: &str,
+        now_unix_ms: u64,
+    ) {
         if let Some(session) = self.uploads.remove(key) {
-            session.cancel.send_replace(true);
-            let _ = session.transfer.cancel(now_unix_ms);
+            let network_id = session.network_id;
+            let binding = session.transfer.session().binding.clone();
+            let cleanup_succeeded = if session.transfer.session().state.is_terminal() {
+                true
+            } else {
+                session.cancel.send_replace(true);
+                session.transfer.cancel(now_unix_ms).is_ok()
+            };
+            self.record_interruption(
+                network_id,
+                &binding,
+                kind,
+                reason_code,
+                cleanup_succeeded,
+                now_unix_ms,
+            );
         }
         if let Some(session) = self.downloads.remove(key) {
-            session.cancel.send_replace(true);
-            let _ = session.transfer.cancel(now_unix_ms);
+            let network_id = session.network_id;
+            let binding = session.transfer.session().binding.clone();
+            let cleanup_succeeded = if session.transfer.session().state.is_terminal() {
+                true
+            } else {
+                session.cancel.send_replace(true);
+                session.transfer.cancel(now_unix_ms).is_ok()
+            };
+            self.record_interruption(
+                network_id,
+                &binding,
+                kind,
+                reason_code,
+                cleanup_succeeded,
+                now_unix_ms,
+            );
         }
     }
 
@@ -709,6 +985,7 @@ impl FileNetworkDataPlane {
         self.uploads.insert(
             key,
             ActiveUploadSession {
+                network_id: context.network_id.clone(),
                 cancel,
                 transfer,
                 assembly: None,
@@ -779,6 +1056,7 @@ impl FileNetworkDataPlane {
         self.downloads.insert(
             key,
             ActiveDownloadSession {
+                network_id: context.network_id.clone(),
                 peer_ip,
                 transfer_id,
                 operation_id,
@@ -805,61 +1083,134 @@ impl FileNetworkDataPlane {
     ) -> Result<Option<FileNetworkFrame>, FileNetworkResponse> {
         let key = NetworkSessionKey::new(transfer_id, operation_id);
         self.ensure_session_authorized(&key, actor, member_access_epoch, now_unix_ms)?;
-        let session = self
+        if self
             .downloads
-            .get_mut(&key)
-            .ok_or_else(|| network_error("file_transfer_direction_mismatch", None))?;
-        if session.exhausted {
+            .get(&key)
+            .ok_or_else(|| network_error("file_transfer_direction_mismatch", None))?
+            .exhausted
+        {
             return Ok(None);
         }
-        if let Err(error) = session.transfer.ensure_authorized(now_unix_ms) {
+
+        let authorization_error = self
+            .downloads
+            .get_mut(&key)
+            .expect("download session checked above")
+            .transfer
+            .ensure_authorized(now_unix_ms)
+            .err();
+        if let Some(error) = authorization_error {
+            let kind = interruption_kind_for_adapter_error(&error);
+            let code = error.code();
             let response = adapter_error(&error);
-            self.downloads.remove(&key);
+            self.cancel_session(&key, kind, code, now_unix_ms);
             return Err(response);
         }
-        if session.pending_chunk.is_none() {
-            let next = match session.transfer.read_next(now_unix_ms) {
+
+        let pending_chunk_missing = self
+            .downloads
+            .get(&key)
+            .expect("download session checked above")
+            .pending_chunk
+            .is_none();
+        if pending_chunk_missing {
+            let next = self
+                .downloads
+                .get_mut(&key)
+                .expect("download session checked above")
+                .transfer
+                .read_next(now_unix_ms);
+            let next = match next {
                 Ok(next) => next,
                 Err(error) => {
+                    let kind = interruption_kind_for_adapter_error(&error);
+                    let code = error.code();
                     let response = adapter_error(&error);
-                    if session.transfer.session().state.is_terminal() {
-                        self.downloads.remove(&key);
+                    let terminal = self
+                        .downloads
+                        .get(&key)
+                        .is_some_and(|session| session.transfer.session().state.is_terminal());
+                    if terminal {
+                        self.cancel_session(&key, kind, code, now_unix_ms);
                     }
                     return Err(response);
                 }
             };
             let Some(data) = next else {
-                session.exhausted = true;
+                self.downloads
+                    .get_mut(&key)
+                    .expect("download session checked above")
+                    .exhausted = true;
                 return Ok(None);
             };
-            let chunk_index = session
+            let chunk_index = self
+                .downloads
+                .get(&key)
+                .expect("download session checked above")
                 .transfer
                 .session()
                 .received_chunk_count()
                 .saturating_sub(1);
-            let chunk_index = u32::try_from(chunk_index)
-                .map_err(|_| network_error("file_transfer_chunk_out_of_range", None))?;
-            let expected = session
+            let Some(chunk_index) = u32::try_from(chunk_index).ok() else {
+                self.cancel_session(
+                    &key,
+                    FileTransferInterruptionKind::Interrupted,
+                    "file_transfer_chunk_out_of_range",
+                    now_unix_ms,
+                );
+                return Err(network_error("file_transfer_chunk_out_of_range", None));
+            };
+            let Some(expected_length) = self
+                .downloads
+                .get(&key)
+                .expect("download session checked above")
                 .transfer
                 .session()
                 .manifest
                 .chunks
                 .get(chunk_index as usize)
-                .ok_or_else(|| network_error("file_transfer_chunk_out_of_range", None))?;
-            if u64::try_from(data.len()).ok() != Some(expected.length) {
-                self.cancel_session(&key, now_unix_ms);
+                .map(|chunk| chunk.length)
+            else {
+                self.cancel_session(
+                    &key,
+                    FileTransferInterruptionKind::Interrupted,
+                    "file_transfer_chunk_out_of_range",
+                    now_unix_ms,
+                );
+                return Err(network_error("file_transfer_chunk_out_of_range", None));
+            };
+            if u64::try_from(data.len()).ok() != Some(expected_length) {
+                self.cancel_session(
+                    &key,
+                    FileTransferInterruptionKind::Interrupted,
+                    "file_transfer_chunk_corrupt",
+                    now_unix_ms,
+                );
                 return Err(network_error("file_transfer_chunk_corrupt", None));
             }
-            session.pending_chunk = Some(PendingDownloadChunk {
+            self.downloads
+                .get_mut(&key)
+                .expect("download session checked above")
+                .pending_chunk = Some(PendingDownloadChunk {
                 chunk_index,
                 data,
                 sent_bytes: 0,
             });
         }
-        let pending = session
-            .pending_chunk
-            .as_mut()
-            .ok_or_else(|| network_error("file_transfer_session_unavailable", None))?;
+
+        let session = self
+            .downloads
+            .get_mut(&key)
+            .expect("download session checked above");
+        let Some(pending) = session.pending_chunk.as_mut() else {
+            self.cancel_session(
+                &key,
+                FileTransferInterruptionKind::Interrupted,
+                "file_transfer_session_unavailable",
+                now_unix_ms,
+            );
+            return Err(network_error("file_transfer_session_unavailable", None));
+        };
         let start = pending.sent_bytes;
         let end = start
             .saturating_add(MAX_FILE_NETWORK_FRAGMENT_BYTES)
@@ -881,16 +1232,26 @@ impl FileNetworkDataPlane {
         if complete {
             session.pending_chunk = None;
         }
-        FileNetworkFrame::chunk(
+        let frame = FileNetworkFrame::chunk(
             request_id,
             transfer_id.clone(),
             operation_id.clone(),
             chunk_index,
             offset,
             data,
-        )
-        .map(Some)
-        .map_err(|_| network_error("file_transfer_chunk_out_of_range", None))
+        );
+        match frame {
+            Ok(frame) => Ok(Some(frame)),
+            Err(_) => {
+                self.cancel_session(
+                    &key,
+                    FileTransferInterruptionKind::Interrupted,
+                    "file_transfer_chunk_out_of_range",
+                    now_unix_ms,
+                );
+                Err(network_error("file_transfer_chunk_out_of_range", None))
+            }
+        }
     }
 
     fn resume(
@@ -1063,9 +1424,21 @@ impl FileNetworkDataPlane {
             return response;
         }
         if let Some(session) = self.uploads.remove(&key) {
+            let network_id = session.network_id;
+            let binding = session.transfer.session().binding.clone();
             let mut progress = session.transfer.progress();
             session.cancel.send_replace(true);
-            return match session.transfer.cancel(now_unix_ms) {
+            let cleanup = session.transfer.cancel(now_unix_ms);
+            let cleanup_succeeded = cleanup.is_ok() || progress.state.is_terminal();
+            self.record_interruption(
+                network_id,
+                &binding,
+                FileTransferInterruptionKind::Cancelled,
+                "file_transfer_cancelled",
+                cleanup_succeeded,
+                now_unix_ms,
+            );
+            return match cleanup {
                 Ok(()) => {
                     progress.state = TransferState::Cancelled;
                     progress_response(progress)
@@ -1076,9 +1449,21 @@ impl FileNetworkDataPlane {
         let Some(session) = self.downloads.remove(&key) else {
             return network_error("file_transfer_session_unavailable", None);
         };
+        let network_id = session.network_id;
+        let binding = session.transfer.session().binding.clone();
         let mut progress = session.transfer.progress();
         session.cancel.send_replace(true);
-        match session.transfer.cancel(now_unix_ms) {
+        let cleanup = session.transfer.cancel(now_unix_ms);
+        let cleanup_succeeded = cleanup.is_ok() || progress.state.is_terminal();
+        self.record_interruption(
+            network_id,
+            &binding,
+            FileTransferInterruptionKind::Cancelled,
+            "file_transfer_cancelled",
+            cleanup_succeeded,
+            now_unix_ms,
+        );
+        match cleanup {
             Ok(()) => {
                 progress.state = TransferState::Cancelled;
                 progress_response(progress)
@@ -1105,7 +1490,8 @@ impl FileNetworkDataPlane {
             if session.assembly.is_some() {
                 return network_error("file_transfer_incomplete", None);
             }
-            return match session.transfer.finish(now_unix_ms) {
+            let finished = session.transfer.finish(now_unix_ms);
+            return match finished {
                 Ok(progress) => {
                     self.uploads.remove(&key);
                     FileNetworkResponse::Completed {
@@ -1113,9 +1499,15 @@ impl FileNetworkDataPlane {
                     }
                 }
                 Err(error) => {
+                    let kind = interruption_kind_for_adapter_error(&error);
+                    let code = error.code();
                     let response = adapter_error(&error);
-                    if session.transfer.session().state.is_terminal() {
-                        self.uploads.remove(&key);
+                    let terminal = self
+                        .uploads
+                        .get(&key)
+                        .is_some_and(|session| session.transfer.session().state.is_terminal());
+                    if terminal {
+                        self.cancel_session(&key, kind, code, now_unix_ms);
                     }
                     response
                 }
@@ -1124,7 +1516,8 @@ impl FileNetworkDataPlane {
         let Some(session) = self.downloads.get_mut(&key) else {
             return network_error("file_transfer_session_unavailable", None);
         };
-        match session.transfer.finish(now_unix_ms) {
+        let finished = session.transfer.finish(now_unix_ms);
+        match finished {
             Ok(progress) => {
                 self.downloads.remove(&key);
                 FileNetworkResponse::Completed {
@@ -1132,9 +1525,15 @@ impl FileNetworkDataPlane {
                 }
             }
             Err(error) => {
+                let kind = interruption_kind_for_adapter_error(&error);
+                let code = error.code();
                 let response = adapter_error(&error);
-                if session.transfer.session().state.is_terminal() {
-                    self.downloads.remove(&key);
+                let terminal = self
+                    .downloads
+                    .get(&key)
+                    .is_some_and(|session| session.transfer.session().state.is_terminal());
+                if terminal {
+                    self.cancel_session(&key, kind, code, now_unix_ms);
                 }
                 response
             }
@@ -2049,6 +2448,7 @@ mod tests {
             ),
             FileNetworkResponse::Opened { .. }
         ));
+        assert_eq!(staging_file_count(temporary.path()), 1);
         runtime
             .capability()
             .disable(&node(9), 14)
@@ -2062,6 +2462,9 @@ mod tests {
             "file_capability_revoked"
         );
         assert_eq!(data_plane.session_count(), 0);
+        assert_eq!(runtime.active_transfer_count(), 0);
+        assert_eq!(staging_file_count(temporary.path()), 0);
+        assert!(!temporary.path().join("hello-4.txt").exists());
 
         runtime
             .enable(
@@ -2083,6 +2486,7 @@ mod tests {
             ),
             FileNetworkResponse::Opened { .. }
         ));
+        assert_eq!(staging_file_count(temporary.path()), 1);
         assert_eq!(
             response_code(
                 data_plane
@@ -2092,6 +2496,199 @@ mod tests {
             "file_transfer_access_revoked"
         );
         assert_eq!(data_plane.session_count(), 0);
+        assert_eq!(runtime.active_transfer_count(), 0);
+        assert_eq!(staging_file_count(temporary.path()), 0);
+        assert!(!temporary.path().join("hello-6.txt").exists());
+
+        let activity = data_plane.drain_activity();
+        assert_eq!(activity.len(), 2);
+        assert!(activity.iter().all(|entry| {
+            entry.action == "file.transfer.authorization_revoked"
+                && entry.outcome == AuditOutcome::Denied
+                && entry.details["cleanup_code"] == "file_transfer_cleanup_completed"
+                && entry.details["direction"] == "upload"
+                && entry.details["object_kind"] == "file_transfer"
+        }));
+        assert_eq!(
+            activity[0].reason.as_deref(),
+            Some("file_capability_revoked")
+        );
+        assert_eq!(
+            activity[1].reason.as_deref(),
+            Some("file_transfer_access_revoked")
+        );
+        let encoded = serde_json::to_string(&activity).expect("serialize activity");
+        assert!(!encoded.contains("hello-4.txt"));
+        assert!(!encoded.contains("hello-6.txt"));
+        assert!(!encoded.contains(temporary.path().to_str().expect("utf8 path")));
+    }
+
+    #[test]
+    fn explicit_cancel_records_activity_and_cleans_unpublished_upload() {
+        let temporary = TempDir::new().expect("tempdir");
+        let share = upload_share();
+        let actor = node(4);
+        let runtime = FileRuntime::new(FileShareCapability::new());
+        runtime
+            .enable(
+                &share,
+                &node(9),
+                temporary.path().to_str().expect("utf8 path"),
+                1,
+            )
+            .expect("enable File runtime");
+        let context = upload_context(&share, &actor);
+        let content = b"private-cancel-content";
+        let target = "cancel-private.bin";
+        let mut data_plane = FileNetworkDataPlane::new(runtime.clone());
+
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::OpenUpload {
+                    share_id: share.id.clone(),
+                    transfer_id: transfer(20),
+                    operation_id: operation(21),
+                    path: SharedPath::parse(target).expect("path"),
+                    manifest: manifest(content, content.len() as u64),
+                },
+                10,
+            ),
+            FileNetworkResponse::Opened { .. }
+        ));
+        assert!(
+            !data_plane
+                .handle_chunk(
+                    &actor,
+                    7,
+                    &transfer(20),
+                    &operation(21),
+                    0,
+                    0,
+                    b"private",
+                    11,
+                )
+                .expect("partial upload")
+                .0
+        );
+        assert_eq!(runtime.active_transfer_count(), 1);
+        assert_eq!(staging_file_count(temporary.path()), 1);
+
+        let cancelled = data_plane.handle_request(
+            &actor,
+            &context,
+            true,
+            7,
+            Ipv6Addr::LOCALHOST,
+            FileNetworkRequest::Cancel {
+                transfer_id: transfer(20),
+                operation_id: operation(21),
+            },
+            12,
+        );
+        assert!(matches!(
+            cancelled,
+            FileNetworkResponse::Progress { progress }
+                if progress.state == TransferState::Cancelled
+        ));
+        assert_eq!(data_plane.session_count(), 0);
+        assert_eq!(runtime.active_transfer_count(), 0);
+        assert_eq!(staging_file_count(temporary.path()), 0);
+        assert!(!temporary.path().join(target).exists());
+
+        let activity = data_plane.drain_activity();
+        assert_eq!(activity.len(), 1);
+        let entry = &activity[0];
+        assert_eq!(entry.action, "file.transfer.cancelled");
+        assert_eq!(entry.outcome, AuditOutcome::Succeeded);
+        assert_eq!(entry.reason.as_deref(), Some("file_transfer_cancelled"));
+        assert_eq!(
+            entry.details["cleanup_code"],
+            "file_transfer_cleanup_completed"
+        );
+        assert_eq!(entry.details["transfer_id"], transfer(20).to_string());
+        assert_eq!(entry.details["operation_id"], operation(21).to_string());
+        assert_eq!(entry.details["direction"], "upload");
+        let encoded = serde_json::to_string(&activity).expect("serialize activity");
+        assert!(!encoded.contains(target));
+        assert!(!encoded.contains("private-cancel-content"));
+        assert!(!encoded.contains(temporary.path().to_str().expect("utf8 path")));
+    }
+
+    #[test]
+    fn file_network_activity_queue_keeps_only_the_latest_256_entries() {
+        let temporary = TempDir::new().expect("tempdir");
+        std::fs::write(temporary.path().join("source.bin"), b"activity").expect("source");
+        let share = upload_share();
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = enable_download_runtime(&temporary, &share);
+        let mut data_plane = FileNetworkDataPlane::new(runtime.clone());
+        let transfer_id = |index: usize| {
+            TransferId::from_public_key(format!("activity-transfer-{index}").as_bytes())
+        };
+        let operation_id = |index: usize| {
+            OperationId::from_public_key(format!("activity-operation-{index}").as_bytes())
+        };
+
+        for index in 0..FILE_NETWORK_ACTIVITY_RETENTION_LIMIT + 44 {
+            let now_unix_ms = 10 + u64::try_from(index).expect("time");
+            assert!(matches!(
+                data_plane.handle_request(
+                    &actor,
+                    &context,
+                    true,
+                    7,
+                    Ipv6Addr::LOCALHOST,
+                    FileNetworkRequest::OpenDownload {
+                        share_id: share.id.clone(),
+                        transfer_id: transfer_id(index),
+                        operation_id: operation_id(index),
+                        path: SharedPath::parse("source.bin").expect("path"),
+                    },
+                    now_unix_ms,
+                ),
+                FileNetworkResponse::Opened { .. }
+            ));
+            assert!(matches!(
+                data_plane.handle_request(
+                    &actor,
+                    &context,
+                    true,
+                    7,
+                    Ipv6Addr::LOCALHOST,
+                    FileNetworkRequest::Cancel {
+                        transfer_id: transfer_id(index),
+                        operation_id: operation_id(index),
+                    },
+                    now_unix_ms + 1,
+                ),
+                FileNetworkResponse::Progress { .. }
+            ));
+        }
+
+        assert_eq!(data_plane.session_count(), 0);
+        assert_eq!(runtime.active_transfer_count(), 0);
+        assert_eq!(
+            data_plane.activity.len(),
+            FILE_NETWORK_ACTIVITY_RETENTION_LIMIT
+        );
+        let activity = data_plane.drain_activity();
+        assert_eq!(activity.len(), FILE_NETWORK_ACTIVITY_RETENTION_LIMIT);
+        let first = 44;
+        let last = FILE_NETWORK_ACTIVITY_RETENTION_LIMIT + 43;
+        assert_eq!(
+            activity[0].details["transfer_id"],
+            transfer_id(first).to_string()
+        );
+        assert_eq!(
+            activity.last().expect("latest activity").details["transfer_id"],
+            transfer_id(last).to_string()
+        );
     }
 
     #[test]
@@ -2349,6 +2946,359 @@ mod tests {
     }
 
     #[test]
+    fn owner_disable_revokes_all_active_sessions_and_rejects_new_requests() {
+        let temporary = TempDir::new().expect("tempdir");
+        let source = b"owner-preserved-download";
+        std::fs::write(temporary.path().join("source.bin"), source).expect("source");
+        let share = share();
+        let runtime = enable_download_runtime(&temporary, &share);
+        let mut data_plane = FileNetworkDataPlane::new(runtime.clone());
+        let actors = [node(4), node(5)];
+        let contexts = actors
+            .iter()
+            .map(|actor| upload_context(&share, actor))
+            .collect::<Vec<_>>();
+
+        for (index, (actor, context)) in actors.iter().zip(&contexts).enumerate() {
+            let offset = u8::try_from(index).expect("index");
+            open_download(
+                &mut data_plane,
+                actor,
+                context,
+                &share,
+                40 + offset,
+                50 + offset,
+                10,
+            );
+        }
+        assert_eq!(data_plane.session_count(), 2);
+        assert_eq!(runtime.active_transfer_count(), 2);
+
+        runtime
+            .capability()
+            .disable(&share.owner, 20)
+            .expect("disable owner capability");
+        assert_eq!(
+            data_plane.cancel_all_for_authorization_loss("file_capability_revoked", 21),
+            2
+        );
+        assert_eq!(data_plane.session_count(), 0);
+        assert_eq!(runtime.active_transfer_count(), 0);
+        assert_eq!(
+            std::fs::read(temporary.path().join("source.bin")).expect("owner source"),
+            source
+        );
+
+        for (index, (actor, context)) in actors.iter().zip(&contexts).enumerate() {
+            let offset = u8::try_from(index).expect("index");
+            assert_eq!(
+                response_code(data_plane.handle_request(
+                    actor,
+                    context,
+                    true,
+                    7,
+                    Ipv6Addr::LOCALHOST,
+                    FileNetworkRequest::OpenDownload {
+                        share_id: share.id.clone(),
+                        transfer_id: transfer(60 + offset),
+                        operation_id: operation(70 + offset),
+                        path: SharedPath::parse("source.bin").expect("path"),
+                    },
+                    22,
+                )),
+                "file_capability_disabled"
+            );
+        }
+
+        let activity = data_plane.drain_activity();
+        assert_eq!(activity.len(), 2);
+        assert!(activity.iter().all(|entry| {
+            entry.action == "file.transfer.authorization_revoked"
+                && entry.outcome == AuditOutcome::Denied
+                && entry.reason.as_deref() == Some("file_capability_revoked")
+                && entry.details["direction"] == "download"
+                && entry.details["cleanup_code"] == "file_transfer_cleanup_completed"
+        }));
+    }
+
+    #[test]
+    fn owner_disable_revokes_concurrent_upload_and_download_without_publishing() {
+        let temporary = TempDir::new().expect("tempdir");
+        let source = b"owner-preserved-download";
+        std::fs::write(temporary.path().join("source.bin"), source).expect("source");
+        let share = upload_share();
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = enable_download_runtime(&temporary, &share);
+        let mut data_plane = FileNetworkDataPlane::new(runtime.clone());
+        let upload_content = b"partial-upload-content";
+        let upload = match data_plane.handle_request(
+            &actor,
+            &context,
+            true,
+            7,
+            Ipv6Addr::LOCALHOST,
+            FileNetworkRequest::OpenUpload {
+                share_id: share.id.clone(),
+                transfer_id: transfer(90),
+                operation_id: operation(91),
+                path: SharedPath::parse("incoming.bin").expect("upload path"),
+                manifest: manifest(upload_content, 8),
+            },
+            10,
+        ) {
+            FileNetworkResponse::Opened { session } => *session,
+            other => panic!("expected opened upload, got {other:?}"),
+        };
+        let (advanced, _) = data_plane
+            .handle_chunk(
+                &actor,
+                7,
+                &upload.binding.transfer_id,
+                &upload.binding.operation_id,
+                0,
+                0,
+                &upload_content[..8],
+                11,
+            )
+            .expect("stage first upload chunk");
+        assert!(advanced);
+        let download = open_download(&mut data_plane, &actor, &context, &share, 92, 93, 10);
+        assert!(data_plane
+            .next_download_frame(
+                &actor,
+                7,
+                &download.binding.transfer_id,
+                &download.binding.operation_id,
+                12,
+            )
+            .expect("first download fragment")
+            .is_some());
+        assert_eq!(data_plane.session_count(), 2);
+        assert_eq!(runtime.active_transfer_count(), 2);
+        assert_eq!(staging_file_count(temporary.path()), 1);
+
+        runtime
+            .capability()
+            .disable(&share.owner, 20)
+            .expect("disable owner capability");
+        assert_eq!(
+            data_plane.cancel_all_for_authorization_loss("file_capability_revoked", 21),
+            2
+        );
+        assert_eq!(data_plane.session_count(), 0);
+        assert_eq!(runtime.active_transfer_count(), 0);
+        assert_eq!(staging_file_count(temporary.path()), 0);
+        assert!(!temporary.path().join("incoming.bin").exists());
+        assert_eq!(
+            std::fs::read(temporary.path().join("source.bin")).expect("owner source"),
+            source
+        );
+
+        let activity = data_plane.drain_activity();
+        assert_eq!(activity.len(), 2);
+        assert!(activity.iter().any(|entry| {
+            entry.action == "file.transfer.authorization_revoked"
+                && entry.outcome == AuditOutcome::Denied
+                && entry.reason.as_deref() == Some("file_capability_revoked")
+                && entry.details["direction"] == "upload"
+                && entry.details["cleanup_code"] == "file_transfer_cleanup_completed"
+        }));
+        assert!(activity.iter().any(|entry| {
+            entry.action == "file.transfer.authorization_revoked"
+                && entry.outcome == AuditOutcome::Denied
+                && entry.reason.as_deref() == Some("file_capability_revoked")
+                && entry.details["direction"] == "download"
+                && entry.details["cleanup_code"] == "file_transfer_cleanup_completed"
+        }));
+    }
+
+    #[test]
+    fn member_removal_revokes_concurrent_upload_and_download_without_publishing() {
+        let temporary = TempDir::new().expect("tempdir");
+        let source = b"member-removal-preserves-download";
+        std::fs::write(temporary.path().join("source.bin"), source).expect("source");
+        let share = upload_share();
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = enable_download_runtime(&temporary, &share);
+        let mut data_plane = FileNetworkDataPlane::new(runtime.clone());
+        let upload_content = b"partial-member-upload-content";
+        let upload = match data_plane.handle_request(
+            &actor,
+            &context,
+            true,
+            7,
+            Ipv6Addr::LOCALHOST,
+            FileNetworkRequest::OpenUpload {
+                share_id: share.id.clone(),
+                transfer_id: transfer(94),
+                operation_id: operation(95),
+                path: SharedPath::parse("incoming.bin").expect("upload path"),
+                manifest: manifest(upload_content, 8),
+            },
+            10,
+        ) {
+            FileNetworkResponse::Opened { session } => *session,
+            other => panic!("expected opened upload, got {other:?}"),
+        };
+        assert!(
+            data_plane
+                .handle_chunk(
+                    &actor,
+                    7,
+                    &upload.binding.transfer_id,
+                    &upload.binding.operation_id,
+                    0,
+                    0,
+                    &upload_content[..8],
+                    11,
+                )
+                .expect("stage first upload chunk")
+                .0
+        );
+        let download = open_download(&mut data_plane, &actor, &context, &share, 96, 97, 10);
+        assert!(data_plane
+            .next_download_frame(
+                &actor,
+                7,
+                &download.binding.transfer_id,
+                &download.binding.operation_id,
+                12,
+            )
+            .expect("first download fragment")
+            .is_some());
+        assert_eq!(data_plane.session_count(), 2);
+        assert_eq!(runtime.active_transfer_count(), 2);
+        assert_eq!(staging_file_count(temporary.path()), 1);
+
+        let current_directory = directory(share.network_id.clone(), member(&actor, 7));
+        assert_eq!(
+            data_plane.cancel_sessions_without_member_access(
+                &share.network_id,
+                Some(&current_directory),
+                Some(10),
+                20,
+            ),
+            0
+        );
+        assert_eq!(data_plane.session_count(), 2);
+
+        let mut removed_member = current_directory;
+        removed_member.members.clear();
+        assert_eq!(
+            data_plane.cancel_sessions_without_member_access(
+                &share.network_id,
+                Some(&removed_member),
+                Some(10),
+                21,
+            ),
+            2
+        );
+        assert_eq!(data_plane.session_count(), 0);
+        assert_eq!(runtime.active_transfer_count(), 0);
+        assert_eq!(staging_file_count(temporary.path()), 0);
+        assert!(!temporary.path().join("incoming.bin").exists());
+        assert_eq!(
+            std::fs::read(temporary.path().join("source.bin")).expect("owner source"),
+            source
+        );
+
+        let activity = data_plane.drain_activity();
+        assert_eq!(activity.len(), 2);
+        assert!(activity.iter().all(|entry| {
+            entry.action == "file.transfer.authorization_revoked"
+                && entry.outcome == AuditOutcome::Denied
+                && entry.reason.as_deref() == Some("file_member_unavailable")
+                && entry.details["cleanup_code"] == "file_transfer_cleanup_completed"
+        }));
+        assert!(activity
+            .iter()
+            .any(|entry| { entry.details["direction"] == "upload" }));
+        assert!(activity
+            .iter()
+            .any(|entry| { entry.details["direction"] == "download" }));
+    }
+
+    #[test]
+    fn acl_reconfiguration_revokes_live_transfer_and_rejects_new_requests() {
+        let temporary = TempDir::new().expect("tempdir");
+        let source = b"acl-protected-download";
+        std::fs::write(temporary.path().join("source.bin"), source).expect("source");
+        let share = share();
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = enable_download_runtime(&temporary, &share);
+        let mut data_plane = FileNetworkDataPlane::new(runtime.clone());
+        let capability_epoch = data_plane.subscribe_capability_epoch();
+        let active = open_download(&mut data_plane, &actor, &context, &share, 80, 81, 10);
+        assert!(data_plane
+            .next_download_frame(
+                &actor,
+                7,
+                &active.binding.transfer_id,
+                &active.binding.operation_id,
+                11,
+            )
+            .expect("first fragment")
+            .is_some());
+
+        let mut revoked = share.clone();
+        revoked.revision = revoked.revision.saturating_add(1);
+        revoked.network_acl = FileAcl::default();
+        revoked.local_acl = FileAcl::default();
+        runtime
+            .enable(
+                &revoked,
+                &share.owner,
+                temporary.path().to_str().expect("utf8 path"),
+                12,
+            )
+            .expect("replace share ACL");
+        assert!(capability_epoch.has_changed().expect("epoch sender alive"));
+        assert_eq!(
+            data_plane.cancel_all_for_authorization_loss("file_capability_revoked", 13),
+            1
+        );
+        assert_eq!(data_plane.session_count(), 0);
+        assert_eq!(runtime.active_transfer_count(), 0);
+        assert_eq!(
+            std::fs::read(temporary.path().join("source.bin")).expect("owner source"),
+            source
+        );
+
+        assert_eq!(
+            response_code(data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::OpenDownload {
+                    share_id: revoked.id.clone(),
+                    transfer_id: transfer(82),
+                    operation_id: operation(83),
+                    path: SharedPath::parse("source.bin").expect("path"),
+                },
+                14,
+            )),
+            "file_acl_no_allow"
+        );
+        let activity = data_plane.drain_activity();
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].action, "file.transfer.authorization_revoked");
+        assert_eq!(activity[0].outcome, AuditOutcome::Denied);
+        assert_eq!(
+            activity[0].reason.as_deref(),
+            Some("file_capability_revoked")
+        );
+        assert_eq!(
+            activity[0].details["cleanup_code"],
+            "file_transfer_cleanup_completed"
+        );
+    }
+
+    #[test]
     fn download_fails_closed_on_capability_member_epoch_and_ttl_changes() {
         let temporary = TempDir::new().expect("tempdir");
         std::fs::write(temporary.path().join("source.bin"), b"authorization").expect("source");
@@ -2430,6 +3380,29 @@ mod tests {
             "file_transfer_expired"
         );
         assert_eq!(data_plane.session_count(), 0);
+        assert_eq!(runtime.active_transfer_count(), 0);
+
+        let activity = data_plane.drain_activity();
+        assert_eq!(activity.len(), 3);
+        assert_eq!(activity[0].action, "file.transfer.authorization_revoked");
+        assert_eq!(
+            activity[0].reason.as_deref(),
+            Some("file_capability_revoked")
+        );
+        assert_eq!(activity[1].action, "file.transfer.authorization_revoked");
+        assert_eq!(
+            activity[1].reason.as_deref(),
+            Some("file_transfer_access_revoked")
+        );
+        assert_eq!(activity[2].action, "file.transfer.interrupted");
+        assert_eq!(activity[2].outcome, AuditOutcome::Failed);
+        assert_eq!(activity[2].reason.as_deref(), Some("file_transfer_expired"));
+        assert!(activity.iter().all(|entry| {
+            entry.details["direction"] == "download"
+                && entry.details["cleanup_code"] == "file_transfer_cleanup_completed"
+        }));
+        let encoded = serde_json::to_string(&activity).expect("serialize activity");
+        assert!(!encoded.contains("source.bin"));
     }
 
     #[test]

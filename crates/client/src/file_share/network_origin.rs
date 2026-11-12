@@ -62,6 +62,8 @@ pub(crate) enum FileNetworkOriginError {
     UnexpectedResponse,
     #[error("File response binding does not match the operation")]
     BindingMismatch,
+    #[error("File transfer access was revoked")]
+    AccessRevoked,
     #[error("File download chunk is out of order, out of range or replayed")]
     ChunkOutOfOrder,
     #[error("File download chunk checksum or length is invalid")]
@@ -88,6 +90,7 @@ impl FileNetworkOriginError {
             Self::PeerMismatch => "file_transfer_peer_mismatch",
             Self::UnexpectedResponse => "file_transfer_response_unexpected",
             Self::BindingMismatch => "file_transfer_binding_mismatch",
+            Self::AccessRevoked => "file_transfer_access_revoked",
             Self::ChunkOutOfOrder => "file_transfer_chunk_out_of_order",
             Self::ChunkCorrupt => "file_transfer_chunk_corrupt",
             Self::Io(_) => "file_transfer_io",
@@ -158,6 +161,7 @@ pub(crate) struct OriginOutbound {
     pub(crate) peer: OriginPeer,
     pub(crate) transfer_id: TransferId,
     pub(crate) operation_id: OperationId,
+    pub(crate) actor_access_epoch: Option<u64>,
     pub(crate) frame: FileNetworkFrame,
 }
 
@@ -662,6 +666,7 @@ impl FileNetworkOrigin {
             peer,
             transfer_id: transfer_id.clone(),
             operation_id: operation_id.clone(),
+            actor_access_epoch: None,
             frame,
         });
         self.push_event(transfer.event(TransferState::Queued, None));
@@ -1049,16 +1054,43 @@ impl FileNetworkOrigin {
         Ok(())
     }
 
-    /// Reauthorize and continue a paused operation using the exact binding
-    /// returned when the owner first opened it.
-    pub(crate) fn resume(
+    /// Return the peer and bound access epoch that must be reauthorized before
+    /// resuming a paused operation. The live member directory is intentionally
+    /// not consulted here; the runtime owns that check and passes the result to
+    /// [`Self::resume_authorized`].
+    pub(crate) fn resume_scope(
+        &self,
+        transfer_id: &TransferId,
+        operation_id: &OperationId,
+    ) -> Result<(OriginPeer, u64), FileNetworkOriginError> {
+        let key = OriginTransferKey::new(transfer_id, operation_id);
+        let transfer = self
+            .transfers
+            .get(&key)
+            .ok_or(FileNetworkOriginError::NotFound)?;
+        if !transfer.paused || transfer.pending.is_some() || transfer.pause_after_reply {
+            return Err(FileNetworkOriginError::InvalidState);
+        }
+        let binding = transfer
+            .binding
+            .as_ref()
+            .ok_or(FileNetworkOriginError::InvalidState)?;
+        Ok((transfer.peer.clone(), binding.access_epoch))
+    }
+
+    /// Continue a paused operation only if the caller's freshly resolved member
+    /// access epoch still matches the binding returned by the owner. A revoked
+    /// epoch fails the local operation closed and removes any paused journal or
+    /// download staging before a resume frame can be queued.
+    pub(crate) fn resume_authorized(
         &mut self,
         transfer_id: &TransferId,
         operation_id: &OperationId,
+        current_access_epoch: u64,
         now_unix_ms: u64,
     ) -> Result<(), FileNetworkOriginError> {
         let key = OriginTransferKey::new(transfer_id, operation_id);
-        let Some(transfer) = self.transfers.get_mut(&key) else {
+        let Some(transfer) = self.transfers.get(&key) else {
             return Err(FileNetworkOriginError::NotFound);
         };
         if now_unix_ms >= transfer.deadline_unix_ms {
@@ -1069,9 +1101,44 @@ impl FileNetworkOrigin {
         if !transfer.paused || transfer.pending.is_some() || transfer.pause_after_reply {
             return Err(FileNetworkOriginError::InvalidState);
         }
+        let binding = transfer
+            .binding
+            .as_ref()
+            .ok_or(FileNetworkOriginError::InvalidState)?;
+        if current_access_epoch == 0 || current_access_epoch != binding.access_epoch {
+            self.fail_transfer_at(&key, now_unix_ms, "file_transfer_access_revoked", false);
+            self.outbound_notify.notify_one();
+            return Err(FileNetworkOriginError::AccessRevoked);
+        }
+        let transfer = self
+            .transfers
+            .get_mut(&key)
+            .ok_or(FileNetworkOriginError::NotFound)?;
         queue_resume(transfer, &mut self.outbound)?;
         self.outbound_notify.notify_one();
         Ok(())
+    }
+
+    /// Continue a paused operation using the exact binding returned when the
+    /// owner first opened it. Runtime callers must use
+    /// [`Self::resume_authorized`] after resolving the live member epoch.
+    #[cfg(test)]
+    pub(crate) fn resume(
+        &mut self,
+        transfer_id: &TransferId,
+        operation_id: &OperationId,
+        now_unix_ms: u64,
+    ) -> Result<(), FileNetworkOriginError> {
+        let key = OriginTransferKey::new(transfer_id, operation_id);
+        let Some(transfer) = self.transfers.get(&key) else {
+            return Err(FileNetworkOriginError::NotFound);
+        };
+        let access_epoch = transfer
+            .binding
+            .as_ref()
+            .ok_or(FileNetworkOriginError::InvalidState)?
+            .access_epoch;
+        self.resume_authorized(transfer_id, operation_id, access_epoch, now_unix_ms)
     }
 
     /// Expire timed-out operations and remove any partial staging file.
@@ -1501,6 +1568,7 @@ impl FileNetworkOrigin {
                     peer: transfer.peer.clone(),
                     transfer_id: transfer.transfer_id.clone(),
                     operation_id: transfer.operation_id.clone(),
+                    actor_access_epoch: outbound_access_epoch(transfer),
                     frame,
                 });
                 Ok(())
@@ -2067,6 +2135,13 @@ fn transfer_total_chunks(transfer: &OriginTransfer) -> u32 {
     }
 }
 
+fn outbound_access_epoch(transfer: &OriginTransfer) -> Option<u64> {
+    transfer
+        .binding
+        .as_ref()
+        .map(|binding| binding.access_epoch)
+}
+
 fn queue_open_upload(
     transfer: &mut OriginTransfer,
     outbound: &mut VecDeque<OriginOutbound>,
@@ -2096,6 +2171,7 @@ fn queue_open_upload(
         peer: transfer.peer.clone(),
         transfer_id: transfer.transfer_id.clone(),
         operation_id: transfer.operation_id.clone(),
+        actor_access_epoch: outbound_access_epoch(transfer),
         frame,
     });
     Ok(())
@@ -2152,6 +2228,7 @@ fn queue_next_upload_action(
         peer: transfer.peer.clone(),
         transfer_id: transfer.transfer_id.clone(),
         operation_id: transfer.operation_id.clone(),
+        actor_access_epoch: outbound_access_epoch(transfer),
         frame,
     });
     Ok(())
@@ -2176,6 +2253,7 @@ fn queue_finish_upload(
         peer: transfer.peer.clone(),
         transfer_id: transfer.transfer_id.clone(),
         operation_id: transfer.operation_id.clone(),
+        actor_access_epoch: outbound_access_epoch(transfer),
         frame,
     });
     Ok(())
@@ -2203,6 +2281,7 @@ fn queue_pause(
         peer: transfer.peer.clone(),
         transfer_id: transfer.transfer_id.clone(),
         operation_id: transfer.operation_id.clone(),
+        actor_access_epoch: outbound_access_epoch(transfer),
         frame,
     });
     Ok(())
@@ -2269,6 +2348,7 @@ fn queue_resume(
         peer: transfer.peer.clone(),
         transfer_id: transfer.transfer_id.clone(),
         operation_id: transfer.operation_id.clone(),
+        actor_access_epoch: outbound_access_epoch(transfer),
         frame,
     });
     Ok(())
@@ -2287,6 +2367,7 @@ fn queue_cancel(transfer: &mut OriginTransfer, outbound: &mut VecDeque<OriginOut
             peer: transfer.peer.clone(),
             transfer_id: transfer.transfer_id.clone(),
             operation_id: transfer.operation_id.clone(),
+            actor_access_epoch: outbound_access_epoch(transfer),
             frame,
         });
     }
@@ -4899,6 +4980,119 @@ mod tests {
         assert_eq!((chunk_index, offset), (1, 8));
         assert_eq!(fragment, data[8..16]);
         assert!(store.load().expect("journal").is_empty());
+    }
+
+    #[test]
+    fn restored_upload_with_revoked_epoch_fails_closed_without_resume_frame() {
+        let temporary = TempDir::new().expect("tempdir");
+        let source = temporary.path().join("source.bin");
+        let data = b"0123456789abcdefghij";
+        std::fs::write(&source, data).expect("source");
+        let local_node_id = node(4);
+        let store = FileOriginStore::at(temporary.path(), "network");
+        let mut origin = FileNetworkOrigin::with_store(local_node_id.clone(), store.clone());
+        let (open_request_id, session) =
+            start_upload(&mut origin, &local_node_id, &source, 2, data, 8);
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+        let (chunk_request_id, _, _, chunk_index, _, _) = take_chunk(&mut origin);
+        origin
+            .pause(&transfer(2), &operation(2), NOW + 2)
+            .expect("defer pause");
+        origin
+            .handle_response(
+                &peer(),
+                chunk_request_id,
+                FileNetworkResponse::ChunkAccepted {
+                    chunk_index,
+                    chunk_complete: true,
+                    progress: progress(TransferState::Active, 8, data.len() as u64, 1, 3),
+                },
+                NOW + 3,
+            )
+            .expect("chunk acknowledgement");
+        let (pause_request_id, _) = take_request(&mut origin);
+        origin
+            .handle_response(
+                &peer(),
+                pause_request_id,
+                FileNetworkResponse::Progress {
+                    progress: progress(TransferState::Paused, 8, data.len() as u64, 1, 3),
+                },
+                NOW + 4,
+            )
+            .expect("pause response");
+        drop(origin);
+
+        let mut restored = FileNetworkOrigin::with_store(local_node_id, store.clone());
+        let restored_events = restored.restore_paused(NOW + 5).expect("restore");
+        assert_eq!(restored_events[0].state, TransferState::Paused);
+        assert_eq!(
+            restored
+                .resume_scope(&transfer(2), &operation(2))
+                .expect("resume scope"),
+            (peer(), 7)
+        );
+
+        assert!(matches!(
+            restored.resume_authorized(&transfer(2), &operation(2), 8, NOW + 6),
+            Err(FileNetworkOriginError::AccessRevoked)
+        ));
+        assert!(restored.pop_outbound().is_none());
+        assert_eq!(restored.active_count(), 0);
+        assert!(store.load().expect("journal").is_empty());
+        assert_eq!(std::fs::read(&source).expect("source remains"), data);
+        let events = restored.drain_events();
+        assert_eq!(
+            events.last().map(|event| event.state),
+            Some(TransferState::Failed)
+        );
+        assert_eq!(
+            events.last().and_then(|event| event.error_code.as_deref()),
+            Some("file_transfer_access_revoked")
+        );
+    }
+
+    #[test]
+    fn restored_download_with_revoked_epoch_removes_staging_without_resume_frame() {
+        let temporary = TempDir::new().expect("tempdir");
+        let data = b"restored download content";
+        let (destination, local_node_id, store, staging_path) =
+            paused_download_fixture(&temporary, data, 32, 5);
+        assert!(staging_path.exists());
+
+        let mut restored = FileNetworkOrigin::with_store(local_node_id, store.clone());
+        let restored_events = restored.restore_paused(NOW + 5).expect("restore");
+        assert_eq!(restored_events[0].state, TransferState::Paused);
+        assert_eq!(restored.active_count(), 1);
+        assert!(staging_path.exists());
+
+        assert!(matches!(
+            restored.resume_authorized(&transfer(2), &operation(2), 8, NOW + 6),
+            Err(FileNetworkOriginError::AccessRevoked)
+        ));
+        assert!(restored.pop_outbound().is_none());
+        assert_eq!(restored.active_count(), 0);
+        assert!(!staging_path.exists());
+        assert!(!destination.exists());
+        assert!(store.load().expect("journal").is_empty());
+        let events = restored.drain_events();
+        assert_eq!(
+            events.last().map(|event| event.state),
+            Some(TransferState::Failed)
+        );
+        assert_eq!(
+            events.last().and_then(|event| event.error_code.as_deref()),
+            Some("file_transfer_access_revoked")
+        );
     }
 
     #[test]

@@ -2521,6 +2521,10 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
         .file_network
         .as_ref()
         .map(FileNetworkDataPlane::download_notify);
+    let mut file_capability_epoch = runtime
+        .file_network
+        .as_ref()
+        .map(FileNetworkDataPlane::subscribe_capability_epoch);
     let file_origin_notify = runtime.file_origin.outbound_notify();
     let mut file_origin_expiry = tokio::time::interval(Duration::from_secs(1));
     file_origin_expiry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -2555,6 +2559,33 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                 }
             } => {
                 drive_pending_file_downloads(runtime).await;
+            }
+
+            // Owner enable/disable/reconfigure advances the local capability
+            // epoch. Cancel every admitted session before another peer frame
+            // can run, and publish one bounded cleanup activity per transfer.
+            changed = async {
+                match file_capability_epoch.as_mut() {
+                    Some(epoch) => epoch.changed().await.is_ok(),
+                    None => std::future::pending::<bool>().await,
+                }
+            } => {
+                if changed {
+                    let now_unix_ms = unix_time_ms();
+                    let cancelled = runtime.file_network.as_mut().map_or(0, |file_network| {
+                        file_network.cancel_all_for_authorization_loss(
+                            "file_capability_revoked",
+                            now_unix_ms,
+                        )
+                    });
+                    if cancelled > 0 {
+                        tracing::info!(
+                            cancelled,
+                            "File 能力变更已主动终止全部活动传输"
+                        );
+                    }
+                    publish_file_network_activity(runtime).await;
+                }
             }
 
             // Requester upload fragments, finish requests and cancellations
@@ -2651,6 +2682,22 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                         directory: Some(directory),
                         received_at_unix_ms: Some(received_at_unix_ms),
                     }) => {
+                        let now_unix_ms = unix_time_ms();
+                        let cancelled = runtime.file_network.as_mut().map_or(0, |file_network| {
+                            file_network.cancel_sessions_without_member_access(
+                                &directory.network_id,
+                                Some(&directory),
+                                Some(received_at_unix_ms),
+                                now_unix_ms,
+                            )
+                        });
+                        if cancelled > 0 {
+                            tracing::info!(
+                                cancelled,
+                                "成员目录刷新已主动终止失去 File 授权的传输"
+                            );
+                            publish_file_network_activity(runtime).await;
+                        }
                         let selection_directory = directory.clone();
                         if let Err(denial) = runtime
                             .exit_contribution_gate
@@ -2670,6 +2717,24 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                             .await;
                     }
                     Some(_) => {
+                        if let Some(network_id) = runtime.network_id.clone() {
+                            let cancelled =
+                                runtime.file_network.as_mut().map_or(0, |file_network| {
+                                    file_network.cancel_sessions_without_member_access(
+                                        &network_id,
+                                        None,
+                                        None,
+                                        unix_time_ms(),
+                                    )
+                                });
+                            if cancelled > 0 {
+                                tracing::info!(
+                                    cancelled,
+                                    "成员目录不可用，已主动终止 File 传输"
+                                );
+                                publish_file_network_activity(runtime).await;
+                            }
+                        }
                         runtime.exit_contribution_gate.clear_member_directory();
                         runtime
                             .handle_exit_selection_directory_unavailable(
@@ -2800,22 +2865,36 @@ async fn drive_pending_file_downloads(runtime: &mut ClientRuntime) {
                     now_unix_ms,
                 ) {
                     Ok(frame) => frame,
-                    Err(_) => {
+                    Err(response) => {
+                        let reason_code = file_network_error_code(&response);
                         cancel_file_network_session(
                             runtime,
                             &download.transfer_id,
                             &download.operation_id,
+                            reason_code,
                             now_unix_ms,
                         );
                         continue;
                     }
                 }
             }
-            Ok(_) | Err(_) => {
+            Ok(_) => {
                 cancel_file_network_session(
                     runtime,
                     &download.transfer_id,
                     &download.operation_id,
+                    "file_transfer_access_revoked",
+                    now_unix_ms,
+                );
+                continue;
+            }
+            Err(response) => {
+                let reason_code = file_network_error_code(&response);
+                cancel_file_network_session(
+                    runtime,
+                    &download.transfer_id,
+                    &download.operation_id,
+                    reason_code,
                     now_unix_ms,
                 );
                 continue;
@@ -2829,6 +2908,7 @@ async fn drive_pending_file_downloads(runtime: &mut ClientRuntime) {
                 runtime,
                 &download.transfer_id,
                 &download.operation_id,
+                "file_transfer_encode_failed",
                 now_unix_ms,
             );
             continue;
@@ -2848,6 +2928,7 @@ async fn drive_pending_file_downloads(runtime: &mut ClientRuntime) {
                 runtime,
                 &download.transfer_id,
                 &download.operation_id,
+                "file_transfer_send_failed",
                 now_unix_ms,
             );
         }
@@ -2862,16 +2943,41 @@ async fn drive_pending_file_downloads(runtime: &mut ClientRuntime) {
             file_network.download_notify().notify_one();
         }
     }
+    publish_file_network_activity(runtime).await;
 }
 
-/// Send requester-side File frames after revalidating the authenticated peer
-/// against the current authoritative membership directory. The state machine
-/// keeps at most one outstanding request per operation, so this pump remains
-/// bounded even when many transfers are active.
+async fn publish_file_network_activity(runtime: &mut ClientRuntime) {
+    let Some(activity) = runtime
+        .file_network
+        .as_mut()
+        .map(FileNetworkDataPlane::drain_activity)
+    else {
+        return;
+    };
+    if activity.is_empty() {
+        return;
+    }
+    if let Some(state) = &runtime.node_state {
+        state.merge_recent_activity(activity).await;
+    }
+}
+
+/// Send requester-side File frames after revalidating both sides against the
+/// current authoritative membership directory. The requester's local member
+/// epoch must still match the binding; the owner is checked independently as
+/// an active File-capable peer. The state machine keeps at most one outstanding
+/// request per operation, so this pump remains bounded.
 async fn drive_pending_file_origin(runtime: &mut ClientRuntime) {
     while let Some(outbound) = runtime.file_origin.pop_outbound() {
         let now_unix_ms = unix_time_ms();
-        if let Err(code) = authorize_file_origin_peer(runtime, &outbound.peer, now_unix_ms).await {
+        if let Err(code) = authorize_file_origin_send(
+            runtime,
+            &outbound.peer,
+            outbound.actor_access_epoch,
+            now_unix_ms,
+        )
+        .await
+        {
             tracing::warn!(
                 peer = %outbound.peer.node_id,
                 transfer_id = %outbound.transfer_id,
@@ -2930,6 +3036,39 @@ async fn drive_pending_file_origin(runtime: &mut ClientRuntime) {
     for event in runtime.file_origin.drain_events() {
         log_file_origin_event(&event);
     }
+}
+
+async fn authorize_file_origin_send(
+    runtime: &ClientRuntime,
+    peer: &OriginPeer,
+    expected_actor_access_epoch: Option<u64>,
+    now_unix_ms: u64,
+) -> Result<(), String> {
+    authorize_file_origin_actor(runtime, expected_actor_access_epoch, now_unix_ms).await?;
+    authorize_file_origin_peer(runtime, peer, now_unix_ms).await
+}
+
+async fn authorize_file_origin_actor(
+    runtime: &ClientRuntime,
+    expected_access_epoch: Option<u64>,
+    now_unix_ms: u64,
+) -> Result<(), String> {
+    let local_node_id = runtime.file_origin.local_node_id();
+    let (member, _) = trusted_file_request_member(runtime, local_node_id, now_unix_ms)
+        .await
+        .map_err(|response| file_network_error_code(&response).to_owned())?;
+    validate_file_origin_actor_epoch(expected_access_epoch, &member)
+}
+
+fn validate_file_origin_actor_epoch(
+    expected_access_epoch: Option<u64>,
+    member: &crate::file_share::TrustedFileMember,
+) -> Result<(), String> {
+    if expected_access_epoch.is_some_and(|epoch| epoch == 0 || member.member_access_epoch != epoch)
+    {
+        return Err("file_transfer_access_revoked".to_owned());
+    }
+    Ok(())
 }
 
 async fn authorize_file_origin_peer(
@@ -3187,7 +3326,7 @@ fn pause_runtime_file_origin_transfer(
         .map_err(file_origin_error_code)
 }
 
-fn resume_runtime_file_origin_transfer(
+async fn resume_runtime_file_origin_transfer(
     runtime: &mut ClientRuntime,
     transfer_id: String,
     operation_id: String,
@@ -3196,9 +3335,29 @@ fn resume_runtime_file_origin_transfer(
         .map_err(|_| "file_transfer_transfer_id_invalid".to_owned())?;
     let operation_id = OperationId::parse(operation_id)
         .map_err(|_| "file_transfer_operation_id_invalid".to_owned())?;
+    let now_unix_ms = unix_time_ms();
+    let (peer, expected_access_epoch) = runtime
+        .file_origin
+        .resume_scope(&transfer_id, &operation_id)
+        .map_err(file_origin_error_code)?;
+
+    if let Err(code) =
+        authorize_file_origin_send(runtime, &peer, Some(expected_access_epoch), now_unix_ms).await
+    {
+        runtime
+            .file_origin
+            .fail_transfer(&transfer_id, &operation_id, now_unix_ms, &code);
+        return Err(code);
+    }
+
     runtime
         .file_origin
-        .resume(&transfer_id, &operation_id, unix_time_ms())
+        .resume_authorized(
+            &transfer_id,
+            &operation_id,
+            expected_access_epoch,
+            now_unix_ms,
+        )
         .map_err(file_origin_error_code)
 }
 
@@ -3259,7 +3418,8 @@ async fn handle_runtime_command(
             operation_id,
             reply,
         } => {
-            let result = resume_runtime_file_origin_transfer(runtime, transfer_id, operation_id);
+            let result =
+                resume_runtime_file_origin_transfer(runtime, transfer_id, operation_id).await;
             let _ = reply.send(result);
             RuntimeCommandOutcome::Continue
         }
@@ -4331,26 +4491,32 @@ async fn handle_file_network_frame(
         } => {
             let (transfer_id, operation_id) = file_network_request_ids(&request);
             let now_unix_ms = unix_time_ms();
-            let response = match trusted_file_request_member(runtime, &peer.node_id, now_unix_ms)
-                .await
-            {
-                Ok((member, network_enabled)) => match runtime.file_network.as_mut() {
-                    Some(file_network) => file_network.handle_request(
-                        &peer.node_id,
-                        &member.context,
-                        network_enabled,
-                        member.member_access_epoch,
-                        peer.virtual_ip,
-                        request,
-                        now_unix_ms,
-                    ),
-                    None => file_network_error("file_runtime_unavailable"),
-                },
-                Err(response) => {
-                    cancel_file_network_session(runtime, &transfer_id, &operation_id, now_unix_ms);
-                    response
-                }
-            };
+            let response =
+                match trusted_file_request_member(runtime, &peer.node_id, now_unix_ms).await {
+                    Ok((member, network_enabled)) => match runtime.file_network.as_mut() {
+                        Some(file_network) => file_network.handle_request(
+                            &peer.node_id,
+                            &member.context,
+                            network_enabled,
+                            member.member_access_epoch,
+                            peer.virtual_ip,
+                            request,
+                            now_unix_ms,
+                        ),
+                        None => file_network_error("file_runtime_unavailable"),
+                    },
+                    Err(response) => {
+                        let reason_code = file_network_error_code(&response);
+                        cancel_file_network_session(
+                            runtime,
+                            &transfer_id,
+                            &operation_id,
+                            reason_code,
+                            now_unix_ms,
+                        );
+                        response
+                    }
+                };
             tracing::debug!(
                 peer = %peer.node_id,
                 %src_ip,
@@ -4370,23 +4536,29 @@ async fn handle_file_network_frame(
             data,
         } => {
             let now_unix_ms = unix_time_ms();
-            let (member, _) = match trusted_file_request_member(runtime, &peer.node_id, now_unix_ms)
-                .await
-            {
-                Ok(authorized) => authorized,
-                Err(response) => {
-                    cancel_file_network_session(runtime, &transfer_id, &operation_id, now_unix_ms);
-                    tracing::debug!(
-                        peer = %peer.node_id,
-                        %src_ip,
-                        %transfer_id,
-                        %operation_id,
-                        error_code = file_network_error_code(&response),
-                        "File 分片授权复核失败，已取消对应传输"
-                    );
-                    return;
-                }
-            };
+            let (member, _) =
+                match trusted_file_request_member(runtime, &peer.node_id, now_unix_ms).await {
+                    Ok(authorized) => authorized,
+                    Err(response) => {
+                        let reason_code = file_network_error_code(&response);
+                        cancel_file_network_session(
+                            runtime,
+                            &transfer_id,
+                            &operation_id,
+                            reason_code,
+                            now_unix_ms,
+                        );
+                        tracing::debug!(
+                            peer = %peer.node_id,
+                            %src_ip,
+                            %transfer_id,
+                            %operation_id,
+                            error_code = file_network_error_code(&response),
+                            "File 分片授权复核失败，已取消对应传输"
+                        );
+                        return;
+                    }
+                };
 
             let origin_peer = OriginPeer {
                 node_id: peer.node_id.clone(),
@@ -4585,17 +4757,20 @@ fn cancel_file_network_session(
     runtime: &mut ClientRuntime,
     transfer_id: &TransferId,
     operation_id: &OperationId,
+    reason_code: &str,
     now_unix_ms: u64,
 ) {
     if let Some(file_network) = runtime.file_network.as_mut() {
-        file_network.cancel_for_authorization_loss(transfer_id, operation_id, now_unix_ms);
+        file_network.cancel_for_authorization_loss(
+            transfer_id,
+            operation_id,
+            reason_code,
+            now_unix_ms,
+        );
     }
-    runtime.file_origin.fail_transfer(
-        transfer_id,
-        operation_id,
-        now_unix_ms,
-        "file_transfer_authorization_lost",
-    );
+    runtime
+        .file_origin
+        .fail_transfer(transfer_id, operation_id, now_unix_ms, reason_code);
 }
 
 async fn send_file_network_response(
@@ -4663,6 +4838,7 @@ async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacke
             frame,
         }) => {
             handle_file_network_frame(runtime, src_ip, peer, frame).await;
+            publish_file_network_activity(runtime).await;
         }
         None => {}
     }
@@ -4690,6 +4866,7 @@ async fn handle_inbound_packet_batch(
                 frame,
             }) => {
                 handle_file_network_frame(runtime, src_ip, peer, frame).await;
+                publish_file_network_activity(runtime).await;
             }
             None => {}
         }
@@ -10008,6 +10185,68 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
             "office"
         );
         assert!(select_probe_network(&NodeSnapshot::default(), "203.0.113.1").is_err());
+    }
+
+    #[test]
+    fn file_origin_requester_epoch_is_not_compared_with_owner_epoch() {
+        use fuckipv6_common::domain::{
+            MemberLifecycleStatus, NetworkMember, NetworkMemberPresence, NetworkMemberStatus,
+        };
+
+        let network_id = NetworkId::from_public_key(b"file-epoch-network");
+        let requester = NodeId::from_public_key(b"file-epoch-requester");
+        let owner = NodeId::from_public_key(b"file-epoch-owner");
+        let member = |node_id: NodeId, role: MembershipRole, access_epoch: u64| NetworkMember {
+            node_id,
+            display_name: None,
+            identity_fingerprint: None,
+            role,
+            groups: Vec::new(),
+            capabilities: Some(vec![CapabilityKind::File]),
+            status: NetworkMemberStatus::Active,
+            lifecycle_state: MemberLifecycleStatus::Active,
+            revision: 2,
+            access_epoch,
+            available_actions: Vec::new(),
+            presence: NetworkMemberPresence::unknown(),
+            exit_availability: Default::default(),
+            joined_at_unix_ms: Some(1_000),
+        };
+        let directory = NetworkMemberDirectory {
+            network_id: network_id.clone(),
+            generated_at_unix_ms: 1_000,
+            viewer_role: MembershipRole::Member,
+            can_manage_members: false,
+            exit_selection_policy: Default::default(),
+            exit_selection_policy_revision: 0,
+            members: vec![
+                member(requester.clone(), MembershipRole::Member, 8),
+                member(owner.clone(), MembershipRole::Owner, 9),
+            ],
+        };
+
+        let requester_member = trusted_file_member(
+            &network_id,
+            Some(&directory),
+            Some(1_000),
+            &requester,
+            2_000,
+        )
+        .expect("requester member");
+        let owner_member =
+            trusted_file_member(&network_id, Some(&directory), Some(1_000), &owner, 2_000)
+                .expect("owner member");
+        assert_eq!(requester_member.member_access_epoch, 8);
+        assert_eq!(owner_member.member_access_epoch, 9);
+        assert_eq!(
+            validate_file_origin_actor_epoch(Some(7), &requester_member),
+            Err("file_transfer_access_revoked".to_owned()),
+            "the requester binding epoch must be compared with its own current epoch"
+        );
+        assert_eq!(
+            validate_file_origin_actor_epoch(Some(8), &requester_member),
+            Ok(())
+        );
     }
 
     #[test]

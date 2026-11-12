@@ -34,6 +34,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use super::authorization::{authorize_command, CommandDenial};
+use super::state::RECENT_ACTIVITY_RETENTION_LIMIT;
 use super::ui_manifest::audit_for_command;
 use super::{
     NodeCommandContext, NodeEventBus, NodeEventKind, NodeLifecycleSnapshot, NodeNetworkRole,
@@ -2767,7 +2768,6 @@ struct CommandEnvelope {
     response: oneshot::Sender<NodeCommandResult>,
 }
 
-const ACTIVITY_RETENTION_LIMIT: usize = 256;
 const COMMAND_AUDIT_RETENTION_LIMIT: usize = 256;
 
 struct CommandAuditTrail {
@@ -2909,7 +2909,7 @@ impl CommandAuditTrail {
                     .cmp(&left.occurred_at_unix_ms)
                     .then_with(|| right.audit_id.cmp(&left.audit_id))
             });
-            activity.truncate(ACTIVITY_RETENTION_LIMIT);
+            activity.truncate(RECENT_ACTIVITY_RETENTION_LIMIT);
         }
         Ok(Some(projected))
     }
@@ -3705,7 +3705,7 @@ impl NodeCommandBus {
             .map_err(|error| NodeCommandBusError::AuditUnavailable(format!("{error:#}")))?;
         if let Some(state) = &self.activity_state {
             state
-                .set_recent_activity(self.audit.recent_activity())
+                .merge_recent_activity(self.audit.recent_activity())
                 .await;
         }
         Ok(())
@@ -6254,7 +6254,7 @@ mod tests {
             .expect("snapshot query");
 
         let activity = state.snapshot().await.recent_activity;
-        assert_eq!(activity.len(), ACTIVITY_RETENTION_LIMIT);
+        assert_eq!(activity.len(), RECENT_ACTIVITY_RETENTION_LIMIT);
         assert!(activity
             .iter()
             .all(|entry| entry.details["command"] == "start_node"));
@@ -6268,7 +6268,7 @@ mod tests {
             .iter()
             .map(|entry| entry.audit_id.as_str())
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(audit_ids.len(), ACTIVITY_RETENTION_LIMIT);
+        assert_eq!(audit_ids.len(), RECENT_ACTIVITY_RETENTION_LIMIT);
         assert!(!activity
             .iter()
             .any(|entry| entry.details["command"] == "get_snapshot"));

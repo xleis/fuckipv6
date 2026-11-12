@@ -3254,8 +3254,8 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 
 - [x] 使用受认证、可取消的 operation 开始传输；
 - [x] 上传/下载支持校验、进度、暂停/恢复和最终确认；
-- [ ] 断点续传绑定文件版本、分块和身份，防止拼接错误内容；
-- [ ] 文件更新后旧续传状态失效；
+- [x] 断点续传绑定文件版本、分块和身份，防止拼接错误内容；
+- [x] 文件更新后旧续传状态失效；
 - [x] 支持取消并清理临时文件；
 - [ ] 区分网络中断、权限撤销、配额超限和磁盘错误；
 - [x] 完成后校验内容哈希并原子落位；
@@ -3278,8 +3278,17 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 `repeated_pause_and_resume_use_fresh_request_ids`、`resume_response_with_a_different_binding_fails_closed` 与
 `resume_response_with_a_different_download_manifest_fails_closed` 覆盖这些边界。IPC 成功、运行时错误和断链回复由
 `file_transfer_start_maps_runtime_replies`、`file_transfer_cancel_maps_runtime_replies`、`file_transfer_pause_maps_runtime_replies`
-与 `file_transfer_resume_maps_runtime_replies` 覆盖。该证据仍是进程内状态机/IPC 自动化测试，不代表真实网络传输、断点跨重启、
-WebUI/Android File 表面或大文件性能验收已经完成。
+与 `file_transfer_resume_maps_runtime_replies` 覆盖。requester 暂停态现已通过 owner-only `FileOriginStore` journal 跨进程重启恢复：
+启动时重新核对本地 NodeId、binding、deadline、manifest/session、请求序号和本地源/目标文件，只恢复已确认暂停的 operation；
+上传源内容变化、下载目标已存在、staging 被替换为符号链接/目录、staging 路径越界、分块或长度不一致均失败关闭。
+duplicate transfer key 或共享 staging 路径会保留首个已恢复文件，不删除其他活动 operation 的 staging。partial download assembly
+保存在同目录 staging 尾部，恢复时截断回完整分块边界并逐块复核 checksum，再以 no-clobber 原子落位。
+`journal_round_trips_with_owner_only_permissions`、`paused_upload_is_restored_and_resends_the_next_chunk`、
+`paused_download_restores_a_partial_fragment_from_staging`、`expired_restored_download_is_not_resumed_and_staging_is_removed`、
+`restored_upload_fails_closed_when_the_source_changes`、`restored_download_rejects_an_existing_destination_without_overwriting_it`、
+`restored_download_rejects_a_replaced_staging_symlink_without_touching_its_target`、`duplicate_restored_transfer_does_not_remove_the_restored_staging_file`
+与 `shared_restored_staging_path_does_not_remove_or_reuse_the_active_file` 覆盖这些恢复边界。该证据仍是进程内状态机、journal 与
+冻结文件系统测试，不代表真实双节点网络中断、真实节点杀进程重启、WebUI/Android File 表面或大文件性能验收已经完成。
 
 ### W15-04 canonicalize 与路径边界 `[~]`
 

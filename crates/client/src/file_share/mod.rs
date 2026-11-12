@@ -11,6 +11,7 @@ mod config;
 mod error;
 mod network;
 mod network_origin;
+mod origin_store;
 mod owner_service;
 mod quota;
 mod rate_limit;
@@ -32,6 +33,7 @@ pub(crate) use network::{
 pub(crate) use network_origin::{
     FileNetworkOrigin, FileNetworkOriginError, OriginPeer, OriginTransferEvent,
 };
+pub(crate) use origin_store::FileOriginStore;
 pub(crate) use owner_service::FileOwnerService;
 pub use owner_service::{FileOwnerServiceError, FileShareConfiguration, FileSharePreview};
 pub use quota::{DirectoryUsage, QuotaScanLimits, UploadQuotaRequest};

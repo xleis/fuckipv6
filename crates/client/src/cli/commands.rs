@@ -29,10 +29,11 @@ use tokio::sync::{mpsc, watch, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration, Instant};
 
+use crate::config_manager::ConfigManager;
 use crate::file_share::{
     decode_file_network_frame, encode_file_network_frame, is_file_network_frame,
     trusted_file_member, FileNetworkDataPlane, FileNetworkFrame, FileNetworkOrigin,
-    FileNetworkOriginError, FileNetworkRequest, FileNetworkResponse, OriginPeer,
+    FileNetworkOriginError, FileNetworkRequest, FileNetworkResponse, FileOriginStore, OriginPeer,
     OriginTransferEvent,
 };
 use crate::ipc::{self, IpcRequest, IpcResponse};
@@ -1619,11 +1620,22 @@ pub(crate) async fn prepare_client_runtime_ext(
         .as_ref()
         .map(|runtime| FileNetworkDataPlane::new(runtime.clone()));
     let local_node_id = NodeId::from_public_key(&relay_identity.public_key_bytes());
+    let file_origin_store = FileOriginStore::at(
+        ConfigManager::new()?.config_dir(),
+        network_id
+            .as_ref()
+            .map(NetworkId::as_str)
+            .unwrap_or("default"),
+    );
+    let mut file_origin = FileNetworkOrigin::with_store(local_node_id, file_origin_store);
+    if let Err(error) = file_origin.restore_paused(unix_time_ms()) {
+        tracing::warn!(error = %error, "恢复暂停的 File 续传失败，已忽略本地续传日志");
+    }
     Ok(ClientRuntime {
         signaling,
         p2p,
         file_network,
-        file_origin: FileNetworkOrigin::new(local_node_id),
+        file_origin,
         identity: relay_identity,
         network_id,
         outbound,

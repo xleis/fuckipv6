@@ -1471,6 +1471,16 @@ mod tests {
         runtime
     }
 
+    #[cfg(target_os = "linux")]
+    fn open_descriptors_under(root: &std::path::Path) -> usize {
+        std::fs::read_dir("/proc/self/fd")
+            .expect("proc fd directory")
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+            .filter(|path| path.starts_with(root))
+            .count()
+    }
+
     fn open_download(
         data_plane: &mut FileNetworkDataPlane,
         actor: &NodeId,
@@ -2421,6 +2431,8 @@ mod tests {
         let actor = node(4);
         let context = upload_context(&share, &actor);
         let runtime = enable_download_runtime(&temporary, &share);
+        #[cfg(target_os = "linux")]
+        let open_descriptors = open_descriptors_under(temporary.path());
         let mut data_plane = FileNetworkDataPlane::new(runtime);
 
         for index in 0..MAX_ACTIVE_FILE_NETWORK_SESSIONS {
@@ -2437,6 +2449,11 @@ mod tests {
             );
         }
         assert_eq!(data_plane.session_count(), MAX_ACTIVE_FILE_NETWORK_SESSIONS);
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            open_descriptors_under(temporary.path()),
+            open_descriptors + MAX_ACTIVE_FILE_NETWORK_SESSIONS
+        );
         assert_eq!(
             response_code(data_plane.handle_request(
                 &actor,
@@ -2474,5 +2491,7 @@ mod tests {
             ));
         }
         assert_eq!(data_plane.session_count(), 0);
+        #[cfg(target_os = "linux")]
+        assert_eq!(open_descriptors_under(temporary.path()), open_descriptors);
     }
 }

@@ -12,9 +12,9 @@ use fuckipv6_common::domain::{
     ExitSelectionResolution, FieldPrivacyPolicy, MembershipRole, MembershipState, MembershipTerms,
     NetworkAcl, NetworkId, NetworkJoinMode, NetworkMemberDirectory, NetworkMemberPresence,
     NetworkMemberStatus, NetworkVisibility, NodeId, NodeLocalAccessPolicy, OperationRecovery,
-    RelayHealthSnapshot, TopologyBuilder, TopologyLinkObservation, TopologyMemberInput,
-    TopologyNetworkInput, TopologySnapshot, TopologyViewer, TrafficRoutingPageModel,
-    TrafficSessionSnapshot,
+    RelayHealthSnapshot, RelayHealthStatus, TopologyBuilder, TopologyLinkObservation,
+    TopologyMemberInput, TopologyNetworkInput, TopologySnapshot, TopologyViewer,
+    TrafficRoutingPageModel, TrafficSessionSnapshot,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -882,26 +882,68 @@ fn embedded_coordinator_capability_state(
 }
 
 fn embedded_relay_capability_state(services: &[NodeEmbeddedServiceSnapshot]) -> CapabilityState {
-    if services
-        .iter()
-        .any(|service| service.relay_status == NodeEmbeddedServiceStatus::Running)
-    {
-        CapabilityState::Enabled
-    } else if services.iter().any(|service| {
+    if services.iter().any(|service| {
         matches!(
             service.relay_status,
             NodeEmbeddedServiceStatus::Starting | NodeEmbeddedServiceStatus::Stopping
         )
     }) {
-        CapabilityState::Starting
-    } else if services
+        return CapabilityState::Starting;
+    }
+    if services
         .iter()
         .any(|service| service.relay_status == NodeEmbeddedServiceStatus::Failed)
     {
-        CapabilityState::Degraded
-    } else {
-        CapabilityState::Disabled
+        return CapabilityState::Unavailable;
     }
+    let relay_services = services
+        .iter()
+        .filter(|service| {
+            service.relay_status != NodeEmbeddedServiceStatus::Stopped
+                || service.relay_health.is_some()
+        })
+        .collect::<Vec<_>>();
+    if relay_services.is_empty() {
+        return CapabilityState::Disabled;
+    }
+    let available = relay_services.iter().any(|service| {
+        !service
+            .relay_health
+            .as_ref()
+            .is_some_and(|health| health.status == RelayHealthStatus::Unavailable)
+    });
+    let unavailable = relay_services.iter().any(|service| {
+        service
+            .relay_health
+            .as_ref()
+            .is_some_and(|health| health.status == RelayHealthStatus::Unavailable)
+    });
+    if unavailable && !available {
+        return CapabilityState::Unavailable;
+    }
+    if unavailable {
+        return CapabilityState::Degraded;
+    }
+    if relay_services.iter().any(|service| {
+        service.relay_health.as_ref().is_some_and(|health| {
+            matches!(
+                health.status,
+                RelayHealthStatus::Degraded | RelayHealthStatus::QuotaExhausted
+            )
+        })
+    }) {
+        return CapabilityState::Degraded;
+    }
+    if relay_services.iter().any(|service| {
+        service.relay_health.is_none()
+            || service
+                .relay_health
+                .as_ref()
+                .is_some_and(|health| health.status == RelayHealthStatus::Unknown)
+    }) {
+        return CapabilityState::Unknown;
+    }
+    CapabilityState::Enabled
 }
 
 fn exit_node_capability_state(snapshot: &NodeSnapshot) -> CapabilityState {
@@ -2055,6 +2097,9 @@ impl Default for NodeStateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fuckipv6_common::domain::{
+        RelayLifecycleState, RelayLimitPolicy, RelayReachabilityState, RelayUsageSnapshot,
+    };
     use fuckipv6_common::i18n::{has_key, Locale};
 
     fn network(name: &str, status: NodeNetworkStatus) -> NodeNetworkSnapshot {
@@ -2138,6 +2183,125 @@ mod tests {
             relay_addr: None,
             relay_health: None,
         }
+    }
+
+    fn relay_service_health(
+        lifecycle: RelayLifecycleState,
+        forwarding_observed: bool,
+        usage: RelayUsageSnapshot,
+        limits: RelayLimitPolicy,
+    ) -> RelayHealthSnapshot {
+        RelayHealthSnapshot::observe(
+            lifecycle,
+            Some("127.0.0.1:6667".parse().expect("relay socket")),
+            true,
+            RelayReachabilityState::Reachable,
+            forwarding_observed,
+            true,
+            limits,
+            Vec::new(),
+            usage,
+            1_700_000_100_000,
+            None,
+        )
+    }
+
+    #[test]
+    fn relay_capability_is_derived_from_health_not_listener_presence() {
+        let mut service = embedded_service("home");
+        service.relay_status = NodeEmbeddedServiceStatus::Running;
+        service.relay_addr = Some("127.0.0.1:6667".parse().expect("relay socket"));
+        service.relay_health = Some(relay_service_health(
+            RelayLifecycleState::Running,
+            false,
+            RelayUsageSnapshot::default(),
+            RelayLimitPolicy::default(),
+        ));
+
+        assert_eq!(
+            embedded_relay_capability_state(&[service.clone()]),
+            CapabilityState::Unknown
+        );
+
+        service.relay_health = Some(relay_service_health(
+            RelayLifecycleState::Running,
+            true,
+            RelayUsageSnapshot {
+                active_connections: 2,
+                active_streams: 2,
+                last_forwarded_at_unix_ms: Some(1_700_000_099_000),
+                ..RelayUsageSnapshot::default()
+            },
+            RelayLimitPolicy::default(),
+        ));
+        assert_eq!(
+            embedded_relay_capability_state(&[service.clone()]),
+            CapabilityState::Enabled
+        );
+
+        service.relay_health = Some(relay_service_health(
+            RelayLifecycleState::Running,
+            true,
+            RelayUsageSnapshot {
+                active_connections: 1,
+                active_streams: 1,
+                forwarded_bytes: 10,
+                last_forwarded_at_unix_ms: Some(1_700_000_099_000),
+                ..RelayUsageSnapshot::default()
+            },
+            RelayLimitPolicy {
+                max_connections: Some(1),
+                max_bytes: Some(10),
+                ..RelayLimitPolicy::default()
+            },
+        ));
+        assert_eq!(
+            embedded_relay_capability_state(&[service]),
+            CapabilityState::Degraded
+        );
+    }
+
+    #[test]
+    fn relay_capability_degrades_when_only_some_networks_are_unavailable() {
+        let healthy = {
+            let mut service = embedded_service("healthy");
+            service.relay_status = NodeEmbeddedServiceStatus::Running;
+            service.relay_health = Some(relay_service_health(
+                RelayLifecycleState::Running,
+                true,
+                RelayUsageSnapshot {
+                    active_connections: 1,
+                    active_streams: 1,
+                    last_forwarded_at_unix_ms: Some(1_700_000_099_000),
+                    ..RelayUsageSnapshot::default()
+                },
+                RelayLimitPolicy::default(),
+            ));
+            service
+        };
+        let unavailable = {
+            let mut service = embedded_service("unavailable");
+            service.relay_status = NodeEmbeddedServiceStatus::Running;
+            service.relay_health = Some(RelayHealthSnapshot::observe(
+                RelayLifecycleState::Running,
+                None,
+                false,
+                RelayReachabilityState::Unreachable,
+                false,
+                false,
+                RelayLimitPolicy::default(),
+                Vec::new(),
+                RelayUsageSnapshot::default(),
+                1_700_000_100_000,
+                Some("authorization_invalid".into()),
+            ));
+            service
+        };
+
+        assert_eq!(
+            embedded_relay_capability_state(&[healthy, unavailable]),
+            CapabilityState::Degraded
+        );
     }
 
     fn peer(network_name: &str) -> NodePeerSnapshot {

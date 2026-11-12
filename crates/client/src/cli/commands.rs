@@ -553,7 +553,6 @@ impl RuntimeRecoveryEvents {
 pub(crate) struct ClientRuntime {
     pub(crate) signaling: Arc<SignalingClient>,
     pub(crate) p2p: P2pEngine,
-    pub(crate) file_runtime: Option<crate::file_share::FileRuntime>,
     file_network: Option<FileNetworkDataPlane>,
     pub(crate) identity: Identity,
     pub(crate) network_id: Option<NetworkId>,
@@ -1619,7 +1618,6 @@ pub(crate) async fn prepare_client_runtime_ext(
     Ok(ClientRuntime {
         signaling,
         p2p,
-        file_runtime,
         file_network,
         identity: relay_identity,
         network_id,
@@ -2502,6 +2500,10 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
     let mut node_state_updates = runtime.node_state_updates.clone();
     let mut exit_contribution_directory_updates =
         runtime.exit_contribution_directory_updates.take();
+    let file_download_notify = runtime
+        .file_network
+        .as_ref()
+        .map(FileNetworkDataPlane::download_notify);
     let mut exit_connection_watchdog = tokio::time::interval(EXIT_CONNECTION_WATCHDOG_INTERVAL);
     exit_connection_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -2520,6 +2522,19 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
             // 从P2P接收已认证明文；不会再次经过 replay window。
             Some(packets) = runtime.p2p.recv_batch(DATA_PLANE_BATCH_SIZE) => {
                 handle_inbound_packet_batch(runtime, packets, "P2P packet").await;
+            }
+
+            // Download chunks are produced only after the peer is checked
+            // against the freshest authoritative member directory. Each wake
+            // emits one bounded fragment so packet, control and shutdown
+            // processing retain their own scheduler turns.
+            _ = async {
+                match file_download_notify.as_ref() {
+                    Some(notify) => notify.notified().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                drive_pending_file_downloads(runtime).await;
             }
 
             // 处理信令事件
@@ -2725,6 +2740,95 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
     }
 
     Ok(None)
+}
+
+async fn drive_pending_file_downloads(runtime: &mut ClientRuntime) {
+    let Some(pending) = runtime
+        .file_network
+        .as_ref()
+        .map(FileNetworkDataPlane::pending_downloads)
+    else {
+        return;
+    };
+
+    for download in pending {
+        let now_unix_ms = unix_time_ms();
+        let authorized = trusted_file_request_member(runtime, &download.actor, now_unix_ms).await;
+        let frame = match authorized {
+            Ok((member, _)) if member.member_access_epoch == download.member_access_epoch => {
+                let Some(file_network) = runtime.file_network.as_mut() else {
+                    return;
+                };
+                match file_network.next_download_frame(
+                    &download.actor,
+                    member.member_access_epoch,
+                    &download.transfer_id,
+                    &download.operation_id,
+                    now_unix_ms,
+                ) {
+                    Ok(frame) => frame,
+                    Err(_) => {
+                        cancel_file_network_session(
+                            runtime,
+                            &download.transfer_id,
+                            &download.operation_id,
+                            now_unix_ms,
+                        );
+                        continue;
+                    }
+                }
+            }
+            Ok(_) | Err(_) => {
+                cancel_file_network_session(
+                    runtime,
+                    &download.transfer_id,
+                    &download.operation_id,
+                    now_unix_ms,
+                );
+                continue;
+            }
+        };
+        let Some(frame) = frame else {
+            continue;
+        };
+        let Ok(encoded) = encode_file_network_frame(&frame) else {
+            cancel_file_network_session(
+                runtime,
+                &download.transfer_id,
+                &download.operation_id,
+                now_unix_ms,
+            );
+            continue;
+        };
+        if let Err(error) = runtime
+            .p2p
+            .send_to(download.peer_ip, runtime.assigned_ip, &encoded)
+            .await
+        {
+            tracing::debug!(
+                peer = %download.actor,
+                transfer_id = %download.transfer_id,
+                operation_id = %download.operation_id,
+                "File 下载分片发送失败: {error:#}"
+            );
+            cancel_file_network_session(
+                runtime,
+                &download.transfer_id,
+                &download.operation_id,
+                now_unix_ms,
+            );
+        }
+    }
+
+    let has_more = runtime
+        .file_network
+        .as_ref()
+        .is_some_and(|file_network| !file_network.pending_downloads().is_empty());
+    if has_more {
+        if let Some(file_network) = runtime.file_network.as_ref() {
+            file_network.download_notify().notify_one();
+        }
+    }
 }
 
 fn local_exit_drain_deadline(runtime: &ClientRuntime) -> Option<Instant> {
@@ -3903,6 +4007,7 @@ async fn handle_file_network_frame(
                         &member.context,
                         network_enabled,
                         member.member_access_epoch,
+                        peer.virtual_ip,
                         request,
                         now_unix_ms,
                     ),

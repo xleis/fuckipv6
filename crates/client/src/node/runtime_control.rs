@@ -2137,6 +2137,7 @@ pub(crate) struct NetworkRuntimeManager {
 }
 
 impl NetworkRuntimeManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         configs: ConfigManager,
         options: RuntimeOptions,

@@ -11,19 +11,21 @@
 
 use fuckipv6_common::codec::{decode, encode};
 use std::collections::BTreeMap;
+use std::net::Ipv6Addr;
+use std::sync::Arc;
 
 use fuckipv6_common::domain::{
     AccessContext, CapabilityKind, ContentHash, FileShareId, MembershipRole, NetworkId,
     NetworkMemberDirectory, NetworkRole, NodeId, OperationId, ResumeRequest, SharedPath,
-    TransferId, TransferManifest, TransferSession, TransferState,
+    TransferDirection, TransferId, TransferManifest, TransferSession, TransferState,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 
 use super::{
-    FileRuntime, FileRuntimeError, RuntimeUploadTransfer, TransferOperationCancellation,
-    TransferProgress, UploadAdmission,
+    FileRuntime, FileRuntimeError, RuntimeDownloadTransfer, RuntimeUploadTransfer,
+    TransferOperationCancellation, TransferProgress, UploadAdmission,
 };
 
 const FRAME_MAGIC: &[u8; 8] = b"FKFILE01";
@@ -226,12 +228,15 @@ impl FileNetworkFrame {
     }
 }
 
-/// Authenticated upload sessions owned by one network runtime. A session is
-/// identified by both transfer and operation IDs, and every chunk is checked
-/// against the authenticated peer before it can reach the staging adapter.
+/// Authenticated File sessions owned by one network runtime. A session is
+/// identified by both transfer and operation IDs, and every upload fragment or
+/// download response is checked against the authenticated peer before it can
+/// cross the owner boundary.
 pub(crate) struct FileNetworkDataPlane {
     runtime: FileRuntime,
     uploads: BTreeMap<NetworkSessionKey, ActiveUploadSession>,
+    downloads: BTreeMap<NetworkSessionKey, ActiveDownloadSession>,
+    download_notify: Arc<Notify>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -250,8 +255,6 @@ impl NetworkSessionKey {
 }
 
 struct ActiveUploadSession {
-    actor: NodeId,
-    member_access_epoch: u64,
     cancel: watch::Sender<bool>,
     transfer: RuntimeUploadTransfer,
     assembly: Option<ChunkAssembly>,
@@ -263,6 +266,33 @@ struct ChunkAssembly {
     expected_length: u64,
     expected_checksum: ContentHash,
     bytes: Vec<u8>,
+}
+
+struct ActiveDownloadSession {
+    peer_ip: Ipv6Addr,
+    transfer_id: TransferId,
+    operation_id: OperationId,
+    cancel: watch::Sender<bool>,
+    transfer: RuntimeDownloadTransfer,
+    pending_chunk: Option<PendingDownloadChunk>,
+    exhausted: bool,
+}
+
+struct PendingDownloadChunk {
+    chunk_index: u32,
+    data: Vec<u8>,
+    sent_bytes: usize,
+}
+
+/// One active download that the network pump may continue. It contains no file
+/// metadata; the pump must still reauthorize the peer before each fragment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingFileDownload {
+    pub(crate) actor: NodeId,
+    pub(crate) member_access_epoch: u64,
+    pub(crate) peer_ip: Ipv6Addr,
+    pub(crate) transfer_id: TransferId,
+    pub(crate) operation_id: OperationId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,22 +366,46 @@ impl FileNetworkDataPlane {
         Self {
             runtime,
             uploads: BTreeMap::new(),
+            downloads: BTreeMap::new(),
+            download_notify: Arc::new(Notify::new()),
         }
     }
 
+    pub(crate) fn download_notify(&self) -> Arc<Notify> {
+        self.download_notify.clone()
+    }
+
     pub(crate) fn session_count(&self) -> usize {
-        self.uploads.len()
+        self.uploads.len() + self.downloads.len()
+    }
+
+    pub(crate) fn pending_downloads(&self) -> Vec<PendingFileDownload> {
+        self.downloads
+            .iter()
+            .filter(|(_, session)| {
+                !session.exhausted && session.transfer.session().state == TransferState::Active
+            })
+            .map(|(_, session)| PendingFileDownload {
+                actor: session.transfer.session().binding.actor.clone(),
+                member_access_epoch: session.transfer.session().binding.access_epoch,
+                peer_ip: session.peer_ip,
+                transfer_id: session.transfer_id.clone(),
+                operation_id: session.operation_id.clone(),
+            })
+            .collect()
     }
 
     /// Handle one authenticated request. The request ID is deliberately not
     /// accepted here: it belongs to the frame transport, while this boundary
     /// owns only operation state.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_request(
         &mut self,
         actor: &NodeId,
         context: &AccessContext,
         network_enabled: bool,
         member_access_epoch: u64,
+        peer_ip: Ipv6Addr,
         request: FileNetworkRequest,
         now_unix_ms: u64,
     ) -> FileNetworkResponse {
@@ -374,9 +428,23 @@ impl FileNetworkDataPlane {
                 manifest,
                 now_unix_ms,
             ),
-            FileNetworkRequest::OpenDownload { .. } => {
-                network_error("file_download_runtime_unavailable", None)
-            }
+            FileNetworkRequest::OpenDownload {
+                share_id,
+                transfer_id,
+                operation_id,
+                path,
+            } => self.open_download(
+                actor,
+                context,
+                network_enabled,
+                member_access_epoch,
+                share_id,
+                transfer_id,
+                operation_id,
+                path,
+                now_unix_ms,
+                peer_ip,
+            ),
             FileNetworkRequest::Resume { request } => self.resume(
                 actor,
                 member_access_epoch,
@@ -421,6 +489,7 @@ impl FileNetworkDataPlane {
     /// Feed one structurally valid 48 KiB network fragment into the one
     /// assembly slot bound to this upload. Gaps, overlaps and cross-chunk
     /// fragments fail closed and cancel the transfer.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn handle_chunk(
         &mut self,
         actor: &NodeId,
@@ -438,6 +507,11 @@ impl FileNetworkDataPlane {
             .uploads
             .get_mut(&key)
             .ok_or_else(|| network_error("file_transfer_session_unavailable", None))?;
+        if let Err(error) = session.transfer.ensure_authorized(now_unix_ms) {
+            let response = adapter_error(&error);
+            self.uploads.remove(&key);
+            return Err(response);
+        }
         let manifest = &session.transfer.session().manifest;
         let Some(expected) = manifest.chunks.get(chunk_index as usize) else {
             session.cancel.send_replace(true);
@@ -527,11 +601,7 @@ impl FileNetworkDataPlane {
         now_unix_ms: u64,
     ) {
         let key = NetworkSessionKey::new(transfer_id, operation_id);
-        let Some(session) = self.uploads.remove(&key) else {
-            return;
-        };
-        session.cancel.send_replace(true);
-        let _ = session.transfer.cancel(now_unix_ms);
+        self.cancel_session(&key, now_unix_ms);
     }
 
     fn ensure_session_authorized(
@@ -541,14 +611,24 @@ impl FileNetworkDataPlane {
         member_access_epoch: u64,
         now_unix_ms: u64,
     ) -> Result<(), FileNetworkResponse> {
-        let Some(session) = self.uploads.get(key) else {
-            return Err(network_error("file_transfer_session_unavailable", None));
-        };
-        let failure = if &session.actor != actor {
+        let binding = self
+            .uploads
+            .get(key)
+            .map(|session| session.transfer.session())
+            .or_else(|| {
+                self.downloads
+                    .get(key)
+                    .map(|session| session.transfer.session())
+            })
+            .ok_or_else(|| network_error("file_transfer_session_unavailable", None))?;
+        let session_actor = &binding.binding.actor;
+        let session_epoch = binding.binding.access_epoch;
+        let expires_at_unix_ms = binding.binding.expires_at_unix_ms;
+        let failure = if session_actor != actor {
             Some("file_transfer_peer_mismatch")
-        } else if member_access_epoch == 0 || member_access_epoch != session.member_access_epoch {
+        } else if member_access_epoch == 0 || member_access_epoch != session_epoch {
             Some("file_transfer_access_revoked")
-        } else if now_unix_ms >= session.transfer.session().binding.expires_at_unix_ms {
+        } else if now_unix_ms >= expires_at_unix_ms {
             Some("file_transfer_expired")
         } else {
             None
@@ -556,10 +636,19 @@ impl FileNetworkDataPlane {
         let Some(code) = failure else {
             return Ok(());
         };
-        let session = self.uploads.remove(key).expect("observed upload session");
-        session.cancel.send_replace(true);
-        let _ = session.transfer.cancel(now_unix_ms);
+        self.cancel_session(key, now_unix_ms);
         Err(network_error(code, None))
+    }
+
+    fn cancel_session(&mut self, key: &NetworkSessionKey, now_unix_ms: u64) {
+        if let Some(session) = self.uploads.remove(key) {
+            session.cancel.send_replace(true);
+            let _ = session.transfer.cancel(now_unix_ms);
+        }
+        if let Some(session) = self.downloads.remove(key) {
+            session.cancel.send_replace(true);
+            let _ = session.transfer.cancel(now_unix_ms);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -579,11 +668,11 @@ impl FileNetworkDataPlane {
         if &context.actor != actor || access_epoch == 0 {
             return network_error("file_transfer_peer_mismatch", None);
         }
-        if self.uploads.len() >= MAX_ACTIVE_FILE_NETWORK_SESSIONS {
+        if self.session_count() >= MAX_ACTIVE_FILE_NETWORK_SESSIONS {
             return network_error("file_network_session_limit", None);
         }
         let key = NetworkSessionKey::new(&transfer_id, &operation_id);
-        if self.uploads.contains_key(&key) {
+        if self.uploads.contains_key(&key) || self.downloads.contains_key(&key) {
             return network_error("file_transfer_operation_active", None);
         }
         let expires_at_unix_ms = now_unix_ms.saturating_add(FILE_NETWORK_TRANSFER_TTL_MS);
@@ -622,8 +711,6 @@ impl FileNetworkDataPlane {
         self.uploads.insert(
             key,
             ActiveUploadSession {
-                actor: actor.clone(),
-                member_access_epoch: access_epoch,
                 cancel,
                 transfer,
                 assembly: None,
@@ -632,7 +719,209 @@ impl FileNetworkDataPlane {
         opened
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn open_download(
+        &mut self,
+        actor: &NodeId,
+        context: &AccessContext,
+        network_enabled: bool,
+        access_epoch: u64,
+        share_id: FileShareId,
+        transfer_id: TransferId,
+        operation_id: OperationId,
+        path: SharedPath,
+        now_unix_ms: u64,
+        peer_ip: Ipv6Addr,
+    ) -> FileNetworkResponse {
+        if &context.actor != actor || access_epoch == 0 {
+            return network_error("file_transfer_peer_mismatch", None);
+        }
+        if self.session_count() >= MAX_ACTIVE_FILE_NETWORK_SESSIONS {
+            return network_error("file_network_session_limit", None);
+        }
+        let key = NetworkSessionKey::new(&transfer_id, &operation_id);
+        if self.uploads.contains_key(&key) || self.downloads.contains_key(&key) {
+            return network_error("file_transfer_operation_active", None);
+        }
+        let expires_at_unix_ms = now_unix_ms.saturating_add(FILE_NETWORK_TRANSFER_TTL_MS);
+        let session = match self.runtime.prepare_download_session(
+            context,
+            access_epoch,
+            network_enabled,
+            &share_id,
+            transfer_id.clone(),
+            operation_id.clone(),
+            path,
+            MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64,
+            expires_at_unix_ms,
+            now_unix_ms,
+        ) {
+            Ok(session) => session,
+            Err(error) => return runtime_error(&error),
+        };
+        let (cancel, cancellation) = watch::channel(false);
+        let cancellation =
+            TransferOperationCancellation::new(session.binding.operation_id.clone(), cancellation);
+        let transfer = match self.runtime.begin_download_cancellable(
+            session,
+            context,
+            network_enabled,
+            cancellation,
+            now_unix_ms,
+        ) {
+            Ok(transfer) => transfer,
+            Err(error) => return runtime_error(&error),
+        };
+        let opened = FileNetworkResponse::Opened {
+            session: Box::new(transfer.session().clone()),
+        };
+        self.downloads.insert(
+            key,
+            ActiveDownloadSession {
+                peer_ip,
+                transfer_id,
+                operation_id,
+                cancel,
+                transfer,
+                pending_chunk: None,
+                exhausted: false,
+            },
+        );
+        self.download_notify.notify_one();
+        opened
+    }
+
+    /// Produce at most one bounded download fragment. Authorization is checked
+    /// again at this boundary because directory/capability changes can arrive
+    /// while the source file remains open.
+    pub(crate) fn next_download_frame(
+        &mut self,
+        actor: &NodeId,
+        member_access_epoch: u64,
+        transfer_id: &TransferId,
+        operation_id: &OperationId,
+        now_unix_ms: u64,
+    ) -> Result<Option<FileNetworkFrame>, FileNetworkResponse> {
+        let key = NetworkSessionKey::new(transfer_id, operation_id);
+        self.ensure_session_authorized(&key, actor, member_access_epoch, now_unix_ms)?;
+        let session = self
+            .downloads
+            .get_mut(&key)
+            .ok_or_else(|| network_error("file_transfer_direction_mismatch", None))?;
+        if session.exhausted {
+            return Ok(None);
+        }
+        if let Err(error) = session.transfer.ensure_authorized(now_unix_ms) {
+            let response = adapter_error(&error);
+            self.downloads.remove(&key);
+            return Err(response);
+        }
+        if session.pending_chunk.is_none() {
+            let next = match session.transfer.read_next(now_unix_ms) {
+                Ok(next) => next,
+                Err(error) => {
+                    let response = adapter_error(&error);
+                    if session.transfer.session().state.is_terminal() {
+                        self.downloads.remove(&key);
+                    }
+                    return Err(response);
+                }
+            };
+            let Some(data) = next else {
+                session.exhausted = true;
+                return Ok(None);
+            };
+            let chunk_index = session
+                .transfer
+                .session()
+                .received_chunk_count()
+                .saturating_sub(1);
+            let chunk_index = u32::try_from(chunk_index)
+                .map_err(|_| network_error("file_transfer_chunk_out_of_range", None))?;
+            let expected = session
+                .transfer
+                .session()
+                .manifest
+                .chunks
+                .get(chunk_index as usize)
+                .ok_or_else(|| network_error("file_transfer_chunk_out_of_range", None))?;
+            if u64::try_from(data.len()).ok() != Some(expected.length) {
+                self.cancel_session(&key, now_unix_ms);
+                return Err(network_error("file_transfer_chunk_corrupt", None));
+            }
+            session.pending_chunk = Some(PendingDownloadChunk {
+                chunk_index,
+                data,
+                sent_bytes: 0,
+            });
+        }
+        let pending = session
+            .pending_chunk
+            .as_mut()
+            .ok_or_else(|| network_error("file_transfer_session_unavailable", None))?;
+        let start = pending.sent_bytes;
+        let end = start
+            .saturating_add(MAX_FILE_NETWORK_FRAGMENT_BYTES)
+            .min(pending.data.len());
+        let offset = session
+            .transfer
+            .session()
+            .manifest
+            .chunks
+            .get(pending.chunk_index as usize)
+            .map(|chunk| chunk.offset)
+            .unwrap_or_default()
+            .saturating_add(start as u64);
+        let data = pending.data[start..end].to_vec();
+        pending.sent_bytes = end;
+        let chunk_index = pending.chunk_index;
+        let complete = pending.sent_bytes == pending.data.len();
+        let request_id = download_fragment_request_id(&session.operation_id, chunk_index, offset);
+        if complete {
+            session.pending_chunk = None;
+        }
+        FileNetworkFrame::chunk(
+            request_id,
+            transfer_id.clone(),
+            operation_id.clone(),
+            chunk_index,
+            offset,
+            data,
+        )
+        .map(Some)
+        .map_err(|_| network_error("file_transfer_chunk_out_of_range", None))
+    }
+
     fn resume(
+        &mut self,
+        actor: &NodeId,
+        member_access_epoch: u64,
+        context: &AccessContext,
+        network_enabled: bool,
+        request: ResumeRequest,
+        now_unix_ms: u64,
+    ) -> FileNetworkResponse {
+        match request.direction {
+            TransferDirection::Upload => self.resume_upload(
+                actor,
+                member_access_epoch,
+                context,
+                network_enabled,
+                request,
+                now_unix_ms,
+            ),
+            TransferDirection::Download => self.resume_download(
+                actor,
+                member_access_epoch,
+                context,
+                network_enabled,
+                request,
+                now_unix_ms,
+            ),
+        }
+    }
+
+    fn resume_upload(
         &mut self,
         actor: &NodeId,
         member_access_epoch: u64,
@@ -677,6 +966,54 @@ impl FileNetworkDataPlane {
         }
     }
 
+    fn resume_download(
+        &mut self,
+        actor: &NodeId,
+        member_access_epoch: u64,
+        context: &AccessContext,
+        network_enabled: bool,
+        request: ResumeRequest,
+        now_unix_ms: u64,
+    ) -> FileNetworkResponse {
+        let key = NetworkSessionKey::new(&request.transfer_id, &request.operation_id);
+        if let Err(response) =
+            self.ensure_session_authorized(&key, actor, member_access_epoch, now_unix_ms)
+        {
+            return response;
+        }
+        let Some(session) = self.downloads.get_mut(&key) else {
+            return network_error("file_transfer_direction_mismatch", None);
+        };
+        if request.actor != *actor {
+            session.cancel.send_replace(true);
+            self.downloads.remove(&key);
+            return network_error("file_transfer_peer_mismatch", None);
+        }
+        session.cancel.send_replace(false);
+        session.exhausted = false;
+        match session.transfer.resume_with_request(
+            &request,
+            member_access_epoch,
+            context,
+            network_enabled,
+            now_unix_ms,
+        ) {
+            Ok(()) => {
+                self.download_notify.notify_one();
+                FileNetworkResponse::Opened {
+                    session: Box::new(session.transfer.session().clone()),
+                }
+            }
+            Err(error) => {
+                let response = adapter_error(&error);
+                if session.transfer.session().state.is_terminal() {
+                    self.downloads.remove(&key);
+                }
+                response
+            }
+        }
+    }
+
     fn pause(
         &mut self,
         actor: &NodeId,
@@ -691,10 +1028,19 @@ impl FileNetworkDataPlane {
         {
             return response;
         }
-        let Some(session) = self.uploads.get_mut(&key) else {
+        if let Some(session) = self.uploads.get_mut(&key) {
+            session.assembly = None;
+            return match session.transfer.pause(now_unix_ms) {
+                Ok(()) => progress_response(session.transfer.progress()),
+                Err(error) => adapter_error(&error),
+            };
+        }
+        let Some(session) = self.downloads.get_mut(&key) else {
             return network_error("file_transfer_session_unavailable", None);
         };
-        session.assembly = None;
+        // `read_next` advances the adapter to the next transfer chunk before
+        // the network pump emits fragments. Keep any partially sent chunk so a
+        // paused/resumed download continues at the exact next fragment.
         match session.transfer.pause(now_unix_ms) {
             Ok(()) => progress_response(session.transfer.progress()),
             Err(error) => adapter_error(&error),
@@ -715,7 +1061,18 @@ impl FileNetworkDataPlane {
         {
             return response;
         }
-        let Some(session) = self.uploads.remove(&key) else {
+        if let Some(session) = self.uploads.remove(&key) {
+            let mut progress = session.transfer.progress();
+            session.cancel.send_replace(true);
+            return match session.transfer.cancel(now_unix_ms) {
+                Ok(()) => {
+                    progress.state = TransferState::Cancelled;
+                    progress_response(progress)
+                }
+                Err(error) => adapter_error(&error),
+            };
+        }
+        let Some(session) = self.downloads.remove(&key) else {
             return network_error("file_transfer_session_unavailable", None);
         };
         let mut progress = session.transfer.progress();
@@ -743,15 +1100,32 @@ impl FileNetworkDataPlane {
         {
             return response;
         }
-        let Some(session) = self.uploads.get_mut(&key) else {
+        if let Some(session) = self.uploads.get_mut(&key) {
+            if session.assembly.is_some() {
+                return network_error("file_transfer_incomplete", None);
+            }
+            return match session.transfer.finish(now_unix_ms) {
+                Ok(progress) => {
+                    self.uploads.remove(&key);
+                    FileNetworkResponse::Completed {
+                        progress: progress.into(),
+                    }
+                }
+                Err(error) => {
+                    let response = adapter_error(&error);
+                    if session.transfer.session().state.is_terminal() {
+                        self.uploads.remove(&key);
+                    }
+                    response
+                }
+            };
+        }
+        let Some(session) = self.downloads.get_mut(&key) else {
             return network_error("file_transfer_session_unavailable", None);
         };
-        if session.assembly.is_some() {
-            return network_error("file_transfer_incomplete", None);
-        }
         match session.transfer.finish(now_unix_ms) {
             Ok(progress) => {
-                self.uploads.remove(&key);
+                self.downloads.remove(&key);
                 FileNetworkResponse::Completed {
                     progress: progress.into(),
                 }
@@ -759,12 +1133,28 @@ impl FileNetworkDataPlane {
             Err(error) => {
                 let response = adapter_error(&error);
                 if session.transfer.session().state.is_terminal() {
-                    self.uploads.remove(&key);
+                    self.downloads.remove(&key);
                 }
                 response
             }
         }
     }
+}
+
+fn download_fragment_request_id(
+    operation_id: &OperationId,
+    chunk_index: u32,
+    offset: u64,
+) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"fuckipv6-file-download-fragment-v1");
+    hasher.update(operation_id.as_str().as_bytes());
+    hasher.update(&chunk_index.to_be_bytes());
+    hasher.update(&offset.to_be_bytes());
+    let digest = hasher.finalize();
+    let mut request_id = [0_u8; 16];
+    request_id.copy_from_slice(&digest.as_bytes()[..16]);
+    request_id
 }
 
 fn progress_response(progress: TransferProgress) -> FileNetworkResponse {
@@ -1052,6 +1442,61 @@ mod tests {
             exit_selection_policy: Default::default(),
             exit_selection_policy_revision: 0,
             members: vec![member],
+        }
+    }
+
+    fn enable_download_runtime(temporary: &TempDir, share: &FileShare) -> FileRuntime {
+        let runtime = FileRuntime::new(FileShareCapability::new());
+        runtime
+            .enable(
+                share,
+                &share.owner,
+                temporary.path().to_str().expect("utf8 path"),
+                1,
+            )
+            .expect("enable File runtime");
+        runtime
+    }
+
+    fn open_download(
+        data_plane: &mut FileNetworkDataPlane,
+        actor: &NodeId,
+        context: &AccessContext,
+        share: &FileShare,
+        transfer_byte: u8,
+        operation_byte: u8,
+        now_unix_ms: u64,
+    ) -> TransferSession {
+        match data_plane.handle_request(
+            actor,
+            context,
+            true,
+            7,
+            Ipv6Addr::LOCALHOST,
+            FileNetworkRequest::OpenDownload {
+                share_id: share.id.clone(),
+                transfer_id: transfer(transfer_byte),
+                operation_id: operation(operation_byte),
+                path: SharedPath::parse("source.bin").expect("path"),
+            },
+            now_unix_ms,
+        ) {
+            FileNetworkResponse::Opened { session } => *session,
+            other => panic!("expected opened download, got {other:?}"),
+        }
+    }
+
+    fn download_resume_request(session: &TransferSession) -> ResumeRequest {
+        ResumeRequest {
+            transfer_id: session.binding.transfer_id.clone(),
+            operation_id: session.binding.operation_id.clone(),
+            share_id: session.binding.share_id.clone(),
+            actor: session.binding.actor.clone(),
+            access_epoch: session.binding.access_epoch,
+            path: session.binding.path.clone(),
+            direction: TransferDirection::Download,
+            content_hash: session.manifest.content_hash.clone(),
+            share_revision: session.binding.share_revision,
         }
     }
 
@@ -1434,13 +1879,21 @@ mod tests {
             share_id: share.id.clone(),
             transfer_id: transfer(transfer_byte),
             operation_id: operation(operation_byte),
-            path: SharedPath::parse(&format!("hello-{transfer_byte}.txt")).expect("path"),
+            path: SharedPath::parse(format!("hello-{transfer_byte}.txt")).expect("path"),
             manifest: manifest(content, 16),
         };
         let mut data_plane = FileNetworkDataPlane::new(runtime.clone());
 
         assert!(matches!(
-            data_plane.handle_request(&actor, &context, true, 7, open(2, 3), 10),
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                open(2, 3),
+                10
+            ),
             FileNetworkResponse::Opened { .. }
         ));
         let (chunk_complete, _) = data_plane
@@ -1453,6 +1906,7 @@ mod tests {
                 &context,
                 true,
                 7,
+                Ipv6Addr::LOCALHOST,
                 FileNetworkRequest::Finish {
                     transfer_id: transfer(2),
                     operation_id: operation(3),
@@ -1464,7 +1918,15 @@ mod tests {
         assert_eq!(data_plane.session_count(), 0);
 
         assert!(matches!(
-            data_plane.handle_request(&actor, &context, true, 7, open(4, 5), 13),
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                open(4, 5),
+                13
+            ),
             FileNetworkResponse::Opened { .. }
         ));
         runtime
@@ -1490,7 +1952,15 @@ mod tests {
             )
             .expect("re-enable File runtime");
         assert!(matches!(
-            data_plane.handle_request(&actor, &context, true, 7, open(6, 7), 17),
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                open(6, 7),
+                17
+            ),
             FileNetworkResponse::Opened { .. }
         ));
         assert_eq!(
@@ -1501,6 +1971,371 @@ mod tests {
             ),
             "file_transfer_access_revoked"
         );
+        assert_eq!(data_plane.session_count(), 0);
+    }
+
+    #[test]
+    fn download_uses_authoritative_manifest_and_48k_fragments() {
+        let temporary = TempDir::new().expect("tempdir");
+        let content: Vec<u8> = (0..(MAX_FILE_NETWORK_FRAGMENT_BYTES * 2 + 37))
+            .map(|index| (index % 251) as u8)
+            .collect();
+        std::fs::write(temporary.path().join("source.bin"), &content).expect("source");
+        let share = share();
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = enable_download_runtime(&temporary, &share);
+        let mut data_plane = FileNetworkDataPlane::new(runtime);
+
+        let opened = open_download(&mut data_plane, &actor, &context, &share, 20, 21, 10);
+        assert_eq!(opened.binding.direction, TransferDirection::Download);
+        assert_eq!(opened.binding.actor, actor);
+        assert_eq!(opened.binding.access_epoch, 7);
+        assert_eq!(opened.manifest.total_bytes, content.len() as u64);
+        assert_eq!(
+            opened.manifest.content_hash,
+            ContentHash::from_bytes(&content)
+        );
+        assert_eq!(
+            opened.manifest.chunk_size,
+            MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64
+        );
+
+        let mut received = Vec::new();
+        let mut fragment_lengths = Vec::new();
+        let mut offset = 0_u64;
+        for _ in 0..16 {
+            let frame = data_plane
+                .next_download_frame(
+                    &actor,
+                    7,
+                    &opened.binding.transfer_id,
+                    &opened.binding.operation_id,
+                    11,
+                )
+                .expect("next download fragment");
+            let Some(frame) = frame else {
+                break;
+            };
+            match frame {
+                FileNetworkFrame::Chunk {
+                    request_id,
+                    chunk_index,
+                    offset: fragment_offset,
+                    data,
+                    ..
+                } => {
+                    assert_eq!(chunk_index, 0);
+                    assert_eq!(fragment_offset, offset);
+                    assert!(!data.is_empty());
+                    assert!(data.len() <= MAX_FILE_NETWORK_FRAGMENT_BYTES);
+                    assert_eq!(
+                        request_id,
+                        download_fragment_request_id(&opened.binding.operation_id, 0, offset)
+                    );
+                    offset = offset.saturating_add(data.len() as u64);
+                    fragment_lengths.push(data.len());
+                    received.extend_from_slice(&data);
+                }
+                other => panic!("expected download chunk, got {other:?}"),
+            }
+        }
+        assert_eq!(received, content);
+        assert_eq!(offset, content.len() as u64);
+        assert_eq!(fragment_lengths.len(), 3);
+        assert!(data_plane.pending_downloads().is_empty());
+
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::Finish {
+                    transfer_id: opened.binding.transfer_id.clone(),
+                    operation_id: opened.binding.operation_id.clone(),
+                },
+                12,
+            ),
+            FileNetworkResponse::Completed { progress }
+                if progress.state == TransferState::Completed
+                    && progress.transferred_bytes == content.len() as u64
+        ));
+        assert_eq!(data_plane.session_count(), 0);
+    }
+
+    #[test]
+    fn paused_download_resumes_at_the_next_unsent_fragment() {
+        let temporary = TempDir::new().expect("tempdir");
+        let content: Vec<u8> = (0..(MAX_FILE_NETWORK_FRAGMENT_BYTES * 2 + 11))
+            .map(|index| (index % 239) as u8)
+            .collect();
+        std::fs::write(temporary.path().join("source.bin"), &content).expect("source");
+        let share = share();
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = enable_download_runtime(&temporary, &share);
+        let mut data_plane = FileNetworkDataPlane::new(runtime);
+        let opened = open_download(&mut data_plane, &actor, &context, &share, 22, 23, 10);
+
+        let first = match data_plane
+            .next_download_frame(
+                &actor,
+                7,
+                &opened.binding.transfer_id,
+                &opened.binding.operation_id,
+                11,
+            )
+            .expect("first fragment")
+            .expect("fragment")
+        {
+            FileNetworkFrame::Chunk { offset, data, .. } => {
+                assert_eq!(offset, 0);
+                data
+            }
+            other => panic!("expected first chunk, got {other:?}"),
+        };
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::Pause {
+                    transfer_id: opened.binding.transfer_id.clone(),
+                    operation_id: opened.binding.operation_id.clone(),
+                },
+                12,
+            ),
+            FileNetworkResponse::Progress { progress } if progress.state == TransferState::Paused
+        ));
+        assert!(data_plane.pending_downloads().is_empty());
+
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::Resume {
+                    request: download_resume_request(&opened),
+                },
+                13,
+            ),
+            FileNetworkResponse::Opened { .. }
+        ));
+        assert_eq!(data_plane.pending_downloads().len(), 1);
+
+        let mut received = first.clone();
+        for _ in 0..16 {
+            let frame = data_plane
+                .next_download_frame(
+                    &actor,
+                    7,
+                    &opened.binding.transfer_id,
+                    &opened.binding.operation_id,
+                    14,
+                )
+                .expect("next download fragment");
+            let Some(frame) = frame else {
+                break;
+            };
+            match frame {
+                FileNetworkFrame::Chunk { offset, data, .. } => {
+                    assert_eq!(offset, received.len() as u64);
+                    received.extend_from_slice(&data);
+                }
+                other => panic!("expected resumed chunk, got {other:?}"),
+            }
+        }
+        assert_eq!(received, content);
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::Finish {
+                    transfer_id: opened.binding.transfer_id.clone(),
+                    operation_id: opened.binding.operation_id.clone(),
+                },
+                15,
+            ),
+            FileNetworkResponse::Completed { .. }
+        ));
+        assert_eq!(data_plane.session_count(), 0);
+
+        let cancelled = open_download(&mut data_plane, &actor, &context, &share, 24, 25, 20);
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::Cancel {
+                    transfer_id: cancelled.binding.transfer_id.clone(),
+                    operation_id: cancelled.binding.operation_id.clone(),
+                },
+                21,
+            ),
+            FileNetworkResponse::Progress { progress }
+                if progress.state == TransferState::Cancelled
+        ));
+        assert_eq!(data_plane.session_count(), 0);
+    }
+
+    #[test]
+    fn download_fails_closed_on_capability_member_epoch_and_ttl_changes() {
+        let temporary = TempDir::new().expect("tempdir");
+        std::fs::write(temporary.path().join("source.bin"), b"authorization").expect("source");
+        let share = share();
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = enable_download_runtime(&temporary, &share);
+        let mut data_plane = FileNetworkDataPlane::new(runtime.clone());
+        let capability_revoked =
+            open_download(&mut data_plane, &actor, &context, &share, 30, 31, 10);
+        assert!(data_plane
+            .next_download_frame(
+                &actor,
+                7,
+                &capability_revoked.binding.transfer_id,
+                &capability_revoked.binding.operation_id,
+                11,
+            )
+            .expect("first fragment")
+            .is_some());
+        runtime
+            .capability()
+            .disable(&share.owner, 12)
+            .expect("disable File runtime");
+        assert_eq!(
+            response_code(
+                data_plane
+                    .next_download_frame(
+                        &actor,
+                        7,
+                        &capability_revoked.binding.transfer_id,
+                        &capability_revoked.binding.operation_id,
+                        13,
+                    )
+                    .expect_err("pending fragment must recheck local capability")
+            ),
+            "file_capability_revoked"
+        );
+        assert_eq!(data_plane.session_count(), 0);
+
+        runtime
+            .enable(
+                &share,
+                &share.owner,
+                temporary.path().to_str().expect("utf8 path"),
+                14,
+            )
+            .expect("re-enable File runtime");
+        let member_revoked = open_download(&mut data_plane, &actor, &context, &share, 32, 33, 15);
+        assert_eq!(
+            response_code(
+                data_plane
+                    .next_download_frame(
+                        &actor,
+                        8,
+                        &member_revoked.binding.transfer_id,
+                        &member_revoked.binding.operation_id,
+                        16,
+                    )
+                    .expect_err("member epoch changed")
+            ),
+            "file_transfer_access_revoked"
+        );
+        assert_eq!(data_plane.session_count(), 0);
+
+        let expired = open_download(&mut data_plane, &actor, &context, &share, 34, 35, 20);
+        assert_eq!(
+            response_code(
+                data_plane
+                    .next_download_frame(
+                        &actor,
+                        7,
+                        &expired.binding.transfer_id,
+                        &expired.binding.operation_id,
+                        expired.binding.expires_at_unix_ms,
+                    )
+                    .expect_err("expired download")
+            ),
+            "file_transfer_expired"
+        );
+        assert_eq!(data_plane.session_count(), 0);
+    }
+
+    #[test]
+    fn download_session_limit_and_cancel_restore_capacity() {
+        let temporary = TempDir::new().expect("tempdir");
+        std::fs::write(temporary.path().join("source.bin"), b"bounded").expect("source");
+        let mut share = share();
+        share.quota.max_concurrent_transfers = 32;
+        share.quota.max_concurrent_transfers_per_member = 32;
+        share.quota.max_concurrent_transfers_per_directory = 32;
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = enable_download_runtime(&temporary, &share);
+        let mut data_plane = FileNetworkDataPlane::new(runtime);
+
+        for index in 0..MAX_ACTIVE_FILE_NETWORK_SESSIONS {
+            let transfer_byte = u8::try_from(index).expect("transfer byte") + 40;
+            let operation_byte = transfer_byte;
+            open_download(
+                &mut data_plane,
+                &actor,
+                &context,
+                &share,
+                transfer_byte,
+                operation_byte,
+                10,
+            );
+        }
+        assert_eq!(data_plane.session_count(), MAX_ACTIVE_FILE_NETWORK_SESSIONS);
+        assert_eq!(
+            response_code(data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::OpenDownload {
+                    share_id: share.id.clone(),
+                    transfer_id: transfer(100),
+                    operation_id: operation(100),
+                    path: SharedPath::parse("source.bin").expect("path"),
+                },
+                11,
+            )),
+            "file_network_session_limit"
+        );
+
+        for index in 0..MAX_ACTIVE_FILE_NETWORK_SESSIONS {
+            let transfer_byte = u8::try_from(index).expect("transfer byte") + 40;
+            assert!(matches!(
+                data_plane.handle_request(
+                    &actor,
+                    &context,
+                    true,
+                    7,
+                    Ipv6Addr::LOCALHOST,
+                    FileNetworkRequest::Cancel {
+                        transfer_id: transfer(transfer_byte),
+                        operation_id: operation(transfer_byte),
+                    },
+                    12,
+                ),
+                FileNetworkResponse::Progress { .. }
+            ));
+        }
         assert_eq!(data_plane.session_count(), 0);
     }
 }

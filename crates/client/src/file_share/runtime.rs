@@ -402,6 +402,16 @@ impl RuntimeUploadTransfer {
             .pause(now_unix_ms)
     }
 
+    pub fn ensure_authorized(&mut self, now_unix_ms: u64) -> Result<(), FileTransferAdapterError> {
+        let result = self
+            .inner
+            .as_mut()
+            .expect("upload transfer is present")
+            .ensure_authorized(now_unix_ms);
+        self.release_if_terminal();
+        result
+    }
+
     pub fn resume(
         &mut self,
         context: &AccessContext,
@@ -522,6 +532,16 @@ impl RuntimeDownloadTransfer {
             .as_mut()
             .expect("download transfer is present")
             .pause(now_unix_ms)
+    }
+
+    pub fn ensure_authorized(&mut self, now_unix_ms: u64) -> Result<(), FileTransferAdapterError> {
+        let result = self
+            .inner
+            .as_mut()
+            .expect("download transfer is present")
+            .ensure_authorized(now_unix_ms);
+        self.release_if_terminal();
+        result
     }
 
     pub fn resume(

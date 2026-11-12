@@ -2141,6 +2141,70 @@ mod tests {
         .await
     }
 
+    async fn register_relay_test_client(
+        session_manager: &Arc<SessionManager>,
+        identity: &Identity,
+        index: u16,
+    ) -> Result<Ipv6Addr> {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        Ok(session_manager
+            .register_client(
+                identity.client_id().to_string(),
+                identity.public_key(),
+                SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::LOCALHOST),
+                    40_000u16.saturating_add(index),
+                ),
+                50_000u16.saturating_add(index),
+                NatType::Open,
+                tx,
+            )
+            .await?
+            .primary_ipv6())
+    }
+
+    async fn wait_for_active_connections(server: &RelayServer, expected: u32) -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if server
+                    .state
+                    .metrics
+                    .active_connections
+                    .load(Ordering::Acquire)
+                    == expected
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .with_context(|| format!("Relay active connection count did not reach {expected}"))
+    }
+
+    async fn wait_for_task_permits(
+        server: &RelayServer,
+        expected_connections: usize,
+        expected_streams: usize,
+    ) -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if server.state.connection_tasks.available_permits() == expected_connections
+                    && server.state.stream_tasks.available_permits() == expected_streams
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .with_context(|| {
+            format!(
+                "Relay task permits did not return to connections={expected_connections}, streams={expected_streams}"
+            )
+        })
+    }
+
     fn test_relay_policy(identities: &[&Identity]) -> RelayAccessPolicy {
         let network_id = test_relay_network_id();
         let provider_node_id = test_relay_provider_node_id();
@@ -3223,6 +3287,248 @@ mod tests {
                 .load(Ordering::Acquire),
             0
         );
+
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_connection_quota_rejects_full_and_recovers_after_disconnect() -> Result<()>
+    {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity_a = Identity::generate()?;
+        let identity_b = Identity::generate()?;
+        let ip_a = register_relay_test_client(&session_manager, &identity_a, 0).await?;
+        let ip_b = register_relay_test_client(&session_manager, &identity_b, 1).await?;
+
+        let authority = Arc::new(MemoryRelayPolicyAuthority::for_identities(&[
+            &identity_a,
+            &identity_b,
+        ]));
+        let mut policy = test_relay_policy(&[&identity_a, &identity_b]);
+        policy.limits.max_connections = Some(1);
+        authority.replace_policy(policy);
+
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager,
+            authority,
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+
+        let client_a = connect_test_relay(relay_addr, server_pin, &identity_a, ip_a).await?;
+        wait_for_active_connections(&server, 1).await?;
+
+        let rejection = match connect_test_relay(relay_addr, server_pin, &identity_b, ip_b).await {
+            Ok(_) => panic!("a full Relay must reject another connection"),
+            Err(error) => error.to_string(),
+        };
+        assert!(rejection.contains("Relay 连接配额已耗尽"), "{rejection}");
+        wait_for_task_permits(
+            &server,
+            MAX_RELAY_CONNECTION_TASKS - 1,
+            MAX_RELAY_STREAM_TASKS,
+        )
+        .await?;
+
+        let usage = server.usage_snapshot().await;
+        assert_eq!(usage.active_connections, 1);
+        assert_eq!(usage.rejected_connections, 1);
+        assert_eq!(usage.active_streams, 0);
+        let health = server.health_snapshot().await;
+        assert_eq!(health.status, RelayHealthStatus::QuotaExhausted);
+        assert!(health.quota_limited);
+
+        client_a.close().await;
+        wait_for_active_connections(&server, 0).await?;
+        wait_for_task_permits(&server, MAX_RELAY_CONNECTION_TASKS, MAX_RELAY_STREAM_TASKS).await?;
+        let recovered_health = server.health_snapshot().await;
+        assert!(!recovered_health.quota_limited);
+
+        let client_b = connect_test_relay(relay_addr, server_pin, &identity_b, ip_b).await?;
+        wait_for_active_connections(&server, 1).await?;
+        assert_eq!(server.usage_snapshot().await.rejected_connections, 1);
+
+        client_b.close().await;
+        wait_for_active_connections(&server, 0).await?;
+        wait_for_task_permits(&server, MAX_RELAY_CONNECTION_TASKS, MAX_RELAY_STREAM_TASKS).await?;
+
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_bandwidth_quota_rejects_then_recovers_over_time() -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity_a = Identity::generate()?;
+        let identity_b = Identity::generate()?;
+        let ip_a = register_relay_test_client(&session_manager, &identity_a, 0).await?;
+        let ip_b = register_relay_test_client(&session_manager, &identity_b, 1).await?;
+
+        let authority = Arc::new(MemoryRelayPolicyAuthority::for_identities(&[
+            &identity_a,
+            &identity_b,
+        ]));
+        let mut policy = test_relay_policy(&[&identity_a, &identity_b]);
+        policy.limits.max_bandwidth_kbps = Some(1);
+        authority.replace_policy(policy);
+
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager,
+            authority,
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+        let client_a = connect_test_relay(relay_addr, server_pin, &identity_a, ip_a).await?;
+        let client_b = connect_test_relay(relay_addr, server_pin, &identity_b, ip_b).await?;
+        wait_for_active_connections(&server, 2).await?;
+
+        let payload = Bytes::from(vec![0x5a; 100]);
+        client_a.send_packet(1, ip_a, ip_b, payload.clone()).await?;
+        let rejection = client_a
+            .send_packet(2, ip_a, ip_b, payload.clone())
+            .await
+            .expect_err("the token bucket must reject traffic above the configured rate")
+            .to_string();
+        assert!(rejection.contains("429"), "{rejection}");
+        wait_for_task_permits(
+            &server,
+            MAX_RELAY_CONNECTION_TASKS - 2,
+            MAX_RELAY_STREAM_TASKS,
+        )
+        .await?;
+
+        let usage = server.usage_snapshot().await;
+        assert_eq!(usage.forwarded_packets, 1);
+        assert_eq!(usage.forwarded_bytes, 100);
+        assert_eq!(usage.rejected_packets, 1);
+        assert_eq!(usage.active_streams, 0);
+        let health = server.health_snapshot().await;
+        assert_eq!(health.status, RelayHealthStatus::Degraded);
+        assert!(health.issues.contains(&RelayHealthIssue::ForwardingStalled));
+
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        client_a
+            .send_packet(3, ip_a, ip_b, payload)
+            .await
+            .context("bandwidth quota did not refill after the configured rate window")?;
+        wait_for_task_permits(
+            &server,
+            MAX_RELAY_CONNECTION_TASKS - 2,
+            MAX_RELAY_STREAM_TASKS,
+        )
+        .await?;
+
+        let usage = server.usage_snapshot().await;
+        assert_eq!(usage.forwarded_packets, 2);
+        assert_eq!(usage.forwarded_bytes, 200);
+        assert_eq!(usage.rejected_packets, 1);
+        assert_eq!(usage.active_streams, 0);
+        assert_eq!(
+            server.health_snapshot().await.status,
+            RelayHealthStatus::Healthy
+        );
+
+        client_a.close().await;
+        client_b.close().await;
+        wait_for_active_connections(&server, 0).await?;
+        wait_for_task_permits(&server, MAX_RELAY_CONNECTION_TASKS, MAX_RELAY_STREAM_TASKS).await?;
+
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_byte_quota_rejects_and_resets_on_schedule() -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity_a = Identity::generate()?;
+        let identity_b = Identity::generate()?;
+        let ip_a = register_relay_test_client(&session_manager, &identity_a, 0).await?;
+        let ip_b = register_relay_test_client(&session_manager, &identity_b, 1).await?;
+
+        let reset_at = now_unix_ms().saturating_add(2_000);
+        let authority = Arc::new(MemoryRelayPolicyAuthority::for_identities(&[
+            &identity_a,
+            &identity_b,
+        ]));
+        let mut policy = test_relay_policy(&[&identity_a, &identity_b]);
+        policy.limits.max_bytes = Some(100);
+        policy.limits.quota_reset_at_unix_ms = Some(reset_at);
+        authority.replace_policy(policy);
+
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager,
+            authority,
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+        let client_a = connect_test_relay(relay_addr, server_pin, &identity_a, ip_a).await?;
+        let client_b = connect_test_relay(relay_addr, server_pin, &identity_b, ip_b).await?;
+        wait_for_active_connections(&server, 2).await?;
+
+        let full_payload = Bytes::from(vec![0x33; 100]);
+        client_a
+            .send_packet(1, ip_a, ip_b, full_payload.clone())
+            .await?;
+        let rejection = client_a
+            .send_packet(2, ip_a, ip_b, full_payload)
+            .await
+            .expect_err("the cumulative byte quota must reject traffic above its limit")
+            .to_string();
+        assert!(rejection.contains("Relay 流量配额已耗尽"), "{rejection}");
+        wait_for_task_permits(
+            &server,
+            MAX_RELAY_CONNECTION_TASKS - 2,
+            MAX_RELAY_STREAM_TASKS,
+        )
+        .await?;
+
+        let usage = server.usage_snapshot().await;
+        assert_eq!(usage.forwarded_packets, 1);
+        assert_eq!(usage.forwarded_bytes, 100);
+        assert_eq!(usage.rejected_packets, 1);
+        assert_eq!(usage.active_streams, 0);
+        assert_eq!(usage.quota_reset_at_unix_ms, Some(reset_at));
+        let health = server.health_snapshot().await;
+        assert_eq!(health.status, RelayHealthStatus::QuotaExhausted);
+        assert!(health.quota_limited);
+
+        let wait_ms = reset_at.saturating_sub(now_unix_ms()).saturating_add(200);
+        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+
+        client_a
+            .send_packet(3, ip_a, ip_b, Bytes::from(vec![0x44; 40]))
+            .await
+            .context("byte quota did not reset at the scheduled Unix time")?;
+        wait_for_task_permits(
+            &server,
+            MAX_RELAY_CONNECTION_TASKS - 2,
+            MAX_RELAY_STREAM_TASKS,
+        )
+        .await?;
+
+        let usage = server.usage_snapshot().await;
+        assert_eq!(usage.forwarded_packets, 1);
+        assert_eq!(usage.forwarded_bytes, 40);
+        assert_eq!(usage.rejected_packets, 0);
+        assert_eq!(usage.active_streams, 0);
+        assert_eq!(usage.quota_started_at_unix_ms, Some(reset_at));
+        assert_eq!(usage.quota_reset_at_unix_ms, None);
+        assert_eq!(
+            server.health_snapshot().await.status,
+            RelayHealthStatus::Healthy
+        );
+
+        client_a.close().await;
+        client_b.close().await;
+        wait_for_active_connections(&server, 0).await?;
+        wait_for_task_permits(&server, MAX_RELAY_CONNECTION_TASKS, MAX_RELAY_STREAM_TASKS).await?;
 
         server_task.abort();
         Ok(())

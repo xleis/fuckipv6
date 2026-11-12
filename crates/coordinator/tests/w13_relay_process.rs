@@ -552,7 +552,7 @@ fn kernel_release() -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sustained_traffic_and_connection_storm_keep_relay_resources_bounded() -> Result<()> {
     const TRAFFIC_PACKETS: usize = 2_048;
-    const PAYLOAD_BYTES: usize = 1_024;
+    const PAYLOAD_BYTES: usize = 16 * 1_024;
     const SEND_CONCURRENCY: usize = 32;
     const CONNECTION_CHURN: usize = 32;
     const MAX_RSS_GROWTH_BYTES: u64 = 96 * 1024 * 1024;
@@ -770,6 +770,7 @@ async fn sustained_traffic_and_connection_storm_keep_relay_resources_bounded() -
     let elapsed_secs = elapsed.as_secs_f64();
     let payload_mib = (TRAFFIC_PACKETS * PAYLOAD_BYTES) as f64 / (1024.0 * 1024.0);
     let throughput_mib_per_sec = payload_mib / elapsed_secs;
+    let packets_per_sec = TRAFFIC_PACKETS as f64 / elapsed_secs;
     let cpu_seconds = traffic_after
         .cpu_ticks
         .saturating_sub(traffic_before.cpu_ticks) as f64
@@ -791,6 +792,7 @@ async fn sustained_traffic_and_connection_storm_keep_relay_resources_bounded() -
         "commit": repository_commit(),
         "worktree_dirty": repository_dirty(),
         "test_profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+        "measurement_scope": "Relay application payload; excludes QUIC frame and TLS record overhead",
         "platform": {
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
@@ -807,6 +809,7 @@ async fn sustained_traffic_and_connection_storm_keep_relay_resources_bounded() -
         "measurements": {
             "elapsed_ms": elapsed.as_millis(),
             "payload_mib_per_sec": throughput_mib_per_sec,
+            "packets_per_sec": packets_per_sec,
             "latency_ms": {
                 "min": latency_min_ms,
                 "mean": latency_mean_ms,

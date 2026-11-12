@@ -59,7 +59,7 @@
 | W10 安全与隐私 | `[x]` | P1 | W9 | 权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计、安全页面状态和可重复治理证据闭环均已完成 |
 | W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约和 W11-09 隔离路由 E2E/失败关闭/网络报告已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，GPUI 已接入同一页面的权威投影、规则/目标/影响展示和精确跳转，真实命中观测、GPUI/WebUI/Android 三端一致、生产后端接线及真实平台监听/适配待完成 |
 | W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05 已完成：本机启停、贡献治理、管理员选择、分层健康与故障切换/撤权均有权威状态和自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收；两侧 Exit 可达、Peer 级统计映射和 W12-09 的 24 小时稳定性/自动清理仍待完成 |
-| W13 Relay | `[~]` | P1 | W10 | W13-01、W13-02 和 W13-06 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；生产数据面故障转移现会写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复已有真实进程测试；真实 Relay 子进程压力测试已覆盖连接风暴、慢连接/资源上限、恢复、吞吐、延迟、CPU 和 RSS，并输出绑定 commit/平台/拓扑的报告。W13-03/04/05/07 仍未完成：满载时其他能力可用性、真实源地址/Exit 要求与恢复路径、真实 Relay 运营者隐私、Relay/Coordinator/Exit 同时故障及 GPUI/WebUI/Android 三端对等 |
+| W13 Relay | `[~]` | P1 | W10 | W13-01、W13-02、W13-05 和 W13-06 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；真实 Relay 子进程运营者导出已验证只含最小 usage/health/governance 字段，不包含载荷、虚拟地址、密钥或显示名；生产数据面故障转移现会写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复已有真实进程测试；真实 Relay 子进程压力测试已覆盖连接风暴、慢连接/资源上限、恢复、吞吐、延迟、CPU 和 RSS，并输出绑定 commit/平台/拓扑的报告。W13-03/04/07 仍未完成：满载时其他能力可用性、真实源地址/Exit 要求与恢复路径、Relay/Coordinator/Exit 同时故障及 GPUI/WebUI/Android 三端对等 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
 | W15 File | `[ ]` | P2 | W10 | ACL、配额、上传下载、续传 |
 | W16 Android | `[ ]` | P2 | W2,W4,W5,W7-W15 | Compose、VpnService、全能力 |
@@ -3047,7 +3047,7 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 
 **验收**：Relay 故障可预测降级；不会因重试风暴造成断网或手工清理。
 
-### W13-05 连接元数据边界 `[~]`
+### W13-05 连接元数据边界 `[x]`
 
 - [x] 定义 Relay 可见与不可见的元数据；
 - [x] 明确 Relay 不获得应用层明文和私钥；
@@ -3055,7 +3055,7 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 - [x] 活动与日志只保留最小必要字段；
 - [x] 支持脱敏导出；
 - [x] 禁止通过 UI 向未授权成员展示中继拓扑细节；
-- [ ] 完成 Relay 运营者视角隐私测试；
+- [x] 完成 Relay 运营者视角隐私测试；
 - [x] 文档不夸大匿名性。
 
 **验收**：Relay 隐私声明与实际可见数据一致，不以“加密”掩盖流量分析风险。
@@ -3102,8 +3102,8 @@ Relay 客户端入站队列现固定为 `RELAY_INCOMING_QUEUE_CAPACITY = 256` �
 失败关闭并在释放后恢复；`quic_relay_slow_unregistered_connection_releases_task_permit_after_close` 验证慢速
 未注册连接关闭后回收 permit。
 `quic_relay_forwards_packets_between_registered_clients` 同时检查 governance、usage 和 health 三个运营者快照，
-确认不包含虚拟 IP、转发的 payload、private/session key、网络显示名或成员显示名。这些是自动化边界与恢复
-测试；真实压力和运营者视角隐私边界仍需由真实子进程测试补充，且单机测试不等同于多主机正式压测。
+确认不包含虚拟 IP、转发的 payload、private/session key、网络显示名或成员显示名。真实压力由独立子进程测试补充；
+单机测试仍不等同于多主机正式压测。
 `RecoveryReport::duration_ms()` 已接入 Linux 恢复成功/失败日志，并有状态、时长和原因测试；
 临时 Coordinator 启动或停止 Relay 均由 `permission.temporary_coordinator_read_only` 拒绝。
 `w13_relay_process::sigkill_restart_releases_relay_port_and_invalidates_old_session` 在 Linux 上启动真实
@@ -3122,6 +3122,14 @@ parent/child QUIC loopback 拓扑、工作负载和全部测量值；报告路�
 `FUCKIPV6_W13_RELAY_STRESS_REPORT` 指定。该证据仍是单机 loopback 压测，不覆盖多主机网络损伤、
 满载时 Coordinator/Exit/WebUI 等其他能力可用性、真实 Relay/Coordinator/Exit 同时故障或跨平台实机验收。
 
+**真实 Relay 运营者隐私测试（2026-11-13）**：`w13_relay_process::operator_privacy_export_contains_usage_but_not_payload_or_addresses`
+在 Linux 上启动真实 Relay 子进程，父进程使用两个独立身份通过 QUIC 建立收发会话并转发带唯一 canary 的载荷，
+随后由子进程原子导出 `fuckipv6.w13.relay-operator-privacy.v1` governance/usage/health 快照。测试验证运营者
+仍能看到连接数、转发包数/字节数、最后转发时间、健康与授权状态和最小治理事件，但最终 JSON 不包含载荷、
+两端虚拟 IP、private/session key、网络/成员显示名或 PEM 私钥标记。测试拓扑明确为单机 parent/child
+Relay over QUIC loopback，release profile 与 debug profile 均通过；这证明当前运营者导出投影的字段边界，
+不等同于外部 Relay 运营者的长期流量分析审计，也不代表能消除时间/体积侧信道。
+
 **生产故障转移审计（2026-11-13）**：多网络 supervisor 现在创建一份共享的
 `OwnerSecurityAudit`，同时注入命令总线和每个网络运行时；Relay 接收流关闭、QUIC 转发失败和转发超时时，
 只有真实传输失败路径会记录待转移上下文，替代 Relay 安装成功后写入一次
@@ -3133,13 +3141,13 @@ parent/child QUIC loopback 拓扑、工作负载和全部测量值；报告路�
 `pending_relay_failover_pairs_only_with_a_newer_generation_once`、
 `relay_failover_audit_worker_persists_and_merges_activity` 和
 `merge_recent_activity_deduplicates_sorts_and_retains_latest_256` 覆盖字段边界、队列满载、单次配对、
-durable 持久化和命令/数据面活动合并。该证据是本地进程内审计与恢复测试，不等同于真实 Relay 运营者隐私、
-正式压力或三组件同时故障验收。
+durable 持久化和命令/数据面活动合并。该证据是本地进程内审计与恢复测试，本身不等同于正式压力或
+三组件同时故障验收；运营者导出字段边界另由上述真实子进程隐私测试覆盖。
 
 本次门禁通过：`cargo test -p fuckipv6-client --all-targets --all-features`（库 1190 passed、3 ignored；register 进程 1 passed；运行时进程 11 passed；7 项特权拓扑测试 ignored）、
 `cargo test -p fuckipv6-common --lib`（396 passed）、
 `cargo test -p fuckipv6-coordinator --lib -- --test-threads=1`（152 passed，其中 relay::server::tests 31 passed）、
-`cargo test -p fuckipv6-coordinator --test w13_relay_process`（3 passed）、
+`cargo test -p fuckipv6-coordinator --test w13_relay_process`（4 passed）、
 `cargo test -p fuckipv6-coordinator existing_session --lib`（5 passed）、
 `cargo test -p fuckipv6-client routing::recovery --lib`（18 passed）、
 `cargo clippy -p fuckipv6-client -p fuckipv6-common -p fuckipv6-coordinator --all-targets --all-features -- -D warnings`、
@@ -3147,9 +3155,9 @@ durable 持久化和命令/数据面活动合并。该证据是本地进程内�
 `npm run typecheck`、`npm run lint`、`npm run build`、`cargo fmt --all -- --check` 和 `git diff --check`。
 平台不支持项通过注入 `io::ErrorKind::Unsupported` 验证的是解释状态和失败关闭，不是 Windows/macOS 实机验收。
 本证据覆盖 Linux 单 Relay 进程崩溃/重启后的监听与旧会话清理，以及单机 loopback 连接风暴、资源边界和
-吞吐/延迟/CPU/RSS 测量；但不覆盖 Windows/macOS 实机崩溃恢复、多主机正式压测、满载时其他能力可用性、
-真实 Relay 运营者隐私、真实 Relay/Coordinator/Exit 同时故障或 Android 对等；
-W13-03、W13-04、W13-05 和 W13-07 的剩余项继续保持未完成，不能据此声明 W13 已全量完成。
+吞吐/延迟/CPU/RSS 测量，以及单机真实子进程的运营者导出字段边界；但不覆盖 Windows/macOS 实机崩溃恢复、
+多主机正式压测、满载时其他能力可用性、真实 Relay/Coordinator/Exit 同时故障或 Android 对等；
+W13-03、W13-04 和 W13-07 的剩余项继续保持未完成，不能据此声明 W13 已全量完成。
 
 **验收**：Relay 独立能力通过功能、隐私、资源和故障测试后才可声明可用。
 

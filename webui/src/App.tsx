@@ -58,6 +58,12 @@ import {
   saveLanguagePreference,
   type LanguagePreference,
 } from "./api/session";
+import {
+  downloadOwnerAuditExport,
+  requestOwnerAuditExport,
+  type RelayAuditExportReceipt,
+  type RelayAuditExportRequest,
+} from "./api/owner-audit";
 import { webAuthnIssue } from "./auth/webauthn";
 import { createCoalescedTask } from "./coalesced-task";
 import { tr } from "./i18n";
@@ -193,8 +199,8 @@ type NodeEventState = {
 };
 
 type ReauthenticationAttempt = {
-  envelope: NodeCommandHttpRequest;
-  resolve(response: NodeApiCommandResponse): void;
+  retry(): Promise<unknown>;
+  resolve(value: unknown): void;
   reject(error: unknown): void;
 };
 
@@ -886,19 +892,45 @@ function AppShell({
     return { operation };
   }
 
-  async function sendWithReauthentication(
-    envelope: NodeCommandHttpRequest,
-  ): Promise<NodeApiCommandResponse> {
+  async function withReauthentication<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
     try {
-      return await sendCommand(envelope);
+      return await operation();
     } catch (error) {
       if (!(error instanceof ReauthenticationRequiredError)) throw error;
-      return new Promise<NodeApiCommandResponse>((resolve, reject) => {
-        reauthenticationAttempt.current = { envelope, resolve, reject };
+      return new Promise<T>((resolve, reject) => {
+        reauthenticationAttempt.current = {
+          retry: operation,
+          resolve: (value) => resolve(value as T),
+          reject,
+        };
         setReauthenticationFailure("");
         setReauthenticationOpen(true);
       });
     }
+  }
+
+  function sendWithReauthentication(
+    envelope: NodeCommandHttpRequest,
+  ): Promise<NodeApiCommandResponse> {
+    return withReauthentication(() => sendCommand(envelope));
+  }
+
+  async function exportRelayAudit(
+    request: RelayAuditExportRequest,
+  ): Promise<RelayAuditExportReceipt> {
+    const exported = await withReauthentication(() =>
+      requestOwnerAuditExport({
+        ...request,
+        resource_prefix: "node_command:",
+      }),
+    );
+    downloadOwnerAuditExport(exported);
+    return {
+      filename: exported.filename,
+      record_count: exported.bundle.records.length,
+    };
   }
 
   function cancelReauthentication(): void {
@@ -929,9 +961,9 @@ function AppShell({
     }
     queryClient.setQueryData(SESSION_QUERY_KEY, session);
 
-    let response: NodeApiCommandResponse;
+    let result: unknown;
     try {
-      response = await sendCommand(attempt.envelope);
+      result = await attempt.retry();
     } catch (error) {
       reauthenticationAttempt.current = null;
       setReauthenticationOpen(false);
@@ -944,7 +976,7 @@ function AppShell({
     reauthenticationAttempt.current = null;
     setReauthenticationOpen(false);
     setReauthenticationPending(false);
-    attempt.resolve(response);
+    attempt.resolve(result);
   }
 
   async function submitAction(
@@ -1384,6 +1416,7 @@ function AppShell({
                   recentDiagnostics={recentDiagnostics}
                   manifestActions={manifestActions}
                   onSubmitAction={submitAction}
+                  onExportRelayAudit={exportRelayAudit}
                   topologySignals={{
                     refreshing: controlRefreshing,
                     stale: eventState.stale,

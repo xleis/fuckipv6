@@ -63,15 +63,16 @@ afterEach(() => {
 
 describe("owner durable audit export", () => {
   it("requests a confirmed network-scoped node command export", async () => {
-    const fetchMock = vi.fn(async () =>
-      new Response(JSON.stringify(exportBundle()), {
-        status: 200,
-        headers: {
-          "Content-Type": "application/json",
-          "Content-Disposition":
-            'attachment; filename="owner-security-audit-export.json"',
-        },
-      }),
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        new Response(JSON.stringify(exportBundle()), {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Disposition":
+              'attachment; filename="owner-security-audit-export.json"',
+          },
+        }),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -85,6 +86,7 @@ describe("owner durable audit export", () => {
     expect(fetchMock).toHaveBeenCalledOnce();
     const [path, init] = fetchMock.mock.calls[0];
     expect(path).toBe("/api/v1/owner/security/audit/export");
+    if (!init) throw new Error("audit export request init is missing");
     expect(init).toEqual(
       expect.objectContaining({
         method: "POST",

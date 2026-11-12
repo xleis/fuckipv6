@@ -28,6 +28,10 @@ use tokio::sync::{mpsc, watch, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration, Instant};
 
+use crate::file_share::{
+    decode_file_network_frame, encode_file_network_frame, is_file_network_frame, FileNetworkFrame,
+    FileNetworkRequest, FileNetworkResponse,
+};
 use crate::ipc::{self, IpcRequest, IpcResponse};
 use crate::local_ipc::IpcRole;
 use crate::node::{
@@ -3866,6 +3870,109 @@ async fn handle_exit_readiness_frame(
     );
 }
 
+/// File frames are never treated as TUN packets. Until the owner capability is
+/// wired into the authenticated data plane, requests fail closed with a stable
+/// response and no frame is written to the interface.
+async fn handle_file_network_frame(
+    runtime: &mut ClientRuntime,
+    src_ip: IpAddr,
+    peer: PeerRouteInfo,
+    frame: Box<FileNetworkFrame>,
+) {
+    match *frame {
+        FileNetworkFrame::Request {
+            request_id,
+            request,
+        } => {
+            let (transfer_id, operation_id) = match &request {
+                FileNetworkRequest::OpenUpload {
+                    transfer_id,
+                    operation_id,
+                    ..
+                }
+                | FileNetworkRequest::OpenDownload {
+                    transfer_id,
+                    operation_id,
+                    ..
+                }
+                | FileNetworkRequest::Pause {
+                    transfer_id,
+                    operation_id,
+                }
+                | FileNetworkRequest::Cancel {
+                    transfer_id,
+                    operation_id,
+                }
+                | FileNetworkRequest::Finish {
+                    transfer_id,
+                    operation_id,
+                } => (transfer_id, operation_id),
+                FileNetworkRequest::Resume { request } => {
+                    (&request.transfer_id, &request.operation_id)
+                }
+            };
+            tracing::debug!(
+                peer = %peer.node_id,
+                %src_ip,
+                %transfer_id,
+                %operation_id,
+                "File 网络请求已认证，但 owner 文件能力尚未接入"
+            );
+            let response = FileNetworkResponse::Error {
+                code: "file_capability_unavailable".into(),
+                retry_after_ms: None,
+            };
+            let Ok(response) = FileNetworkFrame::response(request_id, response) else {
+                return;
+            };
+            let Ok(encoded) = encode_file_network_frame(&response) else {
+                return;
+            };
+            if let Err(error) = runtime
+                .p2p
+                .send_to(peer.virtual_ip, runtime.assigned_ip, &encoded)
+                .await
+            {
+                tracing::debug!(peer = %peer.node_id, "File 网络错误响应发送失败: {error:#}");
+            }
+        }
+        FileNetworkFrame::Chunk {
+            transfer_id,
+            operation_id,
+            chunk_index,
+            ..
+        } => {
+            tracing::debug!(
+                peer = %peer.node_id,
+                %src_ip,
+                %transfer_id,
+                %operation_id,
+                chunk_index,
+                "丢弃没有活动 File 会话的网络分片"
+            );
+        }
+        FileNetworkFrame::Response {
+            request_id,
+            response,
+        } => {
+            let kind = match response {
+                FileNetworkResponse::Opened { .. } => "opened",
+                FileNetworkResponse::Progress { .. } => "progress",
+                FileNetworkResponse::ChunkAccepted { .. } => "chunk_accepted",
+                FileNetworkResponse::Completed { .. } => "completed",
+                FileNetworkResponse::Error { .. } => "error",
+            };
+            tracing::debug!(
+                peer = %peer.node_id,
+                %src_ip,
+                request_id = ?request_id,
+                kind,
+                "忽略未被本机 File 操作关联的响应帧"
+            );
+        }
+    }
+}
+
 async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacket, source: &str) {
     match admit_inbound_packet(runtime, packet).await {
         Some(InboundAdmission::Payload(payload)) => {
@@ -3879,6 +3986,13 @@ async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacke
             frame,
         }) => {
             handle_exit_readiness_frame(runtime, src_ip, peer, frame).await;
+        }
+        Some(InboundAdmission::FileNetwork {
+            src_ip,
+            peer,
+            frame,
+        }) => {
+            handle_file_network_frame(runtime, src_ip, peer, frame).await;
         }
         None => {}
     }
@@ -3900,6 +4014,13 @@ async fn handle_inbound_packet_batch(
             }) => {
                 handle_exit_readiness_frame(runtime, src_ip, peer, frame).await;
             }
+            Some(InboundAdmission::FileNetwork {
+                src_ip,
+                peer,
+                frame,
+            }) => {
+                handle_file_network_frame(runtime, src_ip, peer, frame).await;
+            }
             None => {}
         }
     }
@@ -3914,6 +4035,11 @@ enum InboundAdmission {
         src_ip: IpAddr,
         peer: PeerRouteInfo,
         frame: ExitReadinessFrame,
+    },
+    FileNetwork {
+        src_ip: IpAddr,
+        peer: PeerRouteInfo,
+        frame: Box<FileNetworkFrame>,
     },
 }
 
@@ -3958,6 +4084,21 @@ async fn admit_inbound_packet(
         tracing::debug!("丢弃未注册来源 {src_ip} 的入站数据包");
         return None;
     };
+    if is_file_network_frame(&plain_payload) {
+        let frame = match decode_file_network_frame(&plain_payload) {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::debug!("丢弃来自 {} 的无效 File 网络帧: {error}", src_ip);
+                return None;
+            }
+        };
+        record_p2p_rx_for_peer(&runtime.stats, &peer, plain_payload.len()).await;
+        return Some(InboundAdmission::FileNetwork {
+            src_ip,
+            peer,
+            frame: Box::new(frame),
+        });
+    }
     if is_exit_readiness_frame(&plain_payload) {
         let frame = match decode_exit_readiness_frame(&plain_payload) {
             Ok(frame) => frame,

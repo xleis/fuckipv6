@@ -9,6 +9,7 @@
 mod capability;
 mod config;
 mod error;
+mod network;
 mod owner_service;
 mod quota;
 mod rate_limit;
@@ -22,6 +23,10 @@ pub use capability::{
     FileCapabilityState, FileShareCapability,
 };
 pub use error::{FileShareError, FileShareErrorCode, FileShareResult};
+pub(crate) use network::{
+    decode_file_network_frame, encode_file_network_frame, is_file_network_frame, FileNetworkFrame,
+    FileNetworkRequest, FileNetworkResponse,
+};
 pub(crate) use owner_service::FileOwnerService;
 pub use owner_service::{FileOwnerServiceError, FileShareConfiguration, FileSharePreview};
 pub use quota::{DirectoryUsage, QuotaScanLimits, UploadQuotaRequest};

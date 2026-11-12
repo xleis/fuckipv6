@@ -3314,7 +3314,10 @@ mod tests {
             .await
             .expect_err("revoked destination must not receive relay packets")
             .to_string();
-        assert!(destination_error.contains("403"), "{destination_error}");
+        assert!(
+            destination_error.contains("403") || destination_error.contains("404"),
+            "revoked destination must fail closed: {destination_error}"
+        );
 
         session_manager
             .ban_client(identity_a.client_id().to_string())

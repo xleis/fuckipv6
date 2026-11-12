@@ -1475,6 +1475,79 @@ mod tests {
         assert_eq!(error.code(), FileShareErrorCode::SymlinkRejected);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn allow_within_root_follows_only_links_resolving_inside_the_root() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let share = LocalShareRoot::select(
+            temporary.path().to_str().expect("utf8 temp path"),
+            SymlinkPolicy::AllowWithinRoot,
+        )
+        .expect("share root");
+        fs::create_dir(temporary.path().join("docs")).expect("directory");
+        fs::write(temporary.path().join("docs/readme.txt"), b"inside").expect("inside file");
+        std::os::unix::fs::symlink("docs/readme.txt", temporary.path().join("inside-link"))
+            .expect("inside symlink");
+        let inside = SharedPath::parse("inside-link").expect("path");
+        let mut file = share
+            .open_read(&inside)
+            .expect("inside link must be allowed");
+        let mut content = String::new();
+        file.read_to_string(&mut content).expect("read");
+        assert_eq!(content, "inside");
+
+        let outside = tempfile::tempdir().expect("outside");
+        let secret = outside.path().join("secret.txt");
+        fs::write(&secret, b"outside-secret").expect("outside file");
+        std::os::unix::fs::symlink(&secret, temporary.path().join("outside-link"))
+            .expect("outside symlink");
+        let error = share
+            .open_read(&SharedPath::parse("outside-link").expect("path"))
+            .expect_err("outside link must be rejected");
+        assert_eq!(error.code(), FileShareErrorCode::OutsideRoot);
+        let rendered = error.to_string();
+        assert!(!rendered.contains(&secret.to_string_lossy().to_string()));
+        assert!(!rendered.contains("outside-secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permission_revocation_fails_closed_for_files_and_directories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        let (temporary, share) = root();
+        fs::create_dir(temporary.path().join("docs")).expect("directory");
+        let secret = temporary.path().join("docs/secret.txt");
+        fs::write(&secret, b"secret").expect("file");
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o000))
+            .expect("remove file access");
+        let file_error = share
+            .open_read(&SharedPath::parse("docs/secret.txt").expect("path"))
+            .expect_err("revoked file permission must fail closed");
+        assert_eq!(file_error.code(), FileShareErrorCode::Io);
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600))
+            .expect("restore file access");
+
+        fs::set_permissions(
+            temporary.path().join("docs"),
+            fs::Permissions::from_mode(0o000),
+        )
+        .expect("remove directory access");
+        let directory_error = share
+            .open_read(&SharedPath::parse("docs/secret.txt").expect("path"))
+            .expect_err("revoked directory permission must fail closed");
+        assert_eq!(directory_error.code(), FileShareErrorCode::Io);
+        fs::set_permissions(
+            temporary.path().join("docs"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .expect("restore directory access");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn concurrent_directory_symlink_exchange_never_reads_outside_root() {

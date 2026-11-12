@@ -124,6 +124,7 @@ use fuckipv6_common::domain::SharedPath;
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io::Read;
 
     use fuckipv6_common::domain::{SharedPath, SymlinkPolicy};
@@ -182,6 +183,33 @@ mod tests {
             std::fs::read_to_string(temporary.path().join("result.txt")).expect("read"),
             "original"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_rejects_a_target_parent_swapped_to_an_outside_symlink() {
+        let (temporary, share) = root();
+        let target_parent = temporary.path().join("incoming");
+        fs::create_dir(&target_parent).expect("target parent");
+        let parked_parent = temporary.path().join("parked");
+        let outside = tempfile::tempdir().expect("outside");
+        fs::write(outside.path().join("result.txt"), b"outside-original").expect("outside file");
+
+        let target = SharedPath::parse("incoming/result.txt").expect("path");
+        let mut upload = TemporaryUpload::create(&share).expect("upload");
+        upload.write_all(b"replacement").expect("write");
+
+        fs::rename(&target_parent, &parked_parent).expect("move inside parent");
+        std::os::unix::fs::symlink(outside.path(), &target_parent).expect("outside symlink");
+        let error = upload
+            .persist_new(&target)
+            .expect_err("swapped target parent must fail closed");
+        assert_eq!(error.code(), FileShareErrorCode::SymlinkRejected);
+        assert_eq!(
+            fs::read(outside.path().join("result.txt")).expect("outside file remains"),
+            b"outside-original"
+        );
+        assert!(!parked_parent.join("result.txt").exists());
     }
 
     #[cfg(unix)]

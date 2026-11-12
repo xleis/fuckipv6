@@ -373,6 +373,7 @@ fn update_atomic_max(target: &AtomicU64, value: u64) {
 struct SecureState {
     revoked: bool,
     driver: Option<SessionDriver>,
+    active_generation_confirmed: bool,
     active_since: Option<Instant>,
     active_confirm: Option<ConfirmFrame>,
     initial_confirm: Option<InitiatorConfirmation>,
@@ -585,10 +586,10 @@ impl SecurePeerState {
         self.initiator
     }
 
-    /// Whether an authenticated v2 driver is installed.
+    /// Whether the active v2 generation is authenticated in both directions.
     pub(crate) async fn is_established(&self) -> bool {
         let state = self.lock_state(SecureLockOperation::Diagnostics).await;
-        !state.revoked && state.driver.is_some()
+        !state.revoked && state.driver.is_some() && state.active_generation_confirmed
     }
 
     /// Prevent new session work and wait for already admitted session work.
@@ -628,6 +629,7 @@ impl SecurePeerState {
         }
         state.revoked = true;
         state.driver = None;
+        state.active_generation_confirmed = false;
         state.active_since = None;
         state.active_confirm = None;
         state.initial_confirm = None;
@@ -946,6 +948,7 @@ impl SecurePeerState {
                 install_active_generation(&mut state, driver, now)?;
                 state.authenticated_peer = Some(source);
                 state.active_confirm = Some(confirm);
+                state.active_generation_confirmed = true;
                 Ok(Vec::new())
             }
         }
@@ -1191,6 +1194,9 @@ impl SecurePeerState {
         if state.revoked {
             return Err(SecureRuntimeError::Revoked);
         }
+        if !state.active_generation_confirmed {
+            return Err(SecureRuntimeError::NotEstablished);
+        }
         let destination = state
             .authenticated_peer
             .ok_or(SecureRuntimeError::NotEstablished)?;
@@ -1242,6 +1248,9 @@ impl SecurePeerState {
         let mut state = self.lock_state(SecureLockOperation::Outbound).await;
         if state.revoked {
             return Err(SecureRuntimeError::Revoked);
+        }
+        if !state.active_generation_confirmed {
+            return Err(SecureRuntimeError::NotEstablished);
         }
         let destination = state
             .authenticated_peer
@@ -1394,6 +1403,7 @@ impl SecurePeerState {
                 .expect("driver presence checked above");
             run_cpu_bound_batch(|| driver.open_independent_batch_per_packet_in_place(packets, now))
         }?;
+        let active_generation_confirmed = active_results.iter().any(Result::is_ok);
         let mut results = active_results
             .into_iter()
             .map(|result| {
@@ -1416,8 +1426,11 @@ impl SecurePeerState {
             }
         }
 
-        if results.iter().any(Result::is_ok) {
+        if active_generation_confirmed {
+            state.active_generation_confirmed = true;
             state.initial_confirm = None;
+        }
+        if results.iter().any(Result::is_ok) {
             state.authenticated_peer = Some(canonical_endpoint(source));
         }
         Ok(results)
@@ -1530,6 +1543,7 @@ fn open_with_driver_core(
             // Authenticated traffic under the active generation proves that the
             // peer accepted this endpoint's CONFIRM. Initial CONFIRM retries can
             // now stop without weakening the established generation.
+            state.active_generation_confirmed = true;
             state.initial_confirm = None;
             return Ok(plaintext_len);
         }
@@ -1552,6 +1566,7 @@ fn open_with_driver_core(
                     .take()
                     .expect("staged driver opened a packet");
                 install_active_generation(state, staged.driver, now)?;
+                state.active_generation_confirmed = true;
                 return Ok(plaintext_len);
             }
             Err(error) if is_unknown_epoch(&error) => {}
@@ -1690,6 +1705,7 @@ fn install_active_generation(
         }
     }
     state.driver = Some(driver);
+    state.active_generation_confirmed = false;
     state.active_since = Some(now);
     state.active_confirm = None;
     state.initial_confirm = None;
@@ -2098,6 +2114,12 @@ mod tests {
             )
             .await
             .expect("complete responder");
+        let (_, probe) = responder.seal(&[]).await.expect("seal confirmation probe");
+        assert!(initiator
+            .open(responder_addr, probe)
+            .await
+            .expect("consume confirmation probe")
+            .is_empty());
     }
 
     async fn accept_with_cookie(
@@ -2604,6 +2626,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initiator_requires_authenticated_responder_probe_before_establishing() {
+        let (initiator, responder, initiator_addr, responder_addr) = pair();
+        let accept =
+            accept_with_cookie(&initiator, &responder, initiator_addr, responder_addr).await;
+        let confirm = initiator
+            .handle_control(
+                responder_addr,
+                fuckipv6_secure_session::wire::decode_control(&accept[0].frame)
+                    .expect("decode accept"),
+            )
+            .await
+            .expect("accept response");
+
+        assert_eq!(initiator.epoch().await, Some(1));
+        assert!(!initiator.is_established().await);
+        assert!(matches!(
+            initiator.seal(b"too early").await,
+            Err(SecureRuntimeError::NotEstablished)
+        ));
+        assert!(!responder.is_established().await);
+
+        responder
+            .handle_control(
+                initiator_addr,
+                fuckipv6_secure_session::wire::decode_control(&confirm[0].frame)
+                    .expect("decode confirm"),
+            )
+            .await
+            .expect("complete responder");
+        assert!(responder.is_established().await);
+        assert!(!initiator.is_established().await);
+
+        let (_, probe) = responder.seal(&[]).await.expect("seal authenticated probe");
+        assert!(initiator
+            .open(responder_addr, probe)
+            .await
+            .expect("consume authenticated probe")
+            .is_empty());
+        assert!(initiator.is_established().await);
+        assert!(initiator
+            .retry_staged_confirm()
+            .await
+            .expect("CONFIRM retry state")
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn control_frames_follow_authenticated_source_rebinding() {
         let (initiator, responder, registered_initiator_addr, registered_responder_addr) = pair();
         let accept_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42002);
@@ -3066,6 +3135,16 @@ mod tests {
             )
             .await
             .expect("complete signaling handshake");
+
+        let (_, probe) = responder
+            .seal(&[])
+            .await
+            .expect("seal signaling confirmation probe");
+        assert!(initiator
+            .open_from_session(probe)
+            .await
+            .expect("consume signaling confirmation probe")
+            .is_empty());
 
         assert!(initiator.is_established().await);
         assert!(responder.is_established().await);

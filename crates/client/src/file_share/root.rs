@@ -4,6 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -16,6 +17,15 @@ use super::error::{FileShareError, FileShareErrorCode, FileShareResult};
 use super::quota::{DirectoryUsage, QuotaScanLimits};
 
 pub const FILE_TEMP_DIRECTORY: &str = ".fuckipv6-tmp";
+
+/// User-safe metadata obtained from an anchored share path. The local root and
+/// any filesystem error details remain outside this projection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalFileMetadata {
+    pub is_directory: bool,
+    pub size: u64,
+    pub modified_at_unix_ms: Option<u64>,
+}
 
 /// Crashed uploads cannot outlive the network transfer TTL. Re-enabling a
 /// share uses this age to distinguish abandoned staging files from a transfer
@@ -254,6 +264,32 @@ impl LocalShareRoot {
             scan_directory_portable(&self.canonical_root, 0, limits, &mut usage)?;
             Ok(usage)
         }
+    }
+
+    /// Read metadata through the same symlink policy and anchored path checks as
+    /// file opens. The path must name a non-root object; staging is always
+    /// reserved and cannot be inspected through the shared namespace.
+    pub fn read_metadata(&self, path: &SharedPath) -> FileShareResult<LocalFileMetadata> {
+        self.reject_root_io(path)?;
+        let opened = match self.open_read(path) {
+            Ok(file) => file,
+            Err(first_error) => match self.open_directory(path) {
+                Ok(file) => file,
+                Err(_) => return Err(first_error),
+            },
+        };
+        let metadata = opened.metadata().map_err(|error| {
+            FileShareError::io(
+                FileShareErrorCode::Io,
+                "shared path metadata is unavailable",
+                error,
+            )
+        })?;
+        Ok(LocalFileMetadata {
+            is_directory: metadata.is_dir(),
+            size: metadata.len(),
+            modified_at_unix_ms: metadata.modified().ok().and_then(unix_millis),
+        })
     }
 
     /// Open a shared file. Unix hard links are ordinary directory entries:
@@ -1307,6 +1343,10 @@ fn cstring(value: &str) -> FileShareResult<CString> {
 #[cfg(unix)]
 fn libc_read_flags() -> libc::c_int {
     libc::O_RDONLY
+}
+
+fn unix_millis(time: SystemTime) -> Option<u64> {
+    u64::try_from(time.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()
 }
 
 #[cfg(unix)]

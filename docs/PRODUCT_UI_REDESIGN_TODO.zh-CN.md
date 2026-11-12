@@ -3425,7 +3425,7 @@ staging 陈旧阈值”。
 
 ### W15-07 撤权与传输中断 `[~]`
 
-- [ ] 撤销 ACL 后立即停止新元数据访问和传输请求；
+- [x] 撤销 ACL 后立即停止新元数据访问和传输请求；
 - [x] 已有传输在安全边界内终止或完成策略明确；
 - [x] 成员退出/移除后会话和临时凭据失效；
 - [x] 节点 owner 关闭共享后所有客户端看到不可用；
@@ -3473,8 +3473,11 @@ requester 当前 epoch 比较，避免不同成员 epoch 偶然相同或不同�
 ACL 替换共享时，会在下一次 peer 帧之前主动调用 `cancel_all_for_authorization_loss`，取消上传和下载会话、释放并发 admission、
 关闭文件句柄并清理未发布 staging。`owner_disable_revokes_all_active_sessions_and_rejects_new_requests` 用两个不同成员的活动下载验证
 一次关闭会同时终止全部会话，两个成员随后发起的新下载都返回 `file_capability_disabled`，owner 源文件保持不变。
-`acl_reconfiguration_revokes_live_transfer_and_rejects_new_requests` 验证 ACL 替换推进 capability epoch 后，在途下载被记录为
-`file.transfer.authorization_revoked` / `Denied` 并完成清理，新下载返回 `file_acl_no_allow`，源文件保留。
+`acl_reconfiguration_revokes_live_transfer_and_rejects_new_metadata_and_requests` 验证 ACL 替换推进 capability epoch 后，在途下载被记录为
+`file.transfer.authorization_revoked` / `Denied` 并完成清理；新下载和新元数据请求都返回 `file_acl_no_allow`，源文件保留。
+元数据请求只会在共享 ACL 明确授予 `read_metadata` 后读取锚定路径，并在文件系统查询前后各复核一次 capability epoch；成功响应只包含
+目录标志、大小和修改时间，不包含共享根、文件名、内容摘要或原始文件系统错误。`metadata_requires_explicit_read_metadata_acl_action`
+验证仅有下载授权不会隐式开放元数据；上述 ACL 测试在撤权前确认元数据成功、撤权后确认失败关闭，
 `owner_disable_revokes_concurrent_upload_and_download_without_publishing` 进一步在同一 owner 能力下同时打开上传和下载，关闭能力后
 两者均完成撤权清理：上传 staging 被删除且目标未发布，下载源文件保持原样，两个方向均生成
 `file.transfer.authorization_revoked` / `Denied` 活动。该证据覆盖进程内网络数据面、并发双向传输和多客户端请求路径。

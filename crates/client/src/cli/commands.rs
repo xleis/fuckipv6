@@ -4489,7 +4489,7 @@ async fn handle_file_network_frame(
             request_id,
             request,
         } => {
-            let (transfer_id, operation_id) = file_network_request_ids(&request);
+            let request_ids = file_network_request_ids(&request);
             let now_unix_ms = unix_time_ms();
             let response =
                 match trusted_file_request_member(runtime, &peer.node_id, now_unix_ms).await {
@@ -4507,24 +4507,34 @@ async fn handle_file_network_frame(
                     },
                     Err(response) => {
                         let reason_code = file_network_error_code(&response);
-                        cancel_file_network_session(
-                            runtime,
-                            &transfer_id,
-                            &operation_id,
-                            reason_code,
-                            now_unix_ms,
-                        );
+                        if let Some((transfer_id, operation_id)) = &request_ids {
+                            cancel_file_network_session(
+                                runtime,
+                                transfer_id,
+                                operation_id,
+                                reason_code,
+                                now_unix_ms,
+                            );
+                        }
                         response
                     }
                 };
-            tracing::debug!(
-                peer = %peer.node_id,
-                %src_ip,
-                %transfer_id,
-                %operation_id,
-                response = file_network_response_kind(&response),
-                "已处理认证 File 网络请求"
-            );
+            match &request_ids {
+                Some((transfer_id, operation_id)) => tracing::debug!(
+                    peer = %peer.node_id,
+                    %src_ip,
+                    %transfer_id,
+                    %operation_id,
+                    response = file_network_response_kind(&response),
+                    "已处理认证 File 网络请求"
+                ),
+                None => tracing::debug!(
+                    peer = %peer.node_id,
+                    %src_ip,
+                    response = file_network_response_kind(&response),
+                    "已处理认证 File 元数据请求"
+                ),
+            }
             send_file_network_response(runtime, peer.virtual_ip, request_id, response).await;
         }
         FileNetworkFrame::Chunk {
@@ -4674,7 +4684,7 @@ async fn handle_file_network_frame(
     }
 }
 
-fn file_network_request_ids(request: &FileNetworkRequest) -> (TransferId, OperationId) {
+fn file_network_request_ids(request: &FileNetworkRequest) -> Option<(TransferId, OperationId)> {
     match request {
         FileNetworkRequest::OpenUpload {
             transfer_id,
@@ -4697,10 +4707,11 @@ fn file_network_request_ids(request: &FileNetworkRequest) -> (TransferId, Operat
         | FileNetworkRequest::Finish {
             transfer_id,
             operation_id,
-        } => (transfer_id.clone(), operation_id.clone()),
+        } => Some((transfer_id.clone(), operation_id.clone())),
         FileNetworkRequest::Resume { request } => {
-            (request.transfer_id.clone(), request.operation_id.clone())
+            Some((request.transfer_id.clone(), request.operation_id.clone()))
         }
+        FileNetworkRequest::ReadMetadata { .. } => None,
     }
 }
 
@@ -4797,6 +4808,7 @@ async fn send_file_network_response(
 fn file_network_response_kind(response: &FileNetworkResponse) -> &'static str {
     match response {
         FileNetworkResponse::Opened { .. } => "opened",
+        FileNetworkResponse::Metadata { .. } => "metadata",
         FileNetworkResponse::Progress { .. } => "progress",
         FileNetworkResponse::ChunkAccepted { .. } => "chunk_accepted",
         FileNetworkResponse::Completed { .. } => "completed",

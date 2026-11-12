@@ -37,7 +37,7 @@ pub(crate) use origin_store::FileOriginStore;
 pub(crate) use owner_service::FileOwnerService;
 pub use owner_service::{FileOwnerServiceError, FileShareConfiguration, FileSharePreview};
 pub use quota::{DirectoryUsage, QuotaScanLimits, UploadQuotaRequest};
-pub use root::{LocalShareRoot, FILE_TEMP_DIRECTORY};
+pub use root::{LocalFileMetadata, LocalShareRoot, FILE_TEMP_DIRECTORY};
 pub use runtime::{
     FileRuntime, FileRuntimeError, FileRuntimeSnapshot, RuntimeDownloadTransfer,
     RuntimeUploadTransfer,

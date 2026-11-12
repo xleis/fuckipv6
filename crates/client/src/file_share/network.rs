@@ -96,6 +96,10 @@ pub(crate) enum FileNetworkRequest {
         operation_id: OperationId,
         path: SharedPath,
     },
+    ReadMetadata {
+        share_id: FileShareId,
+        path: SharedPath,
+    },
     Resume {
         request: ResumeRequest,
     },
@@ -119,6 +123,9 @@ pub(crate) enum FileNetworkRequest {
 pub(crate) enum FileNetworkResponse {
     Opened {
         session: Box<TransferSession>,
+    },
+    Metadata {
+        metadata: FileNetworkMetadata,
     },
     Progress {
         progress: FileNetworkProgress,
@@ -145,6 +152,15 @@ pub(crate) struct FileNetworkProgress {
     pub total_bytes: u64,
     pub received_chunks: u32,
     pub total_chunks: u32,
+}
+
+/// Metadata exposed for one authorized shared path. It deliberately omits the
+/// path, local root, content digest and filesystem error text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FileNetworkMetadata {
+    pub is_directory: bool,
+    pub size: u64,
+    pub modified_at_unix_ms: Option<u64>,
 }
 
 impl From<TransferProgress> for FileNetworkProgress {
@@ -567,6 +583,14 @@ impl FileNetworkDataPlane {
                 now_unix_ms,
                 peer_ip,
             ),
+            FileNetworkRequest::ReadMetadata { share_id, path } => self.read_metadata(
+                actor,
+                context,
+                network_enabled,
+                member_access_epoch,
+                share_id,
+                path,
+            ),
             FileNetworkRequest::Resume { request } => self.resume(
                 actor,
                 member_access_epoch,
@@ -605,6 +629,33 @@ impl FileNetworkDataPlane {
                 &operation_id,
                 now_unix_ms,
             ),
+        }
+    }
+
+    fn read_metadata(
+        &self,
+        actor: &NodeId,
+        context: &AccessContext,
+        network_enabled: bool,
+        member_access_epoch: u64,
+        share_id: FileShareId,
+        path: SharedPath,
+    ) -> FileNetworkResponse {
+        if &context.actor != actor || member_access_epoch == 0 {
+            return network_error("file_metadata_peer_mismatch", None);
+        }
+        match self
+            .runtime
+            .read_metadata(context, network_enabled, &share_id, path)
+        {
+            Ok(metadata) => FileNetworkResponse::Metadata {
+                metadata: FileNetworkMetadata {
+                    is_directory: metadata.is_directory,
+                    size: metadata.size,
+                    modified_at_unix_ms: metadata.modified_at_unix_ms,
+                },
+            },
+            Err(error) => runtime_error(&error),
         }
     }
 
@@ -1692,7 +1743,8 @@ fn validate_network_response(response: &FileNetworkResponse) -> Result<(), FileN
         }
         FileNetworkResponse::Progress { .. }
         | FileNetworkResponse::ChunkAccepted { .. }
-        | FileNetworkResponse::Completed { .. } => Ok(()),
+        | FileNetworkResponse::Completed { .. }
+        | FileNetworkResponse::Metadata { .. } => Ok(()),
     }
 }
 
@@ -1742,7 +1794,10 @@ mod tests {
                 id: "allow".into(),
                 subjects: BTreeSet::from([SubjectSelector::AnyMember]),
                 path_prefix: SharedPath::root(),
-                actions: BTreeSet::from([fuckipv6_common::domain::FileAction::Download]),
+                actions: BTreeSet::from([
+                    fuckipv6_common::domain::FileAction::Download,
+                    fuckipv6_common::domain::FileAction::ReadMetadata,
+                ]),
                 effect: FileAclEffect::Allow,
             }],
         }
@@ -1969,6 +2024,10 @@ mod tests {
                 operation_id: operation(3),
                 path: SharedPath::parse("docs/readme.txt").expect("path"),
             },
+            FileNetworkRequest::ReadMetadata {
+                share_id: share_id(1),
+                path: SharedPath::parse("docs/readme.txt").expect("path"),
+            },
             FileNetworkRequest::Resume {
                 request: ResumeRequest {
                     transfer_id: transfer(2),
@@ -2009,6 +2068,13 @@ mod tests {
         let responses = [
             FileNetworkResponse::Opened {
                 session: Box::new(session),
+            },
+            FileNetworkResponse::Metadata {
+                metadata: FileNetworkMetadata {
+                    is_directory: false,
+                    size: 42,
+                    modified_at_unix_ms: Some(1_700_000_000_000),
+                },
             },
             FileNetworkResponse::Progress { progress },
             FileNetworkResponse::ChunkAccepted {
@@ -3221,7 +3287,7 @@ mod tests {
     }
 
     #[test]
-    fn acl_reconfiguration_revokes_live_transfer_and_rejects_new_requests() {
+    fn acl_reconfiguration_revokes_live_transfer_and_rejects_new_metadata_and_requests() {
         let temporary = TempDir::new().expect("tempdir");
         let source = b"acl-protected-download";
         std::fs::write(temporary.path().join("source.bin"), source).expect("source");
@@ -3231,6 +3297,28 @@ mod tests {
         let runtime = enable_download_runtime(&temporary, &share);
         let mut data_plane = FileNetworkDataPlane::new(runtime.clone());
         let capability_epoch = data_plane.subscribe_capability_epoch();
+        let metadata = data_plane.handle_request(
+            &actor,
+            &context,
+            true,
+            7,
+            Ipv6Addr::LOCALHOST,
+            FileNetworkRequest::ReadMetadata {
+                share_id: share.id.clone(),
+                path: SharedPath::parse("source.bin").expect("metadata path"),
+            },
+            9,
+        );
+        assert!(matches!(
+            metadata,
+            FileNetworkResponse::Metadata {
+                metadata: FileNetworkMetadata {
+                    is_directory: false,
+                    size,
+                    ..
+                }
+            } if size == source.len() as u64
+        ));
         let active = open_download(&mut data_plane, &actor, &context, &share, 80, 81, 10);
         assert!(data_plane
             .next_download_frame(
@@ -3284,6 +3372,21 @@ mod tests {
             )),
             "file_acl_no_allow"
         );
+        assert_eq!(
+            response_code(data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::ReadMetadata {
+                    share_id: revoked.id.clone(),
+                    path: SharedPath::parse("source.bin").expect("metadata path"),
+                },
+                15,
+            )),
+            "file_acl_no_allow"
+        );
         let activity = data_plane.drain_activity();
         assert_eq!(activity.len(), 1);
         assert_eq!(activity[0].action, "file.transfer.authorization_revoked");
@@ -3295,6 +3398,36 @@ mod tests {
         assert_eq!(
             activity[0].details["cleanup_code"],
             "file_transfer_cleanup_completed"
+        );
+    }
+
+    #[test]
+    fn metadata_requires_explicit_read_metadata_acl_action() {
+        let temporary = TempDir::new().expect("tempdir");
+        std::fs::write(temporary.path().join("source.bin"), b"private").expect("source");
+        let mut share = share();
+        for acl in [&mut share.network_acl, &mut share.local_acl] {
+            acl.rules[0].actions.remove(&FileAction::ReadMetadata);
+        }
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = enable_download_runtime(&temporary, &share);
+        let mut data_plane = FileNetworkDataPlane::new(runtime);
+
+        assert_eq!(
+            response_code(data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::ReadMetadata {
+                    share_id: share.id.clone(),
+                    path: SharedPath::parse("source.bin").expect("metadata path"),
+                },
+                9,
+            )),
+            "file_acl_no_allow"
         );
     }
 

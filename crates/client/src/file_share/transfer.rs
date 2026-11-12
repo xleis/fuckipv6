@@ -20,7 +20,7 @@ use super::capability::{
 use super::error::FileShareError;
 use super::quota::{self, QuotaScanLimits};
 use super::rate_limit::TransferRateLimiter;
-use super::root::LocalShareRoot;
+use super::root::{LocalFileMetadata, LocalShareRoot};
 use super::temp::TemporaryUpload;
 
 /// Authenticated server-side accounting supplied at upload admission. These
@@ -138,6 +138,33 @@ impl FileTransferAdapter {
             capability,
             bandwidth: Arc::new(TransferRateLimiter::new()),
         }
+    }
+
+    /// Return metadata only after authorizing the exact path against the
+    /// current share ACL and checking the capability epoch again after the
+    /// filesystem lookup.
+    pub fn read_metadata(
+        &self,
+        context: &AccessContext,
+        network_enabled: bool,
+        share_id: &FileShareId,
+        path: SharedPath,
+    ) -> Result<LocalFileMetadata, FileTransferAdapterError> {
+        let lease = self.capability.authorize(
+            &FileAccessRequest {
+                path: path.clone(),
+                action: FileAction::ReadMetadata,
+            },
+            context,
+            network_enabled,
+        )?;
+        if &lease.share().id != share_id {
+            return Err(FileTransferAdapterError::ShareMismatch);
+        }
+        lease.permit().ensure_current()?;
+        let metadata = lease.root().read_metadata(&path)?;
+        lease.permit().ensure_current()?;
+        Ok(metadata)
     }
 
     /// Build the server-authoritative download manifest and binding for one

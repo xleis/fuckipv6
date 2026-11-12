@@ -14,6 +14,7 @@ use fuckipv6_common::domain::{
 };
 
 use super::capability::{FileCapabilityError, FileCapabilitySnapshot, FileShareCapability};
+use super::root::LocalFileMetadata;
 use super::transfer::{
     DownloadTransfer, FileTransferAdapter, FileTransferAdapterError, TransferOperationCancellation,
     TransferProgress, UploadAdmission, UploadTransfer,
@@ -96,6 +97,20 @@ impl FileRuntime {
 
     pub fn capability(&self) -> &FileShareCapability {
         &self.capability
+    }
+
+    /// Authorize and project one path's metadata without creating a transfer
+    /// admission or retaining a file handle after the call returns.
+    pub fn read_metadata(
+        &self,
+        context: &AccessContext,
+        network_enabled: bool,
+        share_id: &FileShareId,
+        path: SharedPath,
+    ) -> Result<LocalFileMetadata, FileRuntimeError> {
+        self.adapter
+            .read_metadata(context, network_enabled, share_id, path)
+            .map_err(Into::into)
     }
 
     /// Prepare an upload binding whose actor, share revision and access epoch

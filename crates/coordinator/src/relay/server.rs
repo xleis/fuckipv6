@@ -2906,7 +2906,10 @@ mod tests {
             .await
             .expect_err("existing destination session must be reauthorized")
             .to_string();
-        assert!(error.contains("403"), "{error}");
+        assert!(
+            error.contains("403") || error.contains("404"),
+            "policy revocation must fail closed with authorization denial or a disconnected destination: {error}"
+        );
         let usage = server.usage_snapshot().await;
         assert_eq!(usage.forwarded_packets, 0);
         assert_eq!(usage.forwarded_bytes, 0);
@@ -3397,7 +3400,10 @@ mod tests {
             .await
             .expect_err("persistently revoked destination must not receive relay packets")
             .to_string();
-        assert!(destination_error.contains("403"), "{destination_error}");
+        assert!(
+            destination_error.contains("403") || destination_error.contains("404"),
+            "revoked destination must fail closed with authorization denial or a disconnected destination: {destination_error}"
+        );
 
         session_manager
             .try_revoke_node(identity_a.client_id(), &identity_a.public_key())

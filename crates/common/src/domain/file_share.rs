@@ -60,10 +60,10 @@ impl ShareRoot {
 /// A portable path relative to a share root.
 ///
 /// The empty string denotes the root. Paths use `/` on every platform.
-/// Backslashes, drive/UNC prefixes, control bytes, alternate data streams, empty
-/// components, `.`/`..`, trailing dots/spaces, and reserved DOS device names are
-/// rejected rather than normalized. This keeps every adapter on the same
-/// authorization decision.
+/// Backslashes, drive/UNC prefixes, control or invisible formatting characters,
+/// alternate data streams, empty components, `.`/`..`, trailing dots/spaces, and
+/// reserved DOS device names are rejected rather than normalized. This keeps
+/// every adapter on the same authorization decision.
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema, Serialize, Deserialize,
 )]
@@ -160,12 +160,13 @@ fn validate_component(component: &str) -> DomainResult<()> {
             "shared path components must not end with a dot or space",
         ));
     }
-    if component
-        .chars()
-        .any(|character| character.is_control() || matches!(character, ':' | '/' | '\\'))
-    {
+    if component.chars().any(|character| {
+        character.is_control()
+            || is_unsafe_format_character(character)
+            || matches!(character, ':' | '/' | '\\')
+    }) {
         return Err(DomainError::invalid_value(
-            "shared path contains a platform-ambiguous or control character",
+            "shared path contains a platform-ambiguous, control, or invisible formatting character",
         ));
     }
     let stem = component.split('.').next().unwrap_or(component);
@@ -183,6 +184,24 @@ fn validate_component(component: &str) -> DomainResult<()> {
         ));
     }
     Ok(())
+}
+
+fn is_unsafe_format_character(character: char) -> bool {
+    matches!(
+        character,
+        '\u{00ad}'
+            | '\u{061c}'
+            | '\u{070f}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
+    )
 }
 
 #[derive(
@@ -1088,6 +1107,7 @@ impl TransferSession {
 mod tests {
     use super::*;
     use crate::domain::permissions::{AccessContext, NetworkRole};
+    use proptest::prelude::*;
 
     fn node(byte: u8) -> NodeId {
         NodeId::from_public_key(&[byte])
@@ -1153,6 +1173,14 @@ mod tests {
         }
     }
 
+    fn portable_component_strategy() -> impl Strategy<Value = String> {
+        proptest::collection::vec(any::<char>(), 1..16)
+            .prop_map(|characters| characters.into_iter().collect::<String>())
+            .prop_filter("valid portable path component", |component| {
+                !component.contains('/') && SharedPath::parse(component.clone()).is_ok()
+            })
+    }
+
     #[test]
     fn portable_paths_reject_traversal_and_platform_ambiguity() {
         assert_eq!(
@@ -1180,6 +1208,81 @@ mod tests {
             .expect("path")
             .is_same_or_descendant_of(&SharedPath::parse("docs").expect("documents")));
         assert!(serde_json::from_str::<SharedPath>(r#""../escape""#).is_err());
+    }
+
+    #[test]
+    fn portable_paths_preserve_case_and_unicode_without_platform_normalization() {
+        for value in ["资料/报告.txt", "café/文件.txt", "emoji-🚀.bin", "Σ/σ.txt"] {
+            let path = SharedPath::parse(value).expect("portable Unicode path");
+            assert_eq!(path.as_str(), value);
+            assert_eq!(
+                serde_json::from_str::<SharedPath>(&serde_json::to_string(&path).expect("json"))
+                    .expect("round trip"),
+                path
+            );
+        }
+
+        let upper = SharedPath::parse("Docs/Readme.txt").expect("upper path");
+        let lower = SharedPath::parse("docs/readme.txt").expect("lower path");
+        assert_ne!(upper, lower);
+        assert!(!lower.is_same_or_descendant_of(&upper));
+
+        for unsafe_path in ["docs/", "docs//readme", "docs/readme/", "docs/\u{202e}txt"] {
+            assert!(SharedPath::parse(unsafe_path).is_err(), "{unsafe_path:?}");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_inputs_never_create_an_ambiguous_shared_path(value in any::<String>()) {
+            let Ok(path) = SharedPath::parse(value.clone()) else {
+                return Ok(());
+            };
+
+            prop_assert_eq!(path.as_str(), value.as_str());
+            prop_assert!(path.as_str().len() <= MAX_PORTABLE_PATH_BYTES);
+            if !path.is_root() {
+                prop_assert!(!path.as_str().starts_with('/'));
+                prop_assert!(!path.as_str().contains('\\'));
+                prop_assert!(!path.as_str().ends_with('/'));
+                for component in path.components() {
+                    prop_assert!(!component.is_empty());
+                    prop_assert!(component.len() <= MAX_PORTABLE_COMPONENT_BYTES);
+                    prop_assert!(!component.ends_with('.') && !component.ends_with(' '));
+                    let contains_ambiguous_character = component.chars().any(|character| {
+                        character.is_control()
+                            || is_unsafe_format_character(character)
+                            || matches!(character, ':' | '/' | '\\')
+                    });
+                    prop_assert!(!contains_ambiguous_character);
+                }
+            }
+
+            let encoded = serde_json::to_string(&path).expect("serialize shared path");
+            let decoded = serde_json::from_str::<SharedPath>(&encoded).expect("deserialize shared path");
+            prop_assert_eq!(decoded, path);
+        }
+
+        #[test]
+        fn generated_portable_paths_obey_component_aware_containment(
+            components in proptest::collection::vec(portable_component_strategy(), 1..8)
+        ) {
+            let path = SharedPath::parse(components.join("/")).expect("generated path");
+            for ancestor_components in 0..=components.len() {
+                let ancestor = if ancestor_components == 0 {
+                    SharedPath::root()
+                } else {
+                    SharedPath::parse(
+                        components[..ancestor_components].join("/")
+                    ).expect("generated ancestor")
+                };
+                prop_assert!(path.is_same_or_descendant_of(&ancestor));
+            }
+
+            let lookalike = SharedPath::parse(format!("{}-lookalike", path.as_str()))
+                .expect("lookalike sibling");
+            prop_assert!(!lookalike.is_same_or_descendant_of(&path));
+        }
     }
 
     #[test]

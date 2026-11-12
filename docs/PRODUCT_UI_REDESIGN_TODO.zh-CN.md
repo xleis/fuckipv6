@@ -59,7 +59,7 @@
 | W10 安全与隐私 | `[x]` | P1 | W9 | 权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计、安全页面状态和可重复治理证据闭环均已完成 |
 | W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约和 W11-09 隔离路由 E2E/失败关闭/网络报告已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，GPUI 已接入同一页面的权威投影、规则/目标/影响展示和精确跳转，真实命中观测、GPUI/WebUI/Android 三端一致、生产后端接线及真实平台监听/适配待完成 |
 | W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05 已完成：本机启停、贡献治理、管理员选择、分层健康与故障切换/撤权均有权威状态和自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收；两侧 Exit 可达、Peer 级统计映射和 W12-09 的 24 小时稳定性/自动清理仍待完成 |
-| W13 Relay | `[~]` | P1 | W10 | W13-01、W13-02、W13-03、W13-05 和 W13-06 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；真实 Relay 子进程运营者导出已验证只含最小 usage/health/governance 字段，不包含载荷、虚拟地址、密钥或显示名；生产数据面故障转移现会写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复已有真实进程测试；真实 Relay 子进程压力测试已覆盖连接风暴、慢连接/资源上限、恢复、吞吐、延迟、CPU 和 RSS，并输出绑定 commit/平台/拓扑的报告；真实 `__control/__node` 进程级测试已验证 Relay 持续满载时 Snapshot 与 UI Manifest 仍可用并在卸载后恢复。W13-04/07 仍未完成：真实源地址/Exit 要求与恢复路径、Relay/Coordinator/Exit 同时故障及 GPUI/WebUI/Android 三端对等 |
+| W13 Relay | `[~]` | P1 | W10 | W13-01、W13-02、W13-03、W13-05 和 W13-06 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；真实 Relay 子进程运营者导出已验证只含最小 usage/health/governance 字段，不包含载荷、虚拟地址、密钥或显示名；生产数据面故障转移现会写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复已有真实进程测试；真实 Relay 子进程压力测试已覆盖连接风暴、慢连接/资源上限、恢复、吞吐、延迟、CPU 和 RSS，并输出绑定 commit/平台/拓扑的报告；真实 `__control/__node` 进程级测试已验证 Relay 持续满载时 Snapshot 与 UI Manifest 仍可用并在卸载后恢复。W13-04 已补齐 Relay 切换使用分配虚拟源地址且未授权 Exit 失败关闭的证据；Relay/Coordinator/Exit 真实同时故障及 GPUI/WebUI/Android 三端对等仍未完成 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
 | W15 File | `[ ]` | P2 | W10 | ACL、配额、上传下载、续传 |
 | W16 Android | `[ ]` | P2 | W2,W4,W5,W7-W15 | Compose、VpnService、全能力 |
@@ -3039,7 +3039,7 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 - [x] 健康状态覆盖进程、监听、网络、配额和实际转发；
 - [x] 候选 Relay 排除离线、过期和未授权对象；
 - [x] 连接失败时按显式策略尝试替代或失败关闭；
-- [ ] 切换不泄漏真实源地址或绕过 Exit 要求；
+- [x] 切换不泄漏真实源地址或绕过 Exit 要求；
 - [x] 回退过程有状态、时长和原因；
 - [x] 恢复后验证路径和会话；
 - [x] 避免无限重试和路由环路；
@@ -3137,6 +3137,15 @@ Relay over QUIC loopback，release profile 与 debug profile 均通过；这证�
 失败关闭；候选环路排除由 `select_relay_candidate` 的有界选择测试覆盖。该证据补齐单机双进程拓扑下的断开、切换、
 重连和环路约束，但不是多主机网络损伤测试，也不能单独证明真实源地址不会经由 Relay 外路径泄漏或 Exit 强制要求
 在完整 TUN/路由路径中不可绕过。
+
+**Relay 切换源地址与 Exit 约束（2026-11-13）**：`relay_failover_rewrites_spoofed_source_and_preserves_selected_exit`
+使用生产 `route_tun_packet` 从带未分配源地址的 TUN 报文生成转发上下文，验证公开 Proxy 目标在没有授权 Exit 时直接
+失败关闭，有管理员选定 Exit 时只转发到该 Exit 的虚拟地址；IPv4/IPv6 伪造源地址都会替换成本机分配的虚拟地址。
+随后强制 direct P2P 发送失败，由生产 `P2pOutboundTransport` 依次尝试 QUIC Relay 和 signaling，并捕获两条回退路径
+实际收到的源/目的地址与密文：两者都只含分配虚拟源和选定 Exit 目的，且复用同一份已封装密文，不回退到真实宿主源地址、
+不重新封包。真实 Relay 子进程的源地址注册绑定、SIGKILL 切换和未知目的 `404` 失败关闭由上述双 Relay 测试补充。
+该组合证据仍基于单机 loopback 和注入式回退捕获，不是多主机 TUN/netns 全路径抓包，不能证明操作系统或平台外路径
+绝无旁路泄漏。
 
 **Relay 满载期间节点控制面可用性（2026-11-13）**：`w13_relay_control_process::relay_saturation_keeps_control_snapshot_and_manifest_available`
 在 Linux 上启动真实 `__control` 和由其拉起的独立 `__node`，测试进程内运行真实 `RelayServer`，通过 QUIC loopback

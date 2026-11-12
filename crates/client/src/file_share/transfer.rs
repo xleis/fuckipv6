@@ -658,6 +658,13 @@ impl UploadTransfer {
             return Err(FileTransferError::InvalidState.into());
         }
         let result = (|| {
+            // Re-check the permit issued when the transfer began before
+            // mapping the current share binding. A disable/reconfigure must be
+            // reported as a revoked transfer permission instead of a generic
+            // binding mismatch.
+            if self.permit.ensure_current().is_err() {
+                return Err(FileTransferError::PermissionRevoked.into());
+            }
             let lease = self.capability.authorize(
                 &FileAccessRequest {
                     path: self.session.binding.path.clone(),
@@ -912,6 +919,11 @@ impl DownloadTransfer {
             return Err(FileTransferError::InvalidState.into());
         }
         let result = (|| {
+            // Preserve revocation classification for a resume that races with
+            // a local capability epoch change.
+            if self.permit.ensure_current().is_err() {
+                return Err(FileTransferError::PermissionRevoked.into());
+            }
             let lease = self.capability.authorize(
                 &FileAccessRequest {
                     path: self.session.binding.path.clone(),
@@ -1744,6 +1756,49 @@ mod tests {
             std::fs::read(host_path(&temporary, "paused.txt")).expect("published file"),
             b"abcdefgh"
         );
+    }
+
+    #[test]
+    fn upload_resume_rejects_a_changed_capability_epoch() {
+        let (temporary, capability, share) = setup();
+        let adapter = FileTransferAdapter::new(capability.clone());
+        let mut transfer = adapter
+            .begin_upload(
+                upload_session(
+                    &share,
+                    "revoked-resume.txt",
+                    b"abcdefgh",
+                    4,
+                    b"revoked",
+                    1_000,
+                ),
+                &context(&share),
+                true,
+                UploadAdmission::default(),
+                10,
+            )
+            .expect("begin upload");
+        transfer.write_chunk(0, b"abcd", 11).expect("first chunk");
+        transfer.pause(12).expect("pause");
+
+        let mut revised = share.clone();
+        revised.revision = 2;
+        revised.updated_at_unix_ms = 13;
+        capability
+            .enable(
+                &revised,
+                &owner(),
+                temporary.path().to_str().expect("utf8 temp path"),
+                13,
+            )
+            .expect("replace share");
+        let error = transfer
+            .resume(&context(&revised), true, 14)
+            .expect_err("old capability epoch must not resume");
+        assert_eq!(error.code(), "file_transfer_permission_revoked");
+        assert_eq!(transfer.session().state, TransferState::Cancelled);
+        assert_eq!(temp_file_count(&temporary), 0);
+        assert!(!host_path(&temporary, "revoked-resume.txt").exists());
     }
 
     #[test]

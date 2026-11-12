@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use fuckipv6_common::domain::{
     AccessContext, ConcurrentNamePolicy, ContentHash, FileAccessDenial, FileAccessDenialCode,
-    FileAccessRequest, FileAction, FileQuotaError, FileTransferError, OperationId, ResumeRequest,
-    SharedPath, TransferDirection, TransferSession, TransferState,
+    FileAccessRequest, FileAction, FileChunk, FileId, FileQuotaError, FileShareId,
+    FileTransferError, FileVersion, OperationId, ResumeRequest, SharedPath, TransferBinding,
+    TransferDirection, TransferId, TransferManifest, TransferSession, TransferState,
 };
 use tokio::sync::watch;
 
@@ -92,6 +93,8 @@ pub enum FileTransferAdapterError {
     ReplacementUnsupported,
     #[error("the File transfer operation was cancelled")]
     Cancelled,
+    #[error("the requested File share is not the enabled share")]
+    ShareMismatch,
     #[error("the File bandwidth quota requires a retry after {retry_after_ms} ms")]
     RateLimited { retry_after_ms: u64 },
 }
@@ -116,6 +119,7 @@ impl FileTransferAdapterError {
             }
             Self::ReplacementUnsupported => "file_transfer_replacement_unsupported",
             Self::Cancelled => "file_transfer_cancelled",
+            Self::ShareMismatch => "file_transfer_share_mismatch",
             Self::RateLimited { .. } => "file_transfer_rate_limited",
         }
     }
@@ -134,6 +138,102 @@ impl FileTransferAdapter {
             capability,
             bandwidth: Arc::new(TransferRateLimiter::new()),
         }
+    }
+
+    /// Build the server-authoritative download manifest and binding for one
+    /// authenticated peer. The client selects only the path; actor, share
+    /// revision, access epoch and content metadata are derived server-side.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_download_session(
+        &self,
+        context: &AccessContext,
+        member_access_epoch: u64,
+        network_enabled: bool,
+        share_id: &FileShareId,
+        transfer_id: TransferId,
+        operation_id: OperationId,
+        path: SharedPath,
+        chunk_size: u64,
+        expires_at_unix_ms: u64,
+        now_unix_ms: u64,
+    ) -> Result<TransferSession, FileTransferAdapterError> {
+        let lease = self.capability.authorize(
+            &FileAccessRequest {
+                path: path.clone(),
+                action: FileAction::Download,
+            },
+            context,
+            network_enabled,
+        )?;
+        if &lease.share().id != share_id {
+            return Err(FileTransferAdapterError::ShareMismatch);
+        }
+        let version = lease.root().file_version(&path, 1)?;
+        let manifest = download_manifest(lease.root(), &path, &version, chunk_size)?;
+        TransferSession::new(
+            TransferBinding {
+                transfer_id,
+                operation_id,
+                share_id: share_id.clone(),
+                actor: context.actor.clone(),
+                access_epoch: member_access_epoch,
+                path,
+                direction: TransferDirection::Download,
+                file_version: Some(version),
+                share_revision: lease.share().revision,
+                expires_at_unix_ms,
+            },
+            manifest,
+            now_unix_ms,
+        )
+        .map_err(Into::into)
+    }
+
+    /// Bind an upload request to the authenticated actor and current local
+    /// share generation. The peer supplies the manifest, but never its identity,
+    /// epoch or share revision.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_upload_session(
+        &self,
+        context: &AccessContext,
+        member_access_epoch: u64,
+        network_enabled: bool,
+        share_id: &FileShareId,
+        transfer_id: TransferId,
+        operation_id: OperationId,
+        path: SharedPath,
+        manifest: TransferManifest,
+        expires_at_unix_ms: u64,
+        now_unix_ms: u64,
+    ) -> Result<TransferSession, FileTransferAdapterError> {
+        let lease = self.capability.authorize(
+            &FileAccessRequest {
+                path: path.clone(),
+                action: FileAction::Upload,
+            },
+            context,
+            network_enabled,
+        )?;
+        if &lease.share().id != share_id {
+            return Err(FileTransferAdapterError::ShareMismatch);
+        }
+        TransferSession::new(
+            TransferBinding {
+                transfer_id,
+                operation_id,
+                share_id: share_id.clone(),
+                actor: context.actor.clone(),
+                access_epoch: member_access_epoch,
+                path,
+                direction: TransferDirection::Upload,
+                file_version: None,
+                share_revision: lease.share().revision,
+                expires_at_unix_ms,
+            },
+            manifest,
+            now_unix_ms,
+        )
+        .map_err(Into::into)
     }
 
     pub fn begin_upload(
@@ -211,12 +311,13 @@ impl FileTransferAdapter {
         )?;
 
         let request = resume_request(&session);
+        let member_access_epoch = session.binding.access_epoch;
         session.resume(
             &request,
             None,
             lease.share().revision,
             true,
-            lease.permit().access_epoch(),
+            member_access_epoch,
             now_unix_ms,
         )?;
         if cancellation
@@ -313,12 +414,13 @@ impl FileTransferAdapter {
         )?;
 
         let request = resume_request(&session);
+        let member_access_epoch = session.binding.access_epoch;
         session.resume(
             &request,
             Some(&current_version),
             lease.share().revision,
             true,
-            lease.permit().access_epoch(),
+            member_access_epoch,
             now_unix_ms,
         )?;
         if cancellation
@@ -367,6 +469,58 @@ impl FileTransferAdapter {
             network_enabled,
         )?)
     }
+}
+
+fn download_manifest(
+    root: &LocalShareRoot,
+    path: &SharedPath,
+    version: &FileVersion,
+    chunk_size: u64,
+) -> Result<TransferManifest, FileTransferAdapterError> {
+    if chunk_size == 0 {
+        return Err(FileTransferError::InvalidManifest.into());
+    }
+    let mut file = root.open_read(path)?;
+    let mut chunks = Vec::new();
+    let mut offset = 0_u64;
+    while offset < version.size {
+        let length = (version.size - offset).min(chunk_size);
+        let mut bytes =
+            vec![0_u8; usize::try_from(length).map_err(|_| FileTransferError::InvalidManifest)?];
+        file.read_exact(&mut bytes).map_err(|error| {
+            FileShareError::io(
+                super::error::FileShareErrorCode::Io,
+                "shared file could not be read for transfer manifest",
+                error,
+            )
+        })?;
+        chunks.push(FileChunk {
+            index: u32::try_from(chunks.len()).map_err(|_| FileTransferError::InvalidManifest)?,
+            offset,
+            length,
+            checksum: ContentHash::from_bytes(&bytes),
+        });
+        offset = offset.saturating_add(length);
+    }
+    let manifest = TransferManifest {
+        file_id: FileId::from_public_key(
+            format!(
+                "{}:{}:{}",
+                path.as_str(),
+                version.content_hash.as_str(),
+                version.revision
+            )
+            .as_bytes(),
+        ),
+        total_bytes: version.size,
+        chunk_size,
+        content_hash: version.content_hash.clone(),
+        chunks,
+    };
+    manifest
+        .validate()
+        .map_err(|_| FileTransferError::InvalidManifest)?;
+    Ok(manifest)
 }
 
 /// A staged upload. Dropping it removes the hidden temporary file; only a
@@ -464,10 +618,31 @@ impl UploadTransfer {
         Ok(())
     }
 
-    /// Reauthorize a paused upload. Any capability epoch or share revision
-    /// change invalidates the original binding and fails the transfer closed.
+    /// Reauthorize a paused upload using the binding generated by this node.
     pub fn resume(
         &mut self,
+        context: &AccessContext,
+        network_enabled: bool,
+        now_unix_ms: u64,
+    ) -> Result<(), FileTransferAdapterError> {
+        let request = resume_request(&self.session);
+        let member_access_epoch = self.session.binding.access_epoch;
+        self.resume_with_request(
+            &request,
+            member_access_epoch,
+            context,
+            network_enabled,
+            now_unix_ms,
+        )
+    }
+
+    /// Reauthorize a paused upload with the peer-supplied resume binding. Any
+    /// member epoch, capability epoch, share revision or file version change
+    /// invalidates the original transfer and fails it closed.
+    pub fn resume_with_request(
+        &mut self,
+        request: &ResumeRequest,
+        member_access_epoch: u64,
         context: &AccessContext,
         network_enabled: bool,
         now_unix_ms: u64,
@@ -487,13 +662,12 @@ impl UploadTransfer {
             )?;
             validate_binding(&self.session, &lease, context)?;
             ensure_upload_destination(lease.root(), lease.share(), &self.session.binding.path)?;
-            let request = resume_request(&self.session);
             self.session.resume(
-                &request,
+                request,
                 None,
                 lease.share().revision,
                 true,
-                lease.permit().access_epoch(),
+                member_access_epoch,
                 now_unix_ms,
             )?;
             lease.permit().ensure_current()?;
@@ -701,6 +875,26 @@ impl DownloadTransfer {
         network_enabled: bool,
         now_unix_ms: u64,
     ) -> Result<(), FileTransferAdapterError> {
+        let request = resume_request(&self.session);
+        let member_access_epoch = self.session.binding.access_epoch;
+        self.resume_with_request(
+            &request,
+            member_access_epoch,
+            context,
+            network_enabled,
+            now_unix_ms,
+        )
+    }
+
+    /// Reauthorize a paused download with the peer-supplied resume binding.
+    pub fn resume_with_request(
+        &mut self,
+        request: &ResumeRequest,
+        member_access_epoch: u64,
+        context: &AccessContext,
+        network_enabled: bool,
+        now_unix_ms: u64,
+    ) -> Result<(), FileTransferAdapterError> {
         self.check_operation_cancellation(now_unix_ms)?;
         if self.session.state != TransferState::Paused {
             return Err(FileTransferError::InvalidState.into());
@@ -728,13 +922,12 @@ impl DownloadTransfer {
                 return Err(FileTransferError::VersionChanged.into());
             }
             let file = lease.root().open_read(&self.session.binding.path)?;
-            let request = resume_request(&self.session);
             self.session.resume(
-                &request,
+                request,
                 Some(&current_version),
                 lease.share().revision,
                 true,
-                lease.permit().access_epoch(),
+                member_access_epoch,
                 now_unix_ms,
             )?;
             lease.permit().ensure_current()?;
@@ -879,9 +1072,6 @@ fn validate_binding(
 ) -> Result<(), FileTransferAdapterError> {
     if session.binding.actor != context.actor || session.binding.share_id != lease.share().id {
         return Err(FileTransferError::BindingMismatch.into());
-    }
-    if session.binding.access_epoch != lease.permit().access_epoch() {
-        return Err(FileTransferError::PermissionRevoked.into());
     }
     if session.binding.share_revision != lease.share().revision {
         return Err(FileTransferError::BindingMismatch.into());

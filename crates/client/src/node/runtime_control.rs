@@ -45,6 +45,7 @@ use crate::cli::commands::{self, CleanupStatus, RuntimeCleanupOutcome, RuntimeOp
 use crate::config_manager::{
     ConfigManager, JoinedNetworkMembership, NetworkConfig, NetworkCreationError,
 };
+use crate::file_share::FileRuntime;
 use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
 use crate::network_setup::{self, NetworkSetupStage};
 use crate::node::runtime_metadata;
@@ -755,6 +756,7 @@ struct LiveNetworkRuntimeLauncher {
     state: NodeStateStore,
     events: NodeEventBus,
     registry: MultiNetworkRegistry,
+    file_runtime: FileRuntime,
 }
 
 impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
@@ -762,6 +764,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
         let state = self.state.clone();
         let events = self.events.clone();
         let registry = self.registry.clone();
+        let file_runtime = self.file_runtime.clone();
 
         Box::pin(async move {
             let mut runtime = commands::prepare_client_runtime_ext(
@@ -771,6 +774,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
                 Some(&request.network_name),
                 request.local_exit_enabled,
                 false,
+                Some(file_runtime),
             )
             .await
             .map_err(|error| {
@@ -2141,11 +2145,13 @@ impl NetworkRuntimeManager {
         lifecycle: NodeLifecycle,
         registry: MultiNetworkRegistry,
         services: EmbeddedServiceManager,
+        file_runtime: FileRuntime,
     ) -> Self {
         let launcher = Arc::new(LiveNetworkRuntimeLauncher {
             state: state.clone(),
             events: events.clone(),
             registry: registry.clone(),
+            file_runtime,
         });
         Self::spawn_with_launcher(
             configs, options, state, events, lifecycle, registry, services, launcher,

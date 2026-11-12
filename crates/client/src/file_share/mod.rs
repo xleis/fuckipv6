@@ -24,8 +24,9 @@ pub use capability::{
 };
 pub use error::{FileShareError, FileShareErrorCode, FileShareResult};
 pub(crate) use network::{
-    decode_file_network_frame, encode_file_network_frame, is_file_network_frame, FileNetworkFrame,
-    FileNetworkRequest, FileNetworkResponse,
+    decode_file_network_frame, encode_file_network_frame, is_file_network_frame,
+    trusted_file_member, FileNetworkDataPlane, FileNetworkFrame, FileNetworkRequest,
+    FileNetworkResponse, TrustedFileMember,
 };
 pub(crate) use owner_service::FileOwnerService;
 pub use owner_service::{FileOwnerServiceError, FileShareConfiguration, FileSharePreview};

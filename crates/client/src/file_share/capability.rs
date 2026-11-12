@@ -298,6 +298,12 @@ impl FileShareCapability {
         }
     }
 
+    /// Observe capability enable/disable/reconfigure generations without
+    /// treating that epoch as member-directory authorization.
+    pub fn subscribe_epoch(&self) -> watch::Receiver<u64> {
+        self.inner.epoch_tx.subscribe()
+    }
+
     /// Metadata is returned only while the local owner keeps the capability
     /// enabled. This is the single metadata gate for command and UI adapters.
     pub fn current_share(&self) -> Option<FileShare> {

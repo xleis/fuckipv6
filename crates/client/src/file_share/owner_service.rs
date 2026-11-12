@@ -254,6 +254,12 @@ impl FileOwnerService {
         }
     }
 
+    /// Share only the transfer runtime with authenticated network data planes.
+    /// The configuration store, audit sink and local root remain owned here.
+    pub(crate) fn network_runtime(&self) -> FileRuntime {
+        self.runtime.clone()
+    }
+
     /// Validate and inspect a prospective share without persisting or enabling
     /// it. The bounded directory scan never follows symlinks.
     pub(crate) async fn preview(

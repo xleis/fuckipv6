@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use fuckipv6_common::domain::{
-    AccessContext, FileQuotaError, NodeId, OperationId, SharedPath, TransferSession,
+    AccessContext, FileQuotaError, FileShareId, NodeId, OperationId, SharedPath, TransferId,
+    TransferManifest, TransferSession,
 };
 
 use super::capability::{FileCapabilityError, FileCapabilitySnapshot, FileShareCapability};
@@ -95,6 +96,70 @@ impl FileRuntime {
 
     pub fn capability(&self) -> &FileShareCapability {
         &self.capability
+    }
+
+    /// Prepare an upload binding whose actor, share revision and access epoch
+    /// come from authenticated local state rather than the peer request.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_upload_session(
+        &self,
+        context: &AccessContext,
+        member_access_epoch: u64,
+        network_enabled: bool,
+        share_id: &FileShareId,
+        transfer_id: TransferId,
+        operation_id: OperationId,
+        path: SharedPath,
+        manifest: TransferManifest,
+        expires_at_unix_ms: u64,
+        now_unix_ms: u64,
+    ) -> Result<TransferSession, FileRuntimeError> {
+        self.adapter
+            .prepare_upload_session(
+                context,
+                member_access_epoch,
+                network_enabled,
+                share_id,
+                transfer_id,
+                operation_id,
+                path,
+                manifest,
+                expires_at_unix_ms,
+                now_unix_ms,
+            )
+            .map_err(Into::into)
+    }
+
+    /// Build a download session from the current server-side file version. A
+    /// client can select a path but cannot supply the manifest it receives.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_download_session(
+        &self,
+        context: &AccessContext,
+        member_access_epoch: u64,
+        network_enabled: bool,
+        share_id: &FileShareId,
+        transfer_id: TransferId,
+        operation_id: OperationId,
+        path: SharedPath,
+        chunk_size: u64,
+        expires_at_unix_ms: u64,
+        now_unix_ms: u64,
+    ) -> Result<TransferSession, FileRuntimeError> {
+        self.adapter
+            .prepare_download_session(
+                context,
+                member_access_epoch,
+                network_enabled,
+                share_id,
+                transfer_id,
+                operation_id,
+                path,
+                chunk_size,
+                expires_at_unix_ms,
+                now_unix_ms,
+            )
+            .map_err(Into::into)
     }
 
     /// Enable the owner-selected root. Any transfer admitted against the prior
@@ -352,6 +417,29 @@ impl RuntimeUploadTransfer {
         result
     }
 
+    pub fn resume_with_request(
+        &mut self,
+        request: &fuckipv6_common::domain::ResumeRequest,
+        member_access_epoch: u64,
+        context: &AccessContext,
+        network_enabled: bool,
+        now_unix_ms: u64,
+    ) -> Result<(), FileTransferAdapterError> {
+        let result = self
+            .inner
+            .as_mut()
+            .expect("upload transfer is present")
+            .resume_with_request(
+                request,
+                member_access_epoch,
+                context,
+                network_enabled,
+                now_unix_ms,
+            );
+        self.release_if_terminal();
+        result
+    }
+
     pub fn finish(
         &mut self,
         now_unix_ms: u64,
@@ -447,6 +535,29 @@ impl RuntimeDownloadTransfer {
             .as_mut()
             .expect("download transfer is present")
             .resume(context, network_enabled, now_unix_ms);
+        self.release_if_terminal();
+        result
+    }
+
+    pub fn resume_with_request(
+        &mut self,
+        request: &fuckipv6_common::domain::ResumeRequest,
+        member_access_epoch: u64,
+        context: &AccessContext,
+        network_enabled: bool,
+        now_unix_ms: u64,
+    ) -> Result<(), FileTransferAdapterError> {
+        let result = self
+            .inner
+            .as_mut()
+            .expect("download transfer is present")
+            .resume_with_request(
+                request,
+                member_access_epoch,
+                context,
+                network_enabled,
+                now_unix_ms,
+            );
         self.release_if_terminal();
         result
     }

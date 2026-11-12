@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
     CapabilityKind, ExitSessionAction, InvitationCode, InvitationRedeemRequest, MembershipRole,
-    MembershipState, NetworkId, NetworkMemberDirectory, NodeId, TrafficFailureKind,
-    TrafficProtectionState, TrafficSessionSnapshot,
+    MembershipState, NetworkId, NetworkMemberDirectory, NodeId, OperationId, TrafficFailureKind,
+    TrafficProtectionState, TrafficSessionSnapshot, TransferId,
 };
 #[cfg(test)]
 use fuckipv6_common::is_encrypted_config_path;
@@ -29,8 +29,9 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration, Instant};
 
 use crate::file_share::{
-    decode_file_network_frame, encode_file_network_frame, is_file_network_frame, FileNetworkFrame,
-    FileNetworkRequest, FileNetworkResponse,
+    decode_file_network_frame, encode_file_network_frame, is_file_network_frame,
+    trusted_file_member, FileNetworkDataPlane, FileNetworkFrame, FileNetworkRequest,
+    FileNetworkResponse,
 };
 use crate::ipc::{self, IpcRequest, IpcResponse};
 use crate::local_ipc::IpcRole;
@@ -552,6 +553,8 @@ impl RuntimeRecoveryEvents {
 pub(crate) struct ClientRuntime {
     pub(crate) signaling: Arc<SignalingClient>,
     pub(crate) p2p: P2pEngine,
+    pub(crate) file_runtime: Option<crate::file_share::FileRuntime>,
+    file_network: Option<FileNetworkDataPlane>,
     pub(crate) identity: Identity,
     pub(crate) network_id: Option<NetworkId>,
     pub(crate) outbound: OutboundDispatcher,
@@ -1405,6 +1408,7 @@ pub(crate) async fn prepare_client_runtime_ext(
     network_name: Option<&str>,
     local_exit_enabled: bool,
     enable_ipc: bool,
+    file_runtime: Option<crate::file_share::FileRuntime>,
 ) -> Result<ClientRuntime> {
     config.tun.name = crate::multi_network::derive_tun_name(network_name, &config.tun.name);
 
@@ -1609,9 +1613,14 @@ pub(crate) async fn prepare_client_runtime_ext(
     } else {
         PathRecoveryState::Disconnected
     };
+    let file_network = file_runtime
+        .as_ref()
+        .map(|runtime| FileNetworkDataPlane::new(runtime.clone()));
     Ok(ClientRuntime {
         signaling,
         p2p,
+        file_runtime,
+        file_network,
         identity: relay_identity,
         network_id,
         outbound,
@@ -3870,9 +3879,8 @@ async fn handle_exit_readiness_frame(
     );
 }
 
-/// File frames are never treated as TUN packets. Until the owner capability is
-/// wired into the authenticated data plane, requests fail closed with a stable
-/// response and no frame is written to the interface.
+/// File frames are never treated as TUN packets. Every request and fragment
+/// re-reads the authoritative directory before it can reach the owner adapter.
 async fn handle_file_network_frame(
     runtime: &mut ClientRuntime,
     src_ip: IpAddr,
@@ -3884,31 +3892,25 @@ async fn handle_file_network_frame(
             request_id,
             request,
         } => {
-            let (transfer_id, operation_id) = match &request {
-                FileNetworkRequest::OpenUpload {
-                    transfer_id,
-                    operation_id,
-                    ..
-                }
-                | FileNetworkRequest::OpenDownload {
-                    transfer_id,
-                    operation_id,
-                    ..
-                }
-                | FileNetworkRequest::Pause {
-                    transfer_id,
-                    operation_id,
-                }
-                | FileNetworkRequest::Cancel {
-                    transfer_id,
-                    operation_id,
-                }
-                | FileNetworkRequest::Finish {
-                    transfer_id,
-                    operation_id,
-                } => (transfer_id, operation_id),
-                FileNetworkRequest::Resume { request } => {
-                    (&request.transfer_id, &request.operation_id)
+            let (transfer_id, operation_id) = file_network_request_ids(&request);
+            let now_unix_ms = unix_time_ms();
+            let response = match trusted_file_request_member(runtime, &peer.node_id, now_unix_ms)
+                .await
+            {
+                Ok((member, network_enabled)) => match runtime.file_network.as_mut() {
+                    Some(file_network) => file_network.handle_request(
+                        &peer.node_id,
+                        &member.context,
+                        network_enabled,
+                        member.member_access_epoch,
+                        request,
+                        now_unix_ms,
+                    ),
+                    None => file_network_error("file_runtime_unavailable"),
+                },
+                Err(response) => {
+                    cancel_file_network_session(runtime, &transfer_id, &operation_id, now_unix_ms);
+                    response
                 }
             };
             tracing::debug!(
@@ -3916,60 +3918,199 @@ async fn handle_file_network_frame(
                 %src_ip,
                 %transfer_id,
                 %operation_id,
-                "File 网络请求已认证，但 owner 文件能力尚未接入"
+                response = file_network_response_kind(&response),
+                "已处理认证 File 网络请求"
             );
-            let response = FileNetworkResponse::Error {
-                code: "file_capability_unavailable".into(),
-                retry_after_ms: None,
-            };
-            let Ok(response) = FileNetworkFrame::response(request_id, response) else {
-                return;
-            };
-            let Ok(encoded) = encode_file_network_frame(&response) else {
-                return;
-            };
-            if let Err(error) = runtime
-                .p2p
-                .send_to(peer.virtual_ip, runtime.assigned_ip, &encoded)
-                .await
-            {
-                tracing::debug!(peer = %peer.node_id, "File 网络错误响应发送失败: {error:#}");
-            }
+            send_file_network_response(runtime, peer.virtual_ip, request_id, response).await;
         }
         FileNetworkFrame::Chunk {
+            request_id,
             transfer_id,
             operation_id,
             chunk_index,
-            ..
+            offset,
+            data,
         } => {
+            let now_unix_ms = unix_time_ms();
+            let response = match trusted_file_request_member(runtime, &peer.node_id, now_unix_ms)
+                .await
+            {
+                Ok((member, _)) => match runtime.file_network.as_mut() {
+                    Some(file_network) => match file_network.handle_chunk(
+                        &peer.node_id,
+                        member.member_access_epoch,
+                        &transfer_id,
+                        &operation_id,
+                        chunk_index,
+                        offset,
+                        &data,
+                        now_unix_ms,
+                    ) {
+                        Ok((chunk_complete, progress)) => FileNetworkResponse::ChunkAccepted {
+                            chunk_index,
+                            chunk_complete,
+                            progress,
+                        },
+                        Err(response) => response,
+                    },
+                    None => file_network_error("file_runtime_unavailable"),
+                },
+                Err(response) => {
+                    cancel_file_network_session(runtime, &transfer_id, &operation_id, now_unix_ms);
+                    response
+                }
+            };
             tracing::debug!(
                 peer = %peer.node_id,
                 %src_ip,
                 %transfer_id,
                 %operation_id,
                 chunk_index,
-                "丢弃没有活动 File 会话的网络分片"
+                response = file_network_response_kind(&response),
+                "已处理认证 File 网络分片"
             );
+            send_file_network_response(runtime, peer.virtual_ip, request_id, response).await;
         }
         FileNetworkFrame::Response {
             request_id,
             response,
         } => {
-            let kind = match response {
-                FileNetworkResponse::Opened { .. } => "opened",
-                FileNetworkResponse::Progress { .. } => "progress",
-                FileNetworkResponse::ChunkAccepted { .. } => "chunk_accepted",
-                FileNetworkResponse::Completed { .. } => "completed",
-                FileNetworkResponse::Error { .. } => "error",
-            };
             tracing::debug!(
                 peer = %peer.node_id,
                 %src_ip,
                 request_id = ?request_id,
-                kind,
+                kind = file_network_response_kind(&response),
                 "忽略未被本机 File 操作关联的响应帧"
             );
         }
+    }
+}
+
+fn file_network_request_ids(request: &FileNetworkRequest) -> (TransferId, OperationId) {
+    match request {
+        FileNetworkRequest::OpenUpload {
+            transfer_id,
+            operation_id,
+            ..
+        }
+        | FileNetworkRequest::OpenDownload {
+            transfer_id,
+            operation_id,
+            ..
+        }
+        | FileNetworkRequest::Pause {
+            transfer_id,
+            operation_id,
+        }
+        | FileNetworkRequest::Cancel {
+            transfer_id,
+            operation_id,
+        }
+        | FileNetworkRequest::Finish {
+            transfer_id,
+            operation_id,
+        } => (transfer_id.clone(), operation_id.clone()),
+        FileNetworkRequest::Resume { request } => {
+            (request.transfer_id.clone(), request.operation_id.clone())
+        }
+    }
+}
+
+async fn trusted_file_request_member(
+    runtime: &ClientRuntime,
+    actor: &NodeId,
+    now_unix_ms: u64,
+) -> Result<(crate::file_share::TrustedFileMember, bool), FileNetworkResponse> {
+    let Some(network_id) = runtime.network_id.as_ref() else {
+        return Err(file_network_error("file_member_directory_unavailable"));
+    };
+    let Some(state) = runtime.node_state.as_ref() else {
+        return Err(file_network_error("file_member_directory_unavailable"));
+    };
+    let directory = state.member_directory(network_id).await;
+    let received_at_unix_ms = state.member_directory_received_at(network_id).await;
+    let member = trusted_file_member(
+        network_id,
+        directory.as_ref(),
+        received_at_unix_ms,
+        actor,
+        now_unix_ms,
+    )?;
+    let snapshot = state.snapshot().await;
+    let network_enabled = network_file_capability_enabled(&snapshot, network_id, now_unix_ms);
+    if !network_enabled {
+        return Err(file_network_error("file_capability_unavailable"));
+    }
+    Ok((member, network_enabled))
+}
+
+fn network_file_capability_enabled(
+    snapshot: &NodeSnapshot,
+    network_id: &NetworkId,
+    now_unix_ms: u64,
+) -> bool {
+    snapshot
+        .network_profiles
+        .iter()
+        .find(|profile| profile.network_id == network_id.as_str())
+        .is_some_and(|profile| {
+            profile
+                .capability_declarations
+                .contains(&CapabilityKind::File)
+                && profile.signed_profile.as_ref().is_some_and(|profile| {
+                    profile.issued_at_unix_ms > 0
+                        && profile.issued_at_unix_ms <= now_unix_ms
+                        && now_unix_ms < profile.expires_at_unix_ms
+                })
+        })
+}
+
+fn cancel_file_network_session(
+    runtime: &mut ClientRuntime,
+    transfer_id: &TransferId,
+    operation_id: &OperationId,
+    now_unix_ms: u64,
+) {
+    if let Some(file_network) = runtime.file_network.as_mut() {
+        file_network.cancel_for_authorization_loss(transfer_id, operation_id, now_unix_ms);
+    }
+}
+
+async fn send_file_network_response(
+    runtime: &ClientRuntime,
+    peer_ip: Ipv6Addr,
+    request_id: [u8; 16],
+    response: FileNetworkResponse,
+) {
+    let Ok(response) = FileNetworkFrame::response(request_id, response) else {
+        return;
+    };
+    let Ok(encoded) = encode_file_network_frame(&response) else {
+        return;
+    };
+    if let Err(error) = runtime
+        .p2p
+        .send_to(peer_ip, runtime.assigned_ip, &encoded)
+        .await
+    {
+        tracing::debug!("File 网络响应发送失败: {error:#}");
+    }
+}
+
+fn file_network_response_kind(response: &FileNetworkResponse) -> &'static str {
+    match response {
+        FileNetworkResponse::Opened { .. } => "opened",
+        FileNetworkResponse::Progress { .. } => "progress",
+        FileNetworkResponse::ChunkAccepted { .. } => "chunk_accepted",
+        FileNetworkResponse::Completed { .. } => "completed",
+        FileNetworkResponse::Error { .. } => "error",
+    }
+}
+
+fn file_network_error(code: &str) -> FileNetworkResponse {
+    FileNetworkResponse::Error {
+        code: code.to_owned(),
+        retry_after_ms: None,
     }
 }
 

@@ -108,6 +108,7 @@ impl MultiNetworkSupervisor {
             lifecycle.clone(),
             registry.clone(),
             services.clone(),
+            file_owner.network_runtime(),
         );
         let commands = spawn_command_bus_with_runtime(
             state.clone(),

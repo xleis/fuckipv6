@@ -2804,6 +2804,20 @@
         "network_id": {
           "$ref": "#/$defs/NetworkId"
         },
+        "relay_limits": {
+          "$ref": "#/$defs/RelayLimitPolicy",
+          "default": {
+            "max_bandwidth_kbps": null,
+            "max_bytes": null,
+            "max_concurrent_streams": null,
+            "max_connections": null,
+            "max_cpu_percent": null,
+            "max_memory_bytes": null,
+            "max_session_duration_secs": null,
+            "quota_reset_at_unix_ms": null
+          },
+          "description": "Administrator-authored hard resource bounds for using Relay. Provider\nlocal limits are intersected with these values."
+        },
         "revision": {
           "format": "uint64",
           "minimum": 0,
@@ -7357,6 +7371,20 @@
         },
         "node_id": {
           "$ref": "#/$defs/NodeId"
+        },
+        "relay_limits": {
+          "$ref": "#/$defs/RelayLimitPolicy",
+          "default": {
+            "max_bandwidth_kbps": null,
+            "max_bytes": null,
+            "max_concurrent_streams": null,
+            "max_connections": null,
+            "max_cpu_percent": null,
+            "max_memory_bytes": null,
+            "max_session_duration_secs": null,
+            "quota_reset_at_unix_ms": null
+          },
+          "description": "Owner-authored hard resource bounds for serving Relay on this node.\nNetwork ACL limits are intersected with these values; this document can\nmake them stricter but cannot loosen network-authored bounds."
         },
         "revision": {
           "format": "uint64",

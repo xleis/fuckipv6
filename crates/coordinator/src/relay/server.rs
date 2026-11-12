@@ -407,12 +407,13 @@ impl RelayServer {
     pub async fn health_snapshot(&self) -> RelayHealthSnapshot {
         let now = now_unix_ms();
         let policy = self.load_policy(now).await;
-        let (limits, authorization_valid, reason_code) = match policy {
-            Ok(policy) => (policy.limits, true, None),
+        let (limits, limit_sources, authorization_valid, reason_code) = match policy {
+            Ok(policy) => (policy.limits, policy.limit_sources, true, None),
             Err(error) => {
                 tracing::warn!("Relay 健康检查无法读取有效策略: {error:#}");
                 (
                     RelayLimitPolicy::default(),
+                    Vec::new(),
                     false,
                     Some("relay.policy_unavailable".into()),
                 )
@@ -449,7 +450,7 @@ impl RelayServer {
                 .load(Ordering::Acquire),
             authorization_valid,
             limits,
-            Vec::new(),
+            limit_sources,
             usage,
             now,
             reason_code,
@@ -2171,6 +2172,7 @@ mod tests {
             network_acl: None,
             members,
             limits: RelayLimitPolicy::default(),
+            limit_sources: Vec::new(),
         }
     }
 
@@ -2738,6 +2740,42 @@ mod tests {
         assert!(health
             .issues
             .contains(&RelayHealthIssue::ForwardingNotObserved));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn health_exposes_policy_limit_sources() -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let authority = Arc::new(MemoryRelayPolicyAuthority::for_identities(&[]));
+        let mut policy = test_relay_policy(&[]);
+        policy.limits = RelayLimitPolicy {
+            max_connections: Some(8),
+            max_bandwidth_kbps: Some(512),
+            ..RelayLimitPolicy::default()
+        };
+        policy.limit_sources = vec![
+            fuckipv6_common::domain::RelayLimitSource::NetworkAcl,
+            fuckipv6_common::domain::RelayLimitSource::NodeLocal,
+            fuckipv6_common::domain::RelayLimitSource::ProviderDefault,
+        ];
+        authority.replace_policy(policy);
+
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager,
+            authority,
+        )?;
+        let health = server.health_snapshot().await;
+
+        assert_eq!(health.limits.max_connections, Some(8));
+        assert_eq!(
+            health.limit_sources,
+            vec![
+                fuckipv6_common::domain::RelayLimitSource::NetworkAcl,
+                fuckipv6_common::domain::RelayLimitSource::NodeLocal,
+                fuckipv6_common::domain::RelayLimitSource::ProviderDefault,
+            ]
+        );
         Ok(())
     }
 

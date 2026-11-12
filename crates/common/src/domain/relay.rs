@@ -109,6 +109,20 @@ impl RelayLimitPolicy {
         self.quota_reset_at_unix_ms
             .is_some_and(|reset| now_unix_ms >= reset)
     }
+
+    /// Whether this policy layer contributes any configured value. An empty
+    /// layer is valid (it inherits the other layers), but it must not be
+    /// reported as a source in Relay health diagnostics.
+    pub fn has_configured_values(&self) -> bool {
+        self.max_connections.is_some()
+            || self.max_concurrent_streams.is_some()
+            || self.max_bandwidth_kbps.is_some()
+            || self.max_bytes.is_some()
+            || self.max_cpu_percent.is_some()
+            || self.max_memory_bytes.is_some()
+            || self.max_session_duration_secs.is_some()
+            || self.quota_reset_at_unix_ms.is_some()
+    }
 }
 
 fn min_option<T: Ord>(left: Option<T>, right: Option<T>) -> Option<T> {
@@ -669,6 +683,11 @@ pub struct RelayAccessPolicy {
     #[serde(default)]
     pub members: BTreeMap<NodeId, RelayMemberPolicyContext>,
     pub limits: RelayLimitPolicy,
+    /// Policy layers that contributed at least one configured value to
+    /// `limits`. This is control-plane metadata and is never inferred from an
+    /// untrusted Relay registration.
+    #[serde(default)]
+    pub limit_sources: Vec<RelayLimitSource>,
 }
 
 /// Both sides of a Relay authorization decision. Keeping both effective
@@ -1249,6 +1268,7 @@ mod tests {
                 max_bandwidth_kbps: Some(1_024),
                 ..RelayLimitPolicy::default()
             },
+            limit_sources: vec![RelayLimitSource::ProviderDefault],
         }
     }
 
@@ -1309,6 +1329,7 @@ mod tests {
                 contributions: vec![crate::domain::ContributionKind::Relay],
             }],
             exit_contribution: None,
+            relay_limits: Box::default(),
             rules: vec![role_rule(&network_id, NetworkRole::Owner)],
         });
         let decision = vetoed
@@ -1411,6 +1432,7 @@ mod tests {
                 conditions: Vec::new(),
             }],
             grants: Vec::<NetworkAclGrant>::new(),
+            relay_limits: Box::default(),
         });
         let decision = policy
             .authorize_member(&member, now())

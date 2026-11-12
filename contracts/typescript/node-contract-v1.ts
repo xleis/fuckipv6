@@ -619,6 +619,7 @@ export type NetworkAcl = {
   "grants"?: Array<NetworkAclGrant>;
   "issued_at_unix_ms": number;
   "network_id": NetworkId;
+  "relay_limits"?: RelayLimitPolicy;
   "revision": number;
   "rules"?: Array<PermissionRule>;
 };
@@ -1811,6 +1812,7 @@ export type NodeLocalAccessPolicy = {
   "issued_at_unix_ms": number;
   "network_scope": NodeNetworkScope;
   "node_id": NodeId;
+  "relay_limits"?: RelayLimitPolicy;
   "revision": number;
   "rules"?: Array<PermissionRule>;
 };

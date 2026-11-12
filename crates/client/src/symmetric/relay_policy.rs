@@ -11,7 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use fuckipv6_common::domain::{
     NetworkAcl, NetworkRecord, NetworkRole, NodeId, NodeLocalAccessPolicy, RelayAccessPolicy,
-    RelayAuthorizationDecision, RelayLimitPolicy, RelayMemberGrant, RelayMemberPolicyContext,
+    RelayAuthorizationDecision, RelayLimitPolicy, RelayLimitSource, RelayMemberGrant,
+    RelayMemberPolicyContext,
 };
 use fuckipv6_coordinator::relay::server::RelayPolicyAuthority;
 
@@ -141,7 +142,7 @@ fn policy_from_snapshot(
         .validate_at(now)
         .context("Relay 网络 ACL 无效或已过期")?;
 
-    let local_limits = provider_limits(&provider_local, &network_acl)?;
+    let (local_limits, limit_sources) = provider_limits(&provider_local, &network_acl)?;
     let provider = RelayMemberPolicyContext {
         role: provider_role,
         groups: Default::default(),
@@ -168,19 +169,34 @@ fn policy_from_snapshot(
         network_acl: Some(network_acl),
         members,
         limits: local_limits,
+        limit_sources,
     };
     policy.validate_at(now).context("组装后的 Relay 策略无效")?;
     Ok((record.clone(), policy))
 }
 
-fn provider_limits(local: &NodeLocalAccessPolicy, acl: &NetworkAcl) -> Result<RelayLimitPolicy> {
-    // The ACL and local policy currently carry governance, not resource quota
-    // values. Keep the conservative provider defaults so an old snapshot never
-    // silently removes every resource bound.
-    let limits = default_provider_limits();
-    limits.validate().map_err(anyhow::Error::new)?;
+fn provider_limits(
+    local: &NodeLocalAccessPolicy,
+    acl: &NetworkAcl,
+) -> Result<(RelayLimitPolicy, Vec<RelayLimitSource>)> {
     local.validate_definition_for_relay(acl.network_id())?;
-    Ok(limits)
+    let limits = local
+        .relay_limits
+        .intersection(&acl.relay_limits)
+        .map_err(anyhow::Error::new)?
+        .intersection(&default_provider_limits())
+        .map_err(anyhow::Error::new)?;
+
+    let mut sources = Vec::new();
+    if acl.relay_limits.has_configured_values() {
+        sources.push(RelayLimitSource::NetworkAcl);
+    }
+    if local.relay_limits.has_configured_values() {
+        sources.push(RelayLimitSource::NodeLocal);
+    }
+    // The provider defaults always contribute configured safety bounds.
+    sources.push(RelayLimitSource::ProviderDefault);
+    Ok((limits, sources))
 }
 
 fn policy_revision(
@@ -268,6 +284,32 @@ impl RelayLocalPolicyValidation for NodeLocalAccessPolicy {
 mod tests {
     use super::*;
 
+    fn local_policy(limits: RelayLimitPolicy) -> NodeLocalAccessPolicy {
+        NodeLocalAccessPolicy {
+            node_id: NodeId::from_public_key(b"relay-provider"),
+            revision: 1,
+            issued_at_unix_ms: 1,
+            expires_at_unix_ms: u64::MAX,
+            network_scope: fuckipv6_common::domain::NodeNetworkScope::All,
+            contribution_vetoes: Vec::new(),
+            exit_contribution: None,
+            relay_limits: Box::new(limits),
+            rules: Vec::new(),
+        }
+    }
+
+    fn network_acl(limits: RelayLimitPolicy) -> NetworkAcl {
+        NetworkAcl {
+            network_id: fuckipv6_common::domain::NetworkId::from_public_key(b"relay-network"),
+            revision: 1,
+            issued_at_unix_ms: 1,
+            expires_at_unix_ms: u64::MAX,
+            rules: Vec::new(),
+            grants: Vec::new(),
+            relay_limits: Box::new(limits),
+        }
+    }
+
     #[test]
     fn missing_authority_files_denies_relay_policy() {
         let root = std::env::temp_dir().join(format!(
@@ -289,5 +331,133 @@ mod tests {
         assert_eq!(limits.max_connections, Some(128));
         assert_eq!(limits.max_concurrent_streams, Some(1024));
         assert_eq!(limits.max_bandwidth_kbps, Some(100_000));
+    }
+
+    #[test]
+    fn network_limit_is_stricter_than_node_and_provider_defaults() {
+        let (limits, sources) = provider_limits(
+            &local_policy(RelayLimitPolicy {
+                max_connections: Some(64),
+                ..RelayLimitPolicy::default()
+            }),
+            &network_acl(RelayLimitPolicy {
+                max_connections: Some(4),
+                ..RelayLimitPolicy::default()
+            }),
+        )
+        .expect("limits");
+
+        assert_eq!(limits.max_connections, Some(4));
+        assert_eq!(
+            sources,
+            vec![
+                RelayLimitSource::NetworkAcl,
+                RelayLimitSource::NodeLocal,
+                RelayLimitSource::ProviderDefault,
+            ]
+        );
+    }
+
+    #[test]
+    fn node_local_limit_is_stricter_than_network_and_provider_defaults() {
+        let (limits, sources) = provider_limits(
+            &local_policy(RelayLimitPolicy {
+                max_concurrent_streams: Some(7),
+                ..RelayLimitPolicy::default()
+            }),
+            &network_acl(RelayLimitPolicy {
+                max_concurrent_streams: Some(32),
+                ..RelayLimitPolicy::default()
+            }),
+        )
+        .expect("limits");
+
+        assert_eq!(limits.max_concurrent_streams, Some(7));
+        assert_eq!(
+            sources,
+            vec![
+                RelayLimitSource::NetworkAcl,
+                RelayLimitSource::NodeLocal,
+                RelayLimitSource::ProviderDefault,
+            ]
+        );
+    }
+
+    #[test]
+    fn unconfigured_fields_are_merged_without_overwriting_each_other() {
+        let (limits, sources) = provider_limits(
+            &local_policy(RelayLimitPolicy {
+                max_memory_bytes: Some(64 * 1024 * 1024),
+                ..RelayLimitPolicy::default()
+            }),
+            &network_acl(RelayLimitPolicy {
+                max_bytes: Some(1_000_000),
+                ..RelayLimitPolicy::default()
+            }),
+        )
+        .expect("limits");
+
+        assert_eq!(limits.max_bytes, Some(1_000_000));
+        assert_eq!(limits.max_memory_bytes, Some(64 * 1024 * 1024));
+        assert_eq!(limits.max_connections, Some(128));
+        assert_eq!(limits.max_concurrent_streams, Some(1_024));
+        assert_eq!(limits.max_bandwidth_kbps, Some(100_000));
+        assert_eq!(limits.max_session_duration_secs, Some(86_400));
+        assert_eq!(
+            sources,
+            vec![
+                RelayLimitSource::NetworkAcl,
+                RelayLimitSource::NodeLocal,
+                RelayLimitSource::ProviderDefault,
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_defaults_cannot_be_loosened_by_either_policy_layer() {
+        let (limits, _) = provider_limits(
+            &local_policy(RelayLimitPolicy {
+                max_connections: Some(1_024),
+                max_bandwidth_kbps: Some(1_000_000),
+                max_session_duration_secs: Some(7 * 24 * 60 * 60),
+                ..RelayLimitPolicy::default()
+            }),
+            &network_acl(RelayLimitPolicy {
+                max_connections: Some(512),
+                max_bandwidth_kbps: Some(500_000),
+                max_session_duration_secs: Some(3 * 24 * 60 * 60),
+                ..RelayLimitPolicy::default()
+            }),
+        )
+        .expect("limits");
+
+        assert_eq!(limits.max_connections, Some(128));
+        assert_eq!(limits.max_bandwidth_kbps, Some(100_000));
+        assert_eq!(limits.max_session_duration_secs, Some(86_400));
+    }
+
+    #[test]
+    fn zero_limit_fails_closed() {
+        let error = provider_limits(
+            &local_policy(RelayLimitPolicy {
+                max_connections: Some(0),
+                ..RelayLimitPolicy::default()
+            }),
+            &network_acl(RelayLimitPolicy::default()),
+        )
+        .expect_err("zero limit must be rejected");
+
+        assert!(format!("{error:#}").contains("must be positive"));
+    }
+
+    #[test]
+    fn only_configured_policy_layers_are_reported_as_sources() {
+        let (_, sources) = provider_limits(
+            &local_policy(RelayLimitPolicy::default()),
+            &network_acl(RelayLimitPolicy::default()),
+        )
+        .expect("limits");
+
+        assert_eq!(sources, vec![RelayLimitSource::ProviderDefault]);
     }
 }

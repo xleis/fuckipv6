@@ -450,6 +450,7 @@ mod tests {
             network_scope: NodeNetworkScope::All,
             contribution_vetoes: Vec::new(),
             exit_contribution: Some(restrictions),
+            relay_limits: Default::default(),
             rules: Vec::new(),
         }
     }

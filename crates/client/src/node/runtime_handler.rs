@@ -4460,6 +4460,7 @@ mod tests {
                 network_scope: NodeNetworkScope::Only(vec![network_id.clone()]),
                 contribution_vetoes: Vec::new(),
                 exit_contribution: None,
+                relay_limits: Default::default(),
                 rules: vec![policy_transaction_rule(
                     "runtime-local-read",
                     PermissionEffect::Allow,
@@ -4481,6 +4482,7 @@ mod tests {
                     Vec::new(),
                 )],
                 grants: Vec::new(),
+                relay_limits: Default::default(),
             }],
         }
     }
@@ -5277,6 +5279,7 @@ mod tests {
                 conditions: Vec::new(),
             }],
             grants: Vec::new(),
+            relay_limits: Default::default(),
         });
         input.network_acl.as_mut().expect("acl").rules[0]
             .subjects

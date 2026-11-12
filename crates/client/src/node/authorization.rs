@@ -1146,6 +1146,7 @@ mod tests {
             expires_at_unix_ms: now.saturating_add(60_000),
             rules,
             grants,
+            relay_limits: Default::default(),
         }
     }
 
@@ -1183,6 +1184,7 @@ mod tests {
             network_scope,
             contribution_vetoes,
             exit_contribution: None,
+            relay_limits: Default::default(),
             rules,
         }
     }

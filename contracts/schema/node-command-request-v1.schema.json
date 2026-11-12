@@ -585,6 +585,20 @@
         "network_id": {
           "$ref": "#/$defs/NetworkId"
         },
+        "relay_limits": {
+          "$ref": "#/$defs/RelayLimitPolicy",
+          "default": {
+            "max_bandwidth_kbps": null,
+            "max_bytes": null,
+            "max_concurrent_streams": null,
+            "max_connections": null,
+            "max_cpu_percent": null,
+            "max_memory_bytes": null,
+            "max_session_duration_secs": null,
+            "quota_reset_at_unix_ms": null
+          },
+          "description": "Administrator-authored hard resource bounds for using Relay. Provider\nlocal limits are intersected with these values."
+        },
         "revision": {
           "format": "uint64",
           "minimum": 0,
@@ -2846,6 +2860,20 @@
         "node_id": {
           "$ref": "#/$defs/NodeId"
         },
+        "relay_limits": {
+          "$ref": "#/$defs/RelayLimitPolicy",
+          "default": {
+            "max_bandwidth_kbps": null,
+            "max_bytes": null,
+            "max_concurrent_streams": null,
+            "max_connections": null,
+            "max_cpu_percent": null,
+            "max_memory_bytes": null,
+            "max_session_duration_secs": null,
+            "quota_reset_at_unix_ms": null
+          },
+          "description": "Owner-authored hard resource bounds for serving Relay on this node.\nNetwork ACL limits are intersected with these values; this document can\nmake them stricter but cannot loosen network-authored bounds."
+        },
         "revision": {
           "format": "uint64",
           "minimum": 0,
@@ -3756,6 +3784,85 @@
     "PublicKey": {
       "description": "Ed25519 public key bytes encoded as URL-safe base64 without padding.",
       "type": "string"
+    },
+    "RelayLimitPolicy": {
+      "description": "Hard limit set for one Relay direction. When a network policy and a node\npolicy both define a value, [`RelayLimitPolicy::intersection`] keeps the\nstricter one.",
+      "properties": {
+        "max_bandwidth_kbps": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_bytes": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_concurrent_streams": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_connections": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_cpu_percent": {
+          "default": null,
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_memory_bytes": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_session_duration_secs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "quota_reset_at_unix_ms": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "ResourceKind": {
       "enum": [

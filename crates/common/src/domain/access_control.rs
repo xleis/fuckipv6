@@ -153,6 +153,11 @@ pub struct NodeLocalAccessPolicy {
     /// Owner restrictions specific to serving as an Exit for a network.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_contribution: Option<super::exit_contribution::ExitContributionRestrictions>,
+    /// Owner-authored hard resource bounds for serving Relay on this node.
+    /// Network ACL limits are intersected with these values; this document can
+    /// make them stricter but cannot loosen network-authored bounds.
+    #[serde(default)]
+    pub relay_limits: Box<super::relay::RelayLimitPolicy>,
     #[serde(default)]
     pub rules: Vec<PermissionRule>,
 }
@@ -184,6 +189,7 @@ impl NodeLocalAccessPolicy {
         if let Some(restrictions) = &self.exit_contribution {
             restrictions.validate()?;
         }
+        self.relay_limits.validate()?;
         let mut rule_ids = BTreeSet::new();
         for rule in &self.rules {
             rule.validate()?;
@@ -345,6 +351,10 @@ pub struct NetworkAcl {
     pub rules: Vec<PermissionRule>,
     #[serde(default)]
     pub grants: Vec<NetworkAclGrant>,
+    /// Administrator-authored hard resource bounds for using Relay. Provider
+    /// local limits are intersected with these values.
+    #[serde(default)]
+    pub relay_limits: Box<super::relay::RelayLimitPolicy>,
 }
 
 impl NetworkAcl {
@@ -370,6 +380,7 @@ impl NetworkAcl {
                 "network ACL validity interval is empty",
             ));
         }
+        self.relay_limits.validate()?;
         let mut rule_ids = BTreeSet::new();
         for rule in &self.rules {
             rule.validate()?;
@@ -1227,6 +1238,7 @@ mod tests {
             expires_at_unix_ms: 10_000,
             rules,
             grants,
+            relay_limits: Default::default(),
         }
     }
 
@@ -1239,6 +1251,7 @@ mod tests {
             network_scope: NodeNetworkScope::All,
             contribution_vetoes: Vec::new(),
             exit_contribution: None,
+            relay_limits: Default::default(),
             rules: vec![allow_rule(
                 b"local-allow",
                 SubjectSelector::AnyMember,

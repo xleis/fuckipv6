@@ -1350,6 +1350,7 @@ mod tests {
             expires_at_unix_ms: 10_000,
             rules,
             grants: Vec::new(),
+            relay_limits: Default::default(),
         }
     }
 
@@ -1451,6 +1452,7 @@ mod tests {
                 revoked_by: None,
                 requires_recent_reauthentication: false,
             }],
+            relay_limits: Default::default(),
         });
         input.local_policy = Some(NodeLocalAccessPolicy {
             node_id: actor(),
@@ -1464,6 +1466,7 @@ mod tests {
                 contributions: vec![ContributionKind::Exit],
             }],
             exit_contribution: None,
+            relay_limits: Default::default(),
             rules: Vec::new(),
         });
         let result = input.evaluate();
@@ -1537,6 +1540,7 @@ mod tests {
                 revoked_by: None,
                 requires_recent_reauthentication: true,
             }],
+            relay_limits: Default::default(),
         });
         let result = input.evaluate();
         assert!(!result.decision.allowed);
@@ -1580,6 +1584,7 @@ mod tests {
                 revoked_by: Some(actor()),
                 requires_recent_reauthentication: false,
             }],
+            relay_limits: Default::default(),
         });
         let result = input.evaluate();
         assert_eq!(
@@ -1608,6 +1613,7 @@ mod tests {
             network_scope: NodeNetworkScope::Only(vec![network_id(b"another-network")]),
             contribution_vetoes: Vec::new(),
             exit_contribution: None,
+            relay_limits: Default::default(),
             rules: Vec::new(),
         });
         let result = input.evaluate();
@@ -1662,6 +1668,7 @@ mod tests {
                 revoked_by: None,
                 requires_recent_reauthentication: false,
             }],
+            relay_limits: Default::default(),
         });
         let result = input.evaluate();
         assert!(result.validation_issues.iter().any(|issue| {

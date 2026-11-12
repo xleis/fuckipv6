@@ -4797,14 +4797,16 @@ public final class NodeContractV1 {
         public final List<NetworkAclGrant> grants;
         public final Long issued_at_unix_ms;
         public final String network_id;
+        public final RelayLimitPolicy relay_limits;
         public final Long revision;
         public final List<PermissionRule> rules;
 
-        public NetworkAcl(Long expires_at_unix_ms, List<NetworkAclGrant> grants, Long issued_at_unix_ms, String network_id, Long revision, List<PermissionRule> rules) {
+        public NetworkAcl(Long expires_at_unix_ms, List<NetworkAclGrant> grants, Long issued_at_unix_ms, String network_id, RelayLimitPolicy relay_limits, Long revision, List<PermissionRule> rules) {
             this.expires_at_unix_ms = expires_at_unix_ms;
             this.grants = grants;
             this.issued_at_unix_ms = issued_at_unix_ms;
             this.network_id = network_id;
+            this.relay_limits = relay_limits;
             this.revision = revision;
             this.rules = rules;
         }
@@ -6210,16 +6212,18 @@ public final class NodeContractV1 {
         public final Long issued_at_unix_ms;
         public final NodeNetworkScope network_scope;
         public final String node_id;
+        public final RelayLimitPolicy relay_limits;
         public final Long revision;
         public final List<PermissionRule> rules;
 
-        public NodeLocalAccessPolicy(List<NodeContributionVeto> contribution_vetoes, ExitContributionRestrictions exit_contribution, Long expires_at_unix_ms, Long issued_at_unix_ms, NodeNetworkScope network_scope, String node_id, Long revision, List<PermissionRule> rules) {
+        public NodeLocalAccessPolicy(List<NodeContributionVeto> contribution_vetoes, ExitContributionRestrictions exit_contribution, Long expires_at_unix_ms, Long issued_at_unix_ms, NodeNetworkScope network_scope, String node_id, RelayLimitPolicy relay_limits, Long revision, List<PermissionRule> rules) {
             this.contribution_vetoes = contribution_vetoes;
             this.exit_contribution = exit_contribution;
             this.expires_at_unix_ms = expires_at_unix_ms;
             this.issued_at_unix_ms = issued_at_unix_ms;
             this.network_scope = network_scope;
             this.node_id = node_id;
+            this.relay_limits = relay_limits;
             this.revision = revision;
             this.rules = rules;
         }

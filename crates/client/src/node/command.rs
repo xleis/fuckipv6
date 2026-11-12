@@ -5453,6 +5453,7 @@ mod tests {
             expires_at_unix_ms: now.saturating_add(60_000),
             rules: vec![deny_rule],
             grants: Vec::new(),
+            relay_limits: Default::default(),
         };
         let context = NodeCommandContext::local_owner(actor(), "gpui:owner-session")
             .with_network_scopes([(

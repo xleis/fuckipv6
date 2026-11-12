@@ -2880,7 +2880,12 @@
       "traffic.routing.test.title": "规则测试",
       "traffic.routing.title": "流量路由",
       "traffic.routing.transaction.description": "预览展示差异、影响对象与风险；应用需要显式确认并锁定同一权威 revision。",
-      "traffic.routing.transaction.title": "预览、原子应用与回滚"
+      "traffic.routing.transaction.title": "预览、原子应用与回滚",
+      "relay.governance.node_filter.label": "节点 ID",
+      "relay.governance.node_filter.placeholder": "精确匹配节点 ID",
+      "relay.governance.node_filter.clear": "清空筛选",
+      "relay.governance.node_filter.matches": "节点筛选命中 {matched} 条。",
+      "relay.governance.node_filter.empty": "没有匹配节点 {node_id} 的 Relay 治理事件。"
     },
     "en": {
       "nav.overview": "Overview",
@@ -5760,7 +5765,12 @@
       "traffic.routing.test.title": "Rule test",
       "traffic.routing.title": "Traffic routing",
       "traffic.routing.transaction.description": "Preview changes, affected objects, and risks. Apply requires explicit confirmation and the same authoritative revision.",
-      "traffic.routing.transaction.title": "Preview, atomic apply, and rollback"
+      "traffic.routing.transaction.title": "Preview, atomic apply, and rollback",
+      "relay.governance.node_filter.label": "Node ID",
+      "relay.governance.node_filter.placeholder": "Exact node ID",
+      "relay.governance.node_filter.clear": "Clear filter",
+      "relay.governance.node_filter.matches": "Node filter matched {matched} events.",
+      "relay.governance.node_filter.empty": "No Relay governance events match node {node_id}."
     }
   }
 }

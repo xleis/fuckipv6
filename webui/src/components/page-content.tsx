@@ -4254,7 +4254,12 @@ function RelayGovernanceDetails({
   networkName: string;
   audit: RelayGovernanceAuditSnapshot;
 }) {
-  const visibleEvents = audit.events.slice(0, RELAY_GOVERNANCE_RENDER_LIMIT);
+  const [nodeFilter, setNodeFilter] = useState("");
+  const normalizedNodeFilter = nodeFilter.trim();
+  const filteredEvents = normalizedNodeFilter
+    ? audit.events.filter((event) => event.node_id === normalizedNodeFilter)
+    : audit.events;
+  const visibleEvents = filteredEvents.slice(-RELAY_GOVERNANCE_RENDER_LIMIT);
   return (
     <section
       className="surface-card"
@@ -4263,11 +4268,46 @@ function RelayGovernanceDetails({
     >
       <div className="card-heading">
         <h3>{label(locale, "gpui.section.relay_governance")}</h3>
-        <span className="status-pill neutral">
-          {formatInteger(locale, audit.events.length)}
+        <span
+          className="status-pill neutral"
+          data-testid="relay-governance-count"
+        >
+          {formatInteger(locale, filteredEvents.length)}
         </span>
       </div>
       <p className="muted-copy">{label(locale, "relay.governance.hint")}</p>
+      <div className="relay-governance-filter">
+        <label>
+          <span>{label(locale, "relay.governance.node_filter.label")}</span>
+          <input
+            type="search"
+            value={nodeFilter}
+            placeholder={label(
+              locale,
+              "relay.governance.node_filter.placeholder",
+            )}
+            onChange={(event) => setNodeFilter(event.currentTarget.value)}
+            data-testid="relay-governance-node-filter"
+          />
+        </label>
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={() => setNodeFilter("")}
+          disabled={nodeFilter.length === 0}
+          data-testid="relay-governance-clear-node-filter"
+        >
+          {label(locale, "relay.governance.node_filter.clear")}
+        </button>
+      </div>
+      {normalizedNodeFilter ? (
+        <p className="muted-copy" data-testid="relay-governance-filter-count">
+          {tr(locale, "relay.governance.node_filter.matches", {
+            node_id: normalizedNodeFilter,
+            matched: formatInteger(locale, filteredEvents.length),
+          })}
+        </p>
+      ) : null}
       {audit.dropped_events > 0 ? (
         <p className="state-notice warn" data-testid="relay-governance-dropped">
           {tr(locale, "relay.governance.dropped", {
@@ -4275,17 +4315,24 @@ function RelayGovernanceDetails({
           })}
         </p>
       ) : null}
-      {audit.events.length > visibleEvents.length ? (
+      {filteredEvents.length > visibleEvents.length ? (
         <p className="muted-copy" data-testid="relay-governance-bounded">
           {tr(locale, "relay.governance.bounded", {
             shown: formatInteger(locale, visibleEvents.length),
-            total: formatInteger(locale, audit.events.length),
+            total: formatInteger(locale, filteredEvents.length),
           })}
         </p>
       ) : null}
       {visibleEvents.length === 0 ? (
-        <p className="empty-copy">
-          {label(locale, "relay.governance.empty")}
+        <p
+          className="empty-copy"
+          data-testid="relay-governance-filter-empty"
+        >
+          {normalizedNodeFilter
+            ? tr(locale, "relay.governance.node_filter.empty", {
+                node_id: normalizedNodeFilter,
+              })
+            : label(locale, "relay.governance.empty")}
         </p>
       ) : (
         <ol className="relay-governance-events">
@@ -4293,6 +4340,8 @@ function RelayGovernanceDetails({
             <li
               className="relay-governance-event"
               data-action={event.action}
+              data-node-id={event.node_id ?? ""}
+              data-occurred-at={event.occurred_at_unix_ms}
               data-testid="relay-governance-event"
               key={`${event.occurred_at_unix_ms}-${event.action}-${index}`}
             >

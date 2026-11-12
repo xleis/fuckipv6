@@ -933,17 +933,20 @@ describe("Relay capability status", () => {
 
   it("renders the owner-only governance ledger with bounded payload-free fields", () => {
     const events = Array.from({ length: 52 }, (_, index) => ({
-      action: index === 0 ? ("session_rejected" as const) : ("recovered" as const),
+      action:
+        index === 2
+          ? ("session_rejected" as const)
+          : ("recovered" as const),
       occurred_at_unix_ms: Date.UTC(2026, 0, 2, 0, 0, index),
       node_id: "node-member-01",
       reason_code:
-        index === 0
-          ? "relay.session.quota_exhausted"
-          : "relay.recovered",
-      observed: index === 0 ? 16 : null,
-      limit: index === 0 ? 16 : null,
+        index === 2
+          ? "relay.session.quota_exhausted.2"
+          : `relay.recovered.${index}`,
+      observed: index === 2 ? 16 : null,
+      limit: index === 2 ? 16 : null,
       reset_at_unix_ms:
-        index === 0 ? Date.UTC(2026, 0, 2, 0, 5, 0) : null,
+        index === 2 ? Date.UTC(2026, 0, 2, 0, 5, 0) : null,
       payload: "TOP_SECRET_PAYLOAD",
       destination: "2001:db8::secret",
     }));
@@ -988,6 +991,18 @@ describe("Relay capability status", () => {
         translated("relay.governance.event.node"),
       ),
     ).toBe(true);
+    expect(renderedEvents[0]).toHaveAttribute(
+      "data-action",
+      "session_rejected",
+    );
+    expect(renderedEvents[0]).toHaveAttribute(
+      "data-occurred-at",
+      String(Date.UTC(2026, 0, 2, 0, 0, 2)),
+    );
+    expect(renderedEvents[renderedEvents.length - 1]).toHaveAttribute(
+      "data-occurred-at",
+      String(Date.UTC(2026, 0, 2, 0, 0, 51)),
+    );
     expect(governance).toHaveTextContent(
       translated("relay.governance.dropped"),
     );
@@ -998,6 +1013,84 @@ describe("Relay capability status", () => {
     expect(governance).not.toHaveTextContent("TOP_SECRET_PAYLOAD");
     expect(governance).not.toHaveTextContent("2001:db8::secret");
     expect(governance).not.toHaveTextContent("private_key");
+  });
+
+  it("filters the live governance ledger by exact trimmed node id", async () => {
+    const user = userEvent.setup();
+    const events = Array.from({ length: 60 }, (_, index) => ({
+      action:
+        index % 2 === 0
+          ? ("session_rejected" as const)
+          : ("recovered" as const),
+      occurred_at_unix_ms: Date.UTC(2026, 0, 2, 1, 0, index),
+      node_id:
+        index % 2 === 0 ? "node-member-01" : "node-member-02",
+      reason_code: `relay.test.${index}`,
+      observed: null,
+      limit: null,
+      reset_at_unix_ms: null,
+      payload: "FILTER_SECRET_PAYLOAD",
+      destination: "2001:db8::filter-secret",
+    }));
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      embedded_services: [
+        {
+          network_name: "owner-relay",
+          status: "running",
+          relay_status: "running",
+          relay_addr: "127.0.0.1:6667",
+          relay_health: relayHealth(),
+          relay_governance: {
+            events,
+            dropped_events: 0,
+          } as RelayGovernanceAuditSnapshot,
+        },
+      ],
+    };
+
+    render(relayElement(snapshot));
+
+    const governance = screen.getByTestId("relay-governance");
+    const count = screen.getByTestId("relay-governance-count");
+    const input = screen.getByTestId("relay-governance-node-filter");
+    const clear = screen.getByTestId("relay-governance-clear-node-filter");
+    expect(count).toHaveTextContent("60");
+    expect(screen.getAllByTestId("relay-governance-event")).toHaveLength(50);
+    expect(clear).toBeDisabled();
+
+    await user.type(input, " node-member-01 ");
+    expect(count).toHaveTextContent("30");
+    expect(screen.getByTestId("relay-governance-filter-count")).toHaveTextContent(
+      translated("relay.governance.node_filter.matches"),
+    );
+    const filteredEvents = screen.getAllByTestId("relay-governance-event");
+    expect(filteredEvents).toHaveLength(30);
+    expect(
+      filteredEvents.every(
+        (event) => event.dataset.nodeId === "node-member-01",
+      ),
+    ).toBe(true);
+
+    await user.clear(input);
+    await user.type(input, "node-missing");
+    expect(count).toHaveTextContent("0");
+    expect(screen.getByTestId("relay-governance-filter-empty")).toHaveTextContent(
+      translated("relay.governance.node_filter.empty"),
+    );
+    expect(
+      screen.queryByTestId("relay-governance-event"),
+    ).not.toBeInTheDocument();
+
+    await user.click(clear);
+    expect(input).toHaveValue("");
+    expect(count).toHaveTextContent("60");
+    expect(screen.getAllByTestId("relay-governance-event")).toHaveLength(50);
+    expect(
+      screen.queryByTestId("relay-governance-filter-empty"),
+    ).not.toBeInTheDocument();
+    expect(governance).not.toHaveTextContent("FILTER_SECRET_PAYLOAD");
+    expect(governance).not.toHaveTextContent("2001:db8::filter-secret");
   });
 
   it("does not infer healthy from a running listener without a health snapshot", () => {

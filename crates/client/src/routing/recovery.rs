@@ -481,6 +481,14 @@ impl RecoveryReport {
         self.status == RecoveryStatus::Recovered
     }
 
+    /// End-to-end duration for this recovery pass. Timestamps are the durable
+    /// wire fields; this helper keeps every adapter and log record from
+    /// inventing a different subtraction or underflow policy.
+    pub fn duration_ms(&self) -> u64 {
+        self.completed_at_unix_ms
+            .saturating_sub(self.started_at_unix_ms)
+    }
+
     pub(crate) fn local_resource_validation(
         &self,
         expectations: RecoveryExpectations,
@@ -1076,6 +1084,12 @@ mod tests {
         assert!(report.diagnostic_id.starts_with("diag-recovery-"));
         assert!(report.completed_at_unix_ms >= report.started_at_unix_ms);
         assert_eq!(
+            report.duration_ms(),
+            report
+                .completed_at_unix_ms
+                .saturating_sub(report.started_at_unix_ms)
+        );
+        assert_eq!(
             backend.calls(),
             vec![
                 "snapshot",
@@ -1084,6 +1098,23 @@ mod tests {
                 "probe:google",
                 "probe:youtube",
             ]
+        );
+    }
+
+    #[test]
+    fn recovery_report_exposes_status_duration_and_reason() {
+        let request = request(RecoveryTrigger::RelayDisconnected);
+        let mut report = RecoveryReport::new(&request, 1_000, "diag-recovery-test".into());
+        report.started_at_unix_ms = 1_000;
+        report.completed_at_unix_ms = 1_275;
+        report.status = RecoveryStatus::DegradedFailClosed;
+        report.error_code = Some("recovery.relay_path_unhealthy".into());
+
+        assert_eq!(report.status, RecoveryStatus::DegradedFailClosed);
+        assert_eq!(report.duration_ms(), 275);
+        assert_eq!(
+            report.error_code.as_deref(),
+            Some("recovery.relay_path_unhealthy")
         );
     }
 

@@ -1862,23 +1862,34 @@ fn embedded_service_rejection(
 ) -> NodeCommandResult {
     use crate::symmetric::EmbeddedServiceError;
 
-    let (code, retryable) = match &error {
-        EmbeddedServiceError::InvalidRequest(_) => (NodeProblemCode::InvalidRequest, false),
-        EmbeddedServiceError::NotFound(_) => (NodeProblemCode::NotFound, false),
+    let (code, retryable, reason_code) = match &error {
+        EmbeddedServiceError::InvalidRequest(_) => (NodeProblemCode::InvalidRequest, false, None),
+        EmbeddedServiceError::NotFound(_) => (NodeProblemCode::NotFound, false, None),
         EmbeddedServiceError::PersistenceFailed { .. }
         | EmbeddedServiceError::OperationFailed { .. }
-        | EmbeddedServiceError::ActorClosed => (NodeProblemCode::Unavailable, true),
+        | EmbeddedServiceError::ActorClosed => (NodeProblemCode::Unavailable, true, None),
         EmbeddedServiceError::AlreadyRunning(_)
         | EmbeddedServiceError::StartFailed { .. }
         | EmbeddedServiceError::StopFailed { .. }
-        | EmbeddedServiceError::ShutdownFailed { .. } => (NodeProblemCode::Unavailable, true),
+        | EmbeddedServiceError::ShutdownFailed { .. } => (NodeProblemCode::Unavailable, true, None),
+        EmbeddedServiceError::RelayStartFailed { reason_code, .. }
+        | EmbeddedServiceError::RelayStopFailed { reason_code, .. } => match *reason_code {
+            "relay.start.platform_unsupported" => {
+                (NodeProblemCode::Unsupported, false, Some(*reason_code))
+            }
+            "relay.start.permission_denied" => {
+                (NodeProblemCode::PermissionDenied, false, Some(*reason_code))
+            }
+            _ => (NodeProblemCode::Unavailable, true, Some(*reason_code)),
+        },
     };
-    NodeCommandResult::rejected(
-        request_id,
-        NodeProblem::new(code, error.to_string())
-            .for_network(network_name)
-            .retryable(retryable),
-    )
+    let mut problem = NodeProblem::new(code, error.to_string())
+        .for_network(network_name)
+        .retryable(retryable);
+    if let Some(reason_code) = reason_code {
+        problem = problem.with_param("reason", reason_code);
+    }
+    NodeCommandResult::rejected(request_id, problem)
 }
 
 async fn start_runtime_networks(

@@ -15,7 +15,8 @@ use fuckipv6_common::domain::{
     LeakDetectionIsolationAction, LeakDetectionProtocol, LeakDetectionSnapshot,
     LeakDetectionSource, LeakDetectionTarget, MemberLifecycleChange, MemberLifecycleChangeRequest,
     MemberRemovalPreview, MemberRemovalPreviewRequest, MembershipRole, NetworkId,
-    NetworkMemberDirectory, TrafficProtectionState,
+    NetworkMemberDirectory, RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot,
+    RelayHealthSnapshot, TrafficProtectionState,
 };
 use fuckipv6_common::{
     ClientConfig, ExitNodeCapabilities, ExitNodeUnsupportedReason, JoinRequestBatchReviewItem,
@@ -124,6 +125,11 @@ pub(crate) enum RuntimeControlError {
     NotFound(String),
     #[error("{0}")]
     Unavailable(String),
+    #[error("[{reason_code}] {message}")]
+    RelayLifecycleFailed {
+        reason_code: &'static str,
+        message: String,
+    },
     #[error("{0}")]
     ResourceExhausted(String),
     #[error("{0}")]
@@ -163,6 +169,11 @@ impl RuntimeControlError {
             Self::Unsupported(_) => NodeProblemCode::Unsupported,
             Self::NotFound(_) => NodeProblemCode::NotFound,
             Self::NetworkSetup { stage, .. } => network_setup_problem_code(*stage),
+            Self::RelayLifecycleFailed { reason_code, .. } => match *reason_code {
+                "relay.start.platform_unsupported" => NodeProblemCode::Unsupported,
+                "relay.start.permission_denied" => NodeProblemCode::PermissionDenied,
+                _ => NodeProblemCode::Unavailable,
+            },
             Self::ActorClosed
             | Self::Unavailable(_)
             | Self::Persistence(_)
@@ -187,6 +198,12 @@ impl RuntimeControlError {
     }
 
     pub(crate) fn retryable(&self) -> bool {
+        if let Self::RelayLifecycleFailed { reason_code, .. } = self {
+            return !matches!(
+                *reason_code,
+                "relay.start.platform_unsupported" | "relay.start.permission_denied"
+            );
+        }
         !matches!(
             self,
             Self::Invalid(_)
@@ -236,6 +253,7 @@ impl RuntimeControlError {
     pub(crate) fn conflict_reason(&self) -> Option<&'static str> {
         match self {
             Self::CreationConflict { reason, .. } => Some(*reason),
+            Self::RelayLifecycleFailed { reason_code, .. } => Some(*reason_code),
             _ => None,
         }
     }
@@ -3790,6 +3808,18 @@ impl NetworkRuntimeActor {
                 .into_iter()
                 .find(|service| service.network_name == network.name)
             {
+                let service = if network.relay_enabled && service.relay_addr.is_none() {
+                    match self.services.enable_relay(&network.name).await {
+                        Ok(updated) => updated,
+                        Err(error) => {
+                            return Err(self
+                                .project_embedded_service_start_failure(&network.name, error)
+                                .await);
+                        }
+                    }
+                } else {
+                    service
+                };
                 self.record_running_embedded_service(&service).await;
                 return Ok(());
             }
@@ -3834,9 +3864,9 @@ impl NetworkRuntimeActor {
         let service = match timeout(remaining, self.services.start(request)).await {
             Ok(Ok(service)) => service,
             Ok(Err(error)) => {
-                self.mark_embedded_service_status(&network.name, NodeEmbeddedServiceStatus::Failed)
-                    .await;
-                return Err(map_service_error(error));
+                return Err(self
+                    .project_embedded_service_start_failure(&network.name, error)
+                    .await);
             }
             Err(_) => {
                 self.mark_embedded_service_status(&network.name, NodeEmbeddedServiceStatus::Failed)
@@ -3867,6 +3897,27 @@ impl NetworkRuntimeActor {
             )));
         }
         Ok(())
+    }
+
+    async fn project_embedded_service_start_failure(
+        &self,
+        network_name: &str,
+        error: EmbeddedServiceError,
+    ) -> RuntimeControlError {
+        if matches!(&error, EmbeddedServiceError::RelayStartFailed { .. }) {
+            if let Ok(service) = self.services.list().await.and_then(|services| {
+                services
+                    .into_iter()
+                    .find(|service| service.network_name == network_name)
+                    .ok_or_else(|| EmbeddedServiceError::NotFound(network_name.into()))
+            }) {
+                self.record_running_embedded_service(&service).await;
+                return map_service_error(error);
+            }
+        }
+        self.mark_embedded_service_status(network_name, NodeEmbeddedServiceStatus::Failed)
+            .await;
+        map_service_error(error)
     }
 
     async fn stop_node(&mut self) -> Result<StopSummary, RuntimeControlError> {
@@ -4249,8 +4300,20 @@ impl NetworkRuntimeActor {
         let service = match self.services.start(service_request).await {
             Ok(service) => service,
             Err(error) => {
-                self.mark_embedded_service_status(&command.name, NodeEmbeddedServiceStatus::Failed)
+                if matches!(&error, EmbeddedServiceError::RelayStartFailed { .. }) {
+                    // Creating a network is atomic from the caller's point of
+                    // view. A Relay startup failure must not leave a
+                    // signaling-only service behind when no network metadata
+                    // has been persisted yet.
+                    self.stop_embedded_service(&command.name).await;
+                    self.forget_network(&command.name).await;
+                } else {
+                    self.mark_embedded_service_status(
+                        &command.name,
+                        NodeEmbeddedServiceStatus::Failed,
+                    )
                     .await;
+                }
                 return Err(map_service_error(error));
             }
         };
@@ -5062,7 +5125,7 @@ impl NetworkRuntimeActor {
             .embedded_services
             .iter()
             .find(|service| service.network_name == network_name)
-            .map(|service| (service.relay_status, service.relay_addr))
+            .cloned()
             .ok_or_else(|| {
                 RuntimeControlError::Persistence(format!(
                     "网络 [{network_name}] 的内嵌服务快照缺失，未应用 Relay 角色更新"
@@ -5087,10 +5150,20 @@ impl NetworkRuntimeActor {
         let updated = match updated {
             Ok(updated) => updated,
             Err(error) => {
-                self.record_embedded_relay_status(
+                let failure_health = match &error {
+                    EmbeddedServiceError::RelayStartFailed { health, .. }
+                    | EmbeddedServiceError::RelayStopFailed { health, .. } => {
+                        Some((**health).clone())
+                    }
+                    _ => None,
+                };
+                self.record_embedded_relay_projection(
                     &network_name,
-                    previous_relay.0,
-                    previous_relay.1,
+                    NodeEmbeddedServiceStatus::Failed,
+                    None,
+                    failure_health,
+                    None,
+                    None,
                 )
                 .await;
                 return Err(map_service_error(error));
@@ -5100,7 +5173,7 @@ impl NetworkRuntimeActor {
         let relay_port = updated
             .relay_addr
             .map(|addr| addr.port())
-            .or(previous_relay.1.map(|addr| addr.port()));
+            .or(previous_relay.relay_addr.map(|addr| addr.port()));
         if let Err(error) =
             self.configs
                 .set_embedded_relay_intent(&network_name, command.enabled, relay_port)
@@ -5108,7 +5181,7 @@ impl NetworkRuntimeActor {
             let rollback = self
                 .rollback_relay_runtime(&network_name, !command.enabled)
                 .await;
-            self.restore_relay_projection(&network_name, previous_relay)
+            self.restore_relay_projection(&network_name, &previous_relay)
                 .await;
             return Err(match rollback {
                 Ok(()) => RuntimeControlError::Persistence(format!(
@@ -5134,7 +5207,7 @@ impl NetworkRuntimeActor {
             );
             self.restore_role_projection(previous_config, previous_roles.clone())
                 .await;
-            self.restore_relay_projection(&network_name, previous_relay)
+            self.restore_relay_projection(&network_name, &previous_relay)
                 .await;
             return Err(match (runtime_rollback, persistence_rollback) {
                 (Ok(()), Ok(())) => RuntimeControlError::Persistence(format!(
@@ -5152,13 +5225,7 @@ impl NetworkRuntimeActor {
             });
         }
 
-        let relay_status = if command.enabled {
-            NodeEmbeddedServiceStatus::Running
-        } else {
-            NodeEmbeddedServiceStatus::Stopped
-        };
-        self.record_embedded_relay_status(&network_name, relay_status, updated.relay_addr)
-            .await;
+        self.record_embedded_relay_snapshot(&updated).await;
         if desired_roles != previous_roles {
             self.events.publish(NodeEventKind::RoleChanged {
                 network_name: network_name.clone(),
@@ -5192,10 +5259,17 @@ impl NetworkRuntimeActor {
     async fn restore_relay_projection(
         &self,
         network_name: &str,
-        relay: (NodeEmbeddedServiceStatus, Option<SocketAddr>),
+        service: &NodeEmbeddedServiceSnapshot,
     ) {
-        self.record_embedded_relay_status(network_name, relay.0, relay.1)
-            .await;
+        self.record_embedded_relay_projection(
+            network_name,
+            service.relay_status,
+            service.relay_addr,
+            service.relay_health.clone(),
+            service.relay_authorization.clone(),
+            service.relay_governance.clone(),
+        )
+        .await;
     }
 
     async fn stop(
@@ -6192,6 +6266,61 @@ impl NetworkRuntimeActor {
         status: NodeEmbeddedServiceStatus,
         relay_addr: Option<SocketAddr>,
     ) {
+        self.record_embedded_relay_projection(network_name, status, relay_addr, None, None, None)
+            .await;
+    }
+
+    async fn record_embedded_relay_snapshot(&self, service: &EmbeddedServiceSnapshot) {
+        let relay_status = match service.relay_health.as_ref().map(|health| health.lifecycle) {
+            Some(fuckipv6_common::domain::RelayLifecycleState::Running) => {
+                NodeEmbeddedServiceStatus::Running
+            }
+            Some(fuckipv6_common::domain::RelayLifecycleState::Starting) => {
+                NodeEmbeddedServiceStatus::Starting
+            }
+            Some(fuckipv6_common::domain::RelayLifecycleState::Stopping) => {
+                NodeEmbeddedServiceStatus::Stopping
+            }
+            Some(
+                fuckipv6_common::domain::RelayLifecycleState::Failed
+                | fuckipv6_common::domain::RelayLifecycleState::Unsupported,
+            ) => NodeEmbeddedServiceStatus::Failed,
+            Some(fuckipv6_common::domain::RelayLifecycleState::Stopped) => {
+                if service.relay_addr.is_some() {
+                    NodeEmbeddedServiceStatus::Failed
+                } else {
+                    NodeEmbeddedServiceStatus::Stopped
+                }
+            }
+            None => {
+                if service.relay_addr.is_some() {
+                    NodeEmbeddedServiceStatus::Running
+                } else {
+                    NodeEmbeddedServiceStatus::Stopped
+                }
+            }
+        };
+        self.record_embedded_relay_projection(
+            &service.network_name,
+            relay_status,
+            service.relay_addr,
+            service.relay_health.clone(),
+            service.relay_authorization.clone(),
+            service.relay_governance.clone(),
+        )
+        .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn record_embedded_relay_projection(
+        &self,
+        network_name: &str,
+        status: NodeEmbeddedServiceStatus,
+        relay_addr: Option<SocketAddr>,
+        relay_health: Option<RelayHealthSnapshot>,
+        relay_authorization: Option<RelayAuthorizationAuditSnapshot>,
+        relay_governance: Option<RelayGovernanceAuditSnapshot>,
+    ) {
         let mut updated = false;
         self.state
             .update(|state| {
@@ -6202,6 +6331,9 @@ impl NetworkRuntimeActor {
                 {
                     existing.relay_status = status;
                     existing.relay_addr = relay_addr;
+                    existing.relay_health = relay_health;
+                    existing.relay_authorization = relay_authorization;
+                    existing.relay_governance = relay_governance;
                     updated = true;
                 }
             })
@@ -6761,6 +6893,24 @@ fn map_service_error(error: EmbeddedServiceError) -> RuntimeControlError {
         } => RuntimeControlError::Unavailable(format!(
             "网络 [{network_name}] 的管理操作失败: {message}"
         )),
+        EmbeddedServiceError::RelayStartFailed {
+            network_name,
+            reason_code,
+            message,
+            ..
+        } => RuntimeControlError::RelayLifecycleFailed {
+            reason_code,
+            message: format!("网络 [{network_name}] 的 Relay 启动失败: {message}"),
+        },
+        EmbeddedServiceError::RelayStopFailed {
+            network_name,
+            reason_code,
+            message,
+            ..
+        } => RuntimeControlError::RelayLifecycleFailed {
+            reason_code,
+            message: format!("网络 [{network_name}] 的 Relay 停止失败: {message}"),
+        },
         EmbeddedServiceError::ActorClosed => RuntimeControlError::ActorClosed,
     }
 }
@@ -6947,6 +7097,13 @@ fn local_exit_error_with_network(
         RuntimeControlError::Unavailable(message) => {
             RuntimeControlError::Unavailable(format!("{context}：{message}"))
         }
+        RuntimeControlError::RelayLifecycleFailed {
+            reason_code,
+            message,
+        } => RuntimeControlError::RelayLifecycleFailed {
+            reason_code,
+            message: format!("{context}：{message}"),
+        },
         RuntimeControlError::ResourceExhausted(message) => {
             RuntimeControlError::ResourceExhausted(format!("{context}：{message}"))
         }
@@ -7171,6 +7328,7 @@ mod tests {
         TunCapabilities, TunCapabilityReason, TunPlatform, TUN_CAPABILITY_SCHEMA_VERSION,
     };
     use fuckipv6_common::domain::{
+        RelayAuthorizationAuditSnapshot, RelayExistingSessionPolicy, RelayGovernanceAuditSnapshot,
         RelayHealthSnapshot, RelayLifecycleState, RelayLimitPolicy, RelayReachabilityState,
         RelayUsageSnapshot,
     };
@@ -9149,6 +9307,47 @@ mod tests {
     }
 
     #[test]
+    fn relay_lifecycle_errors_have_stable_problem_contract() {
+        let cases = [
+            (
+                "relay.start.platform_unsupported",
+                NodeProblemCode::Unsupported,
+                false,
+            ),
+            (
+                "relay.start.permission_denied",
+                NodeProblemCode::PermissionDenied,
+                false,
+            ),
+            (
+                "relay.start.address_in_use",
+                NodeProblemCode::Unavailable,
+                true,
+            ),
+            (
+                "relay.start.network_unreachable",
+                NodeProblemCode::Unavailable,
+                true,
+            ),
+            (
+                "relay.stop.cleanup_incomplete",
+                NodeProblemCode::Unavailable,
+                true,
+            ),
+        ];
+
+        for (reason_code, expected_code, expected_retryable) in cases {
+            let error = RuntimeControlError::RelayLifecycleFailed {
+                reason_code,
+                message: "Relay lifecycle failed".into(),
+            };
+            assert_eq!(error.problem_code(), expected_code);
+            assert_eq!(error.retryable(), expected_retryable);
+            assert_eq!(error.conflict_reason(), Some(reason_code));
+        }
+    }
+
+    #[test]
     fn join_request_control_errors_map_to_stable_problem_contract() {
         let cases = [
             (
@@ -9836,6 +10035,317 @@ mod tests {
             "disabling Relay must retain the last bound port"
         );
 
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn failed_relay_start_is_explained_persisted_and_retryable() {
+        let harness = TestHarness::new("relay-start-failure").await;
+        let network_name = "relay-start-failure";
+        start_fake_network(&harness, network_name).await;
+        let occupied = tokio::net::UdpSocket::bind(("127.0.0.1", 0))
+            .await
+            .expect("occupy Relay UDP port");
+        let relay_port = occupied.local_addr().expect("occupied address").port();
+        let started = harness
+            .services
+            .start(
+                EmbeddedServiceStartRequest::new(network_name, 0, relay_port)
+                    .with_external_host("127.0.0.1")
+                    .with_relay_enabled(false),
+            )
+            .await
+            .expect("start signaling with Relay disabled");
+        harness
+            .configs
+            .set_embedded_service_metadata(
+                network_name,
+                started.signaling_addr.port(),
+                Some(relay_port),
+                false,
+                Some("127.0.0.1".into()),
+                None,
+            )
+            .expect("persist embedded service metadata");
+        record_running_embedded_service_for_test(&harness, &started).await;
+
+        let stale_authorization = RelayAuthorizationAuditSnapshot {
+            network_id: NetworkId::from_public_key(b"stale-relay-auth"),
+            provider_node_id: fuckipv6_common::domain::NodeId::from_public_key(b"relay-provider"),
+            policy_revision: 7,
+            policy_updated_at_unix_ms: 1_700_000_000_000,
+            existing_session_policy: RelayExistingSessionPolicy::Terminate,
+            decisions: Vec::new(),
+            truncated: false,
+        };
+        let stale_governance = RelayGovernanceAuditSnapshot {
+            dropped_events: 1,
+            ..Default::default()
+        };
+        harness
+            .state
+            .update(|snapshot| {
+                let service = snapshot
+                    .embedded_services
+                    .iter_mut()
+                    .find(|service| service.network_name == network_name)
+                    .expect("embedded service snapshot");
+                service.relay_authorization = Some(stale_authorization);
+                service.relay_governance = Some(stale_governance);
+            })
+            .await;
+
+        let mut relay_events = harness.events.subscribe();
+        let error = harness
+            .runtime
+            .set_network_role(role_command(network_name, NodeNetworkRole::Relay, true))
+            .await
+            .expect_err("occupied UDP port must reject Relay enable");
+        let RuntimeControlError::RelayLifecycleFailed { reason_code, .. } = error else {
+            panic!("expected typed Relay lifecycle failure");
+        };
+        assert_eq!(reason_code, "relay.start.address_in_use");
+        assert_eq!(
+            relay_changed_events(&mut relay_events, network_name),
+            vec![
+                NodeEmbeddedServiceStatus::Starting,
+                NodeEmbeddedServiceStatus::Failed,
+            ]
+        );
+
+        let service = harness
+            .state
+            .snapshot()
+            .await
+            .embedded_services
+            .into_iter()
+            .find(|service| service.network_name == network_name)
+            .expect("failed embedded service");
+        assert_eq!(service.relay_status, NodeEmbeddedServiceStatus::Failed);
+        assert!(service.relay_addr.is_none());
+        let health = service.relay_health.expect("failed Relay health");
+        assert_eq!(health.lifecycle, RelayLifecycleState::Failed);
+        assert_eq!(health.reason_code.as_deref(), Some(reason_code));
+        assert!(!health.listener_bound);
+        assert!(service.relay_authorization.is_none());
+        assert!(service.relay_governance.is_none());
+        let manager_service = harness
+            .services
+            .list()
+            .await
+            .expect("list embedded services")
+            .into_iter()
+            .find(|service| service.network_name == network_name)
+            .expect("manager keeps the failed service");
+        assert!(manager_service.relay_addr.is_none());
+        assert_eq!(
+            manager_service
+                .relay_health
+                .and_then(|health| health.reason_code),
+            Some(reason_code.to_string())
+        );
+        assert!(
+            !harness
+                .configs
+                .list_networks()
+                .expect("load network metadata")
+                .into_iter()
+                .find(|network| network.name == network_name)
+                .expect("persisted network")
+                .relay_enabled
+        );
+
+        drop(occupied);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match harness
+                    .runtime
+                    .set_network_role(role_command(network_name, NodeNetworkRole::Relay, true))
+                    .await
+                {
+                    Ok(_) => break,
+                    Err(RuntimeControlError::RelayLifecycleFailed {
+                        reason_code: "relay.start.address_in_use",
+                        ..
+                    }) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("unexpected Relay retry failure: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("Relay retry timed out");
+        let recovered = harness
+            .state
+            .snapshot()
+            .await
+            .embedded_services
+            .into_iter()
+            .find(|service| service.network_name == network_name)
+            .expect("recovered embedded service");
+        assert_eq!(recovered.relay_status, NodeEmbeddedServiceStatus::Running);
+        assert_eq!(
+            recovered.relay_addr.map(|addr| addr.port()),
+            Some(relay_port)
+        );
+        assert_eq!(
+            recovered
+                .relay_health
+                .as_ref()
+                .map(|health| health.lifecycle),
+            Some(RelayLifecycleState::Running)
+        );
+        assert!(
+            harness
+                .configs
+                .list_networks()
+                .expect("load recovered network metadata")
+                .into_iter()
+                .find(|network| network.name == network_name)
+                .expect("persisted recovered network")
+                .relay_enabled
+        );
+
+        harness.shutdown().await;
+        tokio::net::UdpSocket::bind(("127.0.0.1", relay_port))
+            .await
+            .expect("runtime shutdown must release the Relay port");
+    }
+
+    #[tokio::test]
+    async fn initial_relay_restore_failure_keeps_signaling_and_retries_on_next_start() {
+        let harness = TestHarness::new("relay-restore-failure").await;
+        let network_name = "relay-restore-failure";
+        harness
+            .configs
+            .create_network(network_name, "ws://127.0.0.1:6666", true)
+            .expect("create persisted network");
+        let occupied = tokio::net::UdpSocket::bind(("127.0.0.1", 0))
+            .await
+            .expect("occupy Relay UDP port");
+        let relay_port = occupied.local_addr().expect("occupied address").port();
+        harness
+            .configs
+            .set_embedded_service_metadata(
+                network_name,
+                0,
+                Some(relay_port),
+                true,
+                Some("127.0.0.1".into()),
+                None,
+            )
+            .expect("persist embedded service metadata");
+
+        let first = harness
+            .runtime
+            .start_node()
+            .await
+            .expect("Relay failure must be reported without aborting node startup");
+        assert_eq!(first.failed.len(), 1);
+        assert!(first.failed[0]
+            .message
+            .contains("relay.start.address_in_use"));
+
+        let failed_service = harness
+            .state
+            .snapshot()
+            .await
+            .embedded_services
+            .into_iter()
+            .find(|service| service.network_name == network_name)
+            .expect("signaling must remain observable after Relay restore failure");
+        assert_eq!(failed_service.status, NodeEmbeddedServiceStatus::Running);
+        assert_eq!(
+            failed_service.relay_status,
+            NodeEmbeddedServiceStatus::Failed
+        );
+        let signaling_addr = failed_service
+            .signaling_addr
+            .expect("signaling address after Relay restore failure");
+        assert!(failed_service.relay_addr.is_none());
+        let health = failed_service.relay_health.expect("failed Relay health");
+        assert_eq!(health.lifecycle, RelayLifecycleState::Failed);
+        assert_eq!(
+            health.reason_code.as_deref(),
+            Some("relay.start.address_in_use")
+        );
+        tokio::net::TcpListener::bind(("127.0.0.1", signaling_addr.port()))
+            .await
+            .expect_err("signaling listener must survive Relay restore failure");
+
+        drop(occupied);
+        let retried = tokio::time::timeout(Duration::from_secs(2), harness.runtime.start_node())
+            .await
+            .expect("Retry after Relay port release timed out")
+            .expect("retry node startup");
+        assert_eq!(retried.started, vec![network_name]);
+        let recovered = harness
+            .state
+            .snapshot()
+            .await
+            .embedded_services
+            .into_iter()
+            .find(|service| service.network_name == network_name)
+            .expect("recovered embedded service");
+        assert_eq!(recovered.relay_status, NodeEmbeddedServiceStatus::Running);
+        assert_eq!(
+            recovered.relay_addr.map(|addr| addr.port()),
+            Some(relay_port)
+        );
+        assert_eq!(
+            recovered
+                .relay_health
+                .as_ref()
+                .map(|health| health.lifecycle),
+            Some(RelayLifecycleState::Running)
+        );
+
+        harness.shutdown().await;
+        tokio::net::UdpSocket::bind(("127.0.0.1", relay_port))
+            .await
+            .expect("shutdown must release the recovered Relay port");
+    }
+
+    #[tokio::test]
+    async fn create_cleans_up_signaling_when_initial_relay_start_fails() {
+        let harness = TestHarness::new("relay-create-failure").await;
+        let occupied = tokio::net::UdpSocket::bind(("127.0.0.1", 0))
+            .await
+            .expect("occupy Relay UDP port");
+        let relay_port = occupied.local_addr().expect("occupied address").port();
+        let mut command = create_command("relay-create-failure", false);
+        command.relay_port = relay_port;
+        command.external_host = Some("127.0.0.1".into());
+
+        let error = harness
+            .runtime
+            .create(command)
+            .await
+            .expect_err("occupied Relay port must fail network creation");
+        let RuntimeControlError::RelayLifecycleFailed { reason_code, .. } = error else {
+            panic!("expected typed Relay lifecycle failure");
+        };
+        assert_eq!(reason_code, "relay.start.address_in_use");
+        assert!(
+            harness
+                .services
+                .list()
+                .await
+                .expect("list embedded services")
+                .is_empty(),
+            "failed create must not leave an orphan signaling service"
+        );
+        assert!(
+            harness.state.snapshot().await.embedded_services.is_empty(),
+            "rolled-back create must not retain embedded service state"
+        );
+        assert!(!harness.configs.network_exists("relay-create-failure"));
+
+        drop(occupied);
+        tokio::net::UdpSocket::bind(("127.0.0.1", relay_port))
+            .await
+            .expect("failed create must release its signaling-only resources");
         harness.shutdown().await;
     }
 

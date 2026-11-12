@@ -13,9 +13,9 @@ use fuckipv6_common::domain::{
     NetworkAcl, NetworkId, NetworkJoinMode, NetworkMemberDirectory, NetworkMemberPresence,
     NetworkMemberStatus, NetworkVisibility, NodeId, NodeLocalAccessPolicy, OperationRecovery,
     RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot, RelayHealthSnapshot,
-    RelayHealthStatus, TopologyBuilder, TopologyLinkObservation, TopologyMemberInput,
-    TopologyNetworkInput, TopologySnapshot, TopologyViewer, TrafficRoutingPageModel,
-    TrafficSessionSnapshot,
+    RelayHealthStatus, RelayLifecycleState, TopologyBuilder, TopologyLinkObservation,
+    TopologyMemberInput, TopologyNetworkInput, TopologySnapshot, TopologyViewer,
+    TrafficRoutingPageModel, TrafficSessionSnapshot,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -1121,15 +1121,33 @@ impl NodeEmbeddedServiceSnapshot {
     pub(crate) fn running_from_embedded(
         service: &crate::symmetric::EmbeddedServiceSnapshot,
     ) -> Self {
+        let relay_status = match service.relay_health.as_ref().map(|health| health.lifecycle) {
+            Some(RelayLifecycleState::Running) => NodeEmbeddedServiceStatus::Running,
+            Some(RelayLifecycleState::Starting) => NodeEmbeddedServiceStatus::Starting,
+            Some(RelayLifecycleState::Stopping) => NodeEmbeddedServiceStatus::Stopping,
+            Some(RelayLifecycleState::Failed | RelayLifecycleState::Unsupported) => {
+                NodeEmbeddedServiceStatus::Failed
+            }
+            Some(RelayLifecycleState::Stopped) => {
+                if service.relay_addr.is_some() {
+                    NodeEmbeddedServiceStatus::Failed
+                } else {
+                    NodeEmbeddedServiceStatus::Stopped
+                }
+            }
+            None => {
+                if service.relay_addr.is_some() {
+                    NodeEmbeddedServiceStatus::Running
+                } else {
+                    NodeEmbeddedServiceStatus::Stopped
+                }
+            }
+        };
         Self {
             network_name: service.network_name.clone(),
             status: NodeEmbeddedServiceStatus::Running,
             signaling_addr: Some(service.signaling_addr),
-            relay_status: if service.relay_addr.is_some() {
-                NodeEmbeddedServiceStatus::Running
-            } else {
-                NodeEmbeddedServiceStatus::Stopped
-            },
+            relay_status,
             relay_addr: service.relay_addr,
             relay_health: service.relay_health.clone(),
             relay_authorization: service.relay_authorization.clone(),

@@ -1631,6 +1631,42 @@ mod tests {
     }
 
     #[test]
+    fn temporary_coordinator_cannot_start_or_stop_relay() {
+        let relay_policies = (
+            vec![allow(
+                b"local-relay-capability",
+                SubjectSelector::AnyMember,
+                PolicyAction::Update,
+                ResourceKind::Capability,
+            )],
+            vec![allow(
+                b"network-relay-capability",
+                SubjectSelector::AnyMember,
+                PolicyAction::Update,
+                ResourceKind::Capability,
+            )],
+        );
+        for enabled in [true, false] {
+            assert_denied(
+                &network_context(
+                    NetworkRole::TemporaryCoordinator,
+                    [NodePermission::ManageRoles],
+                    &["home"],
+                    MembershipState::Active,
+                    relay_policies.0.clone(),
+                    relay_policies.1.clone(),
+                ),
+                NodeCommand::SetNetworkRole(crate::node::NodeSetNetworkRoleCommand {
+                    network_name: "home".into(),
+                    role: crate::node::NodeNetworkRole::Relay,
+                    enabled,
+                }),
+                "permission.temporary_coordinator_read_only",
+            );
+        }
+    }
+
+    #[test]
     fn network_scope_cannot_be_widened_by_the_command_payload() {
         let (local_policy, network_policy) = start_policies();
         let context = network_context(

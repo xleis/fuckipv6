@@ -71,6 +71,8 @@ struct RelayState {
     listener_open: AtomicBool,
     connection_tasks: Arc<Semaphore>,
     stream_tasks: Arc<Semaphore>,
+    max_connection_tasks: usize,
+    max_stream_tasks: usize,
     governance: RelayGovernanceAudit,
 }
 
@@ -89,6 +91,8 @@ impl Default for RelayState {
             listener_open: AtomicBool::new(true),
             connection_tasks: Arc::new(Semaphore::new(MAX_RELAY_CONNECTION_TASKS)),
             stream_tasks: Arc::new(Semaphore::new(MAX_RELAY_STREAM_TASKS)),
+            max_connection_tasks: MAX_RELAY_CONNECTION_TASKS,
+            max_stream_tasks: MAX_RELAY_STREAM_TASKS,
             governance: RelayGovernanceAudit::default(),
         }
     }
@@ -717,8 +721,8 @@ impl RelayServer {
                     RelayGovernanceAction::SessionRejected,
                     None,
                     "relay.session.task_limit",
-                    Some(MAX_RELAY_CONNECTION_TASKS as u64),
-                    Some(MAX_RELAY_CONNECTION_TASKS as u64),
+                    Some(self.state.max_connection_tasks as u64),
+                    Some(self.state.max_connection_tasks as u64),
                     None,
                 );
                 self.record_forwarding_failure();
@@ -974,8 +978,8 @@ impl RelayServer {
                 RelayGovernanceAction::PacketRejected,
                 Some(&registered.node_id),
                 "relay.packet.task_limit",
-                Some(MAX_RELAY_STREAM_TASKS as u64),
-                Some(MAX_RELAY_STREAM_TASKS as u64),
+                Some(self.state.max_stream_tasks as u64),
+                Some(self.state.max_stream_tasks as u64),
                 None,
             );
             self.record_forwarding_failure();
@@ -2101,6 +2105,8 @@ impl RelayServer {
             listener_open: AtomicBool::new(true),
             connection_tasks: Arc::new(Semaphore::new(max_connection_tasks)),
             stream_tasks: Arc::new(Semaphore::new(max_stream_tasks)),
+            max_connection_tasks,
+            max_stream_tasks,
             governance: RelayGovernanceAudit::default(),
         });
         Ok(server)
@@ -2372,7 +2378,7 @@ mod tests {
         PolicyAction, RelayHealthIssue, RelayHealthStatus, RelayMemberPolicyContext, ResourceKind,
         SecurityRuleId, SubjectSelector,
     };
-    use fuckipv6_common::relay_client::QuicRelayClient;
+    use fuckipv6_common::relay_client::{QuicRelayClient, RELAY_INCOMING_QUEUE_CAPACITY};
     use fuckipv6_common::{
         build_pinned_quic_client_config_with_auth, export_quic_relay_channel_binding,
         recv_relay_message, send_relay_message, BlacklistConfig, Identity, NatType,
@@ -2548,6 +2554,25 @@ mod tests {
     ) -> Result<QuicRelayClient> {
         let grant = test_member_grant(identity, RelayLimitPolicy::default());
         connect_test_relay_with_grant(relay_addr, server_pin, identity, virtual_ip, &grant).await
+    }
+
+    async fn connect_raw_test_relay(
+        relay_addr: SocketAddr,
+        server_pin: [u8; 32],
+        identity: &Identity,
+    ) -> Result<(quinn::Endpoint, quinn::Connection)> {
+        let client_certificate = QuicCertificate::from_identity(identity)?;
+        let mut endpoint =
+            quinn::Endpoint::client(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))?;
+        endpoint.set_default_client_config(build_pinned_quic_client_config_with_auth(
+            server_pin,
+            &client_certificate,
+        )?);
+        let connection = endpoint
+            .connect(relay_addr, "fuckipv6.local")?
+            .await
+            .context("raw relay client handshake failed")?;
+        Ok((endpoint, connection))
     }
 
     async fn connect_test_relay_with_grant(
@@ -3217,19 +3242,32 @@ mod tests {
         assert_eq!(delivered.dst_ip, ip_b);
         assert_eq!(delivered.payload, payload);
 
-        let governance_json = serde_json::to_string(&server.governance_snapshot())?;
-        for forbidden in [
+        let usage = server.usage_snapshot().await;
+        let health = server.health_snapshot().await;
+        let operator_snapshots = [
+            (
+                "governance",
+                serde_json::to_string(&server.governance_snapshot())?,
+            ),
+            ("usage", serde_json::to_string(&usage)?),
+            ("health", serde_json::to_string(&health)?),
+        ];
+        let forbidden = [
             ip_a.to_string(),
             ip_b.to_string(),
             "relay-through-quic".to_string(),
             "private_key".to_string(),
             "session_key".to_string(),
+            "network_display_name".to_string(),
             "member_display_name".to_string(),
-        ] {
-            assert!(
-                !governance_json.contains(&forbidden),
-                "governance export leaked {forbidden}: {governance_json}"
-            );
+        ];
+        for (snapshot_name, snapshot_json) in &operator_snapshots {
+            for forbidden in &forbidden {
+                assert!(
+                    !snapshot_json.contains(forbidden),
+                    "{snapshot_name} operator export leaked {forbidden}: {snapshot_json}"
+                );
+            }
         }
 
         let traffic = session_manager.snapshot().await.traffic;
@@ -3240,11 +3278,9 @@ mod tests {
         );
         assert_eq!(traffic.relay_errors, 0);
 
-        let usage = server.usage_snapshot().await;
         assert!(usage.last_forwarded_at_unix_ms.is_some());
         assert_eq!(usage.cpu_measurement, RelayMeasurementState::Unsupported);
         assert_eq!(usage.memory_measurement, RelayMeasurementState::Unsupported);
-        let health = server.health_snapshot().await;
         assert_eq!(health.status, RelayHealthStatus::Healthy);
         assert_eq!(
             health.network_reachability,
@@ -3254,6 +3290,111 @@ mod tests {
 
         client_a.close().await;
         client_b.close().await;
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn quic_relay_slow_receiver_applies_bounded_backpressure_then_recovers() -> Result<()> {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity_a = Identity::generate()?;
+        let identity_b = Identity::generate()?;
+        let ip_a = register_relay_test_client(&session_manager, &identity_a, 0).await?;
+        let ip_b = register_relay_test_client(&session_manager, &identity_b, 1).await?;
+
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager,
+            relay_authority(&[&identity_a, &identity_b]),
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+
+        let client_a = connect_test_relay(relay_addr, server_pin, &identity_a, ip_a).await?;
+        let client_b = connect_test_relay(relay_addr, server_pin, &identity_b, ip_b).await?;
+        wait_for_active_connections(&server, 2).await?;
+
+        for index in 0..RELAY_INCOMING_QUEUE_CAPACITY {
+            client_a
+                .send_packet(index as u64, ip_a, ip_b, Bytes::from(vec![index as u8]))
+                .await
+                .with_context(|| {
+                    format!("filling bounded relay ingress failed at packet {index}")
+                })?;
+        }
+
+        let blocked = tokio::time::timeout(
+            Duration::from_secs(5),
+            client_a.send_packet(
+                RELAY_INCOMING_QUEUE_CAPACITY as u64,
+                ip_a,
+                ip_b,
+                Bytes::from_static(b"blocked-by-backpressure"),
+            ),
+        )
+        .await
+        .context("the Relay did not time out a full receiver ingress queue")?;
+        let blocked_error = blocked
+            .expect_err("a full receiver ingress queue must reject the forwarding attempt")
+            .to_string();
+        assert!(
+            blocked_error.contains("502") || blocked_error.contains("forwarding failed"),
+            "{blocked_error}"
+        );
+        wait_for_task_permits(
+            &server,
+            MAX_RELAY_CONNECTION_TASKS - 2,
+            MAX_RELAY_STREAM_TASKS,
+        )
+        .await?;
+
+        for index in 0..RELAY_INCOMING_QUEUE_CAPACITY {
+            let packet = tokio::time::timeout(Duration::from_secs(1), client_b.recv_packet())
+                .await
+                .with_context(|| format!("queued packet {index} was not readable"))?
+                .context("relay connection closed before queued packets were drained")?;
+            assert_eq!(packet.payload, Bytes::from(vec![index as u8]));
+        }
+        let blocked_packet = tokio::time::timeout(Duration::from_secs(1), client_b.recv_packet())
+            .await
+            .context("released backpressure packet was not readable")?
+            .context("relay connection closed while releasing backpressure")?;
+        assert_eq!(
+            blocked_packet.payload,
+            Bytes::from_static(b"blocked-by-backpressure")
+        );
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let retry_payload = Bytes::from_static(b"after-backpressure");
+        let (retry, delivered) = tokio::join!(
+            client_a.send_packet(
+                RELAY_INCOMING_QUEUE_CAPACITY as u64 + 1,
+                ip_a,
+                ip_b,
+                retry_payload.clone(),
+            ),
+            async {
+                let packet = client_b
+                    .recv_packet()
+                    .await
+                    .context("relay connection closed during recovery")?;
+                Ok::<_, anyhow::Error>(packet)
+            }
+        );
+        retry.context("Relay did not recover after receiver ingress drained")?;
+        assert_eq!(delivered?.payload, retry_payload);
+        wait_for_task_permits(
+            &server,
+            MAX_RELAY_CONNECTION_TASKS - 2,
+            MAX_RELAY_STREAM_TASKS,
+        )
+        .await?;
+
+        client_a.close().await;
+        client_b.close().await;
+        wait_for_active_connections(&server, 0).await?;
+        wait_for_task_permits(&server, MAX_RELAY_CONNECTION_TASKS, MAX_RELAY_STREAM_TASKS).await?;
         server_task.abort();
         Ok(())
     }
@@ -4510,49 +4651,185 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quic_relay_rejects_packet_when_stream_task_limit_is_exhausted() -> Result<()> {
+    async fn quic_relay_connection_task_limit_rejects_then_recovers_after_permit_release(
+    ) -> Result<()> {
         let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
-        let identity = Identity::generate()?;
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let observed = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41000);
-        let ip = session_manager
-            .register_client(
-                identity.client_id().to_string(),
-                identity.public_key(),
-                observed,
-                51820,
-                NatType::Open,
-                tx,
-            )
-            .await?
-            .primary_ipv6();
+        let identity_a = Identity::generate()?;
+        let identity_b = Identity::generate()?;
+        let ip_a = register_relay_test_client(&session_manager, &identity_a, 0).await?;
+        let ip_b = register_relay_test_client(&session_manager, &identity_b, 1).await?;
 
         let certificate =
             generate_self_signed_quic_certificate(vec!["fuckipv6.local".to_string()])?;
         let server = RelayServer::new_test_with_limits(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
             session_manager,
-            relay_authority(&[&identity]),
+            relay_authority(&[&identity_a, &identity_b]),
             certificate,
+            2,
             8,
-            0,
         )?;
         let relay_addr = server.local_addr();
         let server_pin = server.certificate().public_key_pin;
         let server_task = tokio::spawn(server.clone().run());
-        let client = connect_test_relay(relay_addr, server_pin, &identity, ip).await?;
+        let client_a = connect_test_relay(relay_addr, server_pin, &identity_a, ip_a).await?;
+        wait_for_active_connections(&server, 1).await?;
+        wait_for_task_permits(&server, 1, 8).await?;
 
-        let result = client
-            .send_packet(
-                1,
-                ip,
-                "fd00::1002".parse()?,
-                Bytes::from_static(b"overloaded"),
-            )
-            .await;
+        let held_connection_permit = server
+            .state
+            .connection_tasks
+            .clone()
+            .try_acquire_owned()
+            .expect("test must hold the last connection task permit");
+        let rejected_client = tokio::time::timeout(
+            Duration::from_secs(1),
+            connect_test_relay(relay_addr, server_pin, &identity_b, ip_b),
+        )
+        .await;
+        assert!(
+            !matches!(rejected_client, Ok(Ok(_))),
+            "a full connection task pool must not register another client"
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if server
+                    .governance_snapshot()
+                    .events
+                    .iter()
+                    .any(|event| event.reason_code == "relay.session.task_limit")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("connection task saturation was not audited")?;
+        let task_limit_event = server
+            .governance_snapshot()
+            .events
+            .into_iter()
+            .find(|event| event.reason_code == "relay.session.task_limit")
+            .expect("connection task saturation event");
+        assert_eq!(task_limit_event.observed, Some(2));
+        assert_eq!(task_limit_event.limit, Some(2));
+        assert_eq!(server.usage_snapshot().await.rejected_connections, 1);
+        assert!(server
+            .health_snapshot()
+            .await
+            .issues
+            .contains(&RelayHealthIssue::ResourcePressure));
 
-        let error = result.unwrap_err().to_string();
-        assert!(error.contains("503"));
+        drop(held_connection_permit);
+        wait_for_task_permits(&server, 1, 8).await?;
+        let client_b = tokio::time::timeout(
+            Duration::from_secs(5),
+            connect_test_relay(relay_addr, server_pin, &identity_b, ip_b),
+        )
+        .await
+        .context("connection task permit recovery timed out")??;
+        wait_for_active_connections(&server, 2).await?;
+        wait_for_task_permits(&server, 0, 8).await?;
+
+        client_a.close().await;
+        wait_for_active_connections(&server, 1).await?;
+        wait_for_task_permits(&server, 1, 8).await?;
+        assert!(!server
+            .health_snapshot()
+            .await
+            .issues
+            .contains(&RelayHealthIssue::ResourcePressure));
+
+        client_b.close().await;
+        wait_for_active_connections(&server, 0).await?;
+        wait_for_task_permits(&server, 2, 8).await?;
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_slow_unregistered_connection_releases_task_permit_after_close() -> Result<()>
+    {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity_a = Identity::generate()?;
+        let identity_b = Identity::generate()?;
+        let ip_a = register_relay_test_client(&session_manager, &identity_a, 0).await?;
+        let ip_b = register_relay_test_client(&session_manager, &identity_b, 1).await?;
+
+        let certificate =
+            generate_self_signed_quic_certificate(vec!["fuckipv6.local".to_string()])?;
+        let server = RelayServer::new_test_with_limits(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager,
+            relay_authority(&[&identity_a, &identity_b]),
+            certificate,
+            2,
+            8,
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+
+        let (raw_endpoint, raw_connection) =
+            connect_raw_test_relay(relay_addr, server_pin, &identity_a).await?;
+        wait_for_task_permits(&server, 1, 8).await?;
+        let client_b = connect_test_relay(relay_addr, server_pin, &identity_b, ip_b).await?;
+        wait_for_active_connections(&server, 1).await?;
+        wait_for_task_permits(&server, 0, 8).await?;
+        assert!(server.state.clients.read().await.get(&ip_a).is_none());
+
+        raw_connection.close(0u32.into(), b"slow client closed");
+        raw_endpoint.close(0u32.into(), b"slow client closed");
+        wait_for_task_permits(&server, 1, 8).await?;
+        assert_eq!(server.usage_snapshot().await.active_connections, 1);
+
+        client_b.close().await;
+        wait_for_active_connections(&server, 0).await?;
+        wait_for_task_permits(&server, 2, 8).await?;
+        server_task.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quic_relay_stream_task_limit_rejects_then_recovers_after_permit_release() -> Result<()>
+    {
+        let session_manager = Arc::new(SessionManager::new("fd00::1000/120")?);
+        let identity_a = Identity::generate()?;
+        let identity_b = Identity::generate()?;
+        let ip_a = register_relay_test_client(&session_manager, &identity_a, 0).await?;
+        let ip_b = register_relay_test_client(&session_manager, &identity_b, 1).await?;
+
+        let certificate =
+            generate_self_signed_quic_certificate(vec!["fuckipv6.local".to_string()])?;
+        let server = RelayServer::new_test_with_limits(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            session_manager,
+            relay_authority(&[&identity_a, &identity_b]),
+            certificate,
+            8,
+            1,
+        )?;
+        let relay_addr = server.local_addr();
+        let server_pin = server.certificate().public_key_pin;
+        let server_task = tokio::spawn(server.clone().run());
+        let client_a = connect_test_relay(relay_addr, server_pin, &identity_a, ip_a).await?;
+        let client_b = connect_test_relay(relay_addr, server_pin, &identity_b, ip_b).await?;
+        wait_for_active_connections(&server, 2).await?;
+        wait_for_task_permits(&server, 6, 1).await?;
+
+        let held_stream_permit = server
+            .state
+            .stream_tasks
+            .clone()
+            .try_acquire_owned()
+            .expect("test must hold the only stream task permit");
+        let error = client_a
+            .send_packet(1, ip_a, ip_b, Bytes::from_static(b"overloaded"))
+            .await
+            .expect_err("stream task saturation must reject the packet")
+            .to_string();
+        assert!(error.contains("503"), "{error}");
         let governance = server.governance_snapshot();
         let task_limit_event = governance
             .events
@@ -4563,19 +4840,41 @@ mod tests {
             task_limit_event.action,
             RelayGovernanceAction::PacketRejected
         );
-        assert_eq!(
-            task_limit_event.observed,
-            Some(MAX_RELAY_STREAM_TASKS as u64)
-        );
-        assert_eq!(task_limit_event.limit, Some(MAX_RELAY_STREAM_TASKS as u64));
-        let usage = server.usage_snapshot().await;
-        assert_eq!(usage.rejected_packets, 1);
-        let health = server.health_snapshot().await;
-        assert!(health
+        assert_eq!(task_limit_event.observed, Some(1));
+        assert_eq!(task_limit_event.limit, Some(1));
+        assert_eq!(server.usage_snapshot().await.rejected_packets, 1);
+        assert!(server
+            .health_snapshot()
+            .await
             .issues
-            .contains(&fuckipv6_common::domain::RelayHealthIssue::ResourcePressure));
+            .contains(&RelayHealthIssue::ResourcePressure));
 
-        client.close().await;
+        drop(held_stream_permit);
+        wait_for_task_permits(&server, 6, 1).await?;
+
+        let payload = Bytes::from_static(b"stream recovered");
+        let (sent, received) = tokio::join!(
+            client_a.send_packet(2, ip_a, ip_b, payload.clone()),
+            client_b.recv_packet(),
+        );
+        sent.context("stream task permit did not recover")?;
+        assert_eq!(
+            received
+                .context("relay connection closed before recovery packet")?
+                .payload,
+            payload
+        );
+        wait_for_task_permits(&server, 6, 1).await?;
+        assert!(!server
+            .health_snapshot()
+            .await
+            .issues
+            .contains(&RelayHealthIssue::ResourcePressure));
+
+        client_a.close().await;
+        client_b.close().await;
+        wait_for_active_connections(&server, 0).await?;
+        wait_for_task_permits(&server, 8, 1).await?;
         server_task.abort();
         Ok(())
     }

@@ -283,6 +283,32 @@ pub struct RelayHealthSnapshot {
 }
 
 impl RelayHealthSnapshot {
+    /// Explain a failed or unsupported lifecycle transition without inventing
+    /// listener, reachability or forwarding evidence.
+    pub fn failed(
+        lifecycle: RelayLifecycleState,
+        reason_code: impl Into<String>,
+        observed_at_unix_ms: u64,
+    ) -> Self {
+        debug_assert!(matches!(
+            lifecycle,
+            RelayLifecycleState::Failed | RelayLifecycleState::Unsupported
+        ));
+        Self::observe(
+            lifecycle,
+            None,
+            false,
+            RelayReachabilityState::Unknown,
+            false,
+            false,
+            RelayLimitPolicy::default(),
+            Vec::new(),
+            RelayUsageSnapshot::default(),
+            observed_at_unix_ms,
+            Some(reason_code.into()),
+        )
+    }
+
     /// Build a health snapshot and derive the status from observable evidence.
     #[allow(clippy::too_many_arguments)]
     pub fn observe(

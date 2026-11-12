@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use fuckipv6_common::domain::{
     NetworkRecord, NodeId, RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot,
-    RelayHealthSnapshot,
+    RelayHealthSnapshot, RelayLifecycleState,
 };
 use fuckipv6_common::{
     CoordinatorConfig, Identity, NetworkAllocation, NetworkTicket, RelayEndpoint,
@@ -16,8 +16,10 @@ use fuckipv6_coordinator::{
     signaling::server::{RelayEndpointDirectory, SignalingServer},
     signaling::session::SessionManager,
 };
+use std::io::ErrorKind as IoErrorKind;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::task::JoinHandle;
 
 use crate::config_manager::ConfigManager;
@@ -31,6 +33,81 @@ pub use actor::{
     EmbeddedServiceError, EmbeddedServiceManager, EmbeddedServiceSnapshot,
     EmbeddedServiceStartRequest,
 };
+
+/// Stable explanation for a failed Relay lifecycle transition. The health
+/// snapshot is retained with the coordinator so a failed start remains
+/// observable after the command returns and stale healthy evidence is removed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("Relay 生命周期操作失败 [{reason_code}]: {message}")]
+pub struct RelayLifecycleError {
+    pub reason_code: &'static str,
+    pub message: String,
+    pub health: Box<RelayHealthSnapshot>,
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
+fn classify_relay_start_error(error: &anyhow::Error) -> (&'static str, RelayLifecycleState) {
+    let kind = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .map(std::io::Error::kind);
+    match kind {
+        Some(IoErrorKind::Unsupported) => (
+            "relay.start.platform_unsupported",
+            RelayLifecycleState::Unsupported,
+        ),
+        Some(IoErrorKind::AddrInUse) => ("relay.start.address_in_use", RelayLifecycleState::Failed),
+        Some(IoErrorKind::PermissionDenied) => {
+            ("relay.start.permission_denied", RelayLifecycleState::Failed)
+        }
+        Some(
+            IoErrorKind::NetworkUnreachable
+            | IoErrorKind::HostUnreachable
+            | IoErrorKind::AddrNotAvailable
+            | IoErrorKind::ConnectionRefused
+            | IoErrorKind::ConnectionAborted
+            | IoErrorKind::ConnectionReset
+            | IoErrorKind::NotConnected
+            | IoErrorKind::TimedOut,
+        ) => (
+            "relay.start.network_unreachable",
+            RelayLifecycleState::Failed,
+        ),
+        _ => ("relay.start.unknown", RelayLifecycleState::Failed),
+    }
+}
+
+fn relay_start_failure(error: anyhow::Error) -> RelayLifecycleError {
+    let (reason_code, lifecycle) = classify_relay_start_error(&error);
+    RelayLifecycleError {
+        reason_code,
+        message: format!("{error:#}"),
+        health: Box::new(RelayHealthSnapshot::failed(
+            lifecycle,
+            reason_code,
+            now_unix_ms(),
+        )),
+    }
+}
+
+fn relay_stop_failure(error: anyhow::Error) -> RelayLifecycleError {
+    const REASON_CODE: &str = "relay.stop.cleanup_incomplete";
+    RelayLifecycleError {
+        reason_code: REASON_CODE,
+        message: format!("{error:#}"),
+        health: Box::new(RelayHealthSnapshot::failed(
+            RelayLifecycleState::Failed,
+            REASON_CODE,
+            now_unix_ms(),
+        )),
+    }
+}
 
 /// 内嵌协调端 Actor
 ///
@@ -46,6 +123,7 @@ pub struct EmbeddedCoordinator {
     relay_directory: RelayEndpointDirectory,
     relay_server: Option<RelayServer>,
     relay_task: Option<JoinHandle<Result<()>>>,
+    relay_health: Option<RelayHealthSnapshot>,
     relay_bind_port: u16,
     external_host: Option<String>,
     relay_policy_authority: Arc<DurableRelayPolicyAuthority>,
@@ -280,6 +358,7 @@ impl EmbeddedCoordinator {
             relay_directory,
             relay_server: None,
             relay_task: None,
+            relay_health: None,
             relay_bind_port: request.relay_port,
             external_host: request.external_host.clone(),
             relay_policy_authority,
@@ -289,7 +368,7 @@ impl EmbeddedCoordinator {
         if request.relay_enabled {
             if let Err(error) = coordinator.enable_relay().await {
                 let _ = coordinator.shutdown().await;
-                return Err(error);
+                return Err(error.into());
             }
         }
 
@@ -319,7 +398,7 @@ impl EmbeddedCoordinator {
     pub async fn relay_health(&self) -> Option<RelayHealthSnapshot> {
         match self.relay_server.as_ref() {
             Some(server) => Some(server.health_snapshot().await),
-            None => None,
+            None => self.relay_health.clone(),
         }
     }
 
@@ -359,22 +438,38 @@ impl EmbeddedCoordinator {
 
     /// Start the local Relay independently of signaling and other node
     /// capabilities. Re-enabling after a stop restores the last bound port.
-    pub async fn enable_relay(&mut self) -> Result<SocketAddr> {
+    pub async fn enable_relay(&mut self) -> Result<SocketAddr, RelayLifecycleError> {
         if let Some(addr) = self.relay_addr {
             return Ok(addr);
         }
 
         let relay_bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.relay_bind_port);
-        let relay_server = RelayServer::bind_with_generated_certificate(
+        let relay_server = match RelayServer::bind_with_generated_certificate(
             relay_bind,
             self.session_manager.clone(),
             self.relay_policy_authority.clone(),
-        )
-        .context("无法启动内嵌 QUIC 中继服务")?;
+        ) {
+            Ok(server) => server,
+            Err(error) => {
+                let failure = relay_start_failure(error.context("无法启动内嵌 QUIC 中继服务"));
+                self.relay_health = Some((*failure.health).clone());
+                return Err(failure);
+            }
+        };
         let actual_relay_addr = relay_server.local_addr();
         let relay_pin = relay_server.certificate().public_key_pin;
         let advertised_relay_addr =
-            resolve_relay_advertisement(self.external_host.as_deref(), actual_relay_addr).await?;
+            match resolve_relay_advertisement(self.external_host.as_deref(), actual_relay_addr)
+                .await
+            {
+                Ok(addr) => addr,
+                Err(error) => {
+                    let failure = relay_start_failure(error);
+                    self.relay_health = Some((*failure.health).clone());
+                    drop(relay_server);
+                    return Err(failure);
+                }
+            };
         let relay_endpoint = RelayEndpoint {
             addr: advertised_relay_addr,
             server_name: "fuckipv6.local".to_string(),
@@ -388,13 +483,14 @@ impl EmbeddedCoordinator {
         self.relay_server = Some(relay_server);
         self.relay_task = Some(relay_task);
         self.relay_addr = Some(actual_relay_addr);
+        self.relay_health = None;
         self.relay_bind_port = actual_relay_addr.port();
         Ok(actual_relay_addr)
     }
 
     /// Withdraw this node's Relay endpoint, stop accepting new sessions, close
     /// existing QUIC sessions, and release the listener before returning.
-    pub async fn disable_relay(&mut self) -> Result<()> {
+    pub async fn disable_relay(&mut self) -> Result<(), RelayLifecycleError> {
         self.relay_directory.set_primary(None);
         let Some(server) = self.relay_server.take() else {
             self.relay_addr = None;
@@ -412,7 +508,15 @@ impl EmbeddedCoordinator {
         };
         drop(server);
         self.relay_addr = None;
-        task_result
+        self.relay_health = None;
+        match task_result {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let failure = relay_stop_failure(error);
+                self.relay_health = Some((*failure.health).clone());
+                Err(failure)
+            }
+        }
     }
 
     pub async fn persisted_network_allocation(&self) -> Result<NetworkAllocation> {
@@ -528,12 +632,60 @@ impl Drop for EmbeddedCoordinator {
             task.abort();
         }
         self.relay_server.take();
+        self.relay_health = None;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_start_errors_have_stable_explanations() {
+        let cases = [
+            (
+                std::io::ErrorKind::Unsupported,
+                "relay.start.platform_unsupported",
+                RelayLifecycleState::Unsupported,
+            ),
+            (
+                std::io::ErrorKind::AddrInUse,
+                "relay.start.address_in_use",
+                RelayLifecycleState::Failed,
+            ),
+            (
+                std::io::ErrorKind::PermissionDenied,
+                "relay.start.permission_denied",
+                RelayLifecycleState::Failed,
+            ),
+            (
+                std::io::ErrorKind::NetworkUnreachable,
+                "relay.start.network_unreachable",
+                RelayLifecycleState::Failed,
+            ),
+            (
+                std::io::ErrorKind::InvalidInput,
+                "relay.start.unknown",
+                RelayLifecycleState::Failed,
+            ),
+            (
+                std::io::ErrorKind::Other,
+                "relay.start.unknown",
+                RelayLifecycleState::Failed,
+            ),
+        ];
+
+        for (kind, expected_reason, expected_lifecycle) in cases {
+            let error = anyhow::Error::new(std::io::Error::new(kind, "relay bind failed"))
+                .context("start Relay");
+            let (reason_code, lifecycle) = classify_relay_start_error(&error);
+            assert_eq!(reason_code, expected_reason, "unexpected code for {kind:?}");
+            assert_eq!(
+                lifecycle, expected_lifecycle,
+                "unexpected state for {kind:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn relay_advertisement_uses_external_ipv4_host() {

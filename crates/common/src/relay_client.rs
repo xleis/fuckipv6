@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
 use crate::crypto::Identity;
 use crate::domain::{NodeId, RelayMemberGrant};
@@ -15,12 +15,17 @@ use crate::quic::{
 
 const RELAY_REGISTER_STREAM_ID: u64 = 0;
 const RELAY_AUTHORIZATION_STREAM_ID: u64 = 1;
+/// Bounded application ingress for packets received from a Relay.
+///
+/// A slow consumer applies backpressure to the forwarding stream instead of
+/// allowing the client process to grow an unbounded packet queue.
+pub const RELAY_INCOMING_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Clone)]
 pub struct QuicRelayClient {
     endpoint: quinn::Endpoint,
     connection: quinn::Connection,
-    incoming_rx: Arc<RwLock<mpsc::UnboundedReceiver<RelayPacket>>>,
+    incoming_rx: Arc<Mutex<mpsc::Receiver<RelayPacket>>>,
     member_grant: Arc<RwLock<RelayMemberGrant>>,
 }
 
@@ -97,13 +102,13 @@ impl QuicRelayClient {
             member_grant,
         )
         .await?;
-        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+        let (incoming_tx, incoming_rx) = mpsc::channel(RELAY_INCOMING_QUEUE_CAPACITY);
         spawn_incoming_task(connection.clone(), incoming_tx);
 
         Ok(Self {
             endpoint,
             connection,
-            incoming_rx: Arc::new(RwLock::new(incoming_rx)),
+            incoming_rx: Arc::new(Mutex::new(incoming_rx)),
             member_grant: Arc::new(RwLock::new(member_grant.clone())),
         })
     }
@@ -303,7 +308,7 @@ impl QuicRelayClient {
     }
 
     pub async fn recv_packet(&self) -> Option<RelayPacket> {
-        self.incoming_rx.write().await.recv().await
+        self.incoming_rx.lock().await.recv().await
     }
 
     pub async fn close(&self) {
@@ -367,10 +372,7 @@ async fn register_relay_connection(
     }
 }
 
-fn spawn_incoming_task(
-    connection: quinn::Connection,
-    incoming_tx: mpsc::UnboundedSender<RelayPacket>,
-) {
+fn spawn_incoming_task(connection: quinn::Connection, incoming_tx: mpsc::Sender<RelayPacket>) {
     tokio::spawn(async move {
         loop {
             let (mut send, mut recv) = match connection.accept_bi().await {
@@ -389,11 +391,13 @@ fn spawn_incoming_task(
                         dst_ip,
                         payload,
                     } => {
-                        incoming_tx.send(RelayPacket {
-                            src_ip,
-                            dst_ip,
-                            payload,
-                        })?;
+                        incoming_tx
+                            .send(RelayPacket {
+                                src_ip,
+                                dst_ip,
+                                payload,
+                            })
+                            .await?;
                         let ack = RelayMessage::RegisterAck {
                             accepted: true,
                             message: "accepted".to_string(),

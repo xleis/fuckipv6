@@ -1631,10 +1631,10 @@ fn write_json_sync<T: Serialize>(
     Ok(())
 }
 
-fn sync_dir(path: &Path) -> std::result::Result<(), PolicyTransactionError> {
+fn sync_dir(_path: &Path) -> std::result::Result<(), PolicyTransactionError> {
     #[cfg(unix)]
     {
-        File::open(path)
+        File::open(_path)
             .and_then(|file| file.sync_all())
             .map_err(persistence)?;
     }

@@ -20,7 +20,8 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[cfg(target_os = "linux")]
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -2195,6 +2196,7 @@ fn linux_recovery_expectations(mode: fuckipv6_common::RoutingMode) -> RecoveryEx
     }
 }
 
+#[cfg(target_os = "linux")]
 fn linux_recovery_request(
     mode: fuckipv6_common::RoutingMode,
     trigger: RecoveryTrigger,
@@ -2258,7 +2260,6 @@ fn log_linux_recovery_report(report: &RecoveryReport) {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn recovery_started_reason_code(trigger: RecoveryTrigger) -> &'static str {
     match trigger {
         RecoveryTrigger::SleepWake => "recovery.sleep_wake.started",
@@ -5075,6 +5076,7 @@ async fn admit_inbound_packet(
         // Reaching this point means every Exit policy, contribution, and
         // kernel-forwarding check has succeeded. Only accepted bytes count
         // toward owner bandwidth and quota limits.
+        #[cfg(target_os = "linux")]
         runtime
             .exit_contribution_gate
             .record_forwarded(plain_payload.len(), now_unix_ms);

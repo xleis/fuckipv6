@@ -3539,6 +3539,13 @@ ACL 替换共享时，会在下一次 peer 帧之前主动调用 `cancel_all_for
 不会返回部分目录树。GPUI 已使用该领域语义，WebUI 与 Android File 内容表面仍未实现，故三端一致性继续保留为未完成，
 W15-08 保持 `[~]`。
 
+**交叉编译检查（2026-11-13，不代表实机验收）**：修复 File runtime 在非 Linux 目标下无条件使用 `PathBuf`，以及若干既有的
+条件编译缺口后，`RUSTC="$(rustup which rustc)" rustup run stable cargo check -p fuckipv6-client --lib --target
+x86_64-pc-windows-gnu` 通过。该结果只证明 client library（包含 File runtime 接线）可在 Windows GNU target 上编译；Windows
+大小写不敏感文件系统、重解析点、ACL 与真实传输行为仍未实机验证。macOS target 检查在宿主 Linux 的依赖 C 构建阶段被 Apple SDK
+头文件（`TargetConditionals.h`）阻断，尚未进入项目代码编译，因此不能作为 macOS 编译或运行证据。W15-04、W15-05 与 W15-08
+相关未完成项继续保持未勾选。
+
 **性能基线（2026-11-13，Linux 本地文件系统）**：新增
 `file_transfer_large_multifile_and_resume_report_linux`。数据集包含一个 64 MiB 单文件上传、一个 64 MiB 单文件下载，两者均在
 第 6 个 4 MiB 分块后暂停并恢复，剩余 40 MiB 只能从下一分块继续；另以 4 个 8 MiB 文件、每文件 1 MiB 分块进行交错并发下载。

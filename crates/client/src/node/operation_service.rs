@@ -7,7 +7,9 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -166,6 +168,7 @@ impl OperationService {
         events: NodeEventBus,
     ) -> Result<Self> {
         match endpoint {
+            #[cfg(unix)]
             LocalEndpoint::Path(path) => {
                 let directory = path.parent().context("节点 IPC endpoint 缺少父目录")?;
                 Self::with_store_path(commands, state, events, directory.join(STORE_FILE))

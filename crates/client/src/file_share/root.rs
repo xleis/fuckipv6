@@ -3,6 +3,7 @@ use std::ffi::{CStr, CString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 

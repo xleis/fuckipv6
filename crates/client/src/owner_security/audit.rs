@@ -1154,12 +1154,12 @@ fn write_private_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
-fn secure_directory(path: &Path) -> Result<()> {
+fn secure_directory(_path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("无法收紧安全审计目录权限: {}", path.display()))?;
+        fs::set_permissions(_path, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("无法收紧安全审计目录权限: {}", _path.display()))?;
     }
     Ok(())
 }

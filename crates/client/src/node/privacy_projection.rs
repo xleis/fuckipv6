@@ -17,9 +17,9 @@ use fuckipv6_common::domain::{
     InvitationStatusView, IssuedInvitation, JoinRequest, MemberLifecycleChange,
     MemberRemovalPreview, MembershipState, NetworkId, NetworkMemberDirectory,
     NetworkProfileApplyResult, NetworkProfilePreview, NodeId, PolicyTestResult, PrivacyField,
-    PrivacyObjectState, PrivacyViewer, ProjectedActivityEntry, RelayGovernanceAuditSnapshot,
-    RelayHealthSnapshot, TopologyConnection, TopologyNode, TopologySnapshot,
-    TrafficPolicyTestComparison, TrafficRoutingPageModel, TrafficSessionSnapshot,
+    PrivacyObjectState, PrivacyViewer, ProjectedActivityEntry, RelayAuthorizationAuditSnapshot,
+    RelayGovernanceAuditSnapshot, RelayHealthSnapshot, TopologyConnection, TopologyNode,
+    TopologySnapshot, TrafficPolicyTestComparison, TrafficRoutingPageModel, TrafficSessionSnapshot,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -211,6 +211,10 @@ pub struct ProjectedNodeEmbeddedServiceSnapshot {
     /// Ordinary members receive only the non-sensitive lifecycle projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_health: Option<RelayHealthSnapshot>,
+    /// Sanitized authorization layers are owner-only. They explain the final
+    /// decision without exposing rules, grants or another member's traffic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_authorization: Option<RelayAuthorizationAuditSnapshot>,
     /// Payload-free governance events are owner-only. Ordinary members never
     /// receive the ledger, including rejection reason codes that could reveal
     /// another member's activity.
@@ -935,6 +939,10 @@ impl<'a> SnapshotProjector<'a> {
                 .local_owner
                 .then(|| service.relay_health.clone())
                 .flatten(),
+            relay_authorization: viewer
+                .local_owner
+                .then(|| service.relay_authorization.clone())
+                .flatten(),
             relay_governance: viewer
                 .local_owner
                 .then(|| service.relay_governance.clone())
@@ -1251,15 +1259,18 @@ mod tests {
     use std::net::IpAddr;
 
     use fuckipv6_common::domain::{
-        ActivityEntry, AuditId, AuditOutcome, CapabilityKind, ContentHash, ExitSelectionPolicy,
-        FieldPrivacyPolicy, FieldVisibility, FieldVisibilityRule, MemberLifecycleStatus,
-        MembershipRole, MembershipState, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
-        NetworkMemberObservationSource, NetworkMemberOnlineState, NetworkMemberPresence,
-        NetworkMemberStatus, NetworkRole, RelayGovernanceAction, RelayGovernanceEvent,
-        TopologyBoundary, TopologyConnection, TopologyConnectionState, TopologyNode,
-        TopologyNodeHealth, TopologyNodeNetwork, TrafficAction, TrafficDefaultConfirmedBy,
-        TrafficDefaultPolicy, TrafficPolicy, TrafficRoutingHardConstraints,
-        TrafficRoutingPageModel, TrafficRoutingTarget, TrafficRoutingWorkflowState,
+        ActivityEntry, AuditId, AuditOutcome, CapabilityKind, ContentHash, EffectiveAccessReason,
+        EffectivePolicyLayer, ExitSelectionPolicy, FieldPrivacyPolicy, FieldVisibility,
+        FieldVisibilityRule, MemberLifecycleStatus, MembershipRole, MembershipState, NetworkMember,
+        NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberObservationSource,
+        NetworkMemberOnlineState, NetworkMemberPresence, NetworkMemberStatus, NetworkRole,
+        RelayAuthorizationAuditSnapshot, RelayAuthorizationDiagnostic,
+        RelayAuthorizationSourceDiagnostic, RelayExistingSessionPolicy, RelayGovernanceAction,
+        RelayGovernanceEvent, TopologyBoundary, TopologyConnection, TopologyConnectionState,
+        TopologyNode, TopologyNodeHealth, TopologyNodeNetwork, TrafficAction,
+        TrafficDefaultConfirmedBy, TrafficDefaultPolicy, TrafficPolicy,
+        TrafficRoutingHardConstraints, TrafficRoutingPageModel, TrafficRoutingTarget,
+        TrafficRoutingWorkflowState,
     };
 
     use super::*;
@@ -1536,6 +1547,35 @@ mod tests {
                     1_500,
                     None,
                 )),
+                relay_authorization: Some(RelayAuthorizationAuditSnapshot {
+                    network_id: network("home"),
+                    provider_node_id: NodeId::from_public_key(b"owner-test"),
+                    policy_revision: 7,
+                    policy_updated_at_unix_ms: 1_400,
+                    existing_session_policy: RelayExistingSessionPolicy::Continue,
+                    decisions: vec![RelayAuthorizationDiagnostic {
+                        node_id: NodeId::from_public_key(b"remote-peer"),
+                        allowed: false,
+                        provider: RelayAuthorizationSourceDiagnostic {
+                            allowed: true,
+                            reason: EffectiveAccessReason::Allowed,
+                            layer: Some(EffectivePolicyLayer::Network),
+                            network_acl_revision: 7,
+                            local_policy_revision: 2,
+                            reauthentication_satisfied: true,
+                        },
+                        consumer: Some(RelayAuthorizationSourceDiagnostic {
+                            allowed: false,
+                            reason: EffectiveAccessReason::ExplicitDeny,
+                            layer: Some(EffectivePolicyLayer::Network),
+                            network_acl_revision: 7,
+                            local_policy_revision: 2,
+                            reauthentication_satisfied: true,
+                        }),
+                        final_reason: Some(EffectiveAccessReason::ExplicitDeny),
+                    }],
+                    truncated: false,
+                }),
                 relay_governance: Some(RelayGovernanceAuditSnapshot {
                     events: vec![RelayGovernanceEvent {
                         action: RelayGovernanceAction::SessionRejected,
@@ -1545,6 +1585,8 @@ mod tests {
                         observed: Some(1),
                         limit: Some(1),
                         reset_at_unix_ms: None,
+                        previous_policy_revision: None,
+                        policy_revision: None,
                     }],
                     dropped_events: 2,
                 }),
@@ -1669,6 +1711,7 @@ mod tests {
         assert!(projected.memberships.is_empty());
         assert!(projected.logs.is_empty());
         assert!(projected.embedded_services[0].relay_health.is_none());
+        assert!(projected.embedded_services[0].relay_authorization.is_none());
         assert!(projected.embedded_services[0].relay_governance.is_none());
         assert_eq!(projected.traffic_session, snapshot.traffic_session);
         assert_eq!(json["traffic_session"]["state"], "connecting");
@@ -1732,7 +1775,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_health_and_governance_are_owner_visible_but_hidden_from_ordinary_members() {
+    fn relay_diagnostics_are_owner_visible_but_hidden_from_ordinary_members() {
         let snapshot = full_snapshot();
         let home = network("home");
         let member = network_context(
@@ -1746,6 +1789,9 @@ mod tests {
             .relay_health
             .is_none());
         assert!(member_projection.embedded_services[0]
+            .relay_authorization
+            .is_none());
+        assert!(member_projection.embedded_services[0]
             .relay_governance
             .is_none());
 
@@ -1754,6 +1800,10 @@ mod tests {
         assert_eq!(
             owner_projection.embedded_services[0].relay_health,
             snapshot.embedded_services[0].relay_health
+        );
+        assert_eq!(
+            owner_projection.embedded_services[0].relay_authorization,
+            snapshot.embedded_services[0].relay_authorization
         );
         assert_eq!(
             owner_projection.embedded_services[0].relay_governance,

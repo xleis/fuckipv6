@@ -6,12 +6,14 @@ use fuckipv6_common::domain::JoinRequestReviewAction;
 use fuckipv6_common::domain::{
     parse_policy_test_input, ActivityCategory, ActivityEntry, ActivitySeverity,
     ApplicationIdentity, AuditOutcome, CapabilityKind, CapabilityState, ContentHash,
-    ExitAvailabilitySource, ExitAvailabilityState, ExitContributionAvailability,
-    ExitContributionMode, ExitContributionObligation, ExitContributionScope,
-    ExitSelectionCandidate, ExitSelectionMode, ExitSelectionPolicy, ExitSelectionSource,
-    InvitationCode, InvitationId, InvitationRedeemRequest, MemberLifecycleAction, MembershipRole,
-    NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
-    NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId,
+    EffectiveAccessReason, EffectivePolicyLayer, ExitAvailabilitySource, ExitAvailabilityState,
+    ExitContributionAvailability, ExitContributionMode, ExitContributionObligation,
+    ExitContributionScope, ExitSelectionCandidate, ExitSelectionMode, ExitSelectionPolicy,
+    ExitSelectionSource, InvitationCode, InvitationId, InvitationRedeemRequest,
+    MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode, NetworkMember,
+    NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberStatus,
+    NetworkProfileUpdate, NetworkVisibility, NodeId, RelayAuthorizationAuditSnapshot,
+    RelayAuthorizationDiagnostic, RelayAuthorizationSourceDiagnostic, RelayExistingSessionPolicy,
     RelayGovernanceAction, RelayGovernanceEvent, RelayHealthIssue, RelayHealthSnapshot,
     RelayHealthStatus, RelayLifecycleState, RelayLimitPolicy, RelayLimitSource,
     RelayMeasurementState, RelayReachabilityState, TopologyNode, TopologyNodeHealth,
@@ -6172,6 +6174,32 @@ fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
             })
         })
         .collect::<Vec<_>>();
+    let authorization_rows = snapshot
+        .embedded_services
+        .iter()
+        .flat_map(|service| {
+            let Some(audit) = service.relay_authorization.as_ref() else {
+                return Vec::new();
+            };
+            let mut rows = vec![row(
+                service.network_name.clone(),
+                relay_authorization_detail(locale, audit),
+            )];
+            rows.extend(audit.decisions.iter().map(|decision| {
+                row(
+                    format!("{} · {}", service.network_name, decision.node_id),
+                    relay_authorization_decision_detail(locale, decision),
+                )
+            }));
+            if audit.truncated {
+                rows.push(row(
+                    service.network_name.clone(),
+                    t(locale, "relay.authorization.truncated").to_owned(),
+                ));
+            }
+            rows
+        })
+        .collect::<Vec<_>>();
     let governance_rows = snapshot
         .embedded_services
         .iter()
@@ -6271,6 +6299,11 @@ fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
                 t(locale, "gpui.section.relay_usage"),
                 t(locale, "gpui.empty.relay_usage"),
                 usage_rows,
+            ),
+            section(
+                t(locale, "gpui.section.relay_authorization"),
+                t(locale, "gpui.empty.relay_authorization"),
+                authorization_rows,
             ),
             section(
                 t(locale, "gpui.section.relay_governance"),
@@ -6413,6 +6446,159 @@ fn relay_health_detail(locale: Locale, health: &RelayHealthSnapshot) -> String {
     )
 }
 
+fn relay_authorization_detail(locale: Locale, audit: &RelayAuthorizationAuditSnapshot) -> String {
+    let updated_at = routing_timestamp_label(Some(audit.policy_updated_at_unix_ms), locale);
+    tr(
+        locale,
+        "relay.authorization.snapshot_detail",
+        &[
+            ("network", &audit.network_id.to_string()),
+            ("provider", &audit.provider_node_id.to_string()),
+            ("revision", &relay_format_u64(locale, audit.policy_revision)),
+            ("updated_at", &updated_at),
+            (
+                "existing_sessions",
+                t(
+                    locale,
+                    relay_existing_session_policy_key(audit.existing_session_policy),
+                ),
+            ),
+        ],
+    )
+}
+
+fn relay_authorization_decision_detail(
+    locale: Locale,
+    decision: &RelayAuthorizationDiagnostic,
+) -> String {
+    let final_result = relay_authorization_result(locale, decision.allowed);
+    let provider = relay_authorization_source_detail(locale, &decision.provider);
+    let consumer = decision
+        .consumer
+        .as_ref()
+        .map(|source| relay_authorization_source_detail(locale, source))
+        .unwrap_or_else(|| t(locale, "relay.authorization.consumer_missing").to_owned());
+    let final_reason = decision
+        .final_reason
+        .map(|reason| relay_authorization_reason(locale, reason))
+        .unwrap_or_else(|| t(locale, "relay.authorization.reason.allowed").to_owned());
+    tr(
+        locale,
+        "relay.authorization.decision_detail",
+        &[
+            ("result", &final_result),
+            ("final_reason", &final_reason),
+            ("provider", &provider),
+            ("consumer", &consumer),
+        ],
+    )
+}
+
+fn relay_authorization_source_detail(
+    locale: Locale,
+    source: &RelayAuthorizationSourceDiagnostic,
+) -> String {
+    let result = relay_authorization_result(locale, source.allowed);
+    let reason = relay_authorization_reason(locale, source.reason);
+    let layer = source
+        .layer
+        .map(|layer| relay_authorization_layer(locale, layer))
+        .unwrap_or_else(|| t(locale, "relay.authorization.layer.none").to_owned());
+    let reauthentication = if source.reauthentication_satisfied {
+        t(locale, "relay.authorization.reauth.satisfied")
+    } else {
+        t(locale, "relay.authorization.reauth.required")
+    };
+    tr(
+        locale,
+        "relay.authorization.source_detail",
+        &[
+            ("result", &result),
+            ("reason", &reason),
+            ("layer", &layer),
+            (
+                "acl_revision",
+                &relay_format_u64(locale, source.network_acl_revision),
+            ),
+            (
+                "local_revision",
+                &relay_format_u64(locale, source.local_policy_revision),
+            ),
+            ("reauth", reauthentication),
+        ],
+    )
+}
+
+fn relay_authorization_result(locale: Locale, allowed: bool) -> String {
+    t(
+        locale,
+        if allowed {
+            "relay.authorization.allowed"
+        } else {
+            "relay.authorization.denied"
+        },
+    )
+    .to_owned()
+}
+
+fn relay_authorization_reason(locale: Locale, reason: EffectiveAccessReason) -> String {
+    t(locale, relay_authorization_reason_key(reason)).to_owned()
+}
+
+fn relay_authorization_reason_key(reason: EffectiveAccessReason) -> &'static str {
+    match reason {
+        EffectiveAccessReason::Allowed => "relay.authorization.reason.allowed",
+        EffectiveAccessReason::CrossNetworkDenied => {
+            "relay.authorization.reason.cross_network_denied"
+        }
+        EffectiveAccessReason::NetworkScopeRestricted => {
+            "relay.authorization.reason.network_scope_restricted"
+        }
+        EffectiveAccessReason::LocalContributionVeto => {
+            "relay.authorization.reason.local_contribution_veto"
+        }
+        EffectiveAccessReason::AuthorizationExpired => {
+            "relay.authorization.reason.authorization_expired"
+        }
+        EffectiveAccessReason::AuthorizationRevoked => {
+            "relay.authorization.reason.authorization_revoked"
+        }
+        EffectiveAccessReason::RecentReauthenticationRequired => {
+            "relay.authorization.reason.reauthentication_required"
+        }
+        EffectiveAccessReason::ExplicitDeny => "relay.authorization.reason.explicit_deny",
+        EffectiveAccessReason::RoleCeilingExceeded => {
+            "relay.authorization.reason.role_ceiling_exceeded"
+        }
+        EffectiveAccessReason::TemporaryCoordinatorReadOnly => {
+            "relay.authorization.reason.temporary_coordinator_read_only"
+        }
+        EffectiveAccessReason::DefaultDenied => "relay.authorization.reason.default_denied",
+        EffectiveAccessReason::InvalidPolicy => "relay.authorization.reason.invalid_policy",
+    }
+}
+
+fn relay_authorization_layer(locale: Locale, layer: EffectivePolicyLayer) -> String {
+    t(
+        locale,
+        match layer {
+            EffectivePolicyLayer::Local => "relay.authorization.layer.local",
+            EffectivePolicyLayer::Network => "relay.authorization.layer.network",
+            EffectivePolicyLayer::Request => "relay.authorization.layer.request",
+        },
+    )
+    .to_owned()
+}
+
+fn relay_existing_session_policy_key(policy: RelayExistingSessionPolicy) -> &'static str {
+    match policy {
+        RelayExistingSessionPolicy::Continue => "relay.authorization.existing.continue",
+        RelayExistingSessionPolicy::Migrate => "relay.authorization.existing.migrate",
+        RelayExistingSessionPolicy::Terminate => "relay.authorization.existing.terminate",
+        RelayExistingSessionPolicy::Reauthorize => "relay.authorization.existing.reauthorize",
+    }
+}
+
 fn relay_governance_action_key(action: RelayGovernanceAction) -> &'static str {
     match action {
         RelayGovernanceAction::Enable => "relay.governance.action.enable",
@@ -6449,6 +6635,21 @@ fn relay_governance_event_detail(locale: Locale, event: &RelayGovernanceEvent) -
         .unwrap_or_else(|| not_available.to_owned());
     let occurred_at = routing_timestamp_label(Some(event.occurred_at_unix_ms), locale);
     let reset_at = routing_timestamp_label(event.reset_at_unix_ms, locale);
+    let policy_revision = event
+        .policy_revision
+        .map(|revision| {
+            let previous = event
+                .previous_policy_revision
+                .map(|previous| relay_format_u64(locale, previous))
+                .unwrap_or_else(|| not_available.to_owned());
+            let revision = relay_format_u64(locale, revision);
+            tr(
+                locale,
+                "relay.governance.event.policy_revision",
+                &[("previous", &previous), ("revision", &revision)],
+            )
+        })
+        .unwrap_or_else(|| not_available.to_owned());
     tr(
         locale,
         "relay.governance.event_detail",
@@ -6459,6 +6660,7 @@ fn relay_governance_event_detail(locale: Locale, event: &RelayGovernanceEvent) -
             ("observed", &observed),
             ("limit", &limit),
             ("reset_at", &reset_at),
+            ("policy_revision", &policy_revision),
         ],
     )
 }
@@ -8984,6 +9186,7 @@ mod tests {
             relay_status: NodeEmbeddedServiceStatus::Running,
             relay_addr: Some("127.0.0.1:6667".parse().expect("relay socket")),
             relay_health: health,
+            relay_authorization: None,
             relay_governance: None,
         }
     }
@@ -9166,6 +9369,8 @@ mod tests {
                 observed: Some(16),
                 limit: Some(16),
                 reset_at_unix_ms: Some(1_700_000_160_000),
+                previous_policy_revision: None,
+                policy_revision: None,
             }],
             dropped_events: 3,
         });
@@ -9262,6 +9467,7 @@ mod tests {
                 signaling_addr: None,
                 relay_addr: None,
                 relay_health: None,
+                relay_authorization: None,
                 relay_governance: None,
             });
 

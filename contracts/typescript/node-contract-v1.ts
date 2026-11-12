@@ -1573,6 +1573,7 @@ export type NodeDiscoveryIndexState = "idle" | "pending" | "ready" | "degraded" 
 export type NodeEmbeddedServiceSnapshot = {
   "network_name": string;
   "relay_addr"?: string | null;
+  "relay_authorization"?: RelayAuthorizationAuditSnapshot | null;
   "relay_governance"?: RelayGovernanceAuditSnapshot | null;
   "relay_health"?: RelayHealthSnapshot | null;
   "relay_status"?: NodeEmbeddedServiceStatus;
@@ -2815,6 +2816,7 @@ export type ProjectedNodeCommandResult = {
 export type ProjectedNodeEmbeddedServiceSnapshot = {
   "network_name": string;
   "relay_addr"?: string | null;
+  "relay_authorization"?: RelayAuthorizationAuditSnapshot | null;
   "relay_governance"?: RelayGovernanceAuditSnapshot | null;
   "relay_health"?: RelayHealthSnapshot | null;
   "relay_status"?: NodeEmbeddedServiceStatus;
@@ -2981,6 +2983,35 @@ export type ProjectedNodeSnapshot = {
 
 export type PublicKey = string;
 
+export type RelayAuthorizationAuditSnapshot = {
+  "decisions": Array<RelayAuthorizationDiagnostic>;
+  "existing_session_policy": RelayExistingSessionPolicy;
+  "network_id": NetworkId;
+  "policy_revision": number;
+  "policy_updated_at_unix_ms": number;
+  "provider_node_id": NodeId;
+  "truncated": boolean;
+};
+
+export type RelayAuthorizationDiagnostic = {
+  "allowed": boolean;
+  "consumer"?: RelayAuthorizationSourceDiagnostic | null;
+  "final_reason"?: EffectiveAccessReason | null;
+  "node_id": NodeId;
+  "provider": RelayAuthorizationSourceDiagnostic;
+};
+
+export type RelayAuthorizationSourceDiagnostic = {
+  "allowed": boolean;
+  "layer"?: EffectivePolicyLayer | null;
+  "local_policy_revision": number;
+  "network_acl_revision": number;
+  "reason": EffectiveAccessReason;
+  "reauthentication_satisfied": boolean;
+};
+
+export type RelayExistingSessionPolicy = "reauthorize" | "continue" | "migrate" | "terminate";
+
 export type RelayGovernanceAction = "enable" | "disable" | "authorization_changed" | "quota_changed" | "session_rejected" | "packet_rejected" | "failover" | "recovered";
 
 export type RelayGovernanceAuditSnapshot = {
@@ -2994,6 +3025,8 @@ export type RelayGovernanceEvent = {
   "node_id"?: NodeId | null;
   "observed"?: number | null;
   "occurred_at_unix_ms": number;
+  "policy_revision"?: number | null;
+  "previous_policy_revision"?: number | null;
   "reason_code": string;
   "reset_at_unix_ms"?: number | null;
 };

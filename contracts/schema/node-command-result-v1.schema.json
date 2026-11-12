@@ -5309,6 +5309,17 @@
             "null"
           ]
         },
+        "relay_authorization": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RelayAuthorizationAuditSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Owner-visible, bounded explanation of the current Relay authorization\ndecision. It excludes matching rules, grants and transport metadata."
+        },
         "relay_governance": {
           "anyOf": [
             {
@@ -8831,6 +8842,157 @@
       "description": "Ed25519 public key bytes encoded as URL-safe base64 without padding.",
       "type": "string"
     },
+    "RelayAuthorizationAuditSnapshot": {
+      "description": "Bounded, deterministic snapshot of current Relay member decisions. The\nowner sees which authorization layer produced the final result without the\nmatching rule/grant identifiers or any connection metadata.",
+      "properties": {
+        "decisions": {
+          "items": {
+            "$ref": "#/$defs/RelayAuthorizationDiagnostic"
+          },
+          "type": "array"
+        },
+        "existing_session_policy": {
+          "$ref": "#/$defs/RelayExistingSessionPolicy"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "policy_updated_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "provider_node_id": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "truncated": {
+          "description": "True when the policy contained more members than the bounded projection.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "network_id",
+        "provider_node_id",
+        "policy_revision",
+        "policy_updated_at_unix_ms",
+        "existing_session_policy",
+        "decisions",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "RelayAuthorizationDiagnostic": {
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "consumer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RelayAuthorizationSourceDiagnostic"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "final_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectiveAccessReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "provider": {
+          "$ref": "#/$defs/RelayAuthorizationSourceDiagnostic"
+        }
+      },
+      "required": [
+        "node_id",
+        "allowed",
+        "provider"
+      ],
+      "type": "object"
+    },
+    "RelayAuthorizationSourceDiagnostic": {
+      "description": "Sanitized authorization evidence for the Relay owner. It deliberately omits\nrule and grant identifiers, matched subjects and transport metadata while\nretaining the layer, reason and revisions needed to explain both sides of\nthe final decision.",
+      "properties": {
+        "allowed": {
+          "type": "boolean"
+        },
+        "layer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectivePolicyLayer"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "local_policy_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_acl_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "$ref": "#/$defs/EffectiveAccessReason"
+        },
+        "reauthentication_satisfied": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "allowed",
+        "reason",
+        "network_acl_revision",
+        "local_policy_revision",
+        "reauthentication_satisfied"
+      ],
+      "type": "object"
+    },
+    "RelayExistingSessionPolicy": {
+      "description": "How existing sessions react when Relay authorization changes.",
+      "oneOf": [
+        {
+          "enum": [
+            "reauthorize"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "continue",
+          "description": "Keep the already-established encrypted QUIC session until it closes.",
+          "type": "string"
+        },
+        {
+          "const": "migrate",
+          "description": "Move the member to another authorized Relay without dropping its P2P\noverlay session.",
+          "type": "string"
+        },
+        {
+          "const": "terminate",
+          "description": "Close the relayed session promptly and fail closed.",
+          "type": "string"
+        }
+      ]
+    },
     "RelayGovernanceAction": {
       "description": "Stable governance action names for audit records and activity filters.",
       "enum": [
@@ -8902,6 +9064,24 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "policy_revision": {
+          "description": "Policy revision that became effective for this governance event.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "previous_policy_revision": {
+          "description": "Policy revision observed before an authorization or quota update.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "reason_code": {
           "type": "string"

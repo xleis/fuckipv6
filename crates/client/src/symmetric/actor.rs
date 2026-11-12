@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
-use fuckipv6_common::domain::{RelayGovernanceAuditSnapshot, RelayHealthSnapshot};
+use fuckipv6_common::domain::{
+    RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot, RelayHealthSnapshot,
+};
 use tokio::sync::{mpsc, oneshot};
 
 use super::EmbeddedCoordinator;
@@ -112,6 +114,7 @@ pub struct EmbeddedServiceSnapshot {
     pub signaling_addr: SocketAddr,
     pub relay_addr: Option<SocketAddr>,
     pub relay_health: Option<RelayHealthSnapshot>,
+    pub relay_authorization: Option<RelayAuthorizationAuditSnapshot>,
     pub relay_governance: Option<RelayGovernanceAuditSnapshot>,
 }
 
@@ -123,6 +126,7 @@ impl From<&EmbeddedCoordinator> for EmbeddedServiceSnapshot {
             signaling_addr: coordinator.signaling_addr,
             relay_addr: coordinator.relay_addr,
             relay_health: None,
+            relay_authorization: None,
             relay_governance: None,
         }
     }
@@ -696,6 +700,7 @@ async fn start_service(
 async fn embedded_service_snapshot(coordinator: &EmbeddedCoordinator) -> EmbeddedServiceSnapshot {
     let mut snapshot = EmbeddedServiceSnapshot::from(coordinator);
     snapshot.relay_health = coordinator.relay_health().await;
+    snapshot.relay_authorization = coordinator.relay_authorization_audit_snapshot();
     snapshot.relay_governance = coordinator.relay_governance_snapshot();
     snapshot
 }

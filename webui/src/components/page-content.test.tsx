@@ -14,6 +14,7 @@ import type {
   NodeExitSelectionSnapshot,
   NodeProblem,
   NodeSnapshot,
+  RelayAuthorizationAuditSnapshot,
   RelayGovernanceAuditSnapshot,
   RelayHealthSnapshot,
   NodeUiManifest,
@@ -993,6 +994,152 @@ describe("Relay capability status", () => {
       .getAllByTestId("relay-usage")
       .find((element) => element.dataset.network === "healthy");
     expect(healthyUsage).toHaveTextContent("4096 B");
+  });
+
+  it("explains the provider/consumer authorization intersection without exposing sensitive internals", () => {
+    const authorization: RelayAuthorizationAuditSnapshot = {
+      network_id: "net_owner_relay",
+      provider_node_id: "relay-provider-01",
+      policy_revision: 17,
+      policy_updated_at_unix_ms: Date.UTC(2026, 0, 2, 0, 0, 0),
+      existing_session_policy: "reauthorize",
+      decisions: [
+        {
+          node_id: "node-member-allowed",
+          allowed: true,
+          provider: {
+            allowed: true,
+            reason: "allowed",
+            layer: "network",
+            network_acl_revision: 12,
+            local_policy_revision: 4,
+            reauthentication_satisfied: true,
+          },
+          consumer: {
+            allowed: true,
+            reason: "allowed",
+            layer: "local",
+            network_acl_revision: 12,
+            local_policy_revision: 4,
+            reauthentication_satisfied: true,
+          },
+          final_reason: null,
+        },
+        {
+          node_id: "node-member-denied",
+          allowed: false,
+          provider: {
+            allowed: true,
+            reason: "allowed",
+            layer: "network",
+            network_acl_revision: 12,
+            local_policy_revision: 4,
+            reauthentication_satisfied: true,
+          },
+          consumer: {
+            allowed: false,
+            reason: "explicit_deny",
+            layer: "local",
+            network_acl_revision: 12,
+            local_policy_revision: 4,
+            reauthentication_satisfied: false,
+          },
+          final_reason: "explicit_deny",
+        },
+      ],
+      truncated: false,
+    };
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      embedded_services: [
+        {
+          network_name: "owner-relay",
+          status: "running",
+          relay_status: "running",
+          relay_addr: "127.0.0.1:6667",
+          relay_health: relayHealth(),
+          relay_authorization: {
+            ...authorization,
+            decisions: authorization.decisions.map((decision) => ({
+              ...decision,
+              rule_id: "rule-must-not-render",
+              grant_id: "grant-must-not-render",
+              public_key: "public-key-must-not-render",
+              virtual_ip: "2001:db8::relay-secret",
+            })),
+          } as RelayAuthorizationAuditSnapshot,
+        },
+      ],
+    };
+
+    render(relayElement(snapshot));
+
+    const panel = screen.getByTestId("relay-authorization");
+    expect(panel).toHaveAttribute("data-network", "owner-relay");
+    expect(panel).toHaveTextContent(
+      translated("gpui.section.relay_authorization"),
+    );
+    expect(panel).toHaveTextContent("17");
+    expect(panel).toHaveTextContent(
+      translated("relay.authorization.snapshot_detail"),
+    );
+
+    const decisions = screen.getAllByTestId("relay-authorization-decision");
+    expect(decisions).toHaveLength(2);
+    expect(decisions[0]).toHaveAttribute("data-allowed", "true");
+    expect(decisions[0]).toHaveTextContent(
+      translated("relay.authorization.allowed"),
+    );
+    expect(decisions[1]).toHaveAttribute("data-allowed", "false");
+    expect(decisions[1]).toHaveTextContent(
+      translated("relay.authorization.denied"),
+    );
+    expect(decisions[1]).toHaveTextContent(
+      translated("relay.authorization.decision_detail"),
+    );
+    expect(decisions[1]).toHaveAttribute(
+      "data-provider-reason",
+      "allowed",
+    );
+    expect(decisions[1]).toHaveAttribute(
+      "data-consumer-reason",
+      "explicit_deny",
+    );
+    expect(decisions[1]).toHaveAttribute("data-provider-layer", "network");
+    expect(decisions[1]).toHaveAttribute("data-consumer-layer", "local");
+    expect(decisions[1]).toHaveAttribute("data-consumer-reauth", "false");
+    expect(decisions[1]).toHaveAttribute("data-consumer-allowed", "false");
+
+    for (const secret of [
+      "rule-must-not-render",
+      "grant-must-not-render",
+      "public-key-must-not-render",
+      "2001:db8::relay-secret",
+    ]) {
+      expect(panel.innerHTML).not.toContain(secret);
+    }
+  });
+
+  it("does not render owner-only authorization diagnostics for a member projection", () => {
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      embedded_services: [
+        {
+          network_name: "member-relay",
+          status: "running",
+          relay_status: "running",
+          relay_addr: "127.0.0.1:6667",
+          relay_health: relayHealth(),
+        },
+      ],
+    };
+
+    render(relayElement(snapshot));
+
+    expect(screen.queryByTestId("relay-authorization")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(translated("gpui.section.relay_authorization")),
+    ).not.toBeInTheDocument();
   });
 
   it("renders the owner-only governance ledger with bounded payload-free fields", () => {

@@ -51,6 +51,8 @@ import {
 } from "react";
 import type {
   ActivityEntry,
+  EffectiveAccessReason,
+  EffectivePolicyLayer,
   ExitHealthEvidence,
   ExitHealthLayer,
   ExitHealthProtocol,
@@ -74,6 +76,10 @@ import type {
   NodeSnapshot,
   NodeUiAction,
   NodeUiPage,
+  RelayAuthorizationAuditSnapshot,
+  RelayAuthorizationDiagnostic,
+  RelayAuthorizationSourceDiagnostic,
+  RelayExistingSessionPolicy,
   RelayGovernanceAction,
   RelayGovernanceAuditSnapshot,
   RelayGovernanceEvent,
@@ -4212,6 +4218,171 @@ function RelayHealthDetails({
   );
 }
 
+function relayAuthorizationReasonLabel(
+  locale: Locale,
+  reason: EffectiveAccessReason,
+): string {
+  const key = `relay.authorization.reason.${reason}`;
+  const localized = label(locale, key);
+  return localized === key ? reason : localized;
+}
+
+function relayAuthorizationLayerLabel(
+  locale: Locale,
+  layer: EffectivePolicyLayer | null | undefined,
+): string {
+  if (!layer) return label(locale, "relay.authorization.layer.none");
+  const key = `relay.authorization.layer.${layer}`;
+  const localized = label(locale, key);
+  return localized === key ? layer : localized;
+}
+
+function relayExistingSessionLabel(
+  locale: Locale,
+  policy: RelayExistingSessionPolicy,
+): string {
+  const key = `relay.authorization.existing.${policy}`;
+  const localized = label(locale, key);
+  return localized === key ? policy : localized;
+}
+
+function relayAuthorizationSourceDetail(
+  locale: Locale,
+  source: RelayAuthorizationSourceDiagnostic,
+): string {
+  return tr(locale, "relay.authorization.source_detail", {
+    result: label(
+      locale,
+      source.allowed
+        ? "relay.authorization.allowed"
+        : "relay.authorization.denied",
+    ),
+    reason: relayAuthorizationReasonLabel(locale, source.reason),
+    layer: relayAuthorizationLayerLabel(locale, source.layer),
+    acl_revision: formatInteger(locale, source.network_acl_revision),
+    local_revision: formatInteger(locale, source.local_policy_revision),
+    reauth: label(
+      locale,
+      source.reauthentication_satisfied
+        ? "relay.authorization.reauth.satisfied"
+        : "relay.authorization.reauth.required",
+    ),
+  });
+}
+
+function RelayAuthorizationDecision({
+  locale,
+  decision,
+}: {
+  locale: Locale;
+  decision: RelayAuthorizationDiagnostic;
+}) {
+  return (
+    <li
+      className="relay-authorization-decision"
+      data-allowed={decision.allowed}
+      data-consumer-allowed={decision.consumer?.allowed ?? "missing"}
+      data-consumer-layer={decision.consumer?.layer ?? "none"}
+      data-consumer-reauth={decision.consumer?.reauthentication_satisfied ?? "missing"}
+      data-consumer-reason={decision.consumer?.reason ?? "missing"}
+      data-node-id={decision.node_id}
+      data-provider-allowed={decision.provider.allowed}
+      data-provider-layer={decision.provider.layer ?? "none"}
+      data-provider-reauth={decision.provider.reauthentication_satisfied}
+      data-provider-reason={decision.provider.reason}
+      data-testid="relay-authorization-decision"
+    >
+      <div className="relay-governance-event-heading">
+        <strong>{decision.node_id}</strong>
+        <span
+          className={`status-pill ${decision.allowed ? "success" : "danger"}`}
+        >
+          {label(
+            locale,
+            decision.allowed
+              ? "relay.authorization.allowed"
+              : "relay.authorization.denied",
+          )}
+        </span>
+      </div>
+      <p>
+        {tr(locale, "relay.authorization.decision_detail", {
+          result: label(
+            locale,
+            decision.allowed
+              ? "relay.authorization.allowed"
+              : "relay.authorization.denied",
+          ),
+          final_reason: decision.final_reason
+            ? relayAuthorizationReasonLabel(locale, decision.final_reason)
+            : label(locale, "relay.authorization.reason.allowed"),
+          provider: relayAuthorizationSourceDetail(locale, decision.provider),
+          consumer: decision.consumer
+            ? relayAuthorizationSourceDetail(locale, decision.consumer)
+            : label(locale, "relay.authorization.consumer_missing"),
+        })}
+      </p>
+    </li>
+  );
+}
+
+function RelayAuthorizationDetails({
+  locale,
+  networkName,
+  audit,
+}: {
+  locale: Locale;
+  networkName: string;
+  audit: RelayAuthorizationAuditSnapshot;
+}) {
+  return (
+    <section
+      className="surface-card"
+      data-network={networkName}
+      data-testid="relay-authorization"
+    >
+      <div className="card-heading">
+        <h3>{label(locale, "gpui.section.relay_authorization")}</h3>
+        <span className="status-pill neutral">
+          {formatInteger(locale, audit.policy_revision)}
+        </span>
+      </div>
+      <p className="muted-copy">
+        {tr(locale, "relay.authorization.snapshot_detail", {
+          network: audit.network_id,
+          provider: audit.provider_node_id,
+          revision: formatInteger(locale, audit.policy_revision),
+          updated_at: formatTimestamp(locale, audit.policy_updated_at_unix_ms),
+          existing_sessions: relayExistingSessionLabel(
+            locale,
+            audit.existing_session_policy,
+          ),
+        })}
+      </p>
+      {audit.truncated ? (
+        <p className="state-notice warn" data-testid="relay-authorization-truncated">
+          {label(locale, "relay.authorization.truncated")}
+        </p>
+      ) : null}
+      {audit.decisions.length === 0 ? (
+        <p className="empty-copy">
+          {label(locale, "gpui.empty.relay_authorization")}
+        </p>
+      ) : (
+        <ol className="relay-governance-events">
+          {audit.decisions.map((decision) => (
+            <RelayAuthorizationDecision
+              key={decision.node_id}
+              locale={locale}
+              decision={decision}
+            />
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
 const RELAY_GOVERNANCE_RENDER_LIMIT = 50;
 
 function relayGovernanceActionLabel(
@@ -4247,6 +4418,15 @@ function relayGovernanceEventDetail(
     event.reset_at_unix_ms != null
       ? tr(locale, "relay.governance.event.reset", {
           reset_at: formatTimestamp(locale, event.reset_at_unix_ms),
+        })
+      : null,
+    event.policy_revision != null
+      ? tr(locale, "relay.governance.event.policy_revision", {
+          previous:
+            event.previous_policy_revision != null
+              ? formatInteger(locale, event.previous_policy_revision)
+              : label(locale, "common.not_available"),
+          revision: formatInteger(locale, event.policy_revision),
         })
       : null,
   ].filter((field): field is string => field != null);
@@ -4611,6 +4791,13 @@ function RelayCapabilityDetails({
               </p>
             </section>
           )}
+          {service.relay_authorization ? (
+            <RelayAuthorizationDetails
+              locale={locale}
+              networkName={service.network_name}
+              audit={service.relay_authorization}
+            />
+          ) : null}
           {service.relay_governance ? (
             <RelayDurableAuditDetails
               locale={locale}

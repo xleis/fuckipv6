@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use fuckipv6_common::domain::{
-    NetworkRecord, NodeId, RelayGovernanceAuditSnapshot, RelayHealthSnapshot,
+    NetworkRecord, NodeId, RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot,
+    RelayHealthSnapshot,
 };
 use fuckipv6_common::{
     CoordinatorConfig, Identity, NetworkAllocation, NetworkTicket, RelayEndpoint,
 };
 use fuckipv6_coordinator::{
-    relay::server::RelayServer,
+    relay::server::{RelayPolicyAuthority, RelayServer},
     signaling::blacklist::CoordinatorConfigBlacklistStore,
     signaling::exit_contribution::ExitContributionRequestStore,
     signaling::invitations::InvitationStore,
@@ -319,6 +320,30 @@ impl EmbeddedCoordinator {
         match self.relay_server.as_ref() {
             Some(server) => Some(server.health_snapshot().await),
             None => None,
+        }
+    }
+
+    /// Return the owner-visible, sanitized authorization projection for the
+    /// current Relay policy. A missing or invalid policy remains visible as a
+    /// health failure and never produces a fabricated allow decision.
+    pub fn relay_authorization_audit_snapshot(&self) -> Option<RelayAuthorizationAuditSnapshot> {
+        self.relay_server.as_ref()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_millis()
+            .try_into()
+            .ok()?;
+        match self
+            .relay_policy_authority
+            .current_policy()
+            .and_then(|policy| policy.authorization_audit_snapshot(now).map_err(Into::into))
+        {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                tracing::warn!("无法读取 Relay 授权诊断: {error:#}");
+                None
+            }
         }
     }
 

@@ -12,8 +12,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::access_control::{
-    evaluate_effective_access, EffectiveAccess, EffectiveAccessReason, NetworkAcl,
-    NodeLocalAccessPolicy,
+    evaluate_effective_access, EffectiveAccess, EffectiveAccessReason, EffectivePolicyLayer,
+    NetworkAcl, NodeLocalAccessPolicy,
 };
 use super::ids::{GroupId, NetworkId, NodeId, PublicKey, SecurityRuleId, Signature};
 use super::permissions::{
@@ -706,6 +706,62 @@ pub struct RelayAuthorizationDecision {
     pub limits: RelayLimitPolicy,
 }
 
+/// Sanitized authorization evidence for the Relay owner. It deliberately omits
+/// rule and grant identifiers, matched subjects and transport metadata while
+/// retaining the layer, reason and revisions needed to explain both sides of
+/// the final decision.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct RelayAuthorizationSourceDiagnostic {
+    pub allowed: bool,
+    pub reason: EffectiveAccessReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer: Option<EffectivePolicyLayer>,
+    pub network_acl_revision: u64,
+    pub local_policy_revision: u64,
+    pub reauthentication_satisfied: bool,
+}
+
+impl From<&EffectiveAccess> for RelayAuthorizationSourceDiagnostic {
+    fn from(access: &EffectiveAccess) -> Self {
+        Self {
+            allowed: access.allowed,
+            reason: access.reason,
+            layer: access.layer,
+            network_acl_revision: access.network_acl_revision,
+            local_policy_revision: access.local_policy_revision,
+            reauthentication_satisfied: access.reauthentication_satisfied,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct RelayAuthorizationDiagnostic {
+    pub node_id: NodeId,
+    pub allowed: bool,
+    pub provider: RelayAuthorizationSourceDiagnostic,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consumer: Option<RelayAuthorizationSourceDiagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_reason: Option<EffectiveAccessReason>,
+}
+
+/// Bounded, deterministic snapshot of current Relay member decisions. The
+/// owner sees which authorization layer produced the final result without the
+/// matching rule/grant identifiers or any connection metadata.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct RelayAuthorizationAuditSnapshot {
+    pub network_id: NetworkId,
+    pub provider_node_id: NodeId,
+    pub policy_revision: u64,
+    pub policy_updated_at_unix_ms: u64,
+    pub existing_session_policy: RelayExistingSessionPolicy,
+    pub decisions: Vec<RelayAuthorizationDiagnostic>,
+    /// True when the policy contained more members than the bounded projection.
+    pub truncated: bool,
+}
+
+pub const MAX_RELAY_AUTHORIZATION_DIAGNOSTICS: usize = 256;
+
 impl RelayAccessPolicy {
     pub fn validate_at(&self, now_unix_ms: u64) -> DomainResult<()> {
         if self.revision == 0 {
@@ -881,6 +937,37 @@ impl RelayAccessPolicy {
                     .map(|decision| (node_id.clone(), decision))
             })
             .collect()
+    }
+
+    pub fn authorization_audit_snapshot(
+        &self,
+        now_unix_ms: u64,
+    ) -> DomainResult<RelayAuthorizationAuditSnapshot> {
+        let decisions = self.authorization_snapshot(now_unix_ms)?;
+        let truncated = decisions.len() > MAX_RELAY_AUTHORIZATION_DIAGNOSTICS;
+        let decisions = decisions
+            .into_iter()
+            .take(MAX_RELAY_AUTHORIZATION_DIAGNOSTICS)
+            .map(|(node_id, decision)| RelayAuthorizationDiagnostic {
+                node_id,
+                allowed: decision.allowed,
+                provider: RelayAuthorizationSourceDiagnostic::from(&decision.provider),
+                consumer: decision
+                    .consumer
+                    .as_ref()
+                    .map(RelayAuthorizationSourceDiagnostic::from),
+                final_reason: decision.final_reason,
+            })
+            .collect();
+        Ok(RelayAuthorizationAuditSnapshot {
+            network_id: self.network_id.clone(),
+            provider_node_id: self.provider_node_id.clone(),
+            policy_revision: self.revision,
+            policy_updated_at_unix_ms: self.updated_at_unix_ms,
+            existing_session_policy: self.existing_session_policy,
+            decisions,
+            truncated,
+        })
     }
 }
 
@@ -1214,6 +1301,12 @@ pub struct RelayGovernanceEvent {
     pub limit: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_at_unix_ms: Option<u64>,
+    /// Policy revision observed before an authorization or quota update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_policy_revision: Option<u64>,
+    /// Policy revision that became effective for this governance event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_revision: Option<u64>,
 }
 
 impl RelayGovernanceEvent {
@@ -1501,6 +1594,43 @@ mod tests {
                 .expect("authorization")
                 .allowed
         );
+    }
+
+    #[test]
+    fn authorization_audit_snapshot_explains_both_layers_without_rule_metadata() {
+        let (network_id, provider, member) = ids();
+        let mut policy = policy(network_id.clone(), provider.clone(), member.clone());
+        policy.revision = 7;
+        policy.existing_session_policy = RelayExistingSessionPolicy::Terminate;
+
+        let audit = policy
+            .authorization_audit_snapshot(now())
+            .expect("authorization audit");
+        assert_eq!(audit.network_id, network_id);
+        assert_eq!(audit.provider_node_id, provider);
+        assert_eq!(audit.policy_revision, 7);
+        assert_eq!(
+            audit.existing_session_policy,
+            RelayExistingSessionPolicy::Terminate
+        );
+        assert_eq!(audit.decisions.len(), 1);
+        let decision = &audit.decisions[0];
+        assert_eq!(decision.node_id, member);
+        assert!(decision.allowed);
+        assert!(decision.provider.allowed);
+        assert!(decision
+            .consumer
+            .as_ref()
+            .is_some_and(|consumer| consumer.allowed));
+        assert_eq!(decision.final_reason, None);
+
+        let encoded = serde_json::to_string(&audit).expect("serialize authorization audit");
+        for forbidden in ["matched_", "rule_id", "grant_id", "public_key", "address"] {
+            assert!(
+                !encoded.contains(forbidden),
+                "leaked {forbidden}: {encoded}"
+            );
+        }
     }
 
     #[test]
@@ -1868,6 +1998,8 @@ mod tests {
             observed: Some(65_537),
             limit: Some(65_536),
             reset_at_unix_ms: None,
+            previous_policy_revision: None,
+            policy_revision: None,
         };
         assert!(valid.validate().is_ok());
 

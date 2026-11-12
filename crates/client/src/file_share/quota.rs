@@ -39,28 +39,49 @@ pub struct UploadQuotaRequest {
     pub replaced_bytes: u64,
     pub member_bytes: u64,
     pub concurrent_transfers: u32,
+    pub member_concurrent_transfers: u32,
+    pub directory_concurrent_transfers: u32,
     pub scan_limits: QuotaScanLimits,
+}
+
+/// Filesystem usage and authenticated admission counts for one upload. This
+/// keeps the quota boundary small enough to audit as a single value.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct UploadQuotaCheck<'a> {
+    pub usage: &'a DirectoryUsage,
+    pub upload_bytes: u64,
+    pub replaced_bytes: u64,
+    pub member_bytes: u64,
+    pub concurrent_transfers: u32,
+    pub member_concurrent_transfers: u32,
+    pub directory_concurrent_transfers: u32,
+    pub available_space: u64,
 }
 
 pub(crate) fn check_upload(
     quota: &FileQuota,
-    usage: &DirectoryUsage,
-    upload_bytes: u64,
-    replaced_bytes: u64,
-    member_bytes: u64,
-    concurrent_transfers: u32,
+    check: UploadQuotaCheck<'_>,
 ) -> Result<FileQuotaUsage, FileQuotaError> {
     let quota_usage = FileQuotaUsage {
-        total_bytes: usage.total_bytes,
-        member_bytes,
-        entries: usage.entries,
+        total_bytes: check.usage.total_bytes,
+        member_bytes: check.member_bytes,
+        entries: check.usage.entries,
     };
     quota.check_upload(
-        upload_bytes,
-        replaced_bytes,
+        check.upload_bytes,
+        check.replaced_bytes,
         &quota_usage,
-        concurrent_transfers,
+        check.concurrent_transfers,
+        check.member_concurrent_transfers,
+        check.directory_concurrent_transfers,
     )?;
+    let required_disk_space = check
+        .upload_bytes
+        .checked_add(quota.reserve_bytes)
+        .ok_or(FileQuotaError::DiskSpaceReserved)?;
+    if check.available_space < required_disk_space {
+        return Err(FileQuotaError::DiskSpaceReserved);
+    }
     Ok(quota_usage)
 }
 
@@ -77,6 +98,8 @@ mod tests {
             max_entries: 10,
             reserve_bytes: 100,
             max_concurrent_transfers: 2,
+            max_concurrent_transfers_per_member: 2,
+            max_concurrent_transfers_per_directory: 2,
             max_bandwidth_kbps: 0,
         };
         let usage = DirectoryUsage {
@@ -86,11 +109,35 @@ mod tests {
         };
 
         assert_eq!(
-            check_upload(&quota, &usage, 500, 0, 100, 0),
+            check_upload(
+                &quota,
+                UploadQuotaCheck {
+                    usage: &usage,
+                    upload_bytes: 500,
+                    replaced_bytes: 0,
+                    member_bytes: 100,
+                    concurrent_transfers: 0,
+                    member_concurrent_transfers: 0,
+                    directory_concurrent_transfers: 0,
+                    available_space: u64::MAX,
+                }
+            ),
             Err(FileQuotaError::FileTooLarge)
         );
         assert_eq!(
-            check_upload(&quota, &usage, 200, 100, 100, 0),
+            check_upload(
+                &quota,
+                UploadQuotaCheck {
+                    usage: &usage,
+                    upload_bytes: 200,
+                    replaced_bytes: 100,
+                    member_bytes: 100,
+                    concurrent_transfers: 0,
+                    member_concurrent_transfers: 0,
+                    directory_concurrent_transfers: 0,
+                    available_space: u64::MAX,
+                }
+            ),
             Ok(FileQuotaUsage {
                 total_bytes: 300,
                 member_bytes: 100,
@@ -98,8 +145,68 @@ mod tests {
             })
         );
         assert_eq!(
-            check_upload(&quota, &usage, 200, 0, 100, 2),
+            check_upload(
+                &quota,
+                UploadQuotaCheck {
+                    usage: &usage,
+                    upload_bytes: 200,
+                    replaced_bytes: 0,
+                    member_bytes: 100,
+                    concurrent_transfers: 2,
+                    member_concurrent_transfers: 0,
+                    directory_concurrent_transfers: 0,
+                    available_space: u64::MAX,
+                }
+            ),
             Err(FileQuotaError::ConcurrencyLimit)
+        );
+        assert_eq!(
+            check_upload(
+                &quota,
+                UploadQuotaCheck {
+                    usage: &usage,
+                    upload_bytes: 200,
+                    replaced_bytes: 0,
+                    member_bytes: 100,
+                    concurrent_transfers: 0,
+                    member_concurrent_transfers: 2,
+                    directory_concurrent_transfers: 0,
+                    available_space: u64::MAX,
+                }
+            ),
+            Err(FileQuotaError::MemberConcurrencyLimit)
+        );
+        assert_eq!(
+            check_upload(
+                &quota,
+                UploadQuotaCheck {
+                    usage: &usage,
+                    upload_bytes: 200,
+                    replaced_bytes: 0,
+                    member_bytes: 100,
+                    concurrent_transfers: 0,
+                    member_concurrent_transfers: 0,
+                    directory_concurrent_transfers: 2,
+                    available_space: u64::MAX,
+                }
+            ),
+            Err(FileQuotaError::DirectoryConcurrencyLimit)
+        );
+        assert_eq!(
+            check_upload(
+                &quota,
+                UploadQuotaCheck {
+                    usage: &usage,
+                    upload_bytes: 200,
+                    replaced_bytes: 0,
+                    member_bytes: 100,
+                    concurrent_transfers: 0,
+                    member_concurrent_transfers: 0,
+                    directory_concurrent_transfers: 0,
+                    available_space: 299,
+                }
+            ),
+            Err(FileQuotaError::DiskSpaceReserved)
         );
     }
 }

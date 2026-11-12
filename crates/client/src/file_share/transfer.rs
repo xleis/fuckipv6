@@ -4,6 +4,7 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::sync::Arc;
 
 use fuckipv6_common::domain::{
     AccessContext, ConcurrentNamePolicy, ContentHash, FileAccessDenial, FileAccessDenialCode,
@@ -17,6 +18,7 @@ use super::capability::{
 };
 use super::error::FileShareError;
 use super::quota::{self, QuotaScanLimits};
+use super::rate_limit::TransferRateLimiter;
 use super::root::LocalShareRoot;
 use super::temp::TemporaryUpload;
 
@@ -26,6 +28,8 @@ use super::temp::TemporaryUpload;
 pub struct UploadAdmission {
     pub member_bytes: u64,
     pub concurrent_transfers: u32,
+    pub member_concurrent_transfers: u32,
+    pub directory_concurrent_transfers: u32,
     pub scan_limits: QuotaScanLimits,
 }
 
@@ -88,6 +92,8 @@ pub enum FileTransferAdapterError {
     ReplacementUnsupported,
     #[error("the File transfer operation was cancelled")]
     Cancelled,
+    #[error("the File bandwidth quota requires a retry after {retry_after_ms} ms")]
+    RateLimited { retry_after_ms: u64 },
 }
 
 impl From<FileQuotaError> for FileTransferAdapterError {
@@ -110,6 +116,7 @@ impl FileTransferAdapterError {
             }
             Self::ReplacementUnsupported => "file_transfer_replacement_unsupported",
             Self::Cancelled => "file_transfer_cancelled",
+            Self::RateLimited { .. } => "file_transfer_rate_limited",
         }
     }
 }
@@ -118,11 +125,15 @@ impl FileTransferAdapterError {
 #[derive(Debug, Clone)]
 pub struct FileTransferAdapter {
     capability: FileShareCapability,
+    bandwidth: Arc<TransferRateLimiter>,
 }
 
 impl FileTransferAdapter {
     pub fn new(capability: FileShareCapability) -> Self {
-        Self { capability }
+        Self {
+            capability,
+            bandwidth: Arc::new(TransferRateLimiter::new()),
+        }
     }
 
     pub fn begin_upload(
@@ -183,14 +194,20 @@ impl FileTransferAdapter {
         ensure_upload_destination(lease.root(), lease.share(), &session.binding.path)?;
 
         let usage = lease.root().directory_usage(admission.scan_limits)?;
+        let available_space = lease.root().available_space()?;
         lease.permit().ensure_current()?;
         quota::check_upload(
             &lease.share().quota,
-            &usage,
-            session.manifest.total_bytes,
-            0,
-            admission.member_bytes,
-            admission.concurrent_transfers,
+            quota::UploadQuotaCheck {
+                usage: &usage,
+                upload_bytes: session.manifest.total_bytes,
+                replaced_bytes: 0,
+                member_bytes: admission.member_bytes,
+                concurrent_transfers: admission.concurrent_transfers,
+                member_concurrent_transfers: admission.member_concurrent_transfers,
+                directory_concurrent_transfers: admission.directory_concurrent_transfers,
+                available_space,
+            },
         )?;
 
         let request = resume_request(&session);
@@ -227,6 +244,8 @@ impl FileTransferAdapter {
             hasher: blake3::Hasher::new(),
             next_chunk: 0,
             transferred_bytes: 0,
+            bandwidth: self.bandwidth.clone(),
+            bandwidth_kbps: lease.share().quota.max_bandwidth_kbps,
             cancellation,
         })
     }
@@ -326,6 +345,8 @@ impl FileTransferAdapter {
             hasher: blake3::Hasher::new(),
             next_chunk: 0,
             transferred_bytes: 0,
+            bandwidth: self.bandwidth.clone(),
+            bandwidth_kbps: lease.share().quota.max_bandwidth_kbps,
             cancellation,
         })
     }
@@ -359,6 +380,8 @@ pub struct UploadTransfer {
     hasher: blake3::Hasher,
     next_chunk: u32,
     transferred_bytes: u64,
+    bandwidth: Arc<TransferRateLimiter>,
+    bandwidth_kbps: u32,
     cancellation: Option<TransferOperationCancellation>,
 }
 
@@ -398,6 +421,13 @@ impl UploadTransfer {
             self.upload.take();
             return Err(FileTransferAdapterError::ChunkOutOfOrder);
         }
+        self.bandwidth
+            .try_consume(
+                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                self.bandwidth_kbps,
+                now_unix_ms,
+            )
+            .map_err(|retry_after_ms| FileTransferAdapterError::RateLimited { retry_after_ms })?;
 
         if let Err(error) = self.session.record_chunk(index, bytes, now_unix_ms) {
             let _ = self.session.fail(now_unix_ms);
@@ -591,6 +621,8 @@ pub struct DownloadTransfer {
     hasher: blake3::Hasher,
     next_chunk: u32,
     transferred_bytes: u64,
+    bandwidth: Arc<TransferRateLimiter>,
+    bandwidth_kbps: u32,
     cancellation: Option<TransferOperationCancellation>,
 }
 
@@ -617,6 +649,9 @@ impl DownloadTransfer {
         };
         let length =
             usize::try_from(chunk.length).map_err(|_| FileTransferError::InvalidManifest)?;
+        self.bandwidth
+            .try_consume(chunk.length, self.bandwidth_kbps, now_unix_ms)
+            .map_err(|retry_after_ms| FileTransferAdapterError::RateLimited { retry_after_ms })?;
         let file = self.file.as_mut().ok_or(FileTransferError::InvalidState)?;
         if let Err(error) = file.seek(SeekFrom::Start(chunk.offset)) {
             let _ = self.session.fail(now_unix_ms);
@@ -1254,6 +1289,119 @@ mod tests {
         assert_eq!(error.code(), "file_too_large");
         assert!(!host_path(&temporary, "too-large.bin").exists());
         assert_eq!(temp_file_count(&temporary), 0);
+    }
+
+    #[test]
+    fn low_disk_reserve_rejects_upload_before_staging() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let available = fs2::available_space(temporary.path()).expect("available filesystem space");
+        let mut low_space = share();
+        low_space.quota.total_bytes = u64::MAX;
+        low_space.quota.per_member_bytes = u64::MAX;
+        low_space.quota.max_file_bytes = u64::MAX;
+        low_space.quota.reserve_bytes = available.saturating_sub(1);
+        let capability = FileShareCapability::new();
+        let snapshot = capability
+            .enable(
+                &low_space,
+                &owner(),
+                temporary.path().to_str().expect("utf8 temp path"),
+                10,
+            )
+            .expect("enable low-space File share");
+        assert_eq!(snapshot.state, FileCapabilityState::Ready);
+        let share = low_space;
+        let adapter = FileTransferAdapter::new(capability);
+
+        let error = adapter
+            .begin_upload(
+                upload_session(&share, "reserve.bin", b"abcd", 4, b"reserve", 1_000),
+                &context(&share),
+                true,
+                UploadAdmission::default(),
+                20,
+            )
+            .expect_err("reserve must fail closed");
+        assert_eq!(error.code(), "file_disk_space_reserved");
+        assert!(!host_path(&temporary, "reserve.bin").exists());
+        assert_eq!(temp_file_count(&temporary), 0);
+    }
+
+    #[test]
+    fn rate_limited_upload_remains_retryable_and_completes() {
+        let mut limited = share();
+        limited.quota.max_bandwidth_kbps = 8;
+        let (temporary, capability, share) = setup_with(limited);
+        let adapter = FileTransferAdapter::new(capability);
+        let mut transfer = adapter
+            .begin_upload(
+                upload_session(&share, "paced.txt", b"abcd", 4, b"paced", 1_000),
+                &context(&share),
+                true,
+                UploadAdmission::default(),
+                20,
+            )
+            .expect("begin paced upload");
+
+        let error = transfer
+            .write_chunk(0, b"abcd", 100)
+            .expect_err("first chunk must wait for tokens");
+        let FileTransferAdapterError::RateLimited { retry_after_ms } = error else {
+            panic!("expected rate limit error");
+        };
+        assert!(retry_after_ms > 0);
+        assert_eq!(transfer.session().state, TransferState::Active);
+        assert_eq!(transfer.progress().transferred_bytes, 0);
+        assert!(!host_path(&temporary, "paced.txt").exists());
+
+        assert!(transfer
+            .write_chunk(0, b"abcd", 100 + retry_after_ms)
+            .expect("retry accepted"));
+        transfer
+            .finish(101 + retry_after_ms)
+            .expect("paced upload finishes");
+        assert_eq!(
+            std::fs::read(host_path(&temporary, "paced.txt")).expect("published file"),
+            b"abcd"
+        );
+    }
+
+    #[test]
+    fn rate_limited_download_remains_retryable_and_completes() {
+        let mut limited = share();
+        limited.quota.max_bandwidth_kbps = 8;
+        let (temporary, capability, share) = setup_with(limited);
+        std::fs::write(host_path(&temporary, "paced.txt"), b"abcd").expect("source");
+        let adapter = FileTransferAdapter::new(capability);
+        let expected = version(b"abcd");
+        let mut transfer = adapter
+            .begin_download(
+                download_session(&share, "paced.txt", b"abcd", 4, expected, 1_000),
+                &context(&share),
+                true,
+                20,
+            )
+            .expect("begin paced download");
+
+        let error = transfer
+            .read_next(100)
+            .expect_err("first chunk must wait for tokens");
+        let FileTransferAdapterError::RateLimited { retry_after_ms } = error else {
+            panic!("expected rate limit error");
+        };
+        assert!(retry_after_ms > 0);
+        assert_eq!(transfer.session().state, TransferState::Active);
+        assert_eq!(transfer.progress().transferred_bytes, 0);
+
+        assert_eq!(
+            transfer
+                .read_next(100 + retry_after_ms)
+                .expect("retry accepted"),
+            Some(b"abcd".to_vec())
+        );
+        transfer
+            .finish(101 + retry_after_ms)
+            .expect("paced download finishes");
     }
 
     #[test]

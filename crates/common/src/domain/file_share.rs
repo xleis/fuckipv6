@@ -330,8 +330,16 @@ pub struct FileQuota {
     pub max_file_bytes: u64,
     pub max_entries: u64,
     pub reserve_bytes: u64,
+    /// Process-wide transfer admission limit for this File share.
     pub max_concurrent_transfers: u32,
-    /// Zero means unlimited.
+    /// Per-authenticated-member transfer admission limit.
+    #[serde(default = "default_per_member_concurrency")]
+    pub max_concurrent_transfers_per_member: u32,
+    /// Per-target-directory transfer admission limit.
+    #[serde(default = "default_per_directory_concurrency")]
+    pub max_concurrent_transfers_per_directory: u32,
+    /// Zero means unlimited. Enforcement is a shared token bucket whose burst
+    /// is bounded by the maximum supported transfer chunk.
     pub max_bandwidth_kbps: u32,
 }
 
@@ -344,9 +352,19 @@ impl Default for FileQuota {
             max_entries: 100_000,
             reserve_bytes: 256 * 1024 * 1024,
             max_concurrent_transfers: 4,
+            max_concurrent_transfers_per_member: 2,
+            max_concurrent_transfers_per_directory: 2,
             max_bandwidth_kbps: 0,
         }
     }
+}
+
+const fn default_per_member_concurrency() -> u32 {
+    1
+}
+
+const fn default_per_directory_concurrency() -> u32 {
+    1
 }
 
 impl FileQuota {
@@ -357,6 +375,10 @@ impl FileQuota {
             || self.reserve_bytes >= self.total_bytes
             || self.max_entries == 0
             || self.max_concurrent_transfers == 0
+            || self.max_concurrent_transfers_per_member == 0
+            || self.max_concurrent_transfers_per_member > self.max_concurrent_transfers
+            || self.max_concurrent_transfers_per_directory == 0
+            || self.max_concurrent_transfers_per_directory > self.max_concurrent_transfers
         {
             return Err(DomainError::invalid_value("file quota is invalid"));
         }
@@ -371,12 +393,20 @@ impl FileQuota {
         replaced_bytes: u64,
         usage: &FileQuotaUsage,
         concurrent_transfers: u32,
+        member_concurrent_transfers: u32,
+        directory_concurrent_transfers: u32,
     ) -> Result<(), FileQuotaError> {
         if upload_bytes > self.max_file_bytes {
             return Err(FileQuotaError::FileTooLarge);
         }
         if concurrent_transfers >= self.max_concurrent_transfers {
             return Err(FileQuotaError::ConcurrencyLimit);
+        }
+        if member_concurrent_transfers >= self.max_concurrent_transfers_per_member {
+            return Err(FileQuotaError::MemberConcurrencyLimit);
+        }
+        if directory_concurrent_transfers >= self.max_concurrent_transfers_per_directory {
+            return Err(FileQuotaError::DirectoryConcurrencyLimit);
         }
         if replaced_bytes == 0 && usage.entries >= self.max_entries {
             return Err(FileQuotaError::EntryLimit);
@@ -418,6 +448,9 @@ pub enum FileQuotaError {
     MemberQuotaExceeded,
     EntryLimit,
     ConcurrencyLimit,
+    MemberConcurrencyLimit,
+    DirectoryConcurrencyLimit,
+    DiskSpaceReserved,
 }
 
 impl FileQuotaError {
@@ -428,6 +461,9 @@ impl FileQuotaError {
             Self::MemberQuotaExceeded => "file_member_quota_exceeded",
             Self::EntryLimit => "file_entry_limit",
             Self::ConcurrencyLimit => "file_concurrency_limit",
+            Self::MemberConcurrencyLimit => "file_member_concurrency_limit",
+            Self::DirectoryConcurrencyLimit => "file_directory_concurrency_limit",
+            Self::DiskSpaceReserved => "file_disk_space_reserved",
         }
     }
 }
@@ -1238,6 +1274,8 @@ mod tests {
             max_entries: 2,
             reserve_bytes: 20,
             max_concurrent_transfers: 2,
+            max_concurrent_transfers_per_member: 2,
+            max_concurrent_transfers_per_directory: 2,
             max_bandwidth_kbps: 0,
         };
         let usage = FileQuotaUsage {
@@ -1246,18 +1284,26 @@ mod tests {
             entries: 1,
         };
         assert_eq!(
-            quota.check_upload(61, 0, &usage, 0),
+            quota.check_upload(61, 0, &usage, 0, 0, 0),
             Err(FileQuotaError::FileTooLarge)
         );
         assert_eq!(
-            quota.check_upload(51, 0, &usage, 0),
+            quota.check_upload(51, 0, &usage, 0, 0, 0),
             Err(FileQuotaError::MemberQuotaExceeded)
         );
         assert_eq!(
-            quota.check_upload(10, 0, &usage, 2),
+            quota.check_upload(10, 0, &usage, 2, 0, 0),
             Err(FileQuotaError::ConcurrencyLimit)
         );
-        assert_eq!(quota.check_upload(50, 30, &usage, 0), Ok(()));
+        assert_eq!(
+            quota.check_upload(10, 0, &usage, 0, 2, 0),
+            Err(FileQuotaError::MemberConcurrencyLimit)
+        );
+        assert_eq!(
+            quota.check_upload(10, 0, &usage, 0, 0, 2),
+            Err(FileQuotaError::DirectoryConcurrencyLimit)
+        );
+        assert_eq!(quota.check_upload(50, 30, &usage, 0, 0, 0), Ok(()));
     }
 
     #[test]

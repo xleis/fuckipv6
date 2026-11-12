@@ -1,16 +1,21 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use fuckipv6_common::domain::{
-    AccessContext, AuditEntry, AuditId, AuditLog, AuditOutcome, DomainError, FileAccessDenial,
+    AccessContext, AuditEntry, AuditId, AuditOutcome, DomainError, FileAccessDenial,
     FileAccessRequest, FileAction, FileQuotaError, FileQuotaUsage, FileShare, NetworkId, NodeId,
 };
 use tokio::sync::watch;
 
 use super::error::{FileShareError, FileShareErrorCode, FileShareResult};
-use super::quota::{self, UploadQuotaRequest};
+use super::quota::{self, UploadQuotaCheck, UploadQuotaRequest};
 use super::root::LocalShareRoot;
+
+/// The in-memory capability trail is a bounded observability aid. Durable
+/// owner configuration audit is stored separately in the rotating security
+/// ledger, so dropping the oldest in-memory projection cannot erase evidence.
+const CAPABILITY_AUDIT_RETENTION_LIMIT: usize = 256;
 
 /// Local runtime state for one owner-selected File share. Keeping capability,
 /// authorization, and transfer state together prevents a disabled share from
@@ -24,7 +29,7 @@ struct Inner {
     state: RwLock<Option<EnabledFileShare>>,
     last_network_id: RwLock<Option<NetworkId>>,
     epoch_tx: watch::Sender<u64>,
-    audit: Mutex<AuditLog>,
+    audit: Mutex<CapabilityAuditLog>,
     audit_sequence: AtomicU64,
 }
 
@@ -57,7 +62,7 @@ impl FileShareCapability {
                 state: RwLock::new(None),
                 last_network_id: RwLock::new(None),
                 epoch_tx,
-                audit: Mutex::new(AuditLog::default()),
+                audit: Mutex::new(CapabilityAuditLog::default()),
                 audit_sequence: AtomicU64::new(0),
             }),
         }
@@ -378,14 +383,23 @@ impl FileShareCapability {
             .root()
             .directory_usage(request.scan_limits)
             .map_err(FileCapabilityError::Filesystem)?;
+        let available_space = lease
+            .root()
+            .available_space()
+            .map_err(FileCapabilityError::Filesystem)?;
         lease.permit().ensure_current()?;
         quota::check_upload(
             &lease.share().quota,
-            &usage,
-            request.upload_bytes,
-            request.replaced_bytes,
-            request.member_bytes,
-            request.concurrent_transfers,
+            UploadQuotaCheck {
+                usage: &usage,
+                upload_bytes: request.upload_bytes,
+                replaced_bytes: request.replaced_bytes,
+                member_bytes: request.member_bytes,
+                concurrent_transfers: request.concurrent_transfers,
+                member_concurrent_transfers: request.member_concurrent_transfers,
+                directory_concurrent_transfers: request.directory_concurrent_transfers,
+                available_space,
+            },
         )
         .map_err(FileCapabilityError::Quota)
     }
@@ -419,7 +433,7 @@ impl FileShareCapability {
         self.inner
             .audit
             .lock()
-            .map(|audit| audit.entries().to_vec())
+            .map(|audit| audit.entries().cloned().collect())
             .map_err(|_| FileCapabilityError::Unavailable)
     }
 }
@@ -574,8 +588,34 @@ struct AuditEvent<'a> {
     details: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Default)]
+struct CapabilityAuditLog {
+    entries: VecDeque<AuditEntry>,
+}
+
+impl CapabilityAuditLog {
+    fn append(&mut self, mut entry: AuditEntry) -> Result<(), FileCapabilityError> {
+        entry
+            .validate()
+            .map_err(|_| FileCapabilityError::AuditUnavailable)?;
+        entry.redact_sensitive_fields();
+        entry
+            .validate()
+            .map_err(|_| FileCapabilityError::AuditUnavailable)?;
+        self.entries.push_back(entry);
+        while self.entries.len() > CAPABILITY_AUDIT_RETENTION_LIMIT {
+            self.entries.pop_front();
+        }
+        Ok(())
+    }
+
+    fn entries(&self) -> impl Iterator<Item = &AuditEntry> {
+        self.entries.iter()
+    }
+}
+
 fn record_audit(
-    audit: &Mutex<AuditLog>,
+    audit: &Mutex<CapabilityAuditLog>,
     sequence: &AtomicU64,
     event: AuditEvent<'_>,
 ) -> Result<AuditId, FileCapabilityError> {
@@ -702,6 +742,37 @@ mod tests {
         assert_eq!(
             audit[0].details.get("reason_code").map(String::as_str),
             Some("file_owner_required")
+        );
+    }
+
+    #[test]
+    fn capability_audit_keeps_only_the_latest_bounded_events() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let capability = FileShareCapability::new();
+        let intruder = NodeId::from_public_key(b"intruder");
+        let total_events = CAPABILITY_AUDIT_RETENTION_LIMIT + 44;
+
+        for now_unix_ms in 1..=total_events as u64 {
+            let error = capability
+                .enable(
+                    &share(),
+                    &intruder,
+                    temporary.path().to_str().expect("utf8 temp path"),
+                    now_unix_ms,
+                )
+                .expect_err("non-owner must be denied");
+            assert!(matches!(error, FileCapabilityError::OwnerRequired));
+        }
+
+        let audit = capability.audit_entries().expect("audit");
+        assert_eq!(audit.len(), CAPABILITY_AUDIT_RETENTION_LIMIT);
+        assert_eq!(
+            audit.first().map(|entry| entry.occurred_at_unix_ms),
+            Some(45)
+        );
+        assert_eq!(
+            audit.last().map(|entry| entry.occurred_at_unix_ms),
+            Some(total_events as u64)
         );
     }
 

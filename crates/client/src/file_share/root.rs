@@ -199,6 +199,17 @@ impl LocalShareRoot {
     /// Scan local quota usage with bounded depth and entry count. Symbolic
     /// links and special files are counted as entries but never followed or
     /// charged as file bytes. The internal staging directory is excluded.
+    pub fn available_space(&self) -> FileShareResult<u64> {
+        self.probe()?;
+        fs2::available_space(&self.canonical_root).map_err(|error| {
+            FileShareError::io(
+                FileShareErrorCode::RootUnavailable,
+                "shared filesystem capacity is unavailable",
+                error,
+            )
+        })
+    }
+
     pub fn directory_usage(&self, limits: QuotaScanLimits) -> FileShareResult<DirectoryUsage> {
         const MAX_SCAN_DEPTH: usize = 256;
         if limits.max_entries == 0 || limits.max_depth > MAX_SCAN_DEPTH {

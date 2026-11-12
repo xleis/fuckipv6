@@ -1662,6 +1662,7 @@ export type NodeFileCapabilitySnapshot = {
   "access_epoch"?: number | null;
   "active_transfers"?: number;
   "available_bytes"?: number | null;
+  "network_id"?: NetworkId | null;
   "root_error"?: string | null;
   "share_revision"?: number | null;
   "state": CapabilityState;

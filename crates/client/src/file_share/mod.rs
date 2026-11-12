@@ -11,6 +11,7 @@ mod config;
 mod error;
 mod owner_service;
 mod quota;
+mod rate_limit;
 mod root;
 mod runtime;
 mod temp;

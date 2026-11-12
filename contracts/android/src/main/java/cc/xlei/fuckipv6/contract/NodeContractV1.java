@@ -5767,14 +5767,16 @@ public final class NodeContractV1 {
         public final Long access_epoch;
         public final Long active_transfers;
         public final Long available_bytes;
+        public final String network_id;
         public final String root_error;
         public final Long share_revision;
         public final String state;
 
-        public NodeFileCapabilitySnapshot(Long access_epoch, Long active_transfers, Long available_bytes, String root_error, Long share_revision, String state) {
+        public NodeFileCapabilitySnapshot(Long access_epoch, Long active_transfers, Long available_bytes, String network_id, String root_error, Long share_revision, String state) {
             this.access_epoch = access_epoch;
             this.active_transfers = active_transfers;
             this.available_bytes = available_bytes;
+            this.network_id = network_id;
             this.root_error = root_error;
             this.share_revision = share_revision;
             this.state = state;

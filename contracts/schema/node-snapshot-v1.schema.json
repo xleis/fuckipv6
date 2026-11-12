@@ -2046,6 +2046,17 @@
             "null"
           ]
         },
+        "network_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The network this owner-local share is bound to. This is safe to expose\nto authorized snapshot viewers and lets the UI place File state on the\nmatching network instead of inventing a global File page."
+        },
         "root_error": {
           "type": [
             "string",

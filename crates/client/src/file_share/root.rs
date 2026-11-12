@@ -145,6 +145,13 @@ impl LocalShareRoot {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
+            let anchored = self.root_file.metadata().map_err(|error| {
+                FileShareError::io(
+                    FileShareErrorCode::RootUnavailable,
+                    "anchored shared root metadata is unavailable",
+                    error,
+                )
+            })?;
             let file = OpenOptions::new()
                 .read(true)
                 .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -170,10 +177,14 @@ impl LocalShareRoot {
                     error,
                 )
             })?;
-            if opened.dev() != canonical.dev() || opened.ino() != canonical.ino() {
+            if opened.dev() != anchored.dev()
+                || opened.ino() != anchored.ino()
+                || canonical.dev() != anchored.dev()
+                || canonical.ino() != anchored.ino()
+            {
                 return Err(FileShareError::new(
                     FileShareErrorCode::RootUnavailable,
-                    "shared root changed while being checked",
+                    "shared root was removed or replaced",
                 ));
             }
         }
@@ -1279,6 +1290,46 @@ mod tests {
         let path = SharedPath::parse("outside/secret").expect("path");
         let error = share.open_read(&path).expect_err("symlink must fail");
         assert_eq!(error.code(), FileShareErrorCode::SymlinkRejected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_rejects_root_replaced_by_another_directory() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let selected = temporary.path().join("shared");
+        fs::create_dir(&selected).expect("shared root");
+        let share = LocalShareRoot::select(
+            selected.to_str().expect("utf8 temp path"),
+            SymlinkPolicy::Reject,
+        )
+        .expect("share root");
+
+        fs::rename(&selected, temporary.path().join("shared-original")).expect("rename root");
+        fs::create_dir(&selected).expect("replacement root");
+
+        let error = share.probe().expect_err("replacement root must fail");
+        assert_eq!(error.code(), FileShareErrorCode::RootUnavailable);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_rejects_root_replaced_by_symbolic_link() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let selected = temporary.path().join("shared");
+        let outside = temporary.path().join("outside");
+        fs::create_dir(&selected).expect("shared root");
+        fs::create_dir(&outside).expect("outside root");
+        let share = LocalShareRoot::select(
+            selected.to_str().expect("utf8 temp path"),
+            SymlinkPolicy::Reject,
+        )
+        .expect("share root");
+
+        fs::remove_dir(&selected).expect("remove root");
+        std::os::unix::fs::symlink(&outside, &selected).expect("replacement symlink");
+
+        let error = share.probe().expect_err("replacement symlink must fail");
+        assert_eq!(error.code(), FileShareErrorCode::RootUnavailable);
     }
 
     #[test]

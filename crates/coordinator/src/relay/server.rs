@@ -4,8 +4,8 @@ use fuckipv6_common::{
     build_quic_server_config_with_client_certificate_authorizer,
     domain::{
         NodeId, RelayAccessPolicy, RelayAuthorizationDecision, RelayExistingSessionPolicy,
-        RelayHealthSnapshot, RelayLifecycleState, RelayLimitPolicy, RelayMeasurementState,
-        RelayMemberGrant, RelayReachabilityState, RelayUsageSnapshot,
+        RelayHealthSnapshot, RelayHealthStatus, RelayLifecycleState, RelayLimitPolicy,
+        RelayMeasurementState, RelayMemberGrant, RelayReachabilityState, RelayUsageSnapshot,
     },
     export_quic_relay_channel_binding, generate_self_signed_quic_certificate, recv_relay_message,
     send_relay_message, verify_quic_client_identity_binding, ClientId, ErrorCode, Identity,
@@ -435,7 +435,7 @@ impl RelayServer {
         } else {
             RelayReachabilityState::Unknown
         };
-        RelayHealthSnapshot::observe(
+        let mut health = RelayHealthSnapshot::observe(
             lifecycle,
             if listener_open {
                 Some(self.bind_addr)
@@ -454,7 +454,28 @@ impl RelayServer {
             usage,
             now,
             reason_code,
-        )
+        );
+        if self.state.connection_tasks.available_permits() == 0
+            || self.state.stream_tasks.available_permits() == 0
+        {
+            if !health
+                .issues
+                .contains(&fuckipv6_common::domain::RelayHealthIssue::ResourcePressure)
+            {
+                health
+                    .issues
+                    .push(fuckipv6_common::domain::RelayHealthIssue::ResourcePressure);
+            }
+            if matches!(
+                health.status,
+                RelayHealthStatus::Healthy
+                    | RelayHealthStatus::Unknown
+                    | RelayHealthStatus::Degraded
+            ) {
+                health.status = RelayHealthStatus::Degraded;
+            }
+        }
+        health
     }
 
     async fn load_policy(&self, now_unix_ms: u64) -> Result<RelayAccessPolicy> {
@@ -604,6 +625,7 @@ impl RelayServer {
                     "QUIC 中继连接任务达到上限，拒绝: {}",
                     incoming.remote_address()
                 );
+                record_rejected_connection(&self.state, None);
                 self.record_forwarding_failure();
                 self.session_manager.record_relay_error();
                 continue;
@@ -850,6 +872,8 @@ impl RelayServer {
                 registered.client_id
             );
             self.reject_overloaded_stream(send).await;
+            let member = self.member_usage(&registered.node_id).await;
+            record_rejected_packet(&self.state, &member);
             self.record_forwarding_failure();
             self.session_manager.record_relay_error();
             return true;
@@ -3571,7 +3595,7 @@ mod tests {
         )?;
         let relay_addr = server.local_addr();
         let server_pin = server.certificate().public_key_pin;
-        let server_task = tokio::spawn(server.run());
+        let server_task = tokio::spawn(server.clone().run());
         let client = connect_test_relay(relay_addr, server_pin, &identity, ip).await?;
 
         let result = client
@@ -3585,6 +3609,12 @@ mod tests {
 
         let error = result.unwrap_err().to_string();
         assert!(error.contains("503"));
+        let usage = server.usage_snapshot().await;
+        assert_eq!(usage.rejected_packets, 1);
+        let health = server.health_snapshot().await;
+        assert!(health
+            .issues
+            .contains(&fuckipv6_common::domain::RelayHealthIssue::ResourcePressure));
 
         client.close().await;
         server_task.abort();

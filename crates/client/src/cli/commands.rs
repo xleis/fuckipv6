@@ -4018,9 +4018,11 @@ async fn admit_inbound_packet(
         return None;
     };
 
-    // Virtual-network destinations remain ordinary Mesh traffic. Any other
-    // destination is privileged exit traffic and must pass every policy check.
-    if !runtime.route_engine.is_virtual_network(target_dst) {
+    // Packets addressed to this node's assigned virtual IP are always Mesh
+    // traffic, even when the configured IPv4 virtual prefix does not match the
+    // address allocated by the coordinator. Any other destination is
+    // privileged exit traffic and must pass every policy check.
+    if !is_mesh_inbound_destination(&runtime.route_engine, &runtime.assigned_ips, target_dst) {
         #[cfg(target_os = "linux")]
         let owner_accepts_exit = local_exit_accepts_inbound(runtime);
         #[cfg(not(target_os = "linux"))]
@@ -4101,6 +4103,14 @@ async fn admit_inbound_packet(
 
     record_p2p_rx_for_peer(&runtime.stats, &peer, plain_payload.len()).await;
     Some(InboundAdmission::Payload(plain_payload))
+}
+
+fn is_mesh_inbound_destination(
+    route_engine: &SmartRouteEngine,
+    assigned_ips: &VirtualIps,
+    target_dst: IpAddr,
+) -> bool {
+    assigned_ips.contains(target_dst) || route_engine.is_virtual_network(target_dst)
 }
 
 async fn handle_runtime_signaling_event(
@@ -8480,6 +8490,24 @@ mod tests {
             authenticated_inbound_source(&packet[..19], &peer, &virtual_ips, None),
             None
         );
+    }
+
+    #[test]
+    fn assigned_inbound_destination_is_mesh_even_outside_default_prefix() {
+        let route_engine = SmartRouteEngine::new(fuckipv6_common::RoutingMode::GlobalProxy);
+        let assigned_ips =
+            VirtualIps::dual_stack("10.77.7.2".parse().unwrap(), "fd77:7::2".parse().unwrap());
+
+        assert!(is_mesh_inbound_destination(
+            &route_engine,
+            &assigned_ips,
+            "10.77.7.2".parse().unwrap()
+        ));
+        assert!(!is_mesh_inbound_destination(
+            &route_engine,
+            &assigned_ips,
+            "1.1.1.1".parse().unwrap()
+        ));
     }
 
     #[test]

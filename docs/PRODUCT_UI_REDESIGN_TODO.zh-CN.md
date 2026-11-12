@@ -3287,7 +3287,13 @@ duplicate transfer key 或共享 staging 路径会保留首个已恢复文件，
 `paused_download_restores_a_partial_fragment_from_staging`、`expired_restored_download_is_not_resumed_and_staging_is_removed`、
 `restored_upload_fails_closed_when_the_source_changes`、`restored_download_rejects_an_existing_destination_without_overwriting_it`、
 `restored_download_rejects_a_replaced_staging_symlink_without_touching_its_target`、`duplicate_restored_transfer_does_not_remove_the_restored_staging_file`
-与 `shared_restored_staging_path_does_not_remove_or_reuse_the_active_file` 覆盖这些恢复边界。该证据仍是进程内状态机、journal 与
+与 `shared_restored_staging_path_does_not_remove_or_reuse_the_active_file` 覆盖这些恢复边界。网络协议另有固定 manifest 硬上限：
+总字节 1 GiB、分块 256 个、单块 4 MiB；requester 上传先读取源 metadata 并计算安全分块数，再分配 manifest 和逐块哈希，恢复入口在
+分配前复用同一校验。`upload_manifest_bounds_are_checked_before_allocation`、`oversized_sparse_upload_is_rejected_before_reading_the_source`、
+`tiny_chunks_cannot_amplify_the_upload_manifest` 与 `restored_upload_rejects_source_growth_before_manifest_allocation` 覆盖这些入口；
+`opened_responses_reject_manifests_outside_network_bounds`、`opened_response_frames_reject_unbounded_manifests`、
+`remote_manifests_must_fit_the_bounded_file_and_chunk_limits` 与 `owner_rejects_unbounded_upload_manifests_without_the_frame_decoder`
+覆盖 `Opened` 响应构造/解码、owner 准入和 requester 响应绑定均拒绝超限 manifest。该证据仍是进程内状态机、journal 与
 冻结文件系统测试，不代表真实双节点网络中断、真实节点杀进程重启、WebUI/Android File 表面或大文件性能验收已经完成。
 失败事件保留稳定的具体错误码，并额外投影 `network` / `authorization` / `quota` / `storage` 四类本地操作提示；
 `requester_failures_preserve_network_authorization_quota_and_storage_kinds` 覆盖发送失败、权限撤销、配额超限与磁盘预留拒绝。
@@ -3368,6 +3374,9 @@ NUL/控制字符、不可见 Unicode 格式字符（包括双向覆盖字符）�
 | 目录条目审计 | 100,000 | `FileQuota::max_entries` |
 | 配额扫描深度/条目 | 64 / 100,000 | `QuotaScanLimits::default`，不跟随符号链接 |
 | 单块上限 | 16 MiB | `MAX_TRANSFER_CHUNK_BYTES` |
+| 网络传输总字节 | 1 GiB | `MAX_FILE_NETWORK_TRANSFER_BYTES`，网络 manifest 与 owner/requester 准入 |
+| 网络 manifest 分块 | 256 | `MAX_FILE_NETWORK_MANIFEST_CHUNKS`，`Vec` 分配前校验 |
+| 网络单块上限 | 4 MiB | `MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES`，同时限制 manifest 和 fragment offset |
 | 带宽 | 0 = 不限额 | `max_bandwidth_kbps`；启用时按聚合 File 流量计量，桶容量不超过单块上限 |
 | 节点活动/命令审计 | 256 / 256 | `ACTIVITY_RETENTION_LIMIT` / `COMMAND_AUDIT_RETENTION_LIMIT` |
 | File capability 审计 | 256 | `CAPABILITY_AUDIT_RETENTION_LIMIT`；持久化 owner 安全台账不受内存淘汰影响 |
@@ -3377,7 +3386,12 @@ NUL/控制字符、不可见 Unicode 格式字符（包括双向覆盖字符）�
 `member_and_directory_limits_are_independent_within_global_limit` 与 `directory_limit_blocks_only_the_same_parent_directory` 覆盖；
 低空间在 staging 创建前返回 `file_disk_space_reserved`；上传/下载限速后保持可重试并最终完成；
 `command_audit_keeps_only_the_latest_bounded_entries` 验证命令审计只保留最新 256 条，
-`capability_audit_keeps_only_the_latest_bounded_events` 验证 File capability 审计只保留最新 256 条。
+`capability_audit_keeps_only_the_latest_bounded_events` 验证 File capability 审计只保留最新 256 条；
+`upload_manifest_bounds_are_checked_before_allocation`、`oversized_sparse_upload_is_rejected_before_reading_the_source` 与
+`tiny_chunks_cannot_amplify_the_upload_manifest` 验证 requester 在 manifest 分配和源文件读取前执行网络上限，
+`opened_response_frames_reject_unbounded_manifests`、`remote_manifests_must_fit_the_bounded_file_and_chunk_limits`、
+`owner_rejects_unbounded_upload_manifests_without_the_frame_decoder` 与
+`restored_upload_rejects_source_growth_before_manifest_allocation` 验证响应/owner/恢复入口复用同一边界。
 
 **未测边界**：尚未启动独立 node/control 进程做 File 满载隔离测试；尚未在 Linux/macOS/Windows 实机上采样压力前后的
 文件句柄、线程数和 RSS，因此不能声称 OS 资源已回到基线。大文件、多文件并发和真实网络中断恢复性能也未测试。

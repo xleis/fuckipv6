@@ -12,9 +12,9 @@ use fuckipv6_secure_session::{DataHeader, AEAD_TAG_LEN, DATA_HEADER_LEN, MAX_DAT
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
-use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -151,14 +151,124 @@ struct PeerConnection {
     endpoints: Vec<SocketAddr>,
     active_endpoint: Option<SocketAddr>,
     tcp_link: Option<Arc<TcpLink>>,
+    tcp_probe_link: Option<Arc<TcpLink>>,
+    udp_probe: Arc<UdpProbeState>,
     health: Arc<PeerHealth>,
     secure: Arc<SecurePeerState>,
+}
+
+impl PeerConnection {
+    fn authenticated_tcp_endpoint(&self) -> Option<SocketAddr> {
+        [self.tcp_link.as_ref(), self.tcp_probe_link.as_ref()]
+            .into_iter()
+            .flatten()
+            .find(|link| link.authenticated.load(Ordering::Acquire))
+            .map(|link| link.remote_addr)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+enum UdpProbeAvailability {
+    Unknown = 0,
+    Available = 1,
+    Unavailable = 2,
+}
+
+#[derive(Debug)]
+struct UdpProbeState {
+    availability: AtomicU8,
+    pongs: AtomicU64,
+}
+
+impl UdpProbeState {
+    fn new() -> Self {
+        Self {
+            availability: AtomicU8::new(UdpProbeAvailability::Unknown as u8),
+            pongs: AtomicU64::new(0),
+        }
+    }
+
+    fn record_pong(&self) {
+        self.pongs.fetch_add(1, Ordering::Relaxed);
+        self.availability
+            .store(UdpProbeAvailability::Available as u8, Ordering::Relaxed);
+    }
+
+    fn mark_unavailable(&self) {
+        self.availability
+            .store(UdpProbeAvailability::Unavailable as u8, Ordering::Relaxed);
+    }
+
+    fn availability(&self) -> UdpProbeAvailability {
+        match self.availability.load(Ordering::Relaxed) {
+            value if value == UdpProbeAvailability::Available as u8 => {
+                UdpProbeAvailability::Available
+            }
+            value if value == UdpProbeAvailability::Unavailable as u8 => {
+                UdpProbeAvailability::Unavailable
+            }
+            _ => UdpProbeAvailability::Unknown,
+        }
+    }
+
+    /// UDP stays preferred until repeated misses positively prove that the
+    /// direct UDP path is unavailable. "Not probed yet" must never create a
+    /// TCP link or move business traffic onto TCP.
+    fn requires_tcp_fallback(&self) -> bool {
+        self.availability() == UdpProbeAvailability::Unavailable
+    }
+
+    fn pong_count(&self) -> u64 {
+        self.pongs.load(Ordering::Relaxed)
+    }
+}
+
+fn observe_udp_probe_interval(
+    udp_probe: &UdpProbeState,
+    last_udp_pongs: &mut Option<u64>,
+    udp_misses: &mut u32,
+) {
+    let current_udp_pongs = udp_probe.pong_count();
+    if let Some(previous) = *last_udp_pongs {
+        if current_udp_pongs > previous {
+            *udp_misses = 0;
+        } else {
+            *udp_misses = udp_misses.saturating_add(1);
+            if *udp_misses >= UDP_PROBES_BEFORE_TCP {
+                udp_probe.mark_unavailable();
+            }
+        }
+    }
+    *last_udp_pongs = Some(current_udp_pongs);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TcpChannel {
+    Data,
+    Probe,
 }
 
 struct TcpLink {
     remote_addr: SocketAddr,
     writer: Arc<Mutex<OwnedWriteHalf>>,
     authenticated: Arc<AtomicBool>,
+    #[cfg(test)]
+    frames_written: AtomicUsize,
+}
+
+fn is_latency_sensitive_packet(packet: &[u8]) -> bool {
+    match packet.first().map(|version| version >> 4) {
+        Some(4) => {
+            let header_len = packet
+                .first()
+                .map(|byte| usize::from(byte & 0x0f) * 4)
+                .unwrap_or(0);
+            header_len >= 20 && packet.len() >= header_len && packet[9] == 1
+        }
+        Some(6) => packet.len() >= 40 && packet[6] == 58,
+        _ => false,
+    }
 }
 
 struct AuthenticatedTcpFrame {
@@ -637,12 +747,26 @@ impl P2pEngine {
     }
 
     async fn ensure_tcp_link(&self, client_id: &str) -> Result<Arc<TcpLink>> {
-        if let Some(link) = self.tcp_link(client_id).await {
+        self.ensure_tcp_link_for_channel(client_id, TcpChannel::Data)
+            .await
+    }
+
+    async fn ensure_tcp_probe_link(&self, client_id: &str) -> Result<Arc<TcpLink>> {
+        self.ensure_tcp_link_for_channel(client_id, TcpChannel::Probe)
+            .await
+    }
+
+    async fn ensure_tcp_link_for_channel(
+        &self,
+        client_id: &str,
+        channel: TcpChannel,
+    ) -> Result<Arc<TcpLink>> {
+        if let Some(link) = self.tcp_link_for_channel(client_id, channel).await {
             return Ok(link);
         }
 
         let _connect = self.tcp_connect_lock.lock().await;
-        if let Some(link) = self.tcp_link(client_id).await {
+        if let Some(link) = self.tcp_link_for_channel(client_id, channel).await {
             return Ok(link);
         }
 
@@ -691,6 +815,8 @@ impl P2pEngine {
             remote_addr: endpoint,
             writer: Arc::new(Mutex::new(writer)),
             authenticated: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            frames_written: AtomicUsize::new(0),
         });
         write_tcp_frame(&link, &auth_packet)
             .await
@@ -704,10 +830,18 @@ impl P2pEngine {
             if !Arc::ptr_eq(&connection.secure, &secure) {
                 anyhow::bail!("P2P TCP 建链期间对等节点会话已更新");
             }
-            connection.tcp_link = Some(link.clone());
-            health.reset_probe_window();
+            match channel {
+                TcpChannel::Data => connection.tcp_link = Some(link.clone()),
+                TcpChannel::Probe => connection.tcp_probe_link = Some(link.clone()),
+            }
+            if channel == TcpChannel::Data {
+                health.reset_probe_window();
+            }
         }
-        tracing::info!("P2P TCP 直连已建立: {client_id} 经由 {endpoint}");
+        tracing::info!(
+            "P2P TCP {:?} 直连已建立: {client_id} 经由 {endpoint}",
+            channel
+        );
         self.spawn_tcp_reader_split(
             reader,
             endpoint,
@@ -801,17 +935,9 @@ impl P2pEngine {
                             remote_addr,
                             writer: writer.clone(),
                             authenticated: Arc::new(AtomicBool::new(true)),
+                            #[cfg(test)]
+                            frames_written: AtomicUsize::new(0),
                         });
-                        if !engine
-                            .install_tcp_link(
-                                authenticated_id.as_ref(),
-                                &authenticated.secure,
-                                accepted_link.clone(),
-                            )
-                            .await
-                        {
-                            break;
-                        }
                         let (_, response) = match authenticated.secure.seal(&[]).await {
                             Ok(response) => response,
                             Err(error) => {
@@ -824,7 +950,7 @@ impl P2pEngine {
                             break;
                         }
                         tracing::info!(
-                            "P2P TCP 直连已认证: {} 经由 {remote_addr}",
+                            "P2P TCP 入站直连已认证: {} 经由 {remote_addr}",
                             authenticated_id
                         );
                         link = Some(accepted_link);
@@ -840,6 +966,19 @@ impl P2pEngine {
                     client_id = Some(authenticated_id);
                     route = Some(authenticated.route.clone());
                     if !authenticated.payload.is_empty() {
+                        // The empty sealed frame above proves session
+                        // authentication but does not identify whether this
+                        // stream is the business or low-latency probe channel.
+                        // The first meaningful frame is the reliable channel
+                        // signal; classify from that, not from accept order.
+                        engine
+                            .register_authenticated_inbound_tcp_link(
+                                client_id.as_ref().expect("authenticated client id"),
+                                &authenticated.secure,
+                                link.as_ref().expect("authenticated TCP link"),
+                                TcpChannel::Data,
+                            )
+                            .await;
                         let payload_len = authenticated.payload.len();
                         let delivered =
                             engine
@@ -871,8 +1010,24 @@ impl P2pEngine {
                     tracing::debug!("P2P TCP {remote_addr} 认证未完成，控制帧已丢弃");
                     continue;
                 }
+                let link = link.as_ref().expect("authenticated link must exist");
+                if matches!(
+                    codec::decode::<P2pDatagram>(&frame),
+                    Ok(P2pDatagram::Ping { .. }
+                        | P2pDatagram::Pong { .. }
+                        | P2pDatagram::Control { .. })
+                ) {
+                    engine
+                        .register_authenticated_inbound_tcp_link(
+                            id,
+                            &route.secure,
+                            link,
+                            TcpChannel::Probe,
+                        )
+                        .await;
+                }
                 engine
-                    .handle_tcp_datagram(id.clone(), route.clone(), &frame)
+                    .handle_tcp_datagram(id.clone(), route.clone(), link, &frame)
                     .await;
             }
 
@@ -966,50 +1121,112 @@ impl P2pEngine {
         None
     }
 
-    async fn install_tcp_link(
-        &self,
-        client_id: &str,
-        secure: &Arc<SecurePeerState>,
-        link: Arc<TcpLink>,
-    ) -> bool {
-        let mut connections = self.connections.write().await;
-        let Some(connection) = connections.get_mut(client_id) else {
-            return false;
-        };
-        if !Arc::ptr_eq(&connection.secure, secure) {
-            return false;
-        }
-        connection.tcp_link = Some(link);
-        connection.health.reset_probe_window();
-        true
-    }
-
     async fn clear_tcp_link(&self, client_id: &str, link: &Arc<TcpLink>) {
         let mut connections = self.connections.write().await;
         let Some(connection) = connections.get_mut(client_id) else {
             return;
         };
-        if connection
+        let cleared_data = connection
             .tcp_link
             .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, link))
-        {
+            .is_some_and(|current| Arc::ptr_eq(current, link));
+        let cleared_probe = connection
+            .tcp_probe_link
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, link));
+        if cleared_data {
             connection.tcp_link = None;
+        }
+        if cleared_probe {
+            connection.tcp_probe_link = None;
         }
     }
 
-    async fn tcp_link(&self, client_id: &str) -> Option<Arc<TcpLink>> {
+    /// Inbound TCP links are full-duplex after Secure Session authentication.
+    /// Keep the authenticated writer on the peer so return traffic can use the
+    /// existing NAT traversal instead of trying to dial the peer's public
+    /// endpoint again.
+    async fn register_authenticated_inbound_tcp_link(
+        &self,
+        client_id: &str,
+        secure: &Arc<SecurePeerState>,
+        link: &Arc<TcpLink>,
+        channel: TcpChannel,
+    ) {
+        let mut connections = self.connections.write().await;
+        let Some(connection) = connections.get_mut(client_id) else {
+            return;
+        };
+        if !Arc::ptr_eq(&connection.secure, secure) {
+            return;
+        }
+
+        let already_registered = connection
+            .tcp_link
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, link))
+            || connection
+                .tcp_probe_link
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, link));
+        if already_registered {
+            return;
+        }
+
+        let slot = match channel {
+            TcpChannel::Data => &mut connection.tcp_link,
+            TcpChannel::Probe => &mut connection.tcp_probe_link,
+        };
+        if slot.is_some() {
+            tracing::debug!(
+                "P2P TCP 入站 {:?} 通道已由另一连接占用，忽略重复连接: {client_id}",
+                channel
+            );
+            return;
+        }
+        *slot = Some(link.clone());
+
+        if channel == TcpChannel::Data {
+            connection.health.reset_probe_window();
+        }
+        drop(connections);
+
+        tracing::info!(
+            "P2P TCP 入站 {:?} 双向通道已注册: {client_id} 经由 {}",
+            channel,
+            link.remote_addr
+        );
+    }
+
+    async fn tcp_link_for_channel(
+        &self,
+        client_id: &str,
+        channel: TcpChannel,
+    ) -> Option<Arc<TcpLink>> {
         self.connections
             .read()
             .await
             .get(client_id)
-            .and_then(|connection| connection.tcp_link.clone())
+            .and_then(|connection| match channel {
+                TcpChannel::Data => connection.tcp_link.clone(),
+                TcpChannel::Probe => connection.tcp_probe_link.clone(),
+            })
+    }
+
+    async fn tcp_link(&self, client_id: &str) -> Option<Arc<TcpLink>> {
+        self.tcp_link_for_channel(client_id, TcpChannel::Data).await
+    }
+
+    async fn tcp_probe_link(&self, client_id: &str) -> Option<Arc<TcpLink>> {
+        self.tcp_link_for_channel(client_id, TcpChannel::Probe)
+            .await
     }
 
     async fn handle_tcp_datagram(
         &self,
         client_id: Arc<str>,
         route: Arc<ReceiverRoute>,
+        link: &Arc<TcpLink>,
         frame: &[u8],
     ) {
         let datagram = match codec::decode::<P2pDatagram>(frame) {
@@ -1030,7 +1247,10 @@ impl P2pEngine {
                 };
                 let pong = P2pDatagram::pong(local_ip, timestamp);
                 if let Ok(data) = codec::encode(&pong) {
-                    if let Err(error) = self.send_tcp_datagram(&client_id, &data).await {
+                    if let Err(error) = self
+                        .send_tcp_datagram_on_link(&client_id, link, &data)
+                        .await
+                    {
                         tracing::debug!("无法通过 P2P TCP 发送 Pong: {error}");
                     }
                 }
@@ -1075,13 +1295,22 @@ impl P2pEngine {
         }
     }
 
-    async fn send_tcp_datagram(&self, client_id: &str, data: &[u8]) -> Result<()> {
+    async fn send_tcp_probe_datagram(&self, client_id: &str, data: &[u8]) -> Result<()> {
         let link = self
-            .tcp_link(client_id)
+            .tcp_probe_link(client_id)
             .await
-            .with_context(|| format!("节点 {client_id} 尚无 TCP 直连"))?;
-        if let Err(error) = write_tcp_frame(&link, data).await {
-            self.clear_tcp_link(client_id, &link).await;
+            .with_context(|| format!("节点 {client_id} 尚无 TCP 探测通道"))?;
+        self.send_tcp_datagram_on_link(client_id, &link, data).await
+    }
+
+    async fn send_tcp_datagram_on_link(
+        &self,
+        client_id: &str,
+        link: &Arc<TcpLink>,
+        data: &[u8],
+    ) -> Result<()> {
+        if let Err(error) = write_tcp_frame(link, data).await {
+            self.clear_tcp_link(client_id, link).await;
             return Err(error);
         }
         Ok(())
@@ -1235,6 +1464,8 @@ impl P2pEngine {
             active_endpoint: None,
             endpoints,
             tcp_link: None,
+            tcp_probe_link: None,
+            udp_probe: Arc::new(UdpProbeState::new()),
             health: Arc::new(PeerHealth::new(HEALTH_WINDOW_SIZE)),
             secure: secure.clone(),
         };
@@ -1584,6 +1815,9 @@ impl P2pEngine {
         plaintext_len: usize,
     ) -> Result<InPlaceSendOutcome> {
         let dst_ip = dst_ip.into();
+        let interactive = packet
+            .get(DATA_HEADER_LEN..DATA_HEADER_LEN.saturating_add(plaintext_len))
+            .is_some_and(is_latency_sensitive_packet);
 
         let client_id = {
             let idx = self.ip_index.read().await;
@@ -1594,17 +1828,30 @@ impl P2pEngine {
             anyhow::bail!("No connection to peer {}", dst_ip);
         };
 
-        let (secure, health, tcp_link) = {
+        let (secure, health, mut tcp_link, mut tcp_probe_link, udp_probe) = {
             let connections = self.connections.read().await;
             connections.get(client_id.as_ref()).map(|connection| {
                 (
                     connection.secure.clone(),
                     connection.health.clone(),
                     connection.tcp_link.clone(),
+                    connection.tcp_probe_link.clone(),
+                    connection.udp_probe.clone(),
                 )
             })
         }
         .ok_or_else(|| anyhow::anyhow!("No connection to peer {dst_ip}"))?;
+
+        if udp_probe.requires_tcp_fallback() {
+            if interactive && tcp_probe_link.is_none() {
+                tcp_probe_link = self.ensure_tcp_probe_link(client_id.as_ref()).await.ok();
+                if tcp_probe_link.is_none() {
+                    tcp_link = self.ensure_tcp_link(client_id.as_ref()).await.ok();
+                }
+            } else if !interactive && tcp_link.is_none() {
+                tcp_link = self.ensure_tcp_link(client_id.as_ref()).await.ok();
+            }
+        }
 
         // Admission and the actual transport handoff stay inside this per-session
         // gate. Revocation takes the same gate for writing, so it cannot return
@@ -1651,16 +1898,23 @@ impl P2pEngine {
             }
         }
 
-        if let Some(link) = tcp_link {
-            match write_tcp_frame(&link, &packet[..encoded_len]).await {
-                Ok(()) => {
-                    drop(session);
-                    health.record_payload(encoded_len);
-                    return Ok(InPlaceSendOutcome::Sent);
-                }
-                Err(error) => {
-                    self.clear_tcp_link(client_id.as_ref(), &link).await;
-                    tracing::debug!("P2P TCP 数据发送失败，回退 UDP: {error}");
+        if udp_probe.requires_tcp_fallback() {
+            let link = if interactive {
+                tcp_probe_link.or(tcp_link)
+            } else {
+                tcp_link
+            };
+            if let Some(link) = link {
+                match write_tcp_frame(&link, &packet[..encoded_len]).await {
+                    Ok(()) => {
+                        drop(session);
+                        health.record_payload(encoded_len);
+                        return Ok(InPlaceSendOutcome::Sent);
+                    }
+                    Err(error) => {
+                        self.clear_tcp_link(client_id.as_ref(), &link).await;
+                        tracing::debug!("P2P TCP 数据发送失败，回退 UDP: {error}");
+                    }
                 }
             }
         }
@@ -1698,18 +1952,31 @@ impl P2pEngine {
             return Ok(Vec::new());
         }
 
-        let tcp_active = {
-            let client_id = {
-                let idx = self.ip_index.read().await;
-                idx.get(&dst_ip).cloned()
-            };
-            if let Some(client_id) = client_id {
-                self.tcp_link(client_id.as_ref()).await.is_some()
-            } else {
-                false
-            }
+        let client_id = {
+            let idx = self.ip_index.read().await;
+            idx.get(&dst_ip).cloned()
         };
-        if tcp_active {
+        let tcp_preferred = if let Some(client_id) = client_id.as_ref() {
+            let (tcp_fallback_required, tcp_active) = {
+                let connections = self.connections.read().await;
+                connections
+                    .get(client_id.as_ref())
+                    .map(|connection| {
+                        (
+                            connection.udp_probe.requires_tcp_fallback(),
+                            connection.tcp_link.is_some(),
+                        )
+                    })
+                    .unwrap_or((false, false))
+            };
+            if tcp_fallback_required && !tcp_active {
+                let _ = self.ensure_tcp_link(client_id.as_ref()).await;
+            }
+            tcp_fallback_required && self.tcp_link(client_id.as_ref()).await.is_some()
+        } else {
+            false
+        };
+        if tcp_preferred {
             let mut outcomes = Vec::with_capacity(packets.len());
             for (buffer, plaintext_len) in packets {
                 outcomes.push(
@@ -2144,11 +2411,7 @@ impl P2pEngine {
                 .await
                 .get(id.as_ref())
                 .is_some_and(|conn| {
-                    conn.active_endpoint.is_some()
-                        || conn
-                            .tcp_link
-                            .as_ref()
-                            .is_some_and(|link| link.authenticated.load(Ordering::Acquire))
+                    conn.active_endpoint.is_some() || conn.authenticated_tcp_endpoint().is_some()
                 })
         } else {
             false
@@ -2171,10 +2434,7 @@ impl P2pEngine {
             .get(client_id.as_ref())
             .and_then(|connection| {
                 connection
-                    .tcp_link
-                    .as_ref()
-                    .filter(|link| link.authenticated.load(Ordering::Acquire))
-                    .map(|link| link.remote_addr)
+                    .authenticated_tcp_endpoint()
                     .or(connection.active_endpoint)
             })
     }
@@ -2260,7 +2520,7 @@ impl P2pEngine {
 
         let src_ip = (*self.local_ip.read().await)?;
         let threshold = self.fallback_threshold.read().await.clone();
-        let (peer_info, endpoints, active_endpoint, health) = {
+        let (peer_info, endpoints, active_endpoint, health, udp_probe) = {
             let connections = self.connections.read().await;
             let conn = connections.get(client_id.as_ref())?;
             (
@@ -2268,6 +2528,7 @@ impl P2pEngine {
                 conn.endpoints.clone(),
                 conn.active_endpoint,
                 conn.health.clone(),
+                conn.udp_probe.clone(),
             )
         };
         let before_acked = health
@@ -2282,22 +2543,22 @@ impl P2pEngine {
         let data = codec::encode(&ping).ok()?;
 
         record_peer_probe_sent(&self.connections, client_id.as_ref(), timestamp).await;
-        if self.tcp_link(client_id.as_ref()).await.is_some() {
-            if let Err(error) = self.send_tcp_datagram(client_id.as_ref(), &data).await {
-                tracing::debug!("P2P TCP 主动探测发送失败，回退 UDP: {error}");
-                let socket = self.socket().ok()?;
-                for endpoint in &endpoints {
-                    let _ = socket
-                        .send_to(&data, dual_stack_send_endpoint(*endpoint))
-                        .await;
-                }
-            }
-        } else {
-            let socket = self.socket().ok()?;
+        if let Ok(socket) = self.socket() {
             for endpoint in &endpoints {
                 let _ = socket
                     .send_to(&data, dual_stack_send_endpoint(*endpoint))
                     .await;
+            }
+        }
+        if udp_probe.requires_tcp_fallback() {
+            if self.tcp_probe_link(client_id.as_ref()).await.is_none() {
+                let _ = self.ensure_tcp_probe_link(client_id.as_ref()).await;
+            }
+            if let Err(error) = self
+                .send_tcp_probe_datagram(client_id.as_ref(), &data)
+                .await
+            {
+                tracing::debug!("P2P TCP 主动探测发送失败，继续等待 UDP 响应: {error}");
             }
         }
 
@@ -2309,15 +2570,7 @@ impl P2pEngine {
                     let connection = self.connections.read().await;
                     connection
                         .get(client_id.as_ref())
-                        .map(|conn| {
-                            (
-                                conn.tcp_link
-                                    .as_ref()
-                                    .filter(|link| link.authenticated.load(Ordering::Acquire))
-                                    .map(|link| link.remote_addr),
-                                conn.active_endpoint,
-                            )
-                        })
+                        .map(|conn| (conn.authenticated_tcp_endpoint(), conn.active_endpoint))
                         .unwrap_or((None, active_endpoint))
                 };
                 let active_endpoint = tcp_endpoint.or(udp_endpoint);
@@ -2336,15 +2589,7 @@ impl P2pEngine {
                     let connection = self.connections.read().await;
                     connection
                         .get(client_id.as_ref())
-                        .map(|conn| {
-                            (
-                                conn.tcp_link
-                                    .as_ref()
-                                    .filter(|link| link.authenticated.load(Ordering::Acquire))
-                                    .map(|link| link.remote_addr),
-                                conn.active_endpoint,
-                            )
-                        })
+                        .map(|conn| (conn.authenticated_tcp_endpoint(), conn.active_endpoint))
                         .unwrap_or((None, active_endpoint))
                 };
                 let active_endpoint = tcp_endpoint.or(udp_endpoint);
@@ -2365,7 +2610,7 @@ impl P2pEngine {
         let engine = self.clone();
         let task = tokio::spawn(async move {
             let mut attempts = 0usize;
-            let mut last_acked = None;
+            let mut last_udp_pongs = None;
             let mut udp_misses = 0u32;
             loop {
                 let Some(src_ip) = *engine.local_ip.read().await else {
@@ -2373,27 +2618,16 @@ impl P2pEngine {
                     continue;
                 };
 
-                if let Some(health) = peer_health_state(&engine.connections, &client_id).await {
-                    let threshold = engine.fallback_threshold.read().await.clone();
-                    let acked = health
-                        .snapshot(now_micros(), PROBE_RESPONSE_GRACE, &threshold)
-                        .probes_acked;
-                    if let Some(previous) = last_acked {
-                        if acked > previous {
-                            udp_misses = 0;
-                        } else {
-                            udp_misses = udp_misses.saturating_add(1);
-                        }
-                    }
-                    last_acked = Some(acked);
-                }
-
-                let (endpoints, ping) = {
+                let (endpoints, ping, udp_probe) = {
                     let connections = engine.connections.read().await;
                     let Some(conn) = connections.get(&client_id) else {
                         return;
                     };
-                    (conn.endpoints.clone(), P2pDatagram::ping(src_ip))
+                    (
+                        conn.endpoints.clone(),
+                        P2pDatagram::ping(src_ip),
+                        conn.udp_probe.clone(),
+                    )
                 };
                 let timestamp = match &ping {
                     P2pDatagram::Ping { timestamp, .. } => *timestamp,
@@ -2404,32 +2638,31 @@ impl P2pEngine {
                     return;
                 };
 
-                let mut sent_via_tcp = false;
-                if engine.tcp_link(&client_id).await.is_some() {
-                    sent_via_tcp = engine.send_tcp_datagram(&client_id, &data).await.is_ok();
-                } else if udp_misses >= UDP_PROBES_BEFORE_TCP {
-                    match engine.ensure_tcp_link(&client_id).await {
-                        Ok(_) => {
-                            sent_via_tcp =
-                                engine.send_tcp_datagram(&client_id, &data).await.is_ok();
-                        }
-                        Err(error) => {
-                            tracing::debug!(
-                                "节点 {client_id} 的 TCP 直连尚不可用，继续 UDP 探测: {error}"
-                            );
-                        }
+                observe_udp_probe_interval(&udp_probe, &mut last_udp_pongs, &mut udp_misses);
+
+                // UDP remains the preferred data path. Keep probing it after a
+                // TCP fallback has been established so recovery automatically
+                // returns business traffic to UDP once Pong responses resume.
+                if let Ok(socket) = engine.socket() {
+                    for endpoint in &endpoints {
+                        let _ = socket
+                            .send_to(&data, dual_stack_send_endpoint(*endpoint))
+                            .await;
                     }
                 }
 
-                if !sent_via_tcp {
-                    let Ok(socket) = engine.socket() else {
-                        return;
-                    };
-                    for endpoint in endpoints {
-                        let _ = socket
-                            .send_to(&data, dual_stack_send_endpoint(endpoint))
-                            .await;
+                if udp_misses >= UDP_PROBES_BEFORE_TCP {
+                    if engine.tcp_probe_link(&client_id).await.is_none() {
+                        match engine.ensure_tcp_probe_link(&client_id).await {
+                            Ok(_) => {}
+                            Err(error) => {
+                                tracing::debug!(
+                                    "节点 {client_id} 的 TCP 探测通道尚不可用，继续 UDP 探测: {error}"
+                                );
+                            }
+                        }
                     }
+                    let _ = engine.send_tcp_probe_datagram(&client_id, &data).await;
                 }
 
                 attempts += 1;
@@ -3509,6 +3742,7 @@ async fn handle_pong_datagram(
         timestamp,
     }
     .latency();
+    record_peer_udp_probe_response(connections, client_id).await;
     record_peer_probe_response(connections, client_id, timestamp, rtt_us).await;
     send_quality_report(socket, connections, local_ip, client_id, addr).await;
     tracing::debug!(
@@ -3521,6 +3755,8 @@ async fn handle_pong_datagram(
 }
 
 async fn write_tcp_frame(link: &TcpLink, payload: &[u8]) -> Result<()> {
+    #[cfg(test)]
+    link.frames_written.fetch_add(1, Ordering::Relaxed);
     let len = u16::try_from(payload.len()).context("P2P TCP 帧超过协议上限")?;
     let mut frame = Vec::with_capacity(2 + payload.len());
     frame.extend_from_slice(&len.to_be_bytes());
@@ -3731,6 +3967,16 @@ async fn record_peer_probe_response(
     }
 }
 
+async fn record_peer_udp_probe_response(
+    connections: &Arc<RwLock<HashMap<String, PeerConnection>>>,
+    client_id: &str,
+) {
+    let connections = connections.read().await;
+    if let Some(connection) = connections.get(client_id) {
+        connection.udp_probe.record_pong();
+    }
+}
+
 async fn handle_control_message(
     connections: &Arc<RwLock<HashMap<String, PeerConnection>>>,
     client_id: &str,
@@ -3801,6 +4047,53 @@ fn now_micros() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn udp_probe_prefers_udp_until_repeated_misses_prove_unavailable() {
+        let state = UdpProbeState::new();
+        let mut last_pongs = None;
+        let mut misses = 0;
+
+        assert_eq!(state.availability(), UdpProbeAvailability::Unknown);
+        assert!(
+            !state.requires_tcp_fallback(),
+            "an unprobed UDP path must still be used instead of eagerly opening TCP"
+        );
+
+        observe_udp_probe_interval(&state, &mut last_pongs, &mut misses);
+        for expected_misses in 1..UDP_PROBES_BEFORE_TCP {
+            observe_udp_probe_interval(&state, &mut last_pongs, &mut misses);
+            assert_eq!(misses, expected_misses);
+            assert_eq!(state.availability(), UdpProbeAvailability::Unknown);
+            assert!(!state.requires_tcp_fallback());
+        }
+
+        observe_udp_probe_interval(&state, &mut last_pongs, &mut misses);
+        assert_eq!(misses, UDP_PROBES_BEFORE_TCP);
+        assert_eq!(state.availability(), UdpProbeAvailability::Unavailable);
+        assert!(state.requires_tcp_fallback());
+    }
+
+    #[test]
+    fn udp_pong_restores_udp_preference_after_tcp_fallback() {
+        let state = UdpProbeState::new();
+        let mut last_pongs = None;
+        let mut misses = 0;
+
+        observe_udp_probe_interval(&state, &mut last_pongs, &mut misses);
+        for _ in 0..UDP_PROBES_BEFORE_TCP {
+            observe_udp_probe_interval(&state, &mut last_pongs, &mut misses);
+        }
+        assert!(state.requires_tcp_fallback());
+
+        state.record_pong();
+        assert_eq!(state.availability(), UdpProbeAvailability::Available);
+        assert!(!state.requires_tcp_fallback());
+
+        observe_udp_probe_interval(&state, &mut last_pongs, &mut misses);
+        assert_eq!(misses, 0);
+        assert!(!state.requires_tcp_fallback());
+    }
 
     fn route_info(client_id: &str, ipv6: Ipv6Addr) -> PeerRouteInfo {
         PeerRouteInfo {
@@ -3896,6 +4189,25 @@ mod tests {
         Ok(link)
     }
 
+    async fn wait_for_authenticated_tcp_probe_link(
+        engine: &P2pEngine,
+        client_id: &str,
+    ) -> Result<Arc<TcpLink>> {
+        let link = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(link) = engine.tcp_probe_link(client_id).await {
+                    if link.authenticated.load(Ordering::Acquire) {
+                        return link;
+                    }
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .context("TCP probe link did not authenticate in time")?;
+        Ok(link)
+    }
+
     async fn receive_payload_until(
         engine: &P2pEngine,
         expected_src: IpAddr,
@@ -3928,18 +4240,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unprobed_udp_path_sends_business_traffic_without_opening_tcp() -> Result<()> {
+        let (engine_a, engine_b, ip_a, ip_b, _, _) = established_direct_peers().await?;
+
+        assert!(
+            engine_a.tcp_link("b").await.is_none(),
+            "UDP must remain preferred before a data-path failure is proven"
+        );
+
+        let payload = vec![0x42; 512];
+        engine_a.send_to(ip_b, ip_a, &payload).await?;
+        let packets = receive_payload_until(&engine_b, IpAddr::V6(ip_a), &payload).await?;
+        assert!(
+            packets.iter().any(|packet| matches!(
+                packet,
+                InboundPacket::AuthenticatedPlaintext { src_ip, payload: received, .. }
+                    if *src_ip == IpAddr::V6(ip_a) && received.as_slice() == payload.as_slice()
+            )),
+            "A->B inbound packets: {packets:?}"
+        );
+        assert!(
+            engine_a.tcp_link("b").await.is_none(),
+            "a successful UDP send must not eagerly create a business TCP link"
+        );
+        assert!(
+            engine_a.tcp_probe_link("b").await.is_none(),
+            "a successful UDP send must not eagerly create a probe TCP link"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn tcp_direct_path_carries_authenticated_control_and_payload_bidirectionally(
     ) -> Result<()> {
         let (engine_a, engine_b, ip_a, ip_b, _, endpoint_b) = established_direct_peers().await?;
 
-        let outgoing_a = engine_a.ensure_tcp_link("b").await?;
-        assert_eq!(outgoing_a.remote_addr, endpoint_b);
-        wait_for_authenticated_tcp_link(&engine_a, "b").await?;
-        wait_for_authenticated_tcp_link(&engine_b, "a").await?;
+        {
+            let connections = engine_a.connections.read().await;
+            connections
+                .get("b")
+                .expect("engine A peer B")
+                .udp_probe
+                .mark_unavailable();
+        }
+        {
+            let connections = engine_b.connections.read().await;
+            connections
+                .get("a")
+                .expect("engine B peer A")
+                .udp_probe
+                .mark_unavailable();
+        }
 
         // Removing the UDP socket slots proves the successful traffic below
-        // cannot silently take the UDP fallback. The receiver tasks retain
-        // their own Arc and keep serving the established session.
+        // uses TCP. Receiver tasks retain their own Arc and keep serving the
+        // established Secure Session.
         assert!(engine_a
             .socket
             .lock()
@@ -3953,6 +4308,9 @@ mod tests {
             .take()
             .is_some());
 
+        // Establish the probe stream first. Authentication is an empty sealed
+        // frame, so the receiver must wait for the first Ping before assigning
+        // this accepted connection to the probe slot.
         let probe = engine_a
             .probe_peer_now("b", Duration::from_secs(2))
             .await
@@ -3961,7 +4319,24 @@ mod tests {
         assert!(probe.p2p_active);
         assert_eq!(probe.endpoint, Some(endpoint_b));
 
+        let probe_link = wait_for_authenticated_tcp_probe_link(&engine_a, "b").await?;
+        let inbound_probe_on_b = wait_for_authenticated_tcp_probe_link(&engine_b, "a").await?;
+        assert_eq!(probe_link.remote_addr, endpoint_b);
+        assert!(probe_link.authenticated.load(Ordering::Acquire));
+
+        // Establish the business stream second. Its empty authentication frame
+        // alone must not claim the Data slot; the following payload does that.
+        let data_link = engine_a.ensure_tcp_link("b").await?;
+        assert_eq!(data_link.remote_addr, endpoint_b);
+        wait_for_authenticated_tcp_link(&engine_a, "b").await?;
+        assert!(
+            engine_b.tcp_link("a").await.is_none(),
+            "an authenticated but not-yet-classified accepted link must not claim the Data slot"
+        );
+
         let payload_a_to_b = vec![0x5a; 2_048];
+        data_link.frames_written.store(0, Ordering::Relaxed);
+        probe_link.frames_written.store(0, Ordering::Relaxed);
         engine_a
             .send_to(ip_b, ip_a, &payload_a_to_b)
             .await
@@ -3976,8 +4351,46 @@ mod tests {
             )),
             "A->B inbound packets: {packets_b:?}"
         );
+        assert!(
+            data_link.frames_written.load(Ordering::Relaxed) > 0,
+            "ordinary payload must use the business TCP channel"
+        );
 
+        let inbound_data_on_b = wait_for_authenticated_tcp_link(&engine_b, "a").await?;
+        assert!(
+            !Arc::ptr_eq(&inbound_probe_on_b, &inbound_data_on_b),
+            "the first-arriving probe stream must remain separate from business data"
+        );
+
+        let mut icmp_payload = vec![0u8; 28];
+        icmp_payload[0] = 0x45;
+        icmp_payload[9] = 1;
+        data_link.frames_written.store(0, Ordering::Relaxed);
+        probe_link.frames_written.store(0, Ordering::Relaxed);
+        engine_a
+            .send_to(ip_b, ip_a, &icmp_payload)
+            .await
+            .context("TCP A->B ICMP send failed")?;
+        let packets_b = receive_payload_until(&engine_b, IpAddr::V6(ip_a), &icmp_payload).await?;
+        assert!(packets_b.iter().any(|packet| matches!(
+            packet,
+            InboundPacket::AuthenticatedPlaintext { src_ip, payload, .. }
+                if *src_ip == IpAddr::V6(ip_a) && payload.as_slice() == icmp_payload.as_slice()
+        )));
+        assert_eq!(
+            data_link.frames_written.load(Ordering::Relaxed),
+            0,
+            "ICMP must not queue behind the business TCP channel"
+        );
+        assert!(
+            probe_link.frames_written.load(Ordering::Relaxed) > 0,
+            "ICMP must use the dedicated low-latency TCP channel"
+        );
+
+        // Return traffic must reuse the accepted Data connection instead of
+        // dialing back to the sender's public endpoint.
         let payload_b_to_a = vec![0xa5; 2_048];
+        inbound_data_on_b.frames_written.store(0, Ordering::Relaxed);
         engine_b
             .send_to(ip_a, ip_b, &payload_b_to_a)
             .await
@@ -3991,6 +4404,10 @@ mod tests {
                         && payload.as_slice() == payload_b_to_a.as_slice()
             )),
             "B->A inbound packets: {packets_a:?}"
+        );
+        assert!(
+            inbound_data_on_b.frames_written.load(Ordering::Relaxed) > 0,
+            "return payload must reuse the accepted business TCP connection"
         );
 
         assert!(engine_a
@@ -4379,6 +4796,8 @@ mod tests {
                 endpoints: vec![endpoint_a],
                 active_endpoint: Some(endpoint_a),
                 tcp_link: None,
+                tcp_probe_link: None,
+                udp_probe: Arc::new(UdpProbeState::new()),
                 health: health.clone(),
                 secure: secure.clone(),
             },
@@ -4785,6 +5204,8 @@ mod tests {
                 endpoints: vec![endpoint],
                 active_endpoint: Some(endpoint),
                 tcp_link: None,
+                tcp_probe_link: None,
+                udp_probe: Arc::new(UdpProbeState::new()),
                 health: Arc::new(PeerHealth::new(HEALTH_WINDOW_SIZE)),
                 secure: secure.clone(),
             },

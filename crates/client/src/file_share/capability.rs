@@ -141,6 +141,24 @@ impl FileShareCapability {
                 return Err(FileCapabilityError::Filesystem(error));
             }
         };
+        if let Err(error) =
+            root.cleanup_stale_temporary_files(now_unix_ms, super::root::STALE_TEMP_FILE_AGE_MS)
+        {
+            record_audit(
+                audit,
+                audit_sequence,
+                AuditEvent {
+                    actor,
+                    share,
+                    action: "file.share.enable",
+                    outcome: AuditOutcome::Failed,
+                    now_unix_ms,
+                    summary: "Stale File staging could not be cleaned",
+                    details: BTreeMap::from([("reason_code".into(), error.code_str().into())]),
+                },
+            )?;
+            return Err(FileCapabilityError::Filesystem(error));
+        }
         let access_epoch = next_epoch(state.as_ref().map_or(0, |enabled| enabled.access_epoch));
         record_audit(
             audit,
@@ -661,9 +679,9 @@ fn record_audit(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::fs;
+    use std::fs::{self, FileTimes};
     use std::sync::mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use fuckipv6_common::domain::{
         AccessContext, ConcurrentNamePolicy, FileAccessRequest, FileAcl, FileAclEffect,
@@ -673,6 +691,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::file_share::FILE_TEMP_DIRECTORY;
 
     fn owner() -> NodeId {
         NodeId::from_public_key(b"owner")
@@ -762,6 +781,65 @@ mod tests {
         assert_eq!(audit[0].action, "file.share.enable");
         assert_eq!(audit[1].action, "file.share.disable");
         assert!(!format!("{audit:?}").contains(temporary.path().to_str().expect("utf8")));
+    }
+
+    #[test]
+    fn enable_cleans_expired_crashed_staging_files() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let staging = temporary.path().join(FILE_TEMP_DIRECTORY);
+        fs::create_dir(&staging).expect("staging directory");
+        let stale_name = format!("up-{:032x}", 7);
+        let recent_name = format!("up-{:032x}", 8);
+        let stale_path = staging.join(&stale_name);
+        let recent_path = staging.join(&recent_name);
+        fs::write(&stale_path, b"abandoned").expect("stale staging");
+        fs::write(&recent_path, b"active").expect("recent staging");
+        fs::File::options()
+            .write(true)
+            .open(&stale_path)
+            .expect("open stale")
+            .set_times(
+                FileTimes::new().set_modified(SystemTime::now() - Duration::from_secs(40 * 60)),
+            )
+            .expect("age stale staging");
+
+        let now_unix_ms = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("current time after epoch")
+                .as_millis(),
+        )
+        .expect("timestamp fits u64");
+        let capability = FileShareCapability::new();
+        enable(&capability, &temporary, &share(), now_unix_ms);
+
+        assert!(!stale_path.exists());
+        assert!(recent_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enable_fails_closed_when_staging_directory_is_a_symbolic_link() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside");
+        std::os::unix::fs::symlink(outside.path(), temporary.path().join(FILE_TEMP_DIRECTORY))
+            .expect("staging symlink");
+
+        let capability = FileShareCapability::new();
+        let error = capability
+            .enable(
+                &share(),
+                &owner(),
+                temporary.path().to_str().expect("utf8 temp path"),
+                10,
+            )
+            .expect_err("unsafe staging directory must prevent enable");
+        assert!(matches!(
+            error,
+            FileCapabilityError::Filesystem(ref error)
+                if error.code() == crate::file_share::FileShareErrorCode::TempUnavailable
+        ));
+        assert_eq!(capability.snapshot().state, FileCapabilityState::Disabled);
     }
 
     #[test]

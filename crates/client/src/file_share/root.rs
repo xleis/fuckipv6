@@ -17,6 +17,11 @@ use super::quota::{DirectoryUsage, QuotaScanLimits};
 
 pub const FILE_TEMP_DIRECTORY: &str = ".fuckipv6-tmp";
 
+/// Crashed uploads cannot outlive the network transfer TTL. Re-enabling a
+/// share uses this age to distinguish abandoned staging files from a transfer
+/// that may still be winding down during a configuration replacement.
+pub(crate) const STALE_TEMP_FILE_AGE_MS: u64 = 30 * 60 * 1_000;
+
 /// A node-owner-selected share root anchored for the lifetime of the File
 /// capability. The canonical local path is deliberately not serializable and
 /// must never be projected into network snapshots, events, audit records or UI
@@ -484,6 +489,170 @@ impl LocalShareRoot {
         }
     }
 
+    /// Remove abandoned `up-*` staging files from the anchored private
+    /// directory. This is called when a share becomes visible after process
+    /// startup or an owner configuration change. Only regular files whose
+    /// names match the upload generator are eligible; links, directories and
+    /// user files are never followed or removed.
+    pub(crate) fn cleanup_stale_temporary_files(
+        &self,
+        now_unix_ms: u64,
+        max_age_ms: u64,
+    ) -> FileShareResult<u64> {
+        self.probe()?;
+        #[cfg(unix)]
+        {
+            let directory = match self.open_temporary_directory_unix() {
+                Ok(directory) => directory,
+                Err(error) if error.is_io_kind(io::ErrorKind::NotFound) => return Ok(0),
+                Err(error) => return Err(error),
+            };
+            let stream = DirectoryStream::open(directory.as_raw_fd())?;
+            let directory_fd = unsafe { libc::dirfd(stream.0) };
+            if directory_fd < 0 {
+                return Err(FileShareError::io(
+                    FileShareErrorCode::TempUnavailable,
+                    "temporary upload directory descriptor is unavailable",
+                    io::Error::last_os_error(),
+                ));
+            }
+
+            let mut removed = 0_u64;
+            loop {
+                clear_errno();
+                let entry = unsafe { libc::readdir(stream.0) };
+                if entry.is_null() {
+                    if let Some(error) = take_errno_error() {
+                        return Err(FileShareError::io(
+                            FileShareErrorCode::TempUnavailable,
+                            "temporary upload directory could not be scanned",
+                            error,
+                        ));
+                    }
+                    break;
+                }
+                let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+                let Ok(name_text) = std::str::from_utf8(name.to_bytes()) else {
+                    continue;
+                };
+                if !is_generated_temporary_name(name_text) {
+                    continue;
+                }
+
+                let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+                if unsafe {
+                    libc::fstatat(
+                        directory_fd,
+                        name.as_ptr(),
+                        &mut metadata,
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                } != 0
+                {
+                    let error = io::Error::last_os_error();
+                    if error.kind() == io::ErrorKind::NotFound {
+                        continue;
+                    }
+                    return Err(FileShareError::io(
+                        FileShareErrorCode::TempUnavailable,
+                        "temporary upload entry could not be inspected safely",
+                        error,
+                    ));
+                }
+                if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
+                    continue;
+                }
+                let modified_ms = u64::try_from(metadata.st_mtime)
+                    .ok()
+                    .and_then(|seconds| seconds.checked_mul(1_000))
+                    .map(|seconds| {
+                        seconds.saturating_add(
+                            u64::try_from(metadata.st_mtime_nsec).unwrap_or(0) / 1_000_000,
+                        )
+                    })
+                    .unwrap_or(0);
+                if now_unix_ms.saturating_sub(modified_ms) < max_age_ms {
+                    continue;
+                }
+                if unsafe { libc::unlinkat(directory_fd, name.as_ptr(), 0) } != 0 {
+                    let error = io::Error::last_os_error();
+                    if error.kind() == io::ErrorKind::NotFound {
+                        continue;
+                    }
+                    return Err(FileShareError::io(
+                        FileShareErrorCode::TempUnavailable,
+                        "stale temporary upload could not be removed",
+                        error,
+                    ));
+                }
+                removed = removed.saturating_add(1);
+            }
+            Ok(removed)
+        }
+        #[cfg(not(unix))]
+        {
+            let directory = self.temporary_directory_path();
+            let entries = match fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+                Err(error) => {
+                    return Err(FileShareError::io(
+                        FileShareErrorCode::TempUnavailable,
+                        "temporary upload directory could not be scanned",
+                        error,
+                    ))
+                }
+            };
+            let mut removed = 0_u64;
+            for entry in entries {
+                let entry = entry.map_err(|error| {
+                    FileShareError::io(
+                        FileShareErrorCode::TempUnavailable,
+                        "temporary upload entry could not be read",
+                        error,
+                    )
+                })?;
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if !is_generated_temporary_name(&name) {
+                    continue;
+                }
+                let metadata = fs::symlink_metadata(entry.path()).map_err(|error| {
+                    FileShareError::io(
+                        FileShareErrorCode::TempUnavailable,
+                        "temporary upload entry could not be inspected safely",
+                        error,
+                    )
+                })?;
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    continue;
+                }
+                let modified_ms = metadata
+                    .modified()
+                    .ok()
+                    .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+                    .unwrap_or(0);
+                if now_unix_ms.saturating_sub(modified_ms) < max_age_ms {
+                    continue;
+                }
+                match fs::remove_file(entry.path()) {
+                    Ok(()) => removed = removed.saturating_add(1),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(FileShareError::io(
+                            FileShareErrorCode::TempUnavailable,
+                            "stale temporary upload could not be removed",
+                            error,
+                        ))
+                    }
+                }
+            }
+            Ok(removed)
+        }
+    }
+
     fn reject_root_io(&self, path: &SharedPath) -> FileShareResult<()> {
         if path.is_root() {
             return Err(FileShareError::new(
@@ -874,6 +1043,14 @@ impl LocalShareRoot {
     }
 }
 
+fn is_generated_temporary_name(name: &str) -> bool {
+    name.len() == 35
+        && name.starts_with("up-")
+        && name[3..]
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 #[cfg(unix)]
 struct DirectoryStream(*mut libc::DIR);
 
@@ -1205,7 +1382,9 @@ fn home_directory() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::FileTimes;
     use std::io::{Read, Write};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn root() -> (tempfile::TempDir, LocalShareRoot) {
         let temporary = tempfile::tempdir().expect("tempdir");
@@ -1532,5 +1711,66 @@ mod tests {
             .open_read(&path)
             .expect_err("staging path must be inaccessible");
         assert_eq!(error.code(), FileShareErrorCode::PathRejected);
+    }
+
+    #[test]
+    fn stale_cleanup_removes_only_expired_generated_regular_files() {
+        let (temporary, share) = root();
+        let stale_name = format!("up-{:032x}", 1);
+        let fresh_name = format!("up-{:032x}", 2);
+        let invalid_name = "up-not-a-generated-name".to_owned();
+        let now = SystemTime::now();
+
+        let mut stale = share
+            .create_temporary_file(&stale_name)
+            .expect("stale staging");
+        stale.write_all(b"abandoned").expect("write stale");
+        stale
+            .set_times(FileTimes::new().set_modified(now - Duration::from_secs(10 * 60)))
+            .expect("age stale staging");
+        drop(stale);
+
+        let mut fresh = share
+            .create_temporary_file(&fresh_name)
+            .expect("fresh staging");
+        fresh.write_all(b"active").expect("write fresh");
+        drop(fresh);
+
+        share
+            .create_temporary_file(&invalid_name)
+            .expect("unrelated staging-like file");
+        drop(share.create_temporary_file("notes.txt").expect("user file"));
+
+        #[cfg(unix)]
+        let outside_link = {
+            let outside = tempfile::tempdir().expect("outside");
+            let target = outside.path().join("secret");
+            fs::write(&target, b"outside").expect("outside file");
+            let link_name = format!("up-{:032x}", 3);
+            std::os::unix::fs::symlink(&target, share.temporary_file_path(&link_name))
+                .expect("staging symlink");
+            (outside, link_name)
+        };
+
+        let now_ms = u64::try_from(
+            now.duration_since(UNIX_EPOCH)
+                .expect("current time after epoch")
+                .as_millis(),
+        )
+        .expect("timestamp fits u64");
+        let removed = share
+            .cleanup_stale_temporary_files(now_ms, 60_000)
+            .expect("cleanup");
+        assert_eq!(removed, 1);
+        assert!(!share.temporary_file_path(&stale_name).exists());
+        assert!(share.temporary_file_path(&fresh_name).exists());
+        assert!(share.temporary_file_path(&invalid_name).exists());
+        assert!(share.temporary_file_path("notes.txt").exists());
+        #[cfg(unix)]
+        {
+            assert!(share.temporary_file_path(&outside_link.1).exists());
+            assert!(outside_link.0.path().join("secret").exists());
+        }
+        assert!(temporary.path().join(FILE_TEMP_DIRECTORY).is_dir());
     }
 }

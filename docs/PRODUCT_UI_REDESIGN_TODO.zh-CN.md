@@ -3419,8 +3419,10 @@ macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态及�
 operation，不信任帧内 transfer/operation ID；分片复核失败时取消对应传输。取消和撤权只删除 requester staging，
 owner 本地共享文件不在失败路径中；owner 下载/上传侧撤权取消及 staging 清理已有
 `disabling_capability_cancels_an_active_download`、`disabling_capability_cancels_an_active_upload_and_cleans_staging` 和
-`operation_cancellation_before_upload_finish_never_publishes` 覆盖。尚未启动真实双节点链路演练网络断开、成员并发撤权和
-节点重启，因此 W15-07 继续保持 `[~]`。
+`operation_cancellation_before_upload_finish_never_publishes` 覆盖。`dropping_the_data_plane_aborts_sessions_and_cleans_staging`
+同时打开上传和下载后直接丢弃网络数据面，验证活动准入降到 0、上传 staging 与未发布目标均被清理；Linux 上还验证上传 staging
+和下载源文件两个句柄都回到基线。该测试模拟运行中数据面突然消失，但仍非真实双节点网络断开。尚未演练真实成员并发撤权和
+节点进程重启，因此 W15-07 继续保持 `[~]`。
 
 ### W15-08 File 非目标与发布证据 `[ ]`
 

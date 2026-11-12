@@ -3361,7 +3361,7 @@ macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态以�
 - [x] 限制目录扫描深度和条目数；
 - [x] 限制事件队列和日志增长；
 - [ ] 满载时不影响 node/control 基本功能；
-- [ ] 压力测试后文件句柄、线程和内存回到基线；
+- [ ] 压力测试后文件句柄、线程和内存回到基线（Linux 进程内已自动化通过；macOS/Windows 待验收）；
 - [x] 报告录明阈值与恢复结果。
 
 **验收**：恶意或误用传输无法耗尽节点资源，File 故障不拖垮数据面。
@@ -3402,9 +3402,16 @@ macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态以�
 `download_session_limit_and_cancel_restore_capacity` 在 Linux 上以 `/proc/self/fd` 采样测试临时目录下的文件句柄：开启
 `MAX_ACTIVE_FILE_NETWORK_SESSIONS` 个下载后句柄数增加相同数量，逐个取消并排空会话后恢复测试前基线。
 
-**未测边界**：Linux 句柄证据仅覆盖单个测试进程的正常下载会话与取消，不包括异常退出或满载。尚未启动独立 node/control
-进程做 File 满载隔离测试；尚未在 Linux/macOS/Windows 实机上采样压力前后的线程数和 RSS，也尚未在 macOS/Windows
-实机上采样句柄，因此不能声称 OS 资源已回到基线。大文件、多文件并发和真实网络中断恢复性能也未测试。
+**补充（2026-11-13，Linux 满载进程资源基线）**：独立集成测试 `file_runtime_stress_restores_linux_process_resources`
+启用共享根后先预热，再连续执行 1,024 批、每批 4 路上传（其中每 32 批完成并发布一组文件，其余路径直接丢弃），随后执行
+512 批、每批 4 路下载并读取完整源文件。每批满载时校验整个测试进程的 `/proc/self/fd` 仅比基线多 4、线程数不变；每批释放后
+校验活动准入为 0、staging 为空、句柄和线程数精确回到基线。测试同时采样 `/proc/self/status` 的 `VmRSS`，并要求后半程峰值
+不得比前半程峰值增长超过 4 MiB、最终 RSS 不得比预热后基线高超过 4 MiB。连续执行 5 次均通过：基线固定为 5 个句柄、2 个
+线程、约 5.0 MiB RSS；峰值约 5.1 MiB，最终稳定在峰值且较基线仅保留约 208 KiB allocator 驻留内存。
+
+**未测边界**：Linux 进程内已覆盖满载上传/下载的正常完成、丢弃、staging 清理和 OS 资源恢复，但不包括异常退出。
+尚未启动独立 node/control 进程做真实 File 满载隔离测试；macOS/Windows 的线程、RSS 与句柄基线仍需实机采样。
+大文件、多文件并发和真实网络中断恢复性能也未测试。
 
 ### W15-07 撤权与传输中断 `[~]`
 

@@ -63,8 +63,8 @@ afterEach(() => {
 
 describe("owner durable audit export", () => {
   it("requests a confirmed network-scoped node command export", async () => {
-    const fetchMock = vi.fn(
-      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+    const fetchMock = vi.fn<typeof fetch>(
+      async () =>
         new Response(JSON.stringify(exportBundle()), {
           status: 200,
           headers: {

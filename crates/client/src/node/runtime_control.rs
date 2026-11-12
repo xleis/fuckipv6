@@ -7541,6 +7541,14 @@ mod tests {
                                         let _ =
                                             reply.send(Err("测试运行时不支持 File 传输".into()));
                                     }
+                                    ipc::RuntimeCommand::PauseFileTransfer { reply, .. } => {
+                                        let _ =
+                                            reply.send(Err("测试运行时不支持 File 传输".into()));
+                                    }
+                                    ipc::RuntimeCommand::ResumeFileTransfer { reply, .. } => {
+                                        let _ =
+                                            reply.send(Err("测试运行时不支持 File 传输".into()));
+                                    }
                                     ipc::RuntimeCommand::Disconnect { reply } => {
                                         let _ = reply.send(Ok(()));
                                         break;

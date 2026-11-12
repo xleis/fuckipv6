@@ -3159,6 +3159,36 @@ fn cancel_runtime_file_origin_transfer(
     }
 }
 
+fn pause_runtime_file_origin_transfer(
+    runtime: &mut ClientRuntime,
+    transfer_id: String,
+    operation_id: String,
+) -> Result<(), String> {
+    let transfer_id = TransferId::parse(transfer_id)
+        .map_err(|_| "file_transfer_transfer_id_invalid".to_owned())?;
+    let operation_id = OperationId::parse(operation_id)
+        .map_err(|_| "file_transfer_operation_id_invalid".to_owned())?;
+    runtime
+        .file_origin
+        .pause(&transfer_id, &operation_id, unix_time_ms())
+        .map_err(file_origin_error_code)
+}
+
+fn resume_runtime_file_origin_transfer(
+    runtime: &mut ClientRuntime,
+    transfer_id: String,
+    operation_id: String,
+) -> Result<(), String> {
+    let transfer_id = TransferId::parse(transfer_id)
+        .map_err(|_| "file_transfer_transfer_id_invalid".to_owned())?;
+    let operation_id = OperationId::parse(operation_id)
+        .map_err(|_| "file_transfer_operation_id_invalid".to_owned())?;
+    runtime
+        .file_origin
+        .resume(&transfer_id, &operation_id, unix_time_ms())
+        .map_err(file_origin_error_code)
+}
+
 async fn handle_runtime_command(
     runtime: &mut ClientRuntime,
     command: ipc::RuntimeCommand,
@@ -3199,6 +3229,24 @@ async fn handle_runtime_command(
             reply,
         } => {
             let result = cancel_runtime_file_origin_transfer(runtime, transfer_id, operation_id);
+            let _ = reply.send(result);
+            RuntimeCommandOutcome::Continue
+        }
+        ipc::RuntimeCommand::PauseFileTransfer {
+            transfer_id,
+            operation_id,
+            reply,
+        } => {
+            let result = pause_runtime_file_origin_transfer(runtime, transfer_id, operation_id);
+            let _ = reply.send(result);
+            RuntimeCommandOutcome::Continue
+        }
+        ipc::RuntimeCommand::ResumeFileTransfer {
+            transfer_id,
+            operation_id,
+            reply,
+        } => {
+            let result = resume_runtime_file_origin_transfer(runtime, transfer_id, operation_id);
             let _ = reply.send(result);
             RuntimeCommandOutcome::Continue
         }

@@ -15,7 +15,8 @@ use std::sync::Arc;
 
 use fuckipv6_common::domain::{
     ContentHash, FileChunk, FileId, FileShareId, FileTransferError, NodeId, OperationId,
-    SharedPath, TransferDirection, TransferId, TransferManifest, TransferSession, TransferState,
+    ResumeRequest, SharedPath, TransferBinding, TransferDirection, TransferId, TransferManifest,
+    TransferSession, TransferState,
 };
 use tempfile::NamedTempFile;
 use thiserror::Error;
@@ -40,6 +41,10 @@ pub(crate) enum FileNetworkOriginError {
     DuplicateTransfer,
     #[error("File transfer request is invalid")]
     InvalidRequest,
+    #[error("File transfer operation was not found")]
+    NotFound,
+    #[error("File transfer operation is not in a state that allows this action")]
+    InvalidState,
     #[error("File upload source is not a regular seekable file")]
     InvalidSource,
     #[error("File download destination is invalid")]
@@ -68,6 +73,8 @@ impl FileNetworkOriginError {
             Self::TransferLimit => "file_transfer_limit",
             Self::DuplicateTransfer => "file_transfer_operation_active",
             Self::InvalidRequest => "file_transfer_invalid_request",
+            Self::NotFound => "file_transfer_not_found",
+            Self::InvalidState => "file_transfer_invalid_state",
             Self::InvalidSource => "file_transfer_source_invalid",
             Self::InvalidDestination => "file_transfer_destination_invalid",
             Self::UnknownResponse => "file_transfer_response_unknown",
@@ -135,6 +142,10 @@ struct OriginTransfer {
     direction: TransferDirection,
     deadline_unix_ms: u64,
     pending: Option<PendingOriginReply>,
+    binding: Option<TransferBinding>,
+    paused: bool,
+    pause_after_reply: bool,
+    next_request_sequence: u64,
     state: OriginTransferState,
 }
 
@@ -190,6 +201,9 @@ enum OriginRequestKind {
     FinishUpload,
     OpenDownload,
     FinishDownload,
+    Pause,
+    ResumeUpload,
+    ResumeDownload,
 }
 
 /// Bounded requester-side operation table. All filesystem failures fail the
@@ -244,6 +258,10 @@ impl FileNetworkOrigin {
             direction: TransferDirection::Upload,
             deadline_unix_ms,
             pending: None,
+            binding: None,
+            paused: false,
+            pause_after_reply: false,
+            next_request_sequence: 0,
             state: OriginTransferState::Upload(UploadOriginState {
                 source,
                 manifest,
@@ -280,7 +298,8 @@ impl FileNetworkOrigin {
         validate_download_destination(&destination)?;
         let key = OriginTransferKey::new(&transfer_id, &operation_id);
         let deadline_unix_ms = now_unix_ms.saturating_add(FILE_NETWORK_TRANSFER_TTL_MS);
-        let request_id = origin_request_id(&transfer_id, &operation_id, b"open-download", 0, 0, 0);
+        let request_id =
+            origin_request_id(&transfer_id, &operation_id, b"open-download", 0, 0, 0, 0);
         let request = FileNetworkRequest::OpenDownload {
             share_id: share_id.clone(),
             transfer_id: transfer_id.clone(),
@@ -301,6 +320,10 @@ impl FileNetworkOrigin {
                 request_id,
                 kind: OriginRequestKind::OpenDownload,
             }),
+            binding: None,
+            paused: false,
+            pause_after_reply: false,
+            next_request_sequence: 1,
             state: OriginTransferState::Download(Box::new(DownloadOriginState {
                 destination,
                 session: None,
@@ -427,6 +450,12 @@ impl FileNetworkOrigin {
             (OriginRequestKind::OpenDownload, FileNetworkResponse::Opened { session }) => {
                 self.apply_open_download(&key, *session, now_unix_ms)
             }
+            (OriginRequestKind::ResumeUpload, FileNetworkResponse::Opened { session }) => {
+                self.apply_resume_upload(&key, *session, now_unix_ms)
+            }
+            (OriginRequestKind::ResumeDownload, FileNetworkResponse::Opened { session }) => {
+                self.apply_resume_download(&key, *session, now_unix_ms)
+            }
             (
                 OriginRequestKind::UploadChunk {
                     chunk_index,
@@ -454,10 +483,21 @@ impl FileNetworkOrigin {
             (OriginRequestKind::FinishDownload, FileNetworkResponse::Completed { progress }) => {
                 self.apply_finish(&key, progress, now_unix_ms)
             }
+            (OriginRequestKind::Pause, FileNetworkResponse::Progress { progress }) => {
+                self.apply_pause(&key, progress)
+            }
             _ => Err(FileNetworkOriginError::UnexpectedResponse),
         };
         match result {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                if let Err(error) = self.queue_deferred_pause(&key) {
+                    let code = error.code();
+                    self.fail_transfer_at(&key, now_unix_ms, code, true);
+                    return Err(error);
+                }
+                self.outbound_notify.notify_one();
+                Ok(())
+            }
             Err(error) => {
                 let code = error.code();
                 self.fail_transfer_at(&key, now_unix_ms, code, true);
@@ -499,6 +539,9 @@ impl FileNetworkOrigin {
             }
             if transfer.direction != TransferDirection::Download {
                 return Err(FileNetworkOriginError::PeerMismatch);
+            }
+            if transfer.paused {
+                return Ok(());
             }
             // Receiving the final fragment queues a Finish request. Signal
             // even for intermediate fragments so events are drained promptly.
@@ -615,6 +658,98 @@ impl FileNetworkOrigin {
         cancelled
     }
 
+    /// Pause at the next safe request boundary. If a response or upload
+    /// fragment is already outstanding, the pause request is deferred until
+    /// that exact reply has been applied so upload offsets cannot roll back.
+    pub(crate) fn pause(
+        &mut self,
+        transfer_id: &TransferId,
+        operation_id: &OperationId,
+        now_unix_ms: u64,
+    ) -> Result<(), FileNetworkOriginError> {
+        let key = OriginTransferKey::new(transfer_id, operation_id);
+        let Some(transfer) = self.transfers.get_mut(&key) else {
+            return Err(FileNetworkOriginError::NotFound);
+        };
+        if now_unix_ms >= transfer.deadline_unix_ms {
+            self.fail_transfer_at(&key, now_unix_ms, "file_transfer_expired", false);
+            self.outbound_notify.notify_one();
+            return Err(FileNetworkOriginError::Transfer(FileTransferError::Expired));
+        }
+        if transfer.paused
+            || transfer.pause_after_reply
+            || transfer
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.kind == OriginRequestKind::Pause)
+        {
+            return Err(FileNetworkOriginError::InvalidState);
+        }
+        if transfer.binding.is_none() {
+            if !transfer.pending.as_ref().is_some_and(|pending| {
+                matches!(
+                    pending.kind,
+                    OriginRequestKind::OpenUpload | OriginRequestKind::OpenDownload
+                )
+            }) {
+                return Err(FileNetworkOriginError::InvalidState);
+            }
+            transfer.pause_after_reply = true;
+            return Ok(());
+        }
+        let active = match &transfer.state {
+            OriginTransferState::Upload(_) => transfer
+                .pending
+                .as_ref()
+                .is_none_or(|pending| pending.kind != OriginRequestKind::FinishUpload),
+            OriginTransferState::Download(download) => {
+                download
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.state == TransferState::Active)
+                    && transfer
+                        .pending
+                        .as_ref()
+                        .is_none_or(|pending| pending.kind != OriginRequestKind::FinishDownload)
+            }
+        };
+        if !active {
+            return Err(FileNetworkOriginError::InvalidState);
+        }
+        if transfer.pending.is_some() {
+            transfer.pause_after_reply = true;
+            return Ok(());
+        }
+        queue_pause(transfer, &mut self.outbound)?;
+        self.outbound_notify.notify_one();
+        Ok(())
+    }
+
+    /// Reauthorize and continue a paused operation using the exact binding
+    /// returned when the owner first opened it.
+    pub(crate) fn resume(
+        &mut self,
+        transfer_id: &TransferId,
+        operation_id: &OperationId,
+        now_unix_ms: u64,
+    ) -> Result<(), FileNetworkOriginError> {
+        let key = OriginTransferKey::new(transfer_id, operation_id);
+        let Some(transfer) = self.transfers.get_mut(&key) else {
+            return Err(FileNetworkOriginError::NotFound);
+        };
+        if now_unix_ms >= transfer.deadline_unix_ms {
+            self.fail_transfer_at(&key, now_unix_ms, "file_transfer_expired", false);
+            self.outbound_notify.notify_one();
+            return Err(FileNetworkOriginError::Transfer(FileTransferError::Expired));
+        }
+        if !transfer.paused || transfer.pending.is_some() || transfer.pause_after_reply {
+            return Err(FileNetworkOriginError::InvalidState);
+        }
+        queue_resume(transfer, &mut self.outbound)?;
+        self.outbound_notify.notify_one();
+        Ok(())
+    }
+
     /// Expire timed-out operations and remove any partial staging file.
     pub(crate) fn expire(&mut self, now_unix_ms: u64) {
         let expired = self
@@ -656,6 +791,20 @@ impl FileNetworkOrigin {
         self.events.push_back(event);
     }
 
+    fn queue_deferred_pause(
+        &mut self,
+        key: &OriginTransferKey,
+    ) -> Result<(), FileNetworkOriginError> {
+        let Some(transfer) = self.transfers.get_mut(key) else {
+            return Ok(());
+        };
+        if !transfer.pause_after_reply || transfer.pending.is_some() {
+            return Ok(());
+        }
+        transfer.pause_after_reply = false;
+        queue_pause(transfer, &mut self.outbound)
+    }
+
     fn validate_response(
         &self,
         transfer: &OriginTransfer,
@@ -667,6 +816,12 @@ impl FileNetworkOrigin {
                 validate_opened_upload(transfer, session, &self.local_node_id)
             }
             (OriginRequestKind::OpenDownload, FileNetworkResponse::Opened { session }) => {
+                validate_opened_download(transfer, session, &self.local_node_id)
+            }
+            (OriginRequestKind::ResumeUpload, FileNetworkResponse::Opened { session }) => {
+                validate_opened_upload(transfer, session, &self.local_node_id)
+            }
+            (OriginRequestKind::ResumeDownload, FileNetworkResponse::Opened { session }) => {
                 validate_opened_download(transfer, session, &self.local_node_id)
             }
             (
@@ -695,6 +850,9 @@ impl FileNetworkOrigin {
             (OriginRequestKind::FinishDownload, FileNetworkResponse::Completed { progress }) => {
                 validate_finish(transfer, progress)
             }
+            (OriginRequestKind::Pause, FileNetworkResponse::Progress { progress }) => {
+                validate_pause(transfer, progress)
+            }
             _ => Err(FileNetworkOriginError::UnexpectedResponse),
         }
     }
@@ -713,10 +871,13 @@ impl FileNetworkOrigin {
             if !matches!(transfer.state, OriginTransferState::Upload(_)) {
                 return Err(FileNetworkOriginError::UnexpectedResponse);
             }
+            transfer.binding = Some(session.binding.clone());
             transfer.deadline_unix_ms = transfer
                 .deadline_unix_ms
                 .min(session.binding.expires_at_unix_ms);
-            queue_next_upload_action(transfer, &mut self.outbound)?;
+            if !transfer.pause_after_reply {
+                queue_next_upload_action(transfer, &mut self.outbound)?;
+            }
             transfer.event(TransferState::Active, None)
         };
         self.push_event(event);
@@ -750,6 +911,7 @@ impl FileNetworkOrigin {
         let staging = NamedTempFile::new_in(parent)?;
         let event = match &mut transfer.state {
             OriginTransferState::Download(download) => {
+                transfer.binding = Some(session.binding.clone());
                 transfer.deadline_unix_ms = transfer
                     .deadline_unix_ms
                     .min(session.binding.expires_at_unix_ms);
@@ -760,6 +922,13 @@ impl FileNetworkOrigin {
             _ => return Err(FileNetworkOriginError::UnexpectedResponse),
         };
         self.push_event(event);
+        if self
+            .transfers
+            .get(key)
+            .is_some_and(|transfer| transfer.pause_after_reply)
+        {
+            return Ok(());
+        }
         let finished = self
             .transfers
             .get_mut(key)
@@ -767,6 +936,90 @@ impl FileNetworkOrigin {
         if finished {
             self.finish_download_receiving(key, now_unix_ms)?;
         }
+        Ok(())
+    }
+
+    fn apply_resume_upload(
+        &mut self,
+        key: &OriginTransferKey,
+        session: TransferSession,
+        _now_unix_ms: u64,
+    ) -> Result<(), FileNetworkOriginError> {
+        let event = {
+            let transfer = self
+                .transfers
+                .get_mut(key)
+                .ok_or(FileNetworkOriginError::UnknownResponse)?;
+            if !matches!(transfer.state, OriginTransferState::Upload(_)) {
+                return Err(FileNetworkOriginError::UnexpectedResponse);
+            }
+            transfer.binding = Some(session.binding.clone());
+            transfer.deadline_unix_ms = transfer
+                .deadline_unix_ms
+                .min(session.binding.expires_at_unix_ms);
+            transfer.paused = false;
+            queue_next_upload_action(transfer, &mut self.outbound)?;
+            transfer.event(TransferState::Active, None)
+        };
+        self.push_event(event);
+        Ok(())
+    }
+
+    fn apply_resume_download(
+        &mut self,
+        key: &OriginTransferKey,
+        session: TransferSession,
+        now_unix_ms: u64,
+    ) -> Result<(), FileNetworkOriginError> {
+        let event = {
+            let transfer = self
+                .transfers
+                .get_mut(key)
+                .ok_or(FileNetworkOriginError::UnknownResponse)?;
+            let OriginTransferState::Download(download) = &mut transfer.state else {
+                return Err(FileNetworkOriginError::UnexpectedResponse);
+            };
+            if download.staging.is_none() {
+                return Err(FileNetworkOriginError::BindingMismatch);
+            }
+            transfer.binding = Some(session.binding.clone());
+            transfer.deadline_unix_ms = transfer
+                .deadline_unix_ms
+                .min(session.binding.expires_at_unix_ms);
+            transfer.paused = false;
+            download.session = Some(Box::new(session));
+            transfer.event(TransferState::Active, None)
+        };
+        self.push_event(event);
+        let finished = self
+            .transfers
+            .get_mut(key)
+            .is_some_and(|transfer| transfer.download_finished_receiving());
+        if finished {
+            self.finish_download_receiving(key, now_unix_ms)?;
+        }
+        Ok(())
+    }
+
+    fn apply_pause(
+        &mut self,
+        key: &OriginTransferKey,
+        progress: FileNetworkProgress,
+    ) -> Result<(), FileNetworkOriginError> {
+        let transfer = self
+            .transfers
+            .get_mut(key)
+            .ok_or(FileNetworkOriginError::UnknownResponse)?;
+        validate_pause(transfer, &progress)?;
+        if let OriginTransferState::Upload(upload) = &mut transfer.state {
+            // The owner discards a partially assembled upload chunk on pause.
+            // Rewind that chunk so resume starts at an offset the owner accepts.
+            upload.next_offset = 0;
+        }
+        transfer.paused = true;
+        transfer.pause_after_reply = false;
+        let event = transfer.event(TransferState::Paused, None);
+        self.push_event(event);
         Ok(())
     }
 
@@ -805,7 +1058,9 @@ impl FileNetworkOrigin {
                     upload.completed_chunks = upload.completed_chunks.saturating_add(1);
                 }
             }
-            queue_next_upload_action(transfer, &mut self.outbound)?;
+            if !transfer.pause_after_reply {
+                queue_next_upload_action(transfer, &mut self.outbound)?;
+            }
             transfer.event(TransferState::Active, None)
         };
         self.push_event(event);
@@ -884,14 +1139,7 @@ impl FileNetworkOrigin {
                 let digest =
                     ContentHash::from_digest_bytes(*download.hasher.clone().finalize().as_bytes());
                 session.verify_digest(download.received_bytes, &digest, now_unix_ms)?;
-                let request_id = origin_request_id(
-                    &transfer.transfer_id,
-                    &transfer.operation_id,
-                    b"finish-download",
-                    0,
-                    0,
-                    0,
-                );
+                let request_id = next_origin_request_id(transfer, b"finish-download", 0, 0, 0)?;
                 let request = FileNetworkRequest::Finish {
                     transfer_id: transfer.transfer_id.clone(),
                     operation_id: transfer.operation_id.clone(),
@@ -921,11 +1169,11 @@ impl FileNetworkOrigin {
         code: &str,
         notify_remote: bool,
     ) -> bool {
-        let Some(transfer) = self.transfers.remove(key) else {
+        let Some(mut transfer) = self.transfers.remove(key) else {
             return false;
         };
         if notify_remote {
-            queue_cancel(&transfer, &mut self.outbound);
+            queue_cancel(&mut transfer, &mut self.outbound);
         }
         let state = if code == "file_transfer_expired" {
             TransferState::Expired
@@ -1037,14 +1285,7 @@ fn queue_open_upload(
         OriginTransferState::Upload(upload) => upload.manifest.clone(),
         _ => return Err(FileNetworkOriginError::InvalidRequest),
     };
-    let request_id = origin_request_id(
-        &transfer.transfer_id,
-        &transfer.operation_id,
-        b"open-upload",
-        0,
-        0,
-        0,
-    );
+    let request_id = next_origin_request_id(transfer, b"open-upload", 0, 0, 0)?;
     let request = FileNetworkRequest::OpenUpload {
         share_id,
         transfer_id: transfer.transfer_id.clone(),
@@ -1095,14 +1336,8 @@ fn queue_next_upload_action(
     let Some((chunk_index, offset, length, data)) = next else {
         return queue_finish_upload(transfer, outbound);
     };
-    let request_id = origin_request_id(
-        &transfer.transfer_id,
-        &transfer.operation_id,
-        b"upload-chunk",
-        chunk_index,
-        offset,
-        length,
-    );
+    let request_id =
+        next_origin_request_id(transfer, b"upload-chunk", chunk_index, offset, length)?;
     let frame = FileNetworkFrame::chunk(
         request_id,
         transfer.transfer_id.clone(),
@@ -1133,14 +1368,7 @@ fn queue_finish_upload(
     transfer: &mut OriginTransfer,
     outbound: &mut VecDeque<OriginOutbound>,
 ) -> Result<(), FileNetworkOriginError> {
-    let request_id = origin_request_id(
-        &transfer.transfer_id,
-        &transfer.operation_id,
-        b"finish-upload",
-        0,
-        0,
-        0,
-    );
+    let request_id = next_origin_request_id(transfer, b"finish-upload", 0, 0, 0)?;
     let request = FileNetworkRequest::Finish {
         transfer_id: transfer.transfer_id.clone(),
         operation_id: transfer.operation_id.clone(),
@@ -1160,15 +1388,103 @@ fn queue_finish_upload(
     Ok(())
 }
 
-fn queue_cancel(transfer: &OriginTransfer, outbound: &mut VecDeque<OriginOutbound>) {
-    let request_id = origin_request_id(
-        &transfer.transfer_id,
-        &transfer.operation_id,
-        b"cancel",
-        0,
-        0,
-        0,
-    );
+fn queue_pause(
+    transfer: &mut OriginTransfer,
+    outbound: &mut VecDeque<OriginOutbound>,
+) -> Result<(), FileNetworkOriginError> {
+    if transfer.pending.is_some() {
+        return Err(FileNetworkOriginError::InvalidState);
+    }
+    let request_id = next_origin_request_id(transfer, b"pause", 0, 0, 0)?;
+    let request = FileNetworkRequest::Pause {
+        transfer_id: transfer.transfer_id.clone(),
+        operation_id: transfer.operation_id.clone(),
+    };
+    let frame = FileNetworkFrame::request(request_id, request)
+        .map_err(|_| FileNetworkOriginError::InvalidRequest)?;
+    transfer.pending = Some(PendingOriginReply {
+        request_id,
+        kind: OriginRequestKind::Pause,
+    });
+    outbound.push_back(OriginOutbound {
+        peer: transfer.peer.clone(),
+        transfer_id: transfer.transfer_id.clone(),
+        operation_id: transfer.operation_id.clone(),
+        frame,
+    });
+    Ok(())
+}
+
+fn queue_resume(
+    transfer: &mut OriginTransfer,
+    outbound: &mut VecDeque<OriginOutbound>,
+) -> Result<(), FileNetworkOriginError> {
+    let binding = transfer
+        .binding
+        .clone()
+        .ok_or(FileNetworkOriginError::InvalidState)?;
+    let (direction, content_hash) = match &transfer.state {
+        OriginTransferState::Upload(upload) => (
+            TransferDirection::Upload,
+            upload.manifest.content_hash.clone(),
+        ),
+        OriginTransferState::Download(download) => {
+            let session = download
+                .session
+                .as_ref()
+                .ok_or(FileNetworkOriginError::InvalidState)?;
+            (
+                TransferDirection::Download,
+                session.manifest.content_hash.clone(),
+            )
+        }
+    };
+    if binding.direction != direction
+        || binding.transfer_id != transfer.transfer_id
+        || binding.operation_id != transfer.operation_id
+        || binding.share_id != transfer.share_id
+        || binding.path != transfer.path
+    {
+        return Err(FileNetworkOriginError::BindingMismatch);
+    }
+    let request = ResumeRequest {
+        transfer_id: transfer.transfer_id.clone(),
+        operation_id: transfer.operation_id.clone(),
+        share_id: binding.share_id,
+        actor: binding.actor,
+        access_epoch: binding.access_epoch,
+        path: binding.path,
+        direction,
+        content_hash,
+        share_revision: binding.share_revision,
+    };
+    let label = match direction {
+        TransferDirection::Upload => b"resume-upload".as_slice(),
+        TransferDirection::Download => b"resume-download".as_slice(),
+    };
+    let request_id = next_origin_request_id(transfer, label, 0, 0, 0)?;
+    let frame = FileNetworkFrame::request(request_id, FileNetworkRequest::Resume { request })
+        .map_err(|_| FileNetworkOriginError::InvalidRequest)?;
+    transfer.pending = Some(PendingOriginReply {
+        request_id,
+        kind: match direction {
+            TransferDirection::Upload => OriginRequestKind::ResumeUpload,
+            TransferDirection::Download => OriginRequestKind::ResumeDownload,
+        },
+    });
+    outbound.push_back(OriginOutbound {
+        peer: transfer.peer.clone(),
+        transfer_id: transfer.transfer_id.clone(),
+        operation_id: transfer.operation_id.clone(),
+        frame,
+    });
+    Ok(())
+}
+
+fn queue_cancel(transfer: &mut OriginTransfer, outbound: &mut VecDeque<OriginOutbound>) {
+    let Ok(request_id) = next_origin_request_id(transfer, b"cancel", 0, 0, 0) else {
+        return;
+    };
     let request = FileNetworkRequest::Cancel {
         transfer_id: transfer.transfer_id.clone(),
         operation_id: transfer.operation_id.clone(),
@@ -1212,6 +1528,16 @@ fn validate_opened_download(
         TransferDirection::Download,
         local_node_id,
     )?;
+    let OriginTransferState::Download(download) = &transfer.state else {
+        return Err(FileNetworkOriginError::UnexpectedResponse);
+    };
+    if download
+        .session
+        .as_ref()
+        .is_some_and(|current| current.manifest != session.manifest)
+    {
+        return Err(FileNetworkOriginError::BindingMismatch);
+    }
     if session.state != TransferState::Active || session.binding.file_version.is_none() {
         return Err(FileNetworkOriginError::BindingMismatch);
     }
@@ -1233,6 +1559,10 @@ fn validate_session_binding(
         || session.binding.access_epoch == 0
         || session.binding.share_revision == 0
         || session.binding.expires_at_unix_ms < transfer.deadline_unix_ms
+        || transfer
+            .binding
+            .as_ref()
+            .is_some_and(|binding| binding != &session.binding)
     {
         return Err(FileNetworkOriginError::BindingMismatch);
     }
@@ -1279,6 +1609,36 @@ fn validate_upload_ack(
         || chunk_complete != (end == chunk_end)
         || progress.total_bytes != upload.manifest.total_bytes
         || progress.total_chunks != transfer_total_chunks(transfer)
+    {
+        return Err(FileNetworkOriginError::UnexpectedResponse);
+    }
+    Ok(())
+}
+
+fn validate_pause(
+    transfer: &OriginTransfer,
+    progress: &FileNetworkProgress,
+) -> Result<(), FileNetworkOriginError> {
+    let (local_bytes, local_chunks) = match &transfer.state {
+        OriginTransferState::Upload(upload) => {
+            let local_bytes = upload
+                .manifest
+                .chunks
+                .get(upload.next_chunk as usize)
+                .map_or(upload.manifest.total_bytes, |chunk| chunk.offset);
+            (local_bytes, upload.completed_chunks)
+        }
+        OriginTransferState::Download(download) => {
+            (download.received_bytes, download.received_chunks)
+        }
+    };
+    if progress.state != TransferState::Paused
+        || progress.total_bytes != transfer_total_bytes(transfer)
+        || progress.total_chunks != transfer_total_chunks(transfer)
+        || progress.transferred_bytes < local_bytes
+        || progress.transferred_bytes > progress.total_bytes
+        || progress.received_chunks < local_chunks
+        || progress.received_chunks > progress.total_chunks
     {
         return Err(FileNetworkOriginError::UnexpectedResponse);
     }
@@ -1415,6 +1775,7 @@ fn origin_request_id(
     chunk_index: u32,
     offset: u64,
     length: u64,
+    sequence: u64,
 ) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"fuckipv6-file-origin-request-v1");
@@ -1425,10 +1786,33 @@ fn origin_request_id(
     hasher.update(&chunk_index.to_be_bytes());
     hasher.update(&offset.to_be_bytes());
     hasher.update(&length.to_be_bytes());
+    hasher.update(&sequence.to_be_bytes());
     let digest = hasher.finalize();
     let mut request_id = [0_u8; 16];
     request_id.copy_from_slice(&digest.as_bytes()[..16]);
     request_id
+}
+
+fn next_origin_request_id(
+    transfer: &mut OriginTransfer,
+    label: &[u8],
+    chunk_index: u32,
+    offset: u64,
+    length: u64,
+) -> Result<[u8; 16], FileNetworkOriginError> {
+    let sequence = transfer.next_request_sequence;
+    transfer.next_request_sequence = sequence
+        .checked_add(1)
+        .ok_or(FileNetworkOriginError::InvalidRequest)?;
+    Ok(origin_request_id(
+        &transfer.transfer_id,
+        &transfer.operation_id,
+        label,
+        chunk_index,
+        offset,
+        length,
+        sequence,
+    ))
 }
 
 fn build_upload_manifest(
@@ -2637,5 +3021,561 @@ mod tests {
             failed.error_code.as_deref(),
             Some("file_transfer_authorization_lost")
         );
+    }
+
+    #[test]
+    fn upload_pause_waits_for_ack_and_resumes_at_the_next_chunk() {
+        let temporary = TempDir::new().expect("tempdir");
+        let source = temporary.path().join("source.bin");
+        let data = vec![0x5a; 32];
+        std::fs::write(&source, &data).expect("source");
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) =
+            start_upload(&mut origin, &local_node_id, &source, 2, &data, 16);
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+        let _ = origin.drain_events();
+
+        let (chunk_request_id, _, _, chunk_index, offset, fragment) = take_chunk(&mut origin);
+        assert_eq!((chunk_index, offset, fragment.len()), (0, 0, 16));
+        origin
+            .pause(&transfer(2), &operation(2), NOW + 2)
+            .expect("defer pause");
+        assert!(origin.pop_outbound().is_none());
+
+        origin
+            .handle_response(
+                &peer(),
+                chunk_request_id,
+                FileNetworkResponse::ChunkAccepted {
+                    chunk_index,
+                    chunk_complete: true,
+                    progress: progress(TransferState::Active, 16, 32, 1, 2),
+                },
+                NOW + 3,
+            )
+            .expect("chunk acknowledgement");
+        let (pause_request_id, pause_request) = take_request(&mut origin);
+        assert!(matches!(pause_request, FileNetworkRequest::Pause { .. }));
+        origin
+            .handle_response(
+                &peer(),
+                pause_request_id,
+                FileNetworkResponse::Progress {
+                    progress: progress(TransferState::Paused, 16, 32, 1, 2),
+                },
+                NOW + 4,
+            )
+            .expect("pause response");
+        assert_eq!(
+            origin.drain_events().last().map(|event| event.state),
+            Some(TransferState::Paused)
+        );
+        assert!(matches!(
+            origin.pause(&transfer(2), &operation(2), NOW + 5),
+            Err(FileNetworkOriginError::InvalidState)
+        ));
+
+        origin
+            .resume(&transfer(2), &operation(2), NOW + 5)
+            .expect("queue resume");
+        let (resume_request_id, resume_request) = take_request(&mut origin);
+        let FileNetworkRequest::Resume { request } = resume_request else {
+            panic!("expected resume request");
+        };
+        assert_eq!(request.transfer_id, transfer(2));
+        assert_eq!(request.operation_id, operation(2));
+        assert_eq!(request.direction, TransferDirection::Upload);
+        assert_eq!(request.content_hash, ContentHash::from_bytes(&data));
+        assert!(matches!(
+            origin.resume(&transfer(2), &operation(2), NOW + 6),
+            Err(FileNetworkOriginError::InvalidState)
+        ));
+
+        origin
+            .handle_response(
+                &peer(),
+                resume_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(active_session(
+                        &local_node_id,
+                        TransferDirection::Upload,
+                        transfer(2),
+                        operation(2),
+                        manifest(&data, 16),
+                    )),
+                },
+                NOW + 6,
+            )
+            .expect("resume response");
+        let (_, _, _, chunk_index, offset, fragment) = take_chunk(&mut origin);
+        assert_eq!((chunk_index, offset), (1, 16));
+        assert_eq!(fragment, data[16..]);
+    }
+
+    #[test]
+    fn upload_pause_rewinds_a_partially_sent_chunk() {
+        let temporary = TempDir::new().expect("tempdir");
+        let source = temporary.path().join("source.bin");
+        let data = vec![0x6b; MAX_FILE_NETWORK_FRAGMENT_BYTES + 7];
+        std::fs::write(&source, &data).expect("source");
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) = start_upload(
+            &mut origin,
+            &local_node_id,
+            &source,
+            2,
+            &data,
+            MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64,
+        );
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+
+        let (chunk_request_id, _, _, chunk_index, offset, fragment) = take_chunk(&mut origin);
+        assert_eq!((chunk_index, offset), (0, 0));
+        assert_eq!(fragment.len(), MAX_FILE_NETWORK_FRAGMENT_BYTES);
+        origin
+            .pause(&transfer(2), &operation(2), NOW + 2)
+            .expect("defer pause");
+        origin
+            .handle_response(
+                &peer(),
+                chunk_request_id,
+                FileNetworkResponse::ChunkAccepted {
+                    chunk_index,
+                    chunk_complete: false,
+                    progress: progress(TransferState::Active, 0, data.len() as u64, 0, 1),
+                },
+                NOW + 3,
+            )
+            .expect("partial acknowledgement");
+        let (pause_request_id, pause_request) = take_request(&mut origin);
+        assert!(matches!(pause_request, FileNetworkRequest::Pause { .. }));
+        origin
+            .handle_response(
+                &peer(),
+                pause_request_id,
+                FileNetworkResponse::Progress {
+                    progress: progress(TransferState::Paused, 0, data.len() as u64, 0, 1),
+                },
+                NOW + 4,
+            )
+            .expect("pause response");
+
+        origin
+            .resume(&transfer(2), &operation(2), NOW + 5)
+            .expect("queue resume");
+        let (resume_request_id, _) = take_request(&mut origin);
+        origin
+            .handle_response(
+                &peer(),
+                resume_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(active_session(
+                        &local_node_id,
+                        TransferDirection::Upload,
+                        transfer(2),
+                        operation(2),
+                        manifest(&data, MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64),
+                    )),
+                },
+                NOW + 6,
+            )
+            .expect("resume response");
+        let (_, _, _, chunk_index, offset, fragment) = take_chunk(&mut origin);
+        assert_eq!((chunk_index, offset), (0, 0));
+        assert_eq!(fragment.len(), MAX_FILE_NETWORK_FRAGMENT_BYTES);
+    }
+
+    #[test]
+    fn download_pause_resumes_the_same_partial_fragment() {
+        let temporary = TempDir::new().expect("tempdir");
+        let destination = temporary.path().join("download.bin");
+        let data: Vec<u8> = (0..(MAX_FILE_NETWORK_FRAGMENT_BYTES + 19))
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) = start_download(
+            &mut origin,
+            &local_node_id,
+            &destination,
+            2,
+            &data,
+            MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64,
+        );
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+        origin
+            .handle_chunk(
+                &peer(),
+                download_fragment_request_id(&operation(2), 0, 0),
+                &transfer(2),
+                &operation(2),
+                0,
+                0,
+                &data[..MAX_FILE_NETWORK_FRAGMENT_BYTES],
+                NOW + 2,
+            )
+            .expect("first fragment");
+        assert!(!destination.exists());
+
+        origin
+            .pause(&transfer(2), &operation(2), NOW + 3)
+            .expect("queue pause");
+        let (pause_request_id, pause_request) = take_request(&mut origin);
+        assert!(matches!(pause_request, FileNetworkRequest::Pause { .. }));
+        origin
+            .handle_response(
+                &peer(),
+                pause_request_id,
+                FileNetworkResponse::Progress {
+                    progress: progress(TransferState::Paused, 0, data.len() as u64, 0, 1),
+                },
+                NOW + 4,
+            )
+            .expect("pause response");
+        origin
+            .resume(&transfer(2), &operation(2), NOW + 5)
+            .expect("queue resume");
+        let (resume_request_id, _) = take_request(&mut origin);
+        origin
+            .handle_response(
+                &peer(),
+                resume_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(active_session(
+                        &local_node_id,
+                        TransferDirection::Download,
+                        transfer(2),
+                        operation(2),
+                        manifest(&data, MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64),
+                    )),
+                },
+                NOW + 6,
+            )
+            .expect("resume response");
+        origin
+            .handle_chunk(
+                &peer(),
+                download_fragment_request_id(
+                    &operation(2),
+                    0,
+                    MAX_FILE_NETWORK_FRAGMENT_BYTES as u64,
+                ),
+                &transfer(2),
+                &operation(2),
+                0,
+                MAX_FILE_NETWORK_FRAGMENT_BYTES as u64,
+                &data[MAX_FILE_NETWORK_FRAGMENT_BYTES..],
+                NOW + 7,
+            )
+            .expect("second fragment");
+        let (finish_request_id, finish_request) = take_request(&mut origin);
+        assert!(matches!(finish_request, FileNetworkRequest::Finish { .. }));
+        origin
+            .handle_response(
+                &peer(),
+                finish_request_id,
+                FileNetworkResponse::Completed {
+                    progress: progress(
+                        TransferState::Completed,
+                        data.len() as u64,
+                        data.len() as u64,
+                        1,
+                        1,
+                    ),
+                },
+                NOW + 8,
+            )
+            .expect("finish response");
+        assert_eq!(std::fs::read(&destination).expect("download"), data);
+        assert_eq!(origin.active_count(), 0);
+    }
+
+    #[test]
+    fn repeated_pause_and_resume_use_fresh_request_ids() {
+        let temporary = TempDir::new().expect("tempdir");
+        let destination = temporary.path().join("download.bin");
+        let data = b"repeat pause";
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) =
+            start_download(&mut origin, &local_node_id, &destination, 2, data, 32);
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+
+        origin
+            .pause(&transfer(2), &operation(2), NOW + 2)
+            .expect("first pause");
+        let (first_pause_id, _) = take_request(&mut origin);
+        origin
+            .handle_response(
+                &peer(),
+                first_pause_id,
+                FileNetworkResponse::Progress {
+                    progress: progress(TransferState::Paused, 0, data.len() as u64, 0, 1),
+                },
+                NOW + 3,
+            )
+            .expect("first pause response");
+        origin
+            .resume(&transfer(2), &operation(2), NOW + 4)
+            .expect("first resume");
+        let (first_resume_id, _) = take_request(&mut origin);
+        origin
+            .handle_response(
+                &peer(),
+                first_resume_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(active_session(
+                        &local_node_id,
+                        TransferDirection::Download,
+                        transfer(2),
+                        operation(2),
+                        manifest(data, 32),
+                    )),
+                },
+                NOW + 5,
+            )
+            .expect("first resume response");
+
+        origin
+            .pause(&transfer(2), &operation(2), NOW + 6)
+            .expect("second pause");
+        let (second_pause_id, _) = take_request(&mut origin);
+        origin
+            .handle_response(
+                &peer(),
+                second_pause_id,
+                FileNetworkResponse::Progress {
+                    progress: progress(TransferState::Paused, 0, data.len() as u64, 0, 1),
+                },
+                NOW + 7,
+            )
+            .expect("second pause response");
+        origin
+            .resume(&transfer(2), &operation(2), NOW + 8)
+            .expect("second resume");
+        let (second_resume_id, _) = take_request(&mut origin);
+
+        assert_ne!(first_pause_id, second_pause_id);
+        assert_ne!(first_resume_id, second_resume_id);
+        assert_ne!(first_pause_id, first_resume_id);
+        assert_ne!(second_pause_id, second_resume_id);
+    }
+
+    #[test]
+    fn paused_transfer_expires_and_cleans_staging() {
+        let temporary = TempDir::new().expect("tempdir");
+        let destination = temporary.path().join("download.bin");
+        let data = b"paused content";
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) =
+            start_download(&mut origin, &local_node_id, &destination, 2, data, 32);
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+        origin
+            .pause(&transfer(2), &operation(2), NOW + 2)
+            .expect("queue pause");
+        let (pause_request_id, _) = take_request(&mut origin);
+        origin
+            .handle_response(
+                &peer(),
+                pause_request_id,
+                FileNetworkResponse::Progress {
+                    progress: progress(TransferState::Paused, 0, data.len() as u64, 0, 1),
+                },
+                NOW + 3,
+            )
+            .expect("pause response");
+
+        origin.expire(NOW + FILE_NETWORK_TRANSFER_TTL_MS);
+        assert_eq!(origin.active_count(), 0);
+        let events = origin.drain_events();
+        assert!(events
+            .iter()
+            .any(|event| event.state == TransferState::Expired));
+        assert!(!destination.exists());
+        assert_eq!(
+            std::fs::read_dir(temporary.path())
+                .expect("read dir")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn resume_response_with_a_different_binding_fails_closed() {
+        let temporary = TempDir::new().expect("tempdir");
+        let destination = temporary.path().join("download.bin");
+        let data = b"bound content";
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) =
+            start_download(&mut origin, &local_node_id, &destination, 2, data, 32);
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+        origin
+            .pause(&transfer(2), &operation(2), NOW + 2)
+            .expect("queue pause");
+        let (pause_request_id, _) = take_request(&mut origin);
+        origin
+            .handle_response(
+                &peer(),
+                pause_request_id,
+                FileNetworkResponse::Progress {
+                    progress: progress(TransferState::Paused, 0, data.len() as u64, 0, 1),
+                },
+                NOW + 3,
+            )
+            .expect("pause response");
+        origin
+            .resume(&transfer(2), &operation(2), NOW + 4)
+            .expect("queue resume");
+        let (resume_request_id, _) = take_request(&mut origin);
+        let mut rebound = active_session(
+            &local_node_id,
+            TransferDirection::Download,
+            transfer(2),
+            operation(2),
+            manifest(data, 32),
+        );
+        rebound.binding.path = SharedPath::parse("docs/other.bin").expect("path");
+        assert!(matches!(
+            origin.handle_response(
+                &peer(),
+                resume_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(rebound),
+                },
+                NOW + 5,
+            ),
+            Err(FileNetworkOriginError::BindingMismatch)
+        ));
+        assert_eq!(origin.active_count(), 0);
+        assert!(matches!(
+            take_request(&mut origin).1,
+            FileNetworkRequest::Cancel { .. }
+        ));
+        assert!(!destination.exists());
+        assert_eq!(
+            std::fs::read_dir(temporary.path())
+                .expect("read dir")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn resume_response_with_a_different_download_manifest_fails_closed() {
+        let temporary = TempDir::new().expect("tempdir");
+        let destination = temporary.path().join("download.bin");
+        let data = b"manifest-bound content";
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) =
+            start_download(&mut origin, &local_node_id, &destination, 2, data, 32);
+        let expected_binding = session.binding.clone();
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+        origin
+            .pause(&transfer(2), &operation(2), NOW + 2)
+            .expect("queue pause");
+        let (pause_request_id, _) = take_request(&mut origin);
+        origin
+            .handle_response(
+                &peer(),
+                pause_request_id,
+                FileNetworkResponse::Progress {
+                    progress: progress(TransferState::Paused, 0, data.len() as u64, 0, 1),
+                },
+                NOW + 3,
+            )
+            .expect("pause response");
+        origin
+            .resume(&transfer(2), &operation(2), NOW + 4)
+            .expect("queue resume");
+        let (resume_request_id, _) = take_request(&mut origin);
+        let rebound = active_session(
+            &local_node_id,
+            TransferDirection::Download,
+            transfer(2),
+            operation(2),
+            manifest(data, 16),
+        );
+        assert_eq!(rebound.binding, expected_binding);
+        assert!(matches!(
+            origin.handle_response(
+                &peer(),
+                resume_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(rebound),
+                },
+                NOW + 5,
+            ),
+            Err(FileNetworkOriginError::BindingMismatch)
+        ));
+        assert_eq!(origin.active_count(), 0);
+        assert!(!destination.exists());
     }
 }

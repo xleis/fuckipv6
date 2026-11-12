@@ -3253,7 +3253,7 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 ### W15-03 上传、下载与断点续传 `[~]`
 
 - [x] 使用受认证、可取消的 operation 开始传输；
-- [ ] 上传/下载支持校验、进度、暂停/恢复和最终确认；
+- [x] 上传/下载支持校验、进度、暂停/恢复和最终确认；
 - [ ] 断点续传绑定文件版本、分块和身份，防止拼接错误内容；
 - [ ] 文件更新后旧续传状态失效；
 - [x] 支持取消并清理临时文件；
@@ -3270,9 +3270,16 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 `CancelFileTransfer` 仅通过本地 IPC 进入运行时的受认证 operation；取消、发送失败和过期都会唤醒事件循环并排空状态机队列。
 `outbound_notify_wakes_all_transfer_transitions`、`fail_pending_request_only_fails_the_correlated_operation_and_wakes_pump`、
 `misattributed_download_fragment_cleans_only_target_staging`、`wrong_download_request_id_cleans_only_target_staging` 和
-`download_reassembles_verifies_and_atomically_persists` 覆盖上述状态转换与失败关闭边界；IPC 成功、运行时错误和断链回复由
-`file_transfer_start_maps_runtime_replies` 与 `file_transfer_cancel_maps_runtime_replies` 覆盖。该证据仍是进程内状态机/IPC
-自动化测试，不代表真实网络传输、断点跨重启或大文件性能验收已经完成。
+`download_reassembles_verifies_and_atomically_persists` 覆盖上述状态转换与失败关闭边界。requester Pause/Resume 已接入同一
+本地 IPC 和运行时命令：上传在途分片会等待 ACK 后暂停，暂停时回退未完成块并在恢复后重发；下载保留 staging 和部分 fragment，
+恢复后从相同 offset 续传；重复暂停/恢复、错误 peer/request ID、恢复绑定不匹配和暂停后过期均失败关闭或清理对应 operation。
+`upload_pause_waits_for_ack_and_resumes_at_the_next_chunk`、`upload_pause_rewinds_a_partially_sent_chunk`、
+`download_pause_resumes_the_same_partial_fragment`、`paused_transfer_expires_and_cleans_staging` 和
+`repeated_pause_and_resume_use_fresh_request_ids`、`resume_response_with_a_different_binding_fails_closed` 与
+`resume_response_with_a_different_download_manifest_fails_closed` 覆盖这些边界。IPC 成功、运行时错误和断链回复由
+`file_transfer_start_maps_runtime_replies`、`file_transfer_cancel_maps_runtime_replies`、`file_transfer_pause_maps_runtime_replies`
+与 `file_transfer_resume_maps_runtime_replies` 覆盖。该证据仍是进程内状态机/IPC 自动化测试，不代表真实网络传输、断点跨重启、
+WebUI/Android File 表面或大文件性能验收已经完成。
 
 ### W15-04 canonicalize 与路径边界 `[~]`
 

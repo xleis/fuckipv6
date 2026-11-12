@@ -81,6 +81,14 @@ pub enum IpcRequest {
         transfer_id: String,
         operation_id: String,
     },
+    PauseFileTransfer {
+        transfer_id: String,
+        operation_id: String,
+    },
+    ResumeFileTransfer {
+        transfer_id: String,
+        operation_id: String,
+    },
     Disconnect,
     NodeCommand(Box<NodeCommandRequest>),
 }
@@ -149,6 +157,16 @@ pub(crate) enum RuntimeCommand {
         reply: oneshot::Sender<Result<FileTransferHandle, String>>,
     },
     CancelFileTransfer {
+        transfer_id: String,
+        operation_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    PauseFileTransfer {
+        transfer_id: String,
+        operation_id: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    ResumeFileTransfer {
         transfer_id: String,
         operation_id: String,
         reply: oneshot::Sender<Result<(), String>>,
@@ -727,6 +745,14 @@ async fn handle_client(
             transfer_id,
             operation_id,
         }) => cancel_runtime_file_transfer(&registry, transfer_id, operation_id).await,
+        Ok(IpcRequest::PauseFileTransfer {
+            transfer_id,
+            operation_id,
+        }) => pause_runtime_file_transfer(&registry, transfer_id, operation_id).await,
+        Ok(IpcRequest::ResumeFileTransfer {
+            transfer_id,
+            operation_id,
+        }) => resume_runtime_file_transfer(&registry, transfer_id, operation_id).await,
         Ok(IpcRequest::Disconnect) => disconnect_runtime(&registry).await,
         Ok(IpcRequest::NodeCommand(request)) => match commands {
             Some(commands) => match commands
@@ -877,6 +903,64 @@ async fn cancel_runtime_file_transfer(
         },
         Ok(Err(_)) | Err(_) => IpcResponse::Error {
             message: "File 传输取消请求未收到运行时响应".to_string(),
+        },
+    }
+}
+
+async fn pause_runtime_file_transfer(
+    registry: &MultiNetworkRegistry,
+    transfer_id: String,
+    operation_id: String,
+) -> IpcResponse {
+    let (reply, response) = oneshot::channel();
+    if !registry.send_control(RuntimeCommand::PauseFileTransfer {
+        transfer_id,
+        operation_id,
+        reply,
+    }) {
+        return IpcResponse::Error {
+            message: "运行时不支持 File 传输暂停或控制通道已关闭".to_string(),
+        };
+    }
+
+    match tokio::time::timeout(Duration::from_secs(10), response).await {
+        Ok(Ok(Ok(()))) => IpcResponse::Success {
+            message: "File 传输已暂停".to_string(),
+        },
+        Ok(Ok(Err(code))) => IpcResponse::Error {
+            message: format!("File 传输暂停失败: {code}"),
+        },
+        Ok(Err(_)) | Err(_) => IpcResponse::Error {
+            message: "File 传输暂停请求未收到运行时响应".to_string(),
+        },
+    }
+}
+
+async fn resume_runtime_file_transfer(
+    registry: &MultiNetworkRegistry,
+    transfer_id: String,
+    operation_id: String,
+) -> IpcResponse {
+    let (reply, response) = oneshot::channel();
+    if !registry.send_control(RuntimeCommand::ResumeFileTransfer {
+        transfer_id,
+        operation_id,
+        reply,
+    }) {
+        return IpcResponse::Error {
+            message: "运行时不支持 File 传输恢复或控制通道已关闭".to_string(),
+        };
+    }
+
+    match tokio::time::timeout(Duration::from_secs(10), response).await {
+        Ok(Ok(Ok(()))) => IpcResponse::Success {
+            message: "File 传输已恢复".to_string(),
+        },
+        Ok(Ok(Err(code))) => IpcResponse::Error {
+            message: format!("File 传输恢复失败: {code}"),
+        },
+        Ok(Err(_)) | Err(_) => IpcResponse::Error {
+            message: "File 传输恢复请求未收到运行时响应".to_string(),
         },
     }
 }
@@ -1382,6 +1466,30 @@ mod tests {
             }
             other => panic!("unexpected response: {other:?}"),
         }
+        match pause_runtime_file_transfer(
+            &registry,
+            "transfer".to_string(),
+            "operation".to_string(),
+        )
+        .await
+        {
+            IpcResponse::Error { message } => {
+                assert_eq!(message, "运行时不支持 File 传输暂停或控制通道已关闭");
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        match resume_runtime_file_transfer(
+            &registry,
+            "transfer".to_string(),
+            "operation".to_string(),
+        )
+        .await
+        {
+            IpcResponse::Error { message } => {
+                assert_eq!(message, "运行时不支持 File 传输恢复或控制通道已关闭");
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 
     fn start_file_transfer_request() -> Box<StartFileTransferRequest> {
@@ -1549,6 +1657,180 @@ mod tests {
         match task.await.expect("cancel task") {
             IpcResponse::Error { message } => {
                 assert_eq!(message, "File 传输取消请求未收到运行时响应");
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn file_transfer_pause_maps_runtime_replies() {
+        let registry = MultiNetworkRegistry::new();
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        registry.set_control_sender(control_tx);
+        let task = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                pause_runtime_file_transfer(
+                    &registry,
+                    "transfer".to_string(),
+                    "operation".to_string(),
+                )
+                .await
+            }
+        });
+        let RuntimeCommand::PauseFileTransfer {
+            transfer_id,
+            operation_id,
+            reply,
+        } = control_rx.recv().await.expect("pause command")
+        else {
+            panic!("expected pause file transfer command");
+        };
+        assert_eq!(transfer_id, "transfer");
+        assert_eq!(operation_id, "operation");
+        reply.send(Ok(())).expect("reply pause");
+        match task.await.expect("pause task") {
+            IpcResponse::Success { message } => assert_eq!(message, "File 传输已暂停"),
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        registry.set_control_sender(control_tx);
+        let task = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                pause_runtime_file_transfer(
+                    &registry,
+                    "transfer".to_string(),
+                    "operation".to_string(),
+                )
+                .await
+            }
+        });
+        let RuntimeCommand::PauseFileTransfer { reply, .. } =
+            control_rx.recv().await.expect("pause command")
+        else {
+            panic!("expected pause file transfer command");
+        };
+        reply
+            .send(Err("file_transfer_invalid_state".to_string()))
+            .expect("reply pause error");
+        match task.await.expect("pause task") {
+            IpcResponse::Error { message } => {
+                assert_eq!(message, "File 传输暂停失败: file_transfer_invalid_state");
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        registry.set_control_sender(control_tx);
+        let task = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                pause_runtime_file_transfer(
+                    &registry,
+                    "transfer".to_string(),
+                    "operation".to_string(),
+                )
+                .await
+            }
+        });
+        let RuntimeCommand::PauseFileTransfer { reply, .. } =
+            control_rx.recv().await.expect("pause command")
+        else {
+            panic!("expected pause file transfer command");
+        };
+        drop(reply);
+        match task.await.expect("pause task") {
+            IpcResponse::Error { message } => {
+                assert_eq!(message, "File 传输暂停请求未收到运行时响应");
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn file_transfer_resume_maps_runtime_replies() {
+        let registry = MultiNetworkRegistry::new();
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        registry.set_control_sender(control_tx);
+        let task = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                resume_runtime_file_transfer(
+                    &registry,
+                    "transfer".to_string(),
+                    "operation".to_string(),
+                )
+                .await
+            }
+        });
+        let RuntimeCommand::ResumeFileTransfer {
+            transfer_id,
+            operation_id,
+            reply,
+        } = control_rx.recv().await.expect("resume command")
+        else {
+            panic!("expected resume file transfer command");
+        };
+        assert_eq!(transfer_id, "transfer");
+        assert_eq!(operation_id, "operation");
+        reply.send(Ok(())).expect("reply resume");
+        match task.await.expect("resume task") {
+            IpcResponse::Success { message } => assert_eq!(message, "File 传输已恢复"),
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        registry.set_control_sender(control_tx);
+        let task = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                resume_runtime_file_transfer(
+                    &registry,
+                    "transfer".to_string(),
+                    "operation".to_string(),
+                )
+                .await
+            }
+        });
+        let RuntimeCommand::ResumeFileTransfer { reply, .. } =
+            control_rx.recv().await.expect("resume command")
+        else {
+            panic!("expected resume file transfer command");
+        };
+        reply
+            .send(Err("file_transfer_not_found".to_string()))
+            .expect("reply resume error");
+        match task.await.expect("resume task") {
+            IpcResponse::Error { message } => {
+                assert_eq!(message, "File 传输恢复失败: file_transfer_not_found");
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        registry.set_control_sender(control_tx);
+        let task = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                resume_runtime_file_transfer(
+                    &registry,
+                    "transfer".to_string(),
+                    "operation".to_string(),
+                )
+                .await
+            }
+        });
+        let RuntimeCommand::ResumeFileTransfer { reply, .. } =
+            control_rx.recv().await.expect("resume command")
+        else {
+            panic!("expected resume file transfer command");
+        };
+        drop(reply);
+        match task.await.expect("resume task") {
+            IpcResponse::Error { message } => {
+                assert_eq!(message, "File 传输恢复请求未收到运行时响应");
             }
             other => panic!("unexpected response: {other:?}"),
         }

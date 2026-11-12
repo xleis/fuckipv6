@@ -1509,11 +1509,17 @@ mod tests {
     fn low_disk_reserve_rejects_upload_before_staging() {
         let temporary = tempfile::tempdir().expect("tempdir");
         let available = fs2::available_space(temporary.path()).expect("available filesystem space");
+        // Leave enough headroom that unrelated system writes cannot flip the
+        // initial capability state to LowSpace before admission is exercised.
+        let reserve_headroom = (available / 4).clamp(1, 2 * 1024 * 1024);
+        let upload_bytes = usize::try_from(reserve_headroom.saturating_mul(2))
+            .expect("bounded test upload size fits usize");
+        let contents = vec![0x5a; upload_bytes];
         let mut low_space = share();
         low_space.quota.total_bytes = u64::MAX;
         low_space.quota.per_member_bytes = u64::MAX;
         low_space.quota.max_file_bytes = u64::MAX;
-        low_space.quota.reserve_bytes = available.saturating_sub(1);
+        low_space.quota.reserve_bytes = available.saturating_sub(reserve_headroom);
         let capability = FileShareCapability::new();
         let snapshot = capability
             .enable(
@@ -1529,7 +1535,14 @@ mod tests {
 
         let error = adapter
             .begin_upload(
-                upload_session(&share, "reserve.bin", b"abcd", 4, b"reserve", 1_000),
+                upload_session(
+                    &share,
+                    "reserve.bin",
+                    &contents,
+                    u64::try_from(contents.len()).expect("upload length fits u64"),
+                    b"reserve",
+                    1_000,
+                ),
                 &context(&share),
                 true,
                 UploadAdmission::default(),

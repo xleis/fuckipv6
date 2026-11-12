@@ -8894,6 +8894,7 @@ mod tests {
             relay_status: NodeEmbeddedServiceStatus::Running,
             relay_addr: Some("127.0.0.1:6667".parse().expect("relay socket")),
             relay_health: health,
+            relay_governance: None,
         }
     }
 
@@ -9115,6 +9116,7 @@ mod tests {
                 signaling_addr: None,
                 relay_addr: None,
                 relay_health: None,
+                relay_governance: None,
             });
 
         let overview = project_overview(&snapshot, Locale::En);

@@ -5309,6 +5309,17 @@
             "null"
           ]
         },
+        "relay_governance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RelayGovernanceAuditSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Owner-visible, bounded Relay governance observations. This remains\nabsent for older snapshots, disabled Relays and non-owner projections;\nadapters must not infer an empty ledger from a missing field."
+        },
         "relay_health": {
           "anyOf": [
             {
@@ -8819,6 +8830,97 @@
     "PublicKey": {
       "description": "Ed25519 public key bytes encoded as URL-safe base64 without padding.",
       "type": "string"
+    },
+    "RelayGovernanceAction": {
+      "description": "Stable governance action names for audit records and activity filters.",
+      "enum": [
+        "enable",
+        "disable",
+        "authorization_changed",
+        "quota_changed",
+        "session_rejected",
+        "packet_rejected",
+        "failover",
+        "recovered"
+      ],
+      "type": "string"
+    },
+    "RelayGovernanceAuditSnapshot": {
+      "description": "Snapshot returned by the Relay governance sink. Older events are evicted\nfirst; `dropped_events` makes queue pressure observable rather than silent.",
+      "properties": {
+        "dropped_events": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/$defs/RelayGovernanceEvent"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "events",
+        "dropped_events"
+      ],
+      "type": "object"
+    },
+    "RelayGovernanceEvent": {
+      "description": "One bounded, payload-free Relay governance observation.\n\nEvents intentionally carry no source/destination address, peer display\nname, packet payload, key material or session secret. `node_id` identifies\nthe consumer whose request was rejected or whose authorization changed so\nan owner can filter the audit without exposing the Relay topology.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/RelayGovernanceAction"
+        },
+        "limit": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "node_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "occurred_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "reset_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "action",
+        "occurred_at_unix_ms",
+        "reason_code"
+      ],
+      "type": "object"
     },
     "RelayHealthIssue": {
       "enum": [

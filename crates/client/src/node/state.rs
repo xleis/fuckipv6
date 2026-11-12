@@ -12,9 +12,9 @@ use fuckipv6_common::domain::{
     ExitSelectionResolution, FieldPrivacyPolicy, MembershipRole, MembershipState, MembershipTerms,
     NetworkAcl, NetworkId, NetworkJoinMode, NetworkMemberDirectory, NetworkMemberPresence,
     NetworkMemberStatus, NetworkVisibility, NodeId, NodeLocalAccessPolicy, OperationRecovery,
-    RelayHealthSnapshot, RelayHealthStatus, TopologyBuilder, TopologyLinkObservation,
-    TopologyMemberInput, TopologyNetworkInput, TopologySnapshot, TopologyViewer,
-    TrafficRoutingPageModel, TrafficSessionSnapshot,
+    RelayGovernanceAuditSnapshot, RelayHealthSnapshot, RelayHealthStatus, TopologyBuilder,
+    TopologyLinkObservation, TopologyMemberInput, TopologyNetworkInput, TopologySnapshot,
+    TopologyViewer, TrafficRoutingPageModel, TrafficSessionSnapshot,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -1105,6 +1105,11 @@ pub struct NodeEmbeddedServiceSnapshot {
     /// listener address or lifecycle status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_health: Option<RelayHealthSnapshot>,
+    /// Owner-visible, bounded Relay governance observations. This remains
+    /// absent for older snapshots, disabled Relays and non-owner projections;
+    /// adapters must not infer an empty ledger from a missing field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_governance: Option<RelayGovernanceAuditSnapshot>,
 }
 
 impl NodeEmbeddedServiceSnapshot {
@@ -1122,6 +1127,7 @@ impl NodeEmbeddedServiceSnapshot {
             },
             relay_addr: service.relay_addr,
             relay_health: service.relay_health.clone(),
+            relay_governance: service.relay_governance.clone(),
         }
     }
 }
@@ -2182,6 +2188,7 @@ mod tests {
             relay_status: NodeEmbeddedServiceStatus::Stopped,
             relay_addr: None,
             relay_health: None,
+            relay_governance: None,
         }
     }
 

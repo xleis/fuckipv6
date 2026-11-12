@@ -6155,6 +6155,7 @@ impl NetworkRuntimeActor {
             relay_status,
             relay_addr: None,
             relay_health: None,
+            relay_governance: None,
         };
         self.state
             .update(|state| {
@@ -8255,6 +8256,7 @@ mod tests {
             signaling_addr: Some("127.0.0.1:46666".parse().expect("signaling address")),
             relay_addr: Some("127.0.0.1:46667".parse().expect("relay address")),
             relay_health: None,
+            relay_governance: None,
         };
         harness
             .state

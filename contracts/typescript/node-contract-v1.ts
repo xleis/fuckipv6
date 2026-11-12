@@ -1573,6 +1573,7 @@ export type NodeDiscoveryIndexState = "idle" | "pending" | "ready" | "degraded" 
 export type NodeEmbeddedServiceSnapshot = {
   "network_name": string;
   "relay_addr"?: string | null;
+  "relay_governance"?: RelayGovernanceAuditSnapshot | null;
   "relay_health"?: RelayHealthSnapshot | null;
   "relay_status"?: NodeEmbeddedServiceStatus;
   "signaling_addr"?: string | null;
@@ -2814,6 +2815,7 @@ export type ProjectedNodeCommandResult = {
 export type ProjectedNodeEmbeddedServiceSnapshot = {
   "network_name": string;
   "relay_addr"?: string | null;
+  "relay_governance"?: RelayGovernanceAuditSnapshot | null;
   "relay_health"?: RelayHealthSnapshot | null;
   "relay_status"?: NodeEmbeddedServiceStatus;
   "signaling_addr"?: string | null;
@@ -2978,6 +2980,23 @@ export type ProjectedNodeSnapshot = {
 };
 
 export type PublicKey = string;
+
+export type RelayGovernanceAction = "enable" | "disable" | "authorization_changed" | "quota_changed" | "session_rejected" | "packet_rejected" | "failover" | "recovered";
+
+export type RelayGovernanceAuditSnapshot = {
+  "dropped_events": number;
+  "events": Array<RelayGovernanceEvent>;
+};
+
+export type RelayGovernanceEvent = {
+  "action": RelayGovernanceAction;
+  "limit"?: number | null;
+  "node_id"?: NodeId | null;
+  "observed"?: number | null;
+  "occurred_at_unix_ms": number;
+  "reason_code": string;
+  "reset_at_unix_ms"?: number | null;
+};
 
 export type RelayHealthIssue = "listener_unavailable" | "network_reachability_unknown" | "network_unreachable" | "protocol_error" | "quota_exhausted" | "resource_pressure" | "forwarding_stalled" | "forwarding_not_observed" | "authorization_expired" | "cpu_measurement_unsupported" | "memory_measurement_unsupported";
 

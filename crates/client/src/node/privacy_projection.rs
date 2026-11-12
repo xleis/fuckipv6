@@ -17,9 +17,9 @@ use fuckipv6_common::domain::{
     InvitationStatusView, IssuedInvitation, JoinRequest, MemberLifecycleChange,
     MemberRemovalPreview, MembershipState, NetworkId, NetworkMemberDirectory,
     NetworkProfileApplyResult, NetworkProfilePreview, NodeId, PolicyTestResult, PrivacyField,
-    PrivacyObjectState, PrivacyViewer, ProjectedActivityEntry, RelayHealthSnapshot,
-    TopologyConnection, TopologyNode, TopologySnapshot, TrafficPolicyTestComparison,
-    TrafficRoutingPageModel, TrafficSessionSnapshot,
+    PrivacyObjectState, PrivacyViewer, ProjectedActivityEntry, RelayGovernanceAuditSnapshot,
+    RelayHealthSnapshot, TopologyConnection, TopologyNode, TopologySnapshot,
+    TrafficPolicyTestComparison, TrafficRoutingPageModel, TrafficSessionSnapshot,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -211,6 +211,11 @@ pub struct ProjectedNodeEmbeddedServiceSnapshot {
     /// Ordinary members receive only the non-sensitive lifecycle projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_health: Option<RelayHealthSnapshot>,
+    /// Payload-free governance events are owner-only. Ordinary members never
+    /// receive the ledger, including rejection reason codes that could reveal
+    /// another member's activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_governance: Option<RelayGovernanceAuditSnapshot>,
 }
 
 /// A member directory that has already passed field projection. The inner
@@ -930,6 +935,10 @@ impl<'a> SnapshotProjector<'a> {
                 .local_owner
                 .then(|| service.relay_health.clone())
                 .flatten(),
+            relay_governance: viewer
+                .local_owner
+                .then(|| service.relay_governance.clone())
+                .flatten(),
         }))
     }
 
@@ -1246,11 +1255,11 @@ mod tests {
         FieldPrivacyPolicy, FieldVisibility, FieldVisibilityRule, MemberLifecycleStatus,
         MembershipRole, MembershipState, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
         NetworkMemberObservationSource, NetworkMemberOnlineState, NetworkMemberPresence,
-        NetworkMemberStatus, NetworkRole, TopologyBoundary, TopologyConnection,
-        TopologyConnectionState, TopologyNode, TopologyNodeHealth, TopologyNodeNetwork,
-        TrafficAction, TrafficDefaultConfirmedBy, TrafficDefaultPolicy, TrafficPolicy,
-        TrafficRoutingHardConstraints, TrafficRoutingPageModel, TrafficRoutingTarget,
-        TrafficRoutingWorkflowState,
+        NetworkMemberStatus, NetworkRole, RelayGovernanceAction, RelayGovernanceEvent,
+        TopologyBoundary, TopologyConnection, TopologyConnectionState, TopologyNode,
+        TopologyNodeHealth, TopologyNodeNetwork, TrafficAction, TrafficDefaultConfirmedBy,
+        TrafficDefaultPolicy, TrafficPolicy, TrafficRoutingHardConstraints,
+        TrafficRoutingPageModel, TrafficRoutingTarget, TrafficRoutingWorkflowState,
     };
 
     use super::*;
@@ -1527,6 +1536,18 @@ mod tests {
                     1_500,
                     None,
                 )),
+                relay_governance: Some(RelayGovernanceAuditSnapshot {
+                    events: vec![RelayGovernanceEvent {
+                        action: RelayGovernanceAction::SessionRejected,
+                        occurred_at_unix_ms: 1_500,
+                        node_id: Some(NodeId::from_public_key(b"remote-peer")),
+                        reason_code: "relay.authorization.denied".into(),
+                        observed: Some(1),
+                        limit: Some(1),
+                        reset_at_unix_ms: None,
+                    }],
+                    dropped_events: 2,
+                }),
             }],
             ui_mode: None,
             tun_capabilities: TunCapabilities::default(),
@@ -1648,6 +1669,7 @@ mod tests {
         assert!(projected.memberships.is_empty());
         assert!(projected.logs.is_empty());
         assert!(projected.embedded_services[0].relay_health.is_none());
+        assert!(projected.embedded_services[0].relay_governance.is_none());
         assert_eq!(projected.traffic_session, snapshot.traffic_session);
         assert_eq!(json["traffic_session"]["state"], "connecting");
         for key in [
@@ -1710,7 +1732,7 @@ mod tests {
     }
 
     #[test]
-    fn relay_health_is_owner_visible_but_hidden_from_ordinary_members() {
+    fn relay_health_and_governance_are_owner_visible_but_hidden_from_ordinary_members() {
         let snapshot = full_snapshot();
         let home = network("home");
         let member = network_context(
@@ -1723,12 +1745,19 @@ mod tests {
         assert!(member_projection.embedded_services[0]
             .relay_health
             .is_none());
+        assert!(member_projection.embedded_services[0]
+            .relay_governance
+            .is_none());
 
         let owner = NodeCommandContext::local_owner_for_snapshot(&snapshot, "owner-test");
         let owner_projection = project_node_snapshot(&snapshot, &owner, 1_500).unwrap();
         assert_eq!(
             owner_projection.embedded_services[0].relay_health,
             snapshot.embedded_services[0].relay_health
+        );
+        assert_eq!(
+            owner_projection.embedded_services[0].relay_governance,
+            snapshot.embedded_services[0].relay_governance
         );
     }
 

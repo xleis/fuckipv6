@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use fuckipv6_common::domain::{NetworkRecord, NodeId, RelayHealthSnapshot};
+use fuckipv6_common::domain::{
+    NetworkRecord, NodeId, RelayGovernanceAuditSnapshot, RelayHealthSnapshot,
+};
 use fuckipv6_common::{
     CoordinatorConfig, Identity, NetworkAllocation, NetworkTicket, RelayEndpoint,
 };
@@ -318,6 +320,16 @@ impl EmbeddedCoordinator {
             Some(server) => Some(server.health_snapshot().await),
             None => None,
         }
+    }
+
+    /// Return the Relay's bounded, payload-free governance ledger. The ledger
+    /// is owned by the current Relay instance and therefore disappears when the
+    /// Relay is explicitly disabled; durable lifecycle evidence remains in the
+    /// node command audit.
+    pub fn relay_governance_snapshot(&self) -> Option<RelayGovernanceAuditSnapshot> {
+        self.relay_server
+            .as_ref()
+            .map(RelayServer::governance_snapshot)
     }
 
     /// Start the local Relay independently of signaling and other node

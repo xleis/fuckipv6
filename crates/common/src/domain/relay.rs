@@ -1859,6 +1859,28 @@ mod tests {
     }
 
     #[test]
+    fn governance_event_requires_bounded_stable_reason_code() {
+        let valid = RelayGovernanceEvent {
+            action: RelayGovernanceAction::PacketRejected,
+            occurred_at_unix_ms: now(),
+            node_id: Some(NodeId::from_public_key(b"relay-governance-node")),
+            reason_code: "relay.packet.payload_too_large".into(),
+            observed: Some(65_537),
+            limit: Some(65_536),
+            reset_at_unix_ms: None,
+        };
+        assert!(valid.validate().is_ok());
+
+        for reason_code in ["".into(), "relay.packet.bad\nreason".into(), "x".repeat(97)] {
+            let event = RelayGovernanceEvent {
+                reason_code,
+                ..valid.clone()
+            };
+            assert!(event.validate().is_err());
+        }
+    }
+
+    #[test]
     fn metadata_boundary_never_exposes_payload_or_keys() {
         let boundary = RelayMetadataBoundary::default();
         boundary.validate().unwrap();

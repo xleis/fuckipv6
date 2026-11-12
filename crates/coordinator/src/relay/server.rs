@@ -3089,6 +3089,15 @@ mod tests {
         let client_a = connect_test_relay(relay_addr, server_pin, &identity_a, ip_a).await?;
         let client_b = connect_test_relay(relay_addr, server_pin, &identity_b, ip_b).await?;
 
+        let node_b = NodeId::from_public_key(&identity_b.public_key());
+        let governance = server.governance_snapshot();
+        assert_eq!(governance.dropped_events, 0);
+        assert!(governance.events.iter().any(|event| {
+            event.action == RelayGovernanceAction::AuthorizationChanged
+                && event.node_id.as_ref() == Some(&node_b)
+                && event.reason_code == "relay.authorization.registered"
+        }));
+
         {
             let clients = server.state.clients.read().await;
             assert_eq!(clients.len(), 2);
@@ -3123,6 +3132,21 @@ mod tests {
         assert_eq!(delivered.src_ip, ip_a);
         assert_eq!(delivered.dst_ip, ip_b);
         assert_eq!(delivered.payload, payload);
+
+        let governance_json = serde_json::to_string(&server.governance_snapshot())?;
+        for forbidden in [
+            ip_a.to_string(),
+            ip_b.to_string(),
+            "relay-through-quic".to_string(),
+            "private_key".to_string(),
+            "session_key".to_string(),
+            "member_display_name".to_string(),
+        ] {
+            assert!(
+                !governance_json.contains(&forbidden),
+                "governance export leaked {forbidden}: {governance_json}"
+            );
+        }
 
         let traffic = session_manager.snapshot().await.traffic;
         assert_eq!(traffic.relay_packets, 1);
@@ -3208,6 +3232,43 @@ mod tests {
             ]
         );
         Ok(())
+    }
+
+    #[test]
+    fn governance_audit_is_bounded_and_counts_evictions() {
+        let audit = RelayGovernanceAudit::default();
+        for index in 0..(MAX_RELAY_GOVERNANCE_EVENTS + 44) {
+            audit.record(RelayGovernanceEvent {
+                action: RelayGovernanceAction::AuthorizationChanged,
+                occurred_at_unix_ms: index as u64,
+                node_id: None,
+                reason_code: "relay.authorization.registered".into(),
+                observed: Some(index as u64),
+                limit: None,
+                reset_at_unix_ms: None,
+            });
+        }
+        audit.record(RelayGovernanceEvent {
+            action: RelayGovernanceAction::PacketRejected,
+            occurred_at_unix_ms: 0,
+            node_id: None,
+            reason_code: "invalid\nreason".into(),
+            observed: None,
+            limit: None,
+            reset_at_unix_ms: None,
+        });
+
+        let snapshot = audit.snapshot();
+        assert_eq!(snapshot.events.len(), MAX_RELAY_GOVERNANCE_EVENTS);
+        assert_eq!(snapshot.dropped_events, 44);
+        assert_eq!(
+            snapshot.events.first().and_then(|event| event.observed),
+            Some(44)
+        );
+        assert_eq!(
+            snapshot.events.last().and_then(|event| event.observed),
+            Some((MAX_RELAY_GOVERNANCE_EVENTS + 43) as u64)
+        );
     }
 
     #[tokio::test]
@@ -3676,6 +3737,18 @@ mod tests {
         )
         .await?;
 
+        let node_b = NodeId::from_public_key(&identity_b.public_key());
+        let governance = server.governance_snapshot();
+        let quota_event = governance
+            .events
+            .iter()
+            .find(|event| event.reason_code == "relay.quota.connections.global")
+            .expect("connection quota rejection must be audited");
+        assert_eq!(quota_event.action, RelayGovernanceAction::SessionRejected);
+        assert_eq!(quota_event.node_id.as_ref(), Some(&node_b));
+        assert_eq!(quota_event.observed, Some(2));
+        assert_eq!(quota_event.limit, Some(1));
+
         let usage = server.usage_snapshot().await;
         assert_eq!(usage.active_connections, 1);
         assert_eq!(usage.rejected_connections, 1);
@@ -3744,6 +3817,11 @@ mod tests {
             MAX_RELAY_STREAM_TASKS,
         )
         .await?;
+        assert!(server
+            .governance_snapshot()
+            .events
+            .iter()
+            .any(|event| event.reason_code == "relay.quota.bandwidth"));
 
         let usage = server.usage_snapshot().await;
         assert_eq!(usage.forwarded_packets, 1);
@@ -3765,6 +3843,10 @@ mod tests {
             MAX_RELAY_STREAM_TASKS,
         )
         .await?;
+        assert!(server.governance_snapshot().events.iter().any(|event| {
+            event.action == RelayGovernanceAction::Recovered
+                && event.reason_code == "relay.forwarding.recovered"
+        }));
 
         let usage = server.usage_snapshot().await;
         assert_eq!(usage.forwarded_packets, 2);
@@ -3831,6 +3913,11 @@ mod tests {
             MAX_RELAY_STREAM_TASKS,
         )
         .await?;
+        assert!(server
+            .governance_snapshot()
+            .events
+            .iter()
+            .any(|event| event.reason_code == "relay.quota.bytes"));
 
         let usage = server.usage_snapshot().await;
         assert_eq!(usage.forwarded_packets, 1);
@@ -3855,6 +3942,10 @@ mod tests {
             MAX_RELAY_STREAM_TASKS,
         )
         .await?;
+        assert!(server.governance_snapshot().events.iter().any(|event| {
+            event.action == RelayGovernanceAction::Recovered
+                && event.reason_code == "relay.forwarding.recovered"
+        }));
 
         let usage = server.usage_snapshot().await;
         assert_eq!(usage.forwarded_packets, 1);
@@ -4258,6 +4349,21 @@ mod tests {
 
         let error = result.unwrap_err().to_string();
         assert!(error.contains("503"));
+        let governance = server.governance_snapshot();
+        let task_limit_event = governance
+            .events
+            .iter()
+            .find(|event| event.reason_code == "relay.packet.task_limit")
+            .expect("stream task saturation must be audited");
+        assert_eq!(
+            task_limit_event.action,
+            RelayGovernanceAction::PacketRejected
+        );
+        assert_eq!(
+            task_limit_event.observed,
+            Some(MAX_RELAY_STREAM_TASKS as u64)
+        );
+        assert_eq!(task_limit_event.limit, Some(MAX_RELAY_STREAM_TASKS as u64));
         let usage = server.usage_snapshot().await;
         assert_eq!(usage.rejected_packets, 1);
         let health = server.health_snapshot().await;

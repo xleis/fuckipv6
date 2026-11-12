@@ -356,6 +356,8 @@ impl FileShareCapability {
             };
             (enabled.root.clone(), enabled.share.clone(), permit)
         };
+        root.probe().map_err(FileCapabilityError::Filesystem)?;
+        permit.ensure_current()?;
         Ok(FileCapabilityLease {
             root,
             share,
@@ -432,6 +434,8 @@ impl FileShareCapability {
                 },
             )
         };
+        root.probe().map_err(FileCapabilityError::Filesystem)?;
+        permit.ensure_current()?;
         operation(&root, &share, permit).map_err(FileCapabilityError::Filesystem)
     }
 
@@ -656,12 +660,16 @@ fn record_audit(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+    use std::fs;
     use std::sync::mpsc;
     use std::time::Duration;
 
     use fuckipv6_common::domain::{
-        ConcurrentNamePolicy, FileAcl, FileDeletePolicy, FileQuota, FileShareId, FileShareMode,
-        NetworkId, SymlinkPolicy, FILE_SHARE_SCHEMA_VERSION,
+        AccessContext, ConcurrentNamePolicy, FileAccessRequest, FileAcl, FileAclEffect,
+        FileAclRule, FileAction, FileDeletePolicy, FileQuota, FileShareId, FileShareMode,
+        NetworkId, NetworkRole, SharedPath, SubjectSelector, SymlinkPolicy,
+        FILE_SHARE_SCHEMA_VERSION,
     };
 
     use super::*;
@@ -705,6 +713,34 @@ mod tests {
                 now_unix_ms,
             )
             .expect("enable File")
+    }
+
+    fn authorized_share() -> FileShare {
+        let mut share = share();
+        let rule = FileAclRule {
+            id: "owner-download".into(),
+            subjects: BTreeSet::from([SubjectSelector::Node(owner())]),
+            path_prefix: SharedPath::root(),
+            actions: BTreeSet::from([FileAction::Download]),
+            effect: FileAclEffect::Allow,
+        };
+        share.network_acl = FileAcl {
+            rules: vec![rule.clone()],
+        };
+        share.local_acl = FileAcl { rules: vec![rule] };
+        share
+    }
+
+    fn owner_context(share: &FileShare) -> AccessContext {
+        AccessContext {
+            network_id: share.network_id.clone(),
+            actor: owner(),
+            role: NetworkRole::Owner,
+            groups: BTreeSet::new(),
+            membership_active: true,
+            recent_reauthentication: true,
+            emergency_coordinator: false,
+        }
     }
 
     #[test]
@@ -815,6 +851,41 @@ mod tests {
             Some(FileShareErrorCode::RootUnavailable)
         );
         assert!(capability.current_share().is_some());
+    }
+
+    #[test]
+    fn replaced_root_rejects_new_capability_lease() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let selected = temporary.path().join("shared");
+        fs::create_dir(&selected).expect("shared root");
+        let capability = FileShareCapability::new();
+        let share = authorized_share();
+        capability
+            .enable(
+                &share,
+                &owner(),
+                selected.to_str().expect("utf8 temp path"),
+                10,
+            )
+            .expect("enable File");
+
+        fs::rename(&selected, temporary.path().join("shared-original")).expect("rename root");
+        fs::create_dir(&selected).expect("replacement root");
+        let error = capability
+            .authorize(
+                &FileAccessRequest {
+                    path: SharedPath::parse("result.bin").expect("path"),
+                    action: FileAction::Download,
+                },
+                &owner_context(&share),
+                true,
+            )
+            .expect_err("replaced root must not issue a lease");
+        assert!(matches!(
+            error,
+            FileCapabilityError::Filesystem(ref error)
+                if error.code() == FileShareErrorCode::RootUnavailable
+        ));
     }
 
     #[test]

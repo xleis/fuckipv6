@@ -37,6 +37,8 @@ quinn = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }
 unicode-segmentation = { workspace = true }
+unicode-casefold = "0.2"
+unicode-normalization = "0.1"
 sys-locale = "0.3"
 
 [dev-dependencies]

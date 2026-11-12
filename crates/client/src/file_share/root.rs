@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(target_os = "linux")]
+use std::os::fd::AsFd;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
@@ -64,6 +66,14 @@ impl LocalShareRoot {
         let selected = ShareRoot::new(root_reference).map_err(|error| {
             FileShareError::new(FileShareErrorCode::RootInvalid, error.to_string())
         })?;
+        #[cfg(not(target_os = "linux"))]
+        if symlink_policy == SymlinkPolicy::AllowWithinRoot {
+            return Err(FileShareError::new(
+                FileShareErrorCode::RootInvalid,
+                "following symbolic links is unavailable on this platform",
+            ));
+        }
+
         let selected_path = PathBuf::from(selected.local_reference());
         let metadata = fs::symlink_metadata(&selected_path).map_err(|error| {
             FileShareError::io(
@@ -856,66 +866,41 @@ impl LocalShareRoot {
         Ok(unsafe { File::from_raw_fd(descriptor) })
     }
 
+    #[cfg(target_os = "linux")]
     fn open_following_within_root(&self, path: &SharedPath) -> FileShareResult<File> {
-        let lexical = self.canonical_root.join(path.as_str());
-        let before = fs::canonicalize(&lexical).map_err(|error| {
-            FileShareError::io(
-                FileShareErrorCode::Io,
-                "shared path could not be canonicalized",
-                error,
-            )
+        use rustix::fs::{openat2, Mode, OFlags, ResolveFlags};
+
+        let descriptor = openat2(
+            self.root_file.as_fd(),
+            path.as_str(),
+            OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS,
+        )
+        .map_err(|error| {
+            let error: io::Error = error.into();
+            let code = match error.raw_os_error() {
+                Some(libc::EXDEV) => FileShareErrorCode::OutsideRoot,
+                Some(libc::ELOOP) => FileShareErrorCode::SymlinkRejected,
+                _ => FileShareErrorCode::Io,
+            };
+            FileShareError::io(code, "shared path could not be opened safely", error)
         })?;
-        self.ensure_inside_root(&before)?;
-        let file = OpenOptions::new()
-            .read(true)
-            .open(&lexical)
-            .map_err(|error| {
-                FileShareError::io(
-                    FileShareErrorCode::Io,
-                    "shared path could not be opened",
-                    error,
-                )
-            })?;
-        let after = fs::canonicalize(&lexical).map_err(|error| {
-            FileShareError::io(
-                FileShareErrorCode::Io,
-                "shared path changed while being opened",
-                error,
-            )
-        })?;
-        self.ensure_inside_root(&after)?;
-        if before != after {
-            return Err(FileShareError::new(
-                FileShareErrorCode::SymlinkRejected,
-                "shared path changed while being opened",
-            ));
-        }
-        #[cfg(unix)]
-        {
-            let opened = file.metadata().map_err(|error| {
-                FileShareError::io(
-                    FileShareErrorCode::Io,
-                    "opened shared path metadata is unavailable",
-                    error,
-                )
-            })?;
-            let target = fs::metadata(&after).map_err(|error| {
-                FileShareError::io(
-                    FileShareErrorCode::Io,
-                    "shared path changed while being opened",
-                    error,
-                )
-            })?;
-            if opened.dev() != target.dev() || opened.ino() != target.ino() {
-                return Err(FileShareError::new(
-                    FileShareErrorCode::SymlinkRejected,
-                    "shared path changed while being opened",
-                ));
-            }
-        }
-        Ok(file)
+        Ok(File::from(descriptor))
     }
 
+    /// Non-Linux adapters fail closed until they can provide an equivalent
+    /// handle-relative resolver. Canonicalize-then-open is not sufficient: an
+    /// attacker can swap a directory for an outside link between those calls.
+    #[cfg(not(target_os = "linux"))]
+    fn open_following_within_root(&self, _path: &SharedPath) -> FileShareResult<File> {
+        Err(FileShareError::new(
+            FileShareErrorCode::SymlinkRejected,
+            "following symbolic links is unavailable on this platform",
+        ))
+    }
+
+    #[cfg(not(unix))]
     fn ensure_inside_root(&self, canonical: &Path) -> FileShareResult<()> {
         canonical.strip_prefix(&self.canonical_root).map_err(|_| {
             FileShareError::new(
@@ -1512,7 +1497,7 @@ mod tests {
         assert_eq!(error.code(), FileShareErrorCode::SymlinkRejected);
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn allow_within_root_follows_only_links_resolving_inside_the_root() {
         let temporary = tempfile::tempdir().expect("tempdir");
@@ -1586,14 +1571,16 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    #[test]
-    fn concurrent_directory_symlink_exchange_never_reads_outside_root() {
+    fn run_concurrent_directory_exchange(policy: SymlinkPolicy) {
         use std::ffi::CString;
         use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
         use std::sync::{Arc, Barrier};
         use std::thread;
 
-        let (temporary, share) = root();
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let share =
+            LocalShareRoot::select(temporary.path().to_str().expect("utf8 temp path"), policy)
+                .expect("share root");
         let outside = tempfile::tempdir().expect("outside");
         fs::create_dir(temporary.path().join("pivot")).expect("inside directory");
         fs::write(temporary.path().join("pivot/result.bin"), b"inside").expect("inside file");
@@ -1656,7 +1643,13 @@ mod tests {
                     assert_eq!(content, b"inside");
                     opened_inside += 1;
                 }
-                Err(error) => assert_eq!(error.code(), FileShareErrorCode::SymlinkRejected),
+                Err(error) => {
+                    let expected = match policy {
+                        SymlinkPolicy::Reject => FileShareErrorCode::SymlinkRejected,
+                        SymlinkPolicy::AllowWithinRoot => FileShareErrorCode::OutsideRoot,
+                    };
+                    assert_eq!(error.code(), expected);
+                }
             }
             thread::yield_now();
         }
@@ -1670,6 +1663,18 @@ mod tests {
         );
         assert!(swaps.load(Ordering::Relaxed) > 0);
         assert!(opened_inside > 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn concurrent_directory_symlink_exchange_never_reads_outside_root() {
+        run_concurrent_directory_exchange(SymlinkPolicy::Reject);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn allow_within_root_atomically_rejects_concurrent_exchange_outside_root() {
+        run_concurrent_directory_exchange(SymlinkPolicy::AllowWithinRoot);
     }
 
     #[cfg(unix)]

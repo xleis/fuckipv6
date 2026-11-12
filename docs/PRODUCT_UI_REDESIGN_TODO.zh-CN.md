@@ -3325,12 +3325,12 @@ duplicate transfer key 或共享 staging 路径会保留首个已恢复文件，
 
 - [x] 所有路径在服务端规范化并验证位于共享根目录；
 - [x] 拒绝绝对路径逃逸、`..`、空字节和平台特殊路径；
-- [ ] 处理大小写、Unicode、尾随分隔符和 Windows 路径差异；
+- [x] 处理大小写、Unicode、尾随分隔符和 Windows 路径差异；
 - [x] 在打开文件前后复核真实路径；
 - [x] 对允许链接的策略明确默认禁止；
 - [x] 建立跨平台路径 fuzz/property 测试；
 - [x] 失败返回稳定安全错误，不泄漏根目录外信息；
-- [ ] 代码审查覆盖 TOCTOU 风险。
+- [x] 代码审查覆盖 TOCTOU 风险。
 
 **验收**：任何输入无法读写共享根目录之外的文件，路径测试覆盖目标平台。
 
@@ -3338,11 +3338,16 @@ duplicate transfer key 或共享 staging 路径会保留首个已恢复文件，
 NUL/控制字符、不可见 Unicode 格式字符（包括双向覆盖字符）、ADS 冒号、尾随点/空格、DOS 设备名、超长路径和组件逐项
 失败关闭，不做可能产生歧义的隐式归一化。`arbitrary_inputs_never_create_an_ambiguous_shared_path` 与
 `generated_portable_paths_obey_component_aware_containment` 对任意 Unicode 字符串和生成路径检查解析后不变量、序列化往返及
-组件边界包含关系；`portable_paths_preserve_case_and_unicode_without_platform_normalization` 覆盖中文、emoji、大小写、尾随分隔符
-和格式控制字符。Linux 适配器以锚定 root fd 逐组件 `openat` + `O_NOFOLLOW` 打开，`AllowWithinRoot` 另在打开前后 canonicalize
-并核对打开的 inode/dev；`allow_within_root_follows_only_links_resolving_inside_the_root` 验证根内链接可读、根外链接返回
-`file_path_outside_root` 且错误文本不包含根外真实路径。跨平台 property 测试已在共享代码执行，但 Windows/macOS 实机路径差异、
-重解析点和 TOCTOU 审查仍未完成，故本项不标完成。
+组件边界包含关系；`portable_paths_preserve_rendering_and_fold_authorization_identity` 覆盖中文、emoji、大小写、NFC/NFD、
+希腊字母 final sigma、尾随分隔符和格式控制字符。路径原始拼写继续用于序列化、显示和 transfer binding；ACL 授权比较则按组件先
+NFC、再 full case fold、再 NFC，因此大小写不敏感文件系统上的大小写变体、规范等价 Unicode 和 final sigma 不会绕过目录 Deny。
+DOS 设备名拒绝同时覆盖 `CONIN$`、`CONOUT$`、`CLOCK$` 与 `COM/LPT` 上标数字变体。Linux `Reject` 适配器以锚定 root fd 逐组件
+`openat` + `O_NOFOLLOW` 打开；`AllowWithinRoot` 使用同一 root fd 的 `openat2`，以
+`ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS` 原子解析并打开目标，不再使用 canonicalize 后再 open 的可竞态窗口。根外解析
+映射为 `OutsideRoot`，链接循环映射为 `SymlinkRejected`；`allow_within_root_follows_only_links_resolving_inside_the_root` 验证根内
+链接可读、根外链接失败关闭且错误文本不包含根外真实路径。非 Linux 平台在选择共享根时直接拒绝 `AllowWithinRoot`，避免退回不安全
+实现。跨平台 property 测试已在共享代码执行，Windows GNU client library 交叉编译通过，但 Windows/macOS 实机路径差异和重解析点
+仍未验收，因此 W15-04 继续保持 `[~]`。
 
 ### W15-05 符号链接、竞态与临时文件 `[~]`
 
@@ -3372,6 +3377,13 @@ macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态以�
 `renameat2(RENAME_EXCHANGE)` 持续原子交换共享根内的真实父目录与指向根外的符号链接，同时连续发布 256 个唯一目标文件。
 成功发布只能落在根内真实目录的锚定句柄中；命中根外链接或目录切换时失败关闭。测试还核对根外目录始终只有预置文件且内容不变；
 连续执行 5 次均通过。该证据只代表 Linux 进程内发布路径，不代表真实网络传输或 macOS/Windows 目录交换语义已验证。
+
+**补充（2026-11-13，`AllowWithinRoot` 并发交换）**：
+`allow_within_root_atomically_rejects_concurrent_exchange_outside_root` 在同样持续执行 `renameat2(RENAME_EXCHANGE)` 的条件下，
+通过 `AllowWithinRoot` 连续打开 `pivot/result.bin` 1,000 次。每次成功打开都必须读到根内 `inside`；命中根外符号链接时必须返回
+`file_path_outside_root`，且不得读取根外内容。该测试与 `concurrent_directory_symlink_exchange_never_reads_outside_root` 分别覆盖
+链接策略的允许根内和完全拒绝两条路径，两者各连续执行 20 次均通过，证明 Linux 根 fd 绑定解析在并发目录交换下不会回退到根外
+目标。Windows 重解析点、macOS 实机竞态以及 macOS/Windows 并发重命名语义仍未验收。
 
 ### W15-06 并发、速率与资源限制 `[~]`
 
@@ -3538,6 +3550,15 @@ ACL 替换共享时，会在下一次 peer 帧之前主动调用 `cancel_all_for
 并发配额扫描的最终证据还包括 `concurrent_quota_scans_keep_independent_directory_cursors`，验证每次扫描使用独立目录游标且
 不会返回部分目录树。GPUI 已使用该领域语义，WebUI 与 Android File 内容表面仍未实现，故三端一致性继续保留为未完成，
 W15-08 保持 `[~]`。
+
+**补充（2026-11-13，portable ACL 身份与 Linux TOCTOU）**：
+`portable_paths_preserve_rendering_and_fold_authorization_identity` 与 ACL Deny 大小写变体断言补齐了 portable 路径授权身份，
+确认原始拼写不丢失且大小写、NFC/NFD、final sigma 等价拼写得到同一 ACL 决策。Linux `AllowWithinRoot` 改为锚定 root fd 的
+`openat2(BENEATH | NO_MAGICLINKS)` 原子解析，配合并发 `renameat2(RENAME_EXCHANGE)` 测试证明无法在 canonicalize/open 之间切换
+到根外链接。`cargo test -p fuckipv6-client --lib file_share::` 的 155 项测试、
+`cargo test -p fuckipv6-client --lib` 的 1,316 项通过/3 项忽略，以及
+`cargo clippy -p fuckipv6-client --lib --tests -- -D warnings` 均通过；Windows GNU client library 交叉编译通过但仍不构成
+Windows 实机路径安全证据。WebUI/Android File 内容表面和真实双节点传输仍未完成，故 W15-08 保持 `[~]`。
 
 **交叉编译检查（2026-11-13，不代表实机验收）**：修复 File runtime 在非 Linux 目标下无条件使用 `PathBuf`，以及若干既有的
 条件编译缺口后，`RUSTC="$(rustup which rustc)" rustup run stable cargo check -p fuckipv6-client --lib --target

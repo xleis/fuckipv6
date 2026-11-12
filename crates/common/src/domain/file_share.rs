@@ -12,6 +12,8 @@ use std::fmt;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use unicode_casefold::UnicodeCaseFold;
+use unicode_normalization::UnicodeNormalization;
 
 use super::ids::{ContentHash, FileId, FileShareId, NetworkId, NodeId, OperationId, TransferId};
 use super::permissions::{AccessContext, SubjectSelector};
@@ -108,14 +110,31 @@ impl SharedPath {
         self.0.split('/').filter(|component| !component.is_empty())
     }
 
-    /// Component-aware containment check. It never compares raw prefixes, so
-    /// `docs` does not contain `docs-private`.
+    /// Component-aware containment check using portable path identity. It never
+    /// compares raw prefixes, so `docs` does not contain `docs-private`.
+    ///
+    /// Components are compared after canonical Unicode normalization and full
+    /// case folding. This intentionally makes ACL prefixes conservative on
+    /// case-sensitive filesystems: a deny for `private` also covers a Windows
+    /// case variant such as `PRIVATE`, and canonically equivalent Unicode
+    /// spellings resolve to the same authorization decision.
     pub fn is_same_or_descendant_of(&self, ancestor: &Self) -> bool {
-        if ancestor.is_root() || self == ancestor {
+        if ancestor.is_root() {
             return true;
         }
-        let prefix = format!("{}/", ancestor.0);
-        self.0.starts_with(&prefix)
+        let mut path_components = self.components();
+        let mut ancestor_components = ancestor.components();
+        loop {
+            match (path_components.next(), ancestor_components.next()) {
+                (Some(path), Some(ancestor)) => {
+                    if portable_component_key(path) != portable_component_key(ancestor) {
+                        return false;
+                    }
+                }
+                (_, None) => return true,
+                (None, Some(_)) => return false,
+            }
+        }
     }
 
     pub fn parent(&self) -> Option<Self> {
@@ -171,19 +190,31 @@ fn validate_component(component: &str) -> DomainResult<()> {
     }
     let stem = component.split('.').next().unwrap_or(component);
     let stem = stem.trim_end_matches([' ', '.']).to_ascii_uppercase();
-    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || stem
-            .strip_prefix("COM")
-            .or_else(|| stem.strip_prefix("LPT"))
-            .is_some_and(|suffix| {
-                matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
-            });
+    let reserved = matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" | "CLOCK$"
+    ) || stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"))
+        .is_some_and(|suffix| {
+            matches!(
+                suffix,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        });
     if reserved {
         return Err(DomainError::invalid_value(
             "shared path uses a reserved platform device name",
         ));
     }
     Ok(())
+}
+
+/// Canonical, case-insensitive identity for one portable path component. The
+/// original spelling remains intact for display, serialization and transfer
+/// binding; only authorization comparisons use this key.
+fn portable_component_key(component: &str) -> String {
+    component.nfc().case_fold().nfc().collect()
 }
 
 fn is_unsafe_format_character(character: char) -> bool {
@@ -1199,6 +1230,10 @@ mod tests {
             "docs/name ",
             "docs/CON.txt",
             "docs/COM1",
+            "docs/CONIN$",
+            "docs/CONOUT$.txt",
+            "docs/CLOCK$",
+            "docs/COM¹.txt",
             "docs/\u{0}name",
             "docs/file:stream",
         ] {
@@ -1211,7 +1246,7 @@ mod tests {
     }
 
     #[test]
-    fn portable_paths_preserve_case_and_unicode_without_platform_normalization() {
+    fn portable_paths_preserve_rendering_and_fold_authorization_identity() {
         for value in ["资料/报告.txt", "café/文件.txt", "emoji-🚀.bin", "Σ/σ.txt"] {
             let path = SharedPath::parse(value).expect("portable Unicode path");
             assert_eq!(path.as_str(), value);
@@ -1224,8 +1259,18 @@ mod tests {
 
         let upper = SharedPath::parse("Docs/Readme.txt").expect("upper path");
         let lower = SharedPath::parse("docs/readme.txt").expect("lower path");
-        assert_ne!(upper, lower);
-        assert!(!lower.is_same_or_descendant_of(&upper));
+        assert_ne!(upper, lower, "transfer bindings retain the exact spelling");
+        assert!(lower.is_same_or_descendant_of(&upper));
+        assert!(upper.is_same_or_descendant_of(&lower));
+        assert!(SharedPath::parse("DOCS/README.TXT")
+            .expect("case variant")
+            .is_same_or_descendant_of(&SharedPath::parse("docs").expect("ancestor")));
+        assert!(SharedPath::parse("ς/结果.txt")
+            .expect("final sigma")
+            .is_same_or_descendant_of(&SharedPath::parse("Σ").expect("capital sigma")));
+        assert!(SharedPath::parse("cafe\u{301}/文件.txt")
+            .expect("decomposed path")
+            .is_same_or_descendant_of(&SharedPath::parse("café").expect("composed path")));
 
         for unsafe_path in ["docs/", "docs//readme", "docs/readme/", "docs/\u{202e}txt"] {
             assert!(SharedPath::parse(unsafe_path).is_err(), "{unsafe_path:?}");
@@ -1304,14 +1349,12 @@ mod tests {
             actions: BTreeSet::from([FileAction::Download]),
             effect: FileAclEffect::Deny,
         });
-        assert_eq!(
-            share.authorize(
-                &access("docs/private/key.txt", FileAction::Download),
-                &member_context,
-                true,
-            ),
-            Err(file_denial(FileAccessDenialCode::AclDenied, "network_acl"))
-        );
+        for path in ["docs/private/key.txt", "DOCS/PRIVATE/KEY.TXT"] {
+            assert_eq!(
+                share.authorize(&access(path, FileAction::Download), &member_context, true),
+                Err(file_denial(FileAccessDenialCode::AclDenied, "network_acl"))
+            );
+        }
         share.local_acl.rules.clear();
         assert_eq!(
             share.authorize(

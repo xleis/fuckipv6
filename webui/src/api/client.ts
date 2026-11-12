@@ -69,6 +69,9 @@ function record(value: unknown): value is Record<string, unknown> {
 
 function recentAuthenticationRequired(payload: unknown): boolean {
   if (!record(payload)) return false;
+  if (payload.code === "recent_authentication_required") {
+    return true;
+  }
 
   const result = payload.result;
   if (record(result) && record(result.outcome)) {
@@ -122,7 +125,10 @@ export function newIdempotencyKey(): string {
 }
 
 function throwHttpError(status: number, payload: unknown): void {
-  if (status === 401 && recentAuthenticationRequired(payload)) {
+  if (
+    (status === 401 || status === 403) &&
+    recentAuthenticationRequired(payload)
+  ) {
     throw new ReauthenticationRequiredError();
   }
   if (status === 401) {

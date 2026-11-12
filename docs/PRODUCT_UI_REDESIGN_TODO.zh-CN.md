@@ -3426,6 +3426,13 @@ macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态以�
 `merge_activity_preserves_producers_deduplicates_and_retains_latest_256` 校验命令与 File 网络活动合并后按 `audit_id` 去重、
 最新优先并再次截断到 256 条。
 
+**补充（2026-11-13，并发配额扫描目录游标隔离）**：Linux 目录扫描不再以 `F_DUPFD_CLOEXEC` 复制锚定目录描述符，因为复制出的
+文件描述符共享目录 offset，并发配额扫描会互相吞掉目录项，实际可观察到 0 条或部分目录树。扫描现改为相对锚定 fd 以
+`openat(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)` 重新打开目录，每次扫描拥有独立的 open file description 和目录
+游标。`concurrent_quota_scans_keep_independent_directory_cursors` 让 8 个线程各执行 100 次扫描，每次都必须得到同一份包含
+520 个条目、2,560 字节的完整目录用量；修复前该测试稳定失败，修复后通过。该证据覆盖 Unix 目录扫描实现和并发配额正确性，
+不改变 macOS/Windows 实机、独立 node/control 满载隔离等仍未完成的验收边界。
+
 **补充（2026-11-13，Linux 满载进程资源基线）**：独立集成测试 `file_runtime_stress_restores_linux_process_resources`
 启用共享根后先预热，再连续执行 1,024 批、每批 4 路上传（其中每 32 批完成并发布一组文件，其余路径直接丢弃），随后执行
 512 批、每批 4 路下载并读取完整源文件。每批满载时校验整个测试进程的 `/proc/self/fd` 仅比基线多 4、线程数不变；每批释放后
@@ -3528,7 +3535,9 @@ ACL 替换共享时，会在下一次 peer 帧之前主动调用 `cancel_all_for
 覆盖；portable 路径与穿越规则见 W15-04；Linux 锚定句柄、目录交换、符号链接和权限撤销见 W15-05；配额、并发、带宽、
 磁盘预留、句柄与 `SIGKILL` 恢复见 W15-06；校验、暂停/恢复、重放和原子落位见 W15-03；ACL/成员撤权与清理见 W15-07。
 这些证据完成 Linux/portable 自动化测试矩阵，但不替代 Windows/macOS 实机验收、真实双节点网络和完整 node 服务重启。
-GPUI 已使用该领域语义，WebUI 与 Android File 内容表面仍未实现，故三端一致性继续保留为未完成，W15-08 保持 `[~]`。
+并发配额扫描的最终证据还包括 `concurrent_quota_scans_keep_independent_directory_cursors`，验证每次扫描使用独立目录游标且
+不会返回部分目录树。GPUI 已使用该领域语义，WebUI 与 Android File 内容表面仍未实现，故三端一致性继续保留为未完成，
+W15-08 保持 `[~]`。
 
 **性能基线（2026-11-13，Linux 本地文件系统）**：新增
 `file_transfer_large_multifile_and_resume_report_linux`。数据集包含一个 64 MiB 单文件上传、一个 64 MiB 单文件下载，两者均在

@@ -1093,33 +1093,29 @@ struct DirectoryStream(*mut libc::DIR);
 #[cfg(unix)]
 impl DirectoryStream {
     fn open(directory: libc::c_int) -> FileShareResult<Self> {
-        let duplicate = unsafe { libc::fcntl(directory, libc::F_DUPFD_CLOEXEC, 0) };
-        if duplicate < 0 {
+        // `F_DUPFD_CLOEXEC` would share the directory offset with the anchored
+        // descriptor, so concurrent quota scans could consume each other's
+        // entries. Reopen `.` relative to the anchor to get an independent
+        // open file description and directory cursor.
+        let descriptor = unsafe {
+            libc::openat(
+                directory,
+                c".".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if descriptor < 0 {
             return Err(FileShareError::io(
                 FileShareErrorCode::Io,
-                "shared directory could not be duplicated for scanning",
+                "shared directory could not be reopened for scanning",
                 io::Error::last_os_error(),
             ));
         }
-        // `F_DUPFD_CLOEXEC` shares the directory offset with the anchored
-        // descriptor. Rewind before handing it to `fdopendir`; otherwise each
-        // quota scan after the first would begin at EOF.
-        if unsafe { libc::lseek(duplicate, 0, libc::SEEK_SET) } < 0 {
-            let error = io::Error::last_os_error();
-            unsafe {
-                libc::close(duplicate);
-            }
-            return Err(FileShareError::io(
-                FileShareErrorCode::Io,
-                "shared directory could not be rewound for scanning",
-                error,
-            ));
-        }
-        let stream = unsafe { libc::fdopendir(duplicate) };
+        let stream = unsafe { libc::fdopendir(descriptor) };
         if stream.is_null() {
             let error = io::Error::last_os_error();
             unsafe {
-                libc::close(duplicate);
+                libc::close(descriptor);
             }
             return Err(FileShareError::io(
                 FileShareErrorCode::Io,
@@ -1814,6 +1810,49 @@ mod tests {
             })
             .expect_err("depth limit must fail closed");
         assert_eq!(depth_error.code(), FileShareErrorCode::ScanLimitExceeded);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn concurrent_quota_scans_keep_independent_directory_cursors() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        const THREADS: usize = 8;
+        const SCANS_PER_THREAD: usize = 100;
+        const DIRECTORIES: usize = 8;
+        const FILES_PER_DIRECTORY: usize = 64;
+
+        let (temporary, share) = root();
+        for directory in 0..DIRECTORIES {
+            let directory = temporary.path().join(format!("dir-{directory}"));
+            fs::create_dir(&directory).expect("nested directory");
+            for file in 0..FILES_PER_DIRECTORY {
+                fs::write(directory.join(format!("file-{file}")), b"quota").expect("nested file");
+            }
+        }
+
+        let expected = share
+            .directory_usage(QuotaScanLimits::default())
+            .expect("baseline scan");
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let mut workers = Vec::with_capacity(THREADS);
+        for _ in 0..THREADS {
+            let share = share.clone();
+            let barrier = barrier.clone();
+            workers.push(thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..SCANS_PER_THREAD {
+                    let usage = share
+                        .directory_usage(QuotaScanLimits::default())
+                        .expect("concurrent scan");
+                    assert_eq!(usage, expected, "concurrent scan observed a partial tree");
+                }
+            }));
+        }
+        for worker in workers {
+            worker.join().expect("quota scan worker");
+        }
     }
 
     #[test]

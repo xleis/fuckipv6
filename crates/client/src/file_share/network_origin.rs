@@ -22,8 +22,10 @@ use thiserror::Error;
 use tokio::sync::Notify;
 
 use super::network::{
-    download_fragment_request_id, FileNetworkFrame, FileNetworkProgress, FileNetworkRequest,
-    FileNetworkResponse, MAX_FILE_NETWORK_FRAGMENT_BYTES, MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES,
+    download_fragment_request_id, validate_network_manifest, FileNetworkFrame, FileNetworkProgress,
+    FileNetworkRequest, FileNetworkResponse, MAX_FILE_NETWORK_FRAGMENT_BYTES,
+    MAX_FILE_NETWORK_MANIFEST_CHUNKS, MAX_FILE_NETWORK_TRANSFER_BYTES,
+    MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES,
 };
 use super::origin_store::{
     FileOriginStore, PersistedDownloadAssembly, PersistedDownloadState, PersistedOriginTransfer,
@@ -1584,6 +1586,7 @@ fn persisted_transfer(
     manifest
         .validate()
         .map_err(|_| FileNetworkOriginError::InvalidRequest)?;
+    validate_network_manifest(&manifest).map_err(|_| FileNetworkOriginError::InvalidRequest)?;
     Ok(PersistedOriginTransfer {
         peer: transfer.peer.clone().into(),
         share_id: transfer.share_id.clone(),
@@ -1677,6 +1680,8 @@ fn restore_paused_transfer(
     entry
         .manifest
         .validate()
+        .map_err(|_| FileNetworkOriginError::InvalidRequest)?;
+    validate_network_manifest(&entry.manifest)
         .map_err(|_| FileNetworkOriginError::InvalidRequest)?;
     let binding = &entry.binding;
     if binding.actor != *local_node_id
@@ -2292,6 +2297,8 @@ fn validate_opened_upload(
     session: &TransferSession,
     local_node_id: &NodeId,
 ) -> Result<(), FileNetworkOriginError> {
+    validate_network_manifest(&session.manifest)
+        .map_err(|_| FileNetworkOriginError::BindingMismatch)?;
     let OriginTransferState::Upload(upload) = &transfer.state else {
         return Err(FileNetworkOriginError::UnexpectedResponse);
     };
@@ -2310,6 +2317,8 @@ fn validate_opened_download(
     session: &TransferSession,
     local_node_id: &NodeId,
 ) -> Result<(), FileNetworkOriginError> {
+    validate_network_manifest(&session.manifest)
+        .map_err(|_| FileNetworkOriginError::BindingMismatch)?;
     validate_session_binding(
         transfer,
         session,
@@ -2618,14 +2627,14 @@ fn build_upload_manifest(
         options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
     let mut source = options.open(source_path)?;
-    if !source.metadata()?.is_file() {
+    let metadata = source.metadata()?;
+    if !metadata.is_file() {
         return Err(FileNetworkOriginError::InvalidSource);
     }
-    let metadata = source.metadata()?;
     let total_bytes = metadata.len();
+    let chunk_count = upload_manifest_chunk_count(total_bytes, chunk_size)?;
     let mut hasher = blake3::Hasher::new();
-    let mut chunks =
-        Vec::with_capacity(usize::try_from(total_bytes.div_ceil(chunk_size)).unwrap_or_default());
+    let mut chunks = Vec::with_capacity(chunk_count);
     let mut offset = 0_u64;
     let mut index = 0_u32;
     while offset < total_bytes {
@@ -2659,6 +2668,23 @@ fn build_upload_manifest(
         .validate()
         .map_err(|_| FileNetworkOriginError::InvalidRequest)?;
     Ok((source, manifest))
+}
+
+fn upload_manifest_chunk_count(
+    total_bytes: u64,
+    chunk_size: u64,
+) -> Result<usize, FileNetworkOriginError> {
+    if chunk_size == 0
+        || chunk_size > MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64
+        || total_bytes > MAX_FILE_NETWORK_TRANSFER_BYTES
+    {
+        return Err(FileNetworkOriginError::InvalidRequest);
+    }
+    let chunk_count = total_bytes.div_ceil(chunk_size);
+    if chunk_count > MAX_FILE_NETWORK_MANIFEST_CHUNKS as u64 {
+        return Err(FileNetworkOriginError::InvalidRequest);
+    }
+    usize::try_from(chunk_count).map_err(|_| FileNetworkOriginError::InvalidRequest)
 }
 
 fn validate_download_destination(destination: &Path) -> Result<(), FileNetworkOriginError> {
@@ -2977,6 +3003,153 @@ mod tests {
             .staging_path
             .clone();
         (destination, local_node_id, store, staging_path)
+    }
+
+    #[test]
+    fn upload_manifest_bounds_are_checked_before_allocation() {
+        assert_eq!(
+            upload_manifest_chunk_count(
+                MAX_FILE_NETWORK_TRANSFER_BYTES,
+                MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64,
+            )
+            .expect("maximum transfer fits"),
+            MAX_FILE_NETWORK_MANIFEST_CHUNKS
+        );
+        assert!(matches!(
+            upload_manifest_chunk_count(
+                MAX_FILE_NETWORK_TRANSFER_BYTES + 1,
+                MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64,
+            ),
+            Err(FileNetworkOriginError::InvalidRequest)
+        ));
+        assert!(matches!(
+            upload_manifest_chunk_count(MAX_FILE_NETWORK_MANIFEST_CHUNKS as u64 + 1, 1),
+            Err(FileNetworkOriginError::InvalidRequest)
+        ));
+    }
+
+    #[test]
+    fn oversized_sparse_upload_is_rejected_before_reading_the_source() {
+        let temporary = TempDir::new().expect("tempdir");
+        let source = temporary.path().join("oversized.bin");
+        let file = File::create(&source).expect("sparse source");
+        file.set_len(MAX_FILE_NETWORK_TRANSFER_BYTES + 1)
+            .expect("sparse length");
+        drop(file);
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id);
+
+        assert!(matches!(
+            origin.start_upload(
+                peer(),
+                share(1),
+                transfer(2),
+                operation(2),
+                path(),
+                &source,
+                MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64,
+                NOW,
+            ),
+            Err(FileNetworkOriginError::InvalidRequest)
+        ));
+        assert_eq!(origin.active_count(), 0);
+        assert!(origin.pop_outbound().is_none());
+    }
+
+    #[test]
+    fn tiny_chunks_cannot_amplify_the_upload_manifest() {
+        let temporary = TempDir::new().expect("tempdir");
+        let source = temporary.path().join("small.bin");
+        std::fs::write(&source, vec![0_u8; MAX_FILE_NETWORK_MANIFEST_CHUNKS + 1]).expect("source");
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id);
+
+        assert!(matches!(
+            origin.start_upload(
+                peer(),
+                share(1),
+                transfer(2),
+                operation(2),
+                path(),
+                &source,
+                1,
+                NOW,
+            ),
+            Err(FileNetworkOriginError::InvalidRequest)
+        ));
+        assert_eq!(origin.active_count(), 0);
+        assert!(origin.pop_outbound().is_none());
+    }
+
+    #[test]
+    fn opened_responses_reject_manifests_outside_network_bounds() {
+        let temporary = TempDir::new().expect("tempdir");
+        let source = temporary.path().join("source.bin");
+        std::fs::write(&source, b"ok").expect("source");
+        let destination = temporary.path().join("download.bin");
+        let invalid_manifest = manifest(&vec![7_u8; MAX_FILE_NETWORK_MANIFEST_CHUNKS + 1], 1);
+        let local_node_id = node(4);
+
+        let mut upload_origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (upload_request_id, _) =
+            start_upload(&mut upload_origin, &local_node_id, &source, 2, b"ok", 2);
+        let key = OriginTransferKey::new(&transfer(2), &operation(2));
+        let OriginTransferState::Upload(upload) = &mut upload_origin
+            .transfers
+            .get_mut(&key)
+            .expect("upload transfer")
+            .state
+        else {
+            panic!("expected upload state");
+        };
+        upload.manifest = invalid_manifest.clone();
+        assert!(matches!(
+            upload_origin.handle_response(
+                &peer(),
+                upload_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(active_session(
+                        &local_node_id,
+                        TransferDirection::Upload,
+                        transfer(2),
+                        operation(2),
+                        invalid_manifest.clone(),
+                    )),
+                },
+                NOW + 1,
+            ),
+            Err(FileNetworkOriginError::BindingMismatch)
+        ));
+        assert_eq!(upload_origin.active_count(), 0);
+
+        let mut download_origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (download_request_id, _) = start_download(
+            &mut download_origin,
+            &local_node_id,
+            &destination,
+            3,
+            b"ok",
+            2,
+        );
+        assert!(matches!(
+            download_origin.handle_response(
+                &peer(),
+                download_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(active_session(
+                        &local_node_id,
+                        TransferDirection::Download,
+                        transfer(3),
+                        operation(3),
+                        invalid_manifest,
+                    )),
+                },
+                NOW + 1,
+            ),
+            Err(FileNetworkOriginError::BindingMismatch)
+        ));
+        assert_eq!(download_origin.active_count(), 0);
+        assert!(!destination.exists());
     }
 
     #[test]
@@ -4725,6 +4898,63 @@ mod tests {
         let (_, _, _, chunk_index, offset, fragment) = take_chunk(&mut restored);
         assert_eq!((chunk_index, offset), (1, 8));
         assert_eq!(fragment, data[8..16]);
+        assert!(store.load().expect("journal").is_empty());
+    }
+
+    #[test]
+    fn restored_upload_rejects_source_growth_before_manifest_allocation() {
+        let temporary = TempDir::new().expect("tempdir");
+        let source = temporary.path().join("source.bin");
+        let data = b"01234567";
+        std::fs::write(&source, data).expect("source");
+        let local_node_id = node(4);
+        let store = FileOriginStore::at(temporary.path(), "network");
+        let mut origin = FileNetworkOrigin::with_store(local_node_id.clone(), store.clone());
+        let (open_request_id, session) =
+            start_upload(&mut origin, &local_node_id, &source, 2, data, 4);
+        origin
+            .pause(&transfer(2), &operation(2), NOW + 1)
+            .expect("pause before open completes");
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 2,
+            )
+            .expect("open response");
+        let (pause_request_id, request) = take_request(&mut origin);
+        assert!(matches!(request, FileNetworkRequest::Pause { .. }));
+        origin
+            .handle_response(
+                &peer(),
+                pause_request_id,
+                FileNetworkResponse::Progress {
+                    progress: progress(TransferState::Paused, 0, data.len() as u64, 0, 2),
+                },
+                NOW + 3,
+            )
+            .expect("pause response");
+        drop(origin);
+        assert_eq!(store.load().expect("journal").len(), 1);
+        OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .expect("open source")
+            .set_len(MAX_FILE_NETWORK_TRANSFER_BYTES + 1)
+            .expect("grow source");
+
+        let mut restored = FileNetworkOrigin::with_store(local_node_id, store.clone());
+        let events = restored.restore_paused(NOW + 4).expect("restore");
+        assert_eq!(restored.active_count(), 0);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].state, TransferState::Failed);
+        assert_eq!(
+            events[0].error_code.as_deref(),
+            Some("file_transfer_invalid_request")
+        );
         assert!(store.load().expect("journal").is_empty());
     }
 

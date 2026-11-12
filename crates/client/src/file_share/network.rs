@@ -196,18 +196,7 @@ impl FileNetworkFrame {
         request_id: [u8; 16],
         response: FileNetworkResponse,
     ) -> Result<Self, FileNetworkError> {
-        if let FileNetworkResponse::Error {
-            code,
-            retry_after_ms,
-        } = &response
-        {
-            if !valid_error_code(code) {
-                return Err(FileNetworkError::InvalidErrorCode);
-            }
-            if retry_after_ms.is_some_and(|delay| delay > 86_400_000) {
-                return Err(FileNetworkError::InvalidErrorCode);
-            }
-        }
+        validate_network_response(&response)?;
         Ok(Self::Response {
             request_id,
             response,
@@ -674,6 +663,9 @@ impl FileNetworkDataPlane {
         if &context.actor != actor || access_epoch == 0 {
             return network_error("file_transfer_peer_mismatch", None);
         }
+        if validate_network_manifest(&manifest).is_err() {
+            return network_error("file_transfer_invalid_manifest", None);
+        }
         if self.session_count() >= MAX_ACTIVE_FILE_NETWORK_SESSIONS {
             return network_error("file_network_session_limit", None);
         }
@@ -765,6 +757,9 @@ impl FileNetworkDataPlane {
             Ok(session) => session,
             Err(error) => return runtime_error(&error),
         };
+        if validate_network_manifest(&session.manifest).is_err() {
+            return network_error("file_transfer_invalid_manifest", None);
+        }
         let (cancel, cancellation) = watch::channel(false);
         let cancellation =
             TransferOperationCancellation::new(session.binding.operation_id.clone(), cancellation);
@@ -1277,20 +1272,29 @@ fn validate_frame(frame: &FileNetworkFrame) -> Result<(), FileNetworkError> {
             }
         }
         FileNetworkFrame::Response { response, .. } => {
-            if let FileNetworkResponse::Error {
-                code,
-                retry_after_ms,
-            } = response
-            {
-                if !valid_error_code(code) || retry_after_ms.is_some_and(|delay| delay > 86_400_000)
-                {
-                    return Err(FileNetworkError::InvalidErrorCode);
-                }
-            }
+            validate_network_response(response)?;
         }
         FileNetworkFrame::Chunk { offset, data, .. } => validate_fragment(*offset, data)?,
     }
     Ok(())
+}
+
+fn validate_network_response(response: &FileNetworkResponse) -> Result<(), FileNetworkError> {
+    match response {
+        FileNetworkResponse::Opened { session } => validate_network_manifest(&session.manifest),
+        FileNetworkResponse::Error {
+            code,
+            retry_after_ms,
+        } => {
+            if !valid_error_code(code) || retry_after_ms.is_some_and(|delay| delay > 86_400_000) {
+                return Err(FileNetworkError::InvalidErrorCode);
+            }
+            Ok(())
+        }
+        FileNetworkResponse::Progress { .. }
+        | FileNetworkResponse::ChunkAccepted { .. }
+        | FileNetworkResponse::Completed { .. } => Ok(()),
+    }
 }
 
 fn valid_error_code(code: &str) -> bool {
@@ -1713,6 +1717,43 @@ mod tests {
     }
 
     #[test]
+    fn opened_response_frames_reject_unbounded_manifests() {
+        let checksum = ContentHash::from_bytes(b"chunk");
+        let chunk_count = MAX_FILE_NETWORK_MANIFEST_CHUNKS + 1;
+        let chunks = (0..chunk_count)
+            .map(|index| FileChunk {
+                index: u32::try_from(index).expect("chunk index"),
+                offset: u64::try_from(index).expect("chunk offset"),
+                length: 1,
+                checksum: checksum.clone(),
+            })
+            .collect();
+        let manifest = TransferManifest {
+            file_id: FileId::from_public_key(b"unbounded-response"),
+            total_bytes: u64::try_from(chunk_count).expect("chunk count"),
+            chunk_size: 1,
+            content_hash: checksum,
+            chunks,
+        };
+        let response = FileNetworkResponse::Opened {
+            session: Box::new(session(manifest)),
+        };
+        assert_eq!(
+            FileNetworkFrame::response([1; 16], response.clone()),
+            Err(FileNetworkError::InvalidManifest)
+        );
+        let frame = FileNetworkFrame::Response {
+            request_id: [1; 16],
+            response,
+        };
+        let encoded = encode_file_network_frame(&frame).expect("encode bounded frame");
+        assert_eq!(
+            decode_file_network_frame(&encoded),
+            Err(FileNetworkError::InvalidManifest)
+        );
+    }
+
+    #[test]
     fn frame_decoder_rejects_unknown_magic_version_and_trailing_bytes() {
         assert_eq!(
             decode_file_network_frame(b"not-a-file-frame"),
@@ -2027,6 +2068,45 @@ mod tests {
                     .expect_err("changed member epoch")
             ),
             "file_transfer_access_revoked"
+        );
+        assert_eq!(data_plane.session_count(), 0);
+    }
+
+    #[test]
+    fn owner_rejects_unbounded_upload_manifests_without_the_frame_decoder() {
+        let temporary = TempDir::new().expect("tempdir");
+        let share = upload_share();
+        let actor = node(4);
+        let runtime = FileRuntime::new(FileShareCapability::new());
+        runtime
+            .enable(
+                &share,
+                &node(9),
+                temporary.path().to_str().expect("utf8 path"),
+                1,
+            )
+            .expect("enable File runtime");
+        let context = upload_context(&share, &actor);
+        let mut data_plane = FileNetworkDataPlane::new(runtime);
+        let invalid_manifest = manifest(&vec![0_u8; MAX_FILE_NETWORK_MANIFEST_CHUNKS + 1], 1);
+
+        assert_eq!(
+            response_code(data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::OpenUpload {
+                    share_id: share.id.clone(),
+                    transfer_id: transfer(2),
+                    operation_id: operation(3),
+                    path: SharedPath::parse("invalid.bin").expect("path"),
+                    manifest: invalid_manifest,
+                },
+                10,
+            )),
+            "file_transfer_invalid_manifest"
         );
         assert_eq!(data_plane.session_count(), 0);
     }

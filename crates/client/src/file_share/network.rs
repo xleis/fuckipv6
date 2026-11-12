@@ -1319,7 +1319,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::file_share::FileShareCapability;
+    use crate::file_share::{FileShareCapability, FILE_TEMP_DIRECTORY};
 
     fn node(byte: u8) -> NodeId {
         NodeId::from_public_key(&[byte])
@@ -1479,6 +1479,18 @@ mod tests {
             .filter_map(|entry| std::fs::read_link(entry.path()).ok())
             .filter(|path| path.starts_with(root))
             .count()
+    }
+
+    fn staging_file_count(root: &std::path::Path) -> usize {
+        let staging = root.join(FILE_TEMP_DIRECTORY);
+        match std::fs::read_dir(staging) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+                .count(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => panic!("read staging directory: {error}"),
+        }
     }
 
     fn open_download(
@@ -2491,6 +2503,65 @@ mod tests {
             ));
         }
         assert_eq!(data_plane.session_count(), 0);
+        #[cfg(target_os = "linux")]
+        assert_eq!(open_descriptors_under(temporary.path()), open_descriptors);
+    }
+
+    #[test]
+    fn dropping_the_data_plane_aborts_sessions_and_cleans_staging() {
+        let temporary = TempDir::new().expect("tempdir");
+        std::fs::write(temporary.path().join("source.bin"), b"download").expect("source");
+        let share = upload_share();
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = FileRuntime::new(FileShareCapability::new());
+        runtime
+            .enable(
+                &share,
+                &share.owner,
+                temporary.path().to_str().expect("utf8 path"),
+                1,
+            )
+            .expect("enable File runtime");
+        #[cfg(target_os = "linux")]
+        let open_descriptors = open_descriptors_under(temporary.path());
+        let mut data_plane = FileNetworkDataPlane::new(runtime.clone());
+        let upload_content = b"upload";
+
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::OpenUpload {
+                    share_id: share.id.clone(),
+                    transfer_id: transfer(2),
+                    operation_id: operation(3),
+                    path: SharedPath::parse("incoming.bin").expect("path"),
+                    manifest: manifest(upload_content, 16),
+                },
+                10,
+            ),
+            FileNetworkResponse::Opened { .. }
+        ));
+        open_download(&mut data_plane, &actor, &context, &share, 4, 5, 10);
+
+        assert_eq!(data_plane.session_count(), 2);
+        assert_eq!(runtime.active_transfer_count(), 2);
+        assert_eq!(staging_file_count(temporary.path()), 1);
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            open_descriptors_under(temporary.path()),
+            open_descriptors + 2
+        );
+
+        drop(data_plane);
+
+        assert_eq!(runtime.active_transfer_count(), 0);
+        assert_eq!(staging_file_count(temporary.path()), 0);
+        assert!(!temporary.path().join("incoming.bin").exists());
         #[cfg(target_os = "linux")]
         assert_eq!(open_descriptors_under(temporary.path()), open_descriptors);
     }

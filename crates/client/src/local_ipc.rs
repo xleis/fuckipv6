@@ -427,6 +427,7 @@ impl LocalServer {
             .context("接受本地 IPC 连接失败")?;
         let peer = peer_identity(&stream)?;
         authorize_peer(peer, current_user_id())?;
+        authorize_network_namespace(peer)?;
         Ok(LocalConnection {
             stream,
             peer,
@@ -575,6 +576,7 @@ pub async fn connect(endpoint: &LocalEndpoint, role: IpcRole) -> Result<LocalCon
     // The socket file is owner-only, but checking the live peer credentials as
     // well prevents accidentally connecting through a replaced/stale path.
     authorize_peer(peer, current_user_id())?;
+    authorize_network_namespace(peer)?;
 
     let mut connection = LocalConnection {
         stream,
@@ -820,6 +822,31 @@ pub fn authorize_peer(peer: PeerIdentity, current_user_id: u32) -> Result<()> {
             current_user_id
         );
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn authorize_network_namespace(peer: PeerIdentity) -> Result<()> {
+    let pid = peer
+        .pid
+        .context("拒绝本地 IPC 连接：无法确认对端网络命名空间（缺少 PID）")?;
+    let peer_namespace = std::fs::metadata(format!("/proc/{pid}/ns/net"))
+        .with_context(|| format!("拒绝本地 IPC 连接：无法读取对端进程 {pid} 的网络命名空间"))?;
+    let current_namespace =
+        std::fs::metadata("/proc/self/ns/net").context("无法读取当前进程网络命名空间")?;
+    if !same_network_namespace(&peer_namespace, &current_namespace) {
+        bail!("拒绝跨网络命名空间的本地 IPC 连接：pid={pid}");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn same_network_namespace(peer: &std::fs::Metadata, current: &std::fs::Metadata) -> bool {
+    peer.dev() == current.dev() && peer.ino() == current.ino()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn authorize_network_namespace(_peer: PeerIdentity) -> Result<()> {
     Ok(())
 }
 
@@ -1086,6 +1113,35 @@ mod tests {
         assert!(error.to_string().contains("拒绝"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_ipc_requires_a_peer_pid_and_matches_the_current_namespace() -> Result<()> {
+        let error = authorize_network_namespace(PeerIdentity {
+            euid: current_user_id(),
+            pid: None,
+        })
+        .expect_err("missing peer PID must fail closed");
+        assert!(error.to_string().contains("缺少 PID"));
+
+        authorize_network_namespace(PeerIdentity {
+            euid: current_user_id(),
+            pid: Some(std::process::id()),
+        })?;
+
+        let directory = test_directory("namespace-identity");
+        std::fs::create_dir_all(&directory)?;
+        let first_path = directory.join("first");
+        let second_path = directory.join("second");
+        std::fs::write(&first_path, b"first")?;
+        std::fs::write(&second_path, b"second")?;
+        let first = std::fs::metadata(&first_path)?;
+        let second = std::fs::metadata(&second_path)?;
+        assert!(same_network_namespace(&first, &first));
+        assert!(!same_network_namespace(&first, &second));
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
     #[test]
     fn protocol_version_is_explicit() {
         assert_eq!(PROTOCOL_VERSION, 3);
@@ -1257,6 +1313,115 @@ mod tests {
     const SECOND_UID_ROLE_ENV: &str = "FUCKIPV6_SECOND_UID_TEST_ROLE";
     #[cfg(target_os = "linux")]
     const SECOND_UID_ENDPOINT_ENV: &str = "FUCKIPV6_SECOND_UID_TEST_ENDPOINT";
+
+    #[cfg(target_os = "linux")]
+    const CROSS_NETNS_TEST_NAME: &str = "local_ipc::tests::real_cross_netns_peer_is_rejected";
+    #[cfg(target_os = "linux")]
+    const CROSS_NETNS_ROLE_ENV: &str = "FUCKIPV6_CROSS_NETNS_TEST_ROLE";
+    #[cfg(target_os = "linux")]
+    const CROSS_NETNS_ENDPOINT_ENV: &str = "FUCKIPV6_CROSS_NETNS_TEST_ENDPOINT";
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn real_cross_netns_peer_is_rejected() -> Result<()> {
+        match std::env::var(CROSS_NETNS_ROLE_ENV) {
+            Ok(role) if role == "peer" => run_cross_netns_peer(),
+            Ok(role) => bail!("未知跨 netns 测试角色: {role}"),
+            Err(std::env::VarError::NotPresent) => bootstrap_cross_netns_test(),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn bootstrap_cross_netns_test() -> Result<()> {
+        use std::process::Command;
+
+        match Command::new("unshare")
+            .args(["--net", "true"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(status) if status.success() => {}
+            Ok(_) => {
+                eprintln!("跳过真实跨 netns 测试：当前系统不允许创建网络命名空间");
+                return Ok(());
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                eprintln!("跳过真实跨 netns 测试：系统缺少 unshare");
+                return Ok(());
+            }
+            Err(error) => return Err(error).context("无法探测网络命名空间能力"),
+        }
+
+        let directory = test_directory("cross-netns");
+        prepare_runtime_directory(&directory)?;
+        let endpoint = LocalEndpoint::Path(directory.join("node.sock"));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let server = runtime.block_on(LocalServer::bind(endpoint.clone(), EndpointRole::Node))?;
+        let LocalEndpoint::Path(socket_path) = &endpoint;
+        let executable = std::env::current_exe().context("无法定位本地 IPC 测试程序")?;
+        let mut child = Command::new("unshare")
+            .arg("--net")
+            .arg("--")
+            .arg(executable)
+            .arg(CROSS_NETNS_TEST_NAME)
+            .arg("--exact")
+            .arg("--nocapture")
+            .env(CROSS_NETNS_ROLE_ENV, "peer")
+            .env(CROSS_NETNS_ENDPOINT_ENV, socket_path)
+            .spawn()
+            .context("无法启动跨 netns peer helper")?;
+
+        let accept_result = runtime.block_on(async {
+            timeout(Duration::from_secs(5), server.accept_raw())
+                .await
+                .context("等待跨 netns peer 连接超时")?
+        });
+        let child_status = wait_for_helper(&mut child)?;
+        let error = accept_result.expect_err("跨 netns peer 必须被拒绝");
+        assert!(
+            error.to_string().contains("跨网络命名空间"),
+            "unexpected rejection: {error:#}"
+        );
+        assert!(
+            child_status.success(),
+            "跨 netns peer helper 失败: {child_status}"
+        );
+
+        server_cleanup(&directory)?;
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn run_cross_netns_peer() -> Result<()> {
+        use tokio::io::AsyncReadExt;
+
+        let socket_path = PathBuf::from(
+            std::env::var_os(CROSS_NETNS_ENDPOINT_ENV).context("跨 netns peer 缺少 socket 路径")?,
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(async {
+            let name = socket_path
+                .to_str()
+                .context("跨 netns peer socket 路径不是 UTF-8")?
+                .to_fs_name::<interprocess::local_socket::GenericFilePath>()
+                .context("无法编码跨 netns peer socket 路径")?;
+            let mut stream = timeout(Duration::from_secs(3), LocalStream::connect(name))
+                .await
+                .map_err(|_| anyhow::anyhow!("跨 netns peer 连接超时"))??;
+            let mut byte = [0u8; 1];
+            match timeout(Duration::from_secs(3), stream.read(&mut byte)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => Ok(()),
+                Ok(Ok(_)) => bail!("跨 netns peer 意外收到 IPC 数据"),
+                Err(_) => bail!("跨 netns peer 未在期限内看到服务端关闭连接"),
+            }
+        })
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

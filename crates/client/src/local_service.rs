@@ -4,7 +4,7 @@
 //! timeouts. This module owns connection lifecycle and delegates every command
 //! to the same [`NodeCommandBus`] used by CLI, GPUI and WebUI adapters.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,7 +50,16 @@ pub async fn serve_node(
     events: NodeEventBus,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    serve_node_inner(server, commands, state, events, shutdown, None).await
+    serve_node_inner(
+        server,
+        commands,
+        state,
+        events,
+        Arc::new(AtomicBool::new(true)),
+        shutdown,
+        None,
+    )
+    .await
 }
 
 /// Serve a node whose lifecycle is owned by this process. Unlike the generic
@@ -62,10 +71,20 @@ pub async fn serve_owned_node(
     commands: NodeCommandBus,
     state: NodeStateStore,
     events: NodeEventBus,
+    ready: Arc<AtomicBool>,
     shutdown: watch::Sender<bool>,
 ) -> Result<()> {
     let shutdown_rx = shutdown.subscribe();
-    serve_node_inner(server, commands, state, events, shutdown_rx, Some(shutdown)).await
+    serve_node_inner(
+        server,
+        commands,
+        state,
+        events,
+        ready,
+        shutdown_rx,
+        Some(shutdown),
+    )
+    .await
 }
 
 async fn serve_node_inner(
@@ -73,6 +92,7 @@ async fn serve_node_inner(
     commands: NodeCommandBus,
     state: NodeStateStore,
     events: NodeEventBus,
+    ready: Arc<AtomicBool>,
     mut shutdown: watch::Receiver<bool>,
     stop_controller: Option<watch::Sender<bool>>,
 ) -> Result<()> {
@@ -105,6 +125,7 @@ async fn serve_node_inner(
                         let task_state = state.clone();
                         let task_events = events.clone();
                         let task_operations = operations.clone();
+                        let task_ready = Arc::clone(&ready);
                         let task_shutdown = shutdown.clone();
                         let task_stop_controller = stop_controller.clone();
                         connections.spawn(async move {
@@ -120,6 +141,7 @@ async fn serve_node_inner(
                                 task_state,
                                 task_events,
                                 task_operations,
+                                task_ready,
                                 task_shutdown,
                                 task_stop_controller,
                             )
@@ -184,6 +206,7 @@ async fn serve_connection(
     state: NodeStateStore,
     events: NodeEventBus,
     operations: OperationService,
+    ready: Arc<AtomicBool>,
     mut shutdown: watch::Receiver<bool>,
     stop_controller: Option<watch::Sender<bool>>,
 ) -> Result<()> {
@@ -209,7 +232,16 @@ async fn serve_connection(
                 }
             },
             FrameKind::Ping => {
-                connection.send(FrameKind::Pong, &()).await?;
+                if ready.load(Ordering::Acquire) {
+                    connection.send(FrameKind::Pong, &()).await?;
+                } else {
+                    send_local_error(
+                        connection,
+                        LocalError::new(IpcErrorCode::BackendUnavailable, "节点数据面仍在启动")
+                            .retryable(true),
+                    )
+                    .await?;
+                }
                 continue;
             }
             other => {
@@ -991,6 +1023,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ipc_ping_is_retryable_until_the_data_plane_is_ready() -> Result<()> {
+        let directory = std::env::temp_dir().join(format!(
+            "fuckipv6-local-service-startup-ready-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory)?;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        let endpoint = LocalEndpoint::Path(directory.join("node.sock"));
+        let events = NodeEventBus::new(8);
+        let state = NodeStateStore::with_events(events.clone());
+        let commands = NodeCommandBus::spawn(Arc::new(EchoHandler), events.clone(), 8);
+        let server = LocalServer::bind(endpoint.clone(), EndpointRole::Node).await?;
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let ready = Arc::new(AtomicBool::new(false));
+        let service = tokio::spawn(serve_owned_node(
+            server,
+            commands,
+            state,
+            events,
+            ready.clone(),
+            shutdown_tx.clone(),
+        ));
+
+        let mut connection = crate::local_ipc::connect(&endpoint, IpcRole::Control).await?;
+        connection.send(FrameKind::Ping, &()).await?;
+        let (kind, payload): (FrameKind, serde_json::Value) = connection.receive().await?;
+        assert_eq!(kind, FrameKind::Error);
+        let error: LocalError = serde_json::from_value(payload)?;
+        assert_eq!(error.code, IpcErrorCode::BackendUnavailable);
+        assert!(error.retryable);
+
+        ready.store(true, Ordering::Release);
+        connection.send(FrameKind::Ping, &()).await?;
+        let (kind, payload): (FrameKind, serde_json::Value) = connection.receive().await?;
+        assert_eq!(kind, FrameKind::Pong);
+        assert_eq!(payload, serde_json::Value::Null);
+        drop(connection);
+
+        shutdown_tx.send(true).context("service already stopped")?;
+        timeout(Duration::from_secs(5), service)
+            .await
+            .context("startup-ready local service shutdown timed out")???;
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn serves_snapshot_and_executes_shared_commands() -> Result<()> {
         let fixture = Fixture::new("requests", 8).await?;
         let snapshot = fixture.state.snapshot().await;
@@ -1414,6 +1497,7 @@ mod tests {
             commands,
             state,
             events,
+            Arc::new(AtomicBool::new(true)),
             shutdown_tx.clone(),
         ));
 

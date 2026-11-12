@@ -29,6 +29,9 @@ pub(crate) use network::{
     trusted_file_member, FileNetworkDataPlane, FileNetworkFrame, FileNetworkRequest,
     FileNetworkResponse, TrustedFileMember,
 };
+pub(crate) use network_origin::{
+    FileNetworkOrigin, FileNetworkOriginError, OriginPeer, OriginTransferEvent,
+};
 pub(crate) use owner_service::FileOwnerService;
 pub use owner_service::{FileOwnerServiceError, FileShareConfiguration, FileSharePreview};
 pub use quota::{DirectoryUsage, QuotaScanLimits, UploadQuotaRequest};

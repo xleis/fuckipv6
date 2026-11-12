@@ -3252,16 +3252,27 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 
 ### W15-03 上传、下载与断点续传 `[~]`
 
-- [ ] 使用受认证、可取消的 operation 开始传输；
+- [x] 使用受认证、可取消的 operation 开始传输；
 - [ ] 上传/下载支持校验、进度、暂停/恢复和最终确认；
 - [ ] 断点续传绑定文件版本、分块和身份，防止拼接错误内容；
 - [ ] 文件更新后旧续传状态失效；
-- [ ] 支持取消并清理临时文件；
+- [x] 支持取消并清理临时文件；
 - [ ] 区分网络中断、权限撤销、配额超限和磁盘错误；
-- [ ] 完成后校验内容哈希并原子落位；
+- [x] 完成后校验内容哈希并原子落位；
 - [ ] 覆盖并发同名、重复完成和重放测试。
 
 **验收**：传输中断可安全恢复，损坏/过期分块不会被合并成成功文件。
+
+**证据（2026-11-12，requester 状态机与本地 IPC）**：新增 `FileNetworkOrigin` requester 状态机，上传按 manifest 发送有界分片，
+下载写入同目录私有 staging 文件，逐块校验长度/offset/checksum，完成响应后校验整文件哈希并以 `persist_noclobber` 原子落位。
+所有响应、分片和完成确认严格绑定已认证 peer、request ID、transfer ID、operation ID；错 peer、错 request ID、乱序、
+重放、损坏分片和失效绑定只会失败关闭对应 operation，并清理其 staging，不影响其他传输。`StartFileTransfer` /
+`CancelFileTransfer` 仅通过本地 IPC 进入运行时的受认证 operation；取消、发送失败和过期都会唤醒事件循环并排空状态机队列。
+`outbound_notify_wakes_all_transfer_transitions`、`fail_pending_request_only_fails_the_correlated_operation_and_wakes_pump`、
+`misattributed_download_fragment_cleans_only_target_staging`、`wrong_download_request_id_cleans_only_target_staging` 和
+`download_reassembles_verifies_and_atomically_persists` 覆盖上述状态转换与失败关闭边界；IPC 成功、运行时错误和断链回复由
+`file_transfer_start_maps_runtime_replies` 与 `file_transfer_cancel_maps_runtime_replies` 覆盖。该证据仍是进程内状态机/IPC
+自动化测试，不代表真实网络传输、断点跨重启或大文件性能验收已经完成。
 
 ### W15-04 canonicalize 与路径边界 `[~]`
 
@@ -3334,15 +3345,23 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 ### W15-07 撤权与传输中断 `[~]`
 
 - [ ] 撤销 ACL 后立即停止新元数据访问和传输请求；
-- [ ] 已有传输在安全边界内终止或完成策略明确；
+- [x] 已有传输在安全边界内终止或完成策略明确；
 - [ ] 成员退出/移除后会话和临时凭据失效；
 - [ ] 节点 owner 关闭共享后所有客户端看到不可用；
-- [ ] 不删除 owner 本地文件；
+- [x] 不删除 owner 本地文件；
 - [ ] 活动记录撤权、中断和清理结果；
 - [ ] 覆盖并发上传中撤权、节点重启和网络断开；
 - [ ] 验证无未授权断点续传恢复。
 
 **验收**：撤权快速生效，不留下可继续下载的会话、URL 或临时凭据。
+
+**证据（2026-11-12，安全边界失败关闭）**：requester 在每次发送前重新核对稳定 NodeId、virtual IP、P2P established session、
+网络 File capability 和权威成员目录；收到响应或下载分片后也会复核成员授权。响应复核失败时按已认证 request ID 只失败对应
+operation，不信任帧内 transfer/operation ID；分片复核失败时取消对应传输。取消和撤权只删除 requester staging，
+owner 本地共享文件不在失败路径中；owner 下载/上传侧撤权取消及 staging 清理已有
+`disabling_capability_cancels_an_active_download`、`disabling_capability_cancels_an_active_upload_and_cleans_staging` 和
+`operation_cancellation_before_upload_finish_never_publishes` 覆盖。尚未启动真实双节点链路演练网络断开、成员并发撤权和
+节点重启，因此 W15-07 继续保持 `[~]`。
 
 ### W15-08 File 非目标与发布证据 `[ ]`
 

@@ -11,6 +11,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::Ipv6Addr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use fuckipv6_common::domain::{
     ContentHash, FileChunk, FileId, FileShareId, FileTransferError, NodeId, OperationId,
@@ -18,6 +19,7 @@ use fuckipv6_common::domain::{
 };
 use tempfile::NamedTempFile;
 use thiserror::Error;
+use tokio::sync::Notify;
 
 use super::network::{
     download_fragment_request_id, FileNetworkFrame, FileNetworkProgress, FileNetworkRequest,
@@ -199,6 +201,7 @@ pub(crate) struct FileNetworkOrigin {
     transfers: std::collections::BTreeMap<OriginTransferKey, OriginTransfer>,
     outbound: VecDeque<OriginOutbound>,
     events: VecDeque<OriginTransferEvent>,
+    outbound_notify: Arc<Notify>,
 }
 
 impl FileNetworkOrigin {
@@ -208,6 +211,7 @@ impl FileNetworkOrigin {
             transfers: std::collections::BTreeMap::new(),
             outbound: VecDeque::new(),
             events: VecDeque::new(),
+            outbound_notify: Arc::new(Notify::new()),
         }
     }
 
@@ -257,6 +261,7 @@ impl FileNetworkOrigin {
         )?;
         self.push_event(transfer.event(TransferState::Queued, None));
         self.transfers.insert(key, transfer);
+        self.outbound_notify.notify_one();
         Ok(())
     }
 
@@ -314,6 +319,7 @@ impl FileNetworkOrigin {
         });
         self.push_event(transfer.event(TransferState::Queued, None));
         self.transfers.insert(key, transfer);
+        self.outbound_notify.notify_one();
         Ok(())
     }
 
@@ -321,10 +327,19 @@ impl FileNetworkOrigin {
         self.outbound.pop_front()
     }
 
+    pub(crate) fn outbound_notify(&self) -> Arc<Notify> {
+        self.outbound_notify.clone()
+    }
+
+    pub(crate) fn local_node_id(&self) -> &NodeId {
+        &self.local_node_id
+    }
+
     pub(crate) fn drain_events(&mut self) -> Vec<OriginTransferEvent> {
         self.events.drain(..).collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn active_count(&self) -> usize {
         self.transfers.len()
     }
@@ -370,6 +385,10 @@ impl FileNetworkOrigin {
         if transfer.peer != *peer {
             return Err(FileNetworkOriginError::PeerMismatch);
         }
+        // Response processing may queue the next upload fragment, finish
+        // request, or cancellation. Wake the runtime pump on every matched
+        // response so transfer progress is not tied to a polling interval.
+        self.outbound_notify.notify_one();
         if now_unix_ms >= transfer.deadline_unix_ms {
             self.fail_transfer_at(&key, now_unix_ms, "file_transfer_expired", false);
             return Ok(());
@@ -468,9 +487,22 @@ impl FileNetworkOrigin {
                 .transfers
                 .get_mut(&key)
                 .ok_or(FileNetworkOriginError::UnknownResponse)?;
-            if transfer.peer != *peer || transfer.direction != TransferDirection::Download {
+            if transfer.peer != *peer {
+                self.outbound_notify.notify_one();
+                self.fail_transfer_at(
+                    &key,
+                    now_unix_ms,
+                    FileNetworkOriginError::PeerMismatch.code(),
+                    true,
+                );
                 return Err(FileNetworkOriginError::PeerMismatch);
             }
+            if transfer.direction != TransferDirection::Download {
+                return Err(FileNetworkOriginError::PeerMismatch);
+            }
+            // Receiving the final fragment queues a Finish request. Signal
+            // even for intermediate fragments so events are drained promptly.
+            self.outbound_notify.notify_one();
             if now_unix_ms >= transfer.deadline_unix_ms {
                 self.fail_transfer_at(&key, now_unix_ms, "file_transfer_expired", false);
                 return Ok(());
@@ -523,12 +555,46 @@ impl FileNetworkOrigin {
         now_unix_ms: u64,
         code: &str,
     ) -> bool {
-        self.fail_transfer_at(
+        let failed = self.fail_transfer_at(
             &OriginTransferKey::new(transfer_id, operation_id),
             now_unix_ms,
             code,
             false,
-        )
+        );
+        if failed {
+            self.outbound_notify.notify_one();
+        }
+        failed
+    }
+
+    /// Fail the operation whose exact authenticated request id is outstanding.
+    /// This is used when the runtime can no longer authorize a response before
+    /// it reaches the state machine, so the local operation and any staging
+    /// file must be closed without trusting the frame's transfer identifiers.
+    pub(crate) fn fail_pending_request(
+        &mut self,
+        request_id: [u8; 16],
+        now_unix_ms: u64,
+        code: &str,
+    ) -> bool {
+        let key = self
+            .transfers
+            .iter()
+            .find(|(_, transfer)| {
+                transfer
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.request_id == request_id)
+            })
+            .map(|(key, _)| key.clone());
+        let Some(key) = key else {
+            return false;
+        };
+        let failed = self.fail_transfer_at(&key, now_unix_ms, code, false);
+        if failed {
+            self.outbound_notify.notify_one();
+        }
+        failed
     }
 
     pub(crate) fn cancel(
@@ -537,12 +603,16 @@ impl FileNetworkOrigin {
         operation_id: &OperationId,
         now_unix_ms: u64,
     ) -> bool {
-        self.fail_transfer_at(
+        let cancelled = self.fail_transfer_at(
             &OriginTransferKey::new(transfer_id, operation_id),
             now_unix_ms,
             "file_transfer_cancelled",
             true,
-        )
+        );
+        if cancelled {
+            self.outbound_notify.notify_one();
+        }
+        cancelled
     }
 
     /// Expire timed-out operations and remove any partial staging file.
@@ -553,8 +623,12 @@ impl FileNetworkOrigin {
             .filter(|(_, transfer)| now_unix_ms >= transfer.deadline_unix_ms)
             .map(|(key, _)| key.clone())
             .collect::<Vec<_>>();
+        let had_expired = !expired.is_empty();
         for key in expired {
             self.fail_transfer_at(&key, now_unix_ms, "file_transfer_expired", true);
+        }
+        if had_expired {
+            self.outbound_notify.notify_one();
         }
     }
 
@@ -2052,6 +2126,192 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn misattributed_download_fragment_cleans_only_target_staging() {
+        let temporary = TempDir::new().expect("tempdir");
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let notify = origin.outbound_notify();
+        let (first_request_id, first_session) = start_download(
+            &mut origin,
+            &local_node_id,
+            &temporary.path().join("first.bin"),
+            2,
+            b"first",
+            4,
+        );
+        expect_outbound_notification(&notify).await;
+        let (second_request_id, second_session) = start_download(
+            &mut origin,
+            &local_node_id,
+            &temporary.path().join("second.bin"),
+            3,
+            b"second",
+            4,
+        );
+        expect_outbound_notification(&notify).await;
+
+        origin
+            .handle_response(
+                &peer(),
+                first_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(first_session),
+                },
+                NOW + 1,
+            )
+            .expect("first open response");
+        expect_outbound_notification(&notify).await;
+        origin
+            .handle_response(
+                &peer(),
+                second_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(second_session),
+                },
+                NOW + 1,
+            )
+            .expect("second open response");
+        expect_outbound_notification(&notify).await;
+        assert_eq!(
+            std::fs::read_dir(temporary.path())
+                .expect("read dir")
+                .count(),
+            2
+        );
+
+        let wrong_peer = OriginPeer {
+            node_id: node(8),
+            virtual_ip: Ipv6Addr::LOCALHOST,
+        };
+        assert!(matches!(
+            origin.handle_chunk(
+                &wrong_peer,
+                download_fragment_request_id(&operation(2), 0, 0),
+                &transfer(2),
+                &operation(2),
+                0,
+                0,
+                b"firs",
+                NOW + 2,
+            ),
+            Err(FileNetworkOriginError::PeerMismatch)
+        ));
+        expect_outbound_notification(&notify).await;
+        assert!(!origin.owns_download(&peer().node_id, &transfer(2), &operation(2)));
+        assert!(origin.owns_download(&peer().node_id, &transfer(3), &operation(3)));
+        assert_eq!(
+            std::fs::read_dir(temporary.path())
+                .expect("read dir")
+                .count(),
+            1
+        );
+        let (_, cancel_request) = take_request(&mut origin);
+        assert!(matches!(cancel_request, FileNetworkRequest::Cancel { .. }));
+
+        origin
+            .handle_chunk(
+                &peer(),
+                download_fragment_request_id(&operation(3), 0, 0),
+                &transfer(3),
+                &operation(3),
+                0,
+                0,
+                b"seco",
+                NOW + 3,
+            )
+            .expect("unrelated download remains active");
+        assert!(origin.owns_download(&peer().node_id, &transfer(3), &operation(3)));
+    }
+
+    #[tokio::test]
+    async fn wrong_download_request_id_cleans_only_target_staging() {
+        let temporary = TempDir::new().expect("tempdir");
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let notify = origin.outbound_notify();
+        let (first_request_id, first_session) = start_download(
+            &mut origin,
+            &local_node_id,
+            &temporary.path().join("first.bin"),
+            2,
+            b"first",
+            4,
+        );
+        expect_outbound_notification(&notify).await;
+        let (second_request_id, second_session) = start_download(
+            &mut origin,
+            &local_node_id,
+            &temporary.path().join("second.bin"),
+            3,
+            b"second",
+            4,
+        );
+        expect_outbound_notification(&notify).await;
+
+        origin
+            .handle_response(
+                &peer(),
+                first_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(first_session),
+                },
+                NOW + 1,
+            )
+            .expect("first open response");
+        expect_outbound_notification(&notify).await;
+        origin
+            .handle_response(
+                &peer(),
+                second_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(second_session),
+                },
+                NOW + 1,
+            )
+            .expect("second open response");
+        expect_outbound_notification(&notify).await;
+
+        assert!(matches!(
+            origin.handle_chunk(
+                &peer(),
+                [0xff; 16],
+                &transfer(2),
+                &operation(2),
+                0,
+                0,
+                b"firs",
+                NOW + 2,
+            ),
+            Err(FileNetworkOriginError::ChunkOutOfOrder)
+        ));
+        expect_outbound_notification(&notify).await;
+        assert!(!origin.owns_download(&peer().node_id, &transfer(2), &operation(2)));
+        assert!(origin.owns_download(&peer().node_id, &transfer(3), &operation(3)));
+        assert_eq!(
+            std::fs::read_dir(temporary.path())
+                .expect("read dir")
+                .count(),
+            1
+        );
+        let (_, cancel_request) = take_request(&mut origin);
+        assert!(matches!(cancel_request, FileNetworkRequest::Cancel { .. }));
+
+        origin
+            .handle_chunk(
+                &peer(),
+                download_fragment_request_id(&operation(3), 0, 0),
+                &transfer(3),
+                &operation(3),
+                0,
+                0,
+                b"seco",
+                NOW + 3,
+            )
+            .expect("unrelated download remains active");
+        assert!(origin.owns_download(&peer().node_id, &transfer(3), &operation(3)));
+    }
+
     #[test]
     fn empty_files_complete_without_data_fragments() {
         let temporary = TempDir::new().expect("tempdir");
@@ -2231,5 +2491,151 @@ mod tests {
             origin.push_event(event.clone());
         }
         assert_eq!(origin.drain_events().len(), MAX_ORIGIN_EVENTS);
+    }
+
+    async fn expect_outbound_notification(notify: &Arc<Notify>) {
+        tokio::time::timeout(std::time::Duration::from_millis(100), notify.notified())
+            .await
+            .expect("outbound notification");
+    }
+
+    #[tokio::test]
+    async fn outbound_notify_wakes_all_transfer_transitions() {
+        let temporary = TempDir::new().expect("tempdir");
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let notify = origin.outbound_notify();
+        let data = b"abcdefgh";
+
+        let (request_id, session) = start_download(
+            &mut origin,
+            &local_node_id,
+            &temporary.path().join("download.bin"),
+            2,
+            data,
+            4,
+        );
+        expect_outbound_notification(&notify).await;
+
+        origin
+            .handle_response(
+                &peer(),
+                request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+        expect_outbound_notification(&notify).await;
+
+        origin
+            .handle_chunk(
+                &peer(),
+                download_fragment_request_id(&operation(2), 0, 0),
+                &transfer(2),
+                &operation(2),
+                0,
+                0,
+                &data[..4],
+                NOW + 2,
+            )
+            .expect("first download chunk");
+        expect_outbound_notification(&notify).await;
+
+        assert!(origin.cancel(&transfer(2), &operation(2), NOW + 3));
+        expect_outbound_notification(&notify).await;
+        let (_, cancel_request) = take_request(&mut origin);
+        assert!(matches!(cancel_request, FileNetworkRequest::Cancel { .. }));
+
+        start_download(
+            &mut origin,
+            &local_node_id,
+            &temporary.path().join("failed.bin"),
+            3,
+            data,
+            4,
+        );
+        assert!(origin.fail_transfer(
+            &transfer(3),
+            &operation(3),
+            NOW + 4,
+            "file_transfer_send_failed",
+        ));
+        expect_outbound_notification(&notify).await;
+
+        start_download(
+            &mut origin,
+            &local_node_id,
+            &temporary.path().join("expired.bin"),
+            5,
+            data,
+            4,
+        );
+        origin.expire(NOW + FILE_NETWORK_TRANSFER_TTL_MS);
+        expect_outbound_notification(&notify).await;
+    }
+
+    #[tokio::test]
+    async fn fail_pending_request_only_fails_the_correlated_operation_and_wakes_pump() {
+        let temporary = TempDir::new().expect("tempdir");
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let notify = origin.outbound_notify();
+        let (first_request_id, _) = start_download(
+            &mut origin,
+            &local_node_id,
+            &temporary.path().join("first.bin"),
+            2,
+            b"first",
+            4,
+        );
+        expect_outbound_notification(&notify).await;
+        let (second_request_id, second_session) = start_download(
+            &mut origin,
+            &local_node_id,
+            &temporary.path().join("second.bin"),
+            3,
+            b"second",
+            4,
+        );
+        expect_outbound_notification(&notify).await;
+
+        assert!(origin.fail_pending_request(
+            first_request_id,
+            NOW + 1,
+            "file_transfer_authorization_lost",
+        ));
+        expect_outbound_notification(&notify).await;
+        assert_eq!(origin.active_count(), 1);
+        assert!(!origin.owns_download(&peer().node_id, &transfer(2), &operation(2)));
+        assert!(origin.owns_download(&peer().node_id, &transfer(3), &operation(3)));
+        assert!(!origin.fail_pending_request(
+            first_request_id,
+            NOW + 2,
+            "file_transfer_authorization_lost",
+        ));
+
+        origin
+            .handle_response(
+                &peer(),
+                second_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(second_session),
+                },
+                NOW + 3,
+            )
+            .expect("unrelated operation stays correlated");
+        let failed = origin
+            .drain_events()
+            .into_iter()
+            .find(|event| {
+                event.operation_id == operation(2) && event.state == TransferState::Failed
+            })
+            .expect("failed event");
+        assert_eq!(
+            failed.error_code.as_deref(),
+            Some("file_transfer_authorization_lost")
+        );
     }
 }

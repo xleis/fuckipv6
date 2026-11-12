@@ -7533,6 +7533,14 @@ mod tests {
                                     ipc::RuntimeCommand::ProbePeer { reply, .. } => {
                                         let _ = reply.send(Err("测试运行时不支持探测".into()));
                                     }
+                                    ipc::RuntimeCommand::StartFileTransfer { reply, .. } => {
+                                        let _ =
+                                            reply.send(Err("测试运行时不支持 File 传输".into()));
+                                    }
+                                    ipc::RuntimeCommand::CancelFileTransfer { reply, .. } => {
+                                        let _ =
+                                            reply.send(Err("测试运行时不支持 File 传输".into()));
+                                    }
                                     ipc::RuntimeCommand::Disconnect { reply } => {
                                         let _ = reply.send(Ok(()));
                                         break;

@@ -8004,7 +8004,7 @@ mod tests {
             after
                 .capabilities
                 .state(fuckipv6_common::domain::CapabilityKind::File),
-            fuckipv6_common::domain::CapabilityState::Unsupported
+            fuckipv6_common::domain::CapabilityState::Disabled
         );
         assert_eq!(after_network.roles, before_network.roles);
         assert_eq!(after_network.peer_count, before_network.peer_count);

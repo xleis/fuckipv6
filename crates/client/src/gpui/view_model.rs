@@ -8117,6 +8117,9 @@ mod tests {
             .find(|page| page.id == "settings")
             .expect("settings page");
         let mut snapshot = populated_snapshot();
+        snapshot.exit_node_capabilities = fuckipv6_common::ExitNodeCapabilities::for_platform(
+            fuckipv6_common::ExitNodePlatform::Windows,
+        );
         snapshot.ui_mode = Some(crate::ui::UiModeResolution {
             requested: crate::ui::UiModeRequest::Auto,
             effective: UiMode::Gpui,
@@ -8194,11 +8197,18 @@ mod tests {
             .expect("platform limitations row");
         assert!(platform_limits
             .detail
+            .contains(t(Locale::ZhCn, "capability.exit")));
+        assert!(!platform_limits
+            .detail
             .contains(t(Locale::ZhCn, "capability.file")));
-        assert!(services
-            .rows
-            .iter()
-            .any(|row| row.detail == t(Locale::ZhCn, "status.capability.unsupported")));
+        assert!(services.rows.iter().any(|row| {
+            row.title == t(Locale::ZhCn, "capability.file")
+                && row.detail == t(Locale::ZhCn, "status.capability.disabled")
+        }));
+        assert!(services.rows.iter().any(|row| {
+            row.title == t(Locale::ZhCn, "capability.exit")
+                && row.detail == t(Locale::ZhCn, "status.capability.unsupported")
+        }));
 
         let discovery = &model.sections[3];
         assert!(discovery.rows.iter().any(|row| {

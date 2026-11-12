@@ -251,6 +251,10 @@ impl LocalShareRoot {
         }
     }
 
+    /// Open a shared file. Unix hard links are ordinary directory entries:
+    /// selecting a root authorizes every name below it, and the adapter does not
+    /// attempt to infer an inode's other paths. Owners must not hard-link
+    /// sensitive files from outside the selected root.
     pub fn open_read(&self, path: &SharedPath) -> FileShareResult<File> {
         self.reject_root_io(path)?;
         match self.symlink_policy {
@@ -1290,6 +1294,120 @@ mod tests {
         let path = SharedPath::parse("outside/secret").expect("path");
         let error = share.open_read(&path).expect_err("symlink must fail");
         assert_eq!(error.code(), FileShareErrorCode::SymlinkRejected);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn concurrent_directory_symlink_exchange_never_reads_outside_root() {
+        use std::ffi::CString;
+        use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let (temporary, share) = root();
+        let outside = tempfile::tempdir().expect("outside");
+        fs::create_dir(temporary.path().join("pivot")).expect("inside directory");
+        fs::write(temporary.path().join("pivot/result.bin"), b"inside").expect("inside file");
+        fs::write(outside.path().join("result.bin"), b"outside-secret").expect("outside file");
+        std::os::unix::fs::symlink(outside.path(), temporary.path().join("alternate"))
+            .expect("outside symlink");
+
+        let pivot = CString::new(temporary.path().join("pivot").to_str().expect("utf8 path"))
+            .expect("path without NUL");
+        let alternate = CString::new(
+            temporary
+                .path()
+                .join("alternate")
+                .to_str()
+                .expect("utf8 path"),
+        )
+        .expect("path without NUL");
+        let stop = Arc::new(AtomicBool::new(false));
+        let swaps = Arc::new(AtomicUsize::new(0));
+        let rename_error = Arc::new(AtomicI32::new(0));
+        let barrier = Arc::new(Barrier::new(2));
+        let attacker = {
+            let stop = stop.clone();
+            let swaps = swaps.clone();
+            let rename_error = rename_error.clone();
+            let barrier = barrier.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                while !stop.load(Ordering::Relaxed) {
+                    let result = unsafe {
+                        libc::renameat2(
+                            libc::AT_FDCWD,
+                            pivot.as_ptr(),
+                            libc::AT_FDCWD,
+                            alternate.as_ptr(),
+                            libc::RENAME_EXCHANGE,
+                        )
+                    };
+                    if result != 0 {
+                        rename_error.store(
+                            io::Error::last_os_error().raw_os_error().unwrap_or(-1),
+                            Ordering::Relaxed,
+                        );
+                        break;
+                    }
+                    swaps.fetch_add(1, Ordering::Relaxed);
+                    thread::yield_now();
+                }
+            })
+        };
+
+        barrier.wait();
+        let path = SharedPath::parse("pivot/result.bin").expect("path");
+        let mut opened_inside = 0;
+        for _ in 0..1_000 {
+            match share.open_read(&path) {
+                Ok(mut file) => {
+                    let mut content = Vec::new();
+                    file.read_to_end(&mut content).expect("read");
+                    assert_eq!(content, b"inside");
+                    opened_inside += 1;
+                }
+                Err(error) => assert_eq!(error.code(), FileShareErrorCode::SymlinkRejected),
+            }
+            thread::yield_now();
+        }
+        stop.store(true, Ordering::Relaxed);
+        attacker.join().expect("attacker thread");
+
+        assert_eq!(
+            rename_error.load(Ordering::Relaxed),
+            0,
+            "rename exchange must be supported"
+        );
+        assert!(swaps.load(Ordering::Relaxed) > 0);
+        assert!(opened_inside > 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hard_link_inside_root_is_authorized_as_a_directory_entry() {
+        let temporary = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::NamedTempFile::new().expect("outside file");
+        fs::write(outside.path(), b"hard-linked").expect("write outside file");
+        fs::hard_link(outside.path(), temporary.path().join("linked.bin")).expect("hard link");
+        let share = LocalShareRoot::select(
+            temporary.path().to_str().expect("utf8 temp path"),
+            SymlinkPolicy::Reject,
+        )
+        .expect("share root");
+
+        let path = SharedPath::parse("linked.bin").expect("path");
+        let mut file = share.open_read(&path).expect("open hard link");
+        let mut content = Vec::new();
+        file.read_to_end(&mut content).expect("read");
+        assert_eq!(content, b"hard-linked");
+        assert_eq!(
+            share
+                .directory_usage(QuotaScanLimits::default())
+                .expect("quota scan")
+                .total_bytes,
+            11
+        );
     }
 
     #[cfg(unix)]

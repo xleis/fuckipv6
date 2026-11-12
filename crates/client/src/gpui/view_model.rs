@@ -12,14 +12,15 @@ use fuckipv6_common::domain::{
     InvitationCode, InvitationId, InvitationRedeemRequest, MemberLifecycleAction, MembershipRole,
     NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
     NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId,
-    RelayHealthIssue, RelayHealthSnapshot, RelayHealthStatus, RelayLifecycleState,
-    RelayLimitPolicy, RelayLimitSource, RelayMeasurementState, RelayReachabilityState,
-    TopologyNode, TopologyNodeHealth, TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy,
-    TrafficFlow, TrafficMatch, TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput,
-    TrafficProtectionState, TrafficProtocol, TrafficRoutingHitSample, TrafficRoutingObservation,
-    TrafficRoutingPageModel, TrafficRoutingRuleActivityEffect, TrafficRoutingRuleImpactView,
-    TrafficRoutingTarget, TrafficRoutingTargetKind, TrafficRoutingTargetRef,
-    TrafficRoutingWorkflowState, TrafficSessionEventKind,
+    RelayGovernanceAction, RelayGovernanceAuditSnapshot, RelayGovernanceEvent, RelayHealthIssue,
+    RelayHealthSnapshot, RelayHealthStatus, RelayLifecycleState, RelayLimitPolicy,
+    RelayLimitSource, RelayMeasurementState, RelayReachabilityState, TopologyNode,
+    TopologyNodeHealth, TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy, TrafficFlow,
+    TrafficMatch, TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput, TrafficProtectionState,
+    TrafficProtocol, TrafficRoutingHitSample, TrafficRoutingObservation, TrafficRoutingPageModel,
+    TrafficRoutingRuleActivityEffect, TrafficRoutingRuleImpactView, TrafficRoutingTarget,
+    TrafficRoutingTargetKind, TrafficRoutingTargetRef, TrafficRoutingWorkflowState,
+    TrafficSessionEventKind,
 };
 use fuckipv6_common::i18n::{format_integer, t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
@@ -6171,6 +6172,40 @@ fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
             })
         })
         .collect::<Vec<_>>();
+    let governance_rows = snapshot
+        .embedded_services
+        .iter()
+        .flat_map(|service| {
+            let Some(audit) = service.relay_governance.as_ref() else {
+                return Vec::new();
+            };
+            let mut rows = audit
+                .events
+                .iter()
+                .map(|event| {
+                    row(
+                        format!(
+                            "{} · {}",
+                            service.network_name,
+                            relay_governance_action_label(locale, event.action)
+                        ),
+                        relay_governance_event_detail(locale, event),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if audit.dropped_events > 0 {
+                rows.push(row(
+                    service.network_name.clone(),
+                    tr(
+                        locale,
+                        "relay.governance.dropped_detail",
+                        &[("dropped", &relay_format_u64(locale, audit.dropped_events))],
+                    ),
+                ));
+            }
+            rows
+        })
+        .collect::<Vec<_>>();
     let healthy_services = snapshot
         .embedded_services
         .iter()
@@ -6236,6 +6271,11 @@ fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
                 t(locale, "gpui.section.relay_usage"),
                 t(locale, "gpui.empty.relay_usage"),
                 usage_rows,
+            ),
+            section(
+                t(locale, "gpui.section.relay_governance"),
+                t(locale, "gpui.empty.relay_governance"),
+                governance_rows,
             ),
             section(
                 t(locale, "gpui.section.current_roles"),
@@ -6369,6 +6409,56 @@ fn relay_health_detail(locale: Locale, health: &RelayHealthSnapshot) -> String {
             ("authorization", authorization),
             ("quota", quota),
             ("observed_at", &observed_at),
+        ],
+    )
+}
+
+fn relay_governance_action_key(action: RelayGovernanceAction) -> &'static str {
+    match action {
+        RelayGovernanceAction::Enable => "relay.governance.action.enable",
+        RelayGovernanceAction::Disable => "relay.governance.action.disable",
+        RelayGovernanceAction::AuthorizationChanged => {
+            "relay.governance.action.authorization_changed"
+        }
+        RelayGovernanceAction::QuotaChanged => "relay.governance.action.quota_changed",
+        RelayGovernanceAction::SessionRejected => "relay.governance.action.session_rejected",
+        RelayGovernanceAction::PacketRejected => "relay.governance.action.packet_rejected",
+        RelayGovernanceAction::Failover => "relay.governance.action.failover",
+        RelayGovernanceAction::Recovered => "relay.governance.action.recovered",
+    }
+}
+
+fn relay_governance_action_label(locale: Locale, action: RelayGovernanceAction) -> String {
+    t(locale, relay_governance_action_key(action)).to_owned()
+}
+
+fn relay_governance_event_detail(locale: Locale, event: &RelayGovernanceEvent) -> String {
+    let not_available = t(locale, "common.not_available");
+    let node_id = event
+        .node_id
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| not_available.to_owned());
+    let observed = event
+        .observed
+        .map(|value| relay_format_u64(locale, value))
+        .unwrap_or_else(|| not_available.to_owned());
+    let limit = event
+        .limit
+        .map(|value| relay_format_u64(locale, value))
+        .unwrap_or_else(|| not_available.to_owned());
+    let occurred_at = routing_timestamp_label(Some(event.occurred_at_unix_ms), locale);
+    let reset_at = routing_timestamp_label(event.reset_at_unix_ms, locale);
+    tr(
+        locale,
+        "relay.governance.event_detail",
+        &[
+            ("occurred_at", &occurred_at),
+            ("node_id", &node_id),
+            ("reason_code", &event.reason_code),
+            ("observed", &observed),
+            ("limit", &limit),
+            ("reset_at", &reset_at),
         ],
     )
 }
@@ -9055,6 +9145,62 @@ mod tests {
         assert!(usage.rows[0]
             .detail
             .contains(t(Locale::ZhCn, "relay.measurement.not_measured")));
+    }
+
+    #[test]
+    fn relay_projection_renders_bounded_owner_governance_without_sensitive_fields() {
+        let mut service = relay_service(
+            "governed",
+            Some(relay_health_fixture(
+                true,
+                RelayUsageSnapshot::default(),
+                RelayLimitPolicy::default(),
+            )),
+        );
+        service.relay_governance = Some(RelayGovernanceAuditSnapshot {
+            events: vec![RelayGovernanceEvent {
+                action: RelayGovernanceAction::SessionRejected,
+                occurred_at_unix_ms: 1_700_000_100_000,
+                node_id: Some(NodeId::from_public_key(b"relay-member")),
+                reason_code: "relay.session.quota_exhausted".into(),
+                observed: Some(16),
+                limit: Some(16),
+                reset_at_unix_ms: Some(1_700_000_160_000),
+            }],
+            dropped_events: 3,
+        });
+        let snapshot = NodeSnapshot {
+            embedded_services: vec![service],
+            ..NodeSnapshot::default()
+        };
+
+        let (_, sections) = project_relay(&snapshot, Locale::En);
+        let governance = sections
+            .iter()
+            .find(|section| section.title == t(Locale::En, "gpui.section.relay_governance"))
+            .expect("relay governance section");
+        assert_eq!(governance.rows.len(), 2);
+        assert!(governance.rows[0]
+            .title
+            .contains(t(Locale::En, "relay.governance.action.session_rejected")));
+        assert!(governance.rows[0]
+            .detail
+            .contains("relay.session.quota_exhausted"));
+        assert!(governance.rows[0].detail.contains("16"));
+        assert!(governance.rows[1].detail.contains(&tr(
+            Locale::En,
+            "relay.governance.dropped_detail",
+            &[("dropped", "3")],
+        )));
+        let rendered = governance
+            .rows
+            .iter()
+            .map(|row| format!("{} {}", row.title, row.detail))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!rendered.contains("TOP_SECRET_PAYLOAD"));
+        assert!(!rendered.contains("2001:db8::secret"));
+        assert!(!rendered.contains("private_key"));
     }
 
     #[test]

@@ -14,6 +14,7 @@ import type {
   NodeExitSelectionSnapshot,
   NodeProblem,
   NodeSnapshot,
+  RelayGovernanceAuditSnapshot,
   RelayHealthSnapshot,
   NodeUiManifest,
   NodeUiPage,
@@ -928,6 +929,75 @@ describe("Relay capability status", () => {
       .getAllByTestId("relay-usage")
       .find((element) => element.dataset.network === "healthy");
     expect(healthyUsage).toHaveTextContent("4096 B");
+  });
+
+  it("renders the owner-only governance ledger with bounded payload-free fields", () => {
+    const events = Array.from({ length: 52 }, (_, index) => ({
+      action: index === 0 ? ("session_rejected" as const) : ("recovered" as const),
+      occurred_at_unix_ms: Date.UTC(2026, 0, 2, 0, 0, index),
+      node_id: "node-member-01",
+      reason_code:
+        index === 0
+          ? "relay.session.quota_exhausted"
+          : "relay.recovered",
+      observed: index === 0 ? 16 : null,
+      limit: index === 0 ? 16 : null,
+      reset_at_unix_ms:
+        index === 0 ? Date.UTC(2026, 0, 2, 0, 5, 0) : null,
+      payload: "TOP_SECRET_PAYLOAD",
+      destination: "2001:db8::secret",
+    }));
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      embedded_services: [
+        {
+          network_name: "owner-relay",
+          status: "running",
+          relay_status: "running",
+          relay_addr: "127.0.0.1:6667",
+          relay_health: relayHealth(),
+          relay_governance: {
+            events,
+            dropped_events: 7,
+          } as RelayGovernanceAuditSnapshot,
+        },
+      ],
+    };
+
+    render(relayElement(snapshot));
+
+    const governance = screen.getByTestId("relay-governance");
+    expect(governance).toHaveAttribute("data-network", "owner-relay");
+    expect(governance).toHaveTextContent(
+      translated("gpui.section.relay_governance"),
+    );
+    expect(governance).toHaveTextContent(
+      translated("relay.governance.action.session_rejected"),
+    );
+    const renderedEvents = screen.getAllByTestId("relay-governance-event");
+    expect(renderedEvents).toHaveLength(50);
+    expect(
+      renderedEvents.every((event) =>
+        event.textContent?.includes(
+          translated("relay.governance.event.reason"),
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      renderedEvents[0].textContent?.includes(
+        translated("relay.governance.event.node"),
+      ),
+    ).toBe(true);
+    expect(governance).toHaveTextContent(
+      translated("relay.governance.dropped"),
+    );
+    expect(governance).toHaveTextContent(
+      translated("relay.governance.bounded"),
+    );
+    expect(screen.getAllByTestId("relay-governance-event")).toHaveLength(50);
+    expect(governance).not.toHaveTextContent("TOP_SECRET_PAYLOAD");
+    expect(governance).not.toHaveTextContent("2001:db8::secret");
+    expect(governance).not.toHaveTextContent("private_key");
   });
 
   it("does not infer healthy from a running listener without a health snapshot", () => {

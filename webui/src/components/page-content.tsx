@@ -73,6 +73,9 @@ import type {
   NodeSnapshot,
   NodeUiAction,
   NodeUiPage,
+  RelayGovernanceAction,
+  RelayGovernanceAuditSnapshot,
+  RelayGovernanceEvent,
   RelayHealthIssue,
   RelayHealthSnapshot,
   RelayHealthStatus,
@@ -4201,6 +4204,111 @@ function RelayHealthDetails({
   );
 }
 
+const RELAY_GOVERNANCE_RENDER_LIMIT = 50;
+
+function relayGovernanceActionLabel(
+  locale: Locale,
+  action: RelayGovernanceAction,
+): string {
+  const key = `relay.governance.action.${action}`;
+  const localized = label(locale, key);
+  return localized === key ? action : localized;
+}
+
+function relayGovernanceEventDetail(
+  locale: Locale,
+  event: RelayGovernanceEvent,
+): string {
+  const fields = [
+    event.node_id
+      ? tr(locale, "relay.governance.event.node", { node_id: event.node_id })
+      : null,
+    tr(locale, "relay.governance.event.reason", {
+      reason_code: event.reason_code,
+    }),
+    event.observed != null
+      ? tr(locale, "relay.governance.event.observed", {
+          observed: formatInteger(locale, event.observed),
+        })
+      : null,
+    event.limit != null
+      ? tr(locale, "relay.governance.event.limit", {
+          limit: formatInteger(locale, event.limit),
+        })
+      : null,
+    event.reset_at_unix_ms != null
+      ? tr(locale, "relay.governance.event.reset", {
+          reset_at: formatTimestamp(locale, event.reset_at_unix_ms),
+        })
+      : null,
+  ].filter((field): field is string => field != null);
+  return fields.join(" · ");
+}
+
+function RelayGovernanceDetails({
+  locale,
+  networkName,
+  audit,
+}: {
+  locale: Locale;
+  networkName: string;
+  audit: RelayGovernanceAuditSnapshot;
+}) {
+  const visibleEvents = audit.events.slice(0, RELAY_GOVERNANCE_RENDER_LIMIT);
+  return (
+    <section
+      className="surface-card"
+      data-testid="relay-governance"
+      data-network={networkName}
+    >
+      <div className="card-heading">
+        <h3>{label(locale, "gpui.section.relay_governance")}</h3>
+        <span className="status-pill neutral">
+          {formatInteger(locale, audit.events.length)}
+        </span>
+      </div>
+      <p className="muted-copy">{label(locale, "relay.governance.hint")}</p>
+      {audit.dropped_events > 0 ? (
+        <p className="state-notice warn" data-testid="relay-governance-dropped">
+          {tr(locale, "relay.governance.dropped", {
+            dropped: formatInteger(locale, audit.dropped_events),
+          })}
+        </p>
+      ) : null}
+      {audit.events.length > visibleEvents.length ? (
+        <p className="muted-copy" data-testid="relay-governance-bounded">
+          {tr(locale, "relay.governance.bounded", {
+            shown: formatInteger(locale, visibleEvents.length),
+            total: formatInteger(locale, audit.events.length),
+          })}
+        </p>
+      ) : null}
+      {visibleEvents.length === 0 ? (
+        <p className="empty-copy">
+          {label(locale, "relay.governance.empty")}
+        </p>
+      ) : (
+        <ol className="relay-governance-events">
+          {visibleEvents.map((event, index) => (
+            <li
+              className="relay-governance-event"
+              data-action={event.action}
+              data-testid="relay-governance-event"
+              key={`${event.occurred_at_unix_ms}-${event.action}-${index}`}
+            >
+              <div className="relay-governance-event-heading">
+                <strong>{relayGovernanceActionLabel(locale, event.action)}</strong>
+                <time>{formatTimestamp(locale, event.occurred_at_unix_ms)}</time>
+              </div>
+              <p>{relayGovernanceEventDetail(locale, event)}</p>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
 function RelayCapabilityDetails({
   snapshot,
   locale,
@@ -4220,34 +4328,41 @@ function RelayCapabilityDetails({
   }
   return (
     <>
-      {services.map((service) =>
-        service.relay_health ? (
-          <RelayHealthDetails
-            key={service.network_name}
-            locale={locale}
-            networkName={service.network_name}
-            health={service.relay_health}
-          />
-        ) : (
-          <section
-            className="surface-card"
-            data-testid="relay-health-missing"
-            data-network={service.network_name}
-            key={service.network_name}
-          >
-            <div className="card-heading">
-              <h3>{label(locale, "gpui.section.relay_health")}</h3>
-              <span className="status-pill neutral">
-                {label(locale, "relay.health.unknown")}
-              </span>
-            </div>
-            <p className="muted-copy">{service.network_name}</p>
-            <p className="empty-copy">
-              {label(locale, "relay.status.no_health")}
-            </p>
-          </section>
-        ),
-      )}
+      {services.map((service) => (
+        <div className="relay-service-stack" key={service.network_name}>
+          {service.relay_health ? (
+            <RelayHealthDetails
+              locale={locale}
+              networkName={service.network_name}
+              health={service.relay_health}
+            />
+          ) : (
+            <section
+              className="surface-card"
+              data-testid="relay-health-missing"
+              data-network={service.network_name}
+            >
+              <div className="card-heading">
+                <h3>{label(locale, "gpui.section.relay_health")}</h3>
+                <span className="status-pill neutral">
+                  {label(locale, "relay.health.unknown")}
+                </span>
+              </div>
+              <p className="muted-copy">{service.network_name}</p>
+              <p className="empty-copy">
+                {label(locale, "relay.status.no_health")}
+              </p>
+            </section>
+          )}
+          {service.relay_governance ? (
+            <RelayGovernanceDetails
+              locale={locale}
+              networkName={service.network_name}
+              audit={service.relay_governance}
+            />
+          ) : null}
+        </div>
+      ))}
     </>
   );
 }

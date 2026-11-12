@@ -10,6 +10,8 @@ use std::future::Future;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -36,7 +38,7 @@ const WINDOWS_SERVICE_ARGUMENT: &str = "--windows-service";
 const OPTIONS_ENV: &str = "FUCKIPV6_INTERNAL_OPTIONS";
 const OPTIONS_FILE_ARGUMENT: &str = "--options-file";
 const CONFIG_DIR_ARGUMENT: &str = "--config-dir";
-const READY_TIMEOUT: Duration = Duration::from_secs(45);
+const READY_TIMEOUT: Duration = Duration::from_secs(60);
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const NODE_UNHEALTHY_TIMEOUT: Duration = Duration::from_secs(20);
 const NODE_IPC_BIND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -331,11 +333,13 @@ async fn run_node(options: InternalOptions) -> Result<()> {
     .context("无法启动节点 IPC 服务")?;
     let commands = supervisor.commands();
     let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+    let ready = Arc::new(AtomicBool::new(false));
     let mut service = tokio::spawn(serve_owned_node(
         server,
         commands.clone(),
         supervisor.state().clone(),
         supervisor.event_bus(),
+        ready.clone(),
         shutdown_tx.clone(),
     ));
 
@@ -378,6 +382,7 @@ async fn run_node(options: InternalOptions) -> Result<()> {
     refresh_node_snapshot_bounded(&commands, startup_context).await;
     refresh_node_state_bounded(&supervisor).await;
 
+    ready.store(true, Ordering::Release);
     println!(
         "{}",
         serde_json::json!({
@@ -585,6 +590,7 @@ where
     let mut adopted_node = false;
     let mut restart_delay = RESTART_BACKOFF_MIN;
     let mut unhealthy_since: Option<Instant> = None;
+    let mut startup_grace_until: Option<Instant> = None;
     let mut shutdown = Box::pin(shutdown);
 
     loop {
@@ -602,6 +608,10 @@ where
                 unhealthy_since = None;
             } else {
                 child = Some(spawn_node_child(&options)?);
+                // The IPC socket binds before persisted data-plane startup has
+                // completed. Do not mistake that startup window for an unhealthy
+                // resident node and restart it.
+                startup_grace_until = Some(Instant::now() + READY_TIMEOUT);
             }
         }
 
@@ -610,6 +620,7 @@ where
                 let was_success = status.success();
                 tracing::warn!(%status, "节点进程已退出");
                 child = None;
+                startup_grace_until = None;
                 if was_success {
                     return Ok(());
                 }
@@ -622,8 +633,14 @@ where
         if node_ready().await {
             restart_delay = RESTART_BACKOFF_MIN;
             unhealthy_since = None;
+            startup_grace_until = None;
             continue;
         }
+
+        if startup_grace_until.is_some_and(|deadline| Instant::now() < deadline) {
+            continue;
+        }
+        startup_grace_until = None;
 
         let unhealthy_for = unhealthy_since.get_or_insert_with(Instant::now).elapsed();
         if unhealthy_for < NODE_UNHEALTHY_TIMEOUT {
@@ -644,6 +661,7 @@ where
         }
         adopted_node = false;
         unhealthy_since = None;
+        startup_grace_until = None;
         sleep(restart_delay).await;
         restart_delay = (restart_delay * 2).min(RESTART_BACKOFF_MAX);
     }
@@ -710,6 +728,25 @@ fn instance_lock_path(directory: &std::path::Path, role: &str) -> PathBuf {
     directory.join(format!("{role}.lock"))
 }
 
+fn instance_lock_pid(role: &str) -> Result<Option<u32>> {
+    let directory = local_ipc::runtime_directory()?;
+    let path = instance_lock_path(&directory, role);
+    match std::fs::read_to_string(&path) {
+        Ok(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Ok(None);
+            }
+            value
+                .parse()
+                .map(Some)
+                .with_context(|| format!("进程锁 {} 不含有效 PID", path.display()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("无法读取进程锁 {}", path.display())),
+    }
+}
+
 fn instance_is_running(role: &str) -> Result<bool> {
     let directory = local_ipc::runtime_directory()?;
     let path = instance_lock_path(&directory, role);
@@ -744,19 +781,114 @@ fn spawn_node_child(options: &InternalOptions) -> Result<Child> {
     command.spawn().context("无法启动节点进程")
 }
 
+/// A newly launched control/node pair that has not yet been attached to a UI.
+///
+/// Dropping an uncommitted lease starts a best-effort rollback. Callers should
+/// await [`ControlLease::rollback`] on their normal error path so the data plane
+/// is cleaned up before the failed startup is reported.
+pub(crate) struct ControlLease {
+    launched: Option<LaunchedControl>,
+}
+
+struct LaunchedControl {
+    control_pid: u32,
+    node_pid: Option<u32>,
+}
+
+impl ControlLease {
+    fn existing() -> Self {
+        Self { launched: None }
+    }
+
+    fn launched(control_pid: u32) -> Self {
+        Self {
+            launched: Some(LaunchedControl {
+                control_pid,
+                node_pid: None,
+            }),
+        }
+    }
+
+    fn record_node(&mut self, node_pid: Option<u32>) {
+        if let Some(launched) = self.launched.as_mut() {
+            launched.node_pid = node_pid;
+        }
+    }
+
+    /// Keep the control/node pair alive after the UI has attached successfully.
+    pub(crate) fn commit(mut self) {
+        self.launched = None;
+    }
+
+    /// Stop only the control/node pair launched by this connection attempt.
+    pub(crate) async fn rollback(mut self) -> Result<()> {
+        let Some(launched) = self.launched.take() else {
+            return Ok(());
+        };
+        tokio::task::spawn_blocking(move || rollback_launched_control(launched))
+            .await
+            .context("等待 control 启动回滚任务失败")??;
+        Ok(())
+    }
+}
+
+impl Drop for ControlLease {
+    fn drop(&mut self) {
+        let Some(launched) = self.launched.take() else {
+            return;
+        };
+        // This path handles cancellation (including the outer UI timeout). The
+        // normal error path awaits rollback instead, so this is only a fallback.
+        std::thread::spawn(move || {
+            if let Err(error) = rollback_launched_control(launched) {
+                tracing::error!(%error, "取消启动后回滚 control/node 失败");
+            }
+        });
+    }
+}
+
 /// Ensure one detached control process is running and has brought up the node.
-/// Closing the calling UI only drops this handle; control and node keep running.
-pub async fn ensure_control(options: &RuntimeOptions) -> Result<()> {
+/// The returned lease must be committed only after the first UI session attaches.
+pub(crate) async fn ensure_control(options: &RuntimeOptions) -> Result<ControlLease> {
     // A live node does not imply a live supervisor: control can be killed while
     // its detached child keeps the data plane running. Always ensure the control
     // lock is held, then wait for the node endpoint it supervises or adopts.
-    if !instance_is_running("control")? {
-        spawn_detached_control(options)?;
+    let node_was_running = instance_is_running("node")? || node_ready().await;
+    if instance_is_running("control")? {
+        wait_for_node_ready(READY_TIMEOUT).await?;
+        return Ok(ControlLease::existing());
     }
-    wait_for_node_ready(READY_TIMEOUT).await
+
+    let control_pid = spawn_detached_control(options)?;
+    let mut lease = ControlLease::launched(control_pid);
+    if let Err(error) = wait_for_node_ready(READY_TIMEOUT).await {
+        if node_was_running {
+            // An already-running node must survive a failed UI attachment. The
+            // replacement control is allowed to keep supervising it.
+            lease.commit();
+        } else {
+            lease.record_node(controlled_node_pid(control_pid)?);
+            if let Err(cleanup_error) = lease.rollback().await {
+                return Err(error.context(format!(
+                    "启动失败，且回滚本次启动的 control/node 失败: {cleanup_error:#}"
+                )));
+            }
+        }
+        return Err(error);
+    }
+
+    if !node_was_running && instance_lock_pid("control")? == Some(control_pid) {
+        lease.record_node(instance_lock_pid("node")?);
+        return Ok(lease);
+    }
+
+    // Another concurrent instance won the startup race, or this control merely
+    // adopted a node that already existed. Neither belongs to this lease.
+    lease.commit();
+    Ok(ControlLease::existing())
 }
 
-fn spawn_detached_control(options: &RuntimeOptions) -> Result<()> {
+fn spawn_detached_control(options: &RuntimeOptions) -> Result<u32> {
     let executable = std::env::current_exe().context("无法定位 fuckipv6 可执行文件")?;
     let encoded = InternalOptions::from(options).encode()?;
     let mut command = Command::new(executable);
@@ -772,13 +904,79 @@ fn spawn_detached_control(options: &RuntimeOptions) -> Result<()> {
         command.process_group(0);
     }
     let mut child = command.spawn().context("无法启动控制进程")?;
+    let pid = child.id();
     // The UI deliberately does not own control's lifetime, but it is still the
     // parent on Unix. Reap control if it exits while the UI remains open so a
     // crashed supervisor cannot linger as a zombie until the UI closes.
     std::thread::spawn(move || {
         let _ = child.wait();
     });
-    Ok(())
+    Ok(pid)
+}
+
+fn controlled_node_pid(control_pid: u32) -> Result<Option<u32>> {
+    if instance_lock_pid("control")? == Some(control_pid) {
+        instance_lock_pid("node")
+    } else {
+        Ok(None)
+    }
+}
+
+fn rollback_launched_control(launched: LaunchedControl) -> Result<()> {
+    tracing::warn!(
+        control_pid = launched.control_pid,
+        node_pid = launched.node_pid,
+        "首次连接失败，回滚本次启动的 control/node"
+    );
+    terminate_process(launched.control_pid)?;
+    if let Some(node_pid) = launched.node_pid {
+        terminate_process(node_pid)?;
+    }
+
+    let deadline = Instant::now() + READY_TIMEOUT;
+    while Instant::now() < deadline {
+        let control_alive = process_is_alive(launched.control_pid);
+        let node_alive = launched.node_pid.is_some_and(process_is_alive);
+        if !control_alive && !node_alive {
+            return Ok(());
+        }
+        std::thread::sleep(READY_POLL_INTERVAL);
+    }
+    bail!(
+        "control/node 在回滚期限内未退出: control_pid={}, node_pid={:?}",
+        launched.control_pid,
+        launched.node_pid
+    )
+}
+
+#[cfg(unix)]
+fn terminate_process(pid: u32) -> Result<()> {
+    // SIGTERM, never SIGKILL: node shutdown owns route and interface cleanup.
+    let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error).with_context(|| format!("无法向进程 {pid} 发送 SIGTERM"))
+}
+
+#[cfg(not(unix))]
+fn terminate_process(pid: u32) -> Result<()> {
+    bail!("当前平台不支持回滚已启动的 control 进程: pid={pid}")
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(not(unix))]
+fn process_is_alive(_pid: u32) -> bool {
+    false
 }
 
 async fn wait_for_node_ready(limit: Duration) -> Result<()> {
@@ -1031,6 +1229,68 @@ mod tests {
         assert!(!node.gui);
         assert_eq!(node.webui_port, 0);
         assert_eq!(node.ui_mode, Some(ui_mode));
+    }
+
+    #[cfg(unix)]
+    fn spawn_test_process() -> std::process::Child {
+        std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn test process")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rollback_terminates_only_the_launched_control_and_node() -> Result<()> {
+        let mut control = spawn_test_process();
+        let mut node = spawn_test_process();
+        let control_pid = control.id();
+        let node_pid = node.id();
+        let control_waiter = std::thread::spawn(move || control.wait());
+        let node_waiter = std::thread::spawn(move || node.wait());
+
+        let mut lease = ControlLease::launched(control_pid);
+        lease.record_node(Some(node_pid));
+        lease.rollback().await?;
+
+        control_waiter.join().expect("reap control")?;
+        node_waiter.join().expect("reap node")?;
+        assert!(!process_is_alive(control_pid));
+        assert!(!process_is_alive(node_pid));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn existing_lease_never_terminates_an_unowned_process() -> Result<()> {
+        let mut child = spawn_test_process();
+        let pid = child.id();
+        let waiter = std::thread::spawn(move || child.wait());
+
+        ControlLease::existing().rollback().await?;
+        assert!(process_is_alive(pid));
+
+        terminate_process(pid)?;
+        waiter.join().expect("reap test process")?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn committed_lease_never_rolls_back_its_process() -> Result<()> {
+        let mut child = spawn_test_process();
+        let pid = child.id();
+        let waiter = std::thread::spawn(move || child.wait());
+
+        ControlLease::launched(pid).commit();
+        assert!(process_is_alive(pid));
+
+        terminate_process(pid)?;
+        waiter.join().expect("reap test process")?;
+        Ok(())
     }
 
     #[test]

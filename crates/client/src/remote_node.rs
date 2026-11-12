@@ -24,7 +24,10 @@ use crate::node::{
 use crate::owner_security::audit::OwnerSecurityAudit;
 use crate::runtime_process;
 
-const INITIAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+// Readiness waits for the persisted data plane, not just the IPC socket. Keep
+// this outer guard above the supervisor's own startup deadline, otherwise a
+// healthy startup is cancelled and its detached control process survives.
+const INITIAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(70);
 const RECONNECT_MIN: Duration = Duration::from_millis(100);
 const RECONNECT_MAX: Duration = Duration::from_secs(2);
 
@@ -100,37 +103,56 @@ impl RemoteNodeSession {
         watch::Sender<bool>,
         JoinHandle<()>,
     )> {
-        timeout(
+        let control = timeout(
             INITIAL_CONNECT_TIMEOUT,
             runtime_process::ensure_control(&options),
         )
         .await
         .context("连接节点控制面超时")??;
 
-        let endpoint = local_ipc::endpoint(EndpointRole::Node)?;
-        let snapshot = request_snapshot(&endpoint, role.clone()).await?;
-        let state = NodeStateStore::new();
-        state.replace_authoritative(snapshot).await;
+        let connected = async {
+            let endpoint = local_ipc::endpoint(EndpointRole::Node)?;
+            let snapshot = request_snapshot(&endpoint, role.clone()).await?;
+            let state = NodeStateStore::new();
+            state.replace_authoritative(snapshot).await;
 
-        let configs = crate::config_manager::ConfigManager::new()?;
-        let identity = configs.load_node_identity()?;
-        let node_id = NodeId::from_public_key(&identity.public_key_bytes());
-        let audit = Arc::new(OwnerSecurityAudit::new(configs.config_dir(), node_id)?);
+            let configs = crate::config_manager::ConfigManager::new()?;
+            let identity = configs.load_node_identity()?;
+            let node_id = NodeId::from_public_key(&identity.public_key_bytes());
+            let audit = Arc::new(OwnerSecurityAudit::new(configs.config_dir(), node_id)?);
 
-        let events = NodeEventBus::default();
-        let handler = Arc::new(RemoteNodeHandler {
-            endpoint: endpoint.clone(),
-            role: role.clone(),
-        });
-        let commands = NodeCommandBus::spawn_with_durable_audit(handler, events.clone(), 32, audit);
-        let (cancel, cancel_rx) = watch::channel(false);
-        let sync = tokio::spawn(sync_node_state(
-            endpoint.clone(),
-            role,
-            state.clone(),
-            cancel_rx,
-        ));
-        Ok((endpoint, state, commands, events, cancel, sync))
+            let events = NodeEventBus::default();
+            let handler = Arc::new(RemoteNodeHandler {
+                endpoint: endpoint.clone(),
+                role: role.clone(),
+            });
+            let commands =
+                NodeCommandBus::spawn_with_durable_audit(handler, events.clone(), 32, audit);
+            let (cancel, cancel_rx) = watch::channel(false);
+            let sync = tokio::spawn(sync_node_state(
+                endpoint.clone(),
+                role,
+                state.clone(),
+                cancel_rx,
+            ));
+            Ok::<_, anyhow::Error>((endpoint, state, commands, events, cancel, sync))
+        }
+        .await;
+
+        match connected {
+            Ok(parts) => {
+                control.commit();
+                Ok(parts)
+            }
+            Err(error) => {
+                if let Err(cleanup_error) = control.rollback().await {
+                    return Err(error.context(format!(
+                        "首次 IPC 连接失败，且回滚本次启动的 control/node 失败: {cleanup_error:#}"
+                    )));
+                }
+                Err(error)
+            }
+        }
     }
 
     pub fn state(&self) -> NodeStateStore {

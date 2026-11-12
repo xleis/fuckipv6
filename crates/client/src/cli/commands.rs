@@ -9012,6 +9012,45 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct RoutedFallbackCall {
+        src_ip: IpAddr,
+        dst_ip: IpAddr,
+        encrypted: Bytes,
+    }
+
+    struct RoutedFallbackTransport {
+        relay_tx: mpsc::UnboundedSender<RoutedFallbackCall>,
+        signaling_tx: mpsc::UnboundedSender<RoutedFallbackCall>,
+    }
+
+    impl FallbackTransport for RoutedFallbackTransport {
+        fn relay<'a>(
+            &'a self,
+            src_ip: Ipv6Addr,
+            dst_ip: Ipv6Addr,
+            encrypted: Bytes,
+        ) -> Pin<Box<dyn Future<Output = RelayForwardOutcome> + Send + 'a>> {
+            Box::pin(async move {
+                let _ = self.relay_tx.send(RoutedFallbackCall {
+                    src_ip: IpAddr::V6(src_ip),
+                    dst_ip: IpAddr::V6(dst_ip),
+                    encrypted,
+                });
+                RelayForwardOutcome::Failed(anyhow::anyhow!("injected relay failure"))
+            })
+        }
+
+        fn signaling(&self, src_ip: IpAddr, dst_ip: IpAddr, encrypted: Bytes) -> Result<()> {
+            let _ = self.signaling_tx.send(RoutedFallbackCall {
+                src_ip,
+                dst_ip,
+                encrypted,
+            });
+            Ok(())
+        }
+    }
+
     fn outbound_packet(dst_ip: Ipv6Addr, marker: u8) -> OutboundPacket {
         OutboundPacket::owned(
             IpAddr::V6(Ipv6Addr::LOCALHOST),
@@ -9245,6 +9284,83 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn relay_failover_rewrites_spoofed_source_and_preserves_selected_exit() -> Result<()> {
+        let (engine_a, _engine_b, ip_a, ip_b) = connected_test_engines().await?;
+        let exit_peer = engine_a
+            .get_peers()
+            .await
+            .into_iter()
+            .find(|peer| peer.virtual_ip == ip_b)
+            .context("connected test peer must be present")?;
+        let exit_node_id = NodeId::from_public_key(&exit_peer.public_key);
+        let assigned_ips = VirtualIps::dual_stack("10.8.0.2".parse()?, ip_a);
+        let route_engine = SmartRouteEngine::new(fuckipv6_common::RoutingMode::GlobalProxy);
+        let spoofed_source: Ipv6Addr = "2001:db8::77".parse()?;
+        let public_destination: Ipv6Addr = "2606:4700:4700::1111".parse()?;
+        let mut packet = [0u8; 40];
+        packet[0] = 0x60;
+        packet[6] = 64;
+        packet[8..24].copy_from_slice(&spoofed_source.octets());
+        packet[24..40].copy_from_slice(&public_destination.octets());
+
+        assert!(
+            route_tun_packet(&engine_a, &assigned_ips, &route_engine, None, &packet)
+                .await
+                .is_none(),
+            "a public Proxy destination must fail closed without an authorized Exit"
+        );
+        let routed = route_tun_packet(
+            &engine_a,
+            &assigned_ips,
+            &route_engine,
+            Some(&exit_node_id),
+            &packet,
+        )
+        .await
+        .context("authorized Exit must route the public destination")?;
+        assert_eq!(routed, (IpAddr::V6(ip_a), IpAddr::V6(ip_b)));
+        assert_ne!(
+            routed.0,
+            IpAddr::V6(spoofed_source),
+            "the source supplied to Relay must be the assigned virtual address"
+        );
+
+        let (relay_tx, mut relay_rx) = mpsc::unbounded_channel();
+        let (signaling_tx, mut signaling_rx) = mpsc::unbounded_channel();
+        let transport = P2pOutboundTransport::with_fallback(
+            engine_a.clone(),
+            Arc::new(RoutedFallbackTransport {
+                relay_tx,
+                signaling_tx,
+            }),
+        );
+        engine_a.set_fail_direct_transport(true);
+        transport
+            .send_packet(OutboundPacket::owned(routed.0, routed.1, packet.to_vec()))
+            .await;
+        engine_a.set_fail_direct_transport(false);
+
+        let relay_call = relay_rx
+            .try_recv()
+            .expect("failed direct path must try the QUIC Relay");
+        let signaling_call = signaling_rx
+            .try_recv()
+            .expect("failed QUIC Relay must try signaling");
+        for call in [&relay_call, &signaling_call] {
+            assert_eq!(call.src_ip, IpAddr::V6(ip_a));
+            assert_eq!(call.dst_ip, IpAddr::V6(ip_b));
+            assert_ne!(call.src_ip, IpAddr::V6(spoofed_source));
+        }
+        assert_eq!(relay_call.encrypted, signaling_call.encrypted);
+        assert_eq!(
+            relay_call.encrypted.as_ptr(),
+            signaling_call.encrypted.as_ptr(),
+            "Relay failover must preserve one sealed ciphertext allocation"
+        );
         Ok(())
     }
 
@@ -9753,6 +9869,30 @@ mod tests {
         assert!(!repeated_local_exit_disable_is_noop(
             true, false, true, true
         ));
+    }
+
+    #[test]
+    fn spoofed_tun_source_is_replaced_with_the_assigned_virtual_address() {
+        let assigned =
+            VirtualIps::dual_stack("10.8.0.2".parse().unwrap(), "fd00::1002".parse().unwrap());
+
+        let mut ipv4 = [0u8; 20];
+        ipv4[0] = 0x45;
+        ipv4[12..16].copy_from_slice(&[192, 168, 1, 77]);
+        ipv4[16..20].copy_from_slice(&[1, 1, 1, 1]);
+        assert_eq!(
+            get_packet_src_ip(&ipv4, &assigned),
+            IpAddr::V4("10.8.0.2".parse().unwrap())
+        );
+
+        let mut ipv6 = [0u8; 40];
+        ipv6[0] = 0x60;
+        ipv6[8..24].copy_from_slice(&"2001:db8::77".parse::<Ipv6Addr>().unwrap().octets());
+        ipv6[24..40].copy_from_slice(&"2606:4700:4700::1111".parse::<Ipv6Addr>().unwrap().octets());
+        assert_eq!(
+            get_packet_src_ip(&ipv6, &assigned),
+            IpAddr::V6("fd00::1002".parse().unwrap())
+        );
     }
 
     #[test]

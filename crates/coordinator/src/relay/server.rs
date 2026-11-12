@@ -67,6 +67,7 @@ struct RelayState {
     drain: Arc<RwLock<()>>,
     quota_window: Mutex<QuotaWindow>,
     policy_revision: AtomicU64,
+    policy_baseline: StdMutex<Option<RelayAccessPolicy>>,
     listener_open: AtomicBool,
     connection_tasks: Arc<Semaphore>,
     stream_tasks: Arc<Semaphore>,
@@ -84,6 +85,7 @@ impl Default for RelayState {
             drain: Arc::new(RwLock::new(())),
             quota_window: Mutex::new(QuotaWindow::default()),
             policy_revision: AtomicU64::new(0),
+            policy_baseline: StdMutex::new(None),
             listener_open: AtomicBool::new(true),
             connection_tasks: Arc::new(Semaphore::new(MAX_RELAY_CONNECTION_TASKS)),
             stream_tasks: Arc::new(Semaphore::new(MAX_RELAY_STREAM_TASKS)),
@@ -387,6 +389,9 @@ impl RelayServer {
         *self.state.rate.write().await = RelayRateState::default();
         self.state.members.write().await.clear();
         self.state.policy_revision.store(0, Ordering::Release);
+        if let Ok(mut baseline) = self.state.policy_baseline.lock() {
+            *baseline = None;
+        }
         reset_metrics(&self.state.metrics);
         let mut quota_window = self.state.quota_window.lock().await;
         *quota_window = QuotaWindow::default();
@@ -537,38 +542,52 @@ impl RelayServer {
             anyhow::bail!("Relay 策略更新时间位于未来，拒绝使用");
         }
 
-        let mut observed_revision = self.state.policy_revision.load(Ordering::Acquire);
-        loop {
-            if policy.revision < observed_revision {
-                anyhow::bail!(
-                    "Relay 策略 revision 回退: {} < {}",
-                    policy.revision,
-                    observed_revision
-                );
+        {
+            let mut baseline = self
+                .state
+                .policy_baseline
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Relay 策略基线锁已损坏"))?;
+            if let Some(previous) = baseline.as_ref() {
+                if policy.revision < previous.revision {
+                    anyhow::bail!(
+                        "Relay 策略 revision 回退: {} < {}",
+                        policy.revision,
+                        previous.revision
+                    );
+                }
+                if policy.revision == previous.revision && policy != *previous {
+                    anyhow::bail!("Relay 策略同一 revision 内容发生变化: {}", policy.revision);
+                }
             }
-            if policy.revision == observed_revision {
-                break;
-            }
-            match self.state.policy_revision.compare_exchange_weak(
-                observed_revision,
-                policy.revision,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    record_governance(
+            if baseline
+                .as_ref()
+                .is_some_and(|previous| policy.revision > previous.revision)
+            {
+                let previous = baseline.as_ref().expect("checked above");
+                if relay_authorization_policy_changed(previous, &policy) {
+                    record_policy_governance(
+                        &self.state,
+                        RelayGovernanceAction::AuthorizationChanged,
+                        "relay.authorization.policy_changed",
+                        previous.revision,
+                        policy.revision,
+                    );
+                }
+                if relay_quota_policy_changed(previous, &policy) {
+                    record_policy_governance(
                         &self.state,
                         RelayGovernanceAction::QuotaChanged,
-                        None,
-                        "relay.policy.changed",
-                        None,
-                        None,
-                        policy.limits.quota_reset_at_unix_ms,
+                        "relay.quota.policy_changed",
+                        previous.revision,
+                        policy.revision,
                     );
-                    break;
                 }
-                Err(current) => observed_revision = current,
             }
+            *baseline = Some(policy.clone());
+            self.state
+                .policy_revision
+                .store(policy.revision, Ordering::Release);
         }
 
         self.apply_quota_window(now_unix_ms, &policy.limits).await;
@@ -2078,6 +2097,7 @@ impl RelayServer {
             drain: Arc::new(RwLock::new(())),
             quota_window: Mutex::new(QuotaWindow::default()),
             policy_revision: AtomicU64::new(0),
+            policy_baseline: StdMutex::new(None),
             listener_open: AtomicBool::new(true),
             connection_tasks: Arc::new(Semaphore::new(max_connection_tasks)),
             stream_tasks: Arc::new(Semaphore::new(max_stream_tasks)),
@@ -2210,7 +2230,71 @@ fn record_governance(
         observed,
         limit,
         reset_at_unix_ms,
+        previous_policy_revision: None,
+        policy_revision: None,
     });
+}
+
+fn record_policy_governance(
+    state: &RelayState,
+    action: RelayGovernanceAction,
+    reason_code: &'static str,
+    previous_policy_revision: u64,
+    policy_revision: u64,
+) {
+    state.governance.record(RelayGovernanceEvent {
+        action,
+        occurred_at_unix_ms: now_unix_ms(),
+        node_id: None,
+        reason_code: reason_code.into(),
+        observed: None,
+        limit: None,
+        reset_at_unix_ms: None,
+        previous_policy_revision: Some(previous_policy_revision),
+        policy_revision: Some(policy_revision),
+    });
+}
+
+fn relay_authorization_policy_changed(
+    previous: &RelayAccessPolicy,
+    current: &RelayAccessPolicy,
+) -> bool {
+    previous.network_id != current.network_id
+        || previous.provider_node_id != current.provider_node_id
+        || previous.existing_session_policy != current.existing_session_policy
+        || previous.network_rules != current.network_rules
+        || previous.network_acl != current.network_acl
+        || relay_member_authorization_changed(&previous.provider, &current.provider)
+        || previous.members.len() != current.members.len()
+        || previous.members.iter().any(|(node_id, member)| {
+            current.members.get(node_id).is_none_or(|current_member| {
+                relay_member_authorization_changed(member, current_member)
+            })
+        })
+}
+
+fn relay_quota_policy_changed(previous: &RelayAccessPolicy, current: &RelayAccessPolicy) -> bool {
+    previous.limits != current.limits
+        || previous.limit_sources != current.limit_sources
+        || previous.provider.limits != current.provider.limits
+        || previous.members.iter().any(|(node_id, member)| {
+            current
+                .members
+                .get(node_id)
+                .is_some_and(|current_member| member.limits != current_member.limits)
+        })
+}
+
+fn relay_member_authorization_changed(
+    previous: &fuckipv6_common::domain::RelayMemberPolicyContext,
+    current: &fuckipv6_common::domain::RelayMemberPolicyContext,
+) -> bool {
+    previous.role != current.role
+        || previous.groups != current.groups
+        || previous.membership_active != current.membership_active
+        || previous.recent_reauthentication != current.recent_reauthentication
+        || previous.local_rules != current.local_rules
+        || previous.local_access_policy != current.local_access_policy
 }
 
 fn reset_metrics(metrics: &RelayMetrics) {
@@ -3234,6 +3318,122 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn policy_revision_changes_are_audited_by_category_and_invalid_revisions_fail_closed(
+    ) -> Result<()> {
+        let authority = Arc::new(MemoryRelayPolicyAuthority::for_identities(&[]));
+        let server = RelayServer::bind_with_generated_certificate(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            Arc::new(SessionManager::new("fd00::1000/120")?),
+            authority.clone(),
+        )?;
+        let now = now_unix_ms();
+
+        server.load_policy(now).await?;
+        assert!(!server
+            .governance_snapshot()
+            .events
+            .iter()
+            .any(|event| matches!(
+                event.action,
+                RelayGovernanceAction::AuthorizationChanged | RelayGovernanceAction::QuotaChanged
+            )));
+
+        let mut combined_policy = authority.current_policy()?;
+        combined_policy.existing_session_policy = RelayExistingSessionPolicy::Continue;
+        combined_policy.limits.max_connections = Some(8);
+        combined_policy.revision += 1;
+        combined_policy.updated_at_unix_ms = now.saturating_sub(1);
+        authority.replace_policy(combined_policy.clone());
+        server.load_policy(now).await?;
+
+        let policy_events = server
+            .governance_snapshot()
+            .events
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event.action,
+                    RelayGovernanceAction::AuthorizationChanged
+                        | RelayGovernanceAction::QuotaChanged
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(policy_events.len(), 2);
+        let authorization_events = policy_events
+            .iter()
+            .filter(|event| event.action == RelayGovernanceAction::AuthorizationChanged)
+            .collect::<Vec<_>>();
+        assert_eq!(authorization_events.len(), 1);
+        assert_eq!(
+            authorization_events[0].reason_code,
+            "relay.authorization.policy_changed"
+        );
+        assert_eq!(authorization_events[0].previous_policy_revision, Some(1));
+        assert_eq!(authorization_events[0].policy_revision, Some(2));
+        assert_eq!(authorization_events[0].observed, None);
+        assert_eq!(authorization_events[0].limit, None);
+        let quota_events = policy_events
+            .iter()
+            .filter(|event| event.action == RelayGovernanceAction::QuotaChanged)
+            .collect::<Vec<_>>();
+        assert_eq!(quota_events.len(), 1);
+        assert_eq!(quota_events[0].reason_code, "relay.quota.policy_changed");
+        assert_eq!(quota_events[0].previous_policy_revision, Some(1));
+        assert_eq!(quota_events[0].policy_revision, Some(2));
+
+        let mut authorization_only = combined_policy.clone();
+        authorization_only.existing_session_policy = RelayExistingSessionPolicy::Terminate;
+        authorization_only.revision += 1;
+        authority.replace_policy(authorization_only.clone());
+        server.load_policy(now).await?;
+        let latest_authorization_event = server
+            .governance_snapshot()
+            .events
+            .into_iter()
+            .rev()
+            .find(|event| event.action == RelayGovernanceAction::AuthorizationChanged)
+            .context("authorization-only change must be audited")?;
+        assert_eq!(latest_authorization_event.previous_policy_revision, Some(2));
+        assert_eq!(latest_authorization_event.policy_revision, Some(3));
+
+        let mut quota_only = authorization_only.clone();
+        quota_only.limits.max_connections = Some(9);
+        quota_only.revision += 1;
+        authority.replace_policy(quota_only.clone());
+        server.load_policy(now).await?;
+        let latest_quota_event = server
+            .governance_snapshot()
+            .events
+            .into_iter()
+            .rev()
+            .find(|event| event.action == RelayGovernanceAction::QuotaChanged)
+            .context("quota-only change must be audited")?;
+        assert_eq!(latest_quota_event.previous_policy_revision, Some(3));
+        assert_eq!(latest_quota_event.policy_revision, Some(4));
+
+        let mut same_revision_mutation = quota_only.clone();
+        same_revision_mutation.limits.max_connections = Some(10);
+        authority.replace_policy(same_revision_mutation);
+        let error = server
+            .load_policy(now)
+            .await
+            .expect_err("a mutated policy under an existing revision must fail closed")
+            .to_string();
+        assert!(error.contains("同一 revision"), "{error}");
+
+        let mut rollback = quota_only;
+        rollback.revision = 3;
+        authority.replace_policy(rollback);
+        let error = server
+            .load_policy(now)
+            .await
+            .expect_err("a policy revision rollback must fail closed")
+            .to_string();
+        assert!(error.contains("revision 回退"), "{error}");
+        Ok(())
+    }
+
     #[test]
     fn governance_audit_is_bounded_and_counts_evictions() {
         let audit = RelayGovernanceAudit::default();
@@ -3246,6 +3446,8 @@ mod tests {
                 observed: Some(index as u64),
                 limit: None,
                 reset_at_unix_ms: None,
+                previous_policy_revision: None,
+                policy_revision: None,
             });
         }
         audit.record(RelayGovernanceEvent {
@@ -3256,6 +3458,8 @@ mod tests {
             observed: None,
             limit: None,
             reset_at_unix_ms: None,
+            previous_policy_revision: None,
+            policy_revision: None,
         });
 
         let snapshot = audit.snapshot();

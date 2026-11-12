@@ -11,8 +11,9 @@ use anyhow::{Context, Result};
 use fuckipv6_common::domain::{
     NetworkId, NetworkRole, NodeId, PermissionCondition, PermissionEffect, PermissionRule,
     PolicyAction, RelayAccessPolicy, RelayAuthorizationDecision, RelayExistingSessionPolicy,
-    RelayLimitPolicy, RelayMemberGrant, RelayMemberPolicyContext, ResourceKind, SecurityRuleId,
-    SubjectSelector,
+    RelayGovernanceAuditSnapshot, RelayHealthSnapshot, RelayHealthStatus, RelayLimitPolicy,
+    RelayMemberGrant, RelayMemberPolicyContext, RelayReachabilityState, RelayUsageSnapshot,
+    ResourceKind, SecurityRuleId, SubjectSelector,
 };
 use fuckipv6_common::{CoordinatorConfig, Identity, NatType, QuicRelayClient};
 use fuckipv6_coordinator::relay::server::{RelayPolicyAuthority, RelayServer};
@@ -27,6 +28,8 @@ const PEER_IDENTITY_ENV: &str = "FUCKIPV6_W13_RELAY_PEER_IDENTITY";
 const STORM_IDENTITIES_ENV: &str = "FUCKIPV6_W13_RELAY_STORM_IDENTITIES";
 const PORT_ENV: &str = "FUCKIPV6_W13_RELAY_PORT";
 const READY_ENV: &str = "FUCKIPV6_W13_RELAY_READY";
+const OPERATOR_SNAPSHOT_REQUEST_ENV: &str = "FUCKIPV6_W13_RELAY_OPERATOR_SNAPSHOT_REQUEST";
+const OPERATOR_SNAPSHOT_EXPORT_ENV: &str = "FUCKIPV6_W13_RELAY_OPERATOR_SNAPSHOT_EXPORT";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Ready {
@@ -37,19 +40,48 @@ struct Ready {
     storm_virtual_ips: Vec<Ipv6Addr>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OperatorPrivacyExport {
+    schema: String,
+    governance: RelayGovernanceAuditSnapshot,
+    usage: RelayUsageSnapshot,
+    health: RelayHealthSnapshot,
+}
+
 struct ChildGuard {
     child: Child,
 }
 
 impl ChildGuard {
     fn spawn(identity: &Path, port: u16, ready: &Path) -> Result<Self> {
-        Self::spawn_with_identities(identity, None, None, port, ready)
+        Self::spawn_with_identities(identity, None, None, None, None, port, ready)
+    }
+
+    fn spawn_with_operator_snapshot(
+        identity: &Path,
+        peer_identity: &Path,
+        snapshot_request: &Path,
+        snapshot_export: &Path,
+        port: u16,
+        ready: &Path,
+    ) -> Result<Self> {
+        Self::spawn_with_identities(
+            identity,
+            Some(peer_identity),
+            None,
+            Some(snapshot_request),
+            Some(snapshot_export),
+            port,
+            ready,
+        )
     }
 
     fn spawn_with_identities(
         identity: &Path,
         peer_identity: Option<&Path>,
         storm_identities: Option<&Path>,
+        snapshot_request: Option<&Path>,
+        snapshot_export: Option<&Path>,
         port: u16,
         ready: &Path,
     ) -> Result<Self> {
@@ -73,6 +105,15 @@ impl ChildGuard {
         }
         if let Some(storm_identities) = storm_identities {
             command.env(STORM_IDENTITIES_ENV, storm_identities);
+        }
+        match (snapshot_request, snapshot_export) {
+            (Some(request), Some(export)) => {
+                command
+                    .env(OPERATOR_SNAPSHOT_REQUEST_ENV, request)
+                    .env(OPERATOR_SNAPSHOT_EXPORT_ENV, export);
+            }
+            (None, None) => {}
+            _ => anyhow::bail!("operator snapshot request and export must be configured together"),
         }
         let child = command
             .spawn()
@@ -303,6 +344,14 @@ fn relay_process_child_fixture() -> Result<()> {
         }
         None => Vec::new(),
     };
+    let operator_snapshot_paths = match (
+        std::env::var_os(OPERATOR_SNAPSHOT_REQUEST_ENV),
+        std::env::var_os(OPERATOR_SNAPSHOT_EXPORT_ENV),
+    ) {
+        (Some(request), Some(export)) => Some((PathBuf::from(request), PathBuf::from(export))),
+        (None, None) => None,
+        _ => anyhow::bail!("operator snapshot request and export must be configured together"),
+    };
     let coordinator_config_path = identity_path.with_extension("coordinator.toml");
     CoordinatorConfig::default().save_to_file(&coordinator_config_path)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -381,7 +430,25 @@ fn relay_process_child_fixture() -> Result<()> {
         let temporary = ready_path.with_extension("tmp");
         std::fs::write(&temporary, serde_json::to_vec(&ready)?)?;
         std::fs::rename(&temporary, &ready_path)?;
+        let snapshot_server = server.clone();
         let server_task = tokio::spawn(server.run());
+        if let Some((request, export)) = operator_snapshot_paths {
+            for _ in 0..4_800 {
+                if request.exists() {
+                    let snapshot = OperatorPrivacyExport {
+                        schema: "fuckipv6.w13.relay-operator-privacy.v1".into(),
+                        governance: snapshot_server.governance_snapshot(),
+                        usage: snapshot_server.usage_snapshot().await,
+                        health: snapshot_server.health_snapshot().await,
+                    };
+                    let temporary = export.with_extension("tmp");
+                    std::fs::write(&temporary, serde_json::to_vec(&snapshot)?)?;
+                    std::fs::rename(&temporary, &export)?;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
         tokio::time::sleep(Duration::from_secs(120)).await;
         server_task.abort();
         Ok::<_, anyhow::Error>(())
@@ -466,6 +533,129 @@ async fn sigkill_restart_releases_relay_port_and_invalidates_old_session() -> Re
         "SIGKILLed first Relay fixture remained present"
     );
 
+    std::fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+async fn wait_for_operator_snapshot(
+    path: &Path,
+    child: &mut ChildGuard,
+) -> Result<OperatorPrivacyExport> {
+    for _ in 0..400 {
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!("Relay fixture exited before operator snapshot export: {status}");
+        }
+        if let Ok(encoded) = std::fs::read(path) {
+            return serde_json::from_slice(&encoded)
+                .context("failed to decode Relay operator privacy snapshot");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    anyhow::bail!("Relay operator privacy snapshot export timed out")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn operator_privacy_export_contains_usage_but_not_payload_or_addresses() -> Result<()> {
+    const PAYLOAD: &[u8] = b"w13-operator-privacy-payload-canary-5f91c7e2";
+
+    let directory = temp_dir("operator-privacy")?;
+    let identity_a_path = directory.join("identity-a.key");
+    let identity_b_path = directory.join("identity-b.key");
+    let ready_path = directory.join("relay-ready.json");
+    let snapshot_request_path = directory.join("operator-snapshot.request");
+    let snapshot_export_path = directory.join("operator-snapshot.json");
+    let identity_a = Identity::generate()?;
+    let identity_b = Identity::generate()?;
+    identity_a.save_to_file(&identity_a_path)?;
+    identity_b.save_to_file(&identity_b_path)?;
+    let port = free_udp_port()?;
+
+    let mut child = ChildGuard::spawn_with_operator_snapshot(
+        &identity_a_path,
+        &identity_b_path,
+        &snapshot_request_path,
+        &snapshot_export_path,
+        port,
+        &ready_path,
+    )?;
+    let ready = wait_for_ready(&ready_path, &mut child).await?;
+    let peer_ip = ready
+        .peer_virtual_ip
+        .context("privacy Relay fixture did not register its peer identity")?;
+
+    let sender = QuicRelayClient::connect(
+        ready.addr,
+        ready.server_pin,
+        "fuckipv6.local",
+        &identity_a,
+        ready.virtual_ip,
+        &grant(&identity_a, "privacy-sender")?,
+    )
+    .await
+    .context("privacy sender could not register")?;
+    let receiver = QuicRelayClient::connect(
+        ready.addr,
+        ready.server_pin,
+        "fuckipv6.local",
+        &identity_b,
+        peer_ip,
+        &grant(&identity_b, "privacy-receiver")?,
+    )
+    .await
+    .context("privacy receiver could not register")?;
+
+    let payload = bytes::Bytes::copy_from_slice(PAYLOAD);
+    let (sent, delivered) = tokio::join!(
+        sender.send_packet(1, ready.virtual_ip, peer_ip, payload.clone()),
+        receiver.recv_packet(),
+    );
+    sent.context("privacy-boundary Relay send failed")?;
+    let delivered = delivered.context("privacy-boundary Relay packet was not delivered")?;
+    assert_eq!(delivered.src_ip, ready.virtual_ip);
+    assert_eq!(delivered.dst_ip, peer_ip);
+    assert_eq!(delivered.payload, payload);
+
+    std::fs::write(&snapshot_request_path, b"export")?;
+    let exported = wait_for_operator_snapshot(&snapshot_export_path, &mut child).await?;
+    assert_eq!(exported.schema, "fuckipv6.w13.relay-operator-privacy.v1");
+    assert_eq!(exported.usage.forwarded_packets, 1);
+    assert_eq!(exported.usage.forwarded_bytes, PAYLOAD.len() as u64);
+    assert_eq!(exported.usage.active_sessions, 2);
+    assert_eq!(exported.health.status, RelayHealthStatus::Healthy);
+    assert_eq!(
+        exported.health.network_reachability,
+        RelayReachabilityState::Reachable
+    );
+    assert!(exported.health.forwarding_observed);
+    assert!(exported.health.authorization_valid);
+    assert_eq!(exported.health.listen_addr, Some(ready.addr));
+    assert!(exported
+        .governance
+        .events
+        .iter()
+        .any(|event| { event.reason_code == "relay.authorization.registered" }));
+
+    let encoded = serde_json::to_string(&exported)?;
+    let forbidden = [
+        String::from_utf8(PAYLOAD.to_vec())?,
+        ready.virtual_ip.to_string(),
+        peer_ip.to_string(),
+        "private_key".into(),
+        "session_key".into(),
+        "network_display_name".into(),
+        "member_display_name".into(),
+        "PRIVATE KEY".into(),
+    ];
+    for forbidden in forbidden {
+        assert!(
+            !encoded.contains(&forbidden),
+            "operator privacy export leaked {forbidden}: {encoded}"
+        );
+    }
+
+    sender.close().await;
+    receiver.close().await;
+    child.kill_and_wait()?;
     std::fs::remove_dir_all(directory)?;
     Ok(())
 }
@@ -580,6 +770,8 @@ async fn sustained_traffic_and_connection_storm_keep_relay_resources_bounded() -
         &identity_a_path,
         Some(&identity_b_path),
         Some(&storm_directory),
+        None,
+        None,
         port,
         &ready_path,
     )?;

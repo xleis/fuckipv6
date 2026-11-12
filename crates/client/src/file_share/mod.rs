@@ -10,6 +10,7 @@ mod capability;
 mod config;
 mod error;
 mod network;
+mod network_origin;
 mod owner_service;
 mod quota;
 mod rate_limit;

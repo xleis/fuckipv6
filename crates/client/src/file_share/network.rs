@@ -172,7 +172,6 @@ pub(crate) enum FileNetworkFrame {
 }
 
 impl FileNetworkFrame {
-    #[cfg(test)]
     pub(crate) fn request(
         request_id: [u8; 16],
         request: FileNetworkRequest,
@@ -1141,7 +1140,7 @@ impl FileNetworkDataPlane {
     }
 }
 
-fn download_fragment_request_id(
+pub(crate) fn download_fragment_request_id(
     operation_id: &OperationId,
     chunk_index: u32,
     offset: u64,

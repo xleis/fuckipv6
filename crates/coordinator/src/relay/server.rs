@@ -4,6 +4,7 @@ use fuckipv6_common::{
     build_quic_server_config_with_client_certificate_authorizer,
     domain::{
         NodeId, RelayAccessPolicy, RelayAuthorizationDecision, RelayExistingSessionPolicy,
+        RelayGovernanceAction, RelayGovernanceAuditSnapshot, RelayGovernanceEvent,
         RelayHealthSnapshot, RelayHealthStatus, RelayLifecycleState, RelayLimitPolicy,
         RelayMeasurementState, RelayMemberGrant, RelayReachabilityState, RelayUsageSnapshot,
     },
@@ -11,10 +12,10 @@ use fuckipv6_common::{
     send_relay_message, verify_quic_client_identity_binding, ClientId, ErrorCode, Identity,
     QuicCertificate, RelayMessage, RelayRegistrationBinding, MAX_SIGNALING_RELAY_PAYLOAD_SIZE,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex, RwLock, Semaphore};
 
@@ -25,6 +26,7 @@ const RELAY_REGISTER_STREAM_ID: u64 = 0;
 const RELAY_AUTHORIZATION_STREAM_ID: u64 = 1;
 const MAX_RELAY_CONNECTION_TASKS: usize = 512;
 const MAX_RELAY_STREAM_TASKS: usize = 4096;
+const MAX_RELAY_GOVERNANCE_EVENTS: usize = 256;
 const RELAY_CONNECTION_LIFECYCLE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Trusted source of the current Relay policy. Production must inject a source
@@ -68,6 +70,7 @@ struct RelayState {
     listener_open: AtomicBool,
     connection_tasks: Arc<Semaphore>,
     stream_tasks: Arc<Semaphore>,
+    governance: RelayGovernanceAudit,
 }
 
 impl Default for RelayState {
@@ -84,6 +87,44 @@ impl Default for RelayState {
             listener_open: AtomicBool::new(true),
             connection_tasks: Arc::new(Semaphore::new(MAX_RELAY_CONNECTION_TASKS)),
             stream_tasks: Arc::new(Semaphore::new(MAX_RELAY_STREAM_TASKS)),
+            governance: RelayGovernanceAudit::default(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct RelayGovernanceAudit {
+    inner: StdMutex<RelayGovernanceAuditInner>,
+}
+
+#[derive(Debug, Default)]
+struct RelayGovernanceAuditInner {
+    events: VecDeque<RelayGovernanceEvent>,
+    dropped_events: u64,
+}
+
+impl RelayGovernanceAudit {
+    fn record(&self, event: RelayGovernanceEvent) {
+        if event.validate().is_err() {
+            return;
+        }
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        if inner.events.len() == MAX_RELAY_GOVERNANCE_EVENTS {
+            inner.events.pop_front();
+            inner.dropped_events = inner.dropped_events.saturating_add(1);
+        }
+        inner.events.push_back(event);
+    }
+
+    fn snapshot(&self) -> RelayGovernanceAuditSnapshot {
+        let Ok(inner) = self.inner.lock() else {
+            return RelayGovernanceAuditSnapshot::default();
+        };
+        RelayGovernanceAuditSnapshot {
+            events: inner.events.iter().cloned().collect(),
+            dropped_events: inner.dropped_events,
         }
     }
 }
@@ -357,6 +398,12 @@ impl RelayServer {
         self.usage_snapshot_inner().await
     }
 
+    /// Return the bounded, payload-free governance ledger maintained by this
+    /// Relay instance. Queue eviction is explicit through `dropped_events`.
+    pub fn governance_snapshot(&self) -> RelayGovernanceAuditSnapshot {
+        self.state.governance.snapshot()
+    }
+
     async fn usage_snapshot_inner(&self) -> RelayUsageSnapshot {
         let clients = self.state.clients.read().await;
         let oldest_session_age_secs = clients
@@ -508,7 +555,18 @@ impl RelayServer {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => break,
+                Ok(_) => {
+                    record_governance(
+                        &self.state,
+                        RelayGovernanceAction::QuotaChanged,
+                        None,
+                        "relay.policy.changed",
+                        None,
+                        None,
+                        policy.limits.quota_reset_at_unix_ms,
+                    );
+                    break;
+                }
                 Err(current) => observed_revision = current,
             }
         }
@@ -540,6 +598,15 @@ impl RelayServer {
         window.started_at_unix_ms = reset_at;
         window.applied_reset_at_unix_ms = Some(reset_at);
         window.active_reset_at_unix_ms = None;
+        record_governance(
+            &self.state,
+            RelayGovernanceAction::QuotaChanged,
+            None,
+            "relay.quota.reset",
+            None,
+            None,
+            Some(reset_at),
+        );
         tracing::info!("Relay 配额窗口已重置: reset_at={reset_at}");
     }
 
@@ -626,6 +693,15 @@ impl RelayServer {
                     incoming.remote_address()
                 );
                 record_rejected_connection(&self.state, None);
+                record_governance(
+                    &self.state,
+                    RelayGovernanceAction::SessionRejected,
+                    None,
+                    "relay.session.task_limit",
+                    Some(MAX_RELAY_CONNECTION_TASKS as u64),
+                    Some(MAX_RELAY_CONNECTION_TASKS as u64),
+                    None,
+                );
                 self.record_forwarding_failure();
                 self.session_manager.record_relay_error();
                 continue;
@@ -874,6 +950,15 @@ impl RelayServer {
             self.reject_overloaded_stream(send).await;
             let member = self.member_usage(&registered.node_id).await;
             record_rejected_packet(&self.state, &member);
+            record_governance(
+                &self.state,
+                RelayGovernanceAction::PacketRejected,
+                Some(&registered.node_id),
+                "relay.packet.task_limit",
+                Some(MAX_RELAY_STREAM_TASKS as u64),
+                Some(MAX_RELAY_STREAM_TASKS as u64),
+                None,
+            );
             self.record_forwarding_failure();
             self.session_manager.record_relay_error();
             return true;
@@ -946,7 +1031,15 @@ impl RelayServer {
         let now = now_unix_ms();
         let Some(member_grant) = member_grant.map(|grant| *grant) else {
             let member_usage = self.member_usage(&node_id).await;
-            record_rejected_connection(&self.state, Some(&member_usage));
+            record_session_rejection(
+                &self.state,
+                Some(&member_usage),
+                Some(&node_id),
+                "relay.session.grant_missing",
+                None,
+                None,
+                None,
+            );
             anyhow::bail!("Relay 注册缺少使用方签名授权");
         };
         let grant_public_key = member_grant
@@ -955,20 +1048,44 @@ impl RelayServer {
             .context("Relay 使用方授权公钥无效")?;
         if grant_public_key.as_slice() != public_key.as_slice() {
             let member_usage = self.member_usage(&node_id).await;
-            record_rejected_connection(&self.state, Some(&member_usage));
+            record_session_rejection(
+                &self.state,
+                Some(&member_usage),
+                Some(&node_id),
+                "relay.session.grant_key_mismatch",
+                None,
+                None,
+                None,
+            );
             anyhow::bail!("Relay 使用方授权公钥与注册身份不一致");
         }
         let (policy, decision) = match self.policy_authority.authorize_grant(&member_grant, now) {
             Ok(result) => result,
             Err(error) => {
                 let member_usage = self.member_usage(&node_id).await;
-                record_rejected_connection(&self.state, Some(&member_usage));
+                record_session_rejection(
+                    &self.state,
+                    Some(&member_usage),
+                    Some(&node_id),
+                    "relay.session.authorization_unavailable",
+                    None,
+                    None,
+                    None,
+                );
                 return Err(error.context("Relay 签名授权校验失败，拒绝注册"));
             }
         };
         if !decision.allowed {
             let member_usage = self.member_usage(&node_id).await;
-            record_rejected_connection(&self.state, Some(&member_usage));
+            record_session_rejection(
+                &self.state,
+                Some(&member_usage),
+                Some(&node_id),
+                "relay.session.authorization_denied",
+                None,
+                None,
+                None,
+            );
             return Err(anyhow::anyhow!(
                 "Relay 注册未同时获得提供方和使用方授权: {}",
                 decision
@@ -992,7 +1109,15 @@ impl RelayServer {
         let member_usage = self.member_usage(&node_id).await;
         let registration = self.state.registration_gate.lock().await;
         if !self.state.listener_open.load(Ordering::Acquire) {
-            record_rejected_connection(&self.state, Some(&member_usage));
+            record_session_rejection(
+                &self.state,
+                Some(&member_usage),
+                Some(&node_id),
+                "relay.session.listener_stopped",
+                None,
+                None,
+                None,
+            );
             return Err(anyhow::anyhow!("Relay 已停止，拒绝新连接"));
         }
 
@@ -1016,22 +1141,70 @@ impl RelayServer {
             .saturating_add(1)
             .saturating_sub(u32::from(existing_node.as_ref() == Some(&node_id)));
 
-        if exceeds_limit(projected_global, policy.limits.max_connections)
-            || exceeds_limit(projected_member, decision.limits.max_connections)
-        {
-            record_rejected_connection(&self.state, Some(&member_usage));
+        if exceeds_limit(projected_global, policy.limits.max_connections) {
+            record_session_rejection(
+                &self.state,
+                Some(&member_usage),
+                Some(&node_id),
+                "relay.quota.connections.global",
+                Some(u64::from(projected_global)),
+                policy.limits.max_connections.map(u64::from),
+                policy.limits.quota_reset_at_unix_ms,
+            );
             return Err(anyhow::anyhow!("Relay 连接配额已耗尽"));
         }
+        if exceeds_limit(projected_member, decision.limits.max_connections) {
+            record_session_rejection(
+                &self.state,
+                Some(&member_usage),
+                Some(&node_id),
+                "relay.quota.connections.member",
+                Some(u64::from(projected_member)),
+                decision.limits.max_connections.map(u64::from),
+                decision.limits.quota_reset_at_unix_ms,
+            );
+            return Err(anyhow::anyhow!("Relay 连接配额已耗尽"));
+        }
+        let global_observed = self
+            .state
+            .metrics
+            .forwarded_bytes
+            .load(Ordering::Acquire)
+            .saturating_add(self.state.metrics.reserved_bytes.load(Ordering::Acquire));
         if !has_byte_capacity(
             self.state.metrics.forwarded_bytes.load(Ordering::Acquire),
             self.state.metrics.reserved_bytes.load(Ordering::Acquire),
             policy.limits.max_bytes,
-        ) || !has_byte_capacity(
+        ) {
+            record_session_rejection(
+                &self.state,
+                Some(&member_usage),
+                Some(&node_id),
+                "relay.quota.bytes.global",
+                Some(global_observed),
+                policy.limits.max_bytes,
+                policy.limits.quota_reset_at_unix_ms,
+            );
+            return Err(anyhow::anyhow!("Relay 流量配额已耗尽"));
+        }
+        let member_observed = member_usage
+            .forwarded_bytes
+            .load(Ordering::Acquire)
+            .saturating_add(member_usage.reserved_bytes.load(Ordering::Acquire));
+        if !has_byte_capacity(
             member_usage.forwarded_bytes.load(Ordering::Acquire),
             member_usage.reserved_bytes.load(Ordering::Acquire),
             decision.limits.max_bytes,
         ) {
-            record_rejected_connection(&self.state, Some(&member_usage));
+            record_session_rejection(
+                &self.state,
+                Some(&member_usage),
+                Some(&node_id),
+                "relay.quota.bytes.member",
+                Some(member_observed),
+                decision.limits.max_bytes,
+                decision.limits.quota_reset_at_unix_ms,
+            );
             return Err(anyhow::anyhow!("Relay 流量配额已耗尽"));
         }
 
@@ -1059,6 +1232,15 @@ impl RelayServer {
             .await;
         drop(registration);
 
+        record_governance(
+            &self.state,
+            RelayGovernanceAction::AuthorizationChanged,
+            Some(&node_id),
+            "relay.authorization.registered",
+            Some(policy.revision),
+            None,
+            None,
+        );
         tracing::info!("QUIC 中继客户端注册成功: {} ({})", client_id, virtual_ip);
 
         Ok(RegisteredRelayClient {
@@ -1197,6 +1379,17 @@ impl RelayServer {
             .forward_to_client(&dst_client, request.stream_id, &packet)
             .await
         {
+            let member = self.member_usage(&registered.node_id).await;
+            record_rejected_packet(&self.state, &member);
+            record_governance(
+                &self.state,
+                RelayGovernanceAction::PacketRejected,
+                Some(&registered.node_id),
+                "relay.packet.forward_failed",
+                None,
+                None,
+                None,
+            );
             let error = RelayMessage::error(
                 ErrorCode::BadGateway,
                 format!("relay forwarding failed: {err:#}"),
@@ -1204,7 +1397,28 @@ impl RelayServer {
             send_relay_message(&mut send, request.stream_id, &error).await?;
             return Ok(());
         }
+        let last_failure = self
+            .state
+            .metrics
+            .last_forwarding_failure_at_unix_ms
+            .load(Ordering::Acquire);
+        let last_forwarded = self
+            .state
+            .metrics
+            .last_forwarded_at_unix_ms
+            .load(Ordering::Acquire);
         reservation.commit();
+        if last_failure > last_forwarded {
+            record_governance(
+                &self.state,
+                RelayGovernanceAction::Recovered,
+                Some(&registered.node_id),
+                "relay.forwarding.recovered",
+                None,
+                None,
+                None,
+            );
+        }
 
         let ack = RelayMessage::RegisterAck {
             accepted: true,
@@ -1320,6 +1534,15 @@ impl RelayServer {
 
         self.ensure_rate_buckets(&registered.node_id, &policy.limits, &decision.limits)
             .await;
+        record_governance(
+            &self.state,
+            RelayGovernanceAction::AuthorizationChanged,
+            Some(&registered.node_id),
+            "relay.authorization.updated",
+            Some(policy.revision),
+            None,
+            None,
+        );
         tracing::info!(
             client_id = %registered.client_id,
             revision = policy.revision,
@@ -1387,8 +1610,17 @@ impl RelayServer {
     ) -> std::result::Result<(RelayClient, RelayStreamGuard, QuotaReservation), Box<RelayMessage>>
     {
         let src_usage = self.member_usage(src_node_id).await;
-        let reject = |message: RelayMessage| {
+        let reject = |reason_code: &'static str, message: RelayMessage| {
             record_rejected_packet(&self.state, &src_usage);
+            record_governance(
+                &self.state,
+                RelayGovernanceAction::PacketRejected,
+                Some(src_node_id),
+                reason_code,
+                None,
+                None,
+                None,
+            );
             Box::new(message)
         };
 
@@ -1397,108 +1629,153 @@ impl RelayServer {
             Ok(policy) => policy,
             Err(error) => {
                 tracing::error!("Relay 数据面包策略不可用: {error:#}");
-                return Err(reject(RelayMessage::error(
-                    ErrorCode::Internal,
-                    "relay policy unavailable",
-                )));
+                return Err(reject(
+                    "relay.packet.policy_unavailable",
+                    RelayMessage::error(ErrorCode::Internal, "relay policy unavailable"),
+                ));
             }
         };
 
         if request.payload.len() > MAX_SIGNALING_RELAY_PAYLOAD_SIZE {
-            return Err(reject(RelayMessage::error(
-                ErrorCode::BadRequest,
-                "relay payload exceeds the protocol limit",
-            )));
+            return Err(reject(
+                "relay.packet.payload_too_large",
+                RelayMessage::error(
+                    ErrorCode::BadRequest,
+                    "relay payload exceeds the protocol limit",
+                ),
+            ));
         }
 
         if request.src_ip != registered_src_ip {
-            return Err(reject(RelayMessage::error(
-                ErrorCode::Forbidden,
-                "source IP does not match relay registration",
-            )));
+            return Err(reject(
+                "relay.packet.source_ip_mismatch",
+                RelayMessage::error(
+                    ErrorCode::Forbidden,
+                    "source IP does not match relay registration",
+                ),
+            ));
         }
 
         let Some(src_client) = self.lookup_client(registered_src_ip).await else {
-            return Err(reject(RelayMessage::error(
-                ErrorCode::Forbidden,
-                "source relay registration is no longer active",
-            )));
+            return Err(reject(
+                "relay.packet.source_disconnected",
+                RelayMessage::error(
+                    ErrorCode::Forbidden,
+                    "source relay registration is no longer active",
+                ),
+            ));
         };
         if src_client.connection_id != src_connection_id
             || src_client.client_id != *src_client_id
             || src_client.node_id != *src_node_id
         {
-            return Err(reject(RelayMessage::error(
-                ErrorCode::Forbidden,
-                "source relay connection has been replaced",
-            )));
+            return Err(reject(
+                "relay.packet.source_replaced",
+                RelayMessage::error(
+                    ErrorCode::Forbidden,
+                    "source relay connection has been replaced",
+                ),
+            ));
         }
 
         self.ensure_packet_authorized(src_client_id, src_public_key, "source")
             .await
             .inspect_err(|_| {
                 record_rejected_packet(&self.state, &src_usage);
+                record_governance(
+                    &self.state,
+                    RelayGovernanceAction::PacketRejected,
+                    Some(src_node_id),
+                    "relay.packet.source_authorization",
+                    None,
+                    None,
+                    None,
+                );
             })?;
         if self
             .session_manager
             .is_blacklisted(src_client_id, src_public_key)
             .await
         {
-            return Err(reject(RelayMessage::error(
-                ErrorCode::Forbidden,
-                "source client identity is blacklisted",
-            )));
+            return Err(reject(
+                "relay.packet.source_blacklisted",
+                RelayMessage::error(
+                    ErrorCode::Forbidden,
+                    "source client identity is blacklisted",
+                ),
+            ));
         }
 
         let Some(dst_client) = self.lookup_client(request.dst_ip).await else {
-            return Err(reject(RelayMessage::error(
-                ErrorCode::NotFound,
-                format!(
-                    "destination is not connected to QUIC relay: {}",
-                    request.dst_ip
+            return Err(reject(
+                "relay.packet.destination_disconnected",
+                RelayMessage::error(
+                    ErrorCode::NotFound,
+                    format!(
+                        "destination is not connected to QUIC relay: {}",
+                        request.dst_ip
+                    ),
                 ),
-            )));
+            ));
         };
 
         if dst_client.connection_id == src_connection_id && request.src_ip == request.dst_ip {
-            return Err(reject(RelayMessage::error(
-                ErrorCode::BadRequest,
-                "refusing relay packet to self",
-            )));
+            return Err(reject(
+                "relay.packet.self",
+                RelayMessage::error(ErrorCode::BadRequest, "refusing relay packet to self"),
+            ));
         }
 
         self.ensure_packet_authorized(&dst_client.client_id, &dst_client.public_key, "destination")
             .await
             .inspect_err(|_| {
                 record_rejected_packet(&self.state, &src_usage);
+                record_governance(
+                    &self.state,
+                    RelayGovernanceAction::PacketRejected,
+                    Some(src_node_id),
+                    "relay.packet.destination_authorization",
+                    None,
+                    None,
+                    None,
+                );
             })?;
         if self
             .session_manager
             .is_blacklisted(&dst_client.client_id, &dst_client.public_key)
             .await
         {
-            return Err(reject(RelayMessage::error(
-                ErrorCode::Forbidden,
-                "destination client identity is blacklisted",
-            )));
+            return Err(reject(
+                "relay.packet.destination_blacklisted",
+                RelayMessage::error(
+                    ErrorCode::Forbidden,
+                    "destination client identity is blacklisted",
+                ),
+            ));
         }
 
         let (global_limits, source_limits) = match policy.existing_session_policy {
             RelayExistingSessionPolicy::Continue => {
                 if let Some(max_duration) = src_client.effective_limits.max_session_duration_secs {
                     if src_client.registered_at.elapsed() >= Duration::from_secs(max_duration) {
-                        return Err(reject(RelayMessage::error(
-                            ErrorCode::Forbidden,
-                            "relay session duration limit exceeded",
-                        )));
+                        return Err(reject(
+                            "relay.quota.session_duration.source",
+                            RelayMessage::error(
+                                ErrorCode::Forbidden,
+                                "relay session duration limit exceeded",
+                            ),
+                        ));
                     }
                 }
                 if let Some(max_duration) = dst_client.effective_limits.max_session_duration_secs {
                     if dst_client.registered_at.elapsed() >= Duration::from_secs(max_duration) {
-                        return Err(reject(RelayMessage::error(
-                            ErrorCode::Forbidden,
-                            "destination relay session duration limit exceeded",
-                        )));
+                        return Err(reject(
+                            "relay.quota.session_duration.destination",
+                            RelayMessage::error(
+                                ErrorCode::Forbidden,
+                                "destination relay session duration limit exceeded",
+                            ),
+                        ));
                     }
                 }
                 if src_client.policy_revision != policy.revision {
@@ -1518,10 +1795,13 @@ impl RelayServer {
                     Ok(result) => result,
                     Err(error) => {
                         tracing::error!("Relay 源授权计算失败: {error}");
-                        return Err(reject(RelayMessage::error(
-                            ErrorCode::Internal,
-                            "relay source authorization failed",
-                        )));
+                        return Err(reject(
+                            "relay.packet.source_authorization_unavailable",
+                            RelayMessage::error(
+                                ErrorCode::Internal,
+                                "relay source authorization failed",
+                            ),
+                        ));
                     }
                 };
                 let (destination_policy, destination_decision) = match self
@@ -1531,10 +1811,13 @@ impl RelayServer {
                     Ok(result) => result,
                     Err(error) => {
                         tracing::error!("Relay 目标授权计算失败: {error}");
-                        return Err(reject(RelayMessage::error(
-                            ErrorCode::Internal,
-                            "relay destination authorization failed",
-                        )));
+                        return Err(reject(
+                            "relay.packet.destination_authorization_unavailable",
+                            RelayMessage::error(
+                                ErrorCode::Internal,
+                                "relay destination authorization failed",
+                            ),
+                        ));
                     }
                 };
                 if !source_decision.allowed || !destination_decision.allowed {
@@ -1545,42 +1828,54 @@ impl RelayServer {
                         source_decision.final_reason,
                         destination_decision.final_reason
                     );
-                    return Err(reject(RelayMessage::error(
-                        ErrorCode::Forbidden,
-                        "relay authorization changed",
-                    )));
+                    return Err(reject(
+                        "relay.packet.authorization_changed",
+                        RelayMessage::error(ErrorCode::Forbidden, "relay authorization changed"),
+                    ));
                 }
                 if source_policy.network_id != destination_policy.network_id
                     || source_policy.provider_node_id != destination_policy.provider_node_id
                 {
-                    return Err(reject(RelayMessage::error(
-                        ErrorCode::Forbidden,
-                        "relay authorization contexts do not share a provider",
-                    )));
+                    return Err(reject(
+                        "relay.packet.authorization_context_mismatch",
+                        RelayMessage::error(
+                            ErrorCode::Forbidden,
+                            "relay authorization contexts do not share a provider",
+                        ),
+                    ));
                 }
                 if let Some(max_duration) = source_decision.limits.max_session_duration_secs {
                     if src_client.registered_at.elapsed() >= Duration::from_secs(max_duration) {
-                        return Err(reject(RelayMessage::error(
-                            ErrorCode::Forbidden,
-                            "relay session duration limit exceeded",
-                        )));
+                        return Err(reject(
+                            "relay.quota.session_duration.source",
+                            RelayMessage::error(
+                                ErrorCode::Forbidden,
+                                "relay session duration limit exceeded",
+                            ),
+                        ));
                     }
                 }
                 if let Some(max_duration) = destination_decision.limits.max_session_duration_secs {
                     if dst_client.registered_at.elapsed() >= Duration::from_secs(max_duration) {
-                        return Err(reject(RelayMessage::error(
-                            ErrorCode::Forbidden,
-                            "destination relay session duration limit exceeded",
-                        )));
+                        return Err(reject(
+                            "relay.quota.session_duration.destination",
+                            RelayMessage::error(
+                                ErrorCode::Forbidden,
+                                "destination relay session duration limit exceeded",
+                            ),
+                        ));
                     }
                 }
                 (source_policy.limits, source_decision.limits)
             }
             RelayExistingSessionPolicy::Migrate | RelayExistingSessionPolicy::Terminate => {
-                return Err(reject(RelayMessage::error(
-                    ErrorCode::Forbidden,
-                    "existing relay session policy requires resumption on another Relay",
-                )));
+                return Err(reject(
+                    "relay.packet.resumption_required",
+                    RelayMessage::error(
+                        ErrorCode::Forbidden,
+                        "existing relay session policy requires resumption on another Relay",
+                    ),
+                ));
             }
         };
 
@@ -1592,10 +1887,13 @@ impl RelayServer {
         ) {
             Ok(guard) => guard,
             Err(()) => {
-                return Err(reject(RelayMessage::error(
-                    ErrorCode::Overloaded,
-                    "relay stream concurrency limit exceeded",
-                )));
+                return Err(reject(
+                    "relay.quota.streams",
+                    RelayMessage::error(
+                        ErrorCode::Overloaded,
+                        "relay stream concurrency limit exceeded",
+                    ),
+                ));
             }
         };
 
@@ -1611,7 +1909,10 @@ impl RelayServer {
         {
             Ok(reservation) => reservation,
             Err(message) => {
-                return Err(reject(RelayMessage::error(ErrorCode::Overloaded, message)))
+                return Err(reject(
+                    "relay.quota.bytes",
+                    RelayMessage::error(ErrorCode::Overloaded, message),
+                ))
             }
         };
 
@@ -1624,10 +1925,10 @@ impl RelayServer {
             )
             .await
         {
-            return Err(reject(RelayMessage::error(
-                ErrorCode::RateLimited,
-                "relay bandwidth limit exceeded",
-            )));
+            return Err(reject(
+                "relay.quota.bandwidth",
+                RelayMessage::error(ErrorCode::RateLimited, "relay bandwidth limit exceeded"),
+            ));
         }
 
         Ok((dst_client, _stream_guard, reservation))
@@ -1780,6 +2081,7 @@ impl RelayServer {
             listener_open: AtomicBool::new(true),
             connection_tasks: Arc::new(Semaphore::new(max_connection_tasks)),
             stream_tasks: Arc::new(Semaphore::new(max_stream_tasks)),
+            governance: RelayGovernanceAudit::default(),
         });
         Ok(server)
     }
@@ -1868,6 +2170,47 @@ fn record_rejected_packet(state: &RelayState, member: &MemberUsage) {
         .rejected_packets
         .fetch_add(1, Ordering::Relaxed);
     member.rejected_packets.fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_session_rejection(
+    state: &RelayState,
+    member: Option<&MemberUsage>,
+    node_id: Option<&NodeId>,
+    reason_code: &'static str,
+    observed: Option<u64>,
+    limit: Option<u64>,
+    reset_at_unix_ms: Option<u64>,
+) {
+    record_rejected_connection(state, member);
+    record_governance(
+        state,
+        RelayGovernanceAction::SessionRejected,
+        node_id,
+        reason_code,
+        observed,
+        limit,
+        reset_at_unix_ms,
+    );
+}
+
+fn record_governance(
+    state: &RelayState,
+    action: RelayGovernanceAction,
+    node_id: Option<&NodeId>,
+    reason_code: &'static str,
+    observed: Option<u64>,
+    limit: Option<u64>,
+    reset_at_unix_ms: Option<u64>,
+) {
+    state.governance.record(RelayGovernanceEvent {
+        action,
+        occurred_at_unix_ms: now_unix_ms(),
+        node_id: node_id.cloned(),
+        reason_code: reason_code.into(),
+        observed,
+        limit,
+        reset_at_unix_ms,
+    });
 }
 
 fn reset_metrics(metrics: &RelayMetrics) {

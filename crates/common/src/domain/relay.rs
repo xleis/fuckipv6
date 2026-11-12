@@ -1195,6 +1195,49 @@ impl RelayGovernanceAction {
     }
 }
 
+/// One bounded, payload-free Relay governance observation.
+///
+/// Events intentionally carry no source/destination address, peer display
+/// name, packet payload, key material or session secret. `node_id` identifies
+/// the consumer whose request was rejected or whose authorization changed so
+/// an owner can filter the audit without exposing the Relay topology.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct RelayGovernanceEvent {
+    pub action: RelayGovernanceAction,
+    pub occurred_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<NodeId>,
+    pub reason_code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at_unix_ms: Option<u64>,
+}
+
+impl RelayGovernanceEvent {
+    pub fn validate(&self) -> DomainResult<()> {
+        if self.reason_code.is_empty()
+            || self.reason_code.chars().any(char::is_control)
+            || self.reason_code.len() > 96
+        {
+            return Err(DomainError::invalid_value(
+                "Relay governance reason code must be a bounded stable identifier",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Snapshot returned by the Relay governance sink. Older events are evicted
+/// first; `dropped_events` makes queue pressure observable rather than silent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct RelayGovernanceAuditSnapshot {
+    pub events: Vec<RelayGovernanceEvent>,
+    pub dropped_events: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3041,7 +3041,7 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 - [x] 连接失败时按显式策略尝试替代或失败关闭；
 - [ ] 切换不泄漏真实源地址或绕过 Exit 要求；
 - [x] 回退过程有状态、时长和原因；
-- [ ] 恢复后验证路径和会话；
+- [x] 恢复后验证路径和会话；
 - [x] 避免无限重试和路由环路；
 - [ ] 覆盖 Relay、Coordinator、Exit 同时故障。
 
@@ -3077,7 +3077,7 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 
 - [x] 覆盖双边授权交集和拒绝优先；
 - [x] 覆盖配额、连接风暴、慢连接和资源耗尽；
-- [ ] 覆盖链路断开、切换、重连和环路；
+- [x] 覆盖链路断开、切换、重连和环路；
 - [ ] 覆盖与 Exit/Coordinator 同时故障；
 - [x] 测量吞吐、延迟、并发、CPU 和内存；
 - [ ] 验证满载时节点其他能力仍可用；
@@ -3129,6 +3129,14 @@ parent/child QUIC loopback 拓扑、工作负载和全部测量值；报告路�
 两端虚拟 IP、private/session key、网络/成员显示名或 PEM 私钥标记。测试拓扑明确为单机 parent/child
 Relay over QUIC loopback，release profile 与 debug profile 均通过；这证明当前运营者导出投影的字段边界，
 不等同于外部 Relay 运营者的长期流量分析审计，也不代表能消除时间/体积侧信道。
+
+**真实双 Relay 故障切换（2026-11-13）**：`w13_relay_process::dual_relay_failover_reconnects_with_source_binding_and_closed_path`
+在 Linux 上同时启动两个独立 Relay 子进程，两个进程分别注册相同发送方/接收方身份并通过 QUIC 真实转发首个 canary；
+随后 SIGKILL 当前 Relay，验证旧会话无法继续发送。发送方和接收方连接第二个 Relay 并完成新握手后，恢复路径和会话
+再次真实转发第二个 canary。测试还验证使用另一成员虚拟 IP 注册会被拒绝，未连接的目的虚拟地址会返回 `404` 并
+失败关闭；候选环路排除由 `select_relay_candidate` 的有界选择测试覆盖。该证据补齐单机双进程拓扑下的断开、切换、
+重连和环路约束，但不是多主机网络损伤测试，也不能单独证明真实源地址不会经由 Relay 外路径泄漏或 Exit 强制要求
+在完整 TUN/路由路径中不可绕过。
 
 **生产故障转移审计（2026-11-13）**：多网络 supervisor 现在创建一份共享的
 `OwnerSecurityAudit`，同时注入命令总线和每个网络运行时；Relay 接收流关闭、QUIC 转发失败和转发超时时，

@@ -2858,6 +2858,17 @@ mod tests {
             .update(|snapshot| {
                 snapshot.embedded_services[0].status = NodeEmbeddedServiceStatus::Running;
                 snapshot.embedded_services[0].relay_status = NodeEmbeddedServiceStatus::Running;
+                snapshot.embedded_services[0].relay_health = Some(relay_service_health(
+                    RelayLifecycleState::Running,
+                    true,
+                    RelayUsageSnapshot {
+                        active_connections: 1,
+                        active_streams: 1,
+                        last_forwarded_at_unix_ms: Some(1_700_000_099_000),
+                        ..RelayUsageSnapshot::default()
+                    },
+                    RelayLimitPolicy::default(),
+                ));
                 snapshot.networks[0].roles = vec![NodeNetworkRole::ExitNode];
                 snapshot.local_exit.owner_exit_enabled = true;
                 snapshot.local_exit.stage = LocalExitCapabilityStage::Enabled;

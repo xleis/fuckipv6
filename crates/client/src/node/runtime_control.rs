@@ -7169,6 +7169,10 @@ mod tests {
     use crate::tun::{
         TunCapabilities, TunCapabilityReason, TunPlatform, TUN_CAPABILITY_SCHEMA_VERSION,
     };
+    use fuckipv6_common::domain::{
+        RelayHealthSnapshot, RelayLifecycleState, RelayLimitPolicy, RelayReachabilityState,
+        RelayUsageSnapshot,
+    };
     use futures::FutureExt;
     use std::collections::HashSet;
     use std::net::{Ipv4Addr, Ipv6Addr};
@@ -8056,6 +8060,27 @@ mod tests {
             .await;
     }
 
+    fn healthy_relay_health() -> RelayHealthSnapshot {
+        RelayHealthSnapshot::observe(
+            RelayLifecycleState::Running,
+            Some("127.0.0.1:46667".parse().expect("relay address")),
+            true,
+            RelayReachabilityState::Reachable,
+            true,
+            true,
+            RelayLimitPolicy::default(),
+            Vec::new(),
+            RelayUsageSnapshot {
+                active_connections: 1,
+                active_streams: 1,
+                last_forwarded_at_unix_ms: Some(1_700_000_099_000),
+                ..RelayUsageSnapshot::default()
+            },
+            1_700_000_100_000,
+            None,
+        )
+    }
+
     async fn wait_for_routing_calls(fake: &FakeLauncher, expected: usize) {
         timeout(Duration::from_secs(2), async {
             loop {
@@ -8255,7 +8280,7 @@ mod tests {
             relay_status: NodeEmbeddedServiceStatus::Running,
             signaling_addr: Some("127.0.0.1:46666".parse().expect("signaling address")),
             relay_addr: Some("127.0.0.1:46667".parse().expect("relay address")),
-            relay_health: None,
+            relay_health: Some(healthy_relay_health()),
             relay_governance: None,
         };
         harness

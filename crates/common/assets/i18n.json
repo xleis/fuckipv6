@@ -2885,7 +2885,23 @@
       "relay.governance.node_filter.placeholder": "精确匹配节点 ID",
       "relay.governance.node_filter.clear": "清空筛选",
       "relay.governance.node_filter.matches": "节点筛选命中 {matched} 条。",
-      "relay.governance.node_filter.empty": "没有匹配节点 {node_id} 的 Relay 治理事件。"
+      "relay.governance.node_filter.empty": "没有匹配节点 {node_id} 的 Relay 治理事件。",
+      "gpui.section.relay_durable_audit": "持久 Relay 审计导出",
+      "relay.durable_audit.persistent": "持久账本",
+      "relay.durable_audit.hint": "这里导出 W10 持久账本中的 Relay 启停与治理命令审计，不是上方仅存在于当前进程的 Live governance ledger。服务端会重新脱敏并验证审计链，导出需要最近五分钟内的 Passkey 重认证。",
+      "relay.durable_audit.scope": "网络范围：{network_id} · 资源范围：node_command:",
+      "relay.durable_audit.from": "起始时间（可选）",
+      "relay.durable_audit.to": "结束时间（可选）",
+      "relay.durable_audit.confirm": "我确认导出该网络的 Relay 治理命令审计，并理解导出由服务端验证、重新脱敏且要求最近 Passkey 重认证。",
+      "relay.durable_audit.invalid_time": "时间范围包含无效时间，请重新选择。",
+      "relay.durable_audit.invalid_range": "起始时间不能晚于结束时间。",
+      "relay.durable_audit.failed": "持久 Relay 审计导出失败；没有生成下载文件。",
+      "relay.durable_audit.export": "导出持久审计",
+      "relay.durable_audit.exporting": "正在导出…",
+      "relay.durable_audit.success": "已导出 {records} 条审计记录。",
+      "relay.durable_audit.empty_success": "该范围内没有 Relay 治理记录；已生成可验证的空导出文件。",
+      "relay.durable_audit.unavailable": "当前页面未连接持久审计导出接口，导出已禁用。",
+      "relay.durable_audit.network_unresolved": "无法将该 Relay 服务映射到网络 ID，导出已禁用。"
     },
     "en": {
       "nav.overview": "Overview",
@@ -5770,7 +5786,23 @@
       "relay.governance.node_filter.placeholder": "Exact node ID",
       "relay.governance.node_filter.clear": "Clear filter",
       "relay.governance.node_filter.matches": "Node filter matched {matched} events.",
-      "relay.governance.node_filter.empty": "No Relay governance events match node {node_id}."
+      "relay.governance.node_filter.empty": "No Relay governance events match node {node_id}.",
+      "gpui.section.relay_durable_audit": "Durable Relay audit export",
+      "relay.durable_audit.persistent": "Durable ledger",
+      "relay.durable_audit.hint": "This exports Relay enable, disable, and governance command audit from the W10 durable ledger, not the live governance ledger that disappears with the current process. The server re-redacts the data and verifies the audit chain; export requires Passkey reauthentication within the last five minutes.",
+      "relay.durable_audit.scope": "Network scope: {network_id} · Resource scope: node_command:",
+      "relay.durable_audit.from": "Start time (optional)",
+      "relay.durable_audit.to": "End time (optional)",
+      "relay.durable_audit.confirm": "I confirm the Relay governance command export for this network and understand that the server verifies the chain, re-redacts the data, and requires recent Passkey reauthentication.",
+      "relay.durable_audit.invalid_time": "The time range contains an invalid timestamp. Select it again.",
+      "relay.durable_audit.invalid_range": "The start time must not be later than the end time.",
+      "relay.durable_audit.failed": "Durable Relay audit export failed; no download was generated.",
+      "relay.durable_audit.export": "Export durable audit",
+      "relay.durable_audit.exporting": "Exporting…",
+      "relay.durable_audit.success": "Exported {records} audit records.",
+      "relay.durable_audit.empty_success": "No Relay governance records exist in this range; a verifiable empty export was generated.",
+      "relay.durable_audit.unavailable": "This page is not connected to the durable audit export API, so export is disabled.",
+      "relay.durable_audit.network_unresolved": "This Relay service cannot be mapped to a network ID, so export is disabled."
     }
   }
 }

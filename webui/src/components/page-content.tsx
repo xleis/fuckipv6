@@ -43,6 +43,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type FormEvent,
   type JSX,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
@@ -96,6 +97,10 @@ import {
   type ActivityFilters,
   type ActivityPresentationSignals,
 } from "../activity";
+import type {
+  RelayAuditExportReceipt,
+  RelayAuditExportRequest,
+} from "../api/owner-audit";
 import {
   executionBlockReason,
   i18n,
@@ -142,6 +147,9 @@ type PageContentProps = {
   onSubmitAction?: TopologyActionSubmit;
   topologySignals?: TopologyPresentationSignals;
   activitySignals?: ActivityPresentationSignals;
+  onExportRelayAudit?: (
+    request: RelayAuditExportRequest,
+  ) => Promise<RelayAuditExportReceipt>;
 };
 
 function empty(text: string): JSX.Element {
@@ -4358,12 +4366,212 @@ function RelayGovernanceDetails({
   );
 }
 
+function optionalUnixMs(value: string): number | undefined {
+  if (!value) return undefined;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function RelayDurableAuditDetails({
+  locale,
+  networkName,
+  networkId,
+  onExport,
+}: {
+  locale: Locale;
+  networkName: string;
+  networkId: string | null;
+  onExport?: (
+    request: RelayAuditExportRequest,
+  ) => Promise<RelayAuditExportReceipt>;
+}) {
+  const [fromValue, setFromValue] = useState("");
+  const [toValue, setToValue] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [validationFailure, setValidationFailure] = useState("");
+  const [exportFailure, setExportFailure] = useState("");
+  const [receipt, setReceipt] = useState<RelayAuditExportReceipt | null>(null);
+  const unavailableReason = !networkId
+    ? label(locale, "relay.durable_audit.network_unresolved")
+    : !onExport
+      ? label(locale, "relay.durable_audit.unavailable")
+      : "";
+
+  function clearFeedback(): void {
+    setValidationFailure("");
+    setExportFailure("");
+    setReceipt(null);
+  }
+
+  async function submitExport(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!networkId || !onExport || !confirmed || pending) return;
+    const fromUnixMs = optionalUnixMs(fromValue);
+    const toUnixMs = optionalUnixMs(toValue);
+    if ((fromValue && fromUnixMs == null) || (toValue && toUnixMs == null)) {
+      setValidationFailure(
+        label(locale, "relay.durable_audit.invalid_time"),
+      );
+      return;
+    }
+    if (
+      fromUnixMs != null &&
+      toUnixMs != null &&
+      fromUnixMs > toUnixMs
+    ) {
+      setValidationFailure(
+        label(locale, "relay.durable_audit.invalid_range"),
+      );
+      return;
+    }
+
+    setPending(true);
+    setValidationFailure("");
+    setExportFailure("");
+    setReceipt(null);
+    try {
+      const result = await onExport({
+        network_id: networkId,
+        ...(fromUnixMs != null ? { from_unix_ms: fromUnixMs } : {}),
+        ...(toUnixMs != null ? { to_unix_ms: toUnixMs } : {}),
+      });
+      setReceipt(result);
+      setConfirmed(false);
+    } catch {
+      setExportFailure(label(locale, "relay.durable_audit.failed"));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <section
+      className="surface-card"
+      data-testid="relay-durable-audit"
+      data-network={networkName}
+      aria-busy={pending}
+    >
+      <div className="card-heading">
+        <h3>{label(locale, "gpui.section.relay_durable_audit")}</h3>
+        <span className="status-pill neutral">
+          {label(locale, "relay.durable_audit.persistent")}
+        </span>
+      </div>
+      <p className="muted-copy">
+        {label(locale, "relay.durable_audit.hint")}
+      </p>
+      <p className="muted-copy" data-testid="relay-durable-audit-scope">
+        {networkId
+          ? tr(locale, "relay.durable_audit.scope", {
+              network_id: networkId,
+            })
+          : unavailableReason}
+      </p>
+      <form onSubmit={(event) => void submitExport(event)}>
+        <div className="form-grid cols-2">
+          <label className="form-field">
+            <span>{label(locale, "relay.durable_audit.from")}</span>
+            <input
+              type="datetime-local"
+              value={fromValue}
+              disabled={!networkId || !onExport || pending}
+              onChange={(event) => {
+                setFromValue(event.currentTarget.value);
+                clearFeedback();
+              }}
+            />
+          </label>
+          <label className="form-field">
+            <span>{label(locale, "relay.durable_audit.to")}</span>
+            <input
+              type="datetime-local"
+              value={toValue}
+              disabled={!networkId || !onExport || pending}
+              onChange={(event) => {
+                setToValue(event.currentTarget.value);
+                clearFeedback();
+              }}
+            />
+          </label>
+        </div>
+        <label className="check-field">
+          <input
+            type="checkbox"
+            checked={confirmed}
+            disabled={!networkId || !onExport || pending}
+            onChange={(event) => {
+              setConfirmed(event.currentTarget.checked);
+              setValidationFailure("");
+              setExportFailure("");
+            }}
+          />
+          <span>{label(locale, "relay.durable_audit.confirm")}</span>
+        </label>
+        {validationFailure ? (
+          <p className="form-error" role="alert">
+            {validationFailure}
+          </p>
+        ) : null}
+        {exportFailure ? (
+          <p
+            className="form-error"
+            role="alert"
+            data-testid="relay-durable-audit-error"
+          >
+            {exportFailure}
+          </p>
+        ) : null}
+        <button
+          className="primary-button"
+          type="submit"
+          disabled={!networkId || !onExport || !confirmed || pending}
+          data-testid="relay-durable-audit-export"
+        >
+          {pending
+            ? label(locale, "relay.durable_audit.exporting")
+            : label(locale, "relay.durable_audit.export")}
+        </button>
+        {!networkId || !onExport ? (
+          <p className="state-notice warn" data-testid="relay-durable-audit-unavailable">
+            {unavailableReason}
+          </p>
+        ) : null}
+        {receipt ? (
+          <div
+            className="form-success"
+            role="status"
+            data-testid="relay-durable-audit-success"
+          >
+            {receipt.record_count === 0 ? (
+              <p>{label(locale, "relay.durable_audit.empty_success")}</p>
+            ) : (
+              <p>
+                {tr(locale, "relay.durable_audit.success", {
+                  records: formatInteger(locale, receipt.record_count),
+                })}
+              </p>
+            )}
+            <code data-testid="relay-durable-audit-filename">
+              {receipt.filename}
+            </code>
+          </div>
+        ) : null}
+      </form>
+    </section>
+  );
+}
+
 function RelayCapabilityDetails({
   snapshot,
   locale,
+  onExportRelayAudit,
 }: {
   snapshot: NodeSnapshot;
   locale: Locale;
+  onExportRelayAudit?: (
+    request: RelayAuditExportRequest,
+  ) => Promise<RelayAuditExportReceipt>;
 }) {
   const services = snapshot.embedded_services ?? [];
   if (services.length === 0) {
@@ -4404,6 +4612,17 @@ function RelayCapabilityDetails({
             </section>
           )}
           {service.relay_governance ? (
+            <RelayDurableAuditDetails
+              locale={locale}
+              networkName={service.network_name}
+              networkId={resolveNetworkMembershipId(
+                snapshot.memberships,
+                service.network_name,
+              )}
+              onExport={onExportRelayAudit}
+            />
+          ) : null}
+          {service.relay_governance ? (
             <RelayGovernanceDetails
               locale={locale}
               networkName={service.network_name}
@@ -4420,10 +4639,14 @@ function CapabilityPage({
   snapshot,
   locale,
   kind,
+  onExportRelayAudit,
 }: {
   snapshot: NodeSnapshot;
   locale: Locale;
   kind: "exit" | "relay";
+  onExportRelayAudit?: (
+    request: RelayAuditExportRequest,
+  ) => Promise<RelayAuditExportReceipt>;
 }) {
   const capability = snapshot.capabilities?.capabilities.find(
     (item) => item.kind === kind,
@@ -4587,7 +4810,11 @@ function CapabilityPage({
         </section>
       ) : null}
       {kind === "relay" ? (
-        <RelayCapabilityDetails snapshot={snapshot} locale={locale} />
+        <RelayCapabilityDetails
+          snapshot={snapshot}
+          locale={locale}
+          onExportRelayAudit={onExportRelayAudit}
+        />
       ) : null}
     </div>
   );
@@ -5092,7 +5319,12 @@ export function PageContent(props: PageContentProps) {
       break;
     case "relay":
       content = (
-        <CapabilityPage snapshot={snapshot} locale={locale} kind="relay" />
+        <CapabilityPage
+          snapshot={snapshot}
+          locale={locale}
+          kind="relay"
+          onExportRelayAudit={props.onExportRelayAudit}
+        />
       );
       break;
     case "logs":

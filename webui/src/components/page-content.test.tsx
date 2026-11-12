@@ -226,7 +226,16 @@ function relayHealth(
   };
 }
 
-function relayElement(snapshot: NodeSnapshot) {
+function relayElement(
+  snapshot: NodeSnapshot,
+  onExportRelayAudit?: (
+    request: {
+      network_id: string;
+      from_unix_ms?: number;
+      to_unix_ms?: number;
+    },
+  ) => Promise<{ filename: string; record_count: number }>,
+) {
   return (
     <PageContent
       page={relayPage}
@@ -238,8 +247,63 @@ function relayElement(snapshot: NodeSnapshot) {
       onNavigate={() => {}}
       onRequestAction={() => {}}
       onRunAction={async () => {}}
+      onExportRelayAudit={onExportRelayAudit}
     />
   );
+}
+
+function relayAuditSnapshot(): NodeSnapshot {
+  return {
+    ...baseSnapshot,
+    memberships: [
+      {
+        network_name: "owner-relay",
+        network_id: "net_owner_relay",
+        node_id: "node-visual-01",
+        state: "active",
+        role: "member",
+        local_policy_revision: 3,
+        network_policy_revision: 3,
+        privacy_policy_revision: 1,
+        member_limit: 16,
+        exit_contribution: "not_required",
+        exit_contribution_scope: "all_members",
+        terms_hash: null,
+        current_terms: null,
+        current_terms_hash: null,
+        policy_confirmation_required: false,
+        acknowledged_at_unix_ms: null,
+        created_at_unix_ms: 1_700_000_000_000,
+        updated_at_unix_ms: 1_700_000_100_000,
+        suspension_reason: null,
+      },
+    ],
+    embedded_services: [
+      {
+        network_name: "owner-relay",
+        status: "running",
+        relay_status: "running",
+        relay_addr: "127.0.0.1:6667",
+        relay_health: relayHealth(),
+        relay_governance: {
+          events: [],
+          dropped_events: 0,
+          payload: "AUDIT_PANEL_PAYLOAD_SENTINEL",
+          destination: "2001:db8::audit-panel-secret",
+        } as RelayGovernanceAuditSnapshot,
+      },
+    ],
+  };
+}
+
+function relayAuditCheckbox(): HTMLInputElement {
+  return screen.getByRole("checkbox", {
+    name: translated("relay.durable_audit.confirm"),
+  }) as HTMLInputElement;
+}
+
+function relayAuditExportButton(): HTMLButtonElement {
+  return screen.getByTestId("relay-durable-audit-export") as HTMLButtonElement;
 }
 
 function datetimeLocal(unixMs: number): string {
@@ -1091,6 +1155,135 @@ describe("Relay capability status", () => {
     ).not.toBeInTheDocument();
     expect(governance).not.toHaveTextContent("FILTER_SECRET_PAYLOAD");
     expect(governance).not.toHaveTextContent("2001:db8::filter-secret");
+  });
+
+  it("exports durable Relay audit for the resolved network and selected time range", async () => {
+    const user = userEvent.setup();
+    const onExport = vi.fn(async () => ({
+      filename: "owner-security-audit-export.json",
+      record_count: 2,
+    }));
+    const from = Date.UTC(2026, 0, 1, 0, 0, 0);
+    const to = Date.UTC(2026, 0, 2, 0, 0, 0);
+    render(relayElement(relayAuditSnapshot(), onExport));
+
+    const panel = screen.getByTestId("relay-durable-audit");
+    expect(panel).toHaveAttribute("data-network", "owner-relay");
+    expect(panel).toHaveTextContent(
+      translated("relay.durable_audit.scope"),
+    );
+    expect(panel).toHaveTextContent(
+      translated("relay.durable_audit.persistent"),
+    );
+    expect(panel).not.toHaveTextContent("AUDIT_PANEL_PAYLOAD_SENTINEL");
+    expect(panel).not.toHaveTextContent("2001:db8::audit-panel-secret");
+
+    fireEvent.change(
+      screen.getByLabelText(translated("relay.durable_audit.from")),
+      { target: { value: datetimeLocal(from) } },
+    );
+    fireEvent.change(
+      screen.getByLabelText(translated("relay.durable_audit.to")),
+      { target: { value: datetimeLocal(to) } },
+    );
+    expect(relayAuditExportButton()).toBeDisabled();
+    await user.click(relayAuditCheckbox());
+    await user.click(relayAuditExportButton());
+
+    expect(onExport).toHaveBeenCalledOnce();
+    expect(onExport).toHaveBeenCalledWith({
+      network_id: "net_owner_relay",
+      from_unix_ms: from,
+      to_unix_ms: to,
+    });
+    const success = await screen.findByTestId("relay-durable-audit-success");
+    expect(success).toHaveTextContent(
+      translated("relay.durable_audit.success"),
+    );
+    expect(
+      screen.getByTestId("relay-durable-audit-filename"),
+    ).toHaveTextContent("owner-security-audit-export.json");
+  });
+
+  it("requires confirmation and a non-inverted time range before export", async () => {
+    const user = userEvent.setup();
+    const onExport = vi.fn(async () => ({
+      filename: "owner-security-audit-export.json",
+      record_count: 1,
+    }));
+    render(relayElement(relayAuditSnapshot(), onExport));
+
+    expect(relayAuditExportButton()).toBeDisabled();
+    await user.click(relayAuditCheckbox());
+    expect(relayAuditExportButton()).toBeEnabled();
+
+    fireEvent.change(
+      screen.getByLabelText(translated("relay.durable_audit.from")),
+      { target: { value: datetimeLocal(Date.UTC(2026, 0, 2)) } },
+    );
+    fireEvent.change(
+      screen.getByLabelText(translated("relay.durable_audit.to")),
+      { target: { value: datetimeLocal(Date.UTC(2026, 0, 1)) } },
+    );
+    await user.click(relayAuditExportButton());
+
+    expect(onExport).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      translated("relay.durable_audit.invalid_range"),
+    );
+
+    await user.click(relayAuditCheckbox());
+    expect(relayAuditExportButton()).toBeDisabled();
+  });
+
+  it("renders verifiable empty exports and stable export failures without claiming success", async () => {
+    const user = userEvent.setup();
+    const onExport = vi
+      .fn()
+      .mockResolvedValueOnce({
+        filename: "empty-owner-security-audit-export.json",
+        record_count: 0,
+      })
+      .mockRejectedValueOnce(new Error("internal URL and payload"));
+    render(relayElement(relayAuditSnapshot(), onExport));
+
+    await user.click(relayAuditCheckbox());
+    await user.click(relayAuditExportButton());
+    const success = await screen.findByTestId("relay-durable-audit-success");
+    expect(success).toHaveTextContent(
+      translated("relay.durable_audit.empty_success"),
+    );
+    expect(
+      screen.getByTestId("relay-durable-audit-filename"),
+    ).toHaveTextContent("empty-owner-security-audit-export.json");
+
+    await user.click(relayAuditCheckbox());
+    await user.click(relayAuditExportButton());
+    expect(
+      await screen.findByTestId("relay-durable-audit-error"),
+    ).toHaveTextContent(translated("relay.durable_audit.failed"));
+    expect(screen.queryByTestId("relay-durable-audit-success")).not.toBeInTheDocument();
+    expect(screen.queryByText(/internal URL and payload/)).not.toBeInTheDocument();
+  });
+
+  it("disables durable export when the network ID or callback is unavailable", () => {
+    const onExport = vi.fn(async () => ({
+      filename: "owner-security-audit-export.json",
+      record_count: 0,
+    }));
+    const missingMembership = relayAuditSnapshot();
+    missingMembership.memberships = [];
+    const { rerender } = render(relayElement(missingMembership, onExport));
+    expect(relayAuditExportButton()).toBeDisabled();
+    expect(
+      screen.getByTestId("relay-durable-audit-unavailable"),
+    ).toHaveTextContent(translated("relay.durable_audit.network_unresolved"));
+
+    rerender(relayElement(relayAuditSnapshot()));
+    expect(relayAuditExportButton()).toBeDisabled();
+    expect(
+      screen.getByTestId("relay-durable-audit-unavailable"),
+    ).toHaveTextContent(translated("relay.durable_audit.unavailable"));
   });
 
   it("does not infer healthy from a running listener without a health snapshot", () => {

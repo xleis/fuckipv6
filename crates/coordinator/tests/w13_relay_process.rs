@@ -537,6 +537,196 @@ async fn sigkill_restart_releases_relay_port_and_invalidates_old_session() -> Re
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dual_relay_failover_reconnects_with_source_binding_and_closed_path() -> Result<()> {
+    const FIRST_PAYLOAD: &[u8] = b"w13-relay-failover-before";
+    const RECOVERED_PAYLOAD: &[u8] = b"w13-relay-failover-after";
+
+    let directory = temp_dir("failover")?;
+    let identity_a_path = directory.join("identity-a.key");
+    let identity_b_path = directory.join("identity-b.key");
+    let relay_a_directory = directory.join("relay-a");
+    let relay_b_directory = directory.join("relay-b");
+    std::fs::create_dir_all(&relay_a_directory)?;
+    std::fs::create_dir_all(&relay_b_directory)?;
+    let relay_a_identity_path = relay_a_directory.join("provider.key");
+    let relay_a_peer_path = relay_a_directory.join("peer.key");
+    let relay_a_ready_path = relay_a_directory.join("ready.json");
+    let relay_b_identity_path = relay_b_directory.join("provider.key");
+    let relay_b_peer_path = relay_b_directory.join("peer.key");
+    let relay_b_ready_path = relay_b_directory.join("ready.json");
+    let identity_a = Identity::generate()?;
+    let identity_b = Identity::generate()?;
+    identity_a.save_to_file(&identity_a_path)?;
+    identity_b.save_to_file(&identity_b_path)?;
+    std::fs::copy(&identity_a_path, &relay_a_identity_path)?;
+    std::fs::copy(&identity_b_path, &relay_a_peer_path)?;
+    std::fs::copy(&identity_a_path, &relay_b_identity_path)?;
+    std::fs::copy(&identity_b_path, &relay_b_peer_path)?;
+
+    let mut relay_a = ChildGuard::spawn_with_identities(
+        &relay_a_identity_path,
+        Some(&relay_a_peer_path),
+        None,
+        None,
+        None,
+        free_udp_port()?,
+        &relay_a_ready_path,
+    )?;
+    let mut relay_b = ChildGuard::spawn_with_identities(
+        &relay_b_identity_path,
+        Some(&relay_b_peer_path),
+        None,
+        None,
+        None,
+        free_udp_port()?,
+        &relay_b_ready_path,
+    )?;
+    let ready_a = wait_for_ready(&relay_a_ready_path, &mut relay_a).await?;
+    let ready_b = wait_for_ready(&relay_b_ready_path, &mut relay_b).await?;
+    let peer_a = ready_a
+        .peer_virtual_ip
+        .context("first Relay did not register the peer identity")?;
+    let peer_b = ready_b
+        .peer_virtual_ip
+        .context("second Relay did not register the peer identity")?;
+    assert_eq!(ready_a.virtual_ip, ready_b.virtual_ip);
+    assert_eq!(peer_a, peer_b);
+    assert_ne!(ready_a.addr, ready_b.addr);
+    assert_ne!(ready_a.server_pin, ready_b.server_pin);
+
+    let sender_a = QuicRelayClient::connect(
+        ready_a.addr,
+        ready_a.server_pin,
+        "fuckipv6.local",
+        &identity_a,
+        ready_a.virtual_ip,
+        &grant(&identity_a, "failover-a-sender")?,
+    )
+    .await
+    .context("first Relay rejected the sender")?;
+    let receiver_a = QuicRelayClient::connect(
+        ready_a.addr,
+        ready_a.server_pin,
+        "fuckipv6.local",
+        &identity_b,
+        peer_a,
+        &grant(&identity_b, "failover-a-receiver")?,
+    )
+    .await
+    .context("first Relay rejected the receiver")?;
+    let first_payload = bytes::Bytes::from_static(FIRST_PAYLOAD);
+    let first_delivery = tokio::time::timeout(Duration::from_secs(5), async {
+        let (sent, received) = tokio::join!(
+            sender_a.send_packet(1, ready_a.virtual_ip, peer_a, first_payload.clone()),
+            receiver_a.recv_packet(),
+        );
+        sent?;
+        received.context("first Relay closed before forwarding the packet")
+    })
+    .await
+    .context("first Relay forwarding timed out")??;
+    assert_eq!(first_delivery.src_ip, ready_a.virtual_ip);
+    assert_eq!(first_delivery.dst_ip, peer_a);
+    assert_eq!(first_delivery.payload, first_payload);
+
+    relay_a.kill_and_wait()?;
+    let stale_send = tokio::time::timeout(
+        Duration::from_secs(3),
+        sender_a.send_packet(
+            1,
+            ready_a.virtual_ip,
+            peer_a,
+            b"stale failover session".as_slice(),
+        ),
+    )
+    .await;
+    assert!(
+        !matches!(stale_send, Ok(Ok(()))),
+        "killed Relay path accepted traffic from its stale session"
+    );
+    sender_a.close().await;
+    receiver_a.close().await;
+
+    let sender_b = QuicRelayClient::connect(
+        ready_b.addr,
+        ready_b.server_pin,
+        "fuckipv6.local",
+        &identity_a,
+        ready_b.virtual_ip,
+        &grant(&identity_a, "failover-b-sender")?,
+    )
+    .await
+    .context("second Relay rejected the reconnected sender")?;
+    let receiver_b = QuicRelayClient::connect(
+        ready_b.addr,
+        ready_b.server_pin,
+        "fuckipv6.local",
+        &identity_b,
+        peer_b,
+        &grant(&identity_b, "failover-b-receiver")?,
+    )
+    .await
+    .context("second Relay rejected the reconnected receiver")?;
+
+    let forged_source = tokio::time::timeout(
+        Duration::from_secs(5),
+        QuicRelayClient::connect(
+            ready_b.addr,
+            ready_b.server_pin,
+            "fuckipv6.local",
+            &identity_a,
+            peer_b,
+            &grant(&identity_a, "failover-forged-source")?,
+        ),
+    )
+    .await
+    .context("forged source registration timed out")?;
+    assert!(
+        forged_source.is_err(),
+        "Relay accepted a registration whose virtual source address belongs to another identity"
+    );
+
+    let unknown_destination = Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 0xdead);
+    let unknown_send = tokio::time::timeout(
+        Duration::from_secs(5),
+        sender_b.send_packet(
+            1,
+            ready_b.virtual_ip,
+            unknown_destination,
+            b"unknown destination must fail closed".as_slice(),
+        ),
+    )
+    .await
+    .context("unknown-destination forwarding timed out")?;
+    let unknown_error = unknown_send.expect_err("Relay accepted an unknown destination");
+    assert!(
+        unknown_error.to_string().contains("404"),
+        "unknown destination did not fail with a not-found response: {unknown_error}"
+    );
+
+    let recovered_payload = bytes::Bytes::from_static(RECOVERED_PAYLOAD);
+    let recovered_delivery = tokio::time::timeout(Duration::from_secs(5), async {
+        let (sent, received) = tokio::join!(
+            sender_b.send_packet(1, ready_b.virtual_ip, peer_b, recovered_payload.clone()),
+            receiver_b.recv_packet(),
+        );
+        sent?;
+        received.context("second Relay closed before forwarding the recovered packet")
+    })
+    .await
+    .context("recovered Relay forwarding timed out")??;
+    assert_eq!(recovered_delivery.src_ip, ready_b.virtual_ip);
+    assert_eq!(recovered_delivery.dst_ip, peer_b);
+    assert_eq!(recovered_delivery.payload, recovered_payload);
+
+    sender_b.close().await;
+    receiver_b.close().await;
+    relay_b.kill_and_wait()?;
+    std::fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
 async fn wait_for_operator_snapshot(
     path: &Path,
     child: &mut ChildGuard,

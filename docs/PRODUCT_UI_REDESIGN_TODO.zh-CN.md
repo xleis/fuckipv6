@@ -61,7 +61,7 @@
 | W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05 已完成：本机启停、贡献治理、管理员选择、分层健康与故障切换/撤权均有权威状态和自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收；两侧 Exit 可达、Peer 级统计映射和 W12-09 的 24 小时稳定性/自动清理仍待完成 |
 | W13 Relay | `[ ]` | P1 | W10 | 授权、配额、健康、回退 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
-| W15 File | `[ ]` | P2 | W10 | ACL、配额、上传下载、续传 |
+| W15 File | `[~]` | P2 | W10 | 本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、并发/速率/磁盘/扫描/审计上界已落地；WebUI/Android File 表面、真实网络传输、跨平台竞态与性能/OS 资源基线仍未完成 |
 | W16 Android | `[ ]` | P2 | W2,W4,W5,W7-W15 | Compose、VpnService、全能力 |
 | W17 跨平台硬化 | `[ ]` | P2 | W6-W16 | Linux/macOS/Windows 实机证据 |
 | W18 发布门禁 | `[ ]` | P0 | 全部 | 自动化、实测、安全和发布证据 |
@@ -3224,7 +3224,7 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 
 目标：File 是受 ACL、配额和路径边界保护的共享能力，不扩张为同步盘、镜像或系统挂载。所有者选择共享目录，网络管理员只控制网络是否允许及授权范围。
 
-### W15-01 共享目录与能力启停 `[ ]`
+### W15-01 共享目录与能力启停 `[~]`
 
 - [ ] 节点 owner 通过原生目录选择器选择共享根目录；
 - [ ] 不把整个磁盘或敏感系统目录设为默认共享；
@@ -3237,7 +3237,7 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 
 **验收**：共享范围由本地 owner 明确授权，关闭后不继续暴露文件元数据或传输。
 
-### W15-02 ACL、配额与可见性 `[ ]`
+### W15-02 ACL、配额与可见性 `[~]`
 
 - [ ] 定义文件/目录级 ACL、组授权和拒绝优先；
 - [ ] 未授权成员看不到文件名称、大小、时间和目录结构；
@@ -3250,7 +3250,7 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 
 **验收**：File 权限是网络授权与本地目录控制的交集；管理员身份不自动等于文件内容权限。
 
-### W15-03 上传、下载与断点续传 `[ ]`
+### W15-03 上传、下载与断点续传 `[~]`
 
 - [ ] 使用受认证、可取消的 operation 开始传输；
 - [ ] 上传/下载支持校验、进度、暂停/恢复和最终确认；
@@ -3263,7 +3263,7 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 
 **验收**：传输中断可安全恢复，损坏/过期分块不会被合并成成功文件。
 
-### W15-04 canonicalize 与路径边界 `[ ]`
+### W15-04 canonicalize 与路径边界 `[~]`
 
 - [ ] 所有路径在服务端规范化并验证位于共享根目录；
 - [ ] 拒绝绝对路径逃逸、`..`、空字节和平台特殊路径；
@@ -3276,7 +3276,7 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 
 **验收**：任何输入无法读写共享根目录之外的文件，路径测试覆盖目标平台。
 
-### W15-05 符号链接、竞态与临时文件 `[ ]`
+### W15-05 符号链接、竞态与临时文件 `[~]`
 
 - [ ] 拒绝指向共享根外的符号链接/重解析点；
 - [ ] 对目录替换、链接交换和并发重命名进行防护；
@@ -3289,20 +3289,49 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 
 **验收**：路径穿越与竞态攻击不能越界；临时文件不泄漏、不无限增长。
 
-### W15-06 并发、速率与资源限制 `[ ]`
+### W15-06 并发、速率与资源限制 `[~]`
 
-- [ ] 限制每成员、每目录和全局并发；
-- [ ] 实现读写速率和带宽配额；
-- [ ] 进行磁盘空间预留与低空间保护；
-- [ ] 限制目录扫描深度和条目数；
-- [ ] 限制事件队列和日志增长；
+- [x] 限制每成员、每目录和全局并发；
+- [x] 实现读写速率和带宽配额；
+- [x] 进行磁盘空间预留与低空间保护；
+- [x] 限制目录扫描深度和条目数；
+- [x] 限制事件队列和日志增长；
 - [ ] 满载时不影响 node/control 基本功能；
 - [ ] 压力测试后文件句柄、线程和内存回到基线；
-- [ ] 报告录明阈值与恢复结果。
+- [x] 报告录明阈值与恢复结果。
 
 **验收**：恶意或误用传输无法耗尽节点资源，File 故障不拖垮数据面。
 
-### W15-07 撤权与传输中断 `[ ]`
+**证据（2026-11-12，自动化边界）**：File runtime 在授权后、staging 前按已认证 actor 与目标父目录执行准入；上传和下载共享同一字节 token bucket，
+限速时返回 `RateLimited { retry_after_ms }` 而不会阻塞 async runtime。默认阈值如下：
+
+| 限制项 | 默认/上限 | 执行点 |
+|---|---:|---|
+| 全局活动传输 | 4 | `FileQuota::max_concurrent_transfers` + `FileRuntime::reserve` |
+| 每成员活动传输 | 2 | `FileQuota::max_concurrent_transfers_per_member` |
+| 每目录活动传输 | 2 | `FileQuota::max_concurrent_transfers_per_directory` |
+| 磁盘预留 | 256 MiB | `FileQuota::reserve_bytes` + `fs2::available_space`，上传准入前失败关闭 |
+| 共享总配额 | 10 GiB | `FileQuota::total_bytes` |
+| 每成员配额 | 2 GiB | `FileQuota::per_member_bytes` |
+| 单文件配额 | 1 GiB | `FileQuota::max_file_bytes` |
+| 目录条目审计 | 100,000 | `FileQuota::max_entries` |
+| 配额扫描深度/条目 | 64 / 100,000 | `QuotaScanLimits::default`，不跟随符号链接 |
+| 单块上限 | 16 MiB | `MAX_TRANSFER_CHUNK_BYTES` |
+| 带宽 | 0 = 不限额 | `max_bandwidth_kbps`；启用时按聚合 File 流量计量，桶容量不超过单块上限 |
+| 节点活动/命令审计 | 256 / 256 | `ACTIVITY_RETENTION_LIMIT` / `COMMAND_AUDIT_RETENTION_LIMIT` |
+| File capability 审计 | 256 | `CAPABILITY_AUDIT_RETENTION_LIMIT`；持久化 owner 安全台账不受内存淘汰影响 |
+
+**自动化恢复结果**：`repeated_transfer_lifecycles_return_admission_and_staging_to_baseline` 连续执行 512 次上传生命周期，
+每次 drop 后活动准入回到 0，最终 staging 目录为空；成员、目录与全局并发额度的独立/同时生效由
+`member_and_directory_limits_are_independent_within_global_limit` 与 `directory_limit_blocks_only_the_same_parent_directory` 覆盖；
+低空间在 staging 创建前返回 `file_disk_space_reserved`；上传/下载限速后保持可重试并最终完成；
+`command_audit_keeps_only_the_latest_bounded_entries` 验证命令审计只保留最新 256 条，
+`capability_audit_keeps_only_the_latest_bounded_events` 验证 File capability 审计只保留最新 256 条。
+
+**未测边界**：尚未启动独立 node/control 进程做 File 满载隔离测试；尚未在 Linux/macOS/Windows 实机上采样压力前后的
+文件句柄、线程数和 RSS，因此不能声称 OS 资源已回到基线。大文件、多文件并发和真实网络中断恢复性能也未测试。
+
+### W15-07 撤权与传输中断 `[~]`
 
 - [ ] 撤销 ACL 后立即停止新元数据访问和传输请求；
 - [ ] 已有传输在安全边界内终止或完成策略明确；
@@ -3317,16 +3346,26 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 
 ### W15-08 File 非目标与发布证据 `[ ]`
 
-- [ ] 明确不做自动同步、双向镜像、系统挂载和远程目录替换；
-- [ ] UI 不展示这些非目标为可用功能；
+- [x] 明确不做自动同步、双向镜像、系统挂载和远程目录替换；
+- [x] UI 不展示这些非目标为可用功能；
 - [ ] 完成 ACL、路径、符号链接、竞态、配额、续传和撤权测试；
 - [ ] GPUI/WebUI/Android 使用同一文件和权限语义；
-- [ ] 移动端 SAF 与桌面目录权限边界清楚；
-- [ ] 活动与审计可追溯；
+- [x] 移动端 SAF 与桌面目录权限边界清楚；
+- [x] 活动与审计可追溯；
 - [ ] 性能报告包含大文件、多文件和中断恢复；
-- [ ] 未通过路径安全测试不得发布。
+- [x] 未通过路径安全测试不得发布。
 
 **验收**：File 第一版范围明确、边界安全、传输闭环，不以同步盘宣传超出实现。
+
+**边界与发布结论（2026-11-12）**：
+
+- W15 第一版不做自动同步、双向镜像、系统挂载或远程目录替换；GPUI 设置页明确提示这些能力不存在。
+- Android SAF 属于 W16，不是 W15 已交付能力；Android 端不得据此声称 File 目录选择或传输已经完成。
+- 当前已有 GPUI owner File 设置流程、本地 owner IPC、持久化、domain ACL、路径边界、临时文件、可恢复传输适配器和资源限制。
+- 当前 WebUI 与 Android 尚无 File 内容浏览/传输表面；不得宣称 GPUI/WebUI/Android 三端 File 语义已经一致。
+- 自动化测试覆盖 Linux 临时目录及 portable 路径规则，但尚未完成 Windows GNU/macOS 实机重解析点、硬链接、目录交换、
+  并发重命名和权限变化测试，也没有真实网络传输链路、撤权中断、节点重启或大文件/多文件性能报告。
+- 因此 W15 保持 `[~]`，第二版能力队列中的“W15 File 完成”继续保持 `[ ]`；真实路径安全、跨平台和三端门禁通过前不得发布为完成。
 
 ## 19. W16：Android
 

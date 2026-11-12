@@ -1324,6 +1324,116 @@ mod tests {
     }
 
     #[test]
+    fn administrator_role_does_not_bypass_file_acl_layers() {
+        let administrator = node(3);
+        let mut share = share();
+        let mut administrator_context = context(&share, administrator.clone());
+        administrator_context.role = NetworkRole::Administrator;
+        let member_only_allow = FileAclRule {
+            id: "members-only".into(),
+            subjects: BTreeSet::from([SubjectSelector::Role(NetworkRole::Member)]),
+            path_prefix: SharedPath::root(),
+            actions: BTreeSet::from([FileAction::ReadMetadata]),
+            effect: FileAclEffect::Allow,
+        };
+        share.network_acl.rules = vec![member_only_allow.clone()];
+        share.local_acl.rules = vec![member_only_allow];
+        assert_eq!(
+            share.authorize(
+                &access("private.txt", FileAction::ReadMetadata),
+                &administrator_context,
+                true,
+            ),
+            Err(file_denial(FileAccessDenialCode::AclNoAllow, "network_acl"))
+        );
+
+        share.network_acl.rules.push(FileAclRule {
+            id: "administrator-network-allow".into(),
+            subjects: BTreeSet::from([SubjectSelector::Node(administrator.clone())]),
+            path_prefix: SharedPath::root(),
+            actions: BTreeSet::from([FileAction::ReadMetadata]),
+            effect: FileAclEffect::Allow,
+        });
+        assert_eq!(
+            share.authorize(
+                &access("private.txt", FileAction::ReadMetadata),
+                &administrator_context,
+                true,
+            ),
+            Err(file_denial(FileAccessDenialCode::AclNoAllow, "local_acl"))
+        );
+
+        share.local_acl.rules.push(FileAclRule {
+            id: "administrator-local-deny".into(),
+            subjects: BTreeSet::from([SubjectSelector::Node(administrator)]),
+            path_prefix: SharedPath::root(),
+            actions: BTreeSet::from([FileAction::ReadMetadata]),
+            effect: FileAclEffect::Deny,
+        });
+        assert_eq!(
+            share.authorize(
+                &access("private.txt", FileAction::ReadMetadata),
+                &administrator_context,
+                true,
+            ),
+            Err(file_denial(FileAccessDenialCode::AclDenied, "local_acl"))
+        );
+    }
+
+    #[test]
+    fn directory_acl_prefixes_cover_descendants_without_matching_siblings() {
+        let member = node(2);
+        let mut share = share();
+        let member_context = context(&share, member.clone());
+        let public_directory = FileAclRule {
+            id: "allow-public-directory".into(),
+            subjects: BTreeSet::from([SubjectSelector::Node(member.clone())]),
+            path_prefix: SharedPath::parse("docs/public").expect("public directory"),
+            actions: BTreeSet::from([FileAction::List]),
+            effect: FileAclEffect::Allow,
+        };
+        let private_directory = FileAclRule {
+            id: "deny-private-directory".into(),
+            subjects: BTreeSet::from([SubjectSelector::Node(member)]),
+            path_prefix: SharedPath::parse("docs/private").expect("private directory"),
+            actions: BTreeSet::from([FileAction::List]),
+            effect: FileAclEffect::Deny,
+        };
+        for acl in [&mut share.network_acl, &mut share.local_acl] {
+            acl.rules = vec![public_directory.clone(), private_directory.clone()];
+        }
+
+        assert!(share
+            .authorize(
+                &access("docs/public", FileAction::List),
+                &member_context,
+                true,
+            )
+            .is_ok());
+        assert!(share
+            .authorize(
+                &access("docs/public/reports", FileAction::List),
+                &member_context,
+                true,
+            )
+            .is_ok());
+        for path in ["docs/private", "docs/private/keys"] {
+            assert_eq!(
+                share.authorize(&access(path, FileAction::List), &member_context, true),
+                Err(file_denial(FileAccessDenialCode::AclDenied, "network_acl"))
+            );
+        }
+        assert_eq!(
+            share.authorize(
+                &access("docs/publicity", FileAction::List),
+                &member_context,
+                true,
+            ),
+            Err(file_denial(FileAccessDenialCode::AclNoAllow, "network_acl"))
+        );
+    }
+
+    #[test]
     fn membership_network_and_read_only_are_enforced_before_acls() {
         let member = node(2);
         let mut share = share();

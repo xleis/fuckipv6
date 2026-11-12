@@ -3226,29 +3226,49 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 
 ### W15-01 共享目录与能力启停 `[~]`
 
-- [ ] 节点 owner 通过原生目录选择器选择共享根目录；
-- [ ] 不把整个磁盘或敏感系统目录设为默认共享；
-- [ ] 启用前展示目录、容量、访问范围和最小权限；
-- [ ] File 能力独立于 Relay/Exit/Coordinator；
+- [x] 节点 owner 通过原生目录选择器选择共享根目录；
+- [x] 不把整个磁盘或敏感系统目录设为默认共享；
+- [x] 启用前展示目录、容量、访问范围和最小权限；
+- [x] File 能力独立于 Relay/Exit/Coordinator；
 - [x] 关闭能力停止新传输并处理已有传输；
-- [ ] 目录不可读、权限变化、磁盘满有明确状态；
-- [ ] 不自动创建桌面/下载目录共享；
-- [ ] 所有配置变化有审计。
+- [x] 目录不可读、权限变化、磁盘满有明确状态；
+- [x] 不自动创建桌面/下载目录共享；
+- [x] 所有配置变化有审计。
 
 **验收**：共享范围由本地 owner 明确授权，关闭后不继续暴露文件元数据或传输。
 
-### W15-02 ACL、配额与可见性 `[~]`
+**证据（2026-11-13，GPUI owner 流程与本地能力）**：`select_file_share_root` 通过 GPUI 原生目录选择器单选共享根，
+取消不会作为错误；选择后必须先完成本地预览才能启用。预览包含容量、目录用量、条目数、访问模式、网络/本地 ACL
+规则数、符号链接策略、审计开关和 deny-by-default 状态。`LocalShareRoot::select` 拒绝文件系统根、Unix 系统目录和
+用户主目录，配置中没有默认共享根，也不会自动创建桌面或下载目录。File capability、owner service、持久化和 IPC 不依赖
+Relay/Exit/Coordinator。`owner_can_enable_and_disable_without_exposing_root`、`root_removal_is_reported_without_raw_paths`、
+`restore_marks_unavailable_when_root_disappears` 与 `audit_failure_prevents_enable_and_persistence` 覆盖根目录不可用、
+稳定错误码、配置持久化和审计失败时拒绝启用；`file.share.preview/enable/disable/restore` 均进入审计。上述为 GPUI 测试
+适配器与 Linux/portable 证据；macOS/Windows 原生选择器和实机权限变化仍需验收，因此 W15-01 保持 `[~]`。
 
-- [ ] 定义文件/目录级 ACL、组授权和拒绝优先；
-- [ ] 未授权成员看不到文件名称、大小、时间和目录结构；
-- [ ] 配置每成员/网络/全局配额；
-- [ ] 限制最大文件、最大目录、并发传输和速率；
-- [ ] 管理员可限制网络是否启用 File，但不能浏览 owner 文件；
-- [ ] 授权变化即时影响元数据和传输接口；
-- [ ] 配额和 ACL 错误结构化展示；
-- [ ] 完成字段级隐私与资源上限测试。
+### W15-02 ACL、配额与可见性 `[x]`
+
+- [x] 定义文件/目录级 ACL、组授权和拒绝优先；
+- [x] 未授权成员看不到文件名称、大小、时间和目录结构；
+- [x] 配置每成员/网络/全局配额；
+- [x] 限制最大文件、最大目录、并发传输和速率；
+- [x] 管理员可限制网络是否启用 File，但不能浏览 owner 文件；
+- [x] 授权变化即时影响元数据和传输接口；
+- [x] 配额和 ACL 错误结构化展示；
+- [x] 完成字段级隐私与资源上限测试。
 
 **验收**：File 权限是网络授权与本地目录控制的交集；管理员身份不自动等于文件内容权限。
+
+**证据（2026-11-13，ACL、配额与字段隐私）**：网络 ACL 与本地 ACL 取交集，`deny_wins_and_both_network_and_local_layers_must_allow`
+验证任一层 Deny 优先且两层都必须显式 Allow；`administrator_role_does_not_bypass_file_acl_layers` 验证网络管理员角色不能
+替代网络或本地文件 ACL，并验证显式 Deny 仍是最终否决；`directory_acl_prefixes_cover_descendants_without_matching_siblings`
+验证目录 ACL 按路径组件覆盖后代、拒绝后代目录，同时不会误匹配 `docs/publicity` 一类相似前缀。元数据只接受精确路径的
+受认证请求，且需要显式 `read_metadata`；没有对成员开放的目录列举 RPC，因此未授权成员不会获得文件名称、大小、时间或
+目录结构。`metadata_requires_explicit_read_metadata_acl_action` 与 `acl_reconfiguration_revokes_live_transfer_and_rejects_new_metadata_and_requests`
+覆盖元数据拒绝和授权变更后的立即失效。`FileQuota` 同时限制总字节、每成员字节、单文件、条目数、磁盘预留、全局/成员/目录
+并发和聚合带宽，错误通过稳定的 `FileQuotaError::code()` / `FileAccessDenial` 返回。网络请求入口还要求当前有效的签名网络
+Profile 声明 `File` capability，管理员可通过该网络授权关闭 File；即使网络已启用，文件内容仍必须通过上述双层 ACL。字段级隐私由
+`file_metadata_projection_omits_hidden_acl_quota_paths_and_timestamps` 覆盖；资源上限见 W15-06。
 
 ### W15-03 上传、下载与断点续传 `[~]`
 
@@ -3490,11 +3510,11 @@ ACL 替换共享时，会在下一次 peer 帧之前主动调用 `cancel_all_for
 `file.transfer.authorization_revoked` / `Denied` 和 `file_transfer_cleanup_completed` 活动。因此“成员退出/移除后会话和临时凭据
 失效”已有自动化闭环；真实双节点网络断开、真实双节点成员退出/移除演练及完整 node 服务重启仍未验证。
 
-### W15-08 File 非目标与发布证据 `[ ]`
+### W15-08 File 非目标与发布证据 `[~]`
 
 - [x] 明确不做自动同步、双向镜像、系统挂载和远程目录替换；
 - [x] UI 不展示这些非目标为可用功能；
-- [ ] 完成 ACL、路径、符号链接、竞态、配额、续传和撤权测试；
+- [x] 完成 ACL、路径、符号链接、竞态、配额、续传和撤权测试；
 - [ ] GPUI/WebUI/Android 使用同一文件和权限语义；
 - [x] 移动端 SAF 与桌面目录权限边界清楚；
 - [x] 活动与审计可追溯；
@@ -3502,6 +3522,13 @@ ACL 替换共享时，会在下一次 peer 帧之前主动调用 `cancel_all_for
 - [x] 未通过路径安全测试不得发布。
 
 **验收**：File 第一版范围明确、边界安全、传输闭环，不以同步盘宣传超出实现。
+
+**补充（2026-11-13，测试矩阵审计）**：ACL 由 `deny_wins_and_both_network_and_local_layers_must_allow`、
+`administrator_role_does_not_bypass_file_acl_layers` 和 `directory_acl_prefixes_cover_descendants_without_matching_siblings`
+覆盖；portable 路径与穿越规则见 W15-04；Linux 锚定句柄、目录交换、符号链接和权限撤销见 W15-05；配额、并发、带宽、
+磁盘预留、句柄与 `SIGKILL` 恢复见 W15-06；校验、暂停/恢复、重放和原子落位见 W15-03；ACL/成员撤权与清理见 W15-07。
+这些证据完成 Linux/portable 自动化测试矩阵，但不替代 Windows/macOS 实机验收、真实双节点网络和完整 node 服务重启。
+GPUI 已使用该领域语义，WebUI 与 Android File 内容表面仍未实现，故三端一致性继续保留为未完成，W15-08 保持 `[~]`。
 
 **性能基线（2026-11-13，Linux 本地文件系统）**：新增
 `file_transfer_large_multifile_and_resume_report_linux`。数据集包含一个 64 MiB 单文件上传、一个 64 MiB 单文件下载，两者均在

@@ -73,6 +73,12 @@ import type {
   NodeSnapshot,
   NodeUiAction,
   NodeUiPage,
+  RelayHealthIssue,
+  RelayHealthSnapshot,
+  RelayHealthStatus,
+  RelayLimitPolicy,
+  RelayLimitSource,
+  RelayMeasurementState,
   TrafficFailureKind,
 } from "../../../contracts/typescript/node-contract-v1";
 import {
@@ -3874,6 +3880,378 @@ function ExitGovernanceCard({
   );
 }
 
+function relayHealthTone(status: RelayHealthStatus): string {
+  if (status === "healthy") return "good";
+  if (status === "degraded" || status === "quota_exhausted") return "warn";
+  if (status === "unavailable") return "bad";
+  return "neutral";
+}
+
+function relayMeasurementLabel(
+  locale: Locale,
+  state: RelayMeasurementState,
+  value: number | null | undefined,
+  suffix: string,
+): string {
+  const measurement = label(locale, `relay.measurement.${state}`);
+  return value == null
+    ? measurement
+    : `${measurement}: ${formatInteger(locale, value)}${suffix}`;
+}
+
+function relayLimitValue(
+  locale: Locale,
+  value: number | null | undefined,
+  unit: string,
+): string {
+  return value == null
+    ? label(locale, "relay.limit.none")
+    : `${formatInteger(locale, value)}${unit}`;
+}
+
+function relayLimitSourceLabel(
+  locale: Locale,
+  source: RelayLimitSource,
+): string {
+  return label(locale, `relay.limit_source.${source}`);
+}
+
+function relayIssueLabel(locale: Locale, issue: RelayHealthIssue): string {
+  const key = `relay.issue.${issue}`;
+  const localized = label(locale, key);
+  return localized === key ? issue : localized;
+}
+
+function RelayLimits({
+  locale,
+  limits,
+  sources,
+}: {
+  locale: Locale;
+  limits: RelayLimitPolicy;
+  sources: RelayLimitSource[];
+}) {
+  const values: Array<[string, string]> = [
+    ["max_connections", relayLimitValue(locale, limits.max_connections, "")],
+    [
+      "max_concurrent_streams",
+      relayLimitValue(locale, limits.max_concurrent_streams, ""),
+    ],
+    [
+      "max_bandwidth_kbps",
+      relayLimitValue(locale, limits.max_bandwidth_kbps, " kbps"),
+    ],
+    ["max_bytes", relayLimitValue(locale, limits.max_bytes, " B")],
+    ["max_cpu_percent", relayLimitValue(locale, limits.max_cpu_percent, "%")],
+    [
+      "max_memory_bytes",
+      relayLimitValue(locale, limits.max_memory_bytes, " B"),
+    ],
+    [
+      "max_session_duration_secs",
+      relayLimitValue(locale, limits.max_session_duration_secs, " s"),
+    ],
+    [
+      "quota_reset_at_unix_ms",
+      limits.quota_reset_at_unix_ms
+        ? formatTimestamp(locale, limits.quota_reset_at_unix_ms)
+        : label(locale, "relay.limit.none"),
+    ],
+  ];
+  return (
+    <section className="surface-card">
+      <div className="card-heading">
+        <h4>{label(locale, "gpui.section.relay_limits")}</h4>
+      </div>
+      <dl className="detail-list">
+        {values.map(([field, value]) => (
+          <div key={field}>
+            <dt>{label(locale, `relay.limits.${field}`)}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+        <div>
+          <dt>{label(locale, "relay.limits.sources")}</dt>
+          <dd className="chip-list">
+            {sources.length === 0
+              ? label(locale, "relay.limit.none")
+              : sources.map((source) => (
+                  <span className="chip" key={source}>
+                    {relayLimitSourceLabel(locale, source)}
+                  </span>
+                ))}
+          </dd>
+        </div>
+      </dl>
+    </section>
+  );
+}
+
+function RelayHealthDetails({
+  locale,
+  networkName,
+  health,
+}: {
+  locale: Locale;
+  networkName: string;
+  health: RelayHealthSnapshot;
+}) {
+  const usage = health.usage;
+  return (
+    <>
+      <section
+        className="surface-card"
+        data-testid="relay-health"
+        data-network={networkName}
+        data-relay-health={health.status}
+      >
+        <div className="card-heading">
+          <h3>{label(locale, "gpui.section.relay_health")}</h3>
+          <span className={`status-pill ${relayHealthTone(health.status)}`}>
+            {label(locale, `relay.health.${health.status}`)}
+          </span>
+        </div>
+        <p className="muted-copy">{networkName}</p>
+        <dl className="detail-list">
+          <div>
+            <dt>{label(locale, "relay.lifecycle")}</dt>
+            <dd data-relay-lifecycle={health.lifecycle}>
+              {label(locale, `relay.lifecycle.${health.lifecycle}`)}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.listener")}</dt>
+            <dd data-listener-bound={health.listener_bound}>
+              {label(
+                locale,
+                health.listener_bound
+                  ? "relay.listener.bound"
+                  : "relay.listener.unbound",
+              )}
+              {health.listen_addr ? ` · ${health.listen_addr}` : ""}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.reachability")}</dt>
+            <dd data-network-reachability={health.network_reachability}>
+              {label(
+                locale,
+                `relay.reachability.${health.network_reachability}`,
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.forwarding")}</dt>
+            <dd data-forwarding-observed={health.forwarding_observed}>
+              {label(
+                locale,
+                health.forwarding_observed
+                  ? "relay.forwarding.observed"
+                  : "relay.forwarding.not_observed",
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.authorization")}</dt>
+            <dd data-authorization-valid={health.authorization_valid}>
+              {label(
+                locale,
+                health.authorization_valid
+                  ? "relay.authorization.valid"
+                  : "relay.authorization.invalid",
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.quota")}</dt>
+            <dd data-quota-limited={health.quota_limited}>
+              {label(
+                locale,
+                health.quota_limited
+                  ? "relay.quota.limited"
+                  : "relay.quota.available",
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.observed_at")}</dt>
+            <dd>{formatTimestamp(locale, health.observed_at_unix_ms)}</dd>
+          </div>
+          {health.reason_code ? (
+            <div>
+              <dt>{label(locale, "relay.reason_code_label")}</dt>
+              <dd>
+                <code>{health.reason_code}</code>
+              </dd>
+            </div>
+          ) : null}
+        </dl>
+        {health.issues.length > 0 ? (
+          <div className="state-notice warn" data-testid="relay-issues">
+            <AlertTriangle size={17} aria-hidden="true" />
+            <div>
+              <strong>{label(locale, "gpui.section.relay_issues")}</strong>
+              <ul className="chip-list">
+                {health.issues.map((issue) => (
+                  <li key={issue}>{relayIssueLabel(locale, issue)}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        ) : null}
+      </section>
+      <RelayLimits
+        locale={locale}
+        limits={health.limits}
+        sources={health.limit_sources ?? []}
+      />
+      <section
+        className="surface-card"
+        data-testid="relay-usage"
+        data-network={networkName}
+      >
+        <div className="card-heading">
+          <h4>{label(locale, "gpui.section.relay_usage")}</h4>
+        </div>
+        <dl className="detail-list">
+          <div>
+            <dt>{label(locale, "relay.usage.active_connections")}</dt>
+            <dd>{formatInteger(locale, usage.active_connections)}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.active_streams")}</dt>
+            <dd>{formatInteger(locale, usage.active_streams)}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.active_sessions")}</dt>
+            <dd>{formatInteger(locale, usage.active_sessions)}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.forwarded")}</dt>
+            <dd>
+              {formatInteger(locale, usage.forwarded_packets)}
+              {" · "}
+              {formatBytes(locale, usage.forwarded_bytes)}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.rejected")}</dt>
+            <dd>
+              {formatInteger(locale, usage.rejected_packets)}
+              {" · "}
+              {formatInteger(locale, usage.rejected_connections)}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.cpu")}</dt>
+            <dd data-cpu-measurement={usage.cpu_measurement}>
+              {relayMeasurementLabel(
+                locale,
+                usage.cpu_measurement ?? "not_measured",
+                usage.observed_cpu_percent,
+                "%",
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.memory")}</dt>
+            <dd data-memory-measurement={usage.memory_measurement}>
+              {relayMeasurementLabel(
+                locale,
+                usage.memory_measurement ?? "not_measured",
+                usage.observed_memory_bytes,
+                " B",
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.last_forwarded")}</dt>
+            <dd>
+              {usage.last_forwarded_at_unix_ms
+                ? formatTimestamp(locale, usage.last_forwarded_at_unix_ms)
+                : label(locale, "common.not_available")}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.last_failure")}</dt>
+            <dd>
+              {usage.last_forwarding_failure_at_unix_ms
+                ? formatTimestamp(
+                    locale,
+                    usage.last_forwarding_failure_at_unix_ms,
+                  )
+                : label(locale, "common.not_available")}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.quota_window")}</dt>
+            <dd>
+              {usage.quota_started_at_unix_ms
+                ? formatTimestamp(locale, usage.quota_started_at_unix_ms)
+                : label(locale, "common.not_available")}
+              {" – "}
+              {usage.quota_reset_at_unix_ms
+                ? formatTimestamp(locale, usage.quota_reset_at_unix_ms)
+                : label(locale, "common.not_available")}
+            </dd>
+          </div>
+        </dl>
+      </section>
+    </>
+  );
+}
+
+function RelayCapabilityDetails({
+  snapshot,
+  locale,
+}: {
+  snapshot: NodeSnapshot;
+  locale: Locale;
+}) {
+  const services = snapshot.embedded_services ?? [];
+  if (services.length === 0) {
+    return (
+      <section className="surface-card" data-testid="relay-no-services">
+        <p className="empty-copy">
+          {label(locale, "gpui.empty.embedded_services")}
+        </p>
+      </section>
+    );
+  }
+  return (
+    <>
+      {services.map((service) =>
+        service.relay_health ? (
+          <RelayHealthDetails
+            key={service.network_name}
+            locale={locale}
+            networkName={service.network_name}
+            health={service.relay_health}
+          />
+        ) : (
+          <section
+            className="surface-card"
+            data-testid="relay-health-missing"
+            data-network={service.network_name}
+            key={service.network_name}
+          >
+            <div className="card-heading">
+              <h3>{label(locale, "gpui.section.relay_health")}</h3>
+              <span className="status-pill neutral">
+                {label(locale, "relay.health.unknown")}
+              </span>
+            </div>
+            <p className="muted-copy">{service.network_name}</p>
+            <p className="empty-copy">
+              {label(locale, "relay.status.no_health")}
+            </p>
+          </section>
+        ),
+      )}
+    </>
+  );
+}
+
 function CapabilityPage({
   snapshot,
   locale,
@@ -4045,17 +4423,7 @@ function CapabilityPage({
         </section>
       ) : null}
       {kind === "relay" ? (
-        <section className="surface-card">
-          <div className="card-heading">
-            <h3>{label(locale, "field.enabled")}</h3>
-            <RadioTower size={17} />
-          </div>
-          <p className="muted-copy">
-            {capability?.state === "enabled"
-              ? "Relay capability is active."
-              : "Relay capability is not active."}
-          </p>
-        </section>
+        <RelayCapabilityDetails snapshot={snapshot} locale={locale} />
       ) : null}
     </div>
   );

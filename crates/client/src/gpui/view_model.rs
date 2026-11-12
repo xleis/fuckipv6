@@ -12,12 +12,14 @@ use fuckipv6_common::domain::{
     InvitationCode, InvitationId, InvitationRedeemRequest, MemberLifecycleAction, MembershipRole,
     NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
     NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId,
-    TopologyNode, TopologyNodeHealth, TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy,
-    TrafficFlow, TrafficMatch, TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput,
-    TrafficProtectionState, TrafficProtocol, TrafficRoutingHitSample, TrafficRoutingObservation,
-    TrafficRoutingPageModel, TrafficRoutingRuleActivityEffect, TrafficRoutingRuleImpactView,
-    TrafficRoutingTarget, TrafficRoutingTargetKind, TrafficRoutingTargetRef,
-    TrafficRoutingWorkflowState, TrafficSessionEventKind,
+    RelayHealthIssue, RelayHealthSnapshot, RelayHealthStatus, RelayLifecycleState,
+    RelayLimitPolicy, RelayLimitSource, RelayMeasurementState, RelayReachabilityState,
+    RelayUsageSnapshot, TopologyNode, TopologyNodeHealth, TopologySnapshot, TrafficAction,
+    TrafficDefaultConfirmedBy, TrafficFlow, TrafficMatch, TrafficMatchRisk, TrafficPolicy,
+    TrafficPolicyTestInput, TrafficProtectionState, TrafficProtocol, TrafficRoutingHitSample,
+    TrafficRoutingObservation, TrafficRoutingPageModel, TrafficRoutingRuleActivityEffect,
+    TrafficRoutingRuleImpactView, TrafficRoutingTarget, TrafficRoutingTargetKind,
+    TrafficRoutingTargetRef, TrafficRoutingWorkflowState, TrafficSessionEventKind,
 };
 use fuckipv6_common::i18n::{format_integer, t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
@@ -6062,6 +6064,10 @@ fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
             let status = t(locale, embedded_service_status_key(service.status));
             let signaling = display_option(locale, service.signaling_addr);
             let relay = display_option(locale, service.relay_addr);
+            let health = service.relay_health.as_ref().map_or_else(
+                || t(locale, "relay.health.unknown").to_owned(),
+                |health| relay_health_status_label(locale, health.status),
+            );
             row(
                 service.network_name.clone(),
                 tr(
@@ -6074,6 +6080,7 @@ fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
                     ],
                 ),
             )
+            .with_relay_health(health)
         })
         .collect::<Vec<_>>();
     let roles = snapshot
@@ -6082,12 +6089,121 @@ fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
         .filter(|network| network.roles.contains(&NodeNetworkRole::Relay))
         .map(|network| row(network.name.clone(), t(locale, "gpui.value.relay_role")))
         .collect::<Vec<_>>();
+    let health_rows = snapshot
+        .embedded_services
+        .iter()
+        .filter_map(|service| {
+            service.relay_health.as_ref().map(|health| {
+                row(
+                    service.network_name.clone(),
+                    relay_health_detail(locale, health),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let issue_rows = snapshot
+        .embedded_services
+        .iter()
+        .flat_map(|service| {
+            let mut rows = service
+                .relay_health
+                .as_ref()
+                .map(|health| {
+                    health
+                        .issues
+                        .iter()
+                        .map(|issue| {
+                            let reason = health
+                                .reason_code
+                                .as_deref()
+                                .unwrap_or_else(|| t(locale, "common.not_available"));
+                            row(
+                                service.network_name.clone(),
+                                tr(
+                                    locale,
+                                    "relay.issue_detail",
+                                    &[
+                                        ("issue", relay_issue_label(locale, *issue)),
+                                        ("reason_code", reason),
+                                    ],
+                                ),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if rows.is_empty() {
+                if let Some(reason) = service
+                    .relay_health
+                    .as_ref()
+                    .and_then(|health| health.reason_code.as_deref())
+                {
+                    rows.push(row(
+                        service.network_name.clone(),
+                        tr(locale, "relay.reason_code", &[("reason_code", reason)]),
+                    ));
+                }
+            }
+            rows
+        })
+        .collect::<Vec<_>>();
+    let limit_rows = snapshot
+        .embedded_services
+        .iter()
+        .filter_map(|service| {
+            service.relay_health.as_ref().map(|health| {
+                row(
+                    service.network_name.clone(),
+                    relay_limit_detail(locale, &health.limits, &health.limit_sources),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let usage_rows = snapshot
+        .embedded_services
+        .iter()
+        .filter_map(|service| {
+            service.relay_health.as_ref().map(|health| {
+                row(
+                    service.network_name.clone(),
+                    relay_usage_detail(locale, health),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let healthy_services = snapshot
+        .embedded_services
+        .iter()
+        .filter(|service| {
+            service
+                .relay_health
+                .as_ref()
+                .is_some_and(|health| health.status == RelayHealthStatus::Healthy)
+        })
+        .count();
     (
         vec![
             metric(
                 t(locale, "gpui.metric.embedded_services"),
                 snapshot.embedded_services.len(),
                 "NodeSnapshot.embedded_services",
+            ),
+            metric(
+                t(locale, "gpui.metric.relay_services"),
+                snapshot
+                    .embedded_services
+                    .iter()
+                    .filter(|service| {
+                        service.relay_status != NodeEmbeddedServiceStatus::Stopped
+                            || service.relay_health.is_some()
+                    })
+                    .count(),
+                "NodeEmbeddedServiceSnapshot.relay_status",
+            ),
+            metric(
+                t(locale, "gpui.metric.relay_healthy_services"),
+                healthy_services,
+                "RelayHealthSnapshot.status",
             ),
             metric(
                 t(locale, "gpui.metric.relay_roles"),
@@ -6102,12 +6218,286 @@ fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
                 services,
             ),
             section(
+                t(locale, "gpui.section.relay_health"),
+                t(locale, "gpui.empty.relay_health"),
+                health_rows,
+            ),
+            section(
+                t(locale, "gpui.section.relay_issues"),
+                t(locale, "gpui.empty.relay_issues"),
+                issue_rows,
+            ),
+            section(
+                t(locale, "gpui.section.relay_limits"),
+                t(locale, "gpui.empty.relay_limits"),
+                limit_rows,
+            ),
+            section(
+                t(locale, "gpui.section.relay_usage"),
+                t(locale, "gpui.empty.relay_usage"),
+                usage_rows,
+            ),
+            section(
                 t(locale, "gpui.section.current_roles"),
                 t(locale, "gpui.empty.relay_roles"),
                 roles,
             ),
         ],
     )
+}
+
+trait RelayHealthRowExt {
+    fn with_relay_health(self, health: String) -> Self;
+}
+
+impl RelayHealthRowExt for RowModel {
+    fn with_relay_health(mut self, health: String) -> Self {
+        self.detail.push_str(" · ");
+        self.detail.push_str(&health);
+        self
+    }
+}
+
+fn relay_health_status_label(locale: Locale, status: RelayHealthStatus) -> String {
+    t(locale, relay_health_status_key(status)).to_owned()
+}
+
+fn relay_health_status_key(status: RelayHealthStatus) -> &'static str {
+    match status {
+        RelayHealthStatus::Unknown => "relay.health.unknown",
+        RelayHealthStatus::Healthy => "relay.health.healthy",
+        RelayHealthStatus::Degraded => "relay.health.degraded",
+        RelayHealthStatus::Unavailable => "relay.health.unavailable",
+        RelayHealthStatus::QuotaExhausted => "relay.health.quota_exhausted",
+    }
+}
+
+fn relay_lifecycle_key(lifecycle: RelayLifecycleState) -> &'static str {
+    match lifecycle {
+        RelayLifecycleState::Stopped => "relay.lifecycle.stopped",
+        RelayLifecycleState::Starting => "relay.lifecycle.starting",
+        RelayLifecycleState::Running => "relay.lifecycle.running",
+        RelayLifecycleState::Stopping => "relay.lifecycle.stopping",
+        RelayLifecycleState::Failed => "relay.lifecycle.failed",
+        RelayLifecycleState::Unsupported => "relay.lifecycle.unsupported",
+    }
+}
+
+fn relay_reachability_key(reachability: RelayReachabilityState) -> &'static str {
+    match reachability {
+        RelayReachabilityState::Unknown => "relay.reachability.unknown",
+        RelayReachabilityState::Reachable => "relay.reachability.reachable",
+        RelayReachabilityState::Unreachable => "relay.reachability.unreachable",
+    }
+}
+
+fn relay_issue_key(issue: RelayHealthIssue) -> &'static str {
+    match issue {
+        RelayHealthIssue::ListenerUnavailable => "relay.issue.listener_unavailable",
+        RelayHealthIssue::NetworkReachabilityUnknown => "relay.issue.network_reachability_unknown",
+        RelayHealthIssue::NetworkUnreachable => "relay.issue.network_unreachable",
+        RelayHealthIssue::ProtocolError => "relay.issue.protocol_error",
+        RelayHealthIssue::QuotaExhausted => "relay.issue.quota_exhausted",
+        RelayHealthIssue::ResourcePressure => "relay.issue.resource_pressure",
+        RelayHealthIssue::ForwardingStalled => "relay.issue.forwarding_stalled",
+        RelayHealthIssue::ForwardingNotObserved => "relay.issue.forwarding_not_observed",
+        RelayHealthIssue::AuthorizationExpired => "relay.issue.authorization_expired",
+        RelayHealthIssue::CpuMeasurementUnsupported => "relay.issue.cpu_measurement_unsupported",
+        RelayHealthIssue::MemoryMeasurementUnsupported => {
+            "relay.issue.memory_measurement_unsupported"
+        }
+    }
+}
+
+fn relay_issue_label(locale: Locale, issue: RelayHealthIssue) -> &'static str {
+    t(locale, relay_issue_key(issue))
+}
+
+fn relay_limit_source_key(source: RelayLimitSource) -> &'static str {
+    match source {
+        RelayLimitSource::NetworkAcl => "relay.limit_source.network_acl",
+        RelayLimitSource::NodeLocal => "relay.limit_source.node_local",
+        RelayLimitSource::ProviderDefault => "relay.limit_source.provider_default",
+    }
+}
+
+fn relay_measurement_key(state: RelayMeasurementState) -> &'static str {
+    match state {
+        RelayMeasurementState::Unsupported => "relay.measurement.unsupported",
+        RelayMeasurementState::NotMeasured => "relay.measurement.not_measured",
+        RelayMeasurementState::Measured => "relay.measurement.measured",
+    }
+}
+
+fn relay_health_detail(locale: Locale, health: &RelayHealthSnapshot) -> String {
+    let status = relay_health_status_label(locale, health.status);
+    let lifecycle = t(locale, relay_lifecycle_key(health.lifecycle));
+    let reachability = t(locale, relay_reachability_key(health.network_reachability));
+    let forwarding = t(
+        locale,
+        if health.forwarding_observed {
+            "relay.forwarding.observed"
+        } else {
+            "relay.forwarding.not_observed"
+        },
+    );
+    let authorization = t(
+        locale,
+        if health.authorization_valid {
+            "relay.authorization.valid"
+        } else {
+            "relay.authorization.invalid"
+        },
+    );
+    let quota = t(
+        locale,
+        if health.quota_limited {
+            "relay.quota.limited"
+        } else {
+            "relay.quota.available"
+        },
+    );
+    let observed_at = routing_timestamp_label(Some(health.observed_at_unix_ms), locale);
+    tr(
+        locale,
+        "relay.health_detail",
+        &[
+            ("status", &status),
+            ("lifecycle", lifecycle),
+            ("reachability", reachability),
+            ("forwarding", forwarding),
+            ("authorization", authorization),
+            ("quota", quota),
+            ("observed_at", &observed_at),
+        ],
+    )
+}
+
+fn relay_limit_detail(
+    locale: Locale,
+    limits: &RelayLimitPolicy,
+    sources: &[RelayLimitSource],
+) -> String {
+    let none = t(locale, "relay.limit.none");
+    let connections = limits
+        .max_connections
+        .map(|value| format_integer(locale, i64::from(value)))
+        .unwrap_or_else(|| none.to_owned());
+    let streams = limits
+        .max_concurrent_streams
+        .map(|value| format_integer(locale, i64::from(value)))
+        .unwrap_or_else(|| none.to_owned());
+    let bandwidth = limits
+        .max_bandwidth_kbps
+        .map(|value| format!("{} kbps", relay_format_u64(locale, value)))
+        .unwrap_or_else(|| none.to_owned());
+    let bytes = limits
+        .max_bytes
+        .map(|value| format!("{} B", relay_format_u64(locale, value)))
+        .unwrap_or_else(|| none.to_owned());
+    let cpu = limits
+        .max_cpu_percent
+        .map(|value| format!("{}%", format_integer(locale, i64::from(value))))
+        .unwrap_or_else(|| none.to_owned());
+    let memory = limits
+        .max_memory_bytes
+        .map(|value| format!("{} B", relay_format_u64(locale, value)))
+        .unwrap_or_else(|| none.to_owned());
+    let duration = limits
+        .max_session_duration_secs
+        .map(|value| format!("{} s", relay_format_u64(locale, value)))
+        .unwrap_or_else(|| none.to_owned());
+    let reset_at = limits
+        .quota_reset_at_unix_ms
+        .map(|value| routing_timestamp_label(Some(value), locale))
+        .unwrap_or_else(|| none.to_owned());
+    let sources = if sources.is_empty() {
+        none.to_owned()
+    } else {
+        sources
+            .iter()
+            .map(|source| t(locale, relay_limit_source_key(*source)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    tr(
+        locale,
+        "relay.limit_detail",
+        &[
+            ("connections", &connections),
+            ("streams", &streams),
+            ("bandwidth", &bandwidth),
+            ("bytes", &bytes),
+            ("cpu", &cpu),
+            ("memory", &memory),
+            ("duration", &duration),
+            ("reset_at", &reset_at),
+            ("sources", &sources),
+        ],
+    )
+}
+
+fn relay_usage_detail(locale: Locale, health: &RelayHealthSnapshot) -> String {
+    let usage = &health.usage;
+    let connections = format_integer(locale, i64::from(usage.active_connections));
+    let streams = format_integer(locale, i64::from(usage.active_streams));
+    let sessions = format_integer(locale, i64::from(usage.active_sessions));
+    let forwarded_packets = relay_format_u64(locale, usage.forwarded_packets);
+    let forwarded_bytes = relay_format_u64(locale, usage.forwarded_bytes);
+    let rejected_packets = relay_format_u64(locale, usage.rejected_packets);
+    let rejected_connections = relay_format_u64(locale, usage.rejected_connections);
+    let cpu = relay_measurement_detail(
+        locale,
+        usage.cpu_measurement,
+        usage.observed_cpu_percent.map(u64::from),
+        "%",
+    );
+    let memory = relay_measurement_detail(
+        locale,
+        usage.memory_measurement,
+        usage.observed_memory_bytes,
+        " B",
+    );
+    let last_success = routing_timestamp_label(usage.last_forwarded_at_unix_ms, locale);
+    let last_failure = routing_timestamp_label(usage.last_forwarding_failure_at_unix_ms, locale);
+    let quota_started = routing_timestamp_label(usage.quota_started_at_unix_ms, locale);
+    let quota_reset = routing_timestamp_label(usage.quota_reset_at_unix_ms, locale);
+    tr(
+        locale,
+        "relay.usage_detail",
+        &[
+            ("connections", &connections),
+            ("streams", &streams),
+            ("sessions", &sessions),
+            ("forwarded_packets", &forwarded_packets),
+            ("forwarded_bytes", &forwarded_bytes),
+            ("rejected_packets", &rejected_packets),
+            ("rejected_connections", &rejected_connections),
+            ("cpu", &cpu),
+            ("memory", &memory),
+            ("last_success", &last_success),
+            ("last_failure", &last_failure),
+            ("quota_started", &quota_started),
+            ("quota_reset", &quota_reset),
+        ],
+    )
+}
+
+fn relay_measurement_detail(
+    locale: Locale,
+    state: RelayMeasurementState,
+    value: Option<u64>,
+    suffix: &str,
+) -> String {
+    let state = t(locale, relay_measurement_key(state));
+    value.map_or_else(
+        || state.to_owned(),
+        |value| format!("{state}: {}{suffix}", relay_format_u64(locale, value)),
+    )
+}
+
+fn relay_format_u64(locale: Locale, value: u64) -> String {
+    i64::try_from(value).map_or_else(|_| value.to_string(), |value| format_integer(locale, value))
 }
 
 fn project_logs(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, Vec<SectionModel>) {
@@ -8468,6 +8858,232 @@ mod tests {
             .sections
             .iter()
             .all(|section| section.title != t(Locale::ZhCn, "runtime.section.interface_problems")));
+    }
+
+    fn relay_health_fixture(
+        forwarding_observed: bool,
+        usage: RelayUsageSnapshot,
+        limits: RelayLimitPolicy,
+    ) -> RelayHealthSnapshot {
+        RelayHealthSnapshot::observe(
+            RelayLifecycleState::Running,
+            Some("127.0.0.1:6667".parse().expect("relay socket")),
+            true,
+            RelayReachabilityState::Reachable,
+            forwarding_observed,
+            true,
+            limits,
+            vec![
+                RelayLimitSource::NetworkAcl,
+                RelayLimitSource::ProviderDefault,
+            ],
+            usage,
+            1_700_000_100_000,
+            Some("relay.test".into()),
+        )
+    }
+
+    fn relay_service(
+        network_name: &str,
+        health: Option<RelayHealthSnapshot>,
+    ) -> NodeEmbeddedServiceSnapshot {
+        NodeEmbeddedServiceSnapshot {
+            network_name: network_name.into(),
+            status: NodeEmbeddedServiceStatus::Stopped,
+            signaling_addr: None,
+            relay_status: NodeEmbeddedServiceStatus::Running,
+            relay_addr: Some("127.0.0.1:6667".parse().expect("relay socket")),
+            relay_health: health,
+        }
+    }
+
+    #[test]
+    fn relay_projection_renders_authoritative_health_limits_usage_and_issues() {
+        let fresh = RelayUsageSnapshot {
+            active_connections: 2,
+            active_streams: 3,
+            active_sessions: 1,
+            forwarded_packets: 12,
+            forwarded_bytes: 4_096,
+            rejected_packets: 1,
+            rejected_connections: 1,
+            last_forwarded_at_unix_ms: Some(1_700_000_099_000),
+            ..RelayUsageSnapshot::default()
+        };
+        let mut quota_usage = fresh.clone();
+        quota_usage.active_connections = 1;
+        quota_usage.forwarded_bytes = 10;
+        let mut stalled_usage = fresh.clone();
+        stalled_usage.last_forwarding_failure_at_unix_ms = Some(1_700_000_099_500);
+        let mut unsupported_usage = fresh.clone();
+        unsupported_usage.cpu_measurement = RelayMeasurementState::Unsupported;
+        unsupported_usage.memory_measurement = RelayMeasurementState::Unsupported;
+        let snapshot = NodeSnapshot {
+            embedded_services: vec![
+                relay_service(
+                    "listener-only",
+                    Some(relay_health_fixture(
+                        false,
+                        RelayUsageSnapshot::default(),
+                        RelayLimitPolicy::default(),
+                    )),
+                ),
+                relay_service(
+                    "healthy",
+                    Some(relay_health_fixture(
+                        true,
+                        fresh,
+                        RelayLimitPolicy::default(),
+                    )),
+                ),
+                relay_service(
+                    "stalled",
+                    Some(relay_health_fixture(
+                        true,
+                        stalled_usage,
+                        RelayLimitPolicy::default(),
+                    )),
+                ),
+                relay_service(
+                    "quota",
+                    Some(relay_health_fixture(
+                        true,
+                        quota_usage,
+                        RelayLimitPolicy {
+                            max_connections: Some(1),
+                            max_bytes: Some(10),
+                            ..RelayLimitPolicy::default()
+                        },
+                    )),
+                ),
+                relay_service(
+                    "unsupported-measurements",
+                    Some(relay_health_fixture(
+                        true,
+                        unsupported_usage,
+                        RelayLimitPolicy {
+                            max_cpu_percent: Some(80),
+                            max_memory_bytes: Some(1_000_000),
+                            ..RelayLimitPolicy::default()
+                        },
+                    )),
+                ),
+            ],
+            ..NodeSnapshot::default()
+        };
+
+        let (metrics, sections) = project_relay(&snapshot, Locale::ZhCn);
+        assert_eq!(
+            metrics
+                .iter()
+                .find(|metric| metric.label == t(Locale::ZhCn, "gpui.metric.relay_healthy_services"))
+                .map(|metric| metric.value.as_str()),
+            Some("1")
+        );
+        let health = sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "gpui.section.relay_health"))
+            .expect("relay health section");
+        assert_eq!(health.rows.len(), 5);
+        assert!(health.rows[0]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.health.unknown")));
+        assert!(health.rows[1]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.health.healthy")));
+        assert!(health.rows[2]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.health.degraded")));
+        assert!(health.rows[3]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.health.quota_exhausted")));
+        assert!(health.rows[4]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.health.degraded")));
+        assert!(health.rows.iter().all(|row| {
+            row.detail
+                .contains(t(Locale::ZhCn, "relay.reachability.reachable"))
+                && row
+                    .detail
+                    .contains(t(Locale::ZhCn, "relay.authorization.valid"))
+        }));
+
+        let issues = sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "gpui.section.relay_issues"))
+            .expect("relay issue section");
+        let issue_text = issues
+            .rows
+            .iter()
+            .map(|row| row.detail.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(issue_text.contains(t(Locale::ZhCn, "relay.issue.forwarding_not_observed")));
+        assert!(issue_text.contains(t(Locale::ZhCn, "relay.issue.forwarding_stalled")));
+        assert!(issue_text.contains(t(Locale::ZhCn, "relay.issue.quota_exhausted")));
+        assert!(issue_text.contains(t(Locale::ZhCn, "relay.issue.cpu_measurement_unsupported")));
+        assert!(issue_text.contains(t(
+            Locale::ZhCn,
+            "relay.issue.memory_measurement_unsupported"
+        )));
+
+        let limits = sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "gpui.section.relay_limits"))
+            .expect("relay limits section");
+        assert_eq!(limits.rows.len(), 5);
+        assert!(limits.rows[3]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.limit_source.network_acl")));
+        assert!(limits.rows[3]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.limit_source.provider_default")));
+
+        let usage = sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "gpui.section.relay_usage"))
+            .expect("relay usage section");
+        assert_eq!(usage.rows.len(), 5);
+        assert!(usage.rows[1].detail.contains("12"));
+        assert!(usage.rows[1]
+            .detail
+            .contains(&format_integer(Locale::ZhCn, 4_096)));
+        assert!(usage.rows[4]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.measurement.unsupported")));
+        assert!(usage.rows[0]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.measurement.not_measured")));
+    }
+
+    #[test]
+    fn relay_projection_never_infers_health_from_a_running_listener() {
+        let snapshot = NodeSnapshot {
+            embedded_services: vec![relay_service("listener-only", None)],
+            ..NodeSnapshot::default()
+        };
+        let (metrics, sections) = project_relay(&snapshot, Locale::En);
+        assert_eq!(
+            metrics
+                .iter()
+                .find(|metric| metric.label == t(Locale::En, "gpui.metric.relay_healthy_services"))
+                .map(|metric| metric.value.as_str()),
+            Some("0")
+        );
+        let services = sections
+            .iter()
+            .find(|section| section.title == t(Locale::En, "gpui.section.embedded_services"))
+            .expect("embedded service section");
+        assert!(services.rows[0]
+            .detail
+            .contains(t(Locale::En, "relay.health.unknown")));
+        assert!(!services.rows[0]
+            .detail
+            .contains(t(Locale::En, "relay.health.healthy")));
+        assert!(sections
+            .iter()
+            .find(|section| section.title == t(Locale::En, "gpui.section.relay_health"))
+            .is_some_and(|section| section.rows.is_empty()));
     }
 
     #[test]

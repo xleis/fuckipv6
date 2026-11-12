@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import manifestFixture from "../../../contracts/typescript/fixtures/node-manifest.json";
@@ -8,6 +14,7 @@ import type {
   NodeExitSelectionSnapshot,
   NodeProblem,
   NodeSnapshot,
+  RelayHealthSnapshot,
   NodeUiManifest,
   NodeUiPage,
 } from "../../../contracts/typescript/node-contract-v1";
@@ -16,10 +23,21 @@ import { PageContent } from "./page-content";
 import { installTestI18nRuntime, translated } from "../test/runtime";
 
 const manifest = manifestFixture as NodeUiManifest;
-const networksPage = manifest.pages.find((page) => page.id === "networks") as NodeUiPage;
-const activityPage = manifest.pages.find((page) => page.id === "activity") as NodeUiPage;
-const settingsPage = manifest.pages.find((page) => page.id === "settings") as NodeUiPage;
-const exitNodePage = manifest.pages.find((page) => page.id === "exit_node") as NodeUiPage;
+const networksPage = manifest.pages.find(
+  (page) => page.id === "networks",
+) as NodeUiPage;
+const activityPage = manifest.pages.find(
+  (page) => page.id === "activity",
+) as NodeUiPage;
+const settingsPage = manifest.pages.find(
+  (page) => page.id === "settings",
+) as NodeUiPage;
+const exitNodePage = manifest.pages.find(
+  (page) => page.id === "exit_node",
+) as NodeUiPage;
+const relayPage = manifest.pages.find(
+  (page) => page.id === "relay",
+) as NodeUiPage;
 const baseSnapshot = productFixture.snapshot as NodeSnapshot;
 const oldTermsHash = "hash_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const currentTermsHash = "hash_BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
@@ -159,6 +177,70 @@ function exitElement(snapshot: NodeSnapshot) {
   );
 }
 
+function relayHealth(
+  overrides: Partial<RelayHealthSnapshot> = {},
+): RelayHealthSnapshot {
+  return {
+    status: "healthy",
+    lifecycle: "running",
+    listen_addr: "127.0.0.1:6667",
+    listener_bound: true,
+    network_reachability: "reachable",
+    forwarding_observed: true,
+    authorization_valid: true,
+    quota_limited: false,
+    limits: {
+      max_connections: 16,
+      max_concurrent_streams: 32,
+      max_bandwidth_kbps: 1000,
+      max_bytes: 1_000_000,
+      max_cpu_percent: 80,
+      max_memory_bytes: 512_000_000,
+      max_session_duration_secs: 3600,
+      quota_reset_at_unix_ms: Date.UTC(2026, 0, 2, 0, 0, 0),
+    },
+    limit_sources: ["network_acl", "node_local", "provider_default"],
+    usage: {
+      active_connections: 2,
+      active_streams: 3,
+      active_sessions: 1,
+      forwarded_packets: 100,
+      forwarded_bytes: 4096,
+      rejected_packets: 1,
+      rejected_connections: 1,
+      oldest_session_age_secs: 20,
+      observed_cpu_percent: 12,
+      observed_memory_bytes: 1024,
+      cpu_measurement: "measured",
+      memory_measurement: "measured",
+      last_forwarded_at_unix_ms: Date.UTC(2026, 0, 1, 23, 59, 59),
+      last_forwarding_failure_at_unix_ms: null,
+      quota_started_at_unix_ms: Date.UTC(2026, 0, 1, 0, 0, 0),
+      quota_reset_at_unix_ms: Date.UTC(2026, 0, 2, 0, 0, 0),
+    },
+    issues: [],
+    observed_at_unix_ms: Date.UTC(2026, 0, 2, 0, 0, 0),
+    reason_code: null,
+    ...overrides,
+  };
+}
+
+function relayElement(snapshot: NodeSnapshot) {
+  return (
+    <PageContent
+      page={relayPage}
+      snapshot={snapshot}
+      locale="zh-CN"
+      selectedNetwork="home"
+      recentDiagnostics={null}
+      onSelectNetwork={() => {}}
+      onNavigate={() => {}}
+      onRequestAction={() => {}}
+      onRunAction={async () => {}}
+    />
+  );
+}
+
 function datetimeLocal(unixMs: number): string {
   const date = new Date(unixMs);
   const pad = (value: number) => String(value).padStart(2, "0");
@@ -229,15 +311,17 @@ describe("administrator Exit governance", () => {
     );
 
     const governance = screen.getByTestId("exit-governance");
-    expect(governance).toHaveTextContent(
-      translated("exit_governance.title"),
-    );
+    expect(governance).toHaveTextContent(translated("exit_governance.title"));
     expect(governance).toHaveTextContent("net_governance");
-    expect(governance).toHaveTextContent(translated("exit_governance.mode.fixed"));
+    expect(governance).toHaveTextContent(
+      translated("exit_governance.mode.fixed"),
+    );
     const selected = within(governance).getByTestId(
       "exit-candidate-net_governance-exit-a",
     );
-    expect(selected).toHaveTextContent(translated("exit_governance.selectable"));
+    expect(selected).toHaveTextContent(
+      translated("exit_governance.selectable"),
+    );
     expect(selected).toHaveTextContent(
       translated("exit_governance.reason.available"),
     );
@@ -278,9 +362,9 @@ describe("administrator Exit governance", () => {
     expect(unavailable).toHaveTextContent(
       translated("exit_governance.reason.stale_directory"),
     );
-    expect(within(unavailable).getByTestId("exit-governance-reason")).toHaveTextContent(
-      "exit.selection.stale_directory",
-    );
+    expect(
+      within(unavailable).getByTestId("exit-governance-reason"),
+    ).toHaveTextContent("exit.selection.stale_directory");
   });
 });
 
@@ -455,7 +539,9 @@ describe("membership policy reconfirmation", () => {
     const onRequestAction = renderNetworks(policySnapshot(false));
     const card = screen.getByTestId("membership-policy-net_policy_home");
 
-    expect(card).toHaveTextContent("translated:membership.policy.confirmation_required");
+    expect(card).toHaveTextContent(
+      "translated:membership.policy.confirmation_required",
+    );
     expect(card).toHaveTextContent(
       "translated:join.exit.disclosure.purpose translated:join.exit.disclosure.bandwidth translated:join.exit.disclosure.traffic translated:join.exit.disclosure.logging translated:join.exit.disclosure.operational_impact translated:join.exit.disclosure.disable",
     );
@@ -485,12 +571,15 @@ describe("membership policy reconfirmation", () => {
     await user.click(confirmation);
 
     expect(onRequestAction).toHaveBeenCalledTimes(1);
-    expect(onRequestAction).toHaveBeenCalledWith("acknowledge_membership_policy", {
-      network_id: "net_policy_home",
-      expected_terms_hash: currentTermsHash,
-      acknowledged_at_unix_ms: "1700000200123",
-      exit_contribution_acknowledged: "true",
-    });
+    expect(onRequestAction).toHaveBeenCalledWith(
+      "acknowledge_membership_policy",
+      {
+        network_id: "net_policy_home",
+        expected_terms_hash: currentTermsHash,
+        acknowledged_at_unix_ms: "1700000200123",
+        exit_contribution_acknowledged: "true",
+      },
+    );
     expect(now).toHaveBeenCalled();
   });
 
@@ -593,30 +682,39 @@ describe("authoritative activity timeline", () => {
 
     render(activityElement(snapshot));
 
-    expect(screen.getByTestId("activity-entry-audit-security")).toHaveTextContent(
-      "latest duplicate",
-    );
+    expect(
+      screen.getByTestId("activity-entry-audit-security"),
+    ).toHaveTextContent("latest duplicate");
     expect(screen.queryByText("stale duplicate")).not.toBeInTheDocument();
     expect(screen.getAllByTestId(/^activity-entry-/)).toHaveLength(3);
 
-    fireEvent.change(
-      screen.getByLabelText("translated:activity.filter.from"),
-      { target: { value: datetimeLocal(start) } },
-    );
+    fireEvent.change(screen.getByLabelText("translated:activity.filter.from"), {
+      target: { value: datetimeLocal(start) },
+    });
     fireEvent.change(screen.getByLabelText("translated:activity.filter.to"), {
       target: { value: datetimeLocal(end) },
     });
 
-    expect(screen.getByTestId("activity-entry-audit-security")).toBeInTheDocument();
-    expect(screen.getByTestId("activity-entry-audit-failure")).toBeInTheDocument();
-    expect(screen.queryByTestId("activity-entry-audit-outside")).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("activity-entry-audit-security"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("activity-entry-audit-failure"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("activity-entry-audit-outside"),
+    ).not.toBeInTheDocument();
 
     await user.selectOptions(
       screen.getByLabelText("translated:activity.filter.category"),
       "operation_failure",
     );
-    expect(screen.queryByTestId("activity-entry-audit-security")).not.toBeInTheDocument();
-    expect(screen.getByTestId("activity-entry-audit-failure")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("activity-entry-audit-security"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("activity-entry-audit-failure"),
+    ).toBeInTheDocument();
   });
 
   it("preserves the reader scroll position when a live snapshot revision arrives", () => {
@@ -624,8 +722,14 @@ describe("authoritative activity timeline", () => {
       ...baseSnapshot,
       revision: 20,
       recent_activity: [
-        activity({ audit_id: "audit-a", occurred_at_unix_ms: Date.UTC(2026, 0, 1, 12, 0, 1) }),
-        activity({ audit_id: "audit-b", occurred_at_unix_ms: Date.UTC(2026, 0, 1, 12, 0, 0) }),
+        activity({
+          audit_id: "audit-a",
+          occurred_at_unix_ms: Date.UTC(2026, 0, 1, 12, 0, 1),
+        }),
+        activity({
+          audit_id: "audit-b",
+          occurred_at_unix_ms: Date.UTC(2026, 0, 1, 12, 0, 0),
+        }),
       ],
     };
     const { rerender } = render(activityElement(snapshot));
@@ -663,14 +767,18 @@ describe("authoritative activity timeline", () => {
     expect(screen.getByTestId("activity-sync-stale")).toHaveTextContent(
       "translated:activity.sync.stale.title",
     );
-    expect(screen.getByTestId("activity-entry-audit-preserved")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("activity-entry-audit-preserved"),
+    ).toBeInTheDocument();
 
     rerender(activityElement(snapshot, { stale: false, refreshing: true }));
     expect(screen.queryByTestId("activity-sync-stale")).not.toBeInTheDocument();
     expect(screen.getByTestId("activity-sync-refreshing")).toHaveTextContent(
       "translated:activity.sync.refreshing.title",
     );
-    expect(screen.getByTestId("activity-entry-audit-preserved")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("activity-entry-audit-preserved"),
+    ).toBeInTheDocument();
   });
 
   it("removes object links when current permission or the object disappears", () => {
@@ -687,7 +795,9 @@ describe("authoritative activity timeline", () => {
       ],
     };
     const { rerender } = render(activityElement(snapshot));
-    expect(screen.getByTestId("activity-object-link-audit-node-link")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("activity-object-link-audit-node-link"),
+    ).toBeInTheDocument();
 
     rerender(
       activityElement({
@@ -695,9 +805,150 @@ describe("authoritative activity timeline", () => {
         permissions: { ...snapshot.permissions!, permissions: [] },
       }),
     );
-    expect(screen.queryByTestId("activity-object-link-audit-node-link")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("activity-object-link-audit-node-link"),
+    ).not.toBeInTheDocument();
 
     rerender(activityElement({ ...snapshot, identity: null }));
-    expect(screen.queryByTestId("activity-object-link-audit-node-link")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("activity-object-link-audit-node-link"),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("Relay capability status", () => {
+  it("renders authoritative health, issues, limits, usage, and measurement states", () => {
+    const listenerOnly = relayHealth({
+      status: "unknown",
+      forwarding_observed: false,
+      issues: ["forwarding_not_observed"],
+      usage: { ...relayHealth().usage, last_forwarded_at_unix_ms: null },
+    });
+    const stalled = relayHealth({
+      status: "degraded",
+      issues: ["forwarding_stalled"],
+      usage: {
+        ...relayHealth().usage,
+        last_forwarding_failure_at_unix_ms: Date.UTC(2026, 0, 2, 0, 0, 1),
+      },
+    });
+    const quota = relayHealth({
+      status: "quota_exhausted",
+      quota_limited: true,
+      issues: ["quota_exhausted"],
+      usage: { ...relayHealth().usage, active_connections: 16 },
+    });
+    const unsupported = relayHealth({
+      status: "degraded",
+      issues: ["cpu_measurement_unsupported", "memory_measurement_unsupported"],
+      usage: {
+        ...relayHealth().usage,
+        observed_cpu_percent: null,
+        observed_memory_bytes: null,
+        cpu_measurement: "unsupported",
+        memory_measurement: "unsupported",
+      },
+    });
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      embedded_services: [
+        ["listener-only", listenerOnly],
+        ["healthy", relayHealth()],
+        ["stalled", stalled],
+        ["quota", quota],
+        ["unsupported", unsupported],
+      ].map(([network_name, health]) => ({
+        network_name: network_name as string,
+        status: "running",
+        relay_status: "running",
+        relay_addr: "127.0.0.1:6667",
+        relay_health: health as RelayHealthSnapshot,
+      })),
+    };
+
+    render(relayElement(snapshot));
+
+    const listenerCard = screen
+      .getAllByTestId("relay-health")
+      .find((element) => element.dataset.network === "listener-only");
+    expect(listenerCard).toHaveAttribute("data-relay-health", "unknown");
+    expect(listenerCard).toHaveTextContent(translated("relay.health.unknown"));
+    expect(listenerCard).not.toHaveTextContent(
+      translated("relay.health.healthy"),
+    );
+    expect(listenerCard).toHaveTextContent(
+      translated("relay.forwarding.not_observed"),
+    );
+
+    const healthyCard = screen
+      .getAllByTestId("relay-health")
+      .find((element) => element.dataset.network === "healthy");
+    expect(healthyCard).toHaveAttribute("data-relay-health", "healthy");
+    expect(healthyCard).toHaveTextContent(translated("relay.health.healthy"));
+    expect(healthyCard).toHaveTextContent(
+      translated("relay.reachability.reachable"),
+    );
+    expect(healthyCard).toHaveTextContent(
+      translated("relay.authorization.valid"),
+    );
+
+    const stalledCard = screen
+      .getAllByTestId("relay-health")
+      .find((element) => element.dataset.network === "stalled");
+    expect(stalledCard).toHaveAttribute("data-relay-health", "degraded");
+    expect(stalledCard).toHaveTextContent(
+      translated("relay.issue.forwarding_stalled"),
+    );
+
+    const quotaCard = screen
+      .getAllByTestId("relay-health")
+      .find((element) => element.dataset.network === "quota");
+    expect(quotaCard).toHaveAttribute("data-relay-health", "quota_exhausted");
+    expect(quotaCard).toHaveTextContent(translated("relay.quota.limited"));
+    expect(quotaCard).toHaveTextContent(
+      translated("relay.issue.quota_exhausted"),
+    );
+
+    const unsupportedCard = screen
+      .getAllByTestId("relay-health")
+      .find((element) => element.dataset.network === "unsupported");
+    expect(unsupportedCard).toHaveTextContent(
+      translated("relay.issue.cpu_measurement_unsupported"),
+    );
+    expect(unsupportedCard).toHaveTextContent(
+      translated("relay.issue.memory_measurement_unsupported"),
+    );
+    expect(
+      screen.getAllByText(translated("relay.measurement.unsupported")),
+    ).toHaveLength(2);
+    expect(
+      screen.getAllByText(translated("relay.limit_source.network_acl")).length,
+    ).toBeGreaterThan(0);
+    const healthyUsage = screen
+      .getAllByTestId("relay-usage")
+      .find((element) => element.dataset.network === "healthy");
+    expect(healthyUsage).toHaveTextContent("4096 B");
+  });
+
+  it("does not infer healthy from a running listener without a health snapshot", () => {
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      embedded_services: [
+        {
+          network_name: "listener-only",
+          status: "running",
+          relay_status: "running",
+          relay_addr: "127.0.0.1:6667",
+          relay_health: null,
+        },
+      ],
+    };
+
+    render(relayElement(snapshot));
+
+    const missing = screen.getByTestId("relay-health-missing");
+    expect(missing).toHaveTextContent(translated("relay.status.no_health"));
+    expect(missing).toHaveTextContent(translated("relay.health.unknown"));
+    expect(missing).not.toHaveTextContent(translated("relay.health.healthy"));
   });
 });

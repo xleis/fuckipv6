@@ -3125,9 +3125,10 @@ Relay 子进程和 QUIC 客户端，完成注册后对 Relay 执行 SIGKILL 并 
 durable 持久化和命令/数据面活动合并。该证据是本地进程内审计与恢复测试，不等同于真实 Relay 运营者隐私、
 正式压力或三组件同时故障验收。
 
-本次门禁通过：`cargo test -p fuckipv6-client --lib`（1178 passed，3 ignored）、
+本次门禁通过：`cargo test -p fuckipv6-client --all-targets --all-features`（库 1190 passed、3 ignored；register 进程 1 passed；运行时进程 11 passed；7 项特权拓扑测试 ignored）、
 `cargo test -p fuckipv6-common --lib`（396 passed）、
-`cargo test -p fuckipv6-coordinator --lib`（152 passed，其中 relay::server::tests 31 passed）、
+`cargo test -p fuckipv6-coordinator --lib -- --test-threads=1`（152 passed，其中 relay::server::tests 31 passed）、
+`cargo test -p fuckipv6-coordinator --test w13_relay_process`（2 passed）、
 `cargo test -p fuckipv6-coordinator existing_session --lib`（5 passed）、
 `cargo test -p fuckipv6-client routing::recovery --lib`（18 passed）、
 `cargo clippy -p fuckipv6-client -p fuckipv6-common -p fuckipv6-coordinator --all-targets --all-features -- -D warnings`、

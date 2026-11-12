@@ -77,7 +77,8 @@
   - 验收：非法角色组合返回稳定错误码；角色启用只启动所需内嵌服务，禁用后释放端口/任务；失败回滚持久化与运行态；角色变化产生快照和事件；覆盖零网络、停止网络和多网络隔离。
   - 进展（2026-10-30）：`NodeCommandBus::SetNetworkRole` 已接入运行中的 `NetworkRuntimeManager` actor。Exit Node 角色可在不重启网络、不清 Peer 的情况下热启用/停用，运行态、磁盘配置和共享快照作为同一串行事务更新；运行态失败、持久化失败或快照发布失败均恢复旧运行态、文件与共享状态，只有全部阶段成功后才发布类型化 `RoleChanged`。网络重启会从持久化配置恢复 Exit Node；停止网络会释放对应运行会话与内嵌服务。Member 是基线能力且不可禁用。
   - 进展（2026-11-12）：Relay 已从内嵌 Signaling 生命周期中拆分，owner 可独立启停，不重启网络且不改变 Exit/Coordinator/File 状态；Relay intent 和最后绑定端口持久化，重启后按 intent 恢复并复用端口，运行态、持久化和共享快照发布失败均尝试完整回滚。manifest 的 `set_relay_role` 已标为 `Implemented`。Discovery 独立热切换仍明确返回 `Unavailable`。
-  - 剩余：完成 Discovery 独立服务生命周期、Relay 可达性/配额/当前负载展示与启停清理活动，以及 NX-06/NX-07 的 CLI/WebUI 统一命令迁移和双 UI 对等验证；本项在这些能力完成前保持进行中。
+  - 进展（2026-11-12，W13 Relay）：完成使用方签名 grant 与提供方本地策略的双侧授权、网络 ACL/节点本地拒绝优先、临时 Coordinator 降权、实时撤权及既有会话 continue/reauthorize/terminate 策略；网络与节点配额取严格交集，并落实连接、并发流、带宽、流量、CPU/内存测量边界和会话时长限制；健康状态由监听、实际转发证据、配额和策略有效性共同推导，候选选择排除离线、过期、未授权、环路和冷却对象，恢复流程硬超时并失败关闭；owner-only 治理快照限制字段且不包含载荷，支持按节点过滤、脱敏 durable audit 导出和 Passkey 后一次性重试。新增进程内 Relay/Coordinator/Exit 连续故障矩阵测试，验证每类故障有界失败关闭且不触发未授权直连 fallback；明确该测试不等同真实三节点验收故障。真实 Relay/Coordinator/Exit 同时故障、压力/吞吐/延迟/CPU/内存、Android、真实浏览器/实机运营者隐私和崩溃/重启资源清理仍未完成。
+  - 剩余：完成 Discovery 独立服务生命周期、Relay 平台不支持状态、崩溃/重启清理与真实运营者隐私/性能验收，以及 NX-06/NX-07 的 CLI/WebUI 统一命令迁移和双 UI/Android 对等验证；本项在这些能力完成前保持进行中。
 
 - [ ] **NX-06 CLI 统一命令迁移（细化 EX-08）**
   - 工作：CLI 的建网、加入、启停、探测、状态、路由、Exit Node 和关闭全部通过 `NodeCommandBus`，CLI 只负责参数解析、确认和结果渲染。

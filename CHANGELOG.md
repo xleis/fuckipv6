@@ -7,6 +7,9 @@ All notable changes are documented here. The project follows semantic versioning
 ### Services
 - **统一服务生命周期管理**: 新增 `fuckipv6 service install/status/restart/stop/start/upgrade/uninstall`，统一生成并管理 Linux systemd、macOS launchd 与 Windows SCM 服务定义；内部 `__service` 角色独立于 UI 监督 control/node/WebUI。安装脚本已改为只调用统一入口，并补充安装、升级、重启、停止、卸载和服务定义测试。Linux 当前主机已通过 systemd unit 校验；macOS/Windows 仍待实机服务验证，Android 前台服务未实现，因此 W2-08 保持部分完成。
 
+### Relay
+- **W13 Relay 控制面与安全边界（进行中）**: Relay 已独立于 Signaling 启停并持久化 owner intent；使用方签名 grant 与提供方本地策略必须同时放行，网络 ACL/节点本地拒绝优先，临时 Coordinator 不能扩大授权，策略变化会实时撤权或按显式既有会话策略处理。网络与节点配额取严格交集，运行时限制连接、并发流、带宽、字节、会话时长及任务许可，并暴露限制来源、使用量、重置时间和测量不支持状态；Relay 健康由监听、网络可达性、实际转发证据和配额共同推导，候选选择排除离线、过期、未授权、冷却及环路对象，恢复流程硬超时并失败关闭。新增 owner-only、payload-free 的治理审计和按节点/时间筛选的脱敏 durable export，明确可见传输元数据与不可见应用载荷/密钥边界，并加入进程内 Relay/Coordinator/Exit 连续故障矩阵测试。真实三组件同时故障、压力/吞吐/延迟/CPU/内存、Android、GPUI/WebUI 对等、真实 Relay 运营者隐私及崩溃/重启资源清理仍未验证，W13 不声明完成。
+
 ### Fixed
 - **建网邀请票据改为类型化所有者结果**: `CreateNetwork` 不再把邀请票据拼进通用完成文本供 WebUI 反向解析，而是返回结构化 `NetworkCreated`；CLI、GPUI 和 WebUI 消费同一结果。票据不进入 `NodeSnapshot`、事件或日志，通用 `Debug` 输出脱敏；WebUI 仅有本地投影时仍不提供重启后的票据持久化/查询，NX-07 保持进行中。
 - **WebUI 控制器改为单一权威节点后端**: `AppController` 现在强制依赖共享 `NodeStateStore + NodeCommandBus`，移除 legacy `AppUiState` 写状态、TCP IPC 轮询、`EmbeddedCoordinator`、取消通道和重复网络状态机。连接、断开、建网、停网、Peer 探测和路由更新只提交类型化节点命令；黑名单与地址池热更新因命令协议尚未提供而明确失败关闭，不再写入第二套 Coordinator。建网票据仍只保留在本地所有者投影，重启后的 owner-only 查询尚未完成；WebUI 端到端场景矩阵与完整类型化错误透传仍属于 NX-07。

@@ -95,6 +95,56 @@ impl FileNetworkOriginError {
     }
 }
 
+/// Stable, UI-safe classification for terminal requester transfer errors.
+/// Wire errors remain individual machine codes; this grouping lets local
+/// surfaces distinguish the four operator actions required by W15-03 without
+/// parsing human-readable messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileTransferFailureKind {
+    Network,
+    Authorization,
+    Quota,
+    Storage,
+    Other,
+}
+
+impl FileTransferFailureKind {
+    pub(crate) fn from_code(code: &str) -> Self {
+        match code {
+            "file_transfer_send_failed"
+            | "file_transfer_session_unavailable"
+            | "file_transfer_peer_unavailable" => Self::Network,
+            "file_transfer_authorization_lost"
+            | "file_transfer_access_revoked"
+            | "file_transfer_permission_revoked" => Self::Authorization,
+            "file_too_large"
+            | "file_total_quota_exceeded"
+            | "file_member_quota_exceeded"
+            | "file_entry_limit"
+            | "file_concurrency_limit"
+            | "file_member_concurrency_limit"
+            | "file_directory_concurrency_limit"
+            | "file_transfer_rate_limited" => Self::Quota,
+            "file_disk_space_reserved"
+            | "file_transfer_io"
+            | "file_transfer_storage"
+            | "file_io_error"
+            | "file_temp_unavailable" => Self::Storage,
+            _ => Self::Other,
+        }
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::Authorization => "authorization",
+            Self::Quota => "quota",
+            Self::Storage => "storage",
+            Self::Other => "other",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OriginPeer {
     pub(crate) node_id: NodeId,
@@ -121,6 +171,14 @@ pub(crate) struct OriginTransferEvent {
     pub(crate) received_chunks: u32,
     pub(crate) total_chunks: u32,
     pub(crate) error_code: Option<String>,
+}
+
+impl OriginTransferEvent {
+    pub(crate) fn failure_kind(&self) -> Option<FileTransferFailureKind> {
+        self.error_code
+            .as_deref()
+            .map(FileTransferFailureKind::from_code)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -3213,6 +3271,200 @@ mod tests {
             Err(FileNetworkOriginError::UnknownResponse)
         ));
         assert_eq!(origin.active_count(), 1);
+    }
+
+    #[test]
+    fn requester_failures_preserve_network_authorization_quota_and_storage_kinds() {
+        let temporary = TempDir::new().expect("tempdir");
+        let source = temporary.path().join("source.bin");
+        std::fs::write(&source, b"hello").expect("source");
+        let local_node_id = node(4);
+
+        for (byte, code, expected_kind) in [
+            (
+                2,
+                "file_transfer_permission_revoked",
+                FileTransferFailureKind::Authorization,
+            ),
+            (
+                3,
+                "file_total_quota_exceeded",
+                FileTransferFailureKind::Quota,
+            ),
+            (
+                4,
+                "file_disk_space_reserved",
+                FileTransferFailureKind::Storage,
+            ),
+        ] {
+            let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+            let (request_id, _) =
+                start_upload(&mut origin, &local_node_id, &source, byte, b"hello", 8);
+            origin
+                .handle_response(
+                    &peer(),
+                    request_id,
+                    FileNetworkResponse::Error {
+                        code: code.to_owned(),
+                        retry_after_ms: None,
+                    },
+                    NOW + 1,
+                )
+                .expect("error response");
+            let event = origin.drain_events().pop().expect("failure event");
+            assert_eq!(event.state, TransferState::Failed);
+            assert_eq!(event.error_code.as_deref(), Some(code));
+            assert_eq!(event.failure_kind(), Some(expected_kind));
+            assert_eq!(origin.active_count(), 0);
+        }
+
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        start_upload(&mut origin, &local_node_id, &source, 5, b"hello", 8);
+        assert!(origin.fail_transfer(
+            &transfer(5),
+            &operation(5),
+            NOW + 1,
+            "file_transfer_send_failed",
+        ));
+        let event = origin.drain_events().pop().expect("network failure event");
+        assert_eq!(event.failure_kind(), Some(FileTransferFailureKind::Network));
+    }
+
+    #[test]
+    fn replayed_download_fragment_fails_closed_and_cleans_staging() {
+        let temporary = TempDir::new().expect("tempdir");
+        let destination = temporary.path().join("download.bin");
+        let data = b"abcdefgh";
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) =
+            start_download(&mut origin, &local_node_id, &destination, 2, data, 4);
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+
+        let request_id = download_fragment_request_id(&operation(2), 0, 0);
+        origin
+            .handle_chunk(
+                &peer(),
+                request_id,
+                &transfer(2),
+                &operation(2),
+                0,
+                0,
+                &data[..4],
+                NOW + 2,
+            )
+            .expect("first fragment");
+        assert_eq!(origin.active_count(), 1);
+        assert!(!destination.exists());
+        assert_eq!(
+            std::fs::read_dir(temporary.path())
+                .expect("read dir")
+                .count(),
+            1
+        );
+
+        assert!(matches!(
+            origin.handle_chunk(
+                &peer(),
+                request_id,
+                &transfer(2),
+                &operation(2),
+                0,
+                0,
+                &data[..4],
+                NOW + 3,
+            ),
+            Err(FileNetworkOriginError::ChunkOutOfOrder)
+        ));
+        assert_eq!(origin.active_count(), 0);
+        assert!(!destination.exists());
+        assert_eq!(
+            std::fs::read_dir(temporary.path())
+                .expect("read dir")
+                .count(),
+            0
+        );
+        assert!(matches!(
+            take_request(&mut origin).1,
+            FileNetworkRequest::Cancel { .. }
+        ));
+        let event = origin.drain_events().pop().expect("failure event");
+        assert_eq!(event.state, TransferState::Failed);
+        assert_eq!(
+            event.error_code.as_deref(),
+            Some("file_transfer_chunk_out_of_order")
+        );
+    }
+
+    #[test]
+    fn replayed_completion_response_does_not_publish_twice() {
+        let temporary = TempDir::new().expect("tempdir");
+        let destination = temporary.path().join("download.bin");
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) =
+            start_download(&mut origin, &local_node_id, &destination, 2, &[], 8);
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+        let (finish_request_id, finish_request) = take_request(&mut origin);
+        assert!(matches!(finish_request, FileNetworkRequest::Finish { .. }));
+        let completed = FileNetworkResponse::Completed {
+            progress: progress(TransferState::Completed, 0, 0, 0, 0),
+        };
+        origin
+            .handle_response(&peer(), finish_request_id, completed.clone(), NOW + 2)
+            .expect("finish response");
+        assert_eq!(origin.active_count(), 0);
+        assert!(std::fs::read(&destination)
+            .expect("published file")
+            .is_empty());
+        assert_eq!(
+            std::fs::read_dir(temporary.path())
+                .expect("read dir")
+                .count(),
+            1
+        );
+        let events = origin.drain_events();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.state == TransferState::Completed)
+                .count(),
+            1
+        );
+
+        assert!(matches!(
+            origin.handle_response(&peer(), finish_request_id, completed, NOW + 3),
+            Err(FileNetworkOriginError::UnknownResponse)
+        ));
+        assert_eq!(origin.active_count(), 0);
+        assert!(std::fs::read(&destination)
+            .expect("published file")
+            .is_empty());
+        assert_eq!(
+            std::fs::read_dir(temporary.path())
+                .expect("read dir")
+                .count(),
+            1
+        );
+        assert!(origin.drain_events().is_empty());
     }
 
     #[test]

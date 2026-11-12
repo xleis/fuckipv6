@@ -2970,6 +2970,7 @@ fn log_file_origin_event(event: &OriginTransferEvent) {
                 state = ?event.state,
                 transferred_bytes = event.transferred_bytes,
                 total_bytes = event.total_bytes,
+                failure_kind = event.failure_kind().map_or("none", |kind| kind.as_str()),
                 error_code = event.error_code.as_deref().unwrap_or("file_transfer_failed"),
                 "File requester 传输已终止"
             );

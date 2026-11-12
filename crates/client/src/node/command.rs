@@ -3550,6 +3550,22 @@ impl NodeCommandBus {
         Self::spawn_with_activity_state(handler, events, capacity, Some(state), None)
     }
 
+    /// Spawn a command bus that publishes sanitized activity into the shared
+    /// node snapshot and commits command records to the same durable ledger as
+    /// the data plane.
+    pub(crate) fn spawn_with_state_and_durable_audit<H>(
+        handler: Arc<H>,
+        events: NodeEventBus,
+        capacity: usize,
+        state: NodeStateStore,
+        audit: Arc<OwnerSecurityAudit>,
+    ) -> Self
+    where
+        H: NodeCommandHandler,
+    {
+        Self::spawn_with_activity_state(handler, events, capacity, Some(state), Some(audit))
+    }
+
     fn spawn_with_activity_state<H>(
         handler: Arc<H>,
         events: NodeEventBus,
@@ -3723,7 +3739,7 @@ impl NodeCommandBus {
             .map_err(|error| NodeCommandBusError::AuditUnavailable(format!("{error:#}")))?;
         if let Some(state) = &self.activity_state {
             state
-                .set_recent_activity(self.audit.recent_activity())
+                .merge_recent_activity(self.audit.recent_activity())
                 .await;
         }
         Ok(())

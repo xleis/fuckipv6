@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
-    evaluate_effective_access, select_relay_candidate, AccessContext, CapabilityKind,
-    ExitSessionAction, InvitationCode, InvitationRedeemRequest, MembershipRole, MembershipState,
-    NetworkId, NetworkMemberDirectory, NetworkRole, NodeId, PermissionIntent, PermissionRequest,
-    PolicyAction, RelayCandidate, RelayHealthStatus, RelayLimitPolicy, RelayMemberGrant,
-    RelaySelectionPolicy, ResourceKind, ResourceRef, TrafficFailureKind, TrafficProtectionState,
-    TrafficSessionSnapshot,
+    evaluate_effective_access, select_relay_candidate, AccessContext, AuditEntry, AuditId,
+    AuditOutcome, CapabilityKind, ExitSessionAction, InvitationCode, InvitationRedeemRequest,
+    MembershipRole, MembershipState, NetworkId, NetworkMemberDirectory, NetworkRole, NodeId,
+    PermissionIntent, PermissionRequest, PolicyAction, RelayCandidate, RelayGovernanceAction,
+    RelayHealthStatus, RelayLimitPolicy, RelayMemberGrant, RelaySelectionPolicy, ResourceKind,
+    ResourceRef, TrafficFailureKind, TrafficProtectionState, TrafficSessionSnapshot,
 };
 #[cfg(test)]
 use fuckipv6_common::is_encrypted_config_path;
@@ -40,6 +40,7 @@ use crate::node::{
     NodeProblemCode, NodeRedeemInvitationCommand, NodeSetLocalExitCapabilityCommand, NodeSnapshot,
     NodeStateStore, RuntimeControlError,
 };
+use crate::owner_security::audit::OwnerSecurityAudit;
 use crate::p2p::buffer_pool::InboundPayload;
 use crate::p2p::connection::{InPlaceSendOutcome, InboundPacket, P2pEngine, PeerRouteInfo};
 use crate::p2p::punching;
@@ -1408,6 +1409,11 @@ fn exit_selection_directory_loss_requires_fail_closed(
     mode != fuckipv6_common::RoutingMode::MeshOnly && had_exit_session
 }
 
+pub(crate) struct RuntimeObservability {
+    pub(crate) state: Option<NodeStateStore>,
+    pub(crate) failover_audit: Option<Arc<OwnerSecurityAudit>>,
+}
+
 pub(crate) async fn prepare_client_runtime_ext(
     config_path: &str,
     mut config: ClientConfig,
@@ -1415,8 +1421,12 @@ pub(crate) async fn prepare_client_runtime_ext(
     network_name: Option<&str>,
     local_exit_enabled: bool,
     enable_ipc: bool,
-    node_state: Option<NodeStateStore>,
+    observability: RuntimeObservability,
 ) -> Result<ClientRuntime> {
+    let RuntimeObservability {
+        state: node_state,
+        failover_audit,
+    } = observability;
     config.tun.name = crate::multi_network::derive_tun_name(network_name, &config.tun.name);
 
     let identity = load_identity(&config)?;
@@ -1586,7 +1596,19 @@ pub(crate) async fn prepare_client_runtime_ext(
     // 创建性能统计收集器
     let stats = StatsCollector::new();
     let (recovery_events, recovery_trigger_tx) = RuntimeRecoveryEvents::spawn();
-    let relay_state = RelayState::with_recovery_trigger_sender(recovery_trigger_tx.clone());
+    let relay_state = match failover_audit {
+        Some(audit) => {
+            let actor = NodeId::from_public_key(&relay_identity.public_key());
+            let sink = spawn_relay_failover_audit_worker(
+                audit,
+                node_state.clone(),
+                actor,
+                network_id.clone(),
+            );
+            RelayState::with_recovery_and_failover_audit(recovery_trigger_tx.clone(), sink)
+        }
+        None => RelayState::with_recovery_trigger_sender(recovery_trigger_tx.clone()),
+    };
     let outbound = OutboundDispatcher::new(
         Arc::new(P2pOutboundTransport::new(
             p2p.clone(),
@@ -1598,7 +1620,10 @@ pub(crate) async fn prepare_client_runtime_ext(
         relay_state,
     );
     if let Some(relay) = relay {
-        if let Err(relay) = outbound.install_relay(relay.client, relay.relay_id).await {
+        if let Err(relay) = outbound
+            .install_relay(relay.client, relay.relay_id, relay.provider_node_id)
+            .await
+        {
             relay.close().await;
         }
     }
@@ -2054,6 +2079,7 @@ struct RelayConnectCandidate {
 struct ConnectedRelay {
     client: QuicRelayClient,
     relay_id: String,
+    provider_node_id: NodeId,
 }
 
 fn relay_connect_candidates(
@@ -2181,6 +2207,14 @@ async fn connect_quic_relay(
             );
             return None;
         };
+        let Some(provider_node_id) = connect_candidate.endpoint.provider_node_id.clone() else {
+            tracing::warn!(
+                diagnostic_id = "relay.selection.provider_identity_missing",
+                relay_id = %selected.relay_id,
+                "Relay 候选缺少提供方身份，停止本次选路并降级"
+            );
+            return None;
+        };
         let started_at = Instant::now();
         let result = tokio::time::timeout(
             RELAY_CONNECT_ATTEMPT_TIMEOUT,
@@ -2215,6 +2249,7 @@ async fn connect_quic_relay(
                 return Some(ConnectedRelay {
                     client,
                     relay_id: selected.relay_id.clone(),
+                    provider_node_id,
                 });
             }
             Ok(Err(error)) => {
@@ -3133,7 +3168,10 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                     (generation, None) => {
                         if let Some(relay) = runtime
                             .outbound
-                            .clear_relay_with_recovery(generation)
+                            .clear_relay_after_failure(
+                                generation,
+                                RelayFailureReason::ReceiveStreamClosed,
+                            )
                             .await
                         {
                             #[cfg(target_os = "linux")]
@@ -5515,7 +5553,10 @@ impl FallbackTransport for RuntimeFallbackTransport {
                         .mark_failure(&relay.relay_id, unix_time_ms());
                     if let Some(failed) = self
                         .relay_state
-                        .clear_relay_with_recovery(relay.generation)
+                        .clear_relay_after_failure(
+                            relay.generation,
+                            RelayFailureReason::ForwardSendFailed,
+                        )
                         .await
                     {
                         failed.client.close().await;
@@ -5529,7 +5570,10 @@ impl FallbackTransport for RuntimeFallbackTransport {
                         .mark_failure(&relay.relay_id, unix_time_ms());
                     if let Some(failed) = self
                         .relay_state
-                        .clear_relay_with_recovery(relay.generation)
+                        .clear_relay_after_failure(
+                            relay.generation,
+                            RelayFailureReason::ForwardSendTimeout,
+                        )
                         .await
                     {
                         failed.client.close().await;
@@ -5552,10 +5596,234 @@ impl FallbackTransport for RuntimeFallbackTransport {
     }
 }
 
+const RELAY_FAILOVER_AUDIT_QUEUE_CAPACITY: usize = 32;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelayFailureReason {
+    ReceiveStreamClosed,
+    ForwardSendFailed,
+    ForwardSendTimeout,
+}
+
+impl RelayFailureReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReceiveStreamClosed => "relay.failure.receive_stream_closed",
+            Self::ForwardSendFailed => "relay.failure.forward_send_failed",
+            Self::ForwardSendTimeout => "relay.failure.forward_send_timeout",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RelayFailoverAuditEvent {
+    actor: NodeId,
+    network_id: Option<NetworkId>,
+    failed_generation: u64,
+    installed_generation: u64,
+    failed_provider_node_id: Option<NodeId>,
+    provider_node_id: NodeId,
+    failure_reason: RelayFailureReason,
+    occurred_at_unix_ms: u64,
+}
+
+impl RelayFailoverAuditEvent {
+    fn audit_entry(&self) -> AuditEntry {
+        let mut details = std::collections::BTreeMap::new();
+        details.insert("reason_code".into(), self.failure_reason.as_str().into());
+        details.insert("failure_code".into(), self.failure_reason.as_str().into());
+        details.insert(
+            "failed_generation".into(),
+            self.failed_generation.to_string(),
+        );
+        details.insert(
+            "installed_generation".into(),
+            self.installed_generation.to_string(),
+        );
+        details.insert("provider_node_id".into(), self.provider_node_id.to_string());
+        if let Some(failed_provider) = &self.failed_provider_node_id {
+            details.insert(
+                "failed_provider_node_id".into(),
+                failed_provider.to_string(),
+            );
+        }
+        details.insert("actor_role".into(), "relay_consumer".into());
+        details.insert("object_kind".into(), "relay_session".into());
+        details.insert("object_id".into(), self.provider_node_id.to_string());
+        if let Some(network_id) = &self.network_id {
+            details.insert("network_id".into(), network_id.to_string());
+        }
+        let audit_id_material = format!(
+            "{}:{}:{}:{}:{}",
+            self.actor,
+            self.network_id
+                .as_ref()
+                .map(ToString::to_string)
+                .as_deref()
+                .unwrap_or("-"),
+            self.failed_generation,
+            self.installed_generation,
+            self.occurred_at_unix_ms,
+        );
+        AuditEntry {
+            audit_id: AuditId::from_public_key(audit_id_material.as_bytes()),
+            operation_id: None,
+            actor: self.actor.clone(),
+            network_id: self.network_id.clone(),
+            action: RelayGovernanceAction::Failover.wire_name().into(),
+            resource: "relay_session".into(),
+            outcome: AuditOutcome::Succeeded,
+            occurred_at_unix_ms: self.occurred_at_unix_ms,
+            summary: "Relay 使用方已切换到新的中继会话".into(),
+            details,
+            sensitive_keys: Default::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RelayFailoverAuditSink {
+    actor: NodeId,
+    network_id: Option<NetworkId>,
+    sender: Option<mpsc::Sender<RelayFailoverAuditEvent>>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl RelayFailoverAuditSink {
+    fn try_record(
+        &self,
+        failed_generation: u64,
+        installed_generation: u64,
+        failed_provider_node_id: Option<NodeId>,
+        provider_node_id: NodeId,
+        failure_reason: RelayFailureReason,
+    ) -> bool {
+        let Some(sender) = self.sender.as_ref() else {
+            return false;
+        };
+        let event = RelayFailoverAuditEvent {
+            actor: self.actor.clone(),
+            network_id: self.network_id.clone(),
+            failed_generation,
+            installed_generation,
+            failed_provider_node_id,
+            provider_node_id,
+            failure_reason,
+            occurred_at_unix_ms: unix_time_ms(),
+        };
+        match sender.try_send(event) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    diagnostic_id = "relay.failover.audit_queue_full",
+                    "Relay 故障转移审计队列已满，丢弃一条非阻塞生命周期记录"
+                );
+                false
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    diagnostic_id = "relay.failover.audit_worker_unavailable",
+                    "Relay 故障转移审计 worker 已停止，记录未持久化"
+                );
+                false
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn dropped_count(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+fn spawn_relay_failover_audit_worker(
+    audit: Arc<OwnerSecurityAudit>,
+    state: Option<NodeStateStore>,
+    actor: NodeId,
+    network_id: Option<NetworkId>,
+) -> RelayFailoverAuditSink {
+    let (sender, mut receiver) =
+        mpsc::channel::<RelayFailoverAuditEvent>(RELAY_FAILOVER_AUDIT_QUEUE_CAPACITY);
+    tokio::spawn(async move {
+        while let Some(event) = receiver.recv().await {
+            let ledger = audit.clone();
+            let entry = event.audit_entry();
+            match tokio::task::spawn_blocking(move || ledger.append_entry(entry)).await {
+                Ok(Ok(record)) => {
+                    if let Some(state) = state.as_ref() {
+                        state
+                            .merge_recent_activity([record.entry.project_activity()])
+                            .await;
+                    }
+                }
+                Ok(Err(error)) => tracing::warn!(
+                    diagnostic_id = "relay.failover.audit_write_failed",
+                    error = %format!("{error:#}"),
+                    "Relay 故障转移审计写入失败"
+                ),
+                Err(error) => tracing::warn!(
+                    diagnostic_id = "relay.failover.audit_worker_failed",
+                    error = %error,
+                    "Relay 故障转移审计 worker 异常退出"
+                ),
+            }
+        }
+    });
+    RelayFailoverAuditSink {
+        actor,
+        network_id,
+        sender: Some(sender),
+        dropped: Arc::new(AtomicU64::new(0)),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RelayFailureContext {
+    failed_generation: u64,
+    provider_node_id: Option<NodeId>,
+    reason: RelayFailureReason,
+}
+
+#[derive(Default)]
+struct PendingRelayFailover {
+    context: Mutex<Option<RelayFailureContext>>,
+}
+
+impl PendingRelayFailover {
+    fn record(&self, context: RelayFailureContext) -> bool {
+        let mut pending = self
+            .context
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.is_some() {
+            return false;
+        }
+        *pending = Some(context);
+        true
+    }
+
+    fn take_after_install(&self, installed_generation: u64) -> Option<RelayFailureContext> {
+        let mut pending = self
+            .context
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending
+            .as_ref()
+            .is_some_and(|context| context.failed_generation < installed_generation)
+        {
+            pending.take()
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Clone)]
 struct RelayHandle {
     generation: u64,
     relay_id: String,
+    provider_node_id: NodeId,
     client: QuicRelayClient,
     forwarding_verified: Arc<AtomicBool>,
 }
@@ -5566,12 +5834,25 @@ struct RelayState {
     next_generation: Arc<AtomicU64>,
     reconnecting: Arc<AtomicBool>,
     closing: Arc<AtomicBool>,
+    pending_failover: Arc<PendingRelayFailover>,
+    failover_audit: Option<RelayFailoverAuditSink>,
     recovery_trigger_tx: Option<RuntimeRecoveryTriggerSender>,
 }
 
 impl RelayState {
     fn with_recovery_trigger_sender(sender: RuntimeRecoveryTriggerSender) -> Self {
         Self {
+            recovery_trigger_tx: Some(sender),
+            ..Self::default()
+        }
+    }
+
+    fn with_recovery_and_failover_audit(
+        sender: RuntimeRecoveryTriggerSender,
+        failover_audit: RelayFailoverAuditSink,
+    ) -> Self {
+        Self {
+            failover_audit: Some(failover_audit),
             recovery_trigger_tx: Some(sender),
             ..Self::default()
         }
@@ -5585,6 +5866,7 @@ impl RelayState {
         &self,
         client: QuicRelayClient,
         relay_id: String,
+        provider_node_id: NodeId,
     ) -> std::result::Result<Option<RelayHandle>, QuicRelayClient> {
         if self.closing.load(Ordering::Acquire) {
             return Err(client);
@@ -5594,12 +5876,25 @@ impl RelayState {
         if self.closing.load(Ordering::Acquire) {
             return Err(client);
         }
-        Ok(slot.replace(RelayHandle {
+        let previous = slot.replace(RelayHandle {
             generation,
             relay_id,
+            provider_node_id: provider_node_id.clone(),
             client,
             forwarding_verified: Arc::new(AtomicBool::new(false)),
-        }))
+        });
+        if let Some(failure) = self.pending_failover.take_after_install(generation) {
+            if let Some(audit) = self.failover_audit.as_ref() {
+                audit.try_record(
+                    failure.failed_generation,
+                    generation,
+                    failure.provider_node_id,
+                    provider_node_id,
+                    failure.reason,
+                );
+            }
+        }
+        Ok(previous)
     }
 
     async fn clear_relay(&self, generation: u64) -> Option<RelayHandle> {
@@ -5616,6 +5911,21 @@ impl RelayState {
 
     async fn clear_relay_with_recovery(&self, generation: u64) -> Option<RelayHandle> {
         let relay = self.clear_relay(generation).await?;
+        self.notify_recovery_trigger(RecoveryTrigger::RelayDisconnected);
+        Some(relay)
+    }
+
+    async fn clear_relay_after_failure(
+        &self,
+        generation: u64,
+        reason: RelayFailureReason,
+    ) -> Option<RelayHandle> {
+        let relay = self.clear_relay(generation).await?;
+        self.pending_failover.record(RelayFailureContext {
+            failed_generation: relay.generation,
+            provider_node_id: Some(relay.provider_node_id.clone()),
+            reason,
+        });
         self.notify_recovery_trigger(RecoveryTrigger::RelayDisconnected);
         Some(relay)
     }
@@ -5818,12 +6128,25 @@ impl OutboundDispatcher {
         &self,
         relay: QuicRelayClient,
         relay_id: String,
+        provider_node_id: NodeId,
     ) -> std::result::Result<Option<RelayHandle>, QuicRelayClient> {
-        self.relay_state.install_relay(relay, relay_id).await
+        self.relay_state
+            .install_relay(relay, relay_id, provider_node_id)
+            .await
     }
 
     async fn clear_relay_with_recovery(&self, generation: u64) -> Option<RelayHandle> {
         self.relay_state.clear_relay_with_recovery(generation).await
+    }
+
+    async fn clear_relay_after_failure(
+        &self,
+        generation: u64,
+        reason: RelayFailureReason,
+    ) -> Option<RelayHandle> {
+        self.relay_state
+            .clear_relay_after_failure(generation, reason)
+            .await
     }
 
     async fn close_relay(&self, total_timeout: Duration) -> CleanupStatus {
@@ -6044,7 +6367,10 @@ fn spawn_relay_reconnect(runtime: &ClientRuntime) -> JoinHandle<()> {
         )
         .await;
         if let Some(relay) = relay {
-            match outbound.install_relay(relay.client, relay.relay_id).await {
+            match outbound
+                .install_relay(relay.client, relay.relay_id, relay.provider_node_id)
+                .await
+            {
                 Ok(Some(previous)) => previous.client.close().await,
                 Ok(None) => {}
                 Err(relay) => relay.close().await,
@@ -8323,6 +8649,166 @@ mod tests {
             RelayLimitPolicy::default(),
         )
         .expect("relay grant")
+    }
+
+    fn relay_failover_test_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("fuckipv6-{label}-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create audit test directory");
+        dir
+    }
+
+    #[test]
+    fn relay_failover_audit_entry_uses_canonical_action_and_minimal_fields() {
+        let actor = NodeId::from_public_key(b"relay-failover-consumer");
+        let network_id = NetworkId::from_public_key(b"relay-failover-network");
+        let failed_provider = NodeId::from_public_key(b"relay-failover-provider-old");
+        let provider = NodeId::from_public_key(b"relay-failover-provider-new");
+        let entry = RelayFailoverAuditEvent {
+            actor,
+            network_id: Some(network_id.clone()),
+            failed_generation: 7,
+            installed_generation: 9,
+            failed_provider_node_id: Some(failed_provider.clone()),
+            provider_node_id: provider.clone(),
+            failure_reason: RelayFailureReason::ForwardSendFailed,
+            occurred_at_unix_ms: 1_700_000_000_000,
+        }
+        .audit_entry();
+
+        assert_eq!(entry.action, RelayGovernanceAction::Failover.wire_name());
+        assert_eq!(entry.resource, "relay_session");
+        assert_eq!(entry.details["failed_generation"], "7");
+        assert_eq!(entry.details["installed_generation"], "9");
+        assert_eq!(
+            entry.details["failed_provider_node_id"],
+            failed_provider.to_string()
+        );
+        assert_eq!(entry.details["provider_node_id"], provider.to_string());
+        assert_eq!(
+            entry.details["reason_code"],
+            "relay.failure.forward_send_failed"
+        );
+        assert_eq!(entry.network_id, Some(network_id));
+        assert_eq!(entry.details.len(), 10);
+
+        let serialized = serde_json::to_string(&entry).expect("serialize audit entry");
+        for forbidden in [
+            "127.0.0.1",
+            "relay.test",
+            "payload",
+            "private_key",
+            "session_secret",
+        ] {
+            assert!(!serialized.contains(forbidden), "audit leaked {forbidden}");
+        }
+    }
+
+    #[test]
+    fn relay_failover_audit_sink_drops_without_blocking_when_full() {
+        let actor = NodeId::from_public_key(b"relay-failover-queue-consumer");
+        let provider = NodeId::from_public_key(b"relay-failover-queue-provider");
+        let (sender, _receiver) = mpsc::channel(1);
+        let sink = RelayFailoverAuditSink {
+            actor,
+            network_id: None,
+            sender: Some(sender),
+            dropped: Arc::new(AtomicU64::new(0)),
+        };
+
+        assert!(sink.try_record(
+            1,
+            2,
+            None,
+            provider.clone(),
+            RelayFailureReason::ReceiveStreamClosed,
+        ));
+        assert!(!sink.try_record(2, 3, None, provider, RelayFailureReason::ForwardSendTimeout,));
+        assert_eq!(sink.dropped_count(), 1);
+    }
+
+    #[test]
+    fn pending_relay_failover_pairs_only_with_a_newer_generation_once() {
+        let pending = PendingRelayFailover::default();
+        let failed_provider = NodeId::from_public_key(b"relay-pending-failed-provider");
+        assert!(pending.record(RelayFailureContext {
+            failed_generation: 4,
+            provider_node_id: Some(failed_provider.clone()),
+            reason: RelayFailureReason::ForwardSendTimeout,
+        }));
+        assert!(!pending.record(RelayFailureContext {
+            failed_generation: 5,
+            provider_node_id: None,
+            reason: RelayFailureReason::ReceiveStreamClosed,
+        }));
+        assert!(pending.take_after_install(4).is_none());
+        assert!(pending.take_after_install(3).is_none());
+        assert_eq!(
+            pending.take_after_install(5),
+            Some(RelayFailureContext {
+                failed_generation: 4,
+                provider_node_id: Some(failed_provider),
+                reason: RelayFailureReason::ForwardSendTimeout,
+            })
+        );
+        assert!(pending.take_after_install(6).is_none());
+    }
+
+    #[tokio::test]
+    async fn relay_failover_audit_worker_persists_and_merges_activity() {
+        let dir = relay_failover_test_dir("relay-failover-worker");
+        let actor = NodeId::from_public_key(b"relay-failover-worker-consumer");
+        let failed_provider = NodeId::from_public_key(b"relay-failover-worker-provider-old");
+        let provider = NodeId::from_public_key(b"relay-failover-worker-provider-new");
+        let state = NodeStateStore::new();
+        let audit = Arc::new(OwnerSecurityAudit::new(&dir, actor.clone()).expect("audit ledger"));
+        let sink =
+            spawn_relay_failover_audit_worker(audit.clone(), Some(state.clone()), actor, None);
+
+        assert!(sink.try_record(
+            11,
+            12,
+            Some(failed_provider),
+            provider,
+            RelayFailureReason::ReceiveStreamClosed,
+        ));
+        let activity = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let activity = state.snapshot().await.recent_activity;
+                if !activity.is_empty() {
+                    break activity;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("activity projection is published");
+        assert_eq!(activity.len(), 1);
+        assert_eq!(
+            activity[0].action,
+            RelayGovernanceAction::Failover.wire_name()
+        );
+        assert_eq!(
+            activity[0].reason.as_deref(),
+            Some("relay.failure.receive_stream_closed")
+        );
+
+        let export = audit
+            .export(&fuckipv6_common::domain::AuditExportFilter::default())
+            .expect("export audit");
+        assert_eq!(export.records.len(), 1);
+        assert_eq!(
+            export.records[0].entry.action,
+            RelayGovernanceAction::Failover.wire_name()
+        );
+
+        drop(sink);
+        drop(audit);
+        std::fs::remove_dir_all(dir).expect("remove audit test directory");
     }
 
     #[test]

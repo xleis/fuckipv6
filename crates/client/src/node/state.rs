@@ -1917,6 +1917,36 @@ impl NodeStateStore {
             .await;
     }
 
+    /// Merge audited activity from independent producers into the canonical
+    /// bounded feed. Audit identity deduplicates retries, and the same ordering
+    /// rule is used for command and data-plane lifecycle records.
+    pub(crate) async fn merge_recent_activity(
+        &self,
+        entries: impl IntoIterator<Item = ActivityEntry>,
+    ) {
+        self.update(|snapshot| {
+            for entry in entries {
+                if let Some(index) = snapshot
+                    .recent_activity
+                    .iter()
+                    .position(|existing| existing.audit_id == entry.audit_id)
+                {
+                    snapshot.recent_activity[index] = entry;
+                } else {
+                    snapshot.recent_activity.push(entry);
+                }
+            }
+            snapshot.recent_activity.sort_by(|left, right| {
+                right
+                    .occurred_at_unix_ms
+                    .cmp(&left.occurred_at_unix_ms)
+                    .then_with(|| right.audit_id.cmp(&left.audit_id))
+            });
+            snapshot.recent_activity.truncate(256);
+        })
+        .await;
+    }
+
     /// Publish the runtime-authoritative traffic-protection session. Adapters
     /// only render this value and must not derive protection from interfaces,
     /// route configuration or a successful CLI command.
@@ -3431,5 +3461,67 @@ mod tests {
         let snapshot = state.snapshot().await;
         assert_eq!(snapshot.revision, 42);
         assert_eq!(snapshot.control_health, NodeControlHealth::Available);
+    }
+
+    #[tokio::test]
+    async fn merge_recent_activity_deduplicates_sorts_and_retains_latest_256() {
+        use fuckipv6_common::domain::{AuditId, AuditOutcome};
+
+        let state = NodeStateStore::new();
+        let actor = NodeId::from_public_key(b"activity-merge-actor");
+        let entry = |index: u64, occurred_at_unix_ms: u64| ActivityEntry {
+            audit_id: AuditId::from_public_key(format!("activity-{index}").as_bytes()),
+            operation_id: None,
+            actor: actor.clone(),
+            network_id: None,
+            action: format!("test.activity.{index}"),
+            resource: "test_activity".into(),
+            outcome: AuditOutcome::Succeeded,
+            occurred_at_unix_ms,
+            summary: format!("activity {index}"),
+            category: Default::default(),
+            severity: Default::default(),
+            actor_role: None,
+            object_kind: "test_activity".into(),
+            object_id: None,
+            reason: None,
+            details: Default::default(),
+        };
+        let entries = (0..260)
+            .map(|index| entry(index, 1_000 + index))
+            .collect::<Vec<_>>();
+
+        state.merge_recent_activity(entries.clone()).await;
+        let merged = state.snapshot().await.recent_activity;
+        assert_eq!(merged.len(), 256);
+        assert_eq!(merged.first().expect("newest").occurred_at_unix_ms, 1_259);
+        assert_eq!(
+            merged.last().expect("oldest retained").occurred_at_unix_ms,
+            1_004
+        );
+
+        let mut replacement = entries[259].clone();
+        replacement.summary = "updated by another producer".into();
+        state.merge_recent_activity([replacement]).await;
+        let deduplicated = state.snapshot().await.recent_activity;
+        assert_eq!(deduplicated.len(), 256);
+        assert_eq!(
+            deduplicated
+                .iter()
+                .filter(|entry| entry.audit_id == entries[259].audit_id)
+                .count(),
+            1
+        );
+        assert_eq!(deduplicated[0].summary, "updated by another producer");
+
+        state.merge_recent_activity([entry(999, 2_000)]).await;
+        let ordered = state.snapshot().await.recent_activity;
+        assert_eq!(ordered.len(), 256);
+        assert_eq!(ordered[0].occurred_at_unix_ms, 2_000);
+        assert!(ordered.windows(2).all(|pair| {
+            pair[0].occurred_at_unix_ms > pair[1].occurred_at_unix_ms
+                || (pair[0].occurred_at_unix_ms == pair[1].occurred_at_unix_ms
+                    && pair[0].audit_id > pair[1].audit_id)
+        }));
     }
 }

@@ -4360,6 +4360,7 @@ pub fn spawn_command_bus_with_services(
     super::NodeCommandBus::spawn_with_state(Arc::new(handler), events, 32, state)
 }
 
+#[cfg(test)]
 pub(crate) fn spawn_command_bus_with_runtime(
     state: NodeStateStore,
     registry: MultiNetworkRegistry,
@@ -4371,6 +4372,26 @@ pub(crate) fn spawn_command_bus_with_runtime(
     let handler =
         NodeRuntimeHandler::with_runtime(state.clone(), registry, services, runtime, configs);
     super::NodeCommandBus::spawn_with_state(Arc::new(handler), events, 32, state)
+}
+
+pub(crate) fn spawn_command_bus_with_runtime_and_audit(
+    state: NodeStateStore,
+    registry: MultiNetworkRegistry,
+    events: super::NodeEventBus,
+    services: EmbeddedServiceManager,
+    runtime: NetworkRuntimeManager,
+    configs: ConfigManager,
+    audit: Arc<crate::owner_security::audit::OwnerSecurityAudit>,
+) -> super::NodeCommandBus {
+    let handler =
+        NodeRuntimeHandler::with_runtime(state.clone(), registry, services, runtime, configs);
+    super::NodeCommandBus::spawn_with_state_and_durable_audit(
+        Arc::new(handler),
+        events,
+        32,
+        state,
+        audit,
+    )
 }
 
 #[cfg(test)]

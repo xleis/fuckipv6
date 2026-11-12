@@ -50,6 +50,7 @@ use crate::config_manager::{
 use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
 use crate::network_setup::{self, NetworkSetupStage};
 use crate::node::runtime_metadata;
+use crate::owner_security::audit::OwnerSecurityAudit;
 use crate::routing::leak_detection::{collect_leak_detection, LeakDetectionContext};
 use crate::signaling::client::{
     InvitationControlError, JoinRequestControlError, JoinRequestStatusSnapshot, SignalingClient,
@@ -774,6 +775,7 @@ struct LiveNetworkRuntimeLauncher {
     state: NodeStateStore,
     events: NodeEventBus,
     registry: MultiNetworkRegistry,
+    failover_audit: Option<Arc<OwnerSecurityAudit>>,
 }
 
 impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
@@ -781,6 +783,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
         let state = self.state.clone();
         let events = self.events.clone();
         let registry = self.registry.clone();
+        let failover_audit = self.failover_audit.clone();
 
         Box::pin(async move {
             let mut runtime = commands::prepare_client_runtime_ext(
@@ -790,7 +793,10 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
                 Some(&request.network_name),
                 request.local_exit_enabled,
                 false,
-                Some(state.clone()),
+                commands::RuntimeObservability {
+                    state: Some(state.clone()),
+                    failover_audit,
+                },
             )
             .await
             .map_err(|error| {
@@ -2153,7 +2159,8 @@ pub(crate) struct NetworkRuntimeManager {
 }
 
 impl NetworkRuntimeManager {
-    pub fn spawn(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn spawn_with_failover_audit(
         configs: ConfigManager,
         options: RuntimeOptions,
         state: NodeStateStore,
@@ -2161,11 +2168,13 @@ impl NetworkRuntimeManager {
         lifecycle: NodeLifecycle,
         registry: MultiNetworkRegistry,
         services: EmbeddedServiceManager,
+        failover_audit: Option<Arc<OwnerSecurityAudit>>,
     ) -> Self {
         let launcher = Arc::new(LiveNetworkRuntimeLauncher {
             state: state.clone(),
             events: events.clone(),
             registry: registry.clone(),
+            failover_audit,
         });
         Self::spawn_with_launcher(
             configs, options, state, events, lifecycle, registry, services, launcher,

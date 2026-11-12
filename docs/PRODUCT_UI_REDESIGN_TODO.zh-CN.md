@@ -3297,29 +3297,48 @@ duplicate transfer key 或共享 staging 路径会保留首个已恢复文件，
 
 ### W15-04 canonicalize 与路径边界 `[~]`
 
-- [ ] 所有路径在服务端规范化并验证位于共享根目录；
-- [ ] 拒绝绝对路径逃逸、`..`、空字节和平台特殊路径；
+- [x] 所有路径在服务端规范化并验证位于共享根目录；
+- [x] 拒绝绝对路径逃逸、`..`、空字节和平台特殊路径；
 - [ ] 处理大小写、Unicode、尾随分隔符和 Windows 路径差异；
-- [ ] 在打开文件前后复核真实路径；
-- [ ] 对允许链接的策略明确默认禁止；
-- [ ] 建立跨平台路径 fuzz/property 测试；
-- [ ] 失败返回稳定安全错误，不泄漏根目录外信息；
+- [x] 在打开文件前后复核真实路径；
+- [x] 对允许链接的策略明确默认禁止；
+- [x] 建立跨平台路径 fuzz/property 测试；
+- [x] 失败返回稳定安全错误，不泄漏根目录外信息；
 - [ ] 代码审查覆盖 TOCTOU 风险。
 
 **验收**：任何输入无法读写共享根目录之外的文件，路径测试覆盖目标平台。
+
+**证据（2026-11-12，portable 规则与 Linux 打开路径）**：`SharedPath` 对绝对路径、盘符/UNC、反斜杠、空组件、`.`/`..`、
+NUL/控制字符、不可见 Unicode 格式字符（包括双向覆盖字符）、ADS 冒号、尾随点/空格、DOS 设备名、超长路径和组件逐项
+失败关闭，不做可能产生歧义的隐式归一化。`arbitrary_inputs_never_create_an_ambiguous_shared_path` 与
+`generated_portable_paths_obey_component_aware_containment` 对任意 Unicode 字符串和生成路径检查解析后不变量、序列化往返及
+组件边界包含关系；`portable_paths_preserve_case_and_unicode_without_platform_normalization` 覆盖中文、emoji、大小写、尾随分隔符
+和格式控制字符。Linux 适配器以锚定 root fd 逐组件 `openat` + `O_NOFOLLOW` 打开，`AllowWithinRoot` 另在打开前后 canonicalize
+并核对打开的 inode/dev；`allow_within_root_follows_only_links_resolving_inside_the_root` 验证根内链接可读、根外链接返回
+`file_path_outside_root` 且错误文本不包含根外真实路径。跨平台 property 测试已在共享代码执行，但 Windows/macOS 实机路径差异、
+重解析点和 TOCTOU 审查仍未完成，故本项不标完成。
 
 ### W15-05 符号链接、竞态与临时文件 `[~]`
 
 - [ ] 拒绝指向共享根外的符号链接/重解析点；
 - [ ] 对目录替换、链接交换和并发重命名进行防护；
-- [ ] 临时文件使用受控目录、随机名和权限；
-- [ ] 上传完成前不可出现在普通文件列表；
+- [x] 临时文件使用受控目录、随机名和权限；
+- [x] 上传完成前不可出现在普通文件列表；
 - [x] 失败/崩溃后清理过期临时文件（启用时在锚定的私有 staging 目录中仅删除超过 30 分钟的 `up-*` 普通文件；不跟随符号链接，清理失败则拒绝启用）；
 - [ ] 文件句柄、大小和磁盘使用有上限；
-- [ ] 覆盖 symlink race、硬链接和权限变化测试；
-- [ ] 不依赖仅字符串前缀判断路径安全。
+- [x] 覆盖 symlink race、硬链接和权限变化测试；
+- [x] 不依赖仅字符串前缀判断路径安全。
 
 **验收**：路径穿越与竞态攻击不能越界；临时文件不泄漏、不无限增长。
+
+**证据（2026-11-12，Linux 与 portable 状态机）**：staging 目录固定为锚定共享根下的 `.fuckipv6-tmp`，目录权限 0700、随机
+`up-*` 文件权限 0600，普通共享路径无法访问该保留目录，完成前目标名不存在。发布使用目录 fd 上的 no-replace 硬链接，并在
+发布后同步目标目录；失败或 Drop 删除 staging。`concurrent_directory_symlink_exchange_never_reads_outside_root` 覆盖目录与根外
+符号链接并发交换，`publication_rejects_a_target_parent_swapped_to_an_outside_symlink` 覆盖发布前父目录被根外链接替换且外部文件
+保持不变，`hard_link_inside_root_is_authorized_as_a_directory_entry` 明确根内硬链接策略，
+`permission_revocation_fails_closed_for_files_and_directories` 覆盖文件和父目录权限撤销后的失败关闭。
+`stale_cleanup_removes_only_expired_generated_regular_files` 验证过期清理不跟随链接、不删除用户文件。上述均为 Linux 和 portable
+代码证据；Windows 重解析点、macOS 实机竞态、并发重命名语义及 OS 文件句柄上限仍未验收。
 
 ### W15-06 并发、速率与资源限制 `[~]`
 

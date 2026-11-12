@@ -3364,7 +3364,9 @@ DOS 设备名拒绝同时覆盖 `CONIN$`、`CONOUT$`、`CLOCK$` 与 `COM/LPT` �
 
 **证据（2026-11-12，Linux 与 portable 状态机）**：staging 目录固定为锚定共享根下的 `.fuckipv6-tmp`，目录权限 0700、随机
 `up-*` 文件权限 0600，普通共享路径无法访问该保留目录，完成前目标名不存在。发布使用目录 fd 上的 no-replace 硬链接，并在
-发布后同步目标目录；失败或 Drop 删除 staging。`concurrent_directory_symlink_exchange_never_reads_outside_root` 覆盖目录与根外
+发布后同步目标目录；失败或 Drop 删除 staging。保留目录名按 ASCII 大小写无关比较，因此大小写不敏感文件系统上的
+`.FUCKIPV6-TMP` 等变体同样返回 `PathRejected`，`reserves_the_temporary_staging_directory` 覆盖三种拼写。
+`concurrent_directory_symlink_exchange_never_reads_outside_root` 覆盖目录与根外
 符号链接并发交换，`publication_rejects_a_target_parent_swapped_to_an_outside_symlink` 覆盖发布前父目录被根外链接替换且外部文件
 保持不变，`hard_link_inside_root_is_authorized_as_a_directory_entry` 明确根内硬链接策略，
 `permission_revocation_fails_closed_for_files_and_directories` 覆盖文件和父目录权限撤销后的失败关闭。

@@ -707,7 +707,11 @@ impl LocalShareRoot {
                 "file operations require a non-root shared path",
             ));
         }
-        if path.components().next() == Some(FILE_TEMP_DIRECTORY) {
+        if path
+            .components()
+            .next()
+            .is_some_and(|component| component.eq_ignore_ascii_case(FILE_TEMP_DIRECTORY))
+        {
             return Err(FileShareError::new(
                 FileShareErrorCode::PathRejected,
                 "the File staging directory is reserved",
@@ -1864,11 +1868,13 @@ mod tests {
     #[test]
     fn reserves_the_temporary_staging_directory() {
         let (_temporary, share) = root();
-        let path = SharedPath::parse(format!("{FILE_TEMP_DIRECTORY}/upload.part")).expect("path");
-        let error = share
-            .open_read(&path)
-            .expect_err("staging path must be inaccessible");
-        assert_eq!(error.code(), FileShareErrorCode::PathRejected);
+        for prefix in [FILE_TEMP_DIRECTORY, ".FUCKIPV6-TMP", ".FuckIPv6-Tmp"] {
+            let path = SharedPath::parse(format!("{prefix}/upload.part")).expect("path");
+            let error = share
+                .open_read(&path)
+                .expect_err("staging path must be inaccessible");
+            assert_eq!(error.code(), FileShareErrorCode::PathRejected);
+        }
     }
 
     #[test]

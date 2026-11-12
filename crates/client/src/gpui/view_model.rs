@@ -6059,6 +6059,8 @@ fn exit_node_unsupported_reason_key(
     }
 }
 
+const RELAY_GOVERNANCE_RENDER_LIMIT: usize = 50;
+
 fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let services = snapshot
         .embedded_services
@@ -6207,8 +6209,16 @@ fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
             let Some(audit) = service.relay_governance.as_ref() else {
                 return Vec::new();
             };
-            let mut rows = audit
+            let visible_events = audit
                 .events
+                .get(
+                    audit
+                        .events
+                        .len()
+                        .saturating_sub(RELAY_GOVERNANCE_RENDER_LIMIT)..,
+                )
+                .unwrap_or_default();
+            let mut rows = visible_events
                 .iter()
                 .map(|event| {
                     row(
@@ -6221,6 +6231,25 @@ fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
                     )
                 })
                 .collect::<Vec<_>>();
+            if audit.events.len() > visible_events.len() {
+                rows.push(row(
+                    service.network_name.clone(),
+                    tr(
+                        locale,
+                        "relay.governance.bounded",
+                        &[
+                            (
+                                "shown",
+                                &relay_format_u64(locale, visible_events.len() as u64),
+                            ),
+                            (
+                                "total",
+                                &relay_format_u64(locale, audit.events.len() as u64),
+                            ),
+                        ],
+                    ),
+                ));
+            }
             if audit.dropped_events > 0 {
                 rows.push(row(
                     service.network_name.clone(),
@@ -6404,6 +6433,7 @@ fn relay_measurement_key(state: RelayMeasurementState) -> &'static str {
 
 fn relay_health_detail(locale: Locale, health: &RelayHealthSnapshot) -> String {
     let status = relay_health_status_label(locale, health.status);
+    let listener = relay_listener_detail(locale, health);
     let lifecycle = t(locale, relay_lifecycle_key(health.lifecycle));
     let reachability = t(locale, relay_reachability_key(health.network_reachability));
     let forwarding = t(
@@ -6433,16 +6463,32 @@ fn relay_health_detail(locale: Locale, health: &RelayHealthSnapshot) -> String {
     let observed_at = routing_timestamp_label(Some(health.observed_at_unix_ms), locale);
     tr(
         locale,
-        "relay.health_detail",
+        "relay.service_detail",
         &[
-            ("status", &status),
+            ("health", &status),
             ("lifecycle", lifecycle),
+            ("listener", &listener),
             ("reachability", reachability),
             ("forwarding", forwarding),
             ("authorization", authorization),
             ("quota", quota),
             ("observed_at", &observed_at),
         ],
+    )
+}
+
+fn relay_listener_detail(locale: Locale, health: &RelayHealthSnapshot) -> String {
+    let state = t(
+        locale,
+        if health.listener_bound {
+            "relay.listener.bound"
+        } else {
+            "relay.listener.unbound"
+        },
+    );
+    health.listen_addr.map_or_else(
+        || state.to_owned(),
+        |listen_addr| format!("{state} · {listen_addr}"),
     )
 }
 
@@ -9295,8 +9341,11 @@ mod tests {
             .detail
             .contains(t(Locale::ZhCn, "relay.health.degraded")));
         assert!(health.rows.iter().all(|row| {
-            row.detail
-                .contains(t(Locale::ZhCn, "relay.reachability.reachable"))
+            row.detail.contains(t(Locale::ZhCn, "relay.listener.bound"))
+                && row.detail.contains("127.0.0.1:6667")
+                && row
+                    .detail
+                    .contains(t(Locale::ZhCn, "relay.reachability.reachable"))
                 && row
                     .detail
                     .contains(t(Locale::ZhCn, "relay.authorization.valid"))
@@ -9361,17 +9410,19 @@ mod tests {
             )),
         );
         service.relay_governance = Some(RelayGovernanceAuditSnapshot {
-            events: vec![RelayGovernanceEvent {
-                action: RelayGovernanceAction::SessionRejected,
-                occurred_at_unix_ms: 1_700_000_100_000,
-                node_id: Some(NodeId::from_public_key(b"relay-member")),
-                reason_code: "relay.session.quota_exhausted".into(),
-                observed: Some(16),
-                limit: Some(16),
-                reset_at_unix_ms: Some(1_700_000_160_000),
-                previous_policy_revision: None,
-                policy_revision: None,
-            }],
+            events: (0..60)
+                .map(|index| RelayGovernanceEvent {
+                    action: RelayGovernanceAction::SessionRejected,
+                    occurred_at_unix_ms: 1_700_000_100_000 + index,
+                    node_id: (index == 59).then(|| NodeId::from_public_key(b"relay-member")),
+                    reason_code: format!("relay.session.quota_exhausted.{index}"),
+                    observed: Some(index),
+                    limit: Some(60),
+                    reset_at_unix_ms: Some(1_700_000_160_000),
+                    previous_policy_revision: None,
+                    policy_revision: None,
+                })
+                .collect(),
             dropped_events: 3,
         });
         let snapshot = NodeSnapshot {
@@ -9384,15 +9435,25 @@ mod tests {
             .iter()
             .find(|section| section.title == t(Locale::En, "gpui.section.relay_governance"))
             .expect("relay governance section");
-        assert_eq!(governance.rows.len(), 2);
+        assert_eq!(governance.rows.len(), 52);
         assert!(governance.rows[0]
             .title
             .contains(t(Locale::En, "relay.governance.action.session_rejected")));
         assert!(governance.rows[0]
             .detail
-            .contains("relay.session.quota_exhausted"));
-        assert!(governance.rows[0].detail.contains("16"));
-        assert!(governance.rows[1].detail.contains(&tr(
+            .contains("relay.session.quota_exhausted.10"));
+        assert!(!governance.rows[0]
+            .detail
+            .contains("relay.session.quota_exhausted.9"));
+        assert!(governance.rows[49]
+            .detail
+            .contains("relay.session.quota_exhausted.59"));
+        assert!(governance.rows[50].detail.contains(&tr(
+            Locale::En,
+            "relay.governance.bounded",
+            &[("shown", "50"), ("total", "60")],
+        )));
+        assert!(governance.rows[51].detail.contains(&tr(
             Locale::En,
             "relay.governance.dropped_detail",
             &[("dropped", "3")],
@@ -9406,6 +9467,22 @@ mod tests {
         assert!(!rendered.contains("TOP_SECRET_PAYLOAD"));
         assert!(!rendered.contains("2001:db8::secret"));
         assert!(!rendered.contains("private_key"));
+    }
+
+    #[test]
+    fn relay_listener_detail_uses_authoritative_bound_state_and_address() {
+        let mut health = relay_health_fixture(
+            true,
+            RelayUsageSnapshot::default(),
+            RelayLimitPolicy::default(),
+        );
+        health.listen_addr = Some("127.0.0.1:6667".parse().expect("relay socket"));
+        health.listener_bound = false;
+
+        let detail = relay_listener_detail(Locale::En, &health);
+        assert!(detail.contains(t(Locale::En, "relay.listener.unbound")));
+        assert!(detail.contains("127.0.0.1:6667"));
+        assert!(!detail.contains(t(Locale::En, "relay.listener.bound")));
     }
 
     #[test]

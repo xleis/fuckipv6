@@ -3257,9 +3257,9 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 - [x] 断点续传绑定文件版本、分块和身份，防止拼接错误内容；
 - [x] 文件更新后旧续传状态失效；
 - [x] 支持取消并清理临时文件；
-- [ ] 区分网络中断、权限撤销、配额超限和磁盘错误；
+- [x] 区分网络中断、权限撤销、配额超限和磁盘错误；
 - [x] 完成后校验内容哈希并原子落位；
-- [ ] 覆盖并发同名、重复完成和重放测试。
+- [x] 覆盖并发同名、重复完成和重放测试。
 
 **验收**：传输中断可安全恢复，损坏/过期分块不会被合并成成功文件。
 
@@ -3289,6 +3289,11 @@ duplicate transfer key 或共享 staging 路径会保留首个已恢复文件，
 `restored_download_rejects_a_replaced_staging_symlink_without_touching_its_target`、`duplicate_restored_transfer_does_not_remove_the_restored_staging_file`
 与 `shared_restored_staging_path_does_not_remove_or_reuse_the_active_file` 覆盖这些恢复边界。该证据仍是进程内状态机、journal 与
 冻结文件系统测试，不代表真实双节点网络中断、真实节点杀进程重启、WebUI/Android File 表面或大文件性能验收已经完成。
+失败事件保留稳定的具体错误码，并额外投影 `network` / `authorization` / `quota` / `storage` 四类本地操作提示；
+`requester_failures_preserve_network_authorization_quota_and_storage_kinds` 覆盖发送失败、权限撤销、配额超限与磁盘预留拒绝。
+`concurrent_same_name_uploads_publish_only_one_file`、`replayed_ack_is_rejected_without_failing_active_transfer`、
+`replayed_download_fragment_fails_closed_and_cleans_staging` 与 `replayed_completion_response_does_not_publish_twice`
+覆盖并发同名、重复 ACK、下载分片重放和完成响应重放；重放不会二次发布或影响其他传输，分片重放会失败关闭并清理 staging。
 
 ### W15-04 canonicalize 与路径边界 `[~]`
 

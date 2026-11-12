@@ -59,7 +59,7 @@
 | W10 安全与隐私 | `[x]` | P1 | W9 | 权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计、安全页面状态和可重复治理证据闭环均已完成 |
 | W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约和 W11-09 隔离路由 E2E/失败关闭/网络报告已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，GPUI 已接入同一页面的权威投影、规则/目标/影响展示和精确跳转，真实命中观测、GPUI/WebUI/Android 三端一致、生产后端接线及真实平台监听/适配待完成 |
 | W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05 已完成：本机启停、贡献治理、管理员选择、分层健康与故障切换/撤权均有权威状态和自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收；两侧 Exit 可达、Peer 级统计映射和 W12-09 的 24 小时稳定性/自动清理仍待完成 |
-| W13 Relay | `[~]` | P1 | W10 | W13-01、W13-02 和 W13-06 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；生产数据面故障转移现会写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复已有真实进程测试；W13-03/04/05/07 仍缺真实三组件同时故障、压力/吞吐/资源测量、真实 Relay 运营者隐私、GPUI/WebUI/Android 三端对等及绑定 commit/平台/拓扑的正式报告 |
+| W13 Relay | `[~]` | P1 | W10 | W13-01、W13-02 和 W13-06 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；生产数据面故障转移现会写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复已有真实进程测试；真实 Relay 子进程压力测试已覆盖连接风暴、慢连接/资源上限、恢复、吞吐、延迟、CPU 和 RSS，并输出绑定 commit/平台/拓扑的报告。W13-03/04/05/07 仍未完成：满载时其他能力可用性、真实源地址/Exit 要求与恢复路径、真实 Relay 运营者隐私、Relay/Coordinator/Exit 同时故障及 GPUI/WebUI/Android 三端对等 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
 | W15 File | `[ ]` | P2 | W10 | ACL、配额、上传下载、续传 |
 | W16 Android | `[ ]` | P2 | W2,W4,W5,W7-W15 | Compose、VpnService、全能力 |
@@ -3030,7 +3030,7 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 - [x] 防止恶意连接耗尽文件描述符或内存；
 - [x] 限制每成员和全局速率；
 - [x] 配额变化不导致无界队列或静默丢弃关键事件；
-- [ ] 完成压力与资源回收测试。
+- [x] 完成压力与资源回收测试。
 
 **验收**：Relay 在满载和攻击流量下保持有界资源并可恢复，不拖垮节点其他能力。
 
@@ -3076,13 +3076,13 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 ### W13-07 Relay 集成与性能测试 `[~]`
 
 - [x] 覆盖双边授权交集和拒绝优先；
-- [ ] 覆盖配额、连接风暴、慢连接和资源耗尽；
+- [x] 覆盖配额、连接风暴、慢连接和资源耗尽；
 - [ ] 覆盖链路断开、切换、重连和环路；
 - [ ] 覆盖与 Exit/Coordinator 同时故障；
-- [ ] 测量吞吐、延迟、并发、CPU 和内存；
+- [x] 测量吞吐、延迟、并发、CPU 和内存；
 - [ ] 验证满载时节点其他能力仍可用；
 - [ ] GPUI/WebUI/Android 状态与操作一致；
-- [ ] 报告绑定 commit、平台和测试拓扑。
+- [x] 报告绑定 commit、平台和测试拓扑。
 
 **证据（2026-11-12）**：Relay 启停现在返回带稳定原因码的
 `RelayLifecycleError`（`relay.start.platform_unsupported`、`address_in_use`、`permission_denied`、
@@ -3103,13 +3103,24 @@ Relay 客户端入站队列现固定为 `RELAY_INCOMING_QUEUE_CAPACITY = 256` �
 未注册连接关闭后回收 permit。
 `quic_relay_forwards_packets_between_registered_clients` 同时检查 governance、usage 和 health 三个运营者快照，
 确认不包含虚拟 IP、转发的 payload、private/session key、网络显示名或成员显示名。这些是自动化边界与恢复
-测试，不等同于正式压力环境、吞吐/CPU/内存测量或真实 Relay 运营者隐私验收。
+测试；真实压力和运营者视角隐私边界仍需由真实子进程测试补充，且单机测试不等同于多主机正式压测。
 `RecoveryReport::duration_ms()` 已接入 Linux 恢复成功/失败日志，并有状态、时长和原因测试；
 临时 Coordinator 启动或停止 Relay 均由 `permission.temporary_coordinator_read_only` 拒绝。
 `w13_relay_process::sigkill_restart_releases_relay_port_and_invalidates_old_session` 在 Linux 上启动真实
 Relay 子进程和 QUIC 客户端，完成注册后对 Relay 执行 SIGKILL 并 reap；父进程确认旧 UDP 端口可立即重新绑定，
 替代进程使用全新证书在同一端口重启并接受新会话。测试同时确认旧 QUIC 会话不能被替代进程接管，必须重新握手。
 该证据只覆盖 Linux 单 Relay 进程崩溃/重启与端口、旧会话清理，不等同于三组件同时故障、完整拓扑恢复或跨平台验收。
+
+**真实 Relay 进程压力与资源报告（2026-11-13）**：`w13_relay_process::sustained_traffic_and_connection_storm_keep_relay_resources_bounded`
+在 Linux 上启动真实 Relay 子进程，先用 32 个独立身份同时连接形成连接风暴，再以 32 并发发送
+`2048 × 16 KiB` 的 `32 MiB` 应用载荷，验证每包恰好一次、源/目的虚拟地址和载荷正确，并在风暴结束后重新建立
+收发会话恢复转发。Release 基线测得应用层吞吐 `72.10 MiB/s`、`4614.37 pps`，
+延迟 p50/p95/p99/max 为 `4.586/8.831/10.502/13.245 ms`，Relay CPU `1.03 s`（约 `232%` 多核利用率），
+RSS `8,790,016 -> 13,418,496 B`（增长 `4,628,480 B`），`recovered_after_churn=true`。
+测试输出 `fuckipv6.w13.relay-stress.v1` JSON，记录 commit、debug/release profile、平台、kernel、单机
+parent/child QUIC loopback 拓扑、工作负载和全部测量值；报告路径可由
+`FUCKIPV6_W13_RELAY_STRESS_REPORT` 指定。该证据仍是单机 loopback 压测，不覆盖多主机网络损伤、
+满载时 Coordinator/Exit/WebUI 等其他能力可用性、真实 Relay/Coordinator/Exit 同时故障或跨平台实机验收。
 
 **生产故障转移审计（2026-11-13）**：多网络 supervisor 现在创建一份共享的
 `OwnerSecurityAudit`，同时注入命令总线和每个网络运行时；Relay 接收流关闭、QUIC 转发失败和转发超时时，
@@ -3128,15 +3139,16 @@ durable 持久化和命令/数据面活动合并。该证据是本地进程内�
 本次门禁通过：`cargo test -p fuckipv6-client --all-targets --all-features`（库 1190 passed、3 ignored；register 进程 1 passed；运行时进程 11 passed；7 项特权拓扑测试 ignored）、
 `cargo test -p fuckipv6-common --lib`（396 passed）、
 `cargo test -p fuckipv6-coordinator --lib -- --test-threads=1`（152 passed，其中 relay::server::tests 31 passed）、
-`cargo test -p fuckipv6-coordinator --test w13_relay_process`（2 passed）、
+`cargo test -p fuckipv6-coordinator --test w13_relay_process`（3 passed）、
 `cargo test -p fuckipv6-coordinator existing_session --lib`（5 passed）、
 `cargo test -p fuckipv6-client routing::recovery --lib`（18 passed）、
 `cargo clippy -p fuckipv6-client -p fuckipv6-common -p fuckipv6-coordinator --all-targets --all-features -- -D warnings`、
 `./scripts/check-contracts.sh`（DTO inventory 289）、WebUI `npm test -- --run`（23 files / 297 tests）、
 `npm run typecheck`、`npm run lint`、`npm run build`、`cargo fmt --all -- --check` 和 `git diff --check`。
 平台不支持项通过注入 `io::ErrorKind::Unsupported` 验证的是解释状态和失败关闭，不是 Windows/macOS 实机验收。
-本证据覆盖 Linux 单 Relay 进程崩溃/重启后的监听与旧会话清理，但不覆盖 Windows/macOS 实机崩溃恢复、
-真实压力/吞吐/资源测量、真实 Relay 运营者隐私、真实 Relay/Coordinator/Exit 同时故障或 Android 对等；
+本证据覆盖 Linux 单 Relay 进程崩溃/重启后的监听与旧会话清理，以及单机 loopback 连接风暴、资源边界和
+吞吐/延迟/CPU/RSS 测量；但不覆盖 Windows/macOS 实机崩溃恢复、多主机正式压测、满载时其他能力可用性、
+真实 Relay 运营者隐私、真实 Relay/Coordinator/Exit 同时故障或 Android 对等；
 W13-03、W13-04、W13-05 和 W13-07 的剩余项继续保持未完成，不能据此声明 W13 已全量完成。
 
 **验收**：Relay 独立能力通过功能、隐私、资源和故障测试后才可声明可用。

@@ -841,14 +841,19 @@ impl P2pEngine {
                     route = Some(authenticated.route.clone());
                     if !authenticated.payload.is_empty() {
                         let payload_len = authenticated.payload.len();
-                        if engine
-                            .incoming_tx
-                            .try_send(InboundPacket::AuthenticatedPlaintext {
-                                src_ip: authenticated.route.src_ip,
-                                peer: authenticated.route.peer.clone(),
-                                payload: authenticated.payload,
-                            })
-                        {
+                        let delivered =
+                            engine
+                                .incoming_tx
+                                .try_send(InboundPacket::AuthenticatedPlaintext {
+                                    src_ip: authenticated.route.src_ip,
+                                    peer: authenticated.route.peer.clone(),
+                                    payload: authenticated.payload,
+                                });
+                        tracing::debug!(
+                            "W12-DIAG TCP 入站队列投递 remote={remote_addr} peer={} payload_len={payload_len} delivered={delivered}",
+                            authenticated.route.peer.client_id
+                        );
+                        if delivered {
                             authenticated.route.health.record_payload(payload_len);
                         }
                     }
@@ -883,16 +888,46 @@ impl P2pEngine {
         remote_addr: SocketAddr,
         frame: Vec<u8>,
     ) -> Option<AuthenticatedTcpFrame> {
-        let header = DataHeader::decode(&frame).ok()?;
-        let (first, rest) = self
+        let header = match DataHeader::decode(&frame) {
+            Ok(header) => header,
+            Err(error) => {
+                tracing::debug!(
+                    "W12-DIAG TCP 数据帧头解码失败 remote={remote_addr} len={} first={:?}: {error}",
+                    frame.len(),
+                    frame.first()
+                );
+                return None;
+            }
+        };
+        let Some((first, rest)) = self
             .receiver_index
             .read()
             .await
-            .candidate_snapshot(header.receiver_index, remote_addr)?;
+            .candidate_snapshot(header.receiver_index, remote_addr)
+        else {
+            tracing::debug!(
+                "W12-DIAG TCP 无 receiver 候选 remote={remote_addr} len={} receiver_index={}",
+                frame.len(),
+                header.receiver_index
+            );
+            return None;
+        };
+        tracing::debug!(
+            "W12-DIAG TCP 数据帧候选 remote={remote_addr} len={} receiver_index={} candidates={}",
+            frame.len(),
+            header.receiver_index,
+            1 + rest.len()
+        );
         for route in std::iter::once(first).chain(rest) {
             let session = match route.secure.acquire_session_permission().await {
                 Ok(permission) => permission,
-                Err(_) => continue,
+                Err(error) => {
+                    tracing::debug!(
+                        "W12-DIAG TCP 无法获取认证许可 peer={} remote={remote_addr}: {error}",
+                        route.peer.client_id
+                    );
+                    continue;
+                }
             };
             let result = route
                 .secure
@@ -901,6 +936,11 @@ impl P2pEngine {
             drop(session);
             match result {
                 Ok(plaintext) => {
+                    tracing::debug!(
+                        "W12-DIAG TCP 认证成功 peer={} remote={remote_addr} plaintext_len={}",
+                        route.peer.client_id,
+                        plaintext.len()
+                    );
                     let secure = route.secure.clone();
                     return Some(AuthenticatedTcpFrame {
                         route,
@@ -908,9 +948,18 @@ impl P2pEngine {
                         payload: InboundPayload::from_bytes(plaintext),
                     });
                 }
-                Err(super::secure_runtime::SecureRuntimeError::NotEstablished) => continue,
+                Err(super::secure_runtime::SecureRuntimeError::NotEstablished) => {
+                    tracing::debug!(
+                        "W12-DIAG TCP 会话尚未建立 peer={} remote={remote_addr}",
+                        route.peer.client_id
+                    );
+                    continue;
+                }
                 Err(error) => {
-                    tracing::debug!("P2P 节点在线 TCP 数据认证失败: {error}");
+                    tracing::debug!(
+                        "W12-DIAG P2P 节点在线 TCP 数据认证失败 peer={} remote={remote_addr}: {error}",
+                        route.peer.client_id
+                    );
                 }
             }
         }

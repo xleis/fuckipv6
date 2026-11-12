@@ -3344,7 +3344,9 @@ NUL/控制字符、不可见 Unicode 格式字符（包括双向覆盖字符）�
 保持不变，`hard_link_inside_root_is_authorized_as_a_directory_entry` 明确根内硬链接策略，
 `permission_revocation_fails_closed_for_files_and_directories` 覆盖文件和父目录权限撤销后的失败关闭。
 `stale_cleanup_removes_only_expired_generated_regular_files` 验证过期清理不跟随链接、不删除用户文件。上述均为 Linux 和 portable
-代码证据；Windows 重解析点、macOS 实机竞态、并发重命名语义及 OS 文件句柄上限仍未验收。
+代码证据。Linux 进程内另由 `download_session_limit_and_cancel_restore_capacity` 读取 `/proc/self/fd`，验证 16 个受全局上限约束的
+下载会话各占用一个临时目录文件句柄，逐个取消后回到同一基线；该结果只覆盖正常取消路径，不证明异常退出、满载隔离或
+macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态及并发重命名语义仍未验收。
 
 ### W15-06 并发、速率与资源限制 `[~]`
 
@@ -3392,9 +3394,12 @@ NUL/控制字符、不可见 Unicode 格式字符（包括双向覆盖字符）�
 `opened_response_frames_reject_unbounded_manifests`、`remote_manifests_must_fit_the_bounded_file_and_chunk_limits`、
 `owner_rejects_unbounded_upload_manifests_without_the_frame_decoder` 与
 `restored_upload_rejects_source_growth_before_manifest_allocation` 验证响应/owner/恢复入口复用同一边界。
+`download_session_limit_and_cancel_restore_capacity` 在 Linux 上以 `/proc/self/fd` 采样测试临时目录下的文件句柄：开启
+`MAX_ACTIVE_FILE_NETWORK_SESSIONS` 个下载后句柄数增加相同数量，逐个取消并排空会话后恢复测试前基线。
 
-**未测边界**：尚未启动独立 node/control 进程做 File 满载隔离测试；尚未在 Linux/macOS/Windows 实机上采样压力前后的
-文件句柄、线程数和 RSS，因此不能声称 OS 资源已回到基线。大文件、多文件并发和真实网络中断恢复性能也未测试。
+**未测边界**：Linux 句柄证据仅覆盖单个测试进程的正常下载会话与取消，不包括异常退出或满载。尚未启动独立 node/control
+进程做 File 满载隔离测试；尚未在 Linux/macOS/Windows 实机上采样压力前后的线程数和 RSS，也尚未在 macOS/Windows
+实机上采样句柄，因此不能声称 OS 资源已回到基线。大文件、多文件并发和真实网络中断恢复性能也未测试。
 
 ### W15-07 撤权与传输中断 `[~]`
 

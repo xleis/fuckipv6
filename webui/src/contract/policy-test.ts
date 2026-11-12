@@ -23,6 +23,7 @@ import type {
   PolicyTestResult,
   PolicyValidationIssue,
   PolicyValidationSource,
+  RelayLimitPolicy,
   ResourceKind,
   SubjectSelector,
 } from "../../../contracts/typescript/node-contract-v1";
@@ -158,6 +159,7 @@ const LOCAL_POLICY_FIELDS = new Set([
   "network_scope",
   "rules",
   "contribution_vetoes",
+  "relay_limits",
 ]);
 const NETWORK_SCOPE_FIELDS = new Set(["kind", "network_ids"]);
 const RULE_FIELDS = new Set([
@@ -178,6 +180,17 @@ const NETWORK_ACL_FIELDS = new Set([
   "expires_at_unix_ms",
   "rules",
   "grants",
+  "relay_limits",
+]);
+const RELAY_LIMIT_FIELDS = new Set([
+  "max_connections",
+  "max_concurrent_streams",
+  "max_bandwidth_kbps",
+  "max_bytes",
+  "max_cpu_percent",
+  "max_memory_bytes",
+  "max_session_duration_secs",
+  "quota_reset_at_unix_ms",
 ]);
 const GRANT_FIELDS = new Set([
   "grant_id",
@@ -309,6 +322,19 @@ function uintAt(value: unknown, path: string): number {
   if (!Number.isSafeInteger(value) || Number(value) < 0)
     fail(path, "must be a non-negative safe integer");
   return Number(value);
+}
+
+function nullableUintAt(
+  value: unknown,
+  path: string,
+  options: { positive?: boolean; maximum?: number } = {},
+): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  const parsed = uintAt(value, path);
+  if (options.positive && parsed === 0) fail(path, "must be positive");
+  if (options.maximum !== undefined && parsed > options.maximum)
+    fail(path, `must not exceed ${options.maximum}`);
+  return parsed;
 }
 
 function arrayAt(value: unknown, path: string): unknown[] {
@@ -514,7 +540,50 @@ function localPolicyAt(value: unknown, path: string): NodeLocalAccessPolicy {
         `${pointer(path, "contribution_vetoes")}/${index}`,
       ),
     );
+  if (policy.relay_limits !== undefined)
+    relayLimitPolicyAt(
+      policy.relay_limits,
+      pointer(path, "relay_limits"),
+    );
   return value as NodeLocalAccessPolicy;
+}
+
+function relayLimitPolicyAt(value: unknown, path: string): RelayLimitPolicy {
+  const limits = objectAt(value, path, RELAY_LIMIT_FIELDS, []);
+  nullableUintAt(limits.max_connections, pointer(path, "max_connections"), {
+    positive: true,
+    maximum: 0xffff_ffff,
+  });
+  nullableUintAt(
+    limits.max_concurrent_streams,
+    pointer(path, "max_concurrent_streams"),
+    { positive: true, maximum: 0xffff_ffff },
+  );
+  nullableUintAt(
+    limits.max_bandwidth_kbps,
+    pointer(path, "max_bandwidth_kbps"),
+    { positive: true },
+  );
+  nullableUintAt(limits.max_bytes, pointer(path, "max_bytes"), {
+    positive: true,
+  });
+  nullableUintAt(limits.max_cpu_percent, pointer(path, "max_cpu_percent"), {
+    positive: true,
+    maximum: 100,
+  });
+  nullableUintAt(limits.max_memory_bytes, pointer(path, "max_memory_bytes"), {
+    positive: true,
+  });
+  nullableUintAt(
+    limits.max_session_duration_secs,
+    pointer(path, "max_session_duration_secs"),
+    { positive: true },
+  );
+  nullableUintAt(
+    limits.quota_reset_at_unix_ms,
+    pointer(path, "quota_reset_at_unix_ms"),
+  );
+  return value as RelayLimitPolicy;
 }
 
 function networkScopeAt(value: unknown, path: string): NodeNetworkScope {
@@ -690,6 +759,8 @@ function networkAclAt(value: unknown, path: string): NetworkAcl {
     arrayAt(acl.grants, pointer(path, "grants")).forEach((grant, index) =>
       networkAclGrantAt(grant, `${pointer(path, "grants")}/${index}`),
     );
+  if (acl.relay_limits !== undefined)
+    relayLimitPolicyAt(acl.relay_limits, pointer(path, "relay_limits"));
   return value as NetworkAcl;
 }
 

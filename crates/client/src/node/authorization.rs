@@ -669,7 +669,8 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::PreviewPolicyRollback
         | NodeCommandKind::GetPolicyHistory
         | NodeCommandKind::GetTrafficPolicy
-        | NodeCommandKind::GetTrafficPolicyHistory => NodePermission::ViewState,
+        | NodeCommandKind::GetTrafficPolicyHistory
+        | NodeCommandKind::GetCoordinatorCandidates => NodePermission::ViewState,
         NodeCommandKind::PreviewTrafficPolicy
         | NodeCommandKind::PreviewTrafficPolicyRollback
         | NodeCommandKind::ApplyTrafficPolicy
@@ -714,7 +715,9 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::RollbackConfiguration
         | NodeCommandKind::ApplyPolicy
         | NodeCommandKind::RollbackPolicy
-        | NodeCommandKind::TestPolicy => NodePermission::ManageNetworks,
+        | NodeCommandKind::TestPolicy
+        | NodeCommandKind::UpdateCoordinatorCandidates
+        | NodeCommandKind::PublishCoordinatorCandidateDeclaration => NodePermission::ManageNetworks,
     }
 }
 
@@ -769,6 +772,8 @@ fn is_local_owner_only(kind: NodeCommandKind) -> bool {
             | NodeCommandKind::RollbackTrafficPolicy
             | NodeCommandKind::GetTrafficPolicyHistory
             | NodeCommandKind::TestTrafficPolicy
+            | NodeCommandKind::GetCoordinatorCandidates
+            | NodeCommandKind::PublishCoordinatorCandidateDeclaration
     )
 }
 
@@ -785,7 +790,8 @@ fn policy_target_kind(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         | NodeCommandKind::ListNetworkMembers
         | NodeCommandKind::PreviewMemberRemoval
         | NodeCommandKind::RefreshDiscoveryIndex
-        | NodeCommandKind::RetryDiscoveryIndex => (PolicyAction::Read, ResourceKind::Network),
+        | NodeCommandKind::RetryDiscoveryIndex
+        | NodeCommandKind::GetCoordinatorCandidates => (PolicyAction::Read, ResourceKind::Network),
         NodeCommandKind::GetConfiguration
         | NodeCommandKind::PreviewConfiguration
         | NodeCommandKind::GetConfigurationHistory => (PolicyAction::Read, ResourceKind::Keys),
@@ -819,6 +825,8 @@ fn policy_target_kind(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         | NodeCommandKind::PublishNetworkDiscovery
         | NodeCommandKind::UpdateNetworkDiscovery
         | NodeCommandKind::UnpublishNetworkDiscovery
+        | NodeCommandKind::UpdateCoordinatorCandidates
+        | NodeCommandKind::PublishCoordinatorCandidateDeclaration
         | NodeCommandKind::RestartNode => (PolicyAction::Update, ResourceKind::Network),
         NodeCommandKind::CreateNetwork | NodeCommandKind::StartNode => {
             (PolicyAction::Create, ResourceKind::Network)
@@ -915,6 +923,15 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
         }
         NodeCommand::RebuildTun { network_name } => {
             NetworkTargets::Named(vec![network_name.clone()])
+        }
+        NodeCommand::GetCoordinatorCandidates(command) => {
+            NetworkTargets::Named(vec![command.network_name.clone()])
+        }
+        NodeCommand::UpdateCoordinatorCandidates(command) => {
+            NetworkTargets::Named(vec![command.network_name.clone()])
+        }
+        NodeCommand::PublishCoordinatorCandidateDeclaration(command) => {
+            NetworkTargets::Named(vec![command.network_name.clone()])
         }
         NodeCommand::ListJoinRequests(command) => {
             NetworkTargets::Named(vec![command.network_id.clone()])

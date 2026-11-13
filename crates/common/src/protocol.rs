@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 use crate::domain::{
-    ContentHash, ExitContributionAuthorizationSnapshot, ExitContributionRequest,
+    ContentHash, CoordinatorCandidateConfig, CoordinatorCandidateDeclaration,
+    CoordinatorCandidateStatus, ExitContributionAuthorizationSnapshot, ExitContributionRequest,
     ExitContributionRequestId, ExitContributionRequestState, ExitContributionReviewAction,
     InvitationCreateRequest, InvitationId, InvitationPreviewRequest, InvitationRedeemRequest,
     InvitationRedemption, InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest,
@@ -368,6 +369,32 @@ pub enum SignalingMessage {
         dst_ip: IpAddr,
         #[serde(with = "serde_bytes_owned")]
         payload: Bytes,
+    },
+
+    // Coordinator candidate configuration and short-lived health declarations.
+    // These are appended to preserve postcard variant numbers. Acknowledgements
+    // and change events are server-originated only.
+    CoordinatorCandidateConfigUpdate {
+        expected_revision: u64,
+        config: CoordinatorCandidateConfig,
+    },
+    CoordinatorCandidateConfigAck {
+        status: CoordinatorCandidateStatus,
+    },
+    CoordinatorCandidateDeclarationPublish {
+        declaration: CoordinatorCandidateDeclaration,
+    },
+    CoordinatorCandidateDeclarationAck {
+        status: CoordinatorCandidateStatus,
+    },
+    CoordinatorCandidateStatusRequest {
+        network_id: NetworkId,
+    },
+    CoordinatorCandidateStatusAck {
+        status: CoordinatorCandidateStatus,
+    },
+    CoordinatorCandidateStatusChanged {
+        network_id: NetworkId,
     },
 }
 
@@ -1261,6 +1288,71 @@ mod tests {
             panic!("expected exit contribution status");
         };
         assert_eq!(decoded, request);
+        Ok(())
+    }
+
+    #[test]
+    fn coordinator_candidate_messages_are_postcard_safe() -> anyhow::Result<()> {
+        use crate::domain::CoordinatorCandidate;
+
+        let identity = crate::Identity::generate()?;
+        let network_id = NetworkId::from_public_key(b"network");
+        let candidate_id = NodeId::from_public_key(&identity.public_key());
+        let config = CoordinatorCandidateConfig::signed(
+            network_id.clone(),
+            1,
+            vec![CoordinatorCandidate {
+                node_id: candidate_id,
+                priority: 10,
+            }],
+            100,
+            200,
+            &identity,
+        )?;
+        let decoded =
+            assert_signaling_round_trip(SignalingMessage::CoordinatorCandidateConfigUpdate {
+                expected_revision: 0,
+                config: config.clone(),
+            })?;
+        let SignalingMessage::CoordinatorCandidateConfigUpdate {
+            expected_revision,
+            config: decoded,
+        } = decoded
+        else {
+            panic!("expected coordinator candidate config update");
+        };
+        assert_eq!(expected_revision, 0);
+        assert_eq!(decoded, config);
+
+        let declaration = CoordinatorCandidateDeclaration::signed(
+            network_id.clone(),
+            1,
+            crate::domain::CoordinatorPublicReachability {
+                public_endpoint: Some("198.51.100.8:443".parse()?),
+                reachable_via_relay: true,
+            },
+            crate::domain::CoordinatorCandidateResources {
+                cpu_cores: 4,
+                memory_bytes: 512 * 1024 * 1024,
+                max_connections: 1_000,
+            },
+            crate::domain::CoordinatorCandidateWillingness::Willing,
+            100,
+            200,
+            &identity,
+        )?;
+        let decoded = assert_signaling_round_trip(
+            SignalingMessage::CoordinatorCandidateDeclarationPublish {
+                declaration: declaration.clone(),
+            },
+        )?;
+        let SignalingMessage::CoordinatorCandidateDeclarationPublish {
+            declaration: decoded,
+        } = decoded
+        else {
+            panic!("expected coordinator candidate declaration");
+        };
+        assert_eq!(decoded, declaration);
         Ok(())
     }
 

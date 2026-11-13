@@ -99,6 +99,73 @@
       ],
       "type": "string"
     },
+    "CoordinatorCandidate": {
+      "description": "One administrator-selected Coordinator candidate. Lower priority values\nare preferred, with node identity as the deterministic tie-breaker.",
+      "properties": {
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "priority": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "node_id",
+        "priority"
+      ],
+      "type": "object"
+    },
+    "CoordinatorCandidateResources": {
+      "properties": {
+        "cpu_cores": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_connections": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "memory_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpu_cores",
+        "memory_bytes",
+        "max_connections"
+      ],
+      "type": "object"
+    },
+    "CoordinatorCandidateWillingness": {
+      "enum": [
+        "willing",
+        "unwilling"
+      ],
+      "type": "string"
+    },
+    "CoordinatorPublicReachability": {
+      "description": "Public reachability evidence supplied by the candidate itself. Consumers\nmust treat this as a claim until the election protocol verifies a quorum.",
+      "properties": {
+        "public_endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reachable_via_relay": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "DiscoveryTransport": {
       "enum": [
         "quic",
@@ -1322,6 +1389,17 @@
       ],
       "type": "object"
     },
+    "NodeCoordinatorCandidateStatusCommand": {
+      "properties": {
+        "network_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_name"
+      ],
+      "type": "object"
+    },
     "NodeCreateInvitationCommand": {
       "properties": {
         "capabilities": {
@@ -2010,6 +2088,36 @@
       ],
       "type": "object"
     },
+    "NodePublishCoordinatorCandidateDeclarationCommand": {
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "public_reachability": {
+          "$ref": "#/$defs/CoordinatorPublicReachability"
+        },
+        "resources": {
+          "$ref": "#/$defs/CoordinatorCandidateResources"
+        },
+        "validity_ms": {
+          "description": "Short declaration lease. Runtime signs the exact timestamps.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "willingness": {
+          "$ref": "#/$defs/CoordinatorCandidateWillingness"
+        }
+      },
+      "required": [
+        "network_name",
+        "willingness",
+        "public_reachability",
+        "resources",
+        "validity_ms"
+      ],
+      "type": "object"
+    },
     "NodeRedeemInvitationCommand": {
       "properties": {
         "coordinator_url": {
@@ -2256,6 +2364,44 @@
         "current",
         "candidate",
         "input"
+      ],
+      "type": "object"
+    },
+    "NodeUpdateCoordinatorCandidatesCommand": {
+      "properties": {
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/CoordinatorCandidate"
+          },
+          "type": "array"
+        },
+        "effective_from_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "expected_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_name",
+        "expected_revision",
+        "candidates",
+        "expires_at_unix_ms"
       ],
       "type": "object"
     },
@@ -4388,6 +4534,57 @@
         },
         "payload": {
           "$ref": "#/$defs/NodeTestTrafficPolicyCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Read the authoritative Coordinator candidate health projection.",
+      "properties": {
+        "command": {
+          "const": "get_coordinator_candidates",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeCoordinatorCandidateStatusCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Replace the administrator-signed candidate group using optimistic revision.",
+      "properties": {
+        "command": {
+          "const": "update_coordinator_candidates",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeUpdateCoordinatorCandidatesCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Publish this node's signed health/willingness declaration; `Unwilling`\nis the owner's explicit refusal of the local candidate role.",
+      "properties": {
+        "command": {
+          "const": "publish_coordinator_candidate_declaration",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodePublishCoordinatorCandidateDeclarationCommand"
         }
       },
       "required": [

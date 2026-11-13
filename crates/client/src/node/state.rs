@@ -7,8 +7,8 @@ use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
 
 use fuckipv6_common::domain::{
-    ActivityEntry, CapabilityKind, CapabilityState, ExitContributionMode,
-    ExitContributionObligation, ExitContributionScope, ExitSelectionPolicy,
+    ActivityEntry, CapabilityKind, CapabilityState, CoordinatorCandidateStatus,
+    ExitContributionMode, ExitContributionObligation, ExitContributionScope, ExitSelectionPolicy,
     ExitSelectionResolution, FieldPrivacyPolicy, MembershipRole, MembershipState, MembershipTerms,
     NetworkAcl, NetworkId, NetworkJoinMode, NetworkMemberDirectory, NetworkMemberPresence,
     NetworkMemberStatus, NetworkVisibility, NodeId, NodeLocalAccessPolicy, OperationRecovery,
@@ -1139,6 +1139,11 @@ pub struct NodeEmbeddedServiceSnapshot {
     /// adapters must not infer an empty ledger from a missing field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_governance: Option<RelayGovernanceAuditSnapshot>,
+    /// Administrator-signed candidate group, verified declarations and the
+    /// currently authoritative leader/term projection. Missing means the
+    /// runtime has not supplied candidate status yet; it is never inferred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_candidates: Option<CoordinatorCandidateStatus>,
 }
 
 impl NodeEmbeddedServiceSnapshot {
@@ -1176,6 +1181,7 @@ impl NodeEmbeddedServiceSnapshot {
             relay_health: service.relay_health.clone(),
             relay_authorization: service.relay_authorization.clone(),
             relay_governance: service.relay_governance.clone(),
+            coordinator_candidates: service.coordinator_candidates.clone(),
         }
     }
 }
@@ -2306,6 +2312,7 @@ mod tests {
             relay_health: None,
             relay_authorization: None,
             relay_governance: None,
+            coordinator_candidates: None,
         }
     }
 

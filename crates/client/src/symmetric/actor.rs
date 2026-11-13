@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use fuckipv6_common::domain::{
+    CoordinatorCandidate, CoordinatorCandidateResources, CoordinatorCandidateStatus,
+    CoordinatorCandidateWillingness, CoordinatorPublicReachability,
     RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot, RelayHealthSnapshot,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -116,6 +118,7 @@ pub struct EmbeddedServiceSnapshot {
     pub relay_health: Option<RelayHealthSnapshot>,
     pub relay_authorization: Option<RelayAuthorizationAuditSnapshot>,
     pub relay_governance: Option<RelayGovernanceAuditSnapshot>,
+    pub coordinator_candidates: Option<CoordinatorCandidateStatus>,
 }
 
 impl From<&EmbeddedCoordinator> for EmbeddedServiceSnapshot {
@@ -128,6 +131,7 @@ impl From<&EmbeddedCoordinator> for EmbeddedServiceSnapshot {
             relay_health: None,
             relay_authorization: None,
             relay_governance: None,
+            coordinator_candidates: None,
         }
     }
 }
@@ -226,6 +230,26 @@ enum EmbeddedServiceCommand {
         network_name: String,
         allocation: NodeNetworkAllocation,
         reply: oneshot::Sender<Result<NodeNetworkAllocationSnapshot, EmbeddedServiceError>>,
+    },
+    GetCoordinatorCandidates {
+        network_name: String,
+        reply: oneshot::Sender<Result<CoordinatorCandidateStatus, EmbeddedServiceError>>,
+    },
+    UpdateCoordinatorCandidates {
+        network_name: String,
+        expected_revision: u64,
+        candidates: Vec<CoordinatorCandidate>,
+        effective_from_unix_ms: u64,
+        expires_at_unix_ms: u64,
+        reply: oneshot::Sender<Result<CoordinatorCandidateStatus, EmbeddedServiceError>>,
+    },
+    PublishCoordinatorCandidateDeclaration {
+        network_name: String,
+        willingness: CoordinatorCandidateWillingness,
+        public_reachability: CoordinatorPublicReachability,
+        resources: CoordinatorCandidateResources,
+        validity_ms: u64,
+        reply: oneshot::Sender<Result<CoordinatorCandidateStatus, EmbeddedServiceError>>,
     },
     Shutdown {
         reply: oneshot::Sender<Result<usize, EmbeddedServiceError>>,
@@ -460,6 +484,104 @@ impl EmbeddedServiceManager {
                         };
                         let _ = reply.send(result);
                     }
+                    EmbeddedServiceCommand::GetCoordinatorCandidates {
+                        network_name,
+                        reply,
+                    } => {
+                        let result = match services.get(&network_name) {
+                            Some(coordinator) => coordinator
+                                .coordinator_candidate_status(
+                                    coordinator.relay_provider_node_id.clone(),
+                                )
+                                .await
+                                .map_err(|error| EmbeddedServiceError::OperationFailed {
+                                    network_name: network_name.clone(),
+                                    message: format!("{error:#}"),
+                                }),
+                            None => Err(EmbeddedServiceError::NotFound(network_name)),
+                        };
+                        let _ = reply.send(result);
+                    }
+                    EmbeddedServiceCommand::UpdateCoordinatorCandidates {
+                        network_name,
+                        expected_revision,
+                        candidates,
+                        effective_from_unix_ms,
+                        expires_at_unix_ms,
+                        reply,
+                    } => {
+                        let result = match (services.get(&network_name), configs.as_ref()) {
+                            (Some(coordinator), Ok(configs)) => {
+                                match configs.load_node_identity() {
+                                    Ok(identity) => coordinator
+                                        .update_coordinator_candidate_config(
+                                            &identity,
+                                            expected_revision,
+                                            candidates,
+                                            effective_from_unix_ms,
+                                            expires_at_unix_ms,
+                                        )
+                                        .await
+                                        .map_err(|error| EmbeddedServiceError::OperationFailed {
+                                            network_name: network_name.clone(),
+                                            message: format!("{error:#}"),
+                                        }),
+                                    Err(error) => Err(EmbeddedServiceError::PersistenceFailed {
+                                        network_name: network_name.clone(),
+                                        message: format!("{error:#}"),
+                                    }),
+                                }
+                            }
+                            (Some(_), Err(message)) => {
+                                Err(EmbeddedServiceError::PersistenceFailed {
+                                    network_name: network_name.clone(),
+                                    message: message.clone(),
+                                })
+                            }
+                            (None, _) => Err(EmbeddedServiceError::NotFound(network_name)),
+                        };
+                        let _ = reply.send(result);
+                    }
+                    EmbeddedServiceCommand::PublishCoordinatorCandidateDeclaration {
+                        network_name,
+                        willingness,
+                        public_reachability,
+                        resources,
+                        validity_ms,
+                        reply,
+                    } => {
+                        let result = match (services.get(&network_name), configs.as_ref()) {
+                            (Some(coordinator), Ok(configs)) => {
+                                match configs.load_node_identity() {
+                                    Ok(identity) => coordinator
+                                        .publish_coordinator_candidate_declaration(
+                                            &identity,
+                                            willingness,
+                                            public_reachability,
+                                            resources,
+                                            validity_ms,
+                                        )
+                                        .await
+                                        .map_err(|error| EmbeddedServiceError::OperationFailed {
+                                            network_name: network_name.clone(),
+                                            message: format!("{error:#}"),
+                                        }),
+                                    Err(error) => Err(EmbeddedServiceError::PersistenceFailed {
+                                        network_name: network_name.clone(),
+                                        message: format!("{error:#}"),
+                                    }),
+                                }
+                            }
+                            (Some(_), Err(message)) => {
+                                Err(EmbeddedServiceError::PersistenceFailed {
+                                    network_name: network_name.clone(),
+                                    message: message.clone(),
+                                })
+                            }
+                            (None, _) => Err(EmbeddedServiceError::NotFound(network_name)),
+                        };
+                        let _ = reply.send(result);
+                    }
                     EmbeddedServiceCommand::Shutdown { reply } => {
                         let count = services.len();
                         let mut failures = Vec::new();
@@ -669,6 +791,75 @@ impl EmbeddedServiceManager {
             .map_err(|_| EmbeddedServiceError::ActorClosed)?
     }
 
+    pub async fn get_coordinator_candidates(
+        &self,
+        network_name: impl Into<String>,
+    ) -> Result<CoordinatorCandidateStatus, EmbeddedServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(EmbeddedServiceCommand::GetCoordinatorCandidates {
+                network_name: network_name.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?;
+        response
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?
+    }
+
+    pub async fn update_coordinator_candidates(
+        &self,
+        network_name: impl Into<String>,
+        expected_revision: u64,
+        candidates: Vec<CoordinatorCandidate>,
+        effective_from_unix_ms: u64,
+        expires_at_unix_ms: u64,
+    ) -> Result<CoordinatorCandidateStatus, EmbeddedServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(EmbeddedServiceCommand::UpdateCoordinatorCandidates {
+                network_name: network_name.into(),
+                expected_revision,
+                candidates,
+                effective_from_unix_ms,
+                expires_at_unix_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?;
+        response
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?
+    }
+
+    pub async fn publish_coordinator_candidate_declaration(
+        &self,
+        network_name: impl Into<String>,
+        willingness: CoordinatorCandidateWillingness,
+        public_reachability: CoordinatorPublicReachability,
+        resources: CoordinatorCandidateResources,
+        validity_ms: u64,
+    ) -> Result<CoordinatorCandidateStatus, EmbeddedServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(
+                EmbeddedServiceCommand::PublishCoordinatorCandidateDeclaration {
+                    network_name: network_name.into(),
+                    willingness,
+                    public_reachability,
+                    resources,
+                    validity_ms,
+                    reply,
+                },
+            )
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?;
+        response
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?
+    }
+
     pub async fn shutdown(&self) -> Result<usize, EmbeddedServiceError> {
         let (reply, response) = oneshot::channel();
         self.sender
@@ -748,6 +939,16 @@ async fn embedded_service_snapshot(coordinator: &EmbeddedCoordinator) -> Embedde
     snapshot.relay_health = coordinator.relay_health().await;
     snapshot.relay_authorization = coordinator.relay_authorization_audit_snapshot();
     snapshot.relay_governance = coordinator.relay_governance_snapshot();
+    snapshot.coordinator_candidates = match coordinator
+        .coordinator_candidate_status(coordinator.relay_provider_node_id.clone())
+        .await
+    {
+        Ok(status) => Some(status),
+        Err(error) => {
+            tracing::warn!(network = %coordinator.ticket.network_name, %error, "无法读取 Coordinator 候选状态");
+            None
+        }
+    };
     snapshot
 }
 

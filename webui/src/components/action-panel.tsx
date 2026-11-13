@@ -86,6 +86,7 @@ const selectInputs = new Set([
   "exit_contribution_mode",
   "join_request_review_action",
   "member_lifecycle_action",
+  "coordinator_willingness",
 ]);
 
 function selectOptions(
@@ -166,6 +167,12 @@ function selectOptions(
     return ["mesh_only", "bypass_mainland", "global_proxy"].map((value) => ({
       value,
       text: value,
+    }));
+  }
+  if (field.input === "coordinator_willingness") {
+    return ["willing", "unwilling"].map((value) => ({
+      value,
+      text: label(locale, `choice.coordinator_willingness.${value}`),
     }));
   }
   return [
@@ -330,7 +337,11 @@ function profileList(
   className = "profile-chip-list",
 ) {
   if (values.length === 0)
-    return <span className="profile-empty-value">{label(locale, "common.none")}</span>;
+    return (
+      <span className="profile-empty-value">
+        {label(locale, "common.none")}
+      </span>
+    );
   return (
     <span className={className}>
       {values.map((value) => (
@@ -419,7 +430,9 @@ function ProfileDocumentCard({
             time: i18n().formatTimestamp(locale, document.expires_at_unix_ms),
           })}
         </span>
-        {signatureValid ? <span>{label(locale, "profile.signature_valid")}</span> : null}
+        {signatureValid ? (
+          <span>{label(locale, "profile.signature_valid")}</span>
+        ) : null}
         {memberCount !== undefined ? (
           <span>
             {tr(locale, "profile.member_count", {
@@ -657,7 +670,10 @@ function NetworkProfileResultCard({
         <AlertTriangle size={14} />
         <div>
           <strong>{label(locale, "profile.withheld")}</strong>
-          {profileList(data.projections.public_card.withheld_categories, locale)}
+          {profileList(
+            data.projections.public_card.withheld_categories,
+            locale,
+          )}
         </div>
       </section>
 
@@ -665,7 +681,9 @@ function NetworkProfileResultCard({
         <section className="profile-result-section">
           <h4>{label(locale, "profile.diff")}</h4>
           {previewData.diff.length === 0 ? (
-            <p className="profile-muted">{label(locale, "profile.no_changes")}</p>
+            <p className="profile-muted">
+              {label(locale, "profile.no_changes")}
+            </p>
           ) : (
             <ul className="profile-diff-list">
               {previewData.diff.map((entry) => (
@@ -673,11 +691,15 @@ function NetworkProfileResultCard({
                   <code>{entry.path}</code>
                   <div>
                     <span>{label(locale, "configuration.before")}</span>
-                    <strong>{entry.before ?? label(locale, "common.none")}</strong>
+                    <strong>
+                      {entry.before ?? label(locale, "common.none")}
+                    </strong>
                   </div>
                   <div>
                     <span>{label(locale, "configuration.after")}</span>
-                    <strong>{entry.after ?? label(locale, "common.none")}</strong>
+                    <strong>
+                      {entry.after ?? label(locale, "common.none")}
+                    </strong>
                   </div>
                 </li>
               ))}
@@ -688,7 +710,9 @@ function NetworkProfileResultCard({
         <section className="profile-result-section">
           <h4>{label(locale, "configuration.history.changed_paths")}</h4>
           {updateData.changed_paths.length === 0 ? (
-            <p className="profile-muted">{label(locale, "profile.no_changes")}</p>
+            <p className="profile-muted">
+              {label(locale, "profile.no_changes")}
+            </p>
           ) : (
             <ul className="profile-path-list">
               {updateData.changed_paths.map((path) => (
@@ -820,18 +844,27 @@ function InvitationCodeCard({
       <div className="network-profile-result-heading">
         <div>
           <span>{label(locale, "invitations.issued_title")}</span>
-          <strong>{label(locale, invitationStateKey(issued.status.state))}</strong>
+          <strong>
+            {label(locale, invitationStateKey(issued.status.state))}
+          </strong>
         </div>
         <Check size={16} />
       </div>
-      <code className="profile-fingerprint invitation-code" data-testid="invitation-code">
+      <code
+        className="profile-fingerprint invitation-code"
+        data-testid="invitation-code"
+      >
         {issued.code}
       </code>
       <div className="inline-notice warning">
         <ShieldAlert size={15} />
         <span>{label(locale, "invitations.code_once")}</span>
       </div>
-      <button className="secondary-button" type="button" onClick={() => void copyCode()}>
+      <button
+        className="secondary-button"
+        type="button"
+        onClick={() => void copyCode()}
+      >
         <Copy size={14} />
         {label(locale, "invitations.copy")}
       </button>
@@ -848,8 +881,12 @@ function InvitationCodeCard({
       <p className="profile-muted">
         {label(locale, "invitations.ordinary_membership")}
       </p>
-      <p className="profile-muted">{label(locale, "invitations.not_permanent")}</p>
-      <p className="profile-muted">{label(locale, "invitations.privacy_boundary")}</p>
+      <p className="profile-muted">
+        {label(locale, "invitations.not_permanent")}
+      </p>
+      <p className="profile-muted">
+        {label(locale, "invitations.privacy_boundary")}
+      </p>
     </section>
   );
 }
@@ -918,7 +955,11 @@ function InvitationStatusCard({
           <span>{label(locale, "invitations.status_title")}</span>
           <strong>{label(locale, invitationStateKey(status.state))}</strong>
         </div>
-        {status.state === "active" ? <Check size={16} /> : <ShieldAlert size={16} />}
+        {status.state === "active" ? (
+          <Check size={16} />
+        ) : (
+          <ShieldAlert size={16} />
+        )}
       </div>
       <InvitationMetadata
         invitation={status.invitation}
@@ -932,7 +973,9 @@ function InvitationStatusCard({
           })}
         </p>
       ) : null}
-      <p className="profile-muted">{label(locale, "invitations.privacy_boundary")}</p>
+      <p className="profile-muted">
+        {label(locale, "invitations.privacy_boundary")}
+      </p>
     </section>
   );
 }
@@ -967,9 +1010,7 @@ function exitContributionModeLabelKey(mode: ExitContributionMode): string {
   }
 }
 
-function joinRequestExitLabelKey(
-  mode: ExitContributionMode,
-): string {
+function joinRequestExitLabelKey(mode: ExitContributionMode): string {
   switch (mode) {
     case "autonomous":
       return "join_requests.exit.autonomous";
@@ -982,9 +1023,7 @@ function joinRequestExitLabelKey(
   }
 }
 
-function invitationExitLabelKey(
-  mode: ExitContributionMode,
-): string {
+function invitationExitLabelKey(mode: ExitContributionMode): string {
   switch (mode) {
     case "autonomous":
       return "invitations.terms.exit_autonomous";
@@ -1033,9 +1072,7 @@ function ExitContributionDisclosure({
     >
       <h4>{label(locale, "join.exit_contribution")}</h4>
       <p>
-        <strong>
-          {label(locale, exitContributionModeLabelKey(mode))}
-        </strong>
+        <strong>{label(locale, exitContributionModeLabelKey(mode))}</strong>
       </p>
       {contributionAvailable ? (
         <>
@@ -1128,12 +1165,8 @@ function JoinPreviewCard({
         {preview.already_member ? (
           <span>{label(locale, "join.already_member")}</span>
         ) : null}
-        <span>
-          {label(locale, `choice.join_mode.${preview.join_mode}`)}
-        </span>
-        <span>
-          {label(locale, `choice.visibility.${preview.visibility}`)}
-        </span>
+        <span>{label(locale, `choice.join_mode.${preview.join_mode}`)}</span>
+        <span>{label(locale, `choice.visibility.${preview.visibility}`)}</span>
       </div>
       {!preview.can_join ? (
         <div className="inline-notice danger">
@@ -1360,10 +1393,13 @@ function InvitationListCard({
 }) {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
-  const [revokeTarget, setRevokeTarget] =
-    useState<InvitationStatusView | null>(null);
+  const [revokeTarget, setRevokeTarget] = useState<InvitationStatusView | null>(
+    null,
+  );
 
-  async function refreshInvitation(status: InvitationStatusView): Promise<void> {
+  async function refreshInvitation(
+    status: InvitationStatusView,
+  ): Promise<void> {
     if (!statusAction || busy || statusBlockedReason) return;
     setBusy(true);
     setFailure("");
@@ -1446,7 +1482,9 @@ function InvitationListCard({
             time: i18n().formatTimestamp(locale, loadedAtUnixMs),
           })}
         </p>
-        <p className="profile-muted">{label(locale, "invitations.privacy_boundary")}</p>
+        <p className="profile-muted">
+          {label(locale, "invitations.privacy_boundary")}
+        </p>
         {failure ? (
           <p className="form-error" role="alert">
             {failure}
@@ -1468,7 +1506,9 @@ function InvitationListCard({
               <li key={status.invitation.invitation_id}>
                 <ShieldAlert size={14} />
                 <div>
-                  <strong>{label(locale, invitationStateKey(status.state))}</strong>
+                  <strong>
+                    {label(locale, invitationStateKey(status.state))}
+                  </strong>
                   <InvitationMetadata
                     invitation={status.invitation}
                     remainingUses={status.remaining_uses}
@@ -1478,7 +1518,9 @@ function InvitationListCard({
                     <button
                       className="secondary-button"
                       type="button"
-                      disabled={busy || Boolean(statusBlockedReason) || !statusAction}
+                      disabled={
+                        busy || Boolean(statusBlockedReason) || !statusAction
+                      }
                       onClick={() => void refreshInvitation(status)}
                     >
                       {busy && pendingAction === statusAction?.id
@@ -1519,7 +1561,9 @@ function InvitationListCard({
                 <AlertTriangle size={20} />
               </div>
               <div>
-                <Dialog.Title>{label(locale, "confirm.revoke_invitation.title")}</Dialog.Title>
+                <Dialog.Title>
+                  {label(locale, "confirm.revoke_invitation.title")}
+                </Dialog.Title>
                 <Dialog.Description>
                   {label(locale, "confirm.revoke_invitation.consequence")}
                 </Dialog.Description>
@@ -1610,10 +1654,16 @@ function InvitationPreviewCard({
     !blockedReason;
   const terms = [
     tr(locale, "invitations.terms.network_policy", {
-      revision: i18n().formatInteger(locale, preview.terms.network_policy_revision),
+      revision: i18n().formatInteger(
+        locale,
+        preview.terms.network_policy_revision,
+      ),
     }),
     tr(locale, "invitations.terms.privacy_policy", {
-      revision: i18n().formatInteger(locale, preview.terms.privacy_policy_revision),
+      revision: i18n().formatInteger(
+        locale,
+        preview.terms.privacy_policy_revision,
+      ),
     }),
     label(locale, invitationExitLabelKey(exitMode)),
     preview.terms.member_limit == null
@@ -1702,8 +1752,12 @@ function InvitationPreviewCard({
         localEnabled={localExitEnabled}
         canJoinWithoutLocalExit={!exitRequired}
       />
-      <p className="profile-muted">{label(locale, "invitations.ordinary_membership")}</p>
-      <p className="profile-muted">{label(locale, "invitations.not_permanent")}</p>
+      <p className="profile-muted">
+        {label(locale, "invitations.ordinary_membership")}
+      </p>
+      <p className="profile-muted">
+        {label(locale, "invitations.not_permanent")}
+      </p>
       <label className="check-field join-terms-check">
         <input
           type="checkbox"
@@ -1998,9 +2052,7 @@ function JoinRequestRisk({
         </div>
         <div>
           <dt>{label(locale, "join_requests.exit")}</dt>
-          <dd>
-            {label(locale, joinRequestExitLabelKey(exitMode))}
-          </dd>
+          <dd>{label(locale, joinRequestExitLabelKey(exitMode))}</dd>
         </div>
         <div>
           <dt>{label(locale, "join_requests.file_access")}</dt>
@@ -2026,9 +2078,7 @@ function JoinRequestRisk({
         </div>
         <div>
           <dt>{label(locale, "join_requests.expires_at")}</dt>
-          <dd>
-            {i18n().formatTimestamp(locale, request.expires_at_unix_ms)}
-          </dd>
+          <dd>{i18n().formatTimestamp(locale, request.expires_at_unix_ms)}</dd>
         </div>
       </dl>
       {request.expires_at_unix_ms <=
@@ -2126,9 +2176,7 @@ function JoinRequestListCard({
               request_id: request.request_id,
               expected_revision: request.revision,
               action: dialog.action,
-              ...(dialog.action === "approve" || !note
-                ? {}
-                : { note }),
+              ...(dialog.action === "approve" || !note ? {} : { note }),
             })),
           ),
         }
@@ -2214,9 +2262,7 @@ function JoinRequestListCard({
             {reviewBlockedReason || batchReviewBlockedReason}
           </p>
         ) : null}
-        {reviewableRequests.length > 1 &&
-        reviewAction &&
-        batchReviewAction ? (
+        {reviewableRequests.length > 1 && reviewAction && batchReviewAction ? (
           <div
             className="join-request-selection-bar"
             data-testid="join-request-selection-bar"
@@ -2256,10 +2302,7 @@ function JoinRequestListCard({
                       openReview(selectedRequests, reviewActionValue, true)
                     }
                   >
-                    {label(
-                      locale,
-                      `join_requests.batch.${reviewActionValue}`,
-                    )}
+                    {label(locale, `join_requests.batch.${reviewActionValue}`)}
                   </button>
                 ),
               )}
@@ -2302,11 +2345,15 @@ function JoinRequestListCard({
                         <label className="join-request-row-select">
                           <input
                             type="checkbox"
-                            aria-label={tr(locale, "join_requests.select_request", {
-                              applicant:
-                                request.applicant.display_name ??
-                                request.applicant.node_id,
-                            })}
+                            aria-label={tr(
+                              locale,
+                              "join_requests.select_request",
+                              {
+                                applicant:
+                                  request.applicant.display_name ??
+                                  request.applicant.node_id,
+                              },
+                            )}
                             checked={selectedIds.includes(request.request_id)}
                             onChange={() => toggleRequest(request.request_id)}
                           />
@@ -2338,10 +2385,14 @@ function JoinRequestListCard({
                   <section className="join-request-reason">
                     <h4>{label(locale, "join_requests.reason")}</h4>
                     <blockquote>
-                      {request.reason ?? label(locale, "join_requests.reason_redacted")}
+                      {request.reason ??
+                        label(locale, "join_requests.reason_redacted")}
                     </blockquote>
                     <p>
-                      {label(locale, `join_requests.reason_visibility.${visibility}`)}
+                      {label(
+                        locale,
+                        `join_requests.reason_visibility.${visibility}`,
+                      )}
                     </p>
                   </section>
                   {request.information_request ? (
@@ -2362,24 +2413,24 @@ function JoinRequestListCard({
                       className="join-request-row-actions"
                       aria-label={label(locale, "join_requests.review_actions")}
                     >
-                      {(["approve", "reject", "request_information"] as const).map(
-                        (reviewActionValue) => (
-                          <button
-                            key={reviewActionValue}
-                            type="button"
-                            className="secondary-button join-request-action-button"
-                            disabled={pending || Boolean(reviewBlockedReason)}
-                            onClick={() =>
-                              openReview([request], reviewActionValue, false)
-                            }
-                          >
-                            {label(
-                              locale,
-                              `choice.join_request_review.${reviewActionValue}`,
-                            )}
-                          </button>
-                        ),
-                      )}
+                      {(
+                        ["approve", "reject", "request_information"] as const
+                      ).map((reviewActionValue) => (
+                        <button
+                          key={reviewActionValue}
+                          type="button"
+                          className="secondary-button join-request-action-button"
+                          disabled={pending || Boolean(reviewBlockedReason)}
+                          onClick={() =>
+                            openReview([request], reviewActionValue, false)
+                          }
+                        >
+                          {label(
+                            locale,
+                            `choice.join_request_review.${reviewActionValue}`,
+                          )}
+                        </button>
+                      ))}
                     </div>
                   ) : null}
                 </article>
@@ -2426,9 +2477,13 @@ function JoinRequestListCard({
                         request.applicant.node_id}
                     </strong>
                     <span>
-                      {label(locale, `choice.join_request_review.${dialog.action}`)}
+                      {label(
+                        locale,
+                        `choice.join_request_review.${dialog.action}`,
+                      )}
                       {" · "}
-                      {label(locale, "join_requests.revision")} {request.revision}
+                      {label(locale, "join_requests.revision")}{" "}
+                      {request.revision}
                     </span>
                   </li>
                 ))}
@@ -2517,7 +2572,10 @@ function JoinRequestListCard({
                     : "primary-button"
                 }
                 type="button"
-                disabled={pending || Boolean(reviewBlockedReason || batchReviewBlockedReason)}
+                disabled={
+                  pending ||
+                  Boolean(reviewBlockedReason || batchReviewBlockedReason)
+                }
                 onClick={() => void submitReview()}
               >
                 {submitting
@@ -2624,8 +2682,9 @@ function ActionCard({
   const [result, setResult] = useState("");
   const [profileOutcome, setProfileOutcome] =
     useState<NetworkProfileOutcome | null>(null);
-  const [joinPreview, setJoinPreview] =
-    useState<NodeNetworkJoinPreview | null>(null);
+  const [joinPreview, setJoinPreview] = useState<NodeNetworkJoinPreview | null>(
+    null,
+  );
   const [joinRequests, setJoinRequests] = useState<{
     result: NodeJoinRequestListResult;
     loadedAtUnixMs: number;
@@ -2678,17 +2737,20 @@ function ActionCard({
           locale,
         )
       : "";
-  function joinRequestReviewBlockedReason(
-    reviewAction?: NodeUiAction,
-  ): string {
+  function joinRequestReviewBlockedReason(reviewAction?: NodeUiAction): string {
     if (pageBlocked) return label(locale, pageBlocked.titleKey);
     if (!reviewAction)
       return label(locale, "join_requests.actions_unavailable");
-    const reason = executionBlockReason(reviewAction, snapshot, selectedNetwork);
+    const reason = executionBlockReason(
+      reviewAction,
+      snapshot,
+      selectedNetwork,
+    );
     return reason ? blockReasonText(reason, locale) : "";
   }
-  const reviewBlockedReason =
-    joinRequestReviewBlockedReason(reviewJoinRequestAction);
+  const reviewBlockedReason = joinRequestReviewBlockedReason(
+    reviewJoinRequestAction,
+  );
   const batchReviewBlockedReason = joinRequestReviewBlockedReason(
     batchReviewJoinRequestsAction,
   );
@@ -2805,7 +2867,8 @@ function ActionCard({
       setInvitations((current) => {
         if (!current) return current;
         const updated = current.items.map((status) =>
-          status.invitation.invitation_id === outcome.data.invitation.invitation_id
+          status.invitation.invitation_id ===
+          outcome.data.invitation.invitation_id
             ? outcome.data
             : status,
         );
@@ -3032,7 +3095,11 @@ function ActionCard({
     setFailure("");
     setResult("");
     try {
-      const submission = await onSubmit(previewInvitationAction, values, () => {});
+      const submission = await onSubmit(
+        previewInvitationAction,
+        values,
+        () => {},
+      );
       if (submission.outcome?.status === "rejected") {
         setFailure(outcomeSummary(submission.outcome, locale));
       } else if (submission.outcome?.status === "invitation_preview") {

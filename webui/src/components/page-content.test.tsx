@@ -35,6 +35,9 @@ const activityPage = manifest.pages.find(
 const settingsPage = manifest.pages.find(
   (page) => page.id === "settings",
 ) as NodeUiPage;
+const runtimePage = manifest.pages.find(
+  (page) => page.id === "node_runtime",
+) as NodeUiPage;
 const exitNodePage = manifest.pages.find(
   (page) => page.id === "exit_node",
 ) as NodeUiPage;
@@ -123,6 +126,22 @@ function renderSettings(
       onRequestAction={() => {}}
       onRunAction={async () => {}}
       manifestActions={actions}
+    />,
+  );
+}
+
+function renderRuntime(snapshot: NodeSnapshot) {
+  return render(
+    <PageContent
+      page={runtimePage}
+      snapshot={snapshot}
+      locale="zh-CN"
+      selectedNetwork="home"
+      recentDiagnostics={null}
+      onSelectNetwork={() => {}}
+      onNavigate={() => {}}
+      onRequestAction={() => {}}
+      onRunAction={async () => {}}
     />,
   );
 }
@@ -1086,6 +1105,83 @@ describe("membership policy reconfirmation", () => {
       }),
     ).not.toBeInTheDocument();
     expect(onRequestAction).not.toHaveBeenCalled();
+  });
+});
+
+describe("Coordinator control-plane runtime state", () => {
+  it("shows governance read-only and quorum details without treating the service as failed", () => {
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      embedded_services: [
+        {
+          network_name: "home",
+          status: "running",
+          coordinator_candidates: {
+            network_id: "net_control_plane_home",
+            generated_at_unix_ms: Date.UTC(2026, 0, 1, 12, 0, 0),
+            config_state: "current",
+            candidates: [],
+            current_leader: null,
+            latest_term: null,
+            emergency: "none",
+            control_plane: {
+              state: "quorum_unavailable",
+              governance_writable: false,
+              reason_code: "coordinator.control_plane.no_majority",
+              quorum: {
+                received_votes: 1,
+                required_votes: 2,
+                participant_count: 3,
+              },
+            },
+          },
+        },
+        {
+          network_name: "unobserved",
+          status: "running",
+        },
+      ],
+    };
+
+    renderRuntime(snapshot);
+
+    const controlPlane = screen.getByTestId("runtime-control-plane");
+    const home = within(controlPlane).getByTestId(
+      "runtime-control-plane-home",
+    );
+    expect(home).toHaveAttribute(
+      "data-control-plane-state",
+      "quorum_unavailable",
+    );
+    expect(home).toHaveAttribute("data-governance-writable", "false");
+    expect(home).toHaveTextContent(
+      translated("runtime.control_plane.limited"),
+    );
+    expect(home).toHaveTextContent(
+      translated("runtime.control_plane.governance_read_only"),
+    );
+    expect(home).toHaveTextContent(
+      "coordinator.control_plane.no_majority",
+    );
+    expect(home).toHaveTextContent("1/2");
+    expect(home).not.toHaveTextContent(
+      translated("runtime.control_plane.available"),
+    );
+
+    const unobserved = within(controlPlane).getByTestId(
+      "runtime-control-plane-unobserved",
+    );
+    expect(unobserved).toHaveAttribute(
+      "data-control-plane-state",
+      "unobserved",
+    );
+    expect(unobserved).toHaveAttribute("data-governance-writable", "false");
+    expect(unobserved).toHaveTextContent(
+      translated("runtime.control_plane.unobserved"),
+    );
+    expect(unobserved).toHaveTextContent(
+      "coordinator.control_plane.unobserved",
+    );
   });
 });
 

@@ -167,6 +167,7 @@ export type CoordinatorCandidateStatus = {
   "candidates": Array<CoordinatorCandidateStatusEntry>;
   "config"?: CoordinatorCandidateConfig | null;
   "config_state": CoordinatorCandidateConfigState;
+  "control_plane"?: CoordinatorControlPlaneStatus;
   "current_leader"?: NodeId | null;
   "emergency": CoordinatorEmergencyState;
   "generated_at_unix_ms": number;
@@ -186,6 +187,15 @@ export type CoordinatorCandidateStatusEntry = {
 };
 
 export type CoordinatorCandidateWillingness = "willing" | "unwilling";
+
+export type CoordinatorControlPlaneState = "available" | "election_in_progress" | "quorum_unavailable" | "no_leader" | "configuration_unavailable" | "read_only";
+
+export type CoordinatorControlPlaneStatus = {
+  "governance_writable": boolean;
+  "quorum": CoordinatorQuorumStatus;
+  "reason_code": string;
+  "state": CoordinatorControlPlaneState;
+};
 
 export type CoordinatorElectionProposal = {
   "candidate_config_revision": number;
@@ -249,6 +259,12 @@ export type CoordinatorPhase = "stable" | "election" | "leader_ack" | "partition
 export type CoordinatorPublicReachability = {
   "public_endpoint"?: string | null;
   "reachable_via_relay"?: boolean;
+};
+
+export type CoordinatorQuorumStatus = {
+  "participant_count": number;
+  "received_votes": number;
+  "required_votes": number;
 };
 
 export type CoordinatorTerm = {

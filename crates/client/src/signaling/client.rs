@@ -1094,6 +1094,54 @@ impl SignalingClient {
     }
 
     /// 获取分配的虚拟IP (IPv6)
+    /// Build an in-memory signaling client for runtime tests. Requests are
+    /// observed on the returned receiver and authoritative responses can be
+    /// routed without opening a socket.
+    #[cfg(test)]
+    pub(crate) fn test_channel() -> (Self, mpsc::UnboundedReceiver<SignalingMessage>) {
+        let (tx, outbound_rx) = mpsc::unbounded_channel::<SignalingMessage>();
+        let (_, event_rx) = mpsc::unbounded_channel::<SignalingEvent>();
+        let (_, assigned_ip_rx) = watch::channel(None);
+        let (_, assigned_virtual_ips_rx) = watch::channel(None);
+        let (_, relay_endpoint_rx) = watch::channel(None);
+        let (_, relay_endpoints_rx) = watch::channel(Vec::new());
+        let (_, known_peers_rx) = watch::channel(Vec::new());
+        let (shutdown_tx, _) = watch::channel(false);
+        (
+            Self {
+                tx,
+                event_rx: Arc::new(RwLock::new(event_rx)),
+                assigned_ip_rx,
+                assigned_virtual_ips_rx,
+                relay_endpoint_rx,
+                relay_endpoints_rx,
+                known_peers_rx,
+                shutdown_tx,
+                task: StdMutex::new(None),
+                join_requests: Arc::new(JoinRequestResponseHub::default()),
+                join_request_gate: Arc::new(Mutex::new(())),
+                invitations: Arc::new(InvitationResponseHub::default()),
+                invitation_gate: Arc::new(Mutex::new(())),
+                network_join_previews: Arc::new(NetworkJoinPreviewResponseHub::default()),
+                network_join_preview_gate: Arc::new(Mutex::new(())),
+                coordinator_candidates: Arc::new(CoordinatorCandidateResponseHub::default()),
+                coordinator_candidate_gate: Arc::new(Mutex::new(())),
+            },
+            outbound_rx,
+        )
+    }
+
+    /// Route one control-plane response in the same way the websocket receive
+    /// loop does. Returns whether a pending coordinator operation consumed it.
+    #[cfg(test)]
+    pub(crate) fn route_coordinator_candidate_test_response(
+        &self,
+        message: SignalingMessage,
+    ) -> bool {
+        self.coordinator_candidates.route(&message)
+    }
+
+    /// 获取分配的虚拟IP (IPv6)
     pub async fn assigned_ip(&self) -> Option<Ipv6Addr> {
         *self.assigned_ip_rx.borrow()
     }
@@ -2512,6 +2560,7 @@ mod tests {
             current_leader: Some(term.leader.clone()),
             latest_term: Some(term.clone()),
             lease: term.lease_status_at(generated_at_unix_ms),
+            control_plane: Default::default(),
             emergency: CoordinatorEmergencyState::NoCandidatesConfigured,
             latest_election: None,
         }

@@ -1863,6 +1863,61 @@ pub struct CoordinatorCandidateStatusEntry {
     pub declaration: Option<CoordinatorCandidateDeclaration>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinatorControlPlaneState {
+    /// A full-authority Stable term has a writable lease.
+    Available,
+    /// An election is active but has not yet committed a term.
+    ElectionInProgress,
+    /// The election ended without a strict majority, or its deadline elapsed
+    /// before the durable term could be installed.
+    QuorumUnavailable,
+    /// The candidate configuration is current, but no term is writable.
+    NoLeader,
+    /// The candidate configuration is missing, pending, or expired.
+    ConfigurationUnavailable,
+    /// Authority is present but cannot safely perform governance writes.
+    ReadOnly,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct CoordinatorQuorumStatus {
+    pub received_votes: usize,
+    pub required_votes: usize,
+    pub participant_count: usize,
+}
+
+/// Fail-closed projection intended for clients and operators. A missing leader
+/// is not a data-plane failure: `governance_writable = false` only pauses
+/// governance until a strict-majority election installs a fresh term.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct CoordinatorControlPlaneStatus {
+    pub state: CoordinatorControlPlaneState,
+    pub governance_writable: bool,
+    pub reason_code: String,
+    pub quorum: CoordinatorQuorumStatus,
+}
+
+impl CoordinatorControlPlaneStatus {
+    pub fn is_available(&self) -> bool {
+        self.state == CoordinatorControlPlaneState::Available
+    }
+}
+
+impl Default for CoordinatorControlPlaneStatus {
+    fn default() -> Self {
+        Self {
+            // Old persisted/client projections did not carry this field. Never
+            // infer writable authority from its absence.
+            state: CoordinatorControlPlaneState::ReadOnly,
+            governance_writable: false,
+            reason_code: "coordinator.control_plane.unobserved".into(),
+            quorum: CoordinatorQuorumStatus::default(),
+        }
+    }
+}
+
 /// Shared UI projection. `latest_term` is retained even after expiry so the UI
 /// can show recent tenure without pretending the old leader still has authority.
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -1879,6 +1934,8 @@ pub struct CoordinatorCandidateStatus {
     pub latest_term: Option<CoordinatorTerm>,
     #[serde(default)]
     pub lease: CoordinatorLeaseStatus,
+    #[serde(default)]
+    pub control_plane: CoordinatorControlPlaneStatus,
     pub emergency: CoordinatorEmergencyState,
     /// Most recent persisted election, including terminal outcomes. Keeping the
     /// full signed proposal and vote set makes takeover decisions auditable from
@@ -1902,6 +1959,147 @@ impl CoordinatorCandidateStatus {
                     .cmp(&right.priority)
                     .then_with(|| left.node_id.cmp(&right.node_id))
             })
+    }
+
+    /// Recompute the control-plane projection after attaching a persisted
+    /// election session. This method only projects authoritative fields already
+    /// present in the status; it never promotes a candidate to Leader.
+    pub fn refresh_control_plane(&mut self) {
+        self.control_plane = self.project_control_plane();
+    }
+
+    fn project_control_plane(&self) -> CoordinatorControlPlaneStatus {
+        let quorum = self.project_quorum();
+        let limited = |state, reason_code: &str| CoordinatorControlPlaneStatus {
+            state,
+            governance_writable: false,
+            reason_code: reason_code.into(),
+            quorum: quorum.clone(),
+        };
+
+        match self.config_state {
+            CoordinatorCandidateConfigState::Missing => {
+                return limited(
+                    CoordinatorControlPlaneState::ConfigurationUnavailable,
+                    "coordinator.control_plane.config_missing",
+                );
+            }
+            CoordinatorCandidateConfigState::Pending => {
+                return limited(
+                    CoordinatorControlPlaneState::ConfigurationUnavailable,
+                    "coordinator.control_plane.config_pending",
+                );
+            }
+            CoordinatorCandidateConfigState::Expired => {
+                return limited(
+                    CoordinatorControlPlaneState::ConfigurationUnavailable,
+                    "coordinator.control_plane.config_expired",
+                );
+            }
+            CoordinatorCandidateConfigState::Current => {}
+        }
+
+        if self.lease.is_writable() && self.current_leader.is_some() {
+            let full_stable_authority = self.latest_term.as_ref().is_some_and(|term| {
+                term.authority == CoordinatorAuthority::Full
+                    && term.phase == CoordinatorPhase::Stable
+            });
+            if full_stable_authority {
+                return CoordinatorControlPlaneStatus {
+                    state: CoordinatorControlPlaneState::Available,
+                    governance_writable: true,
+                    reason_code: "coordinator.control_plane.available".into(),
+                    quorum,
+                };
+            }
+            return limited(
+                CoordinatorControlPlaneState::ReadOnly,
+                "coordinator.control_plane.stable_full_authority_required",
+            );
+        }
+
+        if self.lease.is_writable() {
+            return limited(
+                CoordinatorControlPlaneState::ReadOnly,
+                "coordinator.control_plane.term_config_mismatch",
+            );
+        }
+
+        if matches!(
+            self.lease.reason_code.as_str(),
+            "coordinator.lease.clock_skew" | "coordinator.lease.invalid_term"
+        ) {
+            return limited(
+                CoordinatorControlPlaneState::ReadOnly,
+                self.lease.reason_code.as_str(),
+            );
+        }
+
+        if let Some(election) = &self.latest_election {
+            let no_majority = quorum.received_votes < quorum.required_votes;
+            return match election.stage {
+                CoordinatorElectionStage::Started | CoordinatorElectionStage::Voting
+                    if self.generated_at_unix_ms >= election.deadline_unix_ms =>
+                {
+                    limited(
+                        CoordinatorControlPlaneState::QuorumUnavailable,
+                        if no_majority {
+                            "coordinator.control_plane.no_majority"
+                        } else {
+                            "coordinator.control_plane.commit_pending"
+                        },
+                    )
+                }
+                CoordinatorElectionStage::Started | CoordinatorElectionStage::Voting => limited(
+                    CoordinatorControlPlaneState::ElectionInProgress,
+                    "coordinator.control_plane.awaiting_quorum",
+                ),
+                CoordinatorElectionStage::TimedOut => limited(
+                    CoordinatorControlPlaneState::QuorumUnavailable,
+                    if no_majority {
+                        "coordinator.control_plane.no_majority"
+                    } else {
+                        "coordinator.control_plane.election_timed_out"
+                    },
+                ),
+                CoordinatorElectionStage::Rejected => limited(
+                    CoordinatorControlPlaneState::QuorumUnavailable,
+                    "coordinator.control_plane.election_rejected",
+                ),
+                CoordinatorElectionStage::Committed => limited(
+                    CoordinatorControlPlaneState::NoLeader,
+                    "coordinator.control_plane.committed_term_not_writable",
+                ),
+            };
+        }
+
+        let reason_code = match self.lease.reason_code.as_str() {
+            "coordinator.lease.expired" => "coordinator.control_plane.lease_expired",
+            "coordinator.lease.no_term" => "coordinator.control_plane.no_term",
+            _ => "coordinator.control_plane.leader_unavailable",
+        };
+        limited(CoordinatorControlPlaneState::NoLeader, reason_code)
+    }
+
+    fn project_quorum(&self) -> CoordinatorQuorumStatus {
+        let (received_votes, participant_count) = if let Some(election) = &self.latest_election {
+            (election.votes.len(), election.participants.len())
+        } else if let Some(term) = &self.latest_term {
+            (term.majority_proof.len(), term.candidate_group.len())
+        } else if let Some(config) = &self.config {
+            (0, config.candidates.len())
+        } else {
+            (0, 0)
+        };
+        CoordinatorQuorumStatus {
+            received_votes,
+            required_votes: if participant_count == 0 {
+                0
+            } else {
+                participant_count / 2 + 1
+            },
+            participant_count,
+        }
     }
 
     pub fn assess(
@@ -2053,7 +2251,7 @@ impl CoordinatorCandidateStatus {
                     && lease.is_writable()
             })
             .map(|term| term.leader.clone());
-        Ok(Self {
+        let mut status = Self {
             network_id: network.network_id.clone(),
             generated_at_unix_ms: now_unix_ms,
             config_state,
@@ -2062,9 +2260,12 @@ impl CoordinatorCandidateStatus {
             current_leader,
             latest_term: latest_term.cloned(),
             lease,
+            control_plane: CoordinatorControlPlaneStatus::default(),
             emergency,
             latest_election: None,
-        })
+        };
+        status.refresh_control_plane();
+        Ok(status)
     }
 }
 
@@ -3307,5 +3508,326 @@ mod tests {
         assert!(status.candidates[0].eligible_for_election);
         assert_eq!(status.current_leader, None);
         assert_eq!(status.latest_term, Some(latest_term));
+    }
+
+    #[test]
+    fn control_plane_requires_strict_majority_before_enabling_governance() {
+        let fixture = candidate_fixture();
+        let candidate_one = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_two = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        let ordinary = NodeId::from_public_key(&fixture.ordinary.public_key());
+        let candidates = vec![
+            CoordinatorCandidate {
+                node_id: candidate_one.clone(),
+                priority: 10,
+            },
+            CoordinatorCandidate {
+                node_id: candidate_two.clone(),
+                priority: 20,
+            },
+            CoordinatorCandidate {
+                node_id: ordinary.clone(),
+                priority: 30,
+            },
+        ];
+        let config = config(&fixture, &fixture.owner, candidates);
+        let declarations = vec![
+            declaration(
+                &fixture,
+                &fixture.candidate_one,
+                CoordinatorCandidateWillingness::Willing,
+                2_000,
+            ),
+            declaration(
+                &fixture,
+                &fixture.candidate_two,
+                CoordinatorCandidateWillingness::Willing,
+                2_000,
+            ),
+            declaration(
+                &fixture,
+                &fixture.ordinary,
+                CoordinatorCandidateWillingness::Willing,
+                2_000,
+            ),
+        ];
+        let initial = CoordinatorCandidateStatus::assess(
+            &fixture.network,
+            Some(&config),
+            &declarations,
+            None,
+            3_000,
+        )
+        .unwrap();
+        assert_eq!(
+            initial.control_plane.state,
+            CoordinatorControlPlaneState::NoLeader
+        );
+        assert!(!initial.control_plane.governance_writable);
+        assert_eq!(initial.control_plane.quorum.received_votes, 0);
+        assert_eq!(initial.control_plane.quorum.required_votes, 2);
+        assert_eq!(initial.control_plane.quorum.participant_count, 3);
+
+        let candidate_group = vec![candidate_one.clone(), candidate_two.clone(), ordinary];
+        let proposal = CoordinatorElectionProposal::signed(
+            fixture.network.network_id.clone(),
+            7,
+            1,
+            candidate_group.clone(),
+            3_000,
+            8_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        let mut session = CoordinatorElectionSession::started(proposal, 3_000).unwrap();
+        session.begin_voting(3_000).unwrap();
+        let first_vote = CoordinatorElectionVote::signed(
+            fixture.network.network_id.clone(),
+            7,
+            1,
+            candidate_one.clone(),
+            candidate_group.clone(),
+            3_000,
+            8_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        session.record_vote(first_vote, 3_001).unwrap();
+
+        let mut voting = CoordinatorCandidateStatus::assess(
+            &fixture.network,
+            Some(&config),
+            &declarations,
+            None,
+            3_001,
+        )
+        .unwrap();
+        voting.latest_election = Some(session.clone());
+        voting.refresh_control_plane();
+        assert_eq!(
+            voting.control_plane.state,
+            CoordinatorControlPlaneState::ElectionInProgress
+        );
+        assert!(!voting.control_plane.governance_writable);
+        assert_eq!(voting.control_plane.quorum.received_votes, 1);
+        assert_eq!(voting.control_plane.quorum.required_votes, 2);
+
+        let second_vote = CoordinatorElectionVote::signed(
+            fixture.network.network_id.clone(),
+            7,
+            1,
+            candidate_one.clone(),
+            candidate_group,
+            3_000,
+            8_000,
+            &fixture.candidate_two,
+        )
+        .unwrap();
+        session.record_vote(second_vote, 3_002).unwrap();
+        let term = session.commit(FencingToken(1), 3_003).unwrap();
+        let mut available = CoordinatorCandidateStatus::assess(
+            &fixture.network,
+            Some(&config),
+            &declarations,
+            Some(&term),
+            3_003,
+        )
+        .unwrap();
+        available.latest_election = Some(session);
+        available.refresh_control_plane();
+        assert_eq!(
+            available.control_plane.state,
+            CoordinatorControlPlaneState::Available
+        );
+        assert!(available.control_plane.governance_writable);
+        assert_eq!(available.control_plane.quorum.received_votes, 2);
+        assert_eq!(available.control_plane.quorum.required_votes, 2);
+        assert_eq!(available.current_leader, Some(candidate_one));
+        assert_eq!(available.latest_term.as_ref().unwrap().term, 1);
+        assert_eq!(
+            available.latest_term.as_ref().unwrap().fencing_token,
+            FencingToken(1)
+        );
+
+        let restored = CoordinatorCandidateStatus::assess(
+            &fixture.network,
+            Some(&config),
+            &declarations,
+            available.latest_term.as_ref(),
+            3_004,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.control_plane.state,
+            CoordinatorControlPlaneState::Available
+        );
+        assert!(restored.control_plane.governance_writable);
+        assert_eq!(restored.latest_term, available.latest_term);
+    }
+
+    #[test]
+    fn control_plane_projects_timeout_configuration_and_clock_limits() {
+        let fixture = candidate_fixture();
+        let candidate_one = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_two = NodeId::from_public_key(&fixture.candidate_two.public_key());
+
+        let missing =
+            CoordinatorCandidateStatus::assess(&fixture.network, None, &[], None, 3_000).unwrap();
+        assert_eq!(
+            missing.control_plane.state,
+            CoordinatorControlPlaneState::ConfigurationUnavailable
+        );
+        assert_eq!(
+            missing.control_plane.reason_code,
+            "coordinator.control_plane.config_missing"
+        );
+
+        let config = config(
+            &fixture,
+            &fixture.owner,
+            vec![
+                CoordinatorCandidate {
+                    node_id: candidate_one.clone(),
+                    priority: 10,
+                },
+                CoordinatorCandidate {
+                    node_id: candidate_two.clone(),
+                    priority: 20,
+                },
+            ],
+        );
+        let declarations = vec![
+            declaration(
+                &fixture,
+                &fixture.candidate_one,
+                CoordinatorCandidateWillingness::Willing,
+                2_000,
+            ),
+            declaration(
+                &fixture,
+                &fixture.candidate_two,
+                CoordinatorCandidateWillingness::Willing,
+                2_000,
+            ),
+        ];
+        let expired = CoordinatorCandidateStatus::assess(
+            &fixture.network,
+            Some(&config),
+            &declarations,
+            None,
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(
+            expired.control_plane.state,
+            CoordinatorControlPlaneState::ConfigurationUnavailable
+        );
+        assert_eq!(
+            expired.control_plane.reason_code,
+            "coordinator.control_plane.config_expired"
+        );
+
+        let candidate_group = vec![candidate_one.clone(), candidate_two.clone()];
+        let proposal = CoordinatorElectionProposal::signed(
+            fixture.network.network_id.clone(),
+            7,
+            1,
+            candidate_group.clone(),
+            3_000,
+            6_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        let mut timed_out_session = CoordinatorElectionSession::started(proposal, 3_000).unwrap();
+        timed_out_session.begin_voting(3_000).unwrap();
+        let vote = CoordinatorElectionVote::signed(
+            fixture.network.network_id.clone(),
+            7,
+            1,
+            candidate_one.clone(),
+            candidate_group.clone(),
+            3_000,
+            6_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        timed_out_session.record_vote(vote, 3_001).unwrap();
+        timed_out_session.timed_out(6_000).unwrap();
+        let mut timed_out = CoordinatorCandidateStatus::assess(
+            &fixture.network,
+            Some(&config),
+            &declarations,
+            None,
+            6_000,
+        )
+        .unwrap();
+        timed_out.latest_election = Some(timed_out_session);
+        timed_out.refresh_control_plane();
+        assert_eq!(
+            timed_out.control_plane.state,
+            CoordinatorControlPlaneState::QuorumUnavailable
+        );
+        assert_eq!(
+            timed_out.control_plane.reason_code,
+            "coordinator.control_plane.no_majority"
+        );
+        assert_eq!(timed_out.control_plane.quorum.received_votes, 1);
+        assert_eq!(timed_out.control_plane.quorum.required_votes, 2);
+        assert_eq!(timed_out.latest_term, None);
+        assert_eq!(timed_out.current_leader, None);
+
+        let now_unix_ms = 3_000;
+        let issued_at_unix_ms = now_unix_ms + COORDINATOR_CLOCK_SKEW_LIMIT_MS + 1;
+        let expires_at_unix_ms = issued_at_unix_ms + COORDINATOR_ELECTION_VOTE_MAX_VALIDITY_MS;
+        let majority_votes = [&fixture.candidate_one, &fixture.candidate_two]
+            .into_iter()
+            .map(|voter| {
+                CoordinatorElectionVote::signed(
+                    fixture.network.network_id.clone(),
+                    7,
+                    1,
+                    candidate_one.clone(),
+                    candidate_group.clone(),
+                    issued_at_unix_ms,
+                    expires_at_unix_ms,
+                    voter,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let skewed_term = CoordinatorTerm {
+            network_id: fixture.network.network_id.clone(),
+            term: 1,
+            leader: candidate_one.clone(),
+            candidate_group,
+            candidate_config_revision: 7,
+            majority_proof: majority_votes
+                .iter()
+                .map(|vote| vote.voter.clone())
+                .collect(),
+            majority_votes,
+            authority: CoordinatorAuthority::Full,
+            phase: CoordinatorPhase::Stable,
+            fencing_token: FencingToken(1),
+            issued_at_unix_ms,
+            expires_at_unix_ms,
+        };
+        let skewed = CoordinatorCandidateStatus::assess(
+            &fixture.network,
+            Some(&config),
+            &declarations,
+            Some(&skewed_term),
+            now_unix_ms,
+        )
+        .unwrap();
+        assert_eq!(
+            skewed.control_plane.state,
+            CoordinatorControlPlaneState::ReadOnly
+        );
+        assert_eq!(
+            skewed.control_plane.reason_code,
+            "coordinator.lease.clock_skew"
+        );
+        assert!(!skewed.control_plane.governance_writable);
     }
 }

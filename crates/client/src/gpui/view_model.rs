@@ -7,21 +7,21 @@ use fuckipv6_common::domain::{
     parse_policy_test_input, ActivityCategory, ActivityEntry, ActivitySeverity,
     ApplicationIdentity, AuditOutcome, CapabilityKind, CapabilityState, ContentHash,
     CoordinatorCandidate, CoordinatorCandidateResources, CoordinatorCandidateWillingness,
-    CoordinatorPublicReachability, EffectiveAccessReason, EffectivePolicyLayer,
-    ExitAvailabilitySource, ExitAvailabilityState, ExitContributionAvailability,
-    ExitContributionMode, ExitContributionObligation, ExitContributionScope,
-    ExitSelectionCandidate, ExitSelectionMode, ExitSelectionPolicy, ExitSelectionSource,
-    InvitationCode, InvitationId, InvitationRedeemRequest, MemberLifecycleAction, MembershipRole,
-    NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
-    NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId,
-    RelayAuthorizationAuditSnapshot, RelayAuthorizationDiagnostic,
-    RelayAuthorizationSourceDiagnostic, RelayExistingSessionPolicy, RelayGovernanceAction,
-    RelayGovernanceEvent, RelayHealthIssue, RelayHealthSnapshot, RelayHealthStatus,
-    RelayLifecycleState, RelayLimitPolicy, RelayLimitSource, RelayMeasurementState,
-    RelayReachabilityState, TopologyNode, TopologyNodeHealth, TopologySnapshot, TrafficAction,
-    TrafficDefaultConfirmedBy, TrafficFailureKind, TrafficFlow, TrafficMatch, TrafficMatchRisk,
-    TrafficPolicy, TrafficPolicyTestInput, TrafficProtectionState, TrafficProtocol,
-    TrafficRoutingHitSample, TrafficRoutingObservation, TrafficRoutingPageModel,
+    CoordinatorControlPlaneState, CoordinatorControlPlaneStatus, CoordinatorPublicReachability,
+    EffectiveAccessReason, EffectivePolicyLayer, ExitAvailabilitySource, ExitAvailabilityState,
+    ExitContributionAvailability, ExitContributionMode, ExitContributionObligation,
+    ExitContributionScope, ExitSelectionCandidate, ExitSelectionMode, ExitSelectionPolicy,
+    ExitSelectionSource, InvitationCode, InvitationId, InvitationRedeemRequest,
+    MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode, NetworkMember,
+    NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberStatus,
+    NetworkProfileUpdate, NetworkVisibility, NodeId, RelayAuthorizationAuditSnapshot,
+    RelayAuthorizationDiagnostic, RelayAuthorizationSourceDiagnostic, RelayExistingSessionPolicy,
+    RelayGovernanceAction, RelayGovernanceEvent, RelayHealthIssue, RelayHealthSnapshot,
+    RelayHealthStatus, RelayLifecycleState, RelayLimitPolicy, RelayLimitSource,
+    RelayMeasurementState, RelayReachabilityState, TopologyNode, TopologyNodeHealth,
+    TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy, TrafficFailureKind, TrafficFlow,
+    TrafficMatch, TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput, TrafficProtectionState,
+    TrafficProtocol, TrafficRoutingHitSample, TrafficRoutingObservation, TrafficRoutingPageModel,
     TrafficRoutingRuleActivityEffect, TrafficRoutingRuleImpactView, TrafficRoutingTarget,
     TrafficRoutingTargetKind, TrafficRoutingTargetRef, TrafficRoutingWorkflowState,
     TrafficSessionEventKind,
@@ -4605,6 +4605,20 @@ fn project_node_runtime(
             )
         })
         .collect::<Vec<_>>();
+    let control_plane_rows = snapshot
+        .embedded_services
+        .iter()
+        .map(|service| {
+            let control_plane = service
+                .coordinator_candidates
+                .as_ref()
+                .map(|status| &status.control_plane);
+            row(
+                service.network_name.clone(),
+                coordinator_control_plane_detail(locale, control_plane),
+            )
+        })
+        .collect::<Vec<_>>();
     let tun_capabilities = &snapshot.tun_capabilities;
     let tun_reasons = if tun_capabilities.reasons.is_empty() {
         t(locale, "runtime.value.tun_reason.unknown").to_string()
@@ -4726,8 +4740,48 @@ fn project_node_runtime(
                 t(locale, "runtime.empty.services"),
                 service_rows,
             ));
+            sections.push(section(
+                t(locale, "runtime.section.control_plane"),
+                t(locale, "runtime.empty.control_plane"),
+                control_plane_rows,
+            ));
             sections
         },
+    )
+}
+
+fn coordinator_control_plane_detail(
+    locale: Locale,
+    control_plane: Option<&CoordinatorControlPlaneStatus>,
+) -> String {
+    let unobserved = CoordinatorControlPlaneStatus::default();
+    let control_plane = control_plane.unwrap_or(&unobserved);
+    let state = if control_plane.state == CoordinatorControlPlaneState::Available {
+        t(locale, "runtime.control_plane.available")
+    } else if control_plane.reason_code == "coordinator.control_plane.unobserved" {
+        t(locale, "runtime.control_plane.unobserved")
+    } else {
+        t(locale, "runtime.control_plane.limited")
+    };
+    let governance = if control_plane.governance_writable {
+        t(locale, "runtime.control_plane.governance_writable")
+    } else {
+        t(locale, "runtime.control_plane.governance_read_only")
+    };
+    let received = relay_format_u64(locale, control_plane.quorum.received_votes as u64);
+    let required = relay_format_u64(locale, control_plane.quorum.required_votes as u64);
+    let participants = relay_format_u64(locale, control_plane.quorum.participant_count as u64);
+    tr(
+        locale,
+        "runtime.control_plane.detail",
+        &[
+            ("state", state),
+            ("governance", governance),
+            ("received", &received),
+            ("required", &required),
+            ("participants", &participants),
+            ("reason_code", control_plane.reason_code.as_str()),
+        ],
     )
 }
 
@@ -8456,11 +8510,14 @@ mod tests {
         NodeUiValidation,
     };
     use fuckipv6_common::domain::{
-        ActivityEntry, AuditId, AuditOutcome, DomainSuffix, MembershipState, NetworkMemberPresence,
-        NodeId, PortRange, RelayGovernanceAuditSnapshot, RelayUsageSnapshot, TopologyBoundary,
-        TopologyConnection, TopologyConnectionState, TopologyNode, TopologyNodeNetwork,
-        TrafficDefaultPolicy, TrafficFailureKind, TrafficFailurePolicy, TrafficMatch,
-        TrafficRoutingHardConstraints, TrafficRoutingObservedHit, TrafficRule, TrafficRuleId,
+        ActivityEntry, AuditId, AuditOutcome, CoordinatorCandidateConfigState,
+        CoordinatorCandidateStatus, CoordinatorControlPlaneState, CoordinatorControlPlaneStatus,
+        CoordinatorEmergencyState, CoordinatorQuorumStatus, DomainSuffix, MembershipState,
+        NetworkMemberPresence, NodeId, PortRange, RelayGovernanceAuditSnapshot, RelayUsageSnapshot,
+        TopologyBoundary, TopologyConnection, TopologyConnectionState, TopologyNode,
+        TopologyNodeNetwork, TrafficDefaultPolicy, TrafficFailureKind, TrafficFailurePolicy,
+        TrafficMatch, TrafficRoutingHardConstraints, TrafficRoutingObservedHit, TrafficRule,
+        TrafficRuleId,
     };
     use serde::Deserialize;
     use std::collections::BTreeMap;
@@ -9742,6 +9799,92 @@ mod tests {
             .sections
             .iter()
             .all(|section| section.title != t(Locale::ZhCn, "runtime.section.interface_problems")));
+    }
+
+    #[test]
+    fn runtime_control_plane_limits_governance_without_reporting_node_failure() {
+        let mut snapshot = populated_snapshot();
+        snapshot
+            .embedded_services
+            .push(NodeEmbeddedServiceSnapshot {
+                network_name: "home".into(),
+                status: NodeEmbeddedServiceStatus::Running,
+                signaling_addr: Some("127.0.0.1:6666".parse().expect("signaling socket")),
+                relay_status: NodeEmbeddedServiceStatus::Stopped,
+                relay_addr: None,
+                relay_health: None,
+                relay_authorization: None,
+                relay_governance: None,
+                coordinator_candidates: Some(CoordinatorCandidateStatus {
+                    network_id: NetworkId::from_public_key(b"coordinator-control-plane-ui"),
+                    generated_at_unix_ms: 1_700_000_100_000,
+                    config_state: CoordinatorCandidateConfigState::Current,
+                    config: None,
+                    candidates: Vec::new(),
+                    current_leader: None,
+                    latest_term: None,
+                    lease: Default::default(),
+                    control_plane: CoordinatorControlPlaneStatus {
+                        state: CoordinatorControlPlaneState::QuorumUnavailable,
+                        governance_writable: false,
+                        reason_code: "coordinator.control_plane.no_majority".into(),
+                        quorum: CoordinatorQuorumStatus {
+                            received_votes: 1,
+                            required_votes: 2,
+                            participant_count: 3,
+                        },
+                    },
+                    emergency: CoordinatorEmergencyState::None,
+                    latest_election: None,
+                }),
+            });
+        snapshot
+            .embedded_services
+            .push(NodeEmbeddedServiceSnapshot {
+                network_name: "unobserved".into(),
+                status: NodeEmbeddedServiceStatus::Running,
+                signaling_addr: None,
+                relay_status: NodeEmbeddedServiceStatus::Stopped,
+                relay_addr: None,
+                relay_health: None,
+                relay_authorization: None,
+                relay_governance: None,
+                coordinator_candidates: None,
+            });
+
+        let page = node_ui_manifest()
+            .pages
+            .into_iter()
+            .find(|page| page.id == "node_runtime")
+            .expect("runtime page");
+        let model =
+            build_page_model_for_page(&page, &snapshot, Locale::ZhCn).expect("runtime model");
+        let control_plane = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "runtime.section.control_plane"))
+            .expect("control plane section");
+
+        assert_eq!(control_plane.rows.len(), 2);
+        assert!(control_plane.rows[0]
+            .detail
+            .contains(t(Locale::ZhCn, "runtime.control_plane.limited")));
+        assert!(control_plane.rows[0].detail.contains(t(
+            Locale::ZhCn,
+            "runtime.control_plane.governance_read_only"
+        )));
+        assert!(control_plane.rows[0]
+            .detail
+            .contains("coordinator.control_plane.no_majority"));
+        assert!(control_plane.rows[0].detail.contains("1/2"));
+        assert!(control_plane.rows[0].detail.contains('3'));
+        assert!(control_plane.rows[1]
+            .detail
+            .contains(t(Locale::ZhCn, "runtime.control_plane.unobserved")));
+        assert!(control_plane.rows[1]
+            .detail
+            .contains("coordinator.control_plane.unobserved"));
+        assert!(!control_plane.rows[1].detail.contains("no_majority"));
     }
 
     fn relay_health_fixture(

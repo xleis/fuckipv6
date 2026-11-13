@@ -3318,16 +3318,26 @@ netns/iptables 测试覆盖。三端 Relay UI 的权限、网络选择、健康�
 
 **验收**：正常多数接管可重复、可观察，且不会产生双 Leader 写入。
 
-### W14-04 分区与无多数保护 `[ ]`
+### W14-04 分区与无多数保护 `[x]`
 
-- [ ] 少数分区不选举新 Leader；
-- [ ] 无多数时治理写入失败关闭；
-- [ ] 网络分区期间数据面按既有连接策略继续或安全降级；
-- [ ] 分区恢复后执行状态与任期对齐；
-- [ ] 防止重复提案、过期事件和租户状态回滚；
-- [ ] UI 明确“控制面受限”而非误报节点故障；
-- [ ] 完成网络分区、延迟、丢包和时钟漂移测试；
-- [ ] 所有分区事件可审计。
+- [x] 少数分区不选举新 Leader；
+- [x] 无多数时治理写入失败关闭；
+- [x] 网络分区期间数据面按既有连接策略继续或安全降级；
+- [x] 分区恢复后执行状态与任期对齐；
+- [x] 防止重复提案、过期事件和租户状态回滚；
+- [x] UI 明确“控制面受限”而非误报节点故障；
+- [x] 完成网络分区、延迟、丢包和时钟漂移测试；
+- [x] 所有分区事件可审计。
+
+**证据**：`minority_loss_and_delay_recover_without_rolling_back_the_term` 通过确定性 store/domain 故障注入覆盖少数票、
+无多数超时、迟到票拒绝、恢复后重新取得严格多数并以 term 2 / fencing token 2 提交、旧 term 写入拒绝、重启后任期
+不回退及完整审计链；`control_plane_requires_strict_majority_before_enabling_governance` 和
+`control_plane_projects_timeout_configuration_and_clock_limits` 覆盖选举中、租约过期、配置失效和时钟边界下的
+只读失败关闭。`coordinator_takeover_poll_preserves_the_live_data_plane_session` 验证候选状态轮询不替换
+`SignalingClient`、不结束数据面任务且不发送 shutdown。GPUI、WebUI 和契约测试验证统一投影为“控制面受限”，
+并保留数据面健康状态。Coordinator candidate 测试 13 passed，client takeover 测试 6 passed，common coordinator
+测试 30 passed；`cargo fmt --all -- --check`、Clippy、WebUI typecheck/lint/test 和契约检查均通过。
+本项未声称完成真实 netns/tc netem 多节点网络损伤验收；该拓扑、进程暂停和消息重放仍由 W14-10 执行。
 
 **验收**：系统宁可暂停治理也不制造双写；分区恢复不会回滚已确认状态。
 

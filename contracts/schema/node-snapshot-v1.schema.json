@@ -473,6 +473,19 @@
         "config_state": {
           "$ref": "#/$defs/CoordinatorCandidateConfigState"
         },
+        "control_plane": {
+          "$ref": "#/$defs/CoordinatorControlPlaneStatus",
+          "default": {
+            "governance_writable": false,
+            "quorum": {
+              "participant_count": 0,
+              "received_votes": 0,
+              "required_votes": 0
+            },
+            "reason_code": "coordinator.control_plane.unobserved",
+            "state": "read_only"
+          }
+        },
         "current_leader": {
           "anyOf": [
             {
@@ -581,6 +594,64 @@
         "unwilling"
       ],
       "type": "string"
+    },
+    "CoordinatorControlPlaneState": {
+      "oneOf": [
+        {
+          "const": "available",
+          "description": "A full-authority Stable term has a writable lease.",
+          "type": "string"
+        },
+        {
+          "const": "election_in_progress",
+          "description": "An election is active but has not yet committed a term.",
+          "type": "string"
+        },
+        {
+          "const": "quorum_unavailable",
+          "description": "The election ended without a strict majority, or its deadline elapsed\nbefore the durable term could be installed.",
+          "type": "string"
+        },
+        {
+          "const": "no_leader",
+          "description": "The candidate configuration is current, but no term is writable.",
+          "type": "string"
+        },
+        {
+          "const": "configuration_unavailable",
+          "description": "The candidate configuration is missing, pending, or expired.",
+          "type": "string"
+        },
+        {
+          "const": "read_only",
+          "description": "Authority is present but cannot safely perform governance writes.",
+          "type": "string"
+        }
+      ]
+    },
+    "CoordinatorControlPlaneStatus": {
+      "description": "Fail-closed projection intended for clients and operators. A missing leader\nis not a data-plane failure: `governance_writable = false` only pauses\ngovernance until a strict-majority election installs a fresh term.",
+      "properties": {
+        "governance_writable": {
+          "type": "boolean"
+        },
+        "quorum": {
+          "$ref": "#/$defs/CoordinatorQuorumStatus"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/CoordinatorControlPlaneState"
+        }
+      },
+      "required": [
+        "state",
+        "governance_writable",
+        "reason_code",
+        "quorum"
+      ],
+      "type": "object"
     },
     "CoordinatorElectionProposal": {
       "description": "A candidate-signed request to elect one deterministic Leader. A proposal is\nnot authority: it can only create a persisted election session and the\nresulting term is admitted after independently verified strict-majority\nvotes. The proposer must be the preferred eligible candidate and cannot\nappoint another node or itself outside the configured ordering.",
@@ -903,6 +974,31 @@
           "type": "boolean"
         }
       },
+      "type": "object"
+    },
+    "CoordinatorQuorumStatus": {
+      "properties": {
+        "participant_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "received_votes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "required_votes": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "received_votes",
+        "required_votes",
+        "participant_count"
+      ],
       "type": "object"
     },
     "CoordinatorTerm": {

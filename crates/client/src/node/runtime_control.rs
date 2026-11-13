@@ -8946,6 +8946,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coordinator_takeover_poll_preserves_the_live_data_plane_session() {
+        use fuckipv6_common::domain::{
+            CoordinatorCandidateConfigState, CoordinatorEmergencyState, CoordinatorLeaseStatus,
+        };
+        use fuckipv6_common::SignalingMessage;
+
+        let harness = TestHarness::new("coordinator-takeover-session-continuity").await;
+        harness
+            .configs
+            .create_network("takeover-continuity", "ws://127.0.0.1:6666", true)
+            .expect("create network configuration");
+        let network_id = NetworkId::from_public_key(b"coordinator-takeover-session-continuity");
+        harness
+            .configs
+            .set_network_id_metadata("takeover-continuity", network_id.as_str())
+            .expect("bind network id");
+
+        let (signaling, mut outbound) = SignalingClient::test_channel();
+        let signaling = Arc::new(signaling);
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let (routing_tx, _routing_rx) = mpsc::unbounded_channel();
+        let (terminated_tx, mut terminated_rx) = oneshot::channel();
+        let data_plane = tokio::spawn(async move {
+            let _ = shutdown_rx.changed().await;
+            let _ = terminated_tx.send(());
+            NetworkRuntimeExit {
+                cleanup: RuntimeCleanupOutcome::default(),
+                retained_owner: None,
+            }
+        });
+
+        let mut actor = NetworkRuntimeActor {
+            configs: harness.configs.clone(),
+            options: RuntimeOptions::default(),
+            state: harness.state.clone(),
+            events: harness.events.clone(),
+            lifecycle: harness.lifecycle.clone(),
+            registry: harness.registry.clone(),
+            services: harness.services.clone(),
+            launcher: Arc::new(harness.fake.clone()),
+            sessions: HashMap::from([(
+                "takeover-continuity".to_string(),
+                NetworkRuntimeSession {
+                    network_id: Some(network_id.to_string()),
+                    signaling: Some(signaling.clone()),
+                    tun_name: "fuckipv6-takeover-continuity".into(),
+                    routing_control: routing_tx,
+                    shutdown: shutdown_tx.clone(),
+                    handle: data_plane,
+                },
+            )]),
+            retained_owners: HashMap::new(),
+            cleanup_failures: BTreeMap::new(),
+            completed_cleanup: BTreeMap::new(),
+            timeouts: RuntimeTimeouts::default(),
+        };
+
+        let response_client = signaling.clone();
+        let expected_network_id = network_id.clone();
+        let responder = tokio::spawn(async move {
+            let request = timeout(Duration::from_secs(1), outbound.recv())
+                .await
+                .expect("takeover poll must request authoritative status")
+                .expect("outbound signaling channel must stay open");
+            let SignalingMessage::CoordinatorCandidateStatusRequest {
+                network_id: requested,
+            } = request
+            else {
+                panic!("expected coordinator status request, got {request:?}");
+            };
+            assert_eq!(requested, expected_network_id);
+            let status = CoordinatorCandidateStatus {
+                network_id: requested,
+                generated_at_unix_ms: 1_000,
+                config_state: CoordinatorCandidateConfigState::Missing,
+                config: None,
+                candidates: Vec::new(),
+                current_leader: None,
+                latest_term: None,
+                lease: CoordinatorLeaseStatus::no_term(),
+                control_plane: Default::default(),
+                emergency: CoordinatorEmergencyState::NoCandidatesConfigured,
+                latest_election: None,
+            };
+            assert!(response_client.route_coordinator_candidate_test_response(
+                SignalingMessage::CoordinatorCandidateStatusAck { status },
+            ));
+        });
+
+        timeout(Duration::from_secs(1), actor.refresh_coordinator_takeover())
+            .await
+            .expect("coordinator takeover poll timed out");
+        responder.await.expect("responder task failed");
+
+        let session = actor
+            .sessions
+            .get("takeover-continuity")
+            .expect("data-plane session must not be removed");
+        assert!(session
+            .signaling
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &signaling)));
+        assert!(!session.handle.is_finished());
+        assert!(!*shutdown_tx.borrow());
+        assert!(matches!(
+            terminated_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+
+        let session = actor
+            .sessions
+            .remove("takeover-continuity")
+            .expect("test session");
+        session.shutdown.send(true).expect("stop test session");
+        timeout(Duration::from_secs(1), session.handle)
+            .await
+            .expect("test data-plane session did not stop")
+            .expect("test data-plane task failed");
+        assert_eq!(
+            terminated_rx.await.expect("termination signal must arrive"),
+            ()
+        );
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn local_exit_enable_disable_is_idempotent_and_preserves_network_runtime() {
         let harness = TestHarness::new("local-exit-toggle").await;
         start_fake_network(&harness, "local-exit-toggle").await;

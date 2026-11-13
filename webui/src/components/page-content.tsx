@@ -2062,6 +2062,7 @@ function NodeRuntime({
   const interfaces = snapshot.interfaces ?? [];
   const interfaceProblems = snapshot.interface_problems ?? [];
   const routingSummaries = snapshot.routing_summaries ?? [];
+  const embeddedServices = snapshot.embedded_services ?? [];
   const tunCapabilities = snapshot.tun_capabilities;
   const tunPlatform = tunCapabilities
     ? label(locale, `runtime.value.tun_platform.${tunCapabilities.platform}`)
@@ -2403,11 +2404,11 @@ function NodeRuntime({
       <section className="surface-card" data-testid="runtime-services">
         <div className="card-heading">
           <h3>{label(locale, "runtime.section.services")}</h3>
-          <span>{snapshot.embedded_services?.length ?? 0}</span>
+          <span>{embeddedServices.length}</span>
         </div>
-        {(snapshot.embedded_services?.length ?? 0) === 0
+        {embeddedServices.length === 0
           ? empty(label(locale, "runtime.empty.services"))
-          : (snapshot.embedded_services ?? []).map((service) => (
+          : embeddedServices.map((service) => (
               <div className="compact-row" key={service.network_name}>
                 <RadioTower size={15} className={statusTone(service.status)} />
                 <span>
@@ -2426,6 +2427,65 @@ function NodeRuntime({
                 </span>
               </div>
             ))}
+      </section>
+
+      <section className="surface-card" data-testid="runtime-control-plane">
+        <div className="card-heading">
+          <h3>{label(locale, "runtime.section.control_plane")}</h3>
+          <ShieldCheck size={17} />
+        </div>
+        {embeddedServices.length === 0
+          ? empty(label(locale, "runtime.empty.control_plane"))
+          : embeddedServices.map((service) => {
+              const controlPlane = service.coordinator_candidates?.control_plane;
+              const unobserved = controlPlane == null;
+              const stateLabel = controlPlane?.state === "available"
+                ? label(locale, "runtime.control_plane.available")
+                : unobserved
+                  ? label(locale, "runtime.control_plane.unobserved")
+                  : label(locale, "runtime.control_plane.limited");
+              const writable = controlPlane?.governance_writable === true;
+              const governanceLabel = label(
+                locale,
+                writable
+                  ? "runtime.control_plane.governance_writable"
+                  : "runtime.control_plane.governance_read_only",
+              );
+              const received = controlPlane?.quorum.received_votes ?? 0;
+              const required = controlPlane?.quorum.required_votes ?? 0;
+              const participants = controlPlane?.quorum.participant_count ?? 0;
+              const reasonCode =
+                controlPlane?.reason_code ??
+                "coordinator.control_plane.unobserved";
+              return (
+                <div
+                  className="compact-row"
+                  data-control-plane-state={controlPlane?.state ?? "unobserved"}
+                  data-governance-writable={writable ? "true" : "false"}
+                  data-testid={`runtime-control-plane-${service.network_name}`}
+                  key={service.network_name}
+                >
+                  <Server size={15} />
+                  <span>
+                    <strong>{service.network_name}</strong>
+                    <small>
+                      {stateLabel} · {governanceLabel}
+                    </small>
+                    <small>
+                      {label(locale, "runtime.control_plane.votes")}{" "}
+                      {received}/{required} ·{" "}
+                      {label(locale, "runtime.control_plane.participants")}{" "}
+                      {participants} · <code>{reasonCode}</code>
+                    </small>
+                  </span>
+                  <span
+                    className={`status-pill ${writable ? "good" : "warn"}`}
+                  >
+                    {stateLabel}
+                  </span>
+                </div>
+              );
+            })}
       </section>
     </div>
   );

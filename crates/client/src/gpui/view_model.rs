@@ -3017,6 +3017,7 @@ pub fn build_command(
                         "expires_at_unix_ms",
                         &required("expires_at_unix_ms")?,
                     )?,
+                    credential: None,
                 },
             ))
         }

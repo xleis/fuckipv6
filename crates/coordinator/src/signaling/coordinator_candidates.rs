@@ -2,7 +2,9 @@ use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use fuckipv6_common::domain::{
     AuditEntry, AuditId, AuditLog, AuditOutcome, CoordinatorCandidateConfig,
-    CoordinatorCandidateDeclaration, CoordinatorCandidateStatus, NetworkId, NetworkRecord, NodeId,
+    CoordinatorCandidateDeclaration, CoordinatorCandidateStatus, CoordinatorTerm,
+    CoordinatorWriteCredential, CoordinatorWriteKind, NetworkId, NetworkRecord, NodeId,
+    COORDINATOR_MAX_LEASE_DURATION_MS,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -15,6 +17,15 @@ use std::sync::Mutex;
 const COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION: u16 = 1;
 static AUDIT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+struct ConfigUpdate<'a> {
+    actor: &'a NodeId,
+    expected_revision: u64,
+    config: CoordinatorCandidateConfig,
+    credential: Option<&'a CoordinatorWriteCredential>,
+    network: &'a NetworkRecord,
+    now_unix_ms: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredCoordinatorCandidates {
@@ -22,6 +33,10 @@ struct StoredCoordinatorCandidates {
     config: Option<CoordinatorCandidateConfig>,
     #[serde(default)]
     declarations: BTreeMap<NodeId, CoordinatorCandidateDeclaration>,
+    /// Durable high-water mark. It is retained after lease expiry so a restart
+    /// can never make an older term appear current again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    latest_term: Option<CoordinatorTerm>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +69,12 @@ impl CoordinatorCandidateFile {
                 config.validate_definition()?;
                 if config.network_id != *network_id {
                     bail!("coordinator_candidate.error.network_mismatch");
+                }
+            }
+            if let Some(term) = &stored.latest_term {
+                term.validate_definition()?;
+                if term.network_id != *network_id {
+                    bail!("coordinator_candidate.error.term_network_mismatch");
                 }
             }
             for (node_id, declaration) in &stored.declarations {
@@ -108,6 +129,184 @@ impl CoordinatorCandidateStore {
         })
     }
 
+    /// Admit a new authoritative term. This is the persistence primitive used
+    /// by the election/handoff protocol; it validates the term against the
+    /// active candidate configuration and advances the durable high-water mark.
+    pub fn install_term(
+        &self,
+        actor: &NodeId,
+        term: CoordinatorTerm,
+        now_unix_ms: u64,
+    ) -> Result<CoordinatorCandidateStatus> {
+        let network_id = term.network_id.clone();
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
+        self.ensure_parent()?;
+        let _file_lock = lock_candidate_file(&self.path)?;
+        let mut file = self.load_unlocked()?;
+        let network = read_network_record(&self.network_record_path, &network_id)?;
+
+        let outcome = self.apply_term_install(&mut file, actor, term, &network, now_unix_ms);
+        match outcome {
+            Ok(status) => {
+                append_audit(
+                    &mut file.audit_log,
+                    actor,
+                    &network.network_id,
+                    "coordinator.term.install",
+                    format!("network/{}/coordinator-term", network.network_id),
+                    AuditOutcome::Succeeded,
+                    now_unix_ms,
+                    "coordinator term admitted",
+                    term_audit_details(status.latest_term.as_ref()),
+                )?;
+                self.persist(&file)?;
+                Ok(status)
+            }
+            Err(error) => {
+                append_audit(
+                    &mut file.audit_log,
+                    actor,
+                    &network.network_id,
+                    "coordinator.term.install.rejected",
+                    format!("network/{}/coordinator-term", network.network_id),
+                    audit_outcome_for_error(&error),
+                    now_unix_ms,
+                    "coordinator term rejected",
+                    BTreeMap::from([("error".into(), error.to_string())]),
+                )?;
+                self.persist(&file)?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Renew the current Leader lease without changing term or fencing token.
+    /// Expired or clock-skewed authority remains read-only and the refusal is
+    /// appended to the durable audit chain.
+    pub fn renew_term_lease(
+        &self,
+        actor: &NodeId,
+        credential: &CoordinatorWriteCredential,
+        new_expires_at_unix_ms: u64,
+        now_unix_ms: u64,
+    ) -> Result<CoordinatorCandidateStatus> {
+        let network_id = credential.network_id.clone();
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
+        self.ensure_parent()?;
+        let _file_lock = lock_candidate_file(&self.path)?;
+        let mut file = self.load_unlocked()?;
+        let network = read_network_record(&self.network_record_path, &network_id)?;
+
+        let outcome = self.apply_term_renewal(
+            &mut file,
+            actor,
+            credential,
+            new_expires_at_unix_ms,
+            &network,
+            now_unix_ms,
+        );
+        match outcome {
+            Ok(status) => {
+                append_audit(
+                    &mut file.audit_log,
+                    actor,
+                    &network.network_id,
+                    "coordinator.term.lease.renew",
+                    format!("network/{}/coordinator-term", network.network_id),
+                    AuditOutcome::Succeeded,
+                    now_unix_ms,
+                    "coordinator term lease renewed",
+                    term_audit_details(status.latest_term.as_ref()),
+                )?;
+                self.persist(&file)?;
+                Ok(status)
+            }
+            Err(error) => {
+                append_audit(
+                    &mut file.audit_log,
+                    actor,
+                    &network.network_id,
+                    "coordinator.term.lease.renew.rejected",
+                    format!("network/{}/coordinator-term", network.network_id),
+                    audit_outcome_for_error(&error),
+                    now_unix_ms,
+                    "coordinator term lease renewal rejected",
+                    BTreeMap::from([
+                        ("error".into(), error.to_string()),
+                        ("term".into(), credential.term.to_string()),
+                        (
+                            "fencing_token".into(),
+                            credential.fencing_token.0.to_string(),
+                        ),
+                    ]),
+                )?;
+                self.persist(&file)?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Central write gate for callers that already have a governance payload.
+    /// Rejections are durably audited; the caller must not mutate its store when
+    /// this method returns an error.
+    pub fn authorize_governance_write(
+        &self,
+        actor: &NodeId,
+        credential: &CoordinatorWriteCredential,
+        write: CoordinatorWriteKind,
+        now_unix_ms: u64,
+    ) -> Result<CoordinatorTerm> {
+        let network_id = credential.network_id.clone();
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
+        self.ensure_parent()?;
+        let _file_lock = lock_candidate_file(&self.path)?;
+        let mut file = self.load_unlocked()?;
+        let network = read_network_record(&self.network_record_path, &network_id)?;
+        let stored = file.networks.get(&network_id);
+        let result = stored
+            .and_then(|stored| stored.latest_term.as_ref())
+            .context("coordinator_term.error.missing")
+            .and_then(|term| {
+                term.authorize_write(actor, credential, write, now_unix_ms)?;
+                Ok(term.clone())
+            });
+        if let Err(error) = &result {
+            append_audit(
+                &mut file.audit_log,
+                actor,
+                &network.network_id,
+                "coordinator.term.write.rejected",
+                format!("network/{}/coordinator-term", network.network_id),
+                audit_outcome_for_error(error),
+                now_unix_ms,
+                "coordinator governance write rejected",
+                BTreeMap::from([
+                    ("error".into(), error.to_string()),
+                    ("term".into(), credential.term.to_string()),
+                    (
+                        "fencing_token".into(),
+                        credential.fencing_token.0.to_string(),
+                    ),
+                    ("write".into(), format!("{write:?}")),
+                ]),
+            )?;
+            self.persist(&file)?;
+        }
+        result
+    }
+
     pub fn update_config(
         &self,
         actor: &NodeId,
@@ -127,11 +326,14 @@ impl CoordinatorCandidateStore {
 
         let outcome = self.apply_config_update(
             &mut file,
-            actor,
-            expected_revision,
-            config,
-            &network,
-            now_unix_ms,
+            ConfigUpdate {
+                actor,
+                expected_revision,
+                config,
+                credential: None,
+                network: &network,
+                now_unix_ms,
+            },
         );
         match outcome {
             Ok(status) => {
@@ -171,6 +373,94 @@ impl CoordinatorCandidateStore {
                     "coordinator candidate configuration rejected",
                     BTreeMap::from([
                         ("expected_revision".into(), expected_revision.to_string()),
+                        ("error".into(), error.to_string()),
+                    ]),
+                )?;
+                self.persist(&file)?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Post-election candidate configuration write. Unlike the bootstrap path,
+    /// this method requires an authoritative term and fencing token.
+    pub fn update_config_authorized(
+        &self,
+        actor: &NodeId,
+        expected_revision: u64,
+        config: CoordinatorCandidateConfig,
+        credential: &CoordinatorWriteCredential,
+        now_unix_ms: u64,
+    ) -> Result<CoordinatorCandidateStatus> {
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
+        self.ensure_parent()?;
+        let _file_lock = lock_candidate_file(&self.path)?;
+        let mut file = self.load_unlocked()?;
+        let network = read_network_record(&self.network_record_path, &config.network_id)?;
+
+        let outcome = self.apply_config_update(
+            &mut file,
+            ConfigUpdate {
+                actor,
+                expected_revision,
+                config,
+                credential: Some(credential),
+                network: &network,
+                now_unix_ms,
+            },
+        );
+        match outcome {
+            Ok(status) => {
+                append_audit(
+                    &mut file.audit_log,
+                    actor,
+                    &network.network_id,
+                    "coordinator.candidate.config.update.authorized",
+                    format!("network/{}/coordinator-candidates", network.network_id),
+                    AuditOutcome::Succeeded,
+                    now_unix_ms,
+                    "coordinator candidate configuration updated under term authority",
+                    BTreeMap::from([
+                        (
+                            "revision".into(),
+                            status
+                                .config
+                                .as_ref()
+                                .map(|config| config.revision.to_string())
+                                .unwrap_or_else(|| "0".into()),
+                        ),
+                        ("expected_revision".into(), expected_revision.to_string()),
+                        ("term".into(), credential.term.to_string()),
+                        (
+                            "fencing_token".into(),
+                            credential.fencing_token.0.to_string(),
+                        ),
+                    ]),
+                )?;
+                self.persist(&file)?;
+                Ok(status)
+            }
+            Err(error) => {
+                append_audit(
+                    &mut file.audit_log,
+                    actor,
+                    &network.network_id,
+                    "coordinator.candidate.config.update.authorized",
+                    format!("network/{}/coordinator-candidates", network.network_id),
+                    audit_outcome_for_error(&error),
+                    now_unix_ms,
+                    "coordinator candidate configuration update rejected",
+                    BTreeMap::from([
+                        ("expected_revision".into(), expected_revision.to_string()),
+                        ("term".into(), credential.term.to_string()),
+                        (
+                            "fencing_token".into(),
+                            credential.fencing_token.0.to_string(),
+                        ),
                         ("error".into(), error.to_string()),
                     ]),
                 )?;
@@ -283,12 +573,16 @@ impl CoordinatorCandidateStore {
     fn apply_config_update(
         &self,
         file: &mut CoordinatorCandidateFile,
-        actor: &NodeId,
-        expected_revision: u64,
-        config: CoordinatorCandidateConfig,
-        network: &NetworkRecord,
-        now_unix_ms: u64,
+        update: ConfigUpdate<'_>,
     ) -> Result<CoordinatorCandidateStatus> {
+        let ConfigUpdate {
+            actor,
+            expected_revision,
+            config,
+            credential,
+            network,
+            now_unix_ms,
+        } = update;
         config.validate_against_network(network)?;
         if config.signer != *actor {
             bail!("coordinator_candidate.error.authenticated_actor_mismatch");
@@ -298,6 +592,19 @@ impl CoordinatorCandidateStore {
         }
 
         let stored = file.networks.entry(network.network_id.clone()).or_default();
+        match (&stored.latest_term, credential) {
+            (None, None) => {}
+            (Some(term), Some(credential)) => {
+                term.authorize_write(
+                    actor,
+                    credential,
+                    CoordinatorWriteKind::CandidateSet,
+                    now_unix_ms,
+                )?;
+            }
+            (Some(_), None) => bail!("coordinator_term.error.write_requires_term"),
+            (None, Some(_)) => bail!("coordinator_term.error.missing"),
+        }
         let current_revision = stored
             .config
             .as_ref()
@@ -326,6 +633,108 @@ impl CoordinatorCandidateStore {
         // configuration. Keeping it would make offline status look fresh.
         stored.declarations.clear();
         stored.config = Some(config);
+        let status = status_from_file(network, Some(stored), now_unix_ms)?;
+        self.persist(file)?;
+        Ok(status)
+    }
+
+    fn apply_term_install(
+        &self,
+        file: &mut CoordinatorCandidateFile,
+        actor: &NodeId,
+        term: CoordinatorTerm,
+        network: &NetworkRecord,
+        now_unix_ms: u64,
+    ) -> Result<CoordinatorCandidateStatus> {
+        if !network.members.contains(actor) {
+            bail!("coordinator_term.error.permission_denied");
+        }
+        if term.leader != *actor {
+            bail!("coordinator_term.error.leader_mismatch");
+        }
+        term.validate_at(now_unix_ms)
+            .with_context(|| "coordinator_term.error.invalid")?;
+        let lease = term.lease_status_at(now_unix_ms);
+        if !lease.is_writable() {
+            bail!(
+                "{}",
+                lease
+                    .reason_code
+                    .replace("coordinator.lease", "coordinator_term.error")
+            );
+        }
+        if term.expires_at_unix_ms.saturating_sub(now_unix_ms) > COORDINATOR_MAX_LEASE_DURATION_MS {
+            bail!("coordinator_term.error.lease_too_long");
+        }
+
+        let stored = file
+            .networks
+            .get_mut(&network.network_id)
+            .context("coordinator_term.error.config_missing")?;
+        let config = stored
+            .config
+            .as_ref()
+            .context("coordinator_term.error.config_missing")?;
+        config.validate_against_network(network)?;
+        if now_unix_ms < config.effective_from_unix_ms || now_unix_ms >= config.expires_at_unix_ms {
+            bail!("coordinator_term.error.config_not_current");
+        }
+        term.validate_against_candidate_config(config)?;
+
+        if let Some(current) = &stored.latest_term {
+            if current == &term {
+                return status_from_file(network, Some(stored), now_unix_ms);
+            }
+            current.validate_successor(&term, now_unix_ms)?;
+        }
+        stored.latest_term = Some(term);
+        let status = status_from_file(network, Some(stored), now_unix_ms)?;
+        self.persist(file)?;
+        Ok(status)
+    }
+
+    fn apply_term_renewal(
+        &self,
+        file: &mut CoordinatorCandidateFile,
+        actor: &NodeId,
+        credential: &CoordinatorWriteCredential,
+        new_expires_at_unix_ms: u64,
+        network: &NetworkRecord,
+        now_unix_ms: u64,
+    ) -> Result<CoordinatorCandidateStatus> {
+        let stored = file
+            .networks
+            .get_mut(&network.network_id)
+            .context("coordinator_term.error.missing")?;
+        let current = stored
+            .latest_term
+            .as_ref()
+            .context("coordinator_term.error.missing")?;
+        current.authorize_write(
+            actor,
+            credential,
+            CoordinatorWriteKind::PublishOwnTerm,
+            now_unix_ms,
+        )?;
+        let config = stored
+            .config
+            .as_ref()
+            .context("coordinator_term.error.config_missing")?;
+        current.validate_against_candidate_config(config)?;
+        if new_expires_at_unix_ms <= current.expires_at_unix_ms {
+            bail!("coordinator_term.error.lease_not_extended");
+        }
+        let maximum_expiry = now_unix_ms
+            .checked_add(COORDINATOR_MAX_LEASE_DURATION_MS)
+            .context("coordinator_term.error.lease_overflow")?;
+        if new_expires_at_unix_ms > maximum_expiry {
+            bail!("coordinator_term.error.lease_too_long");
+        }
+
+        let mut renewed = current.clone();
+        renewed.expires_at_unix_ms = new_expires_at_unix_ms;
+        renewed.validate_definition()?;
+        stored.latest_term = Some(renewed);
         let status = status_from_file(network, Some(stored), now_unix_ms)?;
         self.persist(file)?;
         Ok(status)
@@ -414,19 +823,45 @@ fn status_from_file(
     now_unix_ms: u64,
 ) -> Result<CoordinatorCandidateStatus> {
     let config = stored.and_then(|stored| stored.config.as_ref());
+    let latest_term = stored.and_then(|stored| stored.latest_term.as_ref());
     let declarations = stored
         .map(|stored| stored.declarations.values().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
-    CoordinatorCandidateStatus::assess(network, config, &declarations, None, now_unix_ms)
+    CoordinatorCandidateStatus::assess(network, config, &declarations, latest_term, now_unix_ms)
         .context("coordinator_candidate.error.status_projection_failed")
+}
+
+fn term_audit_details(term: Option<&CoordinatorTerm>) -> BTreeMap<String, String> {
+    let Some(term) = term else {
+        return BTreeMap::new();
+    };
+    BTreeMap::from([
+        ("term".into(), term.term.to_string()),
+        ("leader".into(), term.leader.to_string()),
+        ("fencing_token".into(), term.fencing_token.0.to_string()),
+        (
+            "lease_expires_at_unix_ms".into(),
+            term.expires_at_unix_ms.to_string(),
+        ),
+    ])
 }
 
 fn audit_outcome_for_error(error: &anyhow::Error) -> AuditOutcome {
     let code = error.to_string();
     if code.contains("permission_denied")
         || code.contains("actor_mismatch")
+        || code.contains("leader_mismatch")
         || code.contains("not_candidate")
         || code.contains("config_missing")
+        || code.contains("term_rollback")
+        || code.contains("term_conflict")
+        || code.contains("fencing_token_rollback")
+        || code.contains("not_installed")
+        || code.contains("write_forbidden")
+        || code.contains("transition_read_only")
+        || code.contains("clock_skew")
+        || code.contains("lease_expired")
+        || code.contains("write_requires_term")
     {
         AuditOutcome::Denied
     } else {
@@ -548,10 +983,11 @@ fn persist_bytes_atomic(path: &Path, content: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use fuckipv6_common::domain::{
-        CapabilityKind, CoordinatorCandidate, CoordinatorCandidateResources,
-        CoordinatorCandidateWillingness, CoordinatorPublicReachability, ExitContributionMode,
-        ExitContributionObligation, ExitContributionScope, ExitSelectionPolicy,
-        NetworkCreateProfile, NetworkJoinMode, NetworkVisibility, PublicKey,
+        CapabilityKind, CoordinatorAuthority, CoordinatorCandidate, CoordinatorCandidateResources,
+        CoordinatorCandidateWillingness, CoordinatorPhase, CoordinatorPublicReachability,
+        ExitContributionMode, ExitContributionObligation, ExitContributionScope,
+        ExitSelectionPolicy, FencingToken, NetworkCreateProfile, NetworkJoinMode,
+        NetworkVisibility, PublicKey,
     };
     use fuckipv6_common::Identity;
     use std::sync::Arc;
@@ -684,6 +1120,43 @@ mod tests {
                 candidate,
             )
             .unwrap()
+        }
+
+        fn term(
+            &self,
+            term: u64,
+            fencing_token: u64,
+            leader: &Identity,
+            issued_at_unix_ms: u64,
+            expires_at_unix_ms: u64,
+        ) -> CoordinatorTerm {
+            CoordinatorTerm {
+                network_id: self.network.network_id.clone(),
+                term,
+                leader: NodeId::from_public_key(&leader.public_key()),
+                candidate_group: vec![
+                    NodeId::from_public_key(&self.candidate_one.public_key()),
+                    NodeId::from_public_key(&self.candidate_two.public_key()),
+                ],
+                majority_proof: vec![
+                    NodeId::from_public_key(&self.candidate_one.public_key()),
+                    NodeId::from_public_key(&self.candidate_two.public_key()),
+                ],
+                authority: CoordinatorAuthority::Full,
+                phase: CoordinatorPhase::Stable,
+                fencing_token: FencingToken(fencing_token),
+                issued_at_unix_ms,
+                expires_at_unix_ms,
+            }
+        }
+
+        fn credential(&self, term: &CoordinatorTerm) -> CoordinatorWriteCredential {
+            CoordinatorWriteCredential {
+                network_id: term.network_id.clone(),
+                term: term.term,
+                leader: term.leader.clone(),
+                fencing_token: term.fencing_token,
+            }
         }
     }
 
@@ -902,6 +1375,231 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "coordinator_candidate.error.permission_denied"
+        );
+    }
+
+    #[test]
+    fn terms_survive_restart_and_old_writes_are_rejected_and_audited() {
+        let fixture = Fixture::new("term-high-water-mark");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_two_id = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+
+        let first = fixture.term(1, 1, &fixture.candidate_one, NOW, NOW + 60_000);
+        let first_credential = fixture.credential(&first);
+        let status = store
+            .install_term(&candidate_one_id, first.clone(), NOW)
+            .unwrap();
+        assert_eq!(status.current_leader, Some(candidate_one_id.clone()));
+        assert_eq!(status.latest_term.as_ref(), Some(&first));
+        assert!(status.lease.is_writable());
+
+        let restarted = fixture.store();
+        let restored = restarted
+            .status(&owner_id, &fixture.network.network_id, NOW + 1)
+            .unwrap();
+        assert_eq!(restored.latest_term.as_ref(), Some(&first));
+        assert_eq!(restored.current_leader, Some(candidate_one_id.clone()));
+
+        let second = fixture.term(2, 2, &fixture.candidate_two, NOW + 2, NOW + 60_000);
+        store
+            .install_term(&candidate_two_id, second.clone(), NOW + 2)
+            .unwrap();
+        assert_eq!(
+            store
+                .install_term(&candidate_one_id, first.clone(), NOW + 3)
+                .unwrap_err()
+                .to_string()
+                .split(':')
+                .next(),
+            Some("domain.coordinator_term_rollback")
+        );
+        let stale_write_error = store
+            .authorize_governance_write(
+                &candidate_one_id,
+                &first_credential,
+                CoordinatorWriteKind::Membership,
+                NOW + 3,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            stale_write_error.contains("domain.coordinator_term_rollback"),
+            "{stale_write_error}"
+        );
+
+        let audit = store.audit_entries().unwrap();
+        assert!(audit.iter().any(|entry| {
+            entry.action == "coordinator.term.install.rejected"
+                && entry.outcome == AuditOutcome::Denied
+        }));
+        assert!(
+            audit.iter().any(|entry| {
+                entry.action == "coordinator.term.write.rejected"
+                    && entry.outcome == AuditOutcome::Denied
+                    && entry.details.get("term") == Some(&"1".into())
+                    && entry.details.get("fencing_token") == Some(&"[REDACTED]".into())
+            }),
+            "{audit:#?}"
+        );
+    }
+
+    #[test]
+    fn lease_renewal_extends_authority_and_expiry_enters_read_only() {
+        let fixture = Fixture::new("term-lease");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        let first = fixture.term(1, 1, &fixture.candidate_one, NOW, NOW + 60_000);
+        let credential = fixture.credential(&first);
+        store.install_term(&candidate_one_id, first, NOW).unwrap();
+
+        let renewed = store
+            .renew_term_lease(&candidate_one_id, &credential, NOW + 120_000, NOW + 40_000)
+            .unwrap();
+        assert_eq!(
+            renewed.latest_term.as_ref().unwrap().expires_at_unix_ms,
+            NOW + 120_000
+        );
+        assert_eq!(renewed.current_leader, Some(candidate_one_id.clone()));
+
+        let error = store
+            .renew_term_lease(&candidate_one_id, &credential, NOW + 180_000, NOW + 120_000)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("domain.coordinator_lease_expired"),
+            "{error}"
+        );
+        let expired = store
+            .status(&owner_id, &fixture.network.network_id, NOW + 120_000)
+            .unwrap();
+        assert_eq!(expired.current_leader, None);
+        assert_eq!(
+            expired.lease.state,
+            fuckipv6_common::domain::CoordinatorLeaseState::ReadOnly
+        );
+        assert_eq!(expired.lease.reason_code, "coordinator.lease.expired");
+        assert!(store.audit_entries().unwrap().iter().any(|entry| {
+            entry.action == "coordinator.term.lease.renew.rejected"
+                && entry.outcome == AuditOutcome::Denied
+        }));
+    }
+
+    #[test]
+    fn bounded_clock_rollback_marks_authority_read_only() {
+        let fixture = Fixture::new("term-clock");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        store
+            .install_term(
+                &candidate_one_id,
+                fixture.term(1, 1, &fixture.candidate_one, NOW, NOW + 60_000),
+                NOW,
+            )
+            .unwrap();
+
+        let status = store
+            .status(
+                &owner_id,
+                &fixture.network.network_id,
+                NOW - fuckipv6_common::domain::COORDINATOR_CLOCK_SKEW_LIMIT_MS - 1,
+            )
+            .unwrap();
+        assert_eq!(status.current_leader, None);
+        assert_eq!(status.lease.reason_code, "coordinator.lease.clock_skew");
+        assert_eq!(
+            status.lease.observed_clock_skew_ms,
+            fuckipv6_common::domain::COORDINATOR_CLOCK_SKEW_LIMIT_MS + 1
+        );
+    }
+
+    #[test]
+    fn post_term_configuration_write_requires_matching_authority() {
+        let fixture = Fixture::new("term-config-write");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let config_one = fixture.config(
+            1,
+            vec![
+                CoordinatorCandidate {
+                    node_id: owner_id.clone(),
+                    priority: 10,
+                },
+                CoordinatorCandidate {
+                    node_id: candidate_one_id.clone(),
+                    priority: 20,
+                },
+            ],
+        );
+        store.update_config(&owner_id, 0, config_one, NOW).unwrap();
+        let mut term = fixture.term(1, 10, &fixture.candidate_one, NOW, NOW + 60_000);
+        term.leader = owner_id.clone();
+        term.candidate_group = vec![owner_id.clone(), candidate_one_id.clone()];
+        term.majority_proof = vec![owner_id.clone(), candidate_one_id.clone()];
+        let credential = fixture.credential(&term);
+        store.install_term(&owner_id, term, NOW).unwrap();
+
+        let config_two = fixture.config(
+            2,
+            vec![
+                CoordinatorCandidate {
+                    node_id: owner_id.clone(),
+                    priority: 10,
+                },
+                CoordinatorCandidate {
+                    node_id: candidate_one_id.clone(),
+                    priority: 20,
+                },
+            ],
+        );
+
+        assert_eq!(
+            store
+                .update_config(&owner_id, 1, config_two.clone(), NOW + 1)
+                .unwrap_err()
+                .to_string(),
+            "coordinator_term.error.write_requires_term"
+        );
+        store
+            .update_config_authorized(&owner_id, 1, config_two, &credential, NOW + 2)
+            .unwrap();
+        let mut stale = credential;
+        stale.fencing_token = FencingToken(9);
+        let stale_write_error = store
+            .authorize_governance_write(
+                &owner_id,
+                &stale,
+                CoordinatorWriteKind::CandidateSet,
+                NOW + 3,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            stale_write_error.contains("domain.fencing_token_rollback"),
+            "{stale_write_error}"
+        );
+        let audit = store.audit_entries().unwrap();
+        assert!(
+            audit.iter().any(|entry| {
+                entry.action == "coordinator.candidate.config.update"
+                    && entry.outcome == AuditOutcome::Denied
+                    && entry.details.get("error")
+                        == Some(&"coordinator_term.error.write_requires_term".into())
+            }),
+            "{audit:#?}"
         );
     }
 }

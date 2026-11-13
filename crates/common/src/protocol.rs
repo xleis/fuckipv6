@@ -4,13 +4,14 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 use crate::domain::{
     ContentHash, CoordinatorCandidateConfig, CoordinatorCandidateDeclaration,
-    CoordinatorCandidateStatus, ExitContributionAuthorizationSnapshot, ExitContributionRequest,
-    ExitContributionRequestId, ExitContributionRequestState, ExitContributionReviewAction,
-    InvitationCreateRequest, InvitationId, InvitationPreviewRequest, InvitationRedeemRequest,
-    InvitationRedemption, InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest,
-    JoinRequestId, JoinRequestReviewAction, JoinRequestState, MemberLifecycleChange,
-    MemberLifecycleChangeRequest, MemberRemovalPreview, MemberRemovalPreviewRequest, NetworkId,
-    NetworkJoinPreview, NetworkJoinPreviewRequest, NetworkMemberDirectory, NodeId,
+    CoordinatorCandidateStatus, CoordinatorTerm, CoordinatorWriteCredential,
+    ExitContributionAuthorizationSnapshot, ExitContributionRequest, ExitContributionRequestId,
+    ExitContributionRequestState, ExitContributionReviewAction, InvitationCreateRequest,
+    InvitationId, InvitationPreviewRequest, InvitationRedeemRequest, InvitationRedemption,
+    InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestId,
+    JoinRequestReviewAction, JoinRequestState, MemberLifecycleChange, MemberLifecycleChangeRequest,
+    MemberRemovalPreview, MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview,
+    NetworkJoinPreviewRequest, NetworkMemberDirectory, NodeId,
 };
 use crate::types::{ClientId, NatType, PeerInfo, RouteEntry, VirtualIps};
 
@@ -395,6 +396,28 @@ pub enum SignalingMessage {
     },
     CoordinatorCandidateStatusChanged {
         network_id: NetworkId,
+    },
+
+    // Coordinator term authority. Appended after all existing variants so
+    // mixed-version peers cannot shift postcard variant numbers. Once a term is
+    // installed, governance mutations must use an authenticated, fenced form.
+    CoordinatorCandidateConfigUpdateAuthorized {
+        expected_revision: u64,
+        config: CoordinatorCandidateConfig,
+        credential: CoordinatorWriteCredential,
+    },
+    CoordinatorTermInstall {
+        term: CoordinatorTerm,
+    },
+    CoordinatorTermInstallAck {
+        status: CoordinatorCandidateStatus,
+    },
+    CoordinatorTermLeaseRenew {
+        credential: CoordinatorWriteCredential,
+        new_expires_at_unix_ms: u64,
+    },
+    CoordinatorTermLeaseRenewAck {
+        status: CoordinatorCandidateStatus,
     },
 }
 
@@ -1293,7 +1316,10 @@ mod tests {
 
     #[test]
     fn coordinator_candidate_messages_are_postcard_safe() -> anyhow::Result<()> {
-        use crate::domain::CoordinatorCandidate;
+        use crate::domain::{
+            CoordinatorAuthority, CoordinatorCandidate, CoordinatorPhase, CoordinatorTerm,
+            CoordinatorWriteCredential, FencingToken,
+        };
 
         let identity = crate::Identity::generate()?;
         let network_id = NetworkId::from_public_key(b"network");
@@ -1302,7 +1328,7 @@ mod tests {
             network_id.clone(),
             1,
             vec![CoordinatorCandidate {
-                node_id: candidate_id,
+                node_id: candidate_id.clone(),
                 priority: 10,
             }],
             100,
@@ -1353,6 +1379,66 @@ mod tests {
             panic!("expected coordinator candidate declaration");
         };
         assert_eq!(decoded, declaration);
+
+        let term = CoordinatorTerm {
+            network_id: network_id.clone(),
+            term: 1,
+            leader: candidate_id.clone(),
+            candidate_group: vec![candidate_id.clone()],
+            majority_proof: vec![candidate_id.clone()],
+            authority: CoordinatorAuthority::Full,
+            phase: CoordinatorPhase::Stable,
+            fencing_token: FencingToken(1),
+            issued_at_unix_ms: 100,
+            expires_at_unix_ms: 200,
+        };
+        let credential = CoordinatorWriteCredential {
+            network_id: network_id.clone(),
+            term: term.term,
+            leader: candidate_id,
+            fencing_token: term.fencing_token,
+        };
+
+        let decoded = assert_signaling_round_trip(
+            SignalingMessage::CoordinatorCandidateConfigUpdateAuthorized {
+                expected_revision: 1,
+                config: config.clone(),
+                credential: credential.clone(),
+            },
+        )?;
+        let SignalingMessage::CoordinatorCandidateConfigUpdateAuthorized {
+            expected_revision,
+            config: decoded_config,
+            credential: decoded_credential,
+        } = decoded
+        else {
+            panic!("expected authorized coordinator candidate config update");
+        };
+        assert_eq!(expected_revision, 1);
+        assert_eq!(decoded_config, config);
+        assert_eq!(decoded_credential, credential);
+
+        let decoded = assert_signaling_round_trip(SignalingMessage::CoordinatorTermInstall {
+            term: term.clone(),
+        })?;
+        let SignalingMessage::CoordinatorTermInstall { term: decoded } = decoded else {
+            panic!("expected coordinator term install");
+        };
+        assert_eq!(decoded, term);
+
+        let decoded = assert_signaling_round_trip(SignalingMessage::CoordinatorTermLeaseRenew {
+            credential: credential.clone(),
+            new_expires_at_unix_ms: 180,
+        })?;
+        let SignalingMessage::CoordinatorTermLeaseRenew {
+            credential: decoded_credential,
+            new_expires_at_unix_ms,
+        } = decoded
+        else {
+            panic!("expected coordinator term lease renewal");
+        };
+        assert_eq!(decoded_credential, credential);
+        assert_eq!(new_expires_at_unix_ms, 180);
         Ok(())
     }
 

@@ -501,6 +501,16 @@
             }
           ]
         },
+        "lease": {
+          "$ref": "#/$defs/CoordinatorLeaseStatus",
+          "default": {
+            "max_clock_skew_ms": 30000,
+            "observed_clock_skew_ms": 0,
+            "reason_code": "coordinator.lease.no_term",
+            "remaining_ms": 0,
+            "state": "no_term"
+          }
+        },
         "network_id": {
           "$ref": "#/$defs/NetworkId"
         }
@@ -570,6 +580,73 @@
         "all_candidates_unavailable"
       ],
       "type": "string"
+    },
+    "CoordinatorLeaseState": {
+      "oneOf": [
+        {
+          "enum": [
+            "active"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "no_term",
+          "description": "No term has been admitted yet. Governance remains in bootstrap mode.",
+          "type": "string"
+        },
+        {
+          "const": "renewal_due",
+          "description": "The lease is still writable, but renewal is overdue soon.",
+          "type": "string"
+        },
+        {
+          "const": "read_only",
+          "description": "Authority is no longer writable until a fresh term is admitted.",
+          "type": "string"
+        }
+      ]
+    },
+    "CoordinatorLeaseStatus": {
+      "description": "Observable lease projection used by the control plane and UI. `reason_code`\nis stable so a clock-skew alert cannot be mistaken for an ordinary expiry.",
+      "properties": {
+        "lease_expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_clock_skew_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "observed_clock_skew_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "remaining_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/CoordinatorLeaseState"
+        }
+      },
+      "required": [
+        "state",
+        "remaining_ms",
+        "observed_clock_skew_ms",
+        "max_clock_skew_ms",
+        "reason_code"
+      ],
+      "type": "object"
     },
     "CoordinatorPhase": {
       "enum": [

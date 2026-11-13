@@ -2,11 +2,12 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
     CoordinatorCandidateConfig, CoordinatorCandidateDeclaration, CoordinatorCandidateStatus,
-    InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
-    InvitationRedeemRequest, InvitationRedemption, InvitationState, InvitationStatusView,
-    IssuedInvitation, JoinRequest, JoinRequestId, JoinRequestState, MemberLifecycleChange,
-    MemberLifecycleChangeRequest, MemberRemovalPreview, MemberRemovalPreviewRequest, NetworkId,
-    NetworkJoinPreview, NetworkJoinPreviewRequest, NetworkMemberDirectory, NodeId,
+    CoordinatorTerm, CoordinatorWriteCredential, InvitationCode, InvitationCreateRequest,
+    InvitationId, InvitationPreview, InvitationRedeemRequest, InvitationRedemption,
+    InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestId,
+    JoinRequestState, MemberLifecycleChange, MemberLifecycleChangeRequest, MemberRemovalPreview,
+    MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview, NetworkJoinPreviewRequest,
+    NetworkMemberDirectory, NodeId,
 };
 use fuckipv6_common::{
     codec, validate_signaling_message_len, Identity, JoinRequestBatchReviewItem,
@@ -343,6 +344,17 @@ enum PendingCoordinatorCandidate {
         config_revision: u64,
     },
     Status(NetworkId),
+    TermInstall {
+        network_id: NetworkId,
+        term: u64,
+        fencing_token: u64,
+    },
+    TermLeaseRenew {
+        network_id: NetworkId,
+        term: u64,
+        fencing_token: u64,
+        expires_at_unix_ms: u64,
+    },
 }
 
 struct PendingCoordinatorCandidateResponse {
@@ -415,6 +427,40 @@ impl CoordinatorCandidateResponseHub {
             SignalingMessage::CoordinatorCandidateStatusAck { status } => self.matches(
                 |expected| matches!(expected, PendingCoordinatorCandidate::Status(network_id) if status.network_id == *network_id),
             ),
+            SignalingMessage::CoordinatorTermInstallAck { status } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::TermInstall {
+                        network_id,
+                        term,
+                        fencing_token,
+                    } => {
+                        status.network_id == *network_id
+                            && status.latest_term.as_ref().is_some_and(|latest| {
+                                latest.term == *term
+                                    && latest.fencing_token.0 == *fencing_token
+                            })
+                    }
+                    _ => false,
+                })
+            }
+            SignalingMessage::CoordinatorTermLeaseRenewAck { status } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::TermLeaseRenew {
+                        network_id,
+                        term,
+                        fencing_token,
+                        expires_at_unix_ms,
+                    } => {
+                        status.network_id == *network_id
+                            && status.latest_term.as_ref().is_some_and(|latest| {
+                                latest.term == *term
+                                    && latest.fencing_token.0 == *fencing_token
+                                    && latest.expires_at_unix_ms == *expires_at_unix_ms
+                            })
+                    }
+                    _ => false,
+                })
+            }
             _ => return false,
         };
 
@@ -423,6 +469,8 @@ impl CoordinatorCandidateResponseHub {
             SignalingMessage::CoordinatorCandidateConfigAck { .. }
                 | SignalingMessage::CoordinatorCandidateDeclarationAck { .. }
                 | SignalingMessage::CoordinatorCandidateStatusAck { .. }
+                | SignalingMessage::CoordinatorTermInstallAck { .. }
+                | SignalingMessage::CoordinatorTermLeaseRenewAck { .. }
         );
         if !matches {
             return is_candidate_response;
@@ -431,7 +479,9 @@ impl CoordinatorCandidateResponseHub {
         let response = match message {
             SignalingMessage::CoordinatorCandidateConfigAck { status }
             | SignalingMessage::CoordinatorCandidateDeclarationAck { status }
-            | SignalingMessage::CoordinatorCandidateStatusAck { status } => status.clone(),
+            | SignalingMessage::CoordinatorCandidateStatusAck { status }
+            | SignalingMessage::CoordinatorTermInstallAck { status }
+            | SignalingMessage::CoordinatorTermLeaseRenewAck { status } => status.clone(),
             SignalingMessage::Error { code, .. } => {
                 return self.finish(Err(CoordinatorCandidateControlError::Rejected(*code)));
             }
@@ -1238,6 +1288,64 @@ impl SignalingClient {
             SignalingMessage::CoordinatorCandidateConfigUpdate {
                 expected_revision,
                 config,
+            },
+            expected,
+        )
+        .await
+    }
+
+    pub(crate) async fn update_coordinator_candidates_authorized(
+        &self,
+        config: CoordinatorCandidateConfig,
+        expected_revision: u64,
+        credential: CoordinatorWriteCredential,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        let expected = PendingCoordinatorCandidate::Config {
+            network_id: config.network_id.clone(),
+            revision: config.revision,
+        };
+        self.send_coordinator_candidate_operation(
+            SignalingMessage::CoordinatorCandidateConfigUpdateAuthorized {
+                expected_revision,
+                config,
+                credential,
+            },
+            expected,
+        )
+        .await
+    }
+
+    pub(crate) async fn install_coordinator_term(
+        &self,
+        term: CoordinatorTerm,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        let expected = PendingCoordinatorCandidate::TermInstall {
+            network_id: term.network_id.clone(),
+            term: term.term,
+            fencing_token: term.fencing_token.0,
+        };
+        self.send_coordinator_candidate_operation(
+            SignalingMessage::CoordinatorTermInstall { term },
+            expected,
+        )
+        .await
+    }
+
+    pub(crate) async fn renew_coordinator_term_lease(
+        &self,
+        credential: CoordinatorWriteCredential,
+        new_expires_at_unix_ms: u64,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        let expected = PendingCoordinatorCandidate::TermLeaseRenew {
+            network_id: credential.network_id.clone(),
+            term: credential.term,
+            fencing_token: credential.fencing_token.0,
+            expires_at_unix_ms: new_expires_at_unix_ms,
+        };
+        self.send_coordinator_candidate_operation(
+            SignalingMessage::CoordinatorTermLeaseRenew {
+                credential,
+                new_expires_at_unix_ms,
             },
             expected,
         )
@@ -2098,7 +2206,12 @@ fn signaling_message_to_event(msg: SignalingMessage) -> Option<SignalingEvent> {
         | SignalingMessage::CoordinatorCandidateDeclarationPublish { .. }
         | SignalingMessage::CoordinatorCandidateDeclarationAck { .. }
         | SignalingMessage::CoordinatorCandidateStatusRequest { .. }
-        | SignalingMessage::CoordinatorCandidateStatusAck { .. } => None,
+        | SignalingMessage::CoordinatorCandidateStatusAck { .. }
+        | SignalingMessage::CoordinatorCandidateConfigUpdateAuthorized { .. }
+        | SignalingMessage::CoordinatorTermInstall { .. }
+        | SignalingMessage::CoordinatorTermInstallAck { .. }
+        | SignalingMessage::CoordinatorTermLeaseRenew { .. }
+        | SignalingMessage::CoordinatorTermLeaseRenewAck { .. } => None,
 
         _ => None,
     }
@@ -2199,13 +2312,50 @@ pub enum SignalingEvent {
 mod tests {
     use super::*;
     use fuckipv6_common::domain::{
-        ExitContributionMode, ExitContributionObligation, ExitContributionScope, MembershipRole,
-        NetworkCreateProfile, NetworkJoinMode, NetworkRecord, NetworkVisibility, NodeId, PublicKey,
+        CoordinatorAuthority, CoordinatorCandidateConfigState, CoordinatorCandidateStatus,
+        CoordinatorEmergencyState, CoordinatorLeaseState, CoordinatorPhase, CoordinatorTerm,
+        ExitContributionMode, ExitContributionObligation, ExitContributionScope, FencingToken,
+        MembershipRole, NetworkCreateProfile, NetworkJoinMode, NetworkRecord, NetworkVisibility,
+        NodeId, PublicKey,
     };
     use futures::SinkExt;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
+
+    fn coordinator_term(term: u64, fencing_token: u64, expires_at_unix_ms: u64) -> CoordinatorTerm {
+        let network_id = NetworkId::from_public_key(b"coordinator-ack-network");
+        let leader = NodeId::from_public_key(b"coordinator-ack-leader");
+        CoordinatorTerm {
+            network_id,
+            term,
+            leader: leader.clone(),
+            candidate_group: vec![leader.clone()],
+            majority_proof: vec![leader],
+            authority: CoordinatorAuthority::Full,
+            phase: CoordinatorPhase::Stable,
+            fencing_token: FencingToken(fencing_token),
+            issued_at_unix_ms: expires_at_unix_ms.saturating_sub(60_000),
+            expires_at_unix_ms,
+        }
+    }
+
+    fn coordinator_status(
+        term: &CoordinatorTerm,
+        generated_at_unix_ms: u64,
+    ) -> CoordinatorCandidateStatus {
+        CoordinatorCandidateStatus {
+            network_id: term.network_id.clone(),
+            generated_at_unix_ms,
+            config_state: CoordinatorCandidateConfigState::Missing,
+            config: None,
+            candidates: Vec::new(),
+            current_leader: Some(term.leader.clone()),
+            latest_term: Some(term.clone()),
+            lease: term.lease_status_at(generated_at_unix_ms),
+            emergency: CoordinatorEmergencyState::NoCandidatesConfigured,
+        }
+    }
 
     #[tokio::test]
     async fn close_timeout_preserves_task_owner_and_retry_succeeds() -> Result<()> {
@@ -2435,6 +2585,78 @@ mod tests {
                 .await
                 .expect("disconnect must not drop the response channel"),
             Err(InvitationControlError::Disconnected)
+        );
+    }
+
+    #[tokio::test]
+    async fn term_install_ack_requires_the_exact_installed_term_and_token() {
+        let hub = CoordinatorCandidateResponseHub::default();
+        let expected = coordinator_term(2, 20, 1_700_000_060_000);
+        let mut receiver = hub
+            .register(PendingCoordinatorCandidate::TermInstall {
+                network_id: expected.network_id.clone(),
+                term: expected.term,
+                fencing_token: expected.fencing_token.0,
+            })
+            .expect("register term install");
+
+        let wrong = coordinator_term(3, 30, 1_700_000_060_000);
+        assert!(hub.route(&SignalingMessage::CoordinatorTermInstallAck {
+            status: coordinator_status(&wrong, 1_700_000_001_000),
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "a mismatched term acknowledgement must not complete the pending install"
+        );
+
+        let status = coordinator_status(&expected, 1_700_000_001_000);
+        assert!(hub.route(&SignalingMessage::CoordinatorTermInstallAck {
+            status: status.clone(),
+        }));
+        assert_eq!(
+            receiver.await.expect("matching install response"),
+            Ok(status)
+        );
+    }
+
+    #[tokio::test]
+    async fn lease_renewal_ack_requires_the_exact_new_expiry() {
+        let hub = CoordinatorCandidateResponseHub::default();
+        let expected = coordinator_term(2, 20, 1_700_000_120_000);
+        let mut receiver = hub
+            .register(PendingCoordinatorCandidate::TermLeaseRenew {
+                network_id: expected.network_id.clone(),
+                term: expected.term,
+                fencing_token: expected.fencing_token.0,
+                expires_at_unix_ms: expected.expires_at_unix_ms,
+            })
+            .expect("register lease renewal");
+
+        let wrong = coordinator_term(2, 20, 1_700_000_180_000);
+        assert!(hub.route(&SignalingMessage::CoordinatorTermLeaseRenewAck {
+            status: coordinator_status(&wrong, 1_700_000_121_000),
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "an acknowledgement with another expiry must not complete the renewal"
+        );
+
+        let status = coordinator_status(&expected, 1_700_000_061_000);
+        assert_eq!(
+            status.lease.state,
+            CoordinatorLeaseState::Active,
+            "test acknowledgement must carry a writable projected lease"
+        );
+        assert!(hub.route(&SignalingMessage::CoordinatorTermLeaseRenewAck {
+            status: status.clone(),
+        }));
+        assert_eq!(
+            receiver.await.expect("matching renewal response"),
+            Ok(status)
         );
     }
 

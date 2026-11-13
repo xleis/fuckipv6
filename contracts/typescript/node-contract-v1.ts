@@ -171,6 +171,7 @@ export type CoordinatorCandidateStatus = {
   "emergency": CoordinatorEmergencyState;
   "generated_at_unix_ms": number;
   "latest_term"?: CoordinatorTerm | null;
+  "lease"?: CoordinatorLeaseStatus;
   "network_id": NetworkId;
 };
 
@@ -186,6 +187,17 @@ export type CoordinatorCandidateStatusEntry = {
 export type CoordinatorCandidateWillingness = "willing" | "unwilling";
 
 export type CoordinatorEmergencyState = "none" | "no_candidates_configured" | "configuration_pending" | "configuration_expired" | "all_candidates_unavailable";
+
+export type CoordinatorLeaseState = "active" | "no_term" | "renewal_due" | "read_only";
+
+export type CoordinatorLeaseStatus = {
+  "lease_expires_at_unix_ms"?: number | null;
+  "max_clock_skew_ms": number;
+  "observed_clock_skew_ms": number;
+  "reason_code": string;
+  "remaining_ms": number;
+  "state": CoordinatorLeaseState;
+};
 
 export type CoordinatorPhase = "stable" | "election" | "leader_ack" | "partition" | "emergency_proposal" | "emergency_leader" | "handoff" | "recovery_required";
 
@@ -204,6 +216,13 @@ export type CoordinatorTerm = {
   "majority_proof": Array<NodeId>;
   "network_id": NetworkId;
   "phase": CoordinatorPhase;
+  "term": number;
+};
+
+export type CoordinatorWriteCredential = {
+  "fencing_token": FencingToken;
+  "leader": NodeId;
+  "network_id": NetworkId;
   "term": number;
 };
 
@@ -2482,6 +2501,7 @@ export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | 
 
 export type NodeUpdateCoordinatorCandidatesCommand = {
   "candidates": Array<CoordinatorCandidate>;
+  "credential"?: CoordinatorWriteCredential | null;
   "effective_from_unix_ms"?: number | null;
   "expected_revision": number;
   "expires_at_unix_ms": number;

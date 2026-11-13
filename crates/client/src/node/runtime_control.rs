@@ -8,16 +8,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
     CoordinatorCandidateConfig, CoordinatorCandidateDeclaration, CoordinatorCandidateStatus,
-    ExitHealthEvidence, ExitHealthEvidenceState, ExitHealthLayer, ExitHealthProtocol,
-    ExitHealthRetest, ExitHealthRetestPhase, ExitHealthSnapshot, ExitHealthSource,
-    ExitHealthTarget, InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
-    InvitationRedeemRequest, InvitationRedemption, InvitationStatusView, IssuedInvitation,
-    JoinRequest, JoinRequestId, LeakDetectionEvidence, LeakDetectionEvidenceState,
-    LeakDetectionIsolationAction, LeakDetectionProtocol, LeakDetectionSnapshot,
-    LeakDetectionSource, LeakDetectionTarget, MemberLifecycleChange, MemberLifecycleChangeRequest,
-    MemberRemovalPreview, MemberRemovalPreviewRequest, MembershipRole, NetworkId,
-    NetworkMemberDirectory, RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot,
-    RelayHealthSnapshot, TrafficProtectionState,
+    CoordinatorTerm, CoordinatorWriteCredential, ExitHealthEvidence, ExitHealthEvidenceState,
+    ExitHealthLayer, ExitHealthProtocol, ExitHealthRetest, ExitHealthRetestPhase,
+    ExitHealthSnapshot, ExitHealthSource, ExitHealthTarget, InvitationCode,
+    InvitationCreateRequest, InvitationId, InvitationPreview, InvitationRedeemRequest,
+    InvitationRedemption, InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestId,
+    LeakDetectionEvidence, LeakDetectionEvidenceState, LeakDetectionIsolationAction,
+    LeakDetectionProtocol, LeakDetectionSnapshot, LeakDetectionSource, LeakDetectionTarget,
+    MemberLifecycleChange, MemberLifecycleChangeRequest, MemberRemovalPreview,
+    MemberRemovalPreviewRequest, MembershipRole, NetworkId, NetworkMemberDirectory,
+    RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot, RelayHealthSnapshot,
+    TrafficProtectionState,
 };
 use fuckipv6_common::{
     ClientConfig, ExitNodeCapabilities, ExitNodeUnsupportedReason, JoinRequestBatchReviewItem,
@@ -2045,9 +2046,25 @@ enum InvitationExecutionResult {
 }
 
 enum CoordinatorCandidateRuntimeCommand {
-    Status { network_name: String },
+    Status {
+        network_name: String,
+    },
     UpdateConfig(NodeUpdateCoordinatorCandidatesCommand),
     PublishDeclaration(NodePublishCoordinatorCandidateDeclarationCommand),
+    // W14-03 wires these actor-owned election entry points once a verified
+    // majority proof exists. Keeping them here now makes the authorization
+    // boundary testable without exposing an unsafe user command.
+    #[allow(dead_code)]
+    InstallTerm {
+        network_name: String,
+        term: CoordinatorTerm,
+    },
+    #[allow(dead_code)]
+    RenewTermLease {
+        network_name: String,
+        credential: CoordinatorWriteCredential,
+        new_expires_at_unix_ms: u64,
+    },
 }
 
 fn routing_summary_timestamp() -> u64 {
@@ -2788,6 +2805,38 @@ impl NetworkRuntimeManager {
         self.execute_coordinator_candidates(CoordinatorCandidateRuntimeCommand::PublishDeclaration(
             command,
         ))
+        .await
+    }
+
+    /// Internal election/handoff entry point. This is intentionally not a
+    /// user-facing NodeCommand: W14-03 must supply an authenticated majority
+    /// proof before invoking it.
+    #[allow(dead_code)]
+    pub async fn install_coordinator_term(
+        &self,
+        network_name: String,
+        term: CoordinatorTerm,
+    ) -> Result<CoordinatorCandidateStatus, RuntimeControlError> {
+        self.execute_coordinator_candidates(CoordinatorCandidateRuntimeCommand::InstallTerm {
+            network_name,
+            term,
+        })
+        .await
+    }
+
+    /// Renew the current Leader lease without changing term or fencing token.
+    #[allow(dead_code)]
+    pub async fn renew_coordinator_term_lease(
+        &self,
+        network_name: String,
+        credential: CoordinatorWriteCredential,
+        new_expires_at_unix_ms: u64,
+    ) -> Result<CoordinatorCandidateStatus, RuntimeControlError> {
+        self.execute_coordinator_candidates(CoordinatorCandidateRuntimeCommand::RenewTermLease {
+            network_name,
+            credential,
+            new_expires_at_unix_ms,
+        })
         .await
     }
 
@@ -3671,7 +3720,14 @@ impl NetworkRuntimeActor {
                 result
             }
             CoordinatorCandidateRuntimeCommand::UpdateConfig(command) => {
-                let network_name = command.network_name.clone();
+                let NodeUpdateCoordinatorCandidatesCommand {
+                    network_name,
+                    expected_revision,
+                    candidates,
+                    effective_from_unix_ms,
+                    expires_at_unix_ms,
+                    credential,
+                } = command;
                 let (network_id, signaling, ephemeral) =
                     self.coordinator_candidate_signaling(&network_name).await?;
                 let identity = self.configs.load_node_identity().map_err(|error| {
@@ -3681,7 +3737,7 @@ impl NetworkRuntimeActor {
                 });
                 let result = match identity {
                     Ok(identity) => {
-                        let revision = command.expected_revision.checked_add(1).ok_or_else(|| {
+                        let revision = expected_revision.checked_add(1).ok_or_else(|| {
                             coordinator_candidate_invalid(
                                 "Coordinator 候选配置 revision 溢出".to_owned(),
                             )
@@ -3689,22 +3745,37 @@ impl NetworkRuntimeActor {
                         match revision {
                             Ok(revision) => {
                                 let effective_from_unix_ms =
-                                    command.effective_from_unix_ms.unwrap_or_else(unix_time_ms);
+                                    effective_from_unix_ms.unwrap_or_else(unix_time_ms);
                                 match CoordinatorCandidateConfig::signed(
-                                    network_id,
+                                    network_id.clone(),
                                     revision,
-                                    command.candidates,
+                                    candidates,
                                     effective_from_unix_ms,
-                                    command.expires_at_unix_ms,
+                                    expires_at_unix_ms,
                                     &identity,
                                 ) {
-                                    Ok(config) => signaling
-                                        .update_coordinator_candidates(
-                                            config,
-                                            command.expected_revision,
-                                        )
-                                        .await
-                                        .map_err(map_coordinator_candidate_error),
+                                    Ok(config) => match credential {
+                                        Some(credential) if credential.network_id != network_id => {
+                                            Err(coordinator_candidate_invalid(
+                                                "Coordinator 治理写入凭据属于其他网络".to_owned(),
+                                            ))
+                                        }
+                                        Some(credential) => signaling
+                                            .update_coordinator_candidates_authorized(
+                                                config,
+                                                expected_revision,
+                                                credential,
+                                            )
+                                            .await
+                                            .map_err(map_coordinator_candidate_error),
+                                        None => signaling
+                                            .update_coordinator_candidates(
+                                                config,
+                                                expected_revision,
+                                            )
+                                            .await
+                                            .map_err(map_coordinator_candidate_error),
+                                    },
                                     Err(error) => Err(coordinator_candidate_invalid(format!(
                                         "构造 Coordinator 候选配置失败: {error}"
                                     ))),
@@ -3714,6 +3785,44 @@ impl NetworkRuntimeActor {
                         }
                     }
                     Err(error) => Err(error),
+                };
+                self.close_ephemeral_coordinator_candidate_signaling(&signaling, ephemeral)
+                    .await;
+                result
+            }
+            CoordinatorCandidateRuntimeCommand::InstallTerm { network_name, term } => {
+                let (network_id, signaling, ephemeral) =
+                    self.coordinator_candidate_signaling(&network_name).await?;
+                let result = if term.network_id != network_id {
+                    Err(coordinator_candidate_invalid(
+                        "Coordinator 任期属于其他网络".to_owned(),
+                    ))
+                } else {
+                    signaling
+                        .install_coordinator_term(term)
+                        .await
+                        .map_err(map_coordinator_candidate_error)
+                };
+                self.close_ephemeral_coordinator_candidate_signaling(&signaling, ephemeral)
+                    .await;
+                result
+            }
+            CoordinatorCandidateRuntimeCommand::RenewTermLease {
+                network_name,
+                credential,
+                new_expires_at_unix_ms,
+            } => {
+                let (network_id, signaling, ephemeral) =
+                    self.coordinator_candidate_signaling(&network_name).await?;
+                let result = if credential.network_id != network_id {
+                    Err(coordinator_candidate_invalid(
+                        "Coordinator 租约凭据属于其他网络".to_owned(),
+                    ))
+                } else {
+                    signaling
+                        .renew_coordinator_term_lease(credential, new_expires_at_unix_ms)
+                        .await
+                        .map_err(map_coordinator_candidate_error)
                 };
                 self.close_ephemeral_coordinator_candidate_signaling(&signaling, ephemeral)
                     .await;

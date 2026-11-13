@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
-    ExitContributionRequest, ExitContributionRequestId, ExitContributionReviewAction, InvitationId,
-    InvitationState, JoinRequest, JoinRequestId, JoinRequestState, MemberLifecycleChange,
+    CoordinatorTerm, CoordinatorWriteCredential, ExitContributionRequest,
+    ExitContributionRequestId, ExitContributionReviewAction, InvitationId, InvitationState,
+    JoinRequest, JoinRequestId, JoinRequestState, MemberLifecycleChange,
     MemberLifecycleChangeRequest, MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview,
     NetworkMemberPresence, NetworkRecord, NodeId,
 };
@@ -989,6 +990,7 @@ async fn handle_signaling_message(
             handle_coordinator_candidate_config_update(
                 expected_revision,
                 config,
+                None,
                 session_manager,
                 tx,
                 client_id,
@@ -1009,6 +1011,46 @@ async fn handle_signaling_message(
         SignalingMessage::CoordinatorCandidateStatusRequest { network_id } => {
             handle_coordinator_candidate_status(
                 network_id,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
+        SignalingMessage::CoordinatorCandidateConfigUpdateAuthorized {
+            expected_revision,
+            config,
+            credential,
+        } => {
+            handle_coordinator_candidate_config_update(
+                expected_revision,
+                config,
+                Some(credential),
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
+        SignalingMessage::CoordinatorTermInstall { term } => {
+            handle_coordinator_term_install(
+                term,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
+        SignalingMessage::CoordinatorTermLeaseRenew {
+            credential,
+            new_expires_at_unix_ms,
+        } => {
+            handle_coordinator_term_lease_renew(
+                credential,
+                new_expires_at_unix_ms,
                 session_manager,
                 tx,
                 client_id,
@@ -1045,7 +1087,9 @@ async fn handle_signaling_message(
         | SignalingMessage::CoordinatorCandidateConfigAck { .. }
         | SignalingMessage::CoordinatorCandidateDeclarationAck { .. }
         | SignalingMessage::CoordinatorCandidateStatusAck { .. }
-        | SignalingMessage::CoordinatorCandidateStatusChanged { .. } => {
+        | SignalingMessage::CoordinatorCandidateStatusChanged { .. }
+        | SignalingMessage::CoordinatorTermInstallAck { .. }
+        | SignalingMessage::CoordinatorTermLeaseRenewAck { .. } => {
             send_binary(
                 tx,
                 session_manager,
@@ -1130,6 +1174,7 @@ async fn broadcast_coordinator_candidate_status_changed(
 async fn handle_coordinator_candidate_config_update(
     expected_revision: u64,
     config: fuckipv6_common::domain::CoordinatorCandidateConfig,
+    credential: Option<CoordinatorWriteCredential>,
     session_manager: &SessionManager,
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
@@ -1155,7 +1200,18 @@ async fn handle_coordinator_candidate_config_update(
         )?;
         return Ok(());
     }
-    match store.update_config(&actor, expected_revision, config, unix_time_ms()) {
+    let now_unix_ms = unix_time_ms();
+    let outcome = match credential.as_ref() {
+        Some(credential) => store.update_config_authorized(
+            &actor,
+            expected_revision,
+            config,
+            credential,
+            now_unix_ms,
+        ),
+        None => store.update_config(&actor, expected_revision, config, now_unix_ms),
+    };
+    match outcome {
         Ok(status) => {
             send_binary(
                 tx,
@@ -1169,6 +1225,87 @@ async fn handle_coordinator_candidate_config_update(
         }
         Err(error) => {
             tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 候选配置更新");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_term_install(
+    term: CoordinatorTerm,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let network_id = term.network_id.clone();
+    match store.install_term(&actor, term, unix_time_ms()) {
+        Ok(status) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorTermInstallAck {
+                    status: status.clone(),
+                },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 任期安装");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_term_lease_renew(
+    credential: CoordinatorWriteCredential,
+    new_expires_at_unix_ms: u64,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let network_id = credential.network_id.clone();
+    match store.renew_term_lease(&actor, &credential, new_expires_at_unix_ms, unix_time_ms()) {
+        Ok(status) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorTermLeaseRenewAck {
+                    status: status.clone(),
+                },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 任期续租");
             send_binary(
                 tx,
                 session_manager,

@@ -56,7 +56,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 300,
+                NodeContractV1.DTO_CLASS_NAMES.length == 302,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -977,6 +977,25 @@ public final class NodeContractV1Test {
         new NodeContractV1.NodeWsMessage.Resync(null, 1, null);
         new NodeContractV1.NodeWsMessage.Error(
                 null, null, "error", "error.operation_internal", null, null, null, false, 1);
+
+        for (String field : new String[] {
+            "candidates", "credential", "effective_from_unix_ms", "expected_revision",
+            "expires_at_unix_ms", "network_name"
+        }) {
+            NodeContractV1.NodeUpdateCoordinatorCandidatesCommand.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "fencing_token", "leader", "network_id", "term"
+        }) {
+            NodeContractV1.CoordinatorWriteCredential.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "lease_expires_at_unix_ms", "max_clock_skew_ms", "observed_clock_skew_ms",
+            "reason_code", "remaining_ms", "state"
+        }) {
+            NodeContractV1.CoordinatorLeaseStatus.class.getDeclaredField(field);
+        }
+        NodeContractV1.CoordinatorCandidateStatus.class.getDeclaredField("lease");
 
         System.out.println("NodeContractV1Test: passed");
     }

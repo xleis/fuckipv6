@@ -31,6 +31,19 @@ pub enum CoordinatorPhase {
     RecoveryRequired,
 }
 
+/// Maximum tolerated difference between the Coordinator's observed clock and
+/// the time asserted by a term. A larger backwards jump is a fail-closed clock
+/// skew alert rather than an invitation to extend stale authority.
+pub const COORDINATOR_CLOCK_SKEW_LIMIT_MS: u64 = 30_000;
+
+/// Once this much of a lease remains, the Leader must renew it. Writes remain
+/// valid during this transition window, but callers must surface the warning.
+pub const COORDINATOR_LEASE_RENEWAL_WINDOW_MS: u64 = 30_000;
+
+/// Upper bound for a single lease extension. Longer-lived authority requires a
+/// newly validated term rather than repeatedly renewing an old Leader.
+pub const COORDINATOR_MAX_LEASE_DURATION_MS: u64 = 5 * 60 * 1000;
+
 impl CoordinatorPhase {
     pub fn can_transition_to(self, target: Self) -> bool {
         matches!(
@@ -58,6 +71,17 @@ impl CoordinatorPhase {
 )]
 pub struct FencingToken(pub u64);
 
+/// The authority facts that every governance write must carry. The write kind
+/// is supplied separately so one envelope cannot be silently replayed for a
+/// broader operation.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct CoordinatorWriteCredential {
+    pub network_id: NetworkId,
+    pub term: u64,
+    pub leader: NodeId,
+    pub fencing_token: FencingToken,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoordinatorWriteKind {
@@ -76,6 +100,75 @@ pub enum CoordinatorWriteKind {
     SelfPromotion,
 }
 
+impl CoordinatorWriteKind {
+    /// Long-lived network state. These operations additionally require a Full
+    /// authority in the Stable phase; an Emergency Leader is never sufficient.
+    pub fn is_governance(self) -> bool {
+        matches!(
+            self,
+            Self::Membership
+                | Self::Ownership
+                | Self::SecurityPolicy
+                | Self::TrafficPolicy
+                | Self::Keys
+                | Self::CandidateSet
+                | Self::AuditDeletion
+                | Self::SelfPromotion
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinatorLeaseState {
+    /// No term has been admitted yet. Governance remains in bootstrap mode.
+    NoTerm,
+    Active,
+    /// The lease is still writable, but renewal is overdue soon.
+    RenewalDue,
+    /// Authority is no longer writable until a fresh term is admitted.
+    ReadOnly,
+}
+
+/// Observable lease projection used by the control plane and UI. `reason_code`
+/// is stable so a clock-skew alert cannot be mistaken for an ordinary expiry.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct CoordinatorLeaseStatus {
+    pub state: CoordinatorLeaseState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at_unix_ms: Option<u64>,
+    pub remaining_ms: u64,
+    pub observed_clock_skew_ms: u64,
+    pub max_clock_skew_ms: u64,
+    pub reason_code: String,
+}
+
+impl CoordinatorLeaseStatus {
+    pub fn no_term() -> Self {
+        Self {
+            state: CoordinatorLeaseState::NoTerm,
+            lease_expires_at_unix_ms: None,
+            remaining_ms: 0,
+            observed_clock_skew_ms: 0,
+            max_clock_skew_ms: COORDINATOR_CLOCK_SKEW_LIMIT_MS,
+            reason_code: "coordinator.lease.no_term".into(),
+        }
+    }
+
+    pub fn is_writable(&self) -> bool {
+        matches!(
+            self.state,
+            CoordinatorLeaseState::Active | CoordinatorLeaseState::RenewalDue
+        )
+    }
+}
+
+impl Default for CoordinatorLeaseStatus {
+    fn default() -> Self {
+        Self::no_term()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct CoordinatorTerm {
     pub network_id: NetworkId,
@@ -91,7 +184,7 @@ pub struct CoordinatorTerm {
 }
 
 impl CoordinatorTerm {
-    pub fn validate_at(&self, now_unix_ms: u64) -> DomainResult<()> {
+    pub fn validate_definition(&self) -> DomainResult<()> {
         if self.term == 0 || self.fencing_token.0 == 0 {
             return Err(DomainError::invalid_value(
                 "coordinator term and fencing token must be positive",
@@ -100,12 +193,6 @@ impl CoordinatorTerm {
         if self.issued_at_unix_ms >= self.expires_at_unix_ms {
             return Err(DomainError::invariant(
                 "coordinator term validity interval is empty",
-            ));
-        }
-        if now_unix_ms >= self.expires_at_unix_ms {
-            return Err(DomainError::new(
-                "domain.coordinator_term_expired",
-                "coordinator term has expired",
             ));
         }
         let candidates: BTreeSet<_> = self.candidate_group.iter().collect();
@@ -126,6 +213,106 @@ impl CoordinatorTerm {
         {
             return Err(DomainError::invariant(
                 "coordinator majority proof is invalid",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_at(&self, now_unix_ms: u64) -> DomainResult<()> {
+        self.validate_definition()?;
+        if now_unix_ms >= self.expires_at_unix_ms {
+            return Err(DomainError::new(
+                "domain.coordinator_term_expired",
+                "coordinator term has expired",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn lease_status_at(&self, now_unix_ms: u64) -> CoordinatorLeaseStatus {
+        if self.validate_definition().is_err() {
+            return CoordinatorLeaseStatus {
+                state: CoordinatorLeaseState::ReadOnly,
+                lease_expires_at_unix_ms: Some(self.expires_at_unix_ms),
+                remaining_ms: 0,
+                observed_clock_skew_ms: 0,
+                max_clock_skew_ms: COORDINATOR_CLOCK_SKEW_LIMIT_MS,
+                reason_code: "coordinator.lease.invalid_term".into(),
+            };
+        }
+
+        // A Coordinator clock behind the term's issue time is tolerated only up
+        // to a bounded skew. Beyond that, one node may believe an expired lease
+        // is still valid, so authority becomes read-only immediately.
+        let observed_clock_skew_ms = self.issued_at_unix_ms.saturating_sub(now_unix_ms);
+        if observed_clock_skew_ms > COORDINATOR_CLOCK_SKEW_LIMIT_MS {
+            return CoordinatorLeaseStatus {
+                state: CoordinatorLeaseState::ReadOnly,
+                lease_expires_at_unix_ms: Some(self.expires_at_unix_ms),
+                remaining_ms: self.expires_at_unix_ms.saturating_sub(now_unix_ms),
+                observed_clock_skew_ms,
+                max_clock_skew_ms: COORDINATOR_CLOCK_SKEW_LIMIT_MS,
+                reason_code: "coordinator.lease.clock_skew".into(),
+            };
+        }
+
+        if now_unix_ms >= self.expires_at_unix_ms {
+            return CoordinatorLeaseStatus {
+                state: CoordinatorLeaseState::ReadOnly,
+                lease_expires_at_unix_ms: Some(self.expires_at_unix_ms),
+                remaining_ms: 0,
+                observed_clock_skew_ms,
+                max_clock_skew_ms: COORDINATOR_CLOCK_SKEW_LIMIT_MS,
+                reason_code: "coordinator.lease.expired".into(),
+            };
+        }
+
+        let remaining_ms = self.expires_at_unix_ms - now_unix_ms;
+        let renewal_due = remaining_ms <= COORDINATOR_LEASE_RENEWAL_WINDOW_MS;
+        CoordinatorLeaseStatus {
+            state: if renewal_due {
+                CoordinatorLeaseState::RenewalDue
+            } else {
+                CoordinatorLeaseState::Active
+            },
+            lease_expires_at_unix_ms: Some(self.expires_at_unix_ms),
+            remaining_ms,
+            observed_clock_skew_ms,
+            max_clock_skew_ms: COORDINATOR_CLOCK_SKEW_LIMIT_MS,
+            reason_code: if renewal_due {
+                "coordinator.lease.renewal_due"
+            } else {
+                "coordinator.lease.active"
+            }
+            .into(),
+        }
+    }
+
+    pub fn validate_against_candidate_config(
+        &self,
+        config: &CoordinatorCandidateConfig,
+    ) -> DomainResult<()> {
+        self.validate_definition()?;
+        config.validate_definition()?;
+        if self.network_id != config.network_id {
+            return Err(DomainError::invariant(
+                "coordinator term belongs to another network",
+            ));
+        }
+        let configured = config
+            .candidates
+            .iter()
+            .map(|candidate| candidate.node_id.clone())
+            .collect::<BTreeSet<_>>();
+        let term_candidates = self
+            .candidate_group
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if configured != term_candidates {
+            return Err(DomainError::new(
+                "domain.coordinator_term_candidate_group_mismatch",
+                "coordinator term candidate group does not match the active configuration",
             ));
         }
         Ok(())
@@ -152,7 +339,9 @@ impl CoordinatorTerm {
         candidate: &CoordinatorTerm,
         now_unix_ms: u64,
     ) -> DomainResult<()> {
-        self.validate_at(now_unix_ms)?;
+        // An expired term still fences its successor. Recovery must be able to
+        // advance past it even though the old Leader may no longer write.
+        self.validate_definition()?;
         candidate.validate_at(now_unix_ms)?;
         if candidate.network_id != self.network_id {
             return Err(DomainError::invariant(
@@ -178,6 +367,84 @@ impl CoordinatorTerm {
             ));
         }
         Ok(())
+    }
+
+    /// Validate a governance write against this authoritative term. The caller
+    /// must invoke this for every write; term and fencing comparisons are made
+    /// before permission or phase checks so stale leaders are always audited as
+    /// rollback attempts rather than ordinary authorisation failures.
+    pub fn authorize_write(
+        &self,
+        actor: &NodeId,
+        credential: &CoordinatorWriteCredential,
+        write: CoordinatorWriteKind,
+        now_unix_ms: u64,
+    ) -> DomainResult<CoordinatorLeaseStatus> {
+        self.validate_definition()?;
+        if credential.network_id != self.network_id {
+            return Err(DomainError::invariant(
+                "coordinator write credential belongs to another network",
+            ));
+        }
+        if credential.term < self.term {
+            return Err(DomainError::new(
+                "domain.coordinator_term_rollback",
+                "coordinator write carries an obsolete term",
+            ));
+        }
+        if credential.term > self.term {
+            return Err(DomainError::new(
+                "domain.coordinator_term_not_installed",
+                "coordinator write term has not been admitted",
+            ));
+        }
+        if credential.fencing_token < self.fencing_token {
+            return Err(DomainError::new(
+                "domain.fencing_token_rollback",
+                "coordinator write carries an obsolete fencing token",
+            ));
+        }
+        if credential.fencing_token > self.fencing_token {
+            return Err(DomainError::new(
+                "domain.fencing_token_not_installed",
+                "coordinator write fencing token has not been admitted",
+            ));
+        }
+        if credential.leader != self.leader {
+            return Err(DomainError::new(
+                "domain.coordinator_term_conflict",
+                "coordinator write leader does not match the authoritative term",
+            ));
+        }
+
+        let lease = self.lease_status_at(now_unix_ms);
+        if !lease.is_writable() {
+            let code = match lease.reason_code.as_str() {
+                "coordinator.lease.clock_skew" => "domain.coordinator_clock_skew",
+                "coordinator.lease.expired" => "domain.coordinator_lease_expired",
+                _ => "domain.coordinator_term_invalid",
+            };
+            return Err(DomainError::new(code, "coordinator authority is read-only"));
+        }
+        if actor != &self.leader {
+            return Err(DomainError::new(
+                "domain.coordinator_leader_mismatch",
+                "coordinator write actor is not the term leader",
+            ));
+        }
+        if write.is_governance() && self.phase != CoordinatorPhase::Stable {
+            return Err(DomainError::new(
+                "domain.coordinator_transition_read_only",
+                "governance writes are disabled outside the stable phase",
+            ));
+        }
+        if !self.allows_write(write) {
+            return Err(DomainError::new(
+                "domain.coordinator_write_forbidden",
+                "coordinator authority cannot perform this write",
+            ));
+        }
+        Ok(lease)
     }
 
     pub fn transition_phase(
@@ -675,6 +942,8 @@ pub struct CoordinatorCandidateStatus {
     pub current_leader: Option<NodeId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_term: Option<CoordinatorTerm>,
+    #[serde(default)]
+    pub lease: CoordinatorLeaseStatus,
     pub emergency: CoordinatorEmergencyState,
 }
 
@@ -818,8 +1087,15 @@ impl CoordinatorCandidateStatus {
             }
             CoordinatorCandidateConfigState::Current => CoordinatorEmergencyState::None,
         };
+        let lease = latest_term
+            .map(|term| term.lease_status_at(now_unix_ms))
+            .unwrap_or_else(CoordinatorLeaseStatus::no_term);
         let current_leader = latest_term
-            .filter(|term| term.validate_at(now_unix_ms).is_ok())
+            .filter(|term| {
+                config.is_some_and(|config| term.validate_against_candidate_config(config).is_ok())
+                    && config_state == CoordinatorCandidateConfigState::Current
+                    && lease.is_writable()
+            })
             .map(|term| term.leader.clone());
         Ok(Self {
             network_id: network.network_id.clone(),
@@ -829,6 +1105,7 @@ impl CoordinatorCandidateStatus {
             candidates,
             current_leader,
             latest_term: latest_term.cloned(),
+            lease,
             emergency,
         })
     }
@@ -990,6 +1267,100 @@ mod tests {
             "domain.coordinator_term_expired"
         );
     }
+
+    #[test]
+    fn lease_projection_distinguishes_renewal_expiry_and_clock_skew() {
+        let leader = NodeId::from_public_key(b"candidate-1");
+        let mut coordinator = term(1, 1, leader);
+        coordinator.issued_at_unix_ms = 100_000;
+        coordinator.expires_at_unix_ms = 1_000_000;
+
+        assert_eq!(
+            coordinator.lease_status_at(200_000).state,
+            CoordinatorLeaseState::Active
+        );
+        assert_eq!(
+            coordinator.lease_status_at(980_000).state,
+            CoordinatorLeaseState::RenewalDue
+        );
+        assert_eq!(
+            coordinator.lease_status_at(1_000_000).state,
+            CoordinatorLeaseState::ReadOnly
+        );
+
+        let skewed = coordinator.lease_status_at(100_000 - COORDINATOR_CLOCK_SKEW_LIMIT_MS - 1);
+        assert_eq!(skewed.state, CoordinatorLeaseState::ReadOnly);
+        assert_eq!(skewed.reason_code, "coordinator.lease.clock_skew");
+        assert_eq!(
+            skewed.observed_clock_skew_ms,
+            COORDINATOR_CLOCK_SKEW_LIMIT_MS + 1
+        );
+        assert!(!skewed.is_writable());
+    }
+
+    #[test]
+    fn stale_and_expired_write_credentials_fail_closed() {
+        let leader = NodeId::from_public_key(b"candidate-1");
+        let current = term(3, 30, leader.clone());
+        let stale = CoordinatorWriteCredential {
+            network_id: current.network_id.clone(),
+            term: 2,
+            leader: leader.clone(),
+            fencing_token: FencingToken(30),
+        };
+        assert_eq!(
+            current
+                .authorize_write(&leader, &stale, CoordinatorWriteKind::Membership, 100,)
+                .unwrap_err()
+                .code(),
+            "domain.coordinator_term_rollback"
+        );
+
+        let valid = CoordinatorWriteCredential {
+            network_id: current.network_id.clone(),
+            term: current.term,
+            leader,
+            fencing_token: current.fencing_token,
+        };
+        assert_eq!(
+            current
+                .authorize_write(
+                    &current.leader,
+                    &valid,
+                    CoordinatorWriteKind::Membership,
+                    1_000,
+                )
+                .unwrap_err()
+                .code(),
+            "domain.coordinator_lease_expired"
+        );
+    }
+
+    #[test]
+    fn emergency_authority_cannot_use_governance_credential() {
+        let leader = NodeId::from_public_key(b"candidate-1");
+        let mut emergency = term(4, 40, leader.clone());
+        emergency.authority = CoordinatorAuthority::Emergency;
+        emergency.phase = CoordinatorPhase::EmergencyLeader;
+        let credential = CoordinatorWriteCredential {
+            network_id: emergency.network_id.clone(),
+            term: emergency.term,
+            leader: leader.clone(),
+            fencing_token: emergency.fencing_token,
+        };
+
+        assert_eq!(
+            emergency
+                .authorize_write(&leader, &credential, CoordinatorWriteKind::Membership, 100,)
+                .unwrap_err()
+                .code(),
+            "domain.coordinator_transition_read_only"
+        );
+        assert!(emergency
+            .authorize_write(&leader, &credential, CoordinatorWriteKind::HealthCheck, 100,)
+            .is_ok());
+    }
+
     struct CandidateFixture {
         network: NetworkRecord,
         owner: Identity,

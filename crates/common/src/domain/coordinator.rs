@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::ids::{NetworkId, NodeId, PublicKey, Signature};
+use super::ids::{ContentHash, NetworkId, NodeId, PublicKey, Signature};
 use super::network::NetworkRecord;
 use super::{DomainError, DomainResult};
 use crate::Identity;
@@ -48,8 +48,12 @@ pub const COORDINATOR_MAX_LEASE_DURATION_MS: u64 = 5 * 60 * 1000;
 /// election. The proof must remain valid for at least the term lease it backs.
 pub const COORDINATOR_ELECTION_VOTE_SCHEMA_VERSION: u16 = 1;
 pub const COORDINATOR_ELECTION_VOTE_MAX_VALIDITY_MS: u64 = 5 * 60 * 1000;
+pub const COORDINATOR_ELECTION_PROPOSAL_SCHEMA_VERSION: u16 = 1;
+pub const COORDINATOR_ELECTION_SESSION_SCHEMA_VERSION: u16 = 1;
 
 const COORDINATOR_ELECTION_VOTE_SIGNING_DOMAIN: &[u8] = b"fuckipv6.coordinator-election-vote.v1\0";
+const COORDINATOR_ELECTION_PROPOSAL_SIGNING_DOMAIN: &[u8] =
+    b"fuckipv6.coordinator-election-proposal.v1\0";
 
 impl CoordinatorPhase {
     pub fn can_transition_to(self, target: Self) -> bool {
@@ -356,6 +360,577 @@ impl CoordinatorElectionVote {
             ));
         }
         Ok(())
+    }
+
+    pub fn validate_for_proposal(
+        &self,
+        proposal: &CoordinatorElectionProposal,
+    ) -> DomainResult<()> {
+        self.validate_definition()?;
+        proposal.validate_definition()?;
+        if self.network_id != proposal.network_id
+            || self.candidate_config_revision != proposal.candidate_config_revision
+            || self.term != proposal.term
+            || self.leader != proposal.leader
+            || self.candidate_group.iter().collect::<BTreeSet<_>>()
+                != proposal.candidate_group.iter().collect::<BTreeSet<_>>()
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_election_vote_mismatch",
+                "coordinator election vote does not match the proposal",
+            ));
+        }
+        if self.issued_at_unix_ms < proposal.proposed_at_unix_ms
+            || self.expires_at_unix_ms < proposal.expires_at_unix_ms
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_election_vote_expiry",
+                "coordinator election vote does not cover the proposal window",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CoordinatorElectionProposalPayload<'a> {
+    schema_version: u16,
+    network_id: &'a NetworkId,
+    candidate_config_revision: u64,
+    term: u64,
+    leader: &'a NodeId,
+    candidate_group: &'a [NodeId],
+    proposer: &'a NodeId,
+    proposer_public_key: &'a PublicKey,
+    proposed_at_unix_ms: u64,
+    expires_at_unix_ms: u64,
+}
+
+/// A candidate-signed request to elect one deterministic Leader. A proposal is
+/// not authority: it can only create a persisted election session and the
+/// resulting term is admitted after independently verified strict-majority
+/// votes. The proposer must be the preferred eligible candidate and cannot
+/// appoint another node or itself outside the configured ordering.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct CoordinatorElectionProposal {
+    pub schema_version: u16,
+    pub proposal_id: ContentHash,
+    pub network_id: NetworkId,
+    pub candidate_config_revision: u64,
+    pub term: u64,
+    pub leader: NodeId,
+    pub candidate_group: Vec<NodeId>,
+    pub proposer: NodeId,
+    pub proposer_public_key: PublicKey,
+    pub proposed_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+    pub signature: Signature,
+}
+
+impl CoordinatorElectionProposal {
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed(
+        network_id: NetworkId,
+        candidate_config_revision: u64,
+        term: u64,
+        mut candidate_group: Vec<NodeId>,
+        proposed_at_unix_ms: u64,
+        expires_at_unix_ms: u64,
+        identity: &Identity,
+    ) -> DomainResult<Self> {
+        candidate_group.sort();
+        let proposer = NodeId::from_public_key(&identity.public_key());
+        let mut proposal = Self {
+            schema_version: COORDINATOR_ELECTION_PROPOSAL_SCHEMA_VERSION,
+            proposal_id: ContentHash::from_bytes(b"pending-coordinator-election-proposal"),
+            network_id,
+            candidate_config_revision,
+            term,
+            leader: proposer.clone(),
+            candidate_group,
+            proposer,
+            proposer_public_key: PublicKey::from_bytes(identity.public_key_bytes()),
+            proposed_at_unix_ms,
+            expires_at_unix_ms,
+            signature: Signature::from_bytes([0; 64]),
+        };
+        proposal.validate_structure()?;
+        let signature = identity.sign(&proposal.signing_payload()?);
+        let signature = Signature::from_bytes(signature.to_bytes());
+        proposal.proposal_id = ContentHash::from_bytes(&signature.to_bytes()?);
+        proposal.signature = signature;
+        proposal.validate_definition()?;
+        Ok(proposal)
+    }
+
+    fn payload(&self) -> CoordinatorElectionProposalPayload<'_> {
+        CoordinatorElectionProposalPayload {
+            schema_version: self.schema_version,
+            network_id: &self.network_id,
+            candidate_config_revision: self.candidate_config_revision,
+            term: self.term,
+            leader: &self.leader,
+            candidate_group: &self.candidate_group,
+            proposer: &self.proposer,
+            proposer_public_key: &self.proposer_public_key,
+            proposed_at_unix_ms: self.proposed_at_unix_ms,
+            expires_at_unix_ms: self.expires_at_unix_ms,
+        }
+    }
+
+    pub fn signing_payload(&self) -> DomainResult<Vec<u8>> {
+        let encoded = serde_json::to_vec(&self.payload()).map_err(|error| {
+            DomainError::invalid_value(format!(
+                "coordinator election proposal is not serializable: {error}"
+            ))
+        })?;
+        let mut payload =
+            Vec::with_capacity(COORDINATOR_ELECTION_PROPOSAL_SIGNING_DOMAIN.len() + encoded.len());
+        payload.extend_from_slice(COORDINATOR_ELECTION_PROPOSAL_SIGNING_DOMAIN);
+        payload.extend_from_slice(&encoded);
+        Ok(payload)
+    }
+
+    pub fn validate_structure(&self) -> DomainResult<()> {
+        if self.schema_version != COORDINATOR_ELECTION_PROPOSAL_SCHEMA_VERSION {
+            return Err(DomainError::invalid_value(
+                "unsupported coordinator election proposal schema",
+            ));
+        }
+        if self.candidate_config_revision == 0 || self.term == 0 {
+            return Err(DomainError::invalid_value(
+                "coordinator election proposal revision and term must be positive",
+            ));
+        }
+        if self.proposed_at_unix_ms >= self.expires_at_unix_ms {
+            return Err(DomainError::invalid_value(
+                "coordinator election proposal validity interval is empty",
+            ));
+        }
+        if self.expires_at_unix_ms - self.proposed_at_unix_ms
+            > COORDINATOR_ELECTION_VOTE_MAX_VALIDITY_MS
+        {
+            return Err(DomainError::invalid_value(
+                "coordinator election proposal validity exceeds the maximum lease",
+            ));
+        }
+        let candidates = self.candidate_group.iter().collect::<BTreeSet<_>>();
+        if candidates.is_empty() || candidates.len() != self.candidate_group.len() {
+            return Err(DomainError::invalid_value(
+                "coordinator election proposal candidate group must be non-empty and unique",
+            ));
+        }
+        if !candidates.contains(&self.leader) || self.leader != self.proposer {
+            return Err(DomainError::new(
+                "domain.coordinator_election_self_appointment",
+                "coordinator election proposer must be the proposed Leader",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn verify_signature(&self) -> DomainResult<()> {
+        let public_key = self.proposer_public_key.to_bytes()?;
+        if NodeId::from_public_key(&public_key) != self.proposer {
+            return Err(DomainError::new(
+                "domain.coordinator_election_proposer_mismatch",
+                "coordinator election proposer does not match its public key",
+            ));
+        }
+        let signature = self.signature.to_bytes()?;
+        if !Identity::verify(&public_key, &self.signing_payload()?, signature.as_slice()) {
+            return Err(DomainError::new(
+                "domain.invalid_signature",
+                "coordinator election proposal signature is invalid",
+            ));
+        }
+        if self.proposal_id != ContentHash::from_bytes(&signature) {
+            return Err(DomainError::new(
+                "domain.coordinator_election_proposal_id_mismatch",
+                "coordinator election proposal ID does not match its signature",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_definition(&self) -> DomainResult<()> {
+        self.validate_structure()?;
+        self.verify_signature()
+    }
+
+    pub fn validate_at(&self, now_unix_ms: u64) -> DomainResult<()> {
+        self.validate_definition()?;
+        if now_unix_ms < self.proposed_at_unix_ms || now_unix_ms >= self.expires_at_unix_ms {
+            return Err(DomainError::new(
+                "domain.coordinator_election_proposal_expired",
+                "coordinator election proposal is not currently valid",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn majority_threshold(&self) -> usize {
+        self.candidate_group.len() / 2 + 1
+    }
+
+    /// Validate the proposal against the active administrator-signed candidate
+    /// group and current health evidence. A new election is allowed only after
+    /// the current lease is no longer writable, and the old Leader is excluded
+    /// from preferred-candidate selection at that point.
+    pub fn validate_for_election(
+        &self,
+        network: &NetworkRecord,
+        config: &CoordinatorCandidateConfig,
+        declarations: &[CoordinatorCandidateDeclaration],
+        latest_term: Option<&CoordinatorTerm>,
+        now_unix_ms: u64,
+    ) -> DomainResult<()> {
+        self.validate_at(now_unix_ms)?;
+        config.validate_against_network(network)?;
+        if self.network_id != config.network_id
+            || self.candidate_config_revision != config.revision
+            || self.candidate_group.len() != config.candidates.len()
+            || self.candidate_group.iter().collect::<BTreeSet<_>>()
+                != config
+                    .candidates
+                    .iter()
+                    .map(|candidate| &candidate.node_id)
+                    .collect::<BTreeSet<_>>()
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_election_candidate_group_mismatch",
+                "coordinator election proposal does not bind the active candidate group",
+            ));
+        }
+
+        let expected_term = match latest_term {
+            Some(term) => {
+                term.validate_definition()?;
+                if term.network_id != self.network_id {
+                    return Err(DomainError::new(
+                        "domain.coordinator_election_term_mismatch",
+                        "coordinator election proposal conflicts with another network term",
+                    ));
+                }
+                if term.lease_status_at(now_unix_ms).is_writable() {
+                    return Err(DomainError::new(
+                        "domain.coordinator_election_lease_active",
+                        "coordinator election cannot start while the current lease is writable",
+                    ));
+                }
+                term.term
+                    .checked_add(1)
+                    .ok_or_else(|| DomainError::invariant("coordinator term overflow"))?
+            }
+            None => 1,
+        };
+        if self.term != expected_term {
+            return Err(DomainError::new(
+                "domain.coordinator_election_term_not_next",
+                "coordinator election term must be the next durable high-water mark",
+            ));
+        }
+
+        let status = CoordinatorCandidateStatus::assess(
+            network,
+            Some(config),
+            declarations,
+            latest_term,
+            now_unix_ms,
+        )?;
+        let mut eligible = status
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.eligible_for_election)
+            .filter(|candidate| latest_term.is_none_or(|term| term.leader != candidate.node_id))
+            .collect::<Vec<_>>();
+        eligible.sort_by(|left, right| {
+            left.priority
+                .cmp(&right.priority)
+                .then_with(|| left.node_id.cmp(&right.node_id))
+        });
+        let Some(preferred) = eligible.first() else {
+            return Err(DomainError::new(
+                "domain.coordinator_election_no_eligible_candidate",
+                "coordinator election has no healthy willing candidate",
+            ));
+        };
+        if self.leader != preferred.node_id {
+            return Err(DomainError::new(
+                "domain.coordinator_election_leader_not_preferred",
+                "coordinator election Leader is not the preferred eligible candidate",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinatorElectionStage {
+    Started,
+    Voting,
+    Committed,
+    TimedOut,
+    Rejected,
+}
+
+/// Durable election state. Votes are retained for audit and the committed term
+/// is reconstructed from this exact session, preventing a later caller from
+/// substituting a different proof or Leader.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct CoordinatorElectionSession {
+    pub schema_version: u16,
+    pub proposal: CoordinatorElectionProposal,
+    pub stage: CoordinatorElectionStage,
+    pub participants: Vec<NodeId>,
+    pub votes: Vec<CoordinatorElectionVote>,
+    pub started_at_unix_ms: u64,
+    pub deadline_unix_ms: u64,
+    pub updated_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_term: Option<CoordinatorTerm>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection_reason: Option<String>,
+}
+
+impl CoordinatorElectionSession {
+    pub fn started(proposal: CoordinatorElectionProposal, now_unix_ms: u64) -> DomainResult<Self> {
+        proposal.validate_at(now_unix_ms)?;
+        let participants = proposal.candidate_group.clone();
+        let deadline_unix_ms = proposal.expires_at_unix_ms;
+        Ok(Self {
+            schema_version: COORDINATOR_ELECTION_SESSION_SCHEMA_VERSION,
+            proposal,
+            stage: CoordinatorElectionStage::Started,
+            participants,
+            votes: Vec::new(),
+            started_at_unix_ms: now_unix_ms,
+            deadline_unix_ms,
+            updated_at_unix_ms: now_unix_ms,
+            result_term: None,
+            rejection_reason: None,
+        })
+    }
+
+    pub fn validate_definition(&self) -> DomainResult<()> {
+        if self.schema_version != COORDINATOR_ELECTION_SESSION_SCHEMA_VERSION {
+            return Err(DomainError::invalid_value(
+                "unsupported coordinator election session schema",
+            ));
+        }
+        self.proposal.validate_definition()?;
+        if self.participants.iter().collect::<BTreeSet<_>>()
+            != self
+                .proposal
+                .candidate_group
+                .iter()
+                .collect::<BTreeSet<_>>()
+            || self.participants.len() != self.proposal.candidate_group.len()
+        {
+            return Err(DomainError::invariant(
+                "coordinator election participants do not match the proposal",
+            ));
+        }
+        if self.started_at_unix_ms >= self.deadline_unix_ms
+            || self.deadline_unix_ms > self.proposal.expires_at_unix_ms
+        {
+            return Err(DomainError::invariant(
+                "coordinator election session deadline is invalid",
+            ));
+        }
+        let mut voters = BTreeSet::new();
+        for vote in &self.votes {
+            vote.validate_for_proposal(&self.proposal)?;
+            if !voters.insert(vote.voter.clone()) {
+                return Err(DomainError::invariant(
+                    "coordinator election session contains duplicate voters",
+                ));
+            }
+        }
+        match self.stage {
+            CoordinatorElectionStage::Committed => {
+                let term = self
+                    .result_term
+                    .as_ref()
+                    .ok_or_else(|| DomainError::invariant("committed election has no term"))?;
+                term.validate_definition()?;
+                if voters.len() < self.proposal.majority_threshold()
+                    || term.network_id != self.proposal.network_id
+                    || term.term != self.proposal.term
+                    || term.leader != self.proposal.leader
+                    || term.majority_proof
+                        != self
+                            .votes
+                            .iter()
+                            .map(|vote| vote.voter.clone())
+                            .collect::<Vec<_>>()
+                {
+                    return Err(DomainError::invariant(
+                        "committed election term does not match its quorum",
+                    ));
+                }
+            }
+            CoordinatorElectionStage::Started
+            | CoordinatorElectionStage::Voting
+            | CoordinatorElectionStage::TimedOut
+            | CoordinatorElectionStage::Rejected => {
+                if self.result_term.is_some() {
+                    return Err(DomainError::invariant(
+                        "uncommitted election cannot contain a result term",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn begin_voting(&mut self, now_unix_ms: u64) -> DomainResult<()> {
+        self.validate_definition()?;
+        if self.stage != CoordinatorElectionStage::Started {
+            return Err(DomainError::new(
+                "domain.coordinator_election_invalid_stage",
+                "coordinator election is not in the started stage",
+            ));
+        }
+        self.stage = CoordinatorElectionStage::Voting;
+        self.updated_at_unix_ms = now_unix_ms;
+        self.validate_definition()
+    }
+
+    /// Record one signed vote. Repeating the exact same vote is idempotent;
+    /// replacing a voter's choice, voting after the deadline, or voting in a
+    /// terminal stage is rejected.
+    pub fn record_vote(
+        &mut self,
+        vote: CoordinatorElectionVote,
+        now_unix_ms: u64,
+    ) -> DomainResult<bool> {
+        self.validate_definition()?;
+        if let Some(existing) = self
+            .votes
+            .iter()
+            .find(|existing| existing.voter == vote.voter)
+        {
+            if existing == &vote {
+                return Ok(false);
+            }
+            return Err(DomainError::new(
+                "domain.coordinator_election_conflicting_vote",
+                "coordinator election voter already selected another Leader",
+            ));
+        }
+        if self.stage != CoordinatorElectionStage::Voting {
+            return Err(DomainError::new(
+                "domain.coordinator_election_invalid_stage",
+                "coordinator election is not accepting votes",
+            ));
+        }
+        if now_unix_ms >= self.deadline_unix_ms {
+            return Err(DomainError::new(
+                "domain.coordinator_election_expired",
+                "coordinator election deadline has passed",
+            ));
+        }
+        vote.validate_for_proposal(&self.proposal)?;
+        if vote.issued_at_unix_ms > now_unix_ms.saturating_add(COORDINATOR_CLOCK_SKEW_LIMIT_MS) {
+            return Err(DomainError::new(
+                "domain.coordinator_election_vote_from_future",
+                "coordinator election vote was issued too far in the future",
+            ));
+        }
+        if now_unix_ms >= vote.expires_at_unix_ms {
+            return Err(DomainError::new(
+                "domain.coordinator_election_vote_expired",
+                "coordinator election vote has expired",
+            ));
+        }
+        self.votes.push(vote);
+        self.votes
+            .sort_by(|left, right| left.voter.cmp(&right.voter));
+        self.updated_at_unix_ms = now_unix_ms;
+        self.validate_definition()?;
+        Ok(true)
+    }
+
+    /// Commit only with a strict majority. The resulting term lease is bounded
+    /// by the proposal window and every retained vote must cover that window.
+    pub fn commit(
+        &mut self,
+        fencing_token: FencingToken,
+        now_unix_ms: u64,
+    ) -> DomainResult<CoordinatorTerm> {
+        self.validate_definition()?;
+        if self.stage != CoordinatorElectionStage::Voting {
+            return Err(DomainError::new(
+                "domain.coordinator_election_invalid_stage",
+                "coordinator election is not in the voting stage",
+            ));
+        }
+        self.proposal.validate_at(now_unix_ms)?;
+        if self.votes.len() < self.proposal.majority_threshold() {
+            return Err(DomainError::new(
+                "domain.coordinator_election_no_majority",
+                "coordinator election has not reached a strict majority",
+            ));
+        }
+        if fencing_token.0 == 0 {
+            return Err(DomainError::invalid_value(
+                "coordinator election fencing token must be positive",
+            ));
+        }
+        let term = CoordinatorTerm {
+            network_id: self.proposal.network_id.clone(),
+            term: self.proposal.term,
+            leader: self.proposal.leader.clone(),
+            candidate_group: self.proposal.candidate_group.clone(),
+            candidate_config_revision: self.proposal.candidate_config_revision,
+            majority_proof: self.votes.iter().map(|vote| vote.voter.clone()).collect(),
+            majority_votes: self.votes.clone(),
+            authority: CoordinatorAuthority::Full,
+            phase: CoordinatorPhase::Stable,
+            fencing_token,
+            issued_at_unix_ms: now_unix_ms,
+            expires_at_unix_ms: self.deadline_unix_ms,
+        };
+        term.validate_definition()?;
+        self.stage = CoordinatorElectionStage::Committed;
+        self.result_term = Some(term.clone());
+        self.updated_at_unix_ms = now_unix_ms;
+        self.validate_definition()?;
+        Ok(term)
+    }
+
+    pub fn timed_out(&mut self, now_unix_ms: u64) -> DomainResult<()> {
+        self.validate_definition()?;
+        if self.stage != CoordinatorElectionStage::Voting || now_unix_ms < self.deadline_unix_ms {
+            return Err(DomainError::new(
+                "domain.coordinator_election_not_timed_out",
+                "coordinator election is not eligible to time out",
+            ));
+        }
+        self.stage = CoordinatorElectionStage::TimedOut;
+        self.updated_at_unix_ms = now_unix_ms;
+        self.validate_definition()
+    }
+
+    pub fn reject(&mut self, reason: impl Into<String>, now_unix_ms: u64) -> DomainResult<()> {
+        self.validate_definition()?;
+        if matches!(
+            self.stage,
+            CoordinatorElectionStage::Committed
+                | CoordinatorElectionStage::TimedOut
+                | CoordinatorElectionStage::Rejected
+        ) {
+            return Err(DomainError::new(
+                "domain.coordinator_election_invalid_stage",
+                "coordinator election is already terminal",
+            ));
+        }
+        self.stage = CoordinatorElectionStage::Rejected;
+        self.rejection_reason = Some(reason.into());
+        self.updated_at_unix_ms = now_unix_ms;
+        self.validate_definition()
     }
 }
 
@@ -1621,6 +2196,128 @@ mod tests {
             .code(),
             "domain.invalid_value"
         );
+    }
+
+    #[test]
+    fn election_proposal_is_signed_and_bound_to_its_identity() {
+        let fixture = TermFixture::new();
+        let mut proposal = CoordinatorElectionProposal::signed(
+            fixture.network_id.clone(),
+            1,
+            1,
+            fixture.candidate_group(),
+            1_000,
+            2_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        proposal.validate_at(1_500).unwrap();
+
+        proposal.term = 2;
+        assert_eq!(
+            proposal.validate_definition().unwrap_err().code(),
+            "domain.invalid_signature"
+        );
+    }
+
+    #[test]
+    fn election_session_requires_strict_majority_and_is_idempotent() {
+        let fixture = TermFixture::new();
+        let proposal = CoordinatorElectionProposal::signed(
+            fixture.network_id.clone(),
+            1,
+            1,
+            fixture.candidate_group(),
+            1_000,
+            2_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        let mut session = CoordinatorElectionSession::started(proposal.clone(), 1_000).unwrap();
+        session.begin_voting(1_000).unwrap();
+        let first_vote = CoordinatorElectionVote::signed(
+            fixture.network_id.clone(),
+            1,
+            1,
+            proposal.leader.clone(),
+            fixture.candidate_group(),
+            1_000,
+            2_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        assert!(session.record_vote(first_vote.clone(), 1_100).unwrap());
+        assert!(!session.record_vote(first_vote, 1_100).unwrap());
+        assert_eq!(
+            session.commit(FencingToken(1), 1_200).unwrap_err().code(),
+            "domain.coordinator_election_no_majority"
+        );
+
+        let second_vote = CoordinatorElectionVote::signed(
+            fixture.network_id.clone(),
+            1,
+            1,
+            proposal.leader.clone(),
+            fixture.candidate_group(),
+            1_000,
+            2_000,
+            &fixture.candidate_two,
+        )
+        .unwrap();
+        session.record_vote(second_vote, 1_200).unwrap();
+        let term = session.commit(FencingToken(1), 1_300).unwrap();
+        assert_eq!(term.term, 1);
+        assert_eq!(term.leader, proposal.leader);
+        assert_eq!(term.majority_votes.len(), 2);
+        assert_eq!(session.stage, CoordinatorElectionStage::Committed);
+    }
+
+    #[test]
+    fn election_session_rejects_conflicting_duplicate_votes_and_expiry() {
+        let fixture = TermFixture::new();
+        let proposal = CoordinatorElectionProposal::signed(
+            fixture.network_id.clone(),
+            1,
+            1,
+            fixture.candidate_group(),
+            1_000,
+            2_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        let mut session = CoordinatorElectionSession::started(proposal.clone(), 1_000).unwrap();
+        session.begin_voting(1_000).unwrap();
+        let first = CoordinatorElectionVote::signed(
+            fixture.network_id.clone(),
+            1,
+            1,
+            proposal.leader.clone(),
+            fixture.candidate_group(),
+            1_000,
+            2_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        session.record_vote(first, 1_100).unwrap();
+
+        let conflicting = CoordinatorElectionVote::signed(
+            fixture.network_id.clone(),
+            1,
+            1,
+            proposal.leader.clone(),
+            fixture.candidate_group(),
+            1_100,
+            2_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        assert_eq!(
+            session.record_vote(conflicting, 1_200).unwrap_err().code(),
+            "domain.coordinator_election_conflicting_vote"
+        );
+        session.timed_out(2_000).unwrap();
+        assert_eq!(session.stage, CoordinatorElectionStage::TimedOut);
+        assert!(session.result_term.is_none());
     }
 
     #[test]

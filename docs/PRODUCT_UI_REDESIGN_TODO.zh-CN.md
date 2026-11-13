@@ -3800,7 +3800,8 @@ WebUI/Android 内容传输和跨平台竞态仍未验收。
 上传下载请求、控制矩阵、加载/错误/空状态、隐私和禁用控制。`cargo test -p fuckipv6-client --lib` 为 1,457 项通过/3 项忽略，
 `cargo fmt --all -- --check`、`cargo clippy -p fuckipv6-client --lib --tests -- -D warnings` 以及共享契约生成/检查均通过。
 该证据不替代 Android File/SAF、Windows/macOS 实机路径安全、跨平台传输竞态、跨平台验收或 OS/性能基线，故 W15-08 与 W15 总体
-继续保持 `[~]`。
+继续保持 `[~]`。当前 GPUI 工作区在同一分支通过 `x86_64-pc-windows-gnu` client library 编译检查；同时修正了目录列表在非 Unix
+目标下的条件编译未使用值，Linux 断言行为不变。该交叉编译只证明类型与平台接线可构建，不构成 Windows 实机路径安全或传输验收。
 
 **补充（2026-11-13，portable ACL 身份与 Linux TOCTOU）**：
 `portable_paths_preserve_rendering_and_fold_authorization_identity` 与 ACL Deny 大小写变体断言补齐了 portable 路径授权身份，

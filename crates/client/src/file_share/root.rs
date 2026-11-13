@@ -350,7 +350,10 @@ impl LocalShareRoot {
         if !path.is_root() {
             self.reject_root_io(path)?;
         }
+        #[cfg(unix)]
         let directory = self.open_directory(path)?;
+        #[cfg(not(unix))]
+        let _directory = self.open_directory(path)?;
         #[cfg(unix)]
         let mut entries = enumerate_directory_unix(&directory, path)?;
         #[cfg(not(unix))]

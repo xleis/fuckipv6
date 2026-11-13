@@ -491,6 +491,17 @@
           "minimum": 0,
           "type": "integer"
         },
+        "latest_election": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoordinatorElectionSession"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Most recent persisted election, including terminal outcomes. Keeping the\nfull signed proposal and vote set makes takeover decisions auditable from\nthe same projection used by clients and operators."
+        },
         "latest_term": {
           "anyOf": [
             {
@@ -568,6 +579,157 @@
       "enum": [
         "willing",
         "unwilling"
+      ],
+      "type": "string"
+    },
+    "CoordinatorElectionProposal": {
+      "description": "A candidate-signed request to elect one deterministic Leader. A proposal is\nnot authority: it can only create a persisted election session and the\nresulting term is admitted after independently verified strict-majority\nvotes. The proposer must be the preferred eligible candidate and cannot\nappoint another node or itself outside the configured ordering.",
+      "properties": {
+        "candidate_config_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "candidate_group": {
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "leader": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "proposal_id": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "proposed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "proposer": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "proposer_public_key": {
+          "$ref": "#/$defs/PublicKey"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signature": {
+          "$ref": "#/$defs/Signature"
+        },
+        "term": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "proposal_id",
+        "network_id",
+        "candidate_config_revision",
+        "term",
+        "leader",
+        "candidate_group",
+        "proposer",
+        "proposer_public_key",
+        "proposed_at_unix_ms",
+        "expires_at_unix_ms",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "CoordinatorElectionSession": {
+      "description": "Durable election state. Votes are retained for audit and the committed term\nis reconstructed from this exact session, preventing a later caller from\nsubstituting a different proof or Leader.",
+      "properties": {
+        "deadline_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "participants": {
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "proposal": {
+          "$ref": "#/$defs/CoordinatorElectionProposal"
+        },
+        "rejection_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result_term": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoordinatorTerm"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stage": {
+          "$ref": "#/$defs/CoordinatorElectionStage"
+        },
+        "started_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "updated_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "votes": {
+          "items": {
+            "$ref": "#/$defs/CoordinatorElectionVote"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "proposal",
+        "stage",
+        "participants",
+        "votes",
+        "started_at_unix_ms",
+        "deadline_unix_ms",
+        "updated_at_unix_ms"
+      ],
+      "type": "object"
+    },
+    "CoordinatorElectionStage": {
+      "enum": [
+        "started",
+        "voting",
+        "committed",
+        "timed_out",
+        "rejected"
       ],
       "type": "string"
     },

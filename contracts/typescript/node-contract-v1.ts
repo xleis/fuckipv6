@@ -170,6 +170,7 @@ export type CoordinatorCandidateStatus = {
   "current_leader"?: NodeId | null;
   "emergency": CoordinatorEmergencyState;
   "generated_at_unix_ms": number;
+  "latest_election"?: CoordinatorElectionSession | null;
   "latest_term"?: CoordinatorTerm | null;
   "lease"?: CoordinatorLeaseStatus;
   "network_id": NetworkId;
@@ -185,6 +186,36 @@ export type CoordinatorCandidateStatusEntry = {
 };
 
 export type CoordinatorCandidateWillingness = "willing" | "unwilling";
+
+export type CoordinatorElectionProposal = {
+  "candidate_config_revision": number;
+  "candidate_group": Array<NodeId>;
+  "expires_at_unix_ms": number;
+  "leader": NodeId;
+  "network_id": NetworkId;
+  "proposal_id": ContentHash;
+  "proposed_at_unix_ms": number;
+  "proposer": NodeId;
+  "proposer_public_key": PublicKey;
+  "schema_version": number;
+  "signature": Signature;
+  "term": number;
+};
+
+export type CoordinatorElectionSession = {
+  "deadline_unix_ms": number;
+  "participants": Array<NodeId>;
+  "proposal": CoordinatorElectionProposal;
+  "rejection_reason"?: string | null;
+  "result_term"?: CoordinatorTerm | null;
+  "schema_version": number;
+  "stage": CoordinatorElectionStage;
+  "started_at_unix_ms": number;
+  "updated_at_unix_ms": number;
+  "votes": Array<CoordinatorElectionVote>;
+};
+
+export type CoordinatorElectionStage = "started" | "voting" | "committed" | "timed_out" | "rejected";
 
 export type CoordinatorElectionVote = {
   "candidate_config_revision": number;

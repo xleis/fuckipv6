@@ -5,6 +5,7 @@ import java.util.Collections;
 
 import cc.xlei.fuckipv6.contract.NodeContractV1.CommandEnvelope;
 import cc.xlei.fuckipv6.contract.NodeContractV1.CapabilityState;
+import cc.xlei.fuckipv6.contract.NodeContractV1.CoordinatorElectionStage;
 import cc.xlei.fuckipv6.contract.NodeContractV1.LocalExitCapabilityStage;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCleanupFailureReason;
 import cc.xlei.fuckipv6.contract.NodeContractV1.NodeCleanupStepStatus;
@@ -56,7 +57,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 303,
+                NodeContractV1.DTO_CLASS_NAMES.length == 305,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -996,6 +997,20 @@ public final class NodeContractV1Test {
             NodeContractV1.CoordinatorLeaseStatus.class.getDeclaredField(field);
         }
         NodeContractV1.CoordinatorCandidateStatus.class.getDeclaredField("lease");
+        NodeContractV1.CoordinatorCandidateStatus.class.getDeclaredField("latest_election");
+        for (String field : new String[] {
+            "candidate_config_revision", "candidate_group", "expires_at_unix_ms", "leader",
+            "network_id", "proposal_id", "proposed_at_unix_ms", "proposer",
+            "proposer_public_key", "schema_version", "signature", "term"
+        }) {
+            NodeContractV1.CoordinatorElectionProposal.class.getDeclaredField(field);
+        }
+        for (String field : new String[] {
+            "deadline_unix_ms", "participants", "proposal", "rejection_reason", "result_term",
+            "schema_version", "stage", "started_at_unix_ms", "updated_at_unix_ms", "votes"
+        }) {
+            NodeContractV1.CoordinatorElectionSession.class.getDeclaredField(field);
+        }
         for (String field : new String[] {
             "authority", "candidate_config_revision", "candidate_group", "expires_at_unix_ms",
             "fencing_token", "issued_at_unix_ms", "leader", "majority_proof", "majority_votes",
@@ -1010,6 +1025,10 @@ public final class NodeContractV1Test {
         }) {
             NodeContractV1.CoordinatorElectionVote.class.getDeclaredField(field);
         }
+        assertSame(
+                CoordinatorElectionStage.COMMITTED,
+                CoordinatorElectionStage.fromWireName("committed"),
+                "committed election stage wire value");
 
         System.out.println("NodeContractV1Test: passed");
     }

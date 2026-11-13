@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "ConfirmedTrafficDirectFallback", "CoordinatorCandidate", "CoordinatorCandidateConfig", "CoordinatorCandidateDeclaration", "CoordinatorCandidateResources", "CoordinatorCandidateStatus", "CoordinatorCandidateStatusEntry", "CoordinatorElectionVote", "CoordinatorLeaseStatus", "CoordinatorPublicReachability", "CoordinatorTerm", "CoordinatorWriteCredential", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitContributionAvailability", "ExitContributionRestrictions", "ExitContributionTimeWindow", "ExitContributionTrafficQuota", "ExitHealthAssessment", "ExitHealthEvidence", "ExitHealthRetest", "ExitHealthSnapshot", "ExitNodeCapabilities", "ExitSelectionCandidate", "ExitSelectionGroupRule", "ExitSelectionMemberRule", "ExitSelectionPolicy", "ExitSelectionResolution", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "LeakDetectionAssessment", "LeakDetectionEnvironment", "LeakDetectionEvidence", "LeakDetectionSnapshot", "LocalExitCapabilitySnapshot", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkJoinPreview", "NetworkJoinTerms", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeApplyPolicyCommand", "NodeApplyTrafficPolicyCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCoordinatorCandidateStatusCommand", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeExitSelectionSnapshot", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodePreviewPolicyCommand", "NodePreviewPolicyRollbackCommand", "NodePreviewTrafficPolicyCommand", "NodePreviewTrafficPolicyRollbackCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodePublishCoordinatorCandidateDeclarationCommand", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRollbackPolicyCommand", "NodeRollbackTrafficPolicyCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetLocalExitCapabilityCommand", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTestTrafficPolicyCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateCoordinatorCandidatesCommand", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyAffectedObject", "PolicyApplyResult", "PolicyCurrent", "PolicyDiffEntry", "PolicyHistoryEntry", "PolicyHistorySnapshot", "PolicyPrecedenceExplanation", "PolicyPreview", "PolicyRiskSummary", "PolicyRollbackResult", "PolicyRuleExplanation", "PolicySnapshot", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "PortRange", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "RelayAuthorizationAuditSnapshot", "RelayAuthorizationDiagnostic", "RelayAuthorizationSourceDiagnostic", "RelayGovernanceAuditSnapshot", "RelayGovernanceEvent", "RelayHealthSnapshot", "RelayLimitPolicy", "RelayUsageSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TrafficDefaultPolicy", "TrafficFailureDecision", "TrafficFailurePolicy", "TrafficFlow", "TrafficMatch", "TrafficPolicy", "TrafficPolicyAffectedObject", "TrafficPolicyApplyResult", "TrafficPolicyCurrent", "TrafficPolicyDiffEntry", "TrafficPolicyDraft", "TrafficPolicyHistoryEntry", "TrafficPolicyHistorySnapshot", "TrafficPolicyPreview", "TrafficPolicyRollbackResult", "TrafficPolicyTestComparison", "TrafficPolicyTestDelta", "TrafficPolicyTestInput", "TrafficRoutingDefaultPolicyView", "TrafficRoutingHardConstraints", "TrafficRoutingHitSample", "TrafficRoutingMoveAction", "TrafficRoutingNavigation", "TrafficRoutingObservedHit", "TrafficRoutingPageModel", "TrafficRoutingRuleImpact", "TrafficRoutingRuleView", "TrafficRoutingTarget", "TrafficRoutingTargetRef", "TrafficRule", "TrafficRuleRisk", "TrafficSessionEvent", "TrafficSessionSnapshot", "TrafficSessionValidation", "TunCapabilities", "UiModeResolution", "ApplicationIdentity", "ExitContributionMemberScope", "ExitHealthTarget", "ExitSelectionMode", "ExitSelectionSource", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector", "TrafficAction", "TrafficMatchRisk", "TrafficPolicyTestContextSource", "TrafficPolicyTestDecision", "TrafficRoutingObservation", "TrafficRoutingRuleActivityEffect", "TrafficRoutingRuleImpactView", "TrafficRoutingWorkflowState"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "ConfirmedTrafficDirectFallback", "CoordinatorCandidate", "CoordinatorCandidateConfig", "CoordinatorCandidateDeclaration", "CoordinatorCandidateResources", "CoordinatorCandidateStatus", "CoordinatorCandidateStatusEntry", "CoordinatorElectionProposal", "CoordinatorElectionSession", "CoordinatorElectionVote", "CoordinatorLeaseStatus", "CoordinatorPublicReachability", "CoordinatorTerm", "CoordinatorWriteCredential", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitContributionAvailability", "ExitContributionRestrictions", "ExitContributionTimeWindow", "ExitContributionTrafficQuota", "ExitHealthAssessment", "ExitHealthEvidence", "ExitHealthRetest", "ExitHealthSnapshot", "ExitNodeCapabilities", "ExitSelectionCandidate", "ExitSelectionGroupRule", "ExitSelectionMemberRule", "ExitSelectionPolicy", "ExitSelectionResolution", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "LeakDetectionAssessment", "LeakDetectionEnvironment", "LeakDetectionEvidence", "LeakDetectionSnapshot", "LocalExitCapabilitySnapshot", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkJoinPreview", "NetworkJoinTerms", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeApplyPolicyCommand", "NodeApplyTrafficPolicyCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCoordinatorCandidateStatusCommand", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeExitSelectionSnapshot", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodePreviewPolicyCommand", "NodePreviewPolicyRollbackCommand", "NodePreviewTrafficPolicyCommand", "NodePreviewTrafficPolicyRollbackCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodePublishCoordinatorCandidateDeclarationCommand", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRollbackPolicyCommand", "NodeRollbackTrafficPolicyCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetLocalExitCapabilityCommand", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTestTrafficPolicyCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateCoordinatorCandidatesCommand", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyAffectedObject", "PolicyApplyResult", "PolicyCurrent", "PolicyDiffEntry", "PolicyHistoryEntry", "PolicyHistorySnapshot", "PolicyPrecedenceExplanation", "PolicyPreview", "PolicyRiskSummary", "PolicyRollbackResult", "PolicyRuleExplanation", "PolicySnapshot", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "PortRange", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "RelayAuthorizationAuditSnapshot", "RelayAuthorizationDiagnostic", "RelayAuthorizationSourceDiagnostic", "RelayGovernanceAuditSnapshot", "RelayGovernanceEvent", "RelayHealthSnapshot", "RelayLimitPolicy", "RelayUsageSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TrafficDefaultPolicy", "TrafficFailureDecision", "TrafficFailurePolicy", "TrafficFlow", "TrafficMatch", "TrafficPolicy", "TrafficPolicyAffectedObject", "TrafficPolicyApplyResult", "TrafficPolicyCurrent", "TrafficPolicyDiffEntry", "TrafficPolicyDraft", "TrafficPolicyHistoryEntry", "TrafficPolicyHistorySnapshot", "TrafficPolicyPreview", "TrafficPolicyRollbackResult", "TrafficPolicyTestComparison", "TrafficPolicyTestDelta", "TrafficPolicyTestInput", "TrafficRoutingDefaultPolicyView", "TrafficRoutingHardConstraints", "TrafficRoutingHitSample", "TrafficRoutingMoveAction", "TrafficRoutingNavigation", "TrafficRoutingObservedHit", "TrafficRoutingPageModel", "TrafficRoutingRuleImpact", "TrafficRoutingRuleView", "TrafficRoutingTarget", "TrafficRoutingTargetRef", "TrafficRule", "TrafficRuleRisk", "TrafficSessionEvent", "TrafficSessionSnapshot", "TrafficSessionValidation", "TunCapabilities", "UiModeResolution", "ApplicationIdentity", "ExitContributionMemberScope", "ExitHealthTarget", "ExitSelectionMode", "ExitSelectionSource", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector", "TrafficAction", "TrafficMatchRisk", "TrafficPolicyTestContextSource", "TrafficPolicyTestDecision", "TrafficRoutingObservation", "TrafficRoutingRuleActivityEffect", "TrafficRoutingRuleImpactView", "TrafficRoutingWorkflowState"
     };
 
     public enum AclAction {
@@ -368,6 +368,33 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown CoordinatorCandidateWillingness wire value: " + value);
+        }
+    }
+
+    public enum CoordinatorElectionStage {
+        STARTED("started"),
+        VOTING("voting"),
+        COMMITTED("committed"),
+        TIMED_OUT("timed_out"),
+        REJECTED("rejected");
+
+        private final String wireName;
+
+        CoordinatorElectionStage(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static CoordinatorElectionStage fromWireName(String value) {
+            for (CoordinatorElectionStage candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown CoordinatorElectionStage wire value: " + value);
         }
     }
 
@@ -4373,17 +4400,19 @@ public final class NodeContractV1 {
         public final String current_leader;
         public final CoordinatorEmergencyState emergency;
         public final Long generated_at_unix_ms;
+        public final CoordinatorElectionSession latest_election;
         public final CoordinatorTerm latest_term;
         public final CoordinatorLeaseStatus lease;
         public final String network_id;
 
-        public CoordinatorCandidateStatus(List<CoordinatorCandidateStatusEntry> candidates, CoordinatorCandidateConfig config, CoordinatorCandidateConfigState config_state, String current_leader, CoordinatorEmergencyState emergency, Long generated_at_unix_ms, CoordinatorTerm latest_term, CoordinatorLeaseStatus lease, String network_id) {
+        public CoordinatorCandidateStatus(List<CoordinatorCandidateStatusEntry> candidates, CoordinatorCandidateConfig config, CoordinatorCandidateConfigState config_state, String current_leader, CoordinatorEmergencyState emergency, Long generated_at_unix_ms, CoordinatorElectionSession latest_election, CoordinatorTerm latest_term, CoordinatorLeaseStatus lease, String network_id) {
             this.candidates = candidates;
             this.config = config;
             this.config_state = config_state;
             this.current_leader = current_leader;
             this.emergency = emergency;
             this.generated_at_unix_ms = generated_at_unix_ms;
+            this.latest_election = latest_election;
             this.latest_term = latest_term;
             this.lease = lease;
             this.network_id = network_id;
@@ -4406,6 +4435,64 @@ public final class NodeContractV1 {
             this.node_id = node_id;
             this.priority = priority;
             this.reason_code = reason_code;
+        }
+    }
+
+    /** DTO for CoordinatorElectionProposal. */
+    public static final class CoordinatorElectionProposal {
+        public final Long candidate_config_revision;
+        public final List<String> candidate_group;
+        public final Long expires_at_unix_ms;
+        public final String leader;
+        public final String network_id;
+        public final String proposal_id;
+        public final Long proposed_at_unix_ms;
+        public final String proposer;
+        public final String proposer_public_key;
+        public final Integer schema_version;
+        public final String signature;
+        public final Long term;
+
+        public CoordinatorElectionProposal(Long candidate_config_revision, List<String> candidate_group, Long expires_at_unix_ms, String leader, String network_id, String proposal_id, Long proposed_at_unix_ms, String proposer, String proposer_public_key, Integer schema_version, String signature, Long term) {
+            this.candidate_config_revision = candidate_config_revision;
+            this.candidate_group = candidate_group;
+            this.expires_at_unix_ms = expires_at_unix_ms;
+            this.leader = leader;
+            this.network_id = network_id;
+            this.proposal_id = proposal_id;
+            this.proposed_at_unix_ms = proposed_at_unix_ms;
+            this.proposer = proposer;
+            this.proposer_public_key = proposer_public_key;
+            this.schema_version = schema_version;
+            this.signature = signature;
+            this.term = term;
+        }
+    }
+
+    /** DTO for CoordinatorElectionSession. */
+    public static final class CoordinatorElectionSession {
+        public final Long deadline_unix_ms;
+        public final List<String> participants;
+        public final CoordinatorElectionProposal proposal;
+        public final String rejection_reason;
+        public final CoordinatorTerm result_term;
+        public final Integer schema_version;
+        public final CoordinatorElectionStage stage;
+        public final Long started_at_unix_ms;
+        public final Long updated_at_unix_ms;
+        public final List<CoordinatorElectionVote> votes;
+
+        public CoordinatorElectionSession(Long deadline_unix_ms, List<String> participants, CoordinatorElectionProposal proposal, String rejection_reason, CoordinatorTerm result_term, Integer schema_version, CoordinatorElectionStage stage, Long started_at_unix_ms, Long updated_at_unix_ms, List<CoordinatorElectionVote> votes) {
+            this.deadline_unix_ms = deadline_unix_ms;
+            this.participants = participants;
+            this.proposal = proposal;
+            this.rejection_reason = rejection_reason;
+            this.result_term = result_term;
+            this.schema_version = schema_version;
+            this.stage = stage;
+            this.started_at_unix_ms = started_at_unix_ms;
+            this.updated_at_unix_ms = updated_at_unix_ms;
+            this.votes = votes;
         }
     }
 

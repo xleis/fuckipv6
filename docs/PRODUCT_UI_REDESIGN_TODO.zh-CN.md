@@ -3270,7 +3270,7 @@ Relay/Exit/Coordinator。`owner_can_enable_and_disable_without_exposing_root`、
 Profile 声明 `File` capability，管理员可通过该网络授权关闭 File；即使网络已启用，文件内容仍必须通过上述双层 ACL。字段级隐私由
 `file_metadata_projection_omits_hidden_acl_quota_paths_and_timestamps` 覆盖；资源上限见 W15-06。
 
-### W15-03 上传、下载与断点续传 `[~]`
+### W15-03 上传、下载与断点续传 `[x]`
 
 - [x] 使用受认证、可取消的 operation 开始传输；
 - [x] 上传/下载支持校验、进度、暂停/恢复和最终确认；
@@ -3320,6 +3320,16 @@ duplicate transfer key 或共享 staging 路径会保留首个已恢复文件，
 `concurrent_same_name_uploads_publish_only_one_file`、`replayed_ack_is_rejected_without_failing_active_transfer`、
 `replayed_download_fragment_fails_closed_and_cleans_staging` 与 `replayed_completion_response_does_not_publish_twice`
 覆盖并发同名、重复 ACK、下载分片重放和完成响应重放；重放不会二次发布或影响其他传输，分片重放会失败关闭并清理 staging。
+
+**补充（2026-11-13，Linux 独立三节点网络验收）**：`scripts/test-w15-file-netns.sh` 在三个隔离 network namespace 中启动一个
+Coordinator owner 节点和两个真实成员节点，通过 veth 建立真实 P2P 路径，验证正式签名邀请、成员目录中的 File capability、双向上传/
+下载、BLAKE3 完整性、低带宽暂停、veth 断网后恢复续传、取消清理以及在线撤权。测试按持久化日志中的子进程 PID 对真实 node 子进程
+执行 `SIGKILL`，由 supervisor 启动新 PID，再验证网络/P2P 重连、owner 与 requester journal、私有 staging 和下一分块续传，最终文件
+哈希一致。网络级 File capability 撤销时，owner 取消会话并清理 staging，requester 通过原分块 `request_id` 收到
+`file_capability_unavailable`，不会等待 TTL；target 未发布且 journal 清空。验收命令为
+`sudo -n scripts/test-w15-file-netns.sh`，基于 commit `1523f6c` 的 release 二进制通过，证据目录保留在
+`/tmp/w15-file.<UTC时间>.<PID>`。该结果覆盖 Linux 真实网络链路、撤权中断和完整 node supervisor 重启，不替代 Windows/macOS
+实机、WebUI/Android File 内容表面或跨平台性能验收。
 
 ### W15-04 canonicalize 与路径边界 `[~]`
 
@@ -3462,9 +3472,15 @@ staging 陈旧阈值”。
 
 **未测边界**：Linux 进程内已覆盖满载上传/下载的正常完成、丢弃、staging 清理、OS 资源恢复和测试进程 SIGKILL 后的重启
 清理。尚未启动独立 node/control 进程做真实 File 满载隔离测试；macOS/Windows 的线程、RSS 与句柄基线仍需实机采样。
-大文件、多文件并发和真实网络中断恢复性能也未测试。
+真实 veth 断网、续传和完整 node supervisor 重启已经由 W15-03 的三节点 netns 验收覆盖，但该测试不是满载隔离或跨平台性能结论。
 
-### W15-07 撤权与传输中断 `[~]`
+**补充（2026-11-13，完整 node supervisor 重启）**：三节点 netns 测试按 JSON readiness 日志提取真实 node 子进程 PID，而不是把
+supervisor 外壳作为被测进程。下载暂停并写入 staging 后对 node 子进程执行 `SIGKILL`，测试等待旧 PID 消失和 supervisor 发布新
+ready PID，再验证 socket、网络在线状态、P2P、journal、staging 与后续续传。最终检查宿主默认路由/策略规则不变，测试进程、三个
+node 子进程和端口全部清理；fd/线程基线在测试结束时仍处于允许的在线运行时波动范围内。该证据补齐完整 node 服务重启，但不把
+短时三节点验收扩张为满载下 node/control 隔离或 macOS/Windows 资源结论。
+
+### W15-07 撤权与传输中断 `[x]`
 
 - [x] 撤销 ACL 后立即停止新元数据访问和传输请求；
 - [x] 已有传输在安全边界内终止或完成策略明确；
@@ -3472,7 +3488,7 @@ staging 陈旧阈值”。
 - [x] 节点 owner 关闭共享后所有客户端看到不可用；
 - [x] 不删除 owner 本地文件；
 - [x] 活动记录撤权、中断和清理结果；
-- [ ] 覆盖并发上传中撤权、节点重启和网络断开；
+- [x] 覆盖并发上传中撤权、节点重启和网络断开；
 - [x] 验证无未授权断点续传恢复。
 
 **验收**：撤权快速生效，不留下可继续下载的会话、URL 或临时凭据。
@@ -3486,8 +3502,8 @@ owner 本地共享文件不在失败路径中；owner 下载/上传侧撤权取�
 同时打开上传和下载后直接丢弃网络数据面，验证活动准入降到 0、上传 staging 与未发布目标均被清理；Linux 上还验证上传 staging
 和下载源文件两个句柄都回到基线。该测试模拟运行中数据面突然消失，但仍非真实双节点网络断开。
 `file_process_sigkill_staging_is_removed_on_restart` 进一步让持有活动上传的真实测试进程收到 `SIGKILL`，验证崩溃遗留 staging
-不会发布，并可在 FileRuntime 重启后被清理。该测试覆盖独立测试进程异常退出，不是完整 node 服务重启。尚未演练真实成员并发
-撤权、完整 node 服务重启和真实双节点网络断开，因此 W15-07 继续保持 `[~]`。
+不会发布，并可在 FileRuntime 重启后被清理。该测试覆盖独立测试进程异常退出，不是完整 node 服务重启；真实双节点撤权、断网和
+完整 node supervisor 重启由下方独立 netns 验证据补充。
 
 **补充（2026-11-13，撤权/中断/清理活动）**：File 网络数据面新增有界活动队列，并在单帧/批量入站处理及下载 pump 结束后
 合并到节点活动。`sessions_are_bound_to_both_member_epoch_and_local_capability_epoch` 校验本地 capability 撤权和成员 epoch
@@ -3531,6 +3547,12 @@ ACL 替换共享时，会在下一次 peer 帧之前主动调用 `cancel_all_for
 `file.transfer.authorization_revoked` / `Denied` 和 `file_transfer_cleanup_completed` 活动。因此“成员退出/移除后会话和临时凭据
 失效”已有自动化闭环；真实双节点网络断开、真实双节点成员退出/移除演练及完整 node 服务重启仍未验证。
 
+**补充（2026-11-13，Linux 真实双节点撤权与中断）**：独立 netns 验收在节点间真实 veth 路径上完成断网/恢复、在线 ACL 撤销和签名
+网络 File capability 撤销。撤销发生在 2 MiB 上传已写入 owner staging 之后：owner 立即取消会话并清理 staging，requester 收到相关
+错误并清空 journal，上传 target 未发布，requester 本地源文件保持不变。下载侧则在暂停、staging 持久化后由 supervisor 重启真实 node
+子进程，并从 journal/分块边界继续完成。该验收补齐 Linux 上的真实网络断开、撤权中断和完整 node 服务重启；Windows/macOS 实机、
+WebUI/Android 内容传输和跨平台竞态仍未验收。
+
 ### W15-08 File 非目标与发布证据 `[~]`
 
 - [x] 明确不做自动同步、双向镜像、系统挂载和远程目录替换；
@@ -3548,7 +3570,8 @@ ACL 替换共享时，会在下一次 peer 帧之前主动调用 `cancel_all_for
 `administrator_role_does_not_bypass_file_acl_layers` 和 `directory_acl_prefixes_cover_descendants_without_matching_siblings`
 覆盖；portable 路径与穿越规则见 W15-04；Linux 锚定句柄、目录交换、符号链接和权限撤销见 W15-05；配额、并发、带宽、
 磁盘预留、句柄与 `SIGKILL` 恢复见 W15-06；校验、暂停/恢复、重放和原子落位见 W15-03；ACL/成员撤权与清理见 W15-07。
-这些证据完成 Linux/portable 自动化测试矩阵，但不替代 Windows/macOS 实机验收、真实双节点网络和完整 node 服务重启。
+这些证据完成 Linux/portable 自动化测试矩阵；真实双节点网络、撤权中断和完整 node supervisor 重启另由下方 netns 验收补充，
+但仍不替代 Windows/macOS 实机验收。
 并发配额扫描的最终证据还包括 `concurrent_quota_scans_keep_independent_directory_cursors`，验证每次扫描使用独立目录游标且
 不会返回部分目录树。GPUI 已使用该领域语义；WebUI 新增基于 `snapshot.file_capability` 的权威只读状态卡片，只展示能力状态、
 绑定网络、share/access revision、可用空间、活动传输数和稳定根目录错误码，不展示共享根或文件内容，也不提供浏览、上传、下载、
@@ -3582,23 +3605,25 @@ x86_64-pc-windows-gnu` 通过。该结果只证明 client library（包含 File 
 `file_transfer_large_multifile_and_resume_report_linux`。数据集包含一个 64 MiB 单文件上传、一个 64 MiB 单文件下载，两者均在
 第 6 个 4 MiB 分块后暂停并恢复，剩余 40 MiB 只能从下一分块继续；另以 4 个 8 MiB 文件、每文件 1 MiB 分块进行交错并发下载。
 测试逐块计算 BLAKE3，pause/resume 后最终内容哈希必须与数据集一致，同时检查活动传输归零、staging 清空，以及文件描述符和线程
-回到基线。当前环境为 AMD Ryzen 7 5800H、Linux 7.2.14-zen1-1-zen、rustc 1.99.1、16 个逻辑 CPU，基于 `2875448` 加当前
-W15 未提交变更的 debug 测试构建；命令为
+回到基线。当前环境为 AMD Ryzen 7 5800H、Linux 7.2.14-zen1-1-zen、rustc 1.99.1、16 个逻辑 CPU，基于 `1523f6c` 的
+debug 测试构建；命令为
 `cargo test -p fuckipv6-client --test file_share_resources_linux file_transfer_large_multifile_and_resume_report_linux -- --nocapture`。
 本次记录：64 MiB 上传 189.57 ms / 337.6 MiB/s，64 MiB 下载 210.19 ms / 304.5 MiB/s，4×8 MiB 交错下载 118.96 ms /
 269.0 MiB/s；文件描述符 5→5，线程 2→2。该数据仅代表本机临时目录和进程内 adapter 路径，不是 QUIC/P2P 实网吞吐、release
 构建基准或跨平台性能结论。
 
-**边界与发布结论（2026-11-12）**：
+**边界与发布结论（2026-11-13 更新）**：
 
 - W15 第一版不做自动同步、双向镜像、系统挂载或远程目录替换；GPUI 设置页明确提示这些能力不存在。
 - Android SAF 属于 W16，不是 W15 已交付能力；Android 端不得据此声称 File 目录选择或传输已经完成。
-- 当前已有 GPUI owner File 设置流程、本地 owner IPC、持久化、domain ACL、路径边界、临时文件、可恢复传输适配器和资源限制。
+- 当前已有 GPUI owner File 设置流程、本地 owner IPC、持久化、domain ACL、路径边界、临时文件、可恢复传输适配器、资源限制和
+  Linux 独立三节点真实网络验收。
+- Linux netns 已覆盖真实 P2P 上传/下载、低带宽暂停、veth 断网、撤权中断、取消清理、真实 node 子进程 `SIGKILL` 后的 supervisor
+  重启以及 journal/staging 续传；这仍不是 Windows/macOS 实机、跨平台竞态或满载隔离证据。
 - 当前 WebUI 只有权威只读 File 能力状态面，尚无 File 内容浏览、上传、下载或续传操作；Android 尚无 File 表面。
   不得宣称 GPUI/WebUI/Android 三端 File 语义已经一致。
-- 自动化测试覆盖 Linux 临时目录及 portable 路径规则，但尚未完成 Windows GNU/macOS 实机重解析点、硬链接、目录交换、
-  并发重命名和权限变化测试，也没有真实网络传输链路、撤权中断或完整 node 服务重启演练；已有的大文件/多文件性能基线只覆盖
-  Linux 本地文件系统和 debug 测试构建。
+- 自动化测试仍缺 Windows GNU/macOS 实机重解析点、硬链接、目录交换、并发重命名和权限变化验收；已有的大文件/多文件性能基线
+  只覆盖 Linux 本地文件系统和 debug 测试构建。
 - 因此 W15 保持 `[~]`，第二版能力队列中的“W15 File 完成”继续保持 `[ ]`；真实路径安全、跨平台和三端门禁通过前不得发布为完成。
 
 ## 19. W16：Android

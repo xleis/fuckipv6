@@ -776,6 +776,54 @@ impl CoordinatorCandidateStore {
         status_from_file(&network, file.networks.get(network_id), now_unix_ms)
     }
 
+    /// Reject and audit a long-lived governance mutation while an emergency
+    /// runtime lease is active. The caller must invoke this before touching a
+    /// governance store; the candidate-store write path applies the same rule
+    /// atomically under its own file lock.
+    pub fn reject_emergency_governance_write(
+        &self,
+        actor: &NodeId,
+        network_id: &NetworkId,
+        action: &str,
+        now_unix_ms: u64,
+    ) -> Result<bool> {
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
+        self.ensure_parent()?;
+        let _file_lock = lock_candidate_file(&self.path)?;
+        let mut file = self.load_unlocked()?;
+        let network = read_network_record(&self.network_record_path, network_id)?;
+        if !network.members.contains(actor) {
+            bail!("coordinator_candidate.error.permission_denied");
+        }
+
+        let lease = file
+            .networks
+            .get_mut(network_id)
+            .and_then(|stored| stored.emergency_leader.as_mut());
+        let Some(lease) = lease else {
+            return Ok(false);
+        };
+        lease.refresh_at(now_unix_ms)?;
+        if !lease.is_active() {
+            return Ok(false);
+        }
+
+        append_emergency_governance_rejected(
+            &mut file.audit_log,
+            actor,
+            &network.network_id,
+            action,
+            lease,
+            now_unix_ms,
+        )?;
+        self.persist(&file)?;
+        Ok(true)
+    }
+
     /// Central write gate for callers that already have a governance payload.
     /// Rejections are durably audited; the caller must not mutate its store when
     /// this method returns an error.
@@ -1763,6 +1811,21 @@ impl CoordinatorCandidateStore {
             (Some(_), None) => bail!("coordinator_term.error.write_requires_term"),
             (None, Some(_)) => bail!("coordinator_term.error.missing"),
         }
+        if let Some(lease) = stored.emergency_leader.as_mut() {
+            lease.refresh_at(now_unix_ms)?;
+            if lease.is_active() {
+                let lease = lease.clone();
+                append_emergency_governance_rejected(
+                    &mut file.audit_log,
+                    actor,
+                    &network.network_id,
+                    "candidate_config_update",
+                    &lease,
+                    now_unix_ms,
+                )?;
+                bail!("domain.coordinator_emergency_governance_forbidden");
+            }
+        }
         let current_revision = stored
             .config
             .as_ref()
@@ -2198,6 +2261,35 @@ fn emergency_audit_details(
         ("governance_writable".into(), "false".into()),
         ("data_plane_allowed".into(), "true".into()),
     ])
+}
+
+fn append_emergency_governance_rejected(
+    audit_log: &mut AuditLog,
+    actor: &NodeId,
+    network_id: &NetworkId,
+    action: &str,
+    lease: &CoordinatorEmergencyLeaderStatus,
+    now_unix_ms: u64,
+) -> Result<()> {
+    append_audit(
+        audit_log,
+        actor,
+        network_id,
+        "coordinator.emergency.governance.rejected",
+        format!("network/{network_id}/coordinator-emergency"),
+        AuditOutcome::Denied,
+        now_unix_ms,
+        "governance mutation rejected during emergency runtime authority",
+        BTreeMap::from([
+            ("action".into(), action.into()),
+            ("leader".into(), lease.leader.to_string()),
+            ("emergency_epoch".into(), lease.emergency_epoch.to_string()),
+            (
+                "candidate_config_revision".into(),
+                lease.candidate_config_revision.to_string(),
+            ),
+        ]),
+    )
 }
 
 fn audit_outcome_for_error(error: &anyhow::Error) -> AuditOutcome {
@@ -4024,6 +4116,159 @@ mod tests {
                 && entry.details.get("reason_code")
                     == Some(&"coordinator.emergency.reason.candidate_recovered".into())
         }));
+    }
+
+    #[test]
+    fn active_emergency_lease_freezes_candidate_configuration_bootstrap() {
+        let fixture = Fixture::new("emergency-config-freeze");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let ordinary_id = NodeId::from_public_key(&fixture.ordinary.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        let issued = store
+            .issue_emergency_leader(
+                &owner_id,
+                &fixture.network.network_id,
+                &[owner_id.clone(), ordinary_id],
+                NOW,
+            )
+            .unwrap();
+        let lease = issued.status.emergency_leader.unwrap();
+
+        let error = store
+            .update_config(&owner_id, 1, fixture.config_two(2), NOW + 1)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "domain.coordinator_emergency_governance_forbidden");
+
+        let status = store
+            .status(&owner_id, &fixture.network.network_id, NOW + 1)
+            .unwrap();
+        assert_eq!(status.config.as_ref().unwrap().revision, 1);
+        let active = status.emergency_leader.as_ref().unwrap();
+        assert!(active.is_active());
+        assert_eq!(active.emergency_epoch, lease.emergency_epoch);
+
+        let audit = store
+            .audit_entries()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.action == "coordinator.emergency.governance.rejected")
+            .expect("emergency governance rejection must be audited");
+        assert_eq!(audit.outcome, AuditOutcome::Denied);
+        assert_eq!(
+            audit.details.get("action").map(String::as_str),
+            Some("candidate_config_update")
+        );
+        assert_eq!(audit.details.get("leader"), Some(&lease.leader.to_string()));
+        assert_eq!(
+            audit.details.get("emergency_epoch"),
+            Some(&lease.emergency_epoch.to_string())
+        );
+        assert_eq!(
+            audit.details.get("candidate_config_revision"),
+            Some(&lease.candidate_config_revision.to_string())
+        );
+    }
+
+    #[test]
+    fn expired_emergency_lease_does_not_block_candidate_configuration_bootstrap() {
+        let fixture = Fixture::new("expired-emergency-config-freeze");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let ordinary_id = NodeId::from_public_key(&fixture.ordinary.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        store
+            .issue_emergency_leader(
+                &owner_id,
+                &fixture.network.network_id,
+                &[owner_id.clone(), ordinary_id],
+                NOW,
+            )
+            .unwrap();
+
+        let after_expiry = NOW + fuckipv6_common::domain::COORDINATOR_EMERGENCY_LEASE_DURATION_MS;
+        let updated = store
+            .update_config(&owner_id, 1, fixture.config_two(2), after_expiry)
+            .unwrap();
+        assert_eq!(updated.config.as_ref().unwrap().revision, 2);
+        assert!(updated.emergency_leader.is_none());
+        assert!(!store.audit_entries().unwrap().iter().any(|entry| {
+            entry.action == "coordinator.emergency.governance.rejected"
+                && entry.details.get("action").map(String::as_str)
+                    == Some("candidate_config_update")
+        }));
+    }
+
+    #[test]
+    fn governance_write_gate_reports_active_leases_and_is_noop_without_them() {
+        let fixture = Fixture::new("emergency-governance-write-gate");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let ordinary_id = NodeId::from_public_key(&fixture.ordinary.public_key());
+
+        assert!(!store
+            .reject_emergency_governance_write(
+                &owner_id,
+                &fixture.network.network_id,
+                "invitation_create",
+                NOW,
+            )
+            .unwrap());
+        assert!(!store
+            .audit_entries()
+            .unwrap()
+            .iter()
+            .any(|entry| { entry.action == "coordinator.emergency.governance.rejected" }));
+
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        let issued = store
+            .issue_emergency_leader(
+                &owner_id,
+                &fixture.network.network_id,
+                &[owner_id.clone(), ordinary_id],
+                NOW,
+            )
+            .unwrap();
+        let lease = issued.status.emergency_leader.unwrap();
+        assert!(store
+            .reject_emergency_governance_write(
+                &owner_id,
+                &fixture.network.network_id,
+                "invitation_create",
+                NOW + 1,
+            )
+            .unwrap());
+
+        let audit = store
+            .audit_entries()
+            .unwrap()
+            .into_iter()
+            .find(|entry| {
+                entry.action == "coordinator.emergency.governance.rejected"
+                    && entry.details.get("action").map(String::as_str) == Some("invitation_create")
+            })
+            .expect("governance rejection must be audited");
+        assert_eq!(audit.outcome, AuditOutcome::Denied);
+        assert_eq!(audit.details.get("leader"), Some(&lease.leader.to_string()));
+        assert_eq!(
+            audit.details.get("emergency_epoch"),
+            Some(&lease.emergency_epoch.to_string())
+        );
+        assert_eq!(
+            audit.details.get("candidate_config_revision"),
+            Some(&lease.candidate_config_revision.to_string())
+        );
+        let persisted = store
+            .status(&owner_id, &fixture.network.network_id, NOW + 1)
+            .unwrap();
+        assert!(persisted.emergency_leader.unwrap().is_active());
     }
 
     #[test]

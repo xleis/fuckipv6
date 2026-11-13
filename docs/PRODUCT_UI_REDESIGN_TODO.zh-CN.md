@@ -61,7 +61,7 @@
 | W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05 已完成：本机启停、贡献治理、管理员选择、分层健康与故障切换/撤权均有权威状态和自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收；两侧 Exit 可达、Peer 级统计映射和 W12-09 的 24 小时稳定性/自动清理仍待完成 |
 | W13 Relay | `[ ]` | P1 | W10 | 授权、配额、健康、回退 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
-| W15 File | `[~]` | P2 | W10 | 本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、并发/速率/磁盘/扫描/审计上界已落地；WebUI/Android File 表面、真实网络传输、跨平台竞态与性能/OS 资源基线仍未完成 |
+| W15 File | `[~]` | P2 | W10 | 本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、WebUI 权威只读状态面、并发/速率/磁盘/扫描/审计上界已落地；Android File 表面、WebUI 内容浏览/传输、真实网络传输、跨平台竞态与性能/OS 资源基线仍未完成 |
 | W16 Android | `[ ]` | P2 | W2,W4,W5,W7-W15 | Compose、VpnService、全能力 |
 | W17 跨平台硬化 | `[ ]` | P2 | W6-W16 | Linux/macOS/Windows 实机证据 |
 | W18 发布门禁 | `[ ]` | P0 | 全部 | 自动化、实测、安全和发布证据 |
@@ -3314,7 +3314,7 @@ duplicate transfer key 或共享 staging 路径会保留首个已恢复文件，
 `opened_responses_reject_manifests_outside_network_bounds`、`opened_response_frames_reject_unbounded_manifests`、
 `remote_manifests_must_fit_the_bounded_file_and_chunk_limits` 与 `owner_rejects_unbounded_upload_manifests_without_the_frame_decoder`
 覆盖 `Opened` 响应构造/解码、owner 准入和 requester 响应绑定均拒绝超限 manifest。该证据仍是进程内状态机、journal 与
-冻结文件系统测试，不代表真实双节点网络中断、真实节点杀进程重启、WebUI/Android File 表面或大文件性能验收已经完成。
+冻结文件系统测试，不代表真实双节点网络中断、真实节点杀进程重启、WebUI/Android File 传输表面或大文件性能验收已经完成。
 失败事件保留稳定的具体错误码，并额外投影 `network` / `authorization` / `quota` / `storage` 四类本地操作提示；
 `requester_failures_preserve_network_authorization_quota_and_storage_kinds` 覆盖发送失败、权限撤销、配额超限与磁盘预留拒绝。
 `concurrent_same_name_uploads_publish_only_one_file`、`replayed_ack_is_rejected_without_failing_active_transfer`、
@@ -3550,8 +3550,16 @@ ACL 替换共享时，会在下一次 peer 帧之前主动调用 `cancel_all_for
 磁盘预留、句柄与 `SIGKILL` 恢复见 W15-06；校验、暂停/恢复、重放和原子落位见 W15-03；ACL/成员撤权与清理见 W15-07。
 这些证据完成 Linux/portable 自动化测试矩阵，但不替代 Windows/macOS 实机验收、真实双节点网络和完整 node 服务重启。
 并发配额扫描的最终证据还包括 `concurrent_quota_scans_keep_independent_directory_cursors`，验证每次扫描使用独立目录游标且
-不会返回部分目录树。GPUI 已使用该领域语义，WebUI 与 Android File 内容表面仍未实现，故三端一致性继续保留为未完成，
-W15-08 保持 `[~]`。
+不会返回部分目录树。GPUI 已使用该领域语义；WebUI 新增基于 `snapshot.file_capability` 的权威只读状态卡片，只展示能力状态、
+绑定网络、share/access revision、可用空间、活动传输数和稳定根目录错误码，不展示共享根或文件内容，也不提供浏览、上传、下载、
+暂停恢复或远程目录替换。Android File 内容表面仍未实现，故三端一致性继续保留为未完成，W15-08 保持 `[~]`。
+
+**补充（2026-11-13，WebUI File 只读状态面）**：Settings 新增第六个 File 分组，状态只来自节点权威快照；缺少
+`file_capability` 时才回退到 capability registry，且该回退只提供状态、不推测网络、容量或传输数字。卡片不渲染任何按钮，
+并显式说明根目录选择、启停、ACL/配额属于 owner 本机流程，文件浏览和传输不属于 WebUI 当前表面。
+`renders path-free File capability state without inventing content controls` 覆盖字段投影、稳定错误码和无操作控件，
+`React WebUI shell` 设置分组门禁同步为六组。完整 WebUI 回归 22 个测试文件、281 项测试通过，ESLint、TypeScript 类型检查和 Vite
+生产构建通过；嵌入 bundle 已同步。该证据只覆盖 WebUI 状态展示，不构成 Android 内容表面或真实双节点传输验收。
 
 **补充（2026-11-13，portable ACL 身份与 Linux TOCTOU）**：
 `portable_paths_preserve_rendering_and_fold_authorization_identity` 与 ACL Deny 大小写变体断言补齐了 portable 路径授权身份，
@@ -3560,7 +3568,8 @@ W15-08 保持 `[~]`。
 到根外链接。`cargo test -p fuckipv6-client --lib file_share::` 的 155 项测试、
 `cargo test -p fuckipv6-client --lib` 的 1,316 项通过/3 项忽略，以及
 `cargo clippy -p fuckipv6-client --lib --tests -- -D warnings` 均通过；Windows GNU client library 交叉编译通过但仍不构成
-Windows 实机路径安全证据。WebUI/Android File 内容表面和真实双节点传输仍未完成，故 W15-08 保持 `[~]`。
+Windows 实机路径安全证据。WebUI 已有只读能力状态面，但 WebUI/Android File 内容与传输表面和真实双节点传输仍未完成，
+故 W15-08 保持 `[~]`。
 
 **交叉编译检查（2026-11-13，不代表实机验收）**：修复 File runtime 在非 Linux 目标下无条件使用 `PathBuf`，以及若干既有的
 条件编译缺口后，`RUSTC="$(rustup which rustc)" rustup run stable cargo check -p fuckipv6-client --lib --target
@@ -3585,7 +3594,8 @@ W15 未提交变更的 debug 测试构建；命令为
 - W15 第一版不做自动同步、双向镜像、系统挂载或远程目录替换；GPUI 设置页明确提示这些能力不存在。
 - Android SAF 属于 W16，不是 W15 已交付能力；Android 端不得据此声称 File 目录选择或传输已经完成。
 - 当前已有 GPUI owner File 设置流程、本地 owner IPC、持久化、domain ACL、路径边界、临时文件、可恢复传输适配器和资源限制。
-- 当前 WebUI 与 Android 尚无 File 内容浏览/传输表面；不得宣称 GPUI/WebUI/Android 三端 File 语义已经一致。
+- 当前 WebUI 只有权威只读 File 能力状态面，尚无 File 内容浏览、上传、下载或续传操作；Android 尚无 File 表面。
+  不得宣称 GPUI/WebUI/Android 三端 File 语义已经一致。
 - 自动化测试覆盖 Linux 临时目录及 portable 路径规则，但尚未完成 Windows GNU/macOS 实机重解析点、硬链接、目录交换、
   并发重命名和权限变化测试，也没有真实网络传输链路、撤权中断或完整 node 服务重启演练；已有的大文件/多文件性能基线只覆盖
   Linux 本地文件系统和 debug 测试构建。

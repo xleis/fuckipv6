@@ -15,8 +15,9 @@ use fuckipv6_common::domain::{
     NetworkMemberGroup, NetworkMemberObservationSource, NetworkMemberOnlineState,
     NetworkMemberStatus, NetworkProfileApplyResult, NetworkProfilePreview,
     NetworkProfileProjections, NetworkProfileWarningCode, NetworkPublicProfileDocument,
-    NetworkVisibility, OperationError, OperationState, SymlinkPolicy, TopologyConnectionState,
-    TopologySnapshot, TrafficProtectionState, JOIN_REQUEST_MAX_REASON_CHARS,
+    NetworkVisibility, OperationError, OperationId, OperationState, SymlinkPolicy,
+    TopologyConnectionState, TopologySnapshot, TrafficProtectionState, TransferId,
+    JOIN_REQUEST_MAX_REASON_CHARS,
 };
 #[cfg(test)]
 use fuckipv6_common::domain::{
@@ -40,7 +41,7 @@ use gpui::{
 use gpui_base::input::{InputEvent, Textarea, TextareaState};
 
 use super::components::{
-    button, checkbox_control, choice_control, error_state as component_error_state, nav_tab,
+    badge, button, checkbox_control, choice_control, error_state as component_error_state, nav_tab,
     semantic_palette, tabs, toast as component_toast, ButtonVariant,
 };
 use super::configuration_workflow::{
@@ -48,6 +49,10 @@ use super::configuration_workflow::{
     GpuiConfigurationWorkflow,
 };
 use super::file_share_workflow::{FileShareAccessScope, GpuiFileShareDraft};
+use super::file_transfer_workflow::{
+    control_allowed, file_targets_from_snapshot, transfer_direction_key, transfer_state_key,
+    GpuiFileControl, GpuiFileSelectionError, GpuiFileTarget, GpuiFileWorkspace,
+};
 use super::path_picker::{pick_paths, PathPickerMode};
 use super::text_input::{NativeTextInput, TextInputEvent};
 #[cfg(test)]
@@ -70,6 +75,7 @@ use crate::config_transaction::{
     ConfigurationChangeAction, ConfigurationHistoryEntry, ConfigurationImpact,
 };
 use crate::discovery_index::NodeDiscoveryIndexErrorCategory;
+use crate::local_ipc::LocalError;
 use crate::network_discovery::{
     project_discovery, DiscoveryFilters, DiscoveryProjection, DiscoveryProjectionState,
     DiscoveryResult, DiscoveryVisibilityFilter,
@@ -85,7 +91,7 @@ use crate::node::{
     NodeUiAction, NodeUiBackendStatus, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage,
     OperationClientError,
 };
-use crate::remote_node::{RemoteFileOwnerClient, RemoteOperationClient};
+use crate::remote_node::{RemoteFileOwnerClient, RemoteFileTransferClient, RemoteOperationClient};
 
 const WINDOW_WIDTH: f32 = DIMENSIONS.window_default_width_px as f32;
 const WINDOW_HEIGHT: f32 = DIMENSIONS.window_default_height_px as f32;
@@ -295,7 +301,10 @@ struct GpuiShell {
     commands: NodeCommandBus,
     operations: Option<RemoteOperationClient>,
     file_owner: Option<RemoteFileOwnerClient>,
+    file_transfer: Option<RemoteFileTransferClient>,
     file_share_draft: GpuiFileShareDraft,
+    file_workspace: GpuiFileWorkspace,
+    file_polling: bool,
     configs: ConfigManager,
     language_preference: LanguagePreference,
     locale: Locale,
@@ -376,6 +385,7 @@ impl GpuiShell {
         commands: NodeCommandBus,
         operations: Option<RemoteOperationClient>,
         file_owner: Option<RemoteFileOwnerClient>,
+        file_transfer: Option<RemoteFileTransferClient>,
         configs: ConfigManager,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -391,7 +401,10 @@ impl GpuiShell {
             commands,
             operations,
             file_owner,
+            file_transfer,
             file_share_draft: GpuiFileShareDraft::default(),
+            file_workspace: GpuiFileWorkspace::default(),
+            file_polling: false,
             configs,
             language_preference,
             locale,
@@ -524,6 +537,10 @@ impl GpuiShell {
         )
         .detach();
         shell.routing_target_search_input = Some(routing_target_search_input);
+        shell.file_workspace.sync_targets(
+            file_targets_from_snapshot(&shell.snapshot),
+            shell.selected_network.as_deref(),
+        );
 
         shell.watch_state(updates, cx);
         shell.submit_raw(NodeCommand::GetUiManifest, cx);
@@ -1148,6 +1165,10 @@ impl GpuiShell {
                 self.pending_confirmation = None;
             }
         }
+        self.file_workspace.sync_targets(
+            file_targets_from_snapshot(&self.snapshot),
+            self.selected_network.as_deref(),
+        );
         self.fill_empty_network_fields();
         self.sync_text_inputs(cx);
     }
@@ -7658,6 +7679,437 @@ impl GpuiShell {
             .into_any_element()
     }
 
+    fn ensure_file_directory(&mut self, cx: &mut Context<Self>) {
+        if self.selected_page != "files" || !self.file_workspace.needs_directory_load() {
+            return;
+        }
+        let Some(request) = self.file_workspace.begin_directory(false) else {
+            return;
+        };
+        let Some(file_transfer) = self.file_transfer.clone() else {
+            self.file_workspace.finish_directory(
+                &request,
+                Err(t(self.locale, "file.page.error.unavailable").to_string()),
+            );
+            cx.notify();
+            return;
+        };
+
+        cx.spawn(async move |weak, cx| {
+            let result = file_transfer.list_directory(request.request.clone()).await;
+            let _ = weak.update(cx, |shell, cx| {
+                let result =
+                    result.map_err(|error| file_transfer_action_error(shell.locale, &error));
+                shell.file_workspace.finish_directory(&request, result);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn load_more_file_directory(&mut self, cx: &mut Context<Self>) {
+        if self.selected_page != "files" || !self.file_workspace.can_load_more() {
+            return;
+        }
+        let Some(request) = self.file_workspace.begin_directory(true) else {
+            return;
+        };
+        let Some(file_transfer) = self.file_transfer.clone() else {
+            self.file_workspace.finish_directory(
+                &request,
+                Err(t(self.locale, "file.page.error.unavailable").to_string()),
+            );
+            cx.notify();
+            return;
+        };
+
+        cx.spawn(async move |weak, cx| {
+            let result = file_transfer.list_directory(request.request.clone()).await;
+            let _ = weak.update(cx, |shell, cx| {
+                let result =
+                    result.map_err(|error| file_transfer_action_error(shell.locale, &error));
+                shell.file_workspace.finish_directory(&request, result);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn select_file_target(&mut self, key: String, cx: &mut Context<Self>) {
+        if self.file_workspace.select_target(&key) {
+            self.ensure_file_directory(cx);
+            self.request_file_transfer_refresh(cx);
+        }
+    }
+
+    fn navigate_file_directory(&mut self, path: impl Into<String>, cx: &mut Context<Self>) {
+        if self.file_workspace.navigate_directory(path) {
+            self.ensure_file_directory(cx);
+        }
+        cx.notify();
+    }
+
+    fn refresh_file_workspace(&mut self, cx: &mut Context<Self>) {
+        let path = self.file_workspace.directory_path.clone();
+        if self.file_workspace.selected_target.is_some() {
+            self.file_workspace.navigate_directory(path);
+            self.ensure_file_directory(cx);
+        }
+        self.request_file_transfer_refresh(cx);
+        self.submit_raw(NodeCommand::GetSnapshot, cx);
+        cx.notify();
+    }
+
+    fn select_file_upload(&mut self, cx: &mut Context<Self>) {
+        if !self.file_workspace.begin_upload_pick() {
+            return;
+        }
+        let Some(target) = self.file_workspace.selected_target.clone() else {
+            self.file_workspace.finish_upload_pick();
+            return;
+        };
+        let expected_target = target.key();
+        let expected_directory = self.file_workspace.directory_path.clone();
+        let task = pick_paths(cx, PathPickerMode::Files { multiple: false });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |shell, cx| {
+                let is_current_pick = shell.file_workspace.picking_upload
+                    && shell
+                        .file_workspace
+                        .selected_target
+                        .as_ref()
+                        .is_some_and(|target| target.key() == expected_target)
+                    && shell.file_workspace.directory_path == expected_directory;
+                shell.file_workspace.finish_upload_pick();
+                if !is_current_pick {
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(Some(paths)) => match paths.first() {
+                        Some(path) => {
+                            if let Err(error) =
+                                shell.file_workspace.select_upload_file(path.clone())
+                            {
+                                shell.file_workspace.upload_error =
+                                    Some(file_selection_error(shell.locale, &error));
+                            }
+                        }
+                        None => {
+                            shell.file_workspace.upload_error =
+                                Some(t(shell.locale, "file.error.no_directory").to_string());
+                        }
+                    },
+                    Ok(None) => {}
+                    Err(error) => {
+                        shell.file_workspace.upload_error = Some(tr(
+                            shell.locale,
+                            "file.error.picker",
+                            &[("error", &error.to_string())],
+                        ));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn start_file_upload(&mut self, cx: &mut Context<Self>) {
+        let Some((transfer_id, operation_id)) = new_file_transfer_ids() else {
+            self.file_workspace.upload_error =
+                Some(t(self.locale, "file.page.error.generic").to_string());
+            cx.notify();
+            return;
+        };
+        let Some(request) = self.file_workspace.begin_upload(transfer_id, operation_id) else {
+            return;
+        };
+        let Some(file_transfer) = self.file_transfer.clone() else {
+            self.file_workspace.finish_upload_start(
+                request.generation,
+                &request.target_key,
+                &request.request.transfer_id,
+                &request.request.operation_id,
+                Err(t(self.locale, "file.page.error.unavailable").to_string()),
+            );
+            cx.notify();
+            return;
+        };
+
+        cx.spawn(async move |weak, cx| {
+            let result = file_transfer.start(request.request.clone()).await;
+            let _ = weak.update(cx, |shell, cx| {
+                let result = result
+                    .map(|_| ())
+                    .map_err(|error| file_transfer_action_error(shell.locale, &error));
+                if shell.file_workspace.finish_upload_start(
+                    request.generation,
+                    &request.target_key,
+                    &request.request.transfer_id,
+                    &request.request.operation_id,
+                    result,
+                ) == Some(true)
+                {
+                    shell.file_workspace.notice = Some(tr(
+                        shell.locale,
+                        "file.page.upload_started",
+                        &[("name", &request.name)],
+                    ));
+                    shell.request_file_transfer_refresh(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn select_file_download(
+        &mut self,
+        entry: crate::file_share::FileDirectoryEntry,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.file_workspace.begin_download_pick(&entry) {
+            return;
+        }
+        let Some(target) = self.file_workspace.selected_target.clone() else {
+            self.file_workspace.cancel_download_picker();
+            return;
+        };
+        let expected_target = target.key();
+        let task = pick_paths(cx, PathPickerMode::Directories { multiple: false });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update(cx, |shell, cx| {
+                let is_current_pick = shell.file_workspace.picking_download
+                    && shell
+                        .file_workspace
+                        .selected_target
+                        .as_ref()
+                        .is_some_and(|target| target.key() == expected_target)
+                    && shell.file_workspace.downloading_path.is_none();
+                if !is_current_pick {
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(Some(paths)) => match paths.first() {
+                        Some(destination) => {
+                            shell.start_file_download(entry.clone(), destination.clone(), cx);
+                        }
+                        None => {
+                            shell.file_workspace.cancel_download_picker();
+                            shell.file_workspace.download_error =
+                                Some(t(shell.locale, "file.error.no_directory").to_string());
+                        }
+                    },
+                    Ok(None) => shell.file_workspace.cancel_download_picker(),
+                    Err(error) => {
+                        shell.file_workspace.cancel_download_picker();
+                        shell.file_workspace.download_error = Some(tr(
+                            shell.locale,
+                            "file.error.picker",
+                            &[("error", &error.to_string())],
+                        ));
+                    }
+                }
+                if shell.file_workspace.picking_download {
+                    shell.file_workspace.cancel_download_picker();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn start_file_download(
+        &mut self,
+        entry: crate::file_share::FileDirectoryEntry,
+        destination: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((transfer_id, operation_id)) = new_file_transfer_ids() else {
+            self.file_workspace.cancel_download_picker();
+            self.file_workspace.download_error =
+                Some(t(self.locale, "file.page.error.generic").to_string());
+            cx.notify();
+            return;
+        };
+        let request = match self.file_workspace.begin_download(
+            &entry,
+            &destination,
+            transfer_id,
+            operation_id,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                self.file_workspace.cancel_download_picker();
+                self.file_workspace.download_error =
+                    Some(file_selection_error(self.locale, &error));
+                cx.notify();
+                return;
+            }
+        };
+        let Some(file_transfer) = self.file_transfer.clone() else {
+            self.file_workspace.finish_download_start(
+                request.generation,
+                &request.target_key,
+                &request.request.transfer_id,
+                &request.request.operation_id,
+                Err(t(self.locale, "file.page.error.unavailable").to_string()),
+            );
+            cx.notify();
+            return;
+        };
+
+        cx.spawn(async move |weak, cx| {
+            let result = file_transfer.start(request.request.clone()).await;
+            let _ = weak.update(cx, |shell, cx| {
+                let result = result
+                    .map(|_| ())
+                    .map_err(|error| file_transfer_action_error(shell.locale, &error));
+                if shell.file_workspace.finish_download_start(
+                    request.generation,
+                    &request.target_key,
+                    &request.request.transfer_id,
+                    &request.request.operation_id,
+                    result,
+                ) == Some(true)
+                {
+                    shell.file_workspace.notice = Some(tr(
+                        shell.locale,
+                        "file.page.download_started",
+                        &[("name", &request.name)],
+                    ));
+                    shell.request_file_transfer_refresh(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn request_file_transfer_refresh(&mut self, cx: &mut Context<Self>) {
+        let Some(generation) = self.file_workspace.begin_transfer_refresh() else {
+            return;
+        };
+        let Some(file_transfer) = self.file_transfer.clone() else {
+            self.file_workspace.finish_transfer_refresh(
+                generation,
+                Err(t(self.locale, "file.page.error.unavailable").to_string()),
+            );
+            return;
+        };
+
+        cx.spawn(async move |weak, cx| {
+            let result = file_transfer.list_transfers().await;
+            let _ = weak.update(cx, |shell, cx| {
+                let result =
+                    result.map_err(|error| file_transfer_action_error(shell.locale, &error));
+                shell
+                    .file_workspace
+                    .finish_transfer_refresh(generation, result);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn ensure_file_polling(&mut self, cx: &mut Context<Self>) {
+        if self.selected_page != "files" || self.file_polling || self.file_transfer.is_none() {
+            return;
+        }
+        self.file_polling = true;
+        self.request_file_transfer_refresh(cx);
+        cx.spawn(async move |weak, cx| loop {
+            let interval = weak
+                .update(cx, |shell, _| {
+                    if shell.selected_page != "files" || shell.file_transfer.is_none() {
+                        shell.file_polling = false;
+                        return None;
+                    }
+                    Some(if shell.file_workspace.active_transfer_count() > 0 {
+                        std::time::Duration::from_millis(750)
+                    } else {
+                        std::time::Duration::from_millis(2_000)
+                    })
+                })
+                .ok()
+                .flatten();
+            let Some(interval) = interval else {
+                break;
+            };
+            cx.background_executor().timer(interval).await;
+            let keep_polling = weak
+                .update(cx, |shell, cx| {
+                    if shell.selected_page != "files" || shell.file_transfer.is_none() {
+                        shell.file_polling = false;
+                        return false;
+                    }
+                    shell.request_file_transfer_refresh(cx);
+                    true
+                })
+                .unwrap_or(false);
+            if !keep_polling {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    fn file_transfer_control(
+        &mut self,
+        status: &crate::file_share::FileTransferStatus,
+        action: GpuiFileControl,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self.file_workspace.begin_control(status, action) else {
+            return;
+        };
+        let Some(file_transfer) = self.file_transfer.clone() else {
+            self.file_workspace.finish_control(
+                pending.generation,
+                &pending.transfer_id,
+                &pending.operation_id,
+                Err(t(self.locale, "file.page.error.unavailable").to_string()),
+            );
+            cx.notify();
+            return;
+        };
+
+        cx.spawn(async move |weak, cx| {
+            let transfer_id = pending.transfer_id.clone();
+            let operation_id = pending.operation_id.clone();
+            let result = match pending.action {
+                GpuiFileControl::Pause => file_transfer.pause(transfer_id, operation_id).await,
+                GpuiFileControl::Resume => file_transfer.resume(transfer_id, operation_id).await,
+                GpuiFileControl::Cancel => file_transfer.cancel(transfer_id, operation_id).await,
+            };
+            let _ = weak.update(cx, |shell, cx| {
+                let result =
+                    result.map_err(|error| file_transfer_action_error(shell.locale, &error));
+                if shell.file_workspace.finish_control(
+                    pending.generation,
+                    &pending.transfer_id,
+                    &pending.operation_id,
+                    result,
+                ) {
+                    shell.request_file_transfer_refresh(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn networks_content(
         &mut self,
         layout: LayoutClass,
@@ -9631,6 +10083,783 @@ impl GpuiShell {
         content.into_any_element()
     }
 
+    fn files_workspace(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut content = div()
+            .id("files-workspace")
+            .debug_selector(|| "visual-files-workspace".into())
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(self.file_target_card(cx));
+        if self.file_workspace.selected_target.is_some() {
+            content = content.child(self.file_directory_card(cx));
+        }
+        content
+            .child(self.file_transfer_card(cx))
+            .child(activity_sync_notice(
+                "visual-file-privacy-note",
+                t(self.locale, "file.page.directory.title").to_string(),
+                t(self.locale, "file.page.privacy_note").to_string(),
+                SemanticState::Info,
+            ))
+            .into_any_element()
+    }
+
+    fn file_target_card(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let targets = self.file_workspace.targets.clone();
+        let selected_key = self
+            .file_workspace
+            .selected_target
+            .as_ref()
+            .map(GpuiFileTarget::key);
+        let refresh = button(
+            SharedString::from("file-workspace-refresh"),
+            t(self.locale, "file.page.refresh").to_string(),
+            ButtonVariant::Ghost,
+            false,
+        )
+        .debug_selector(|| "visual-file-refresh".into())
+        .on_click(cx.listener(|shell, _, _, cx| shell.refresh_file_workspace(cx)));
+
+        let heading = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .mb_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "file.page.target.title").to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(t(self.locale, "file.page.target.label").to_string()),
+                    ),
+            )
+            .child(refresh);
+
+        let mut options = Vec::new();
+        for (index, target) in targets.iter().enumerate() {
+            let key = target.key();
+            let selected = selected_key.as_deref() == Some(key.as_str());
+            let label = tr(
+                self.locale,
+                "file.page.target.option",
+                &[("network", &target.network_name), ("peer", &target.peer)],
+            );
+            options.push(
+                choice_control(
+                    SharedString::from(format!("file-target-{index}")),
+                    label,
+                    selected,
+                )
+                .debug_selector(move || format!("visual-file-target-{index}"))
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.select_file_target(key.clone(), cx);
+                }))
+                .into_any_element(),
+            );
+        }
+
+        let mut body = if targets.is_empty() {
+            activity_sync_notice(
+                "visual-file-no-targets",
+                t(self.locale, "file.page.no_targets.title").to_string(),
+                t(self.locale, "file.page.no_targets.detail").to_string(),
+                SemanticState::Warning,
+            )
+        } else {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap_2()
+                .children(options)
+                .into_any_element()
+        };
+
+        if let Some(target) = self.file_workspace.selected_target.as_ref() {
+            body = div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .child(body)
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(file_metadata_row(
+                            t(self.locale, "file.page.target.network_id").to_string(),
+                            target.network_id.clone(),
+                        ))
+                        .child(file_metadata_row(
+                            t(self.locale, "file.page.target.peer_id").to_string(),
+                            target.peer.clone(),
+                        )),
+                )
+                .into_any_element();
+        }
+
+        surface_card()
+            .debug_selector(|| "visual-file-target-card".into())
+            .p_4()
+            .child(heading)
+            .child(body)
+            .into_any_element()
+    }
+
+    fn file_directory_card(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let path = self.file_workspace.directory_path.clone();
+        let entries = self.file_workspace.directory_entries.clone();
+        let loaded = self.file_workspace.directory_loaded;
+        let loading = self.file_workspace.directory_loading;
+        let loading_more = self.file_workspace.directory_loading_more;
+        let directory_error = self.file_workspace.directory_error.clone();
+        let truncated = self.file_workspace.directory_truncated;
+        let can_load_more = self.file_workspace.can_load_more();
+        let upload = self
+            .file_workspace
+            .upload
+            .as_ref()
+            .map(|upload| upload.name().to_owned());
+        let picking_upload = self.file_workspace.picking_upload;
+        let uploading = self.file_workspace.uploading;
+        let upload_error = self.file_workspace.upload_error.clone();
+        let download_error = self.file_workspace.download_error.clone();
+        let notice = self.file_workspace.notice.clone();
+        let download_busy =
+            self.file_workspace.picking_download || self.file_workspace.downloading_path.is_some();
+        let at_root = path.is_empty();
+        let parent_path = path
+            .rsplit_once('/')
+            .map_or_else(String::new, |(parent, _)| parent.to_owned());
+
+        let refresh = button(
+            SharedString::from("file-directory-refresh"),
+            t(self.locale, "file.page.refresh").to_string(),
+            ButtonVariant::Ghost,
+            false,
+        )
+        .on_click(cx.listener(|shell, _, _, cx| shell.refresh_file_workspace(cx)));
+        let heading = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .mb_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "file.page.directory.title").to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(t(self.locale, "file.page.directory.detail").to_string()),
+                    ),
+            )
+            .child(refresh);
+
+        let mut breadcrumbs = Vec::new();
+        breadcrumbs.push(
+            button(
+                SharedString::from("file-breadcrumb-root"),
+                t(self.locale, "file.page.root").to_string(),
+                ButtonVariant::Ghost,
+                at_root,
+            )
+            .debug_selector(|| "visual-file-breadcrumb-root".into())
+            .on_click(cx.listener(|shell, _, _, cx| {
+                shell.navigate_file_directory("", cx);
+            }))
+            .into_any_element(),
+        );
+        let mut prefix = String::new();
+        for (index, component) in path
+            .split('/')
+            .filter(|component| !component.is_empty())
+            .enumerate()
+        {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(component);
+            let crumb_path = prefix.clone();
+            breadcrumbs.push(
+                div()
+                    .text_xs()
+                    .text_color(rgba(COLOR_FAINT))
+                    .child("/")
+                    .into_any_element(),
+            );
+            breadcrumbs.push(
+                button(
+                    SharedString::from(format!("file-breadcrumb-{index}")),
+                    component.to_owned(),
+                    ButtonVariant::Ghost,
+                    false,
+                )
+                .debug_selector(move || format!("visual-file-breadcrumb-{index}"))
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.navigate_file_directory(crumb_path.clone(), cx);
+                }))
+                .into_any_element(),
+            );
+        }
+        let up = button(
+            SharedString::from("file-directory-up"),
+            t(self.locale, "file.page.up").to_string(),
+            ButtonVariant::Ghost,
+            at_root,
+        )
+        .debug_selector(|| "visual-file-directory-up".into())
+        .on_click(cx.listener(move |shell, _, _, cx| {
+            shell.navigate_file_directory(parent_path.clone(), cx);
+        }));
+
+        let navigation = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(up)
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_1()
+                    .children(breadcrumbs),
+            );
+
+        let mut directory_body = div().flex().flex_col().gap_3();
+        if loading {
+            directory_body = directory_body.child(activity_sync_notice(
+                "visual-file-directory-loading",
+                t(self.locale, "file.page.directory.loading").to_string(),
+                t(self.locale, "file.page.directory.loading_detail").to_string(),
+                SemanticState::Info,
+            ));
+        } else if let Some(error) = directory_error {
+            directory_body = directory_body
+                .child(
+                    component_error_state(
+                        "file-directory-error",
+                        t(self.locale, "file.page.error.generic"),
+                        error,
+                    )
+                    .debug_selector(|| "visual-file-directory-error".into()),
+                )
+                .child(
+                    button(
+                        SharedString::from("file-directory-retry"),
+                        t(self.locale, "file.page.retry").to_string(),
+                        ButtonVariant::Secondary,
+                        false,
+                    )
+                    .on_click(cx.listener(|shell, _, _, cx| shell.refresh_file_workspace(cx))),
+                );
+        } else if loaded && entries.is_empty() {
+            directory_body = directory_body.child(activity_sync_notice(
+                "visual-file-directory-empty",
+                t(self.locale, "file.page.directory.empty").to_string(),
+                t(self.locale, "file.page.directory.empty_detail").to_string(),
+                SemanticState::Neutral,
+            ));
+        } else if entries.is_empty() {
+            directory_body = directory_body.child(activity_sync_notice(
+                "visual-file-directory-pending",
+                t(self.locale, "file.page.directory.loading").to_string(),
+                t(self.locale, "file.page.directory.loading_detail").to_string(),
+                SemanticState::Info,
+            ));
+        } else {
+            directory_body = directory_body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_3()
+                    .pb_1()
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(t(self.locale, "file.page.table.name").to_string()),
+                    )
+                    .child(
+                        div()
+                            .w(px(96.0))
+                            .text_right()
+                            .child(t(self.locale, "file.page.table.size").to_string()),
+                    )
+                    .child(
+                        div()
+                            .w(px(164.0))
+                            .text_right()
+                            .child(t(self.locale, "file.page.table.modified").to_string()),
+                    )
+                    .child(
+                        div()
+                            .w(px(128.0))
+                            .text_right()
+                            .child(t(self.locale, "file.page.table.actions").to_string()),
+                    ),
+            );
+            let mut rows = Vec::new();
+            for (index, entry) in entries.iter().enumerate() {
+                let name = entry
+                    .path
+                    .as_str()
+                    .rsplit_once('/')
+                    .map_or(entry.path.as_str(), |(_, name)| name)
+                    .to_owned();
+                let action = if entry.is_directory {
+                    let child_path = entry.path.as_str().to_owned();
+                    button(
+                        SharedString::from(format!("file-open-folder-{index}")),
+                        t(self.locale, "file.page.open_folder").to_string(),
+                        ButtonVariant::Ghost,
+                        false,
+                    )
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.navigate_file_directory(child_path.clone(), cx);
+                    }))
+                    .debug_selector(move || format!("visual-file-open-folder-{index}"))
+                    .into_any_element()
+                } else {
+                    let entry = entry.clone();
+                    button(
+                        SharedString::from(format!("file-download-{index}")),
+                        t(self.locale, "file.page.download").to_string(),
+                        ButtonVariant::Ghost,
+                        download_busy,
+                    )
+                    .aria_label(tr(
+                        self.locale,
+                        "file.page.download_aria",
+                        &[("name", &name)],
+                    ))
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.select_file_download(entry.clone(), cx);
+                    }))
+                    .debug_selector(move || format!("visual-file-download-{index}"))
+                    .into_any_element()
+                };
+                let size = if entry.is_directory {
+                    t(self.locale, "file.page.folder").to_string()
+                } else {
+                    format_bytes(self.locale, entry.size)
+                };
+                let modified = entry
+                    .modified_at_unix_ms
+                    .map(|timestamp| format_diagnostic_timestamp(self.locale, timestamp))
+                    .unwrap_or_else(|| t(self.locale, "common.not_available").to_string());
+                rows.push(
+                    div()
+                        .id(SharedString::from(format!("file-entry-{index}")))
+                        .debug_selector(move || format!("visual-file-entry-{index}"))
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgba(COLOR_BORDER))
+                        .bg(rgba(COLOR_PANEL_RAISED))
+                        .text_sm()
+                        .text_color(rgba(COLOR_TEXT))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(lucide_icon(
+                                    if entry.is_directory {
+                                        include_bytes!("../../assets/icons/folder-open.svg")
+                                    } else {
+                                        include_bytes!("../../assets/icons/database.svg")
+                                    },
+                                    16.0,
+                                    if entry.is_directory {
+                                        COLOR_ACCENT
+                                    } else {
+                                        COLOR_MUTED
+                                    },
+                                ))
+                                .child(div().truncate().text_color(rgba(COLOR_TEXT)).child(name)),
+                        )
+                        .child(
+                            div()
+                                .w(px(96.0))
+                                .text_right()
+                                .text_color(rgba(COLOR_MUTED))
+                                .child(size),
+                        )
+                        .child(
+                            div()
+                                .w(px(164.0))
+                                .text_right()
+                                .text_color(rgba(COLOR_MUTED))
+                                .child(modified),
+                        )
+                        .child(div().w(px(128.0)).flex().justify_end().child(action))
+                        .into_any_element(),
+                );
+            }
+            directory_body = directory_body.child(div().flex().flex_col().gap_2().children(rows));
+            if loading_more {
+                directory_body = directory_body.child(activity_sync_notice(
+                    "visual-file-directory-loading-more",
+                    t(self.locale, "file.page.directory.loading").to_string(),
+                    t(self.locale, "file.page.directory.loading_detail").to_string(),
+                    SemanticState::Info,
+                ));
+            } else if can_load_more {
+                directory_body = directory_body.child(
+                    button(
+                        SharedString::from("file-directory-load-more"),
+                        t(self.locale, "file.page.load_more").to_string(),
+                        ButtonVariant::Secondary,
+                        false,
+                    )
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.load_more_file_directory(cx);
+                    })),
+                );
+            }
+            if truncated {
+                directory_body = directory_body.child(activity_sync_notice(
+                    "visual-file-directory-truncated",
+                    t(self.locale, "file.page.directory.truncated").to_string(),
+                    t(self.locale, "file.page.directory.truncated").to_string(),
+                    SemanticState::Warning,
+                ));
+            }
+        }
+
+        let choose_upload = button(
+            SharedString::from("file-upload-pick"),
+            t(self.locale, "file.page.choose_file").to_string(),
+            ButtonVariant::Ghost,
+            picking_upload || uploading,
+        )
+        .on_click(cx.listener(|shell, _, _, cx| shell.select_file_upload(cx)));
+        let start_upload = button(
+            SharedString::from("file-upload-start"),
+            if uploading {
+                t(self.locale, "file.page.uploading").to_string()
+            } else {
+                t(self.locale, "file.page.upload").to_string()
+            },
+            ButtonVariant::Primary,
+            upload.is_none() || uploading || picking_upload,
+        )
+        .on_click(cx.listener(|shell, _, _, cx| shell.start_file_upload(cx)));
+        let mut upload_area = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .pt_3()
+            .border_t_1()
+            .border_color(rgba(COLOR_BORDER))
+            .child(
+                div()
+                    .debug_selector(|| "visual-file-upload-selection".into())
+                    .text_xs()
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(match upload.as_deref() {
+                        Some(name) => {
+                            tr(self.locale, "file.page.upload_selected", &[("name", name)])
+                        }
+                        None => t(self.locale, "file.page.directory.detail").to_string(),
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(choose_upload)
+                    .child(start_upload),
+            );
+        if let Some(error) = upload_error {
+            upload_area = upload_area.child(activity_sync_notice(
+                "visual-file-upload-error",
+                t(self.locale, "file.page.error.generic").to_string(),
+                error,
+                SemanticState::Danger,
+            ));
+        }
+        if let Some(error) = download_error {
+            upload_area = upload_area.child(activity_sync_notice(
+                "visual-file-download-error",
+                t(self.locale, "file.page.error.generic").to_string(),
+                error,
+                SemanticState::Danger,
+            ));
+        }
+        if let Some(notice) = notice {
+            upload_area = upload_area.child(activity_sync_notice(
+                "visual-file-notice",
+                t(self.locale, "file.page.directory.title").to_string(),
+                notice,
+                SemanticState::Success,
+            ));
+        }
+
+        surface_card()
+            .debug_selector(|| "visual-file-directory-card".into())
+            .p_4()
+            .child(heading)
+            .child(navigation)
+            .child(div().mt_3().child(directory_body))
+            .child(div().mt_3().child(upload_area))
+            .into_any_element()
+    }
+
+    fn file_transfer_card(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let statuses = self.file_workspace.transfers.clone();
+        let loaded = self.file_workspace.transfers_loaded;
+        let loading = self.file_workspace.transfers_loading;
+        let transfer_error = self.file_workspace.transfers_error.clone();
+        let active = self.file_workspace.active_transfer_count();
+        let control_pending = self.file_workspace.control.is_some();
+        let refresh = button(
+            SharedString::from("file-transfers-refresh"),
+            t(self.locale, "file.page.refresh").to_string(),
+            ButtonVariant::Ghost,
+            loading,
+        )
+        .on_click(cx.listener(|shell, _, _, cx| shell.request_file_transfer_refresh(cx)));
+        let heading = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .mb_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "file.page.transfers.title").to_string()),
+                    )
+                    .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(tr(
+                        self.locale,
+                        "file.page.transfers.detail",
+                        &[("active", &format_integer(self.locale, active as i64))],
+                    ))),
+            )
+            .child(refresh);
+
+        let mut body = div().flex().flex_col().gap_2();
+        if let Some(error) = transfer_error {
+            body = body.child(activity_sync_notice(
+                "visual-file-transfers-error",
+                t(self.locale, "file.page.error.generic").to_string(),
+                error,
+                SemanticState::Danger,
+            ));
+        }
+        if !loaded && loading {
+            body = body.child(activity_sync_notice(
+                "visual-file-transfers-loading",
+                t(self.locale, "file.page.loading").to_string(),
+                t(self.locale, "file.page.loading_detail").to_string(),
+                SemanticState::Info,
+            ));
+        } else if loaded && statuses.is_empty() {
+            body = body.child(activity_sync_notice(
+                "visual-file-transfers-empty",
+                t(self.locale, "file.page.transfers.empty").to_string(),
+                t(self.locale, "file.page.transfers.empty_detail").to_string(),
+                SemanticState::Neutral,
+            ));
+        }
+
+        for (index, status) in statuses.into_iter().enumerate() {
+            let direction = t(self.locale, transfer_direction_key(status.direction)).to_string();
+            let state = t(self.locale, transfer_state_key(status.state)).to_string();
+            let transferred = format_bytes(self.locale, status.transferred_bytes);
+            let total = format_bytes(self.locale, status.total_bytes);
+            let chunks = format!(
+                "{} / {}",
+                format_integer(self.locale, i64::from(status.received_chunks)),
+                format_integer(self.locale, i64::from(status.total_chunks)),
+            );
+            let progress = tr(
+                self.locale,
+                "file.page.transfer.progress",
+                &[
+                    ("transferred", &transferred),
+                    ("total", &total),
+                    ("chunks", &chunks),
+                ],
+            );
+            let updated = format_diagnostic_timestamp(self.locale, status.updated_at_unix_ms);
+            let pause_allowed =
+                !control_pending && control_allowed(status.state, GpuiFileControl::Pause);
+            let resume_allowed =
+                !control_pending && control_allowed(status.state, GpuiFileControl::Resume);
+            let cancel_allowed =
+                !control_pending && control_allowed(status.state, GpuiFileControl::Cancel);
+            let pause_status = status.clone();
+            let resume_status = status.clone();
+            let cancel_status = status.clone();
+            let mut row = div()
+                .id(SharedString::from(format!("file-transfer-{index}")))
+                .debug_selector(move || format!("visual-file-transfer-{index}"))
+                .flex()
+                .flex_col()
+                .gap_2()
+                .p_3()
+                .rounded_md()
+                .border_1()
+                .border_color(rgba(COLOR_BORDER))
+                .bg(rgba(COLOR_PANEL_RAISED))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(badge(
+                            SharedString::from(format!("file-transfer-direction-{index}")),
+                            direction.clone(),
+                            SemanticState::Info,
+                        ))
+                        .child(badge(
+                            SharedString::from(format!("file-transfer-state-{index}")),
+                            state,
+                            file_transfer_state_semantic(status.state),
+                        ))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                .child(progress),
+                        ),
+                )
+                .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(format!(
+                    "{}: {}",
+                    t(self.locale, "file.page.transfer.operation"),
+                    status.operation_id
+                )))
+                .child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(format!(
+                    "{}: {}",
+                    t(self.locale, "file.page.transfer.updated"),
+                    updated
+                )));
+            if let Some(error_code) = status.error_code.as_deref() {
+                row = row.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgba(COLOR_WARNING))
+                        .child(format!(
+                            "{}: {}",
+                            t(self.locale, "file.page.transfer.error_code"),
+                            error_code
+                        )),
+                );
+            }
+            if let Some(failure_kind) = status.failure_kind.as_deref() {
+                row = row.child(
+                    div()
+                        .text_xs()
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(failure_kind.to_owned()),
+                );
+            }
+            row = row.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        button(
+                            SharedString::from(format!("file-transfer-pause-{index}")),
+                            t(self.locale, "file.page.pause").to_string(),
+                            ButtonVariant::Ghost,
+                            !pause_allowed,
+                        )
+                        .debug_selector(move || format!("visual-file-transfer-pause-{index}"))
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.file_transfer_control(&pause_status, GpuiFileControl::Pause, cx);
+                        })),
+                    )
+                    .child(
+                        button(
+                            SharedString::from(format!("file-transfer-resume-{index}")),
+                            t(self.locale, "file.page.resume").to_string(),
+                            ButtonVariant::Ghost,
+                            !resume_allowed,
+                        )
+                        .debug_selector(move || format!("visual-file-transfer-resume-{index}"))
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.file_transfer_control(
+                                &resume_status,
+                                GpuiFileControl::Resume,
+                                cx,
+                            );
+                        })),
+                    )
+                    .child(
+                        button(
+                            SharedString::from(format!("file-transfer-cancel-{index}")),
+                            t(self.locale, "file.page.cancel").to_string(),
+                            ButtonVariant::Danger,
+                            !cancel_allowed,
+                        )
+                        .debug_selector(move || format!("visual-file-transfer-cancel-{index}"))
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.file_transfer_control(
+                                &cancel_status,
+                                GpuiFileControl::Cancel,
+                                cx,
+                            );
+                        })),
+                    ),
+            );
+            body = body.child(row);
+        }
+
+        surface_card()
+            .debug_selector(|| "visual-file-transfers-card".into())
+            .p_4()
+            .child(heading)
+            .child(body)
+            .into_any_element()
+    }
+
     fn page_content(&mut self, layout: LayoutClass, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(manifest) = self.manifest.as_ref() else {
             return div()
@@ -9790,6 +11019,9 @@ impl GpuiShell {
         if self.selected_page == "routing" {
             content = content.child(self.routing_target_search_card(cx));
             content = content.child(self.routing_authority_notices());
+        }
+        if self.selected_page == "files" {
+            content = content.child(self.files_workspace(cx));
         }
         let section_cards = model
             .sections
@@ -13902,6 +15134,10 @@ impl Render for GpuiShell {
         if self.selected_page == "topology" {
             cx.on_next_frame(window, |shell, _, cx| shell.ensure_topology_directory(cx));
         }
+        if self.selected_page == "files" {
+            cx.on_next_frame(window, |shell, _, cx| shell.ensure_file_directory(cx));
+            self.ensure_file_polling(cx);
+        }
         let content = self.page_content(layout, cx);
         let action_panel = self.action_panel(layout, cx);
         let workspace = if presentation == ActionPanelPresentation::Stacked {
@@ -14190,6 +15426,27 @@ fn configuration_audit_details(
                 }),
         )
         .into_any_element()
+}
+
+fn file_metadata_row(label: String, value: String) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .rounded_md()
+        .border_1()
+        .border_color(rgba(COLOR_BORDER))
+        .bg(rgba(COLOR_PANEL_RAISED))
+        .px_3()
+        .py_1()
+        .text_xs()
+        .child(div().text_color(rgba(COLOR_MUTED)).child(label))
+        .child(
+            div()
+                .font_family("monospace")
+                .text_color(rgba(COLOR_TEXT_SECONDARY))
+                .child(value),
+        )
 }
 
 fn metric_card(label: &str, value: &str, source: &str) -> impl IntoElement {
@@ -15439,6 +16696,81 @@ fn bind_shell_keys(cx: &mut App) {
     ]);
 }
 
+fn new_file_transfer_ids() -> Option<(String, String)> {
+    let mut random = [0_u8; 64];
+    getrandom::fill(&mut random).ok()?;
+    Some((
+        TransferId::from_public_key(&random[..32])
+            .as_str()
+            .to_owned(),
+        OperationId::from_public_key(&random[32..])
+            .as_str()
+            .to_owned(),
+    ))
+}
+
+/// Convert a local File IPC failure into a fixed, path-free user message.
+/// The concrete adapter may add filesystem context to an error chain, so the
+/// desktop UI deliberately never renders `error.to_string()` for transfer
+/// operations.
+fn file_transfer_action_error(locale: Locale, error: &anyhow::Error) -> String {
+    let code = error
+        .downcast_ref::<LocalError>()
+        .and_then(|error| error.file_transfer_error.as_ref())
+        .map(|detail| detail.code.as_str());
+    let key = match code {
+        Some("file_transfer_rate_limited")
+        | Some("file_transfer_limit")
+        | Some("file_transfer_resume_buffer_full") => "file.page.error.rate_limited",
+        Some("file_transfer_access_revoked")
+        | Some("file_transfer_authorization_lost")
+        | Some("file_transfer_permission_revoked") => "file.page.error.permission",
+        Some("file_transfer_peer_invalid")
+        | Some("file_transfer_share_invalid")
+        | Some("file_transfer_transfer_id_invalid")
+        | Some("file_transfer_operation_id_invalid")
+        | Some("file_transfer_path_invalid")
+        | Some("file_transfer_invalid_request")
+        | Some("file_transfer_source_invalid")
+        | Some("file_transfer_destination_invalid")
+        | Some("file_transfer_network_ambiguous")
+        | Some("file_transfer_network_not_found")
+        | Some("file_transfer_share_mismatch")
+        | Some("file_transfer_version_changed") => "file.page.error.unsupported",
+        Some("file_transfer_runtime_timeout")
+        | Some("file_transfer_runtime_unavailable")
+        | Some("file_transfer_session_unavailable")
+        | Some("file_transfer_peer_unavailable")
+        | Some("file_transfer_status_unavailable")
+        | Some("file_transfer_not_found") => "file.page.error.unavailable",
+        _ => "file.page.error.generic",
+    };
+    t(locale, key).to_string()
+}
+
+fn file_selection_error(locale: Locale, error: &GpuiFileSelectionError) -> String {
+    let key = match error {
+        GpuiFileSelectionError::TargetUnavailable => "file.page.error.target_unavailable",
+        GpuiFileSelectionError::MissingFileName => "file.page.error.missing_filename",
+        GpuiFileSelectionError::NonUtf8LocalPath => "file.page.error.non_utf8_path",
+        GpuiFileSelectionError::InvalidSharedPath => "file.page.error.invalid_path",
+        GpuiFileSelectionError::OperationPending => "file.page.error.operation_pending",
+    };
+    t(locale, key).to_string()
+}
+
+fn file_transfer_state_semantic(state: fuckipv6_common::domain::TransferState) -> SemanticState {
+    use fuckipv6_common::domain::TransferState;
+    match state {
+        TransferState::Queued => SemanticState::Info,
+        TransferState::Active | TransferState::Verifying => SemanticState::Warning,
+        TransferState::Paused => SemanticState::Neutral,
+        TransferState::Completed => SemanticState::Success,
+        TransferState::Failed => SemanticState::Danger,
+        TransferState::Cancelled | TransferState::Expired => SemanticState::Unsupported,
+    }
+}
+
 fn new_idempotency_key() -> IdempotencyKey {
     let mut random = [0_u8; 32];
     if getrandom::fill(&mut random).is_err() {
@@ -15522,6 +16854,7 @@ pub fn run_window(
     commands: NodeCommandBus,
     operations: Option<RemoteOperationClient>,
     file_owner: Option<RemoteFileOwnerClient>,
+    file_transfer: Option<RemoteFileTransferClient>,
     configs: ConfigManager,
 ) -> Result<()> {
     let open_error = Arc::new(Mutex::new(None::<String>));
@@ -15557,6 +16890,7 @@ pub fn run_window(
                         commands.clone(),
                         operations.clone(),
                         file_owner.clone(),
+                        file_transfer.clone(),
                         configs.clone(),
                         cx,
                     )
@@ -15623,6 +16957,7 @@ mod tests {
         NodeDiscoveryIndexError, NodeDiscoveryIndexErrorCategory, NodeDiscoveryIndexRecordSnapshot,
         NodeDiscoveryIndexSnapshot, NodeDiscoveryIndexSource, NodeDiscoveryIndexState,
     };
+    use crate::file_share::{FileDirectoryEntry, FileTransferStatus};
     use crate::gpui::view_model::{ActionBlockReason, SearchResultKind};
     use crate::network_discovery::DISCOVERY_RESULT_STALE_AFTER_MS;
     use crate::node::{
@@ -15636,11 +16971,11 @@ mod tests {
         ExitHealthAssessment, ExitHealthEvidence, ExitHealthRetest, ExitHealthRetestPhase,
         JoinApplicantProfile, JoinRequest, JoinRequestGrantPreview, JoinRequestId, MembershipState,
         MembershipTerms, NetworkDiscoveryDocument, NetworkDiscoveryRecord, NetworkEndpoint,
-        NetworkId, NetworkMemberPresence, NodeId, Signature, TopologyBoundary, TopologyConnection,
-        TopologyNode, TopologyNodeHealth, TopologyNodeNetwork, TrafficAction,
+        NetworkId, NetworkMemberPresence, NodeId, SharedPath, Signature, TopologyBoundary,
+        TopologyConnection, TopologyNode, TopologyNodeHealth, TopologyNodeNetwork, TrafficAction,
         TrafficDefaultConfirmedBy, TrafficDefaultPolicy, TrafficFailurePolicy, TrafficPolicy,
         TrafficRoutingHardConstraints, TrafficRoutingPageModel, TrafficRoutingTarget,
-        TrafficRoutingWorkflowState, TrafficRule,
+        TrafficRoutingWorkflowState, TrafficRule, TransferDirection, TransferState,
     };
     use gpui::{Modifiers, OwnedMenuItem, TestAppContext, VisualTestContext};
     use serde_json::{json, Map, Value};
@@ -19025,6 +20360,58 @@ mod tests {
         ConfigManager::new_for_dir(config_dir).expect("temporary config directory")
     }
 
+    fn file_target_fixture() -> GpuiFileTarget {
+        GpuiFileTarget {
+            peer: "peer-studio".into(),
+            network_id: "network-studio".into(),
+            network_name: "Studio".into(),
+            share_id: "share-studio".into(),
+        }
+    }
+
+    fn file_entry_fixture(path: &str, is_directory: bool) -> FileDirectoryEntry {
+        FileDirectoryEntry {
+            path: SharedPath::parse(path).expect("file workspace shared path"),
+            is_directory,
+            size: if is_directory { 0 } else { 4_096 },
+            modified_at_unix_ms: Some(1_700_000_000_000),
+        }
+    }
+
+    fn file_status_fixture(
+        transfer_id: &str,
+        direction: TransferDirection,
+        state: TransferState,
+    ) -> FileTransferStatus {
+        FileTransferStatus {
+            transfer_id: transfer_id.into(),
+            operation_id: format!("operation-{transfer_id}"),
+            direction,
+            state,
+            transferred_bytes: 2_048,
+            total_bytes: 4_096,
+            received_chunks: 1,
+            total_chunks: 2,
+            error_code: None,
+            failure_kind: None,
+            updated_at_unix_ms: 1_700_000_000_000,
+        }
+    }
+
+    fn install_file_workspace(
+        shell: &mut GpuiShell,
+        workspace: GpuiFileWorkspace,
+        cx: &mut Context<GpuiShell>,
+    ) {
+        shell.manifest = Some(crate::node::node_ui_manifest());
+        shell.locale = Locale::En;
+        shell.selected_page = "files".into();
+        shell.file_workspace = workspace;
+        shell.error = None;
+        shell.notice = None;
+        cx.notify();
+    }
+
     fn open_shell_window(
         cx: &mut TestAppContext,
         width: f32,
@@ -19054,7 +20441,7 @@ mod tests {
         drop(runtime_guard);
         drop(runtime);
         let window = cx.open_window(size(px(width), px(height)), move |_, cx| {
-            GpuiShell::new(state, bus, None, None, configs, cx)
+            GpuiShell::new(state, bus, None, None, None, configs, cx)
         });
         cx.run_until_parked();
         window
@@ -19409,6 +20796,223 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn files_workspace_renders_an_explicit_no_target_state(cx: &mut TestAppContext) {
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                install_file_workspace(shell, GpuiFileWorkspace::default(), cx);
+            })
+            .expect("install empty File workspace");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        for selector in [
+            "visual-files-workspace",
+            "visual-file-target-card",
+            "visual-file-no-targets",
+            "visual-file-transfers-card",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "missing File workspace element {selector}"
+            );
+        }
+        assert!(visible.debug_bounds("visual-file-directory-card").is_none());
+    }
+
+    #[gpui::test]
+    fn files_directory_renders_loading_error_and_empty_states(cx: &mut TestAppContext) {
+        let mut workspace = GpuiFileWorkspace::default();
+        workspace.sync_targets(vec![file_target_fixture()], None);
+        workspace.directory_loading = true;
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                install_file_workspace(shell, workspace, cx)
+            })
+            .expect("install loading File directory");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        assert!(visible
+            .debug_bounds("visual-file-directory-loading")
+            .is_some());
+        assert!(visible
+            .debug_bounds("visual-file-directory-error")
+            .is_none());
+        assert!(visible
+            .debug_bounds("visual-file-directory-empty")
+            .is_none());
+
+        window
+            .update(cx, |shell, _, cx| {
+                shell.file_workspace.directory_loading = false;
+                shell.file_workspace.directory_error =
+                    Some(t(shell.locale, "file.page.error.rate_limited").to_string());
+                cx.notify();
+            })
+            .expect("install File directory error");
+        visible.run_until_parked();
+        assert!(visible
+            .debug_bounds("visual-file-directory-error")
+            .is_some());
+        assert!(visible
+            .debug_bounds("visual-file-directory-loading")
+            .is_none());
+        assert!(visible
+            .debug_bounds("visual-file-directory-empty")
+            .is_none());
+
+        window
+            .update(cx, |shell, _, cx| {
+                shell.file_workspace.directory_error = None;
+                shell.file_workspace.directory_loaded = true;
+                shell.file_workspace.directory_entries.clear();
+                cx.notify();
+            })
+            .expect("install empty File directory");
+        visible.run_until_parked();
+        assert!(visible
+            .debug_bounds("visual-file-directory-empty")
+            .is_some());
+        assert!(visible
+            .debug_bounds("visual-file-directory-error")
+            .is_none());
+    }
+
+    #[gpui::test]
+    fn files_directory_renders_breadcrumbs_entries_and_keeps_local_paths_private(
+        cx: &mut TestAppContext,
+    ) {
+        let mut workspace = GpuiFileWorkspace::default();
+        workspace.sync_targets(vec![file_target_fixture()], None);
+        workspace.directory_path = "docs/releases".into();
+        workspace.directory_loaded = true;
+        workspace.directory_entries = vec![
+            file_entry_fixture("docs/releases/archive", true),
+            file_entry_fixture("docs/releases/report.pdf", false),
+        ];
+        workspace
+            .select_upload_file(std::path::PathBuf::from(
+                "/home/member/private/quarterly-report.pdf",
+            ))
+            .expect("select local upload fixture");
+        let window = open_shell_window(cx, 1400.0, 1000.0);
+        window
+            .update(cx, |shell, _, cx| {
+                install_file_workspace(shell, workspace, cx)
+            })
+            .expect("install populated File directory");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        for selector in [
+            "visual-file-directory-card",
+            "visual-file-breadcrumb-root",
+            "visual-file-breadcrumb-0",
+            "visual-file-breadcrumb-1",
+            "visual-file-entry-0",
+            "visual-file-entry-1",
+            "visual-file-open-folder-0",
+            "visual-file-download-1",
+            "visual-file-upload-selection",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "missing File directory element {selector}"
+            );
+        }
+
+        window
+            .update(cx, |shell, _, _| {
+                let upload = shell
+                    .file_workspace
+                    .upload
+                    .as_ref()
+                    .expect("selected upload state");
+                assert_eq!(upload.name(), "quarterly-report.pdf");
+                assert!(!upload.name().contains('/'));
+            })
+            .expect("verify only the selected upload basename is renderable");
+    }
+
+    #[gpui::test]
+    fn file_transfer_controls_render_and_reject_disallowed_actions(cx: &mut TestAppContext) {
+        let mut workspace = GpuiFileWorkspace::default();
+        workspace.transfers_loaded = true;
+        workspace.transfers = vec![
+            file_status_fixture("active", TransferDirection::Upload, TransferState::Active),
+            file_status_fixture("paused", TransferDirection::Download, TransferState::Paused),
+            file_status_fixture(
+                "completed",
+                TransferDirection::Upload,
+                TransferState::Completed,
+            ),
+        ];
+        let window = open_shell_window(cx, 1200.0, 1200.0);
+        window
+            .update(cx, |shell, _, cx| {
+                install_file_workspace(shell, workspace, cx)
+            })
+            .expect("install File transfer controls");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        for selector in [
+            "visual-file-transfer-0",
+            "visual-file-transfer-1",
+            "visual-file-transfer-2",
+            "visual-file-transfer-pause-0",
+            "visual-file-transfer-resume-0",
+            "visual-file-transfer-cancel-0",
+            "visual-file-transfer-pause-1",
+            "visual-file-transfer-resume-1",
+            "visual-file-transfer-cancel-2",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "missing File transfer control {selector}"
+            );
+        }
+
+        let disabled_resume = visible
+            .debug_bounds("visual-file-transfer-resume-0")
+            .expect("disabled resume control");
+        visible.simulate_click(disabled_resume.center(), Modifiers::default());
+        visible.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert!(shell.file_workspace.transfers_error.is_none());
+            })
+            .expect("verify disabled resume control");
+
+        let enabled_resume = visible
+            .debug_bounds("visual-file-transfer-resume-1")
+            .expect("enabled resume control");
+        visible.simulate_click(enabled_resume.center(), Modifiers::default());
+        visible.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(shell.file_workspace.transfers_error.is_some());
+                shell.file_workspace.transfers_error = None;
+                cx.notify();
+            })
+            .expect("verify enabled resume control");
+        visible.run_until_parked();
+
+        let disabled_cancel = visible
+            .debug_bounds("visual-file-transfer-cancel-2")
+            .expect("disabled cancel control");
+        visible.simulate_click(disabled_cancel.center(), Modifiers::default());
+        visible.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert!(shell.file_workspace.transfers_error.is_none());
+            })
+            .expect("verify disabled terminal cancel control");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn writes_headless_product_shell_screenshot_when_requested() {
@@ -19451,7 +21055,7 @@ mod tests {
         );
         let window = cx
             .open_window(size(px(1440.0), px(900.0)), move |_, cx| {
-                cx.new(|cx| GpuiShell::new(state, bus, None, None, configs, cx))
+                cx.new(|cx| GpuiShell::new(state, bus, None, None, None, configs, cx))
             })
             .expect("headless GPUI window");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);

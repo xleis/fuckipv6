@@ -61,7 +61,7 @@
 | W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05、W12-08 和 W12-10 已完成：本机启停、贡献治理、管理员选择、分层健康、故障切换/撤权及 Exit 页面权威分层均有自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收，并通过真实增量证明 IPv4 目标流量归入规范 IPv6 Peer 身份且两侧 Peer/网络级 P2P 计数一致；W12-07 的非浏览器完整文件下载与自动 DNS 清理、两侧 Exit 可达和 W12-09 的 24 小时稳定性仍待完成 |
 | W13 Relay | `[x]` | P1 | W10 | W13-01 至 W13-07 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；真实 Relay 子进程运营者导出只含最小 usage/health/governance 字段，不包含载荷、虚拟地址、密钥或显示名；生产数据面故障转移写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复、真实子进程连接风暴/慢连接/资源上限/吞吐/延迟/CPU/RSS、满载期间 Snapshot/Manifest 可用性及 Relay/Coordinator/Exit 同时故障恢复均有进程或 netns 证据。GPUI、WebUI 与 Android Compose Relay 页面现统一消费共享 Manifest、`NodeSnapshot`、健康/治理投影和 `SetNetworkRole` 命令；Android 在快照或真实命令回调缺失时失败关闭，不注入示例状态。Android 的 VpnService、节点 IPC 和真机 E2E 仍归 W16，不在本项冒充平台数据面完成 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
-| W15 File | `[~]` | P2 | W10 | 本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、WebUI File 目录浏览/上传/下载/暂停恢复/取消、并发/速率/磁盘/扫描/审计上界已落地；Linux 独立三节点真实网络传输、恢复与四槽满载控制面隔离验收已完成，GPUI File 内容操作页、Android File 表面/SAF、Windows/macOS 实机竞态与性能/OS 资源基线仍未完成 |
+| W15 File | `[~]` | P2 | W10 | 本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、GPUI/WebUI File 目录浏览/目标选择/上传下载/分页/暂停恢复/取消、并发/速率/磁盘/扫描/审计上界已落地；Linux 独立三节点真实网络传输、恢复与四槽满载控制面隔离验收已完成，Android File 表面/SAF、Windows/macOS 实机路径安全与传输竞态、跨平台验收及 OS/性能资源基线仍未完成 |
 | W16 Android | `[ ]` | P2 | W2,W4,W5,W7-W15 | Compose、VpnService、全能力 |
 | W17 跨平台硬化 | `[ ]` | P2 | W6-W16 | Linux/macOS/Windows 实机证据 |
 | W18 发布门禁 | `[ ]` | P0 | 全部 | 自动化、实测、安全和发布证据 |
@@ -3781,8 +3781,8 @@ WebUI/Android 内容传输和跨平台竞态仍未验收。
 并发配额扫描的最终证据还包括 `concurrent_quota_scans_keep_independent_directory_cursors`，验证每次扫描使用独立目录游标且
 不会返回部分目录树。GPUI owner 设置页继续使用该领域语义并提供能力状态投影；WebUI 已新增真实 File 页面，通过单一节点控制器
 浏览在线目标目录，执行流式上传、临时令牌下载以及暂停、恢复、取消，同时继续以 `snapshot.file_capability` 展示权威能力状态，
-且不展示共享根或文件内容路径。GPUI File 内容操作页和 Android File 内容表面仍未实现，故三端一致性继续保留为未完成，
-W15-08 保持 `[~]`。
+且不展示共享根或文件内容路径。该段仅记录当时的 WebUI 证据；GPUI File 内容操作页的后续结果见 2026-11-14 补充。Android File 内容表面
+仍未实现，故三端一致性继续保留为未完成，W15-08 保持 `[~]`。
 
 **补充（2026-11-14，WebUI File 内容面）**：File 导航现进入真实内容页，可从权威节点快照选择在线目标，按目录浏览并提供
 面包屑和分页；上传使用 raw `application/octet-stream` 流式请求，下载通过 POST 获取短期令牌后触发浏览器下载，不把文件路径或
@@ -3790,8 +3790,17 @@ W15-08 保持 `[~]`。
 节点 File API，前端不自行拼接本地路径，也不展示共享根。新增 `files-page.test.tsx` 的 11 项测试以及页面接线、导航和 14 页契约
 断言；WebUI 完整 Vitest 为 321 项通过，ESLint、TypeScript 类型检查、Vite 生产构建和 i18n runtime 检查通过。Rust 侧新增
 `webui::file_api` 5 项测试和完整客户端库 1,445 项通过/3 项忽略，`file_share` 195 项、GPUI view model 68 项通过，Clippy
-`-D warnings`、契约生成/检查、Android 全量 debug 单测与 lint 通过；嵌入 WebUI bundle 已同步。该证据仍不构成 GPUI File
-内容操作页、Android SAF/File 内容表面、Windows/macOS 实机路径安全或真实公网性能验收。
+`-D warnings`、契约生成/检查、Android 全量 debug 单测与 lint 通过；嵌入 WebUI bundle 已同步。该证据本身不覆盖 GPUI File
+内容操作页（另见 2026-11-14 补充）、Android SAF/File 内容表面、Windows/macOS 实机路径安全或真实公网性能验收。
+
+**补充（2026-11-14，GPUI File 内容工作区）**：GPUI File 导航现接入权威 `NodeSnapshot`，只从当前网络成员投影在线目标；目录浏览
+支持面包屑、刷新、上下级导航和分页，上传/下载通过本机选择器构造逻辑共享路径，传输列表按 750 ms 活动态 / 2 s 空闲态轮询，
+并按状态启用暂停、恢复和取消。目标或目录切换会递增请求代际，陈旧目录响应不得覆盖当前页面；界面只展示所选上传文件名，不展示
+本地完整路径，也不展示共享根。新增 8 项 File 工作区状态机测试和 4 项 headless GPUI 渲染/交互测试，覆盖目标同步、分页/陈旧响应、
+上传下载请求、控制矩阵、加载/错误/空状态、隐私和禁用控制。`cargo test -p fuckipv6-client --lib` 为 1,457 项通过/3 项忽略，
+`cargo fmt --all -- --check`、`cargo clippy -p fuckipv6-client --lib --tests -- -D warnings` 以及共享契约生成/检查均通过。
+该证据不替代 Android File/SAF、Windows/macOS 实机路径安全、跨平台传输竞态、跨平台验收或 OS/性能基线，故 W15-08 与 W15 总体
+继续保持 `[~]`。
 
 **补充（2026-11-13，portable ACL 身份与 Linux TOCTOU）**：
 `portable_paths_preserve_rendering_and_fold_authorization_identity` 与 ACL Deny 大小写变体断言补齐了 portable 路径授权身份，
@@ -3800,8 +3809,8 @@ W15-08 保持 `[~]`。
 到根外链接。`cargo test -p fuckipv6-client --lib file_share::` 的 155 项测试、
 `cargo test -p fuckipv6-client --lib` 的 1,316 项通过/3 项忽略，以及
 `cargo clippy -p fuckipv6-client --lib --tests -- -D warnings` 均通过；Windows GNU client library 交叉编译通过但仍不构成
-Windows 实机路径安全证据。WebUI File 内容与传输表面已完成自动化闭环，但 GPUI File 内容操作页、Android SAF/File 内容表面、
-Windows/macOS 实机路径安全及跨平台真实传输仍未完成，故 W15-08 保持 `[~]`。
+Windows 实机路径安全证据。WebUI File 内容与传输表面已完成自动化闭环；GPUI File 内容操作页的后续证据见 2026-11-14
+补充。Android SAF/File 内容表面、Windows/macOS 实机路径安全及跨平台真实传输仍未完成，故 W15-08 保持 `[~]`。
 
 **交叉编译检查（2026-11-13，不代表实机验收）**：修复 File runtime 在非 Linux 目标下无条件使用 `PathBuf`，以及若干既有的
 条件编译缺口后，`RUSTC="$(rustup which rustc)" rustup run stable cargo check -p fuckipv6-client --lib --target
@@ -3821,7 +3830,7 @@ debug 测试构建；命令为
 269.0 MiB/s；文件描述符 5→5，线程 2→2。该数据仅代表本机临时目录和进程内 adapter 路径，不是 QUIC/P2P 实网吞吐、release
 构建基准或跨平台性能结论。
 
-**边界与发布结论（2026-11-13 更新）**：
+**边界与发布结论（2026-11-14 更新）**：
 
 - W15 第一版不做自动同步、双向镜像、系统挂载或远程目录替换；GPUI 设置页明确提示这些能力不存在。
 - Android SAF 属于 W16，不是 W15 已交付能力；Android 端不得据此声称 File 目录选择或传输已经完成。
@@ -3830,8 +3839,8 @@ debug 测试构建；命令为
 - Linux netns 已覆盖真实 P2P 上传/下载、低带宽暂停、veth 断网、撤权中断、取消清理、真实 node 子进程 `SIGKILL` 后的 supervisor
   重启、journal/staging 续传，以及四槽满载时三个独立控制面的响应和取消后资源回退；这仍不是 Windows/macOS 实机、跨平台竞态
   或跨平台满载隔离证据。
-- 当前 WebUI 已具备 File 目录浏览、上传、下载、传输状态轮询和暂停/恢复/取消；GPUI File 页仍只有权威能力状态投影，
-  Android 仅同步了导航契约且尚无 SAF/File 内容表面。不得宣称 GPUI/WebUI/Android 三端 File 语义已经一致。
+- 当前 GPUI 与 WebUI 均已具备 File 目录浏览、目标选择、上传、下载、状态轮询和暂停/恢复/取消；GPUI 还提供在线成员目标投影、
+  目录分页与代际隔离。Android 仍仅同步导航契约且尚无 SAF/File 内容表面，不得宣称三端 File 语义已经一致。
 - 自动化测试仍缺 Windows GNU/macOS 实机重解析点、硬链接、目录交换、并发重命名和权限变化验收；已有的大文件/多文件性能基线
   只覆盖 Linux 本地文件系统和 debug 测试构建。
 - 因此 W15 保持 `[~]`，第二版能力队列中的“W15 File 完成”继续保持 `[ ]`；真实路径安全、跨平台和三端门禁通过前不得发布为完成。

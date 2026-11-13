@@ -573,6 +573,85 @@ impl CoordinatorElectionProposal {
         self.candidate_group.len() / 2 + 1
     }
 
+    /// Validate a proposal against the Coordinator's authoritative candidate
+    /// status projection. Runtimes use this before signing a vote so local or
+    /// stale network snapshots cannot nominate an ineligible Leader.
+    pub fn validate_for_candidate_status(
+        &self,
+        status: &CoordinatorCandidateStatus,
+        now_unix_ms: u64,
+    ) -> DomainResult<()> {
+        self.validate_at(now_unix_ms)?;
+        if status.network_id != self.network_id
+            || status.config_state != CoordinatorCandidateConfigState::Current
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_election_candidate_group_mismatch",
+                "coordinator election proposal does not bind the current candidate group",
+            ));
+        }
+        let config = status
+            .config
+            .as_ref()
+            .ok_or_else(|| DomainError::invariant("current candidate status has no config"))?;
+        if self.candidate_config_revision != config.revision
+            || self.candidate_group.len() != config.candidates.len()
+            || self.candidate_group.iter().collect::<BTreeSet<_>>()
+                != config
+                    .candidates
+                    .iter()
+                    .map(|candidate| &candidate.node_id)
+                    .collect::<BTreeSet<_>>()
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_election_candidate_group_mismatch",
+                "coordinator election proposal does not bind the active candidate group",
+            ));
+        }
+
+        let expected_term = match &status.latest_term {
+            Some(term) => {
+                term.validate_definition()?;
+                if term.network_id != self.network_id {
+                    return Err(DomainError::new(
+                        "domain.coordinator_election_term_mismatch",
+                        "coordinator election proposal conflicts with another network term",
+                    ));
+                }
+                if term.lease_status_at(now_unix_ms).is_writable() {
+                    return Err(DomainError::new(
+                        "domain.coordinator_election_lease_active",
+                        "coordinator election cannot start while the current lease is writable",
+                    ));
+                }
+                term.term
+                    .checked_add(1)
+                    .ok_or_else(|| DomainError::invariant("coordinator term overflow"))?
+            }
+            None => 1,
+        };
+        if self.term != expected_term {
+            return Err(DomainError::new(
+                "domain.coordinator_election_term_not_next",
+                "coordinator election term must be the next durable high-water mark",
+            ));
+        }
+
+        let Some(preferred) = status.preferred_election_candidate() else {
+            return Err(DomainError::new(
+                "domain.coordinator_election_no_eligible_candidate",
+                "coordinator election has no healthy willing candidate",
+            ));
+        };
+        if self.proposer != preferred.node_id || self.leader != preferred.node_id {
+            return Err(DomainError::new(
+                "domain.coordinator_election_leader_not_preferred",
+                "coordinator election Leader is not the preferred eligible candidate",
+            ));
+        }
+        Ok(())
+    }
+
     /// Validate the proposal against the active administrator-signed candidate
     /// group and current health evidence. A new election is allowed only after
     /// the current lease is no longer writable, and the old Leader is excluded
@@ -3037,6 +3116,140 @@ mod tests {
             .candidates
             .iter()
             .any(|candidate| candidate.node_id == ordinary));
+    }
+
+    #[test]
+    fn proposals_validate_against_authoritative_candidate_status_before_voting() {
+        let fixture = candidate_fixture();
+        let candidate_one = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_two = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        let config = config(
+            &fixture,
+            &fixture.owner,
+            vec![
+                CoordinatorCandidate {
+                    node_id: candidate_one.clone(),
+                    priority: 10,
+                },
+                CoordinatorCandidate {
+                    node_id: candidate_two.clone(),
+                    priority: 20,
+                },
+            ],
+        );
+        let declarations = vec![
+            declaration(
+                &fixture,
+                &fixture.candidate_one,
+                CoordinatorCandidateWillingness::Willing,
+                2_000,
+            ),
+            declaration(
+                &fixture,
+                &fixture.candidate_two,
+                CoordinatorCandidateWillingness::Willing,
+                2_000,
+            ),
+        ];
+        let candidate_group = vec![candidate_one.clone(), candidate_two.clone()];
+        let majority_votes = [&fixture.candidate_one, &fixture.candidate_two]
+            .into_iter()
+            .map(|voter| {
+                CoordinatorElectionVote::signed(
+                    fixture.network.network_id.clone(),
+                    7,
+                    1,
+                    candidate_one.clone(),
+                    candidate_group.clone(),
+                    1_000,
+                    2_500,
+                    voter,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let latest_term = CoordinatorTerm {
+            network_id: fixture.network.network_id.clone(),
+            term: 1,
+            leader: candidate_one.clone(),
+            candidate_group,
+            candidate_config_revision: 7,
+            majority_proof: majority_votes
+                .iter()
+                .map(|vote| vote.voter.clone())
+                .collect(),
+            majority_votes,
+            authority: CoordinatorAuthority::Full,
+            phase: CoordinatorPhase::Stable,
+            fencing_token: FencingToken(40),
+            issued_at_unix_ms: 1_000,
+            expires_at_unix_ms: 2_500,
+        };
+        let expired_status = CoordinatorCandidateStatus::assess(
+            &fixture.network,
+            Some(&config),
+            &declarations,
+            Some(&latest_term),
+            3_000,
+        )
+        .unwrap();
+        let proposal = CoordinatorElectionProposal::signed(
+            fixture.network.network_id.clone(),
+            7,
+            2,
+            vec![candidate_one.clone(), candidate_two.clone()],
+            3_000,
+            4_000,
+            &fixture.candidate_two,
+        )
+        .unwrap();
+        proposal
+            .validate_for_candidate_status(&expired_status, 3_000)
+            .unwrap();
+
+        let active_status = CoordinatorCandidateStatus::assess(
+            &fixture.network,
+            Some(&config),
+            &declarations,
+            Some(&latest_term),
+            2_000,
+        )
+        .unwrap();
+        let active_proposal = CoordinatorElectionProposal::signed(
+            fixture.network.network_id.clone(),
+            7,
+            2,
+            vec![candidate_one.clone(), candidate_two.clone()],
+            2_000,
+            2_200,
+            &fixture.candidate_two,
+        )
+        .unwrap();
+        assert_eq!(
+            active_proposal
+                .validate_for_candidate_status(&active_status, 2_000)
+                .unwrap_err()
+                .code(),
+            "domain.coordinator_election_lease_active"
+        );
+
+        let non_preferred = CoordinatorElectionProposal::signed(
+            fixture.network.network_id.clone(),
+            7,
+            2,
+            vec![candidate_one, candidate_two],
+            3_000,
+            4_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        assert_eq!(
+            non_preferred
+                .validate_for_candidate_status(&expired_status, 3_000)
+                .unwrap_err()
+                .code(),
+            "domain.coordinator_election_leader_not_preferred"
+        );
     }
 
     #[test]

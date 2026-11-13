@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
-    CoordinatorTerm, CoordinatorWriteCredential, ExitContributionRequest,
-    ExitContributionRequestId, ExitContributionReviewAction, InvitationId, InvitationState,
-    JoinRequest, JoinRequestId, JoinRequestState, MemberLifecycleChange,
-    MemberLifecycleChangeRequest, MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview,
-    NetworkMemberPresence, NetworkRecord, NodeId,
+    ContentHash, CoordinatorElectionProposal, CoordinatorElectionVote, CoordinatorTerm,
+    CoordinatorWriteCredential, ExitContributionRequest, ExitContributionRequestId,
+    ExitContributionReviewAction, InvitationId, InvitationState, JoinRequest, JoinRequestId,
+    JoinRequestState, MemberLifecycleChange, MemberLifecycleChangeRequest,
+    MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview, NetworkMemberPresence,
+    NetworkRecord, NodeId,
 };
 use fuckipv6_common::{
     codec, validate_signaling_message_len, validate_signaling_relay_payload_len, CoordinatorConfig,
@@ -1058,6 +1059,41 @@ async fn handle_signaling_message(
             )
             .await?;
         }
+        SignalingMessage::CoordinatorElectionPropose { proposal } => {
+            handle_coordinator_election_propose(
+                proposal,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
+        SignalingMessage::CoordinatorElectionVote { proposal_id, vote } => {
+            handle_coordinator_election_vote(
+                proposal_id,
+                vote,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
+        SignalingMessage::CoordinatorElectionTimeout {
+            network_id,
+            proposal_id,
+        } => {
+            handle_coordinator_election_timeout(
+                network_id,
+                proposal_id,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
         // These variants are server-to-client events. Accepting one from a
         // client would let it manufacture approval state in another view.
         SignalingMessage::JoinRequestStatus { .. }
@@ -1089,7 +1125,10 @@ async fn handle_signaling_message(
         | SignalingMessage::CoordinatorCandidateStatusAck { .. }
         | SignalingMessage::CoordinatorCandidateStatusChanged { .. }
         | SignalingMessage::CoordinatorTermInstallAck { .. }
-        | SignalingMessage::CoordinatorTermLeaseRenewAck { .. } => {
+        | SignalingMessage::CoordinatorTermLeaseRenewAck { .. }
+        | SignalingMessage::CoordinatorElectionProposeAck { .. }
+        | SignalingMessage::CoordinatorElectionVoteAck { .. }
+        | SignalingMessage::CoordinatorElectionTimeoutAck { .. } => {
             send_binary(
                 tx,
                 session_manager,
@@ -1306,6 +1345,149 @@ async fn handle_coordinator_term_lease_renew(
         }
         Err(error) => {
             tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 任期续租");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_election_propose(
+    proposal: CoordinatorElectionProposal,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let network_id = proposal.network_id.clone();
+    if proposal.proposer != actor {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Forbidden,
+                "Coordinator election proposals must be signed by the authenticated actor",
+            ),
+        )?;
+        return Ok(());
+    }
+    match store.propose_election(&actor, proposal, unix_time_ms()) {
+        Ok(status) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorElectionProposeAck {
+                    status: status.clone(),
+                },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 选举提案");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_election_vote(
+    proposal_id: ContentHash,
+    vote: CoordinatorElectionVote,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let network_id = vote.network_id.clone();
+    if vote.voter != actor {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Forbidden,
+                "Coordinator election votes must be signed by the authenticated actor",
+            ),
+        )?;
+        return Ok(());
+    }
+    match store.record_election_vote(&actor, &proposal_id, vote, unix_time_ms()) {
+        Ok(status) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorElectionVoteAck {
+                    status: status.clone(),
+                },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 选举投票");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_election_timeout(
+    network_id: NetworkId,
+    proposal_id: ContentHash,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    match store.timeout_election(&actor, &network_id, &proposal_id, unix_time_ms()) {
+        Ok(status) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorElectionTimeoutAck {
+                    status: status.clone(),
+                },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 选举超时");
             send_binary(
                 tx,
                 session_manager,

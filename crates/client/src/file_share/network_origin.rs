@@ -5396,6 +5396,167 @@ mod tests {
     }
 
     #[test]
+    fn restored_multi_chunk_download_resumes_a_partial_chunk_at_the_saved_offset() {
+        let temporary = TempDir::new().expect("tempdir");
+        let destination = temporary.path().join("download.bin");
+        let data: Vec<u8> = (0..32).map(|index| (index % 251) as u8).collect();
+        let local_node_id = node(4);
+        let store = FileOriginStore::at(temporary.path(), "network");
+        let mut origin = FileNetworkOrigin::with_store(local_node_id.clone(), store.clone());
+        let (open_request_id, session) =
+            start_download(&mut origin, &local_node_id, &destination, 2, &data, 8);
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+
+        origin
+            .handle_chunk(
+                &peer(),
+                download_fragment_request_id(&operation(2), 0, 0),
+                &transfer(2),
+                &operation(2),
+                0,
+                0,
+                0,
+                &data[..8],
+                NOW + 2,
+            )
+            .expect("first complete transfer chunk");
+        origin
+            .handle_chunk(
+                &peer(),
+                download_fragment_request_id(&operation(2), 1, 8),
+                &transfer(2),
+                &operation(2),
+                0,
+                1,
+                8,
+                &data[8..12],
+                NOW + 3,
+            )
+            .expect("partial second transfer chunk");
+        origin
+            .pause(&transfer(2), &operation(2), NOW + 4)
+            .expect("pause");
+        let (pause_request_id, _) = take_request(&mut origin);
+        origin
+            .handle_response(
+                &peer(),
+                pause_request_id,
+                FileNetworkResponse::Progress {
+                    progress: progress(TransferState::Paused, 8, data.len() as u64, 1, 4),
+                },
+                NOW + 5,
+            )
+            .expect("pause response");
+
+        let journal = store.load().expect("journal");
+        let persisted = journal[0].download.as_ref().expect("download state");
+        assert_eq!(persisted.received_bytes, 8);
+        assert_eq!(persisted.received_chunks, 1);
+        let assembly = persisted.assembly.as_ref().expect("partial assembly");
+        assert_eq!(assembly.chunk_index, 1);
+        assert_eq!(assembly.expected_offset, 8);
+        assert_eq!(assembly.persisted_length, 4);
+        drop(origin);
+
+        let mut restored = FileNetworkOrigin::with_store(local_node_id.clone(), store);
+        let events = restored.restore_paused(NOW + 6).expect("restore");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].state, TransferState::Paused);
+        restored
+            .resume(&transfer(2), &operation(2), NOW + 7)
+            .expect("resume");
+        let (resume_request_id, resume_request) = take_request(&mut restored);
+        match resume_request {
+            FileNetworkRequest::Resume { request } => {
+                assert_eq!(request.resume_chunk_index, 1);
+                assert_eq!(request.resume_offset, 12);
+                assert_eq!(request.resume_generation, 1);
+            }
+            other => panic!("expected resume request, got {other:?}"),
+        }
+
+        let mut resumed_session = active_session(
+            &local_node_id,
+            TransferDirection::Download,
+            transfer(2),
+            operation(2),
+            manifest(&data, 8),
+        );
+        resumed_session
+            .record_chunk(0, &data[..8], NOW + 8)
+            .expect("record completed chunk");
+        restored
+            .handle_response(
+                &peer(),
+                resume_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(resumed_session),
+                },
+                NOW + 8,
+            )
+            .expect("resume response");
+
+        restored
+            .handle_chunk(
+                &peer(),
+                download_fragment_request_id(&operation(2), 1, 12),
+                &transfer(2),
+                &operation(2),
+                0,
+                1,
+                12,
+                &data[12..16],
+                NOW + 9,
+            )
+            .expect("stale generation is ignored");
+        assert!(!destination.exists());
+        for (chunk_index, range) in [(1, 12..16), (2, 16..24), (3, 24..32)] {
+            restored
+                .handle_chunk(
+                    &peer(),
+                    download_fragment_request_id(&operation(2), chunk_index, range.start as u64),
+                    &transfer(2),
+                    &operation(2),
+                    1,
+                    chunk_index,
+                    range.start as u64,
+                    &data[range],
+                    NOW + 10 + u64::from(chunk_index),
+                )
+                .expect("remaining transfer chunk");
+        }
+        let (finish_request_id, finish_request) = take_request(&mut restored);
+        assert!(matches!(finish_request, FileNetworkRequest::Finish { .. }));
+        restored
+            .handle_response(
+                &peer(),
+                finish_request_id,
+                FileNetworkResponse::Completed {
+                    progress: progress(
+                        TransferState::Completed,
+                        data.len() as u64,
+                        data.len() as u64,
+                        4,
+                        4,
+                    ),
+                },
+                NOW + 15,
+            )
+            .expect("finish");
+        assert_eq!(std::fs::read(&destination).expect("download"), data);
+        assert_eq!(restored.active_count(), 0);
+    }
+
+    #[test]
     fn repeated_pause_and_resume_use_fresh_request_ids() {
         let temporary = TempDir::new().expect("tempdir");
         let destination = temporary.path().join("download.bin");

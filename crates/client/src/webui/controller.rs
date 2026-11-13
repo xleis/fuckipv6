@@ -471,8 +471,12 @@ impl AppController {
                     .push(crate::node::NodeEmbeddedServiceSnapshot {
                         network_name: "managed".to_string(),
                         status: NodeEmbeddedServiceStatus::Running,
+                        relay_status: NodeEmbeddedServiceStatus::Running,
                         signaling_addr: None,
                         relay_addr: None,
+                        relay_health: None,
+                        relay_authorization: None,
+                        relay_governance: None,
                     });
             })
             .await;
@@ -1534,8 +1538,12 @@ mod tests {
             embedded_services: vec![NodeEmbeddedServiceSnapshot {
                 network_name: "office".to_string(),
                 status: NodeEmbeddedServiceStatus::Running,
+                relay_status: NodeEmbeddedServiceStatus::Running,
                 signaling_addr: Some("127.0.0.1:6666".parse().unwrap()),
                 relay_addr: Some("127.0.0.1:6667".parse().unwrap()),
+                relay_health: None,
+                relay_authorization: None,
+                relay_governance: None,
             }],
             peers: vec![
                 node_peer("office", "peer-office", true),

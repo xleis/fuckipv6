@@ -106,8 +106,15 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 ipc_command() {
-    local socket_path=$1 command_json=$2
-    python3 - "$socket_path" "$command_json" <<'PY'
+    local socket_path=$1 command_json=$2 ns=""
+    local -a runner=(python3)
+    case "$socket_path" in
+        "$WORK/host/"*) ns=$NSH ;;
+        "$WORK/node1/"*) ns=$NS1 ;;
+        "$WORK/node2/"*) ns=$NS2 ;;
+    esac
+    [ -z "$ns" ] || runner=(ip netns exec "$ns" python3)
+    "${runner[@]}" - "$socket_path" "$command_json" <<'PY'
 import json
 import socket
 import struct
@@ -194,8 +201,15 @@ PY
 }
 
 ipc_local_command() {
-    local socket_path=$1 command_json=$2
-    python3 - "$socket_path" "$command_json" <<'PY'
+    local socket_path=$1 command_json=$2 ns=""
+    local -a runner=(python3)
+    case "$socket_path" in
+        "$WORK/host/"*) ns=$NSH ;;
+        "$WORK/node1/"*) ns=$NS1 ;;
+        "$WORK/node2/"*) ns=$NS2 ;;
+    esac
+    [ -z "$ns" ] || runner=(ip netns exec "$ns" python3)
+    "${runner[@]}" - "$socket_path" "$command_json" <<'PY'
 import json
 import socket
 import struct
@@ -291,7 +305,8 @@ wait_for_live_socket() {
     local socket_path=$1 output=$2 attempts=${3:-60}
     local i
     for ((i = 0; i < attempts; i++)); do
-        if timeout 5s bash -c 'source /dev/stdin' <<EOF >/dev/null 2>&1
+        if WORK="$WORK" NSH="$NSH" NS1="$NS1" NS2="$NS2" \
+            timeout 5s bash -c 'source /dev/stdin' <<EOF >/dev/null 2>&1
 $(declare -f ipc_command snapshot_to)
 snapshot_to "$socket_path" "$output"
 EOF
@@ -639,6 +654,104 @@ path.write_bytes(bytes(chunk))
 PY
 }
 
+install_owner_relay_policy() {
+    local current="$WORK/policy-current.json"
+    local candidate="$WORK/policy-relay-candidate.json"
+    local applied="$WORK/policy-relay-applied.json"
+    local expected_revision owner_rule_id network_rule_id issued_at expires_at command
+
+    ipc_command "$HOST_SOCK" '{"command":"get_policy"}' >"$current"
+    jq -e '.status == "policy"' "$current" >/dev/null \
+        || fail "owner policy transaction could not be read"
+    expected_revision=$(jq -r '.data.revision // empty' "$current")
+    [ -n "$expected_revision" ] || fail "owner policy transaction did not report a revision"
+
+    # SecurityRuleId is a 32-byte URL-safe digest. Reusing the canonical
+    # NetworkId/NodeId digest suffix keeps these deterministic fixtures valid
+    # without introducing a second identifier implementation into the script.
+    owner_rule_id="srule_${HOST_NODE_ID#node_}"
+    network_rule_id="srule_${NETWORK_ID#net_}"
+    issued_at=$(($(date +%s%3N) - 60000))
+    expires_at=$(($(date +%s%3N) + 86400000))
+
+    jq -n \
+        --arg network "$NETWORK_ID" \
+        --arg owner "$HOST_NODE_ID" \
+        --arg owner_rule "$owner_rule_id" \
+        --arg network_rule "$network_rule_id" \
+        --argjson issued "$issued_at" \
+        --argjson expires "$expires_at" \
+        --slurpfile current "$current" '
+        ($current[0].data.snapshot) as $snapshot |
+        {
+          local_policy:{
+            node_id:$owner,
+            revision:1,
+            issued_at_unix_ms:$issued,
+            expires_at_unix_ms:$expires,
+            network_scope:{kind:"only",network_ids:[$network]},
+            contribution_vetoes:[],
+            relay_limits:{},
+            rules:[{
+              rule_id:$owner_rule,
+              effect:"allow",
+              subjects:[{kind:"role",value:"owner"}],
+              resources:["relay"],
+              actions:["use"],
+              conditions:[{kind:"membership_active"}]
+            }]
+          },
+          network_acls:(
+            [$snapshot.network_acls[]? | select(.network_id != $network)] + [{
+              network_id:$network,
+              revision:1,
+              issued_at_unix_ms:$issued,
+              expires_at_unix_ms:$expires,
+              rules:[{
+                rule_id:$network_rule,
+                effect:"allow",
+                subjects:[{kind:"any_member"}],
+                resources:["relay"],
+                actions:["use"],
+                conditions:[{kind:"membership_active"}]
+              }],
+              grants:[],
+              relay_limits:{}
+            }]
+          )
+        }' >"$candidate"
+
+    command=$(jq -cn \
+        --argjson expected "$expected_revision" \
+        --arg network "$NETWORK_ID" \
+        --slurpfile candidate "$candidate" '
+        {command:"apply_policy",payload:{
+          expected_revision:$expected,
+          candidate:$candidate[0],
+          network_ids:[$network],
+          includes_local_policy:true,
+          confirm_privilege_expansion:true
+        }}')
+    ipc_command "$HOST_SOCK" "$command" >"$applied"
+    jq -e --arg network "$NETWORK_ID" --arg owner "$HOST_NODE_ID" '
+      .status == "policy_applied"
+      and .data.previous_revision >= 0
+      and .data.snapshot.local_policy.node_id == $owner
+      and ([.data.snapshot.local_policy.rules[]
+            | select(.resources | index("relay"))
+            | select(.actions | index("use"))] | length == 1)
+      and ([.data.snapshot.network_acls[]
+            | select(.network_id == $network)
+            | .rules[]
+            | select(.resources | index("relay"))
+            | select(.actions | index("use"))] | length == 1)
+    ' "$applied" >/dev/null || {
+        jq . "$applied" >&2 || true
+        fail "owner Relay policy transaction was not applied"
+    }
+    info "owner Relay local policy and network ACL are durably authorized"
+}
+
 profile_update_command() {
     local capabilities_json=$1 network_json=$2
     jq -cn --arg network "$NETWORK" --argjson capabilities "$capabilities_json" \
@@ -983,24 +1096,31 @@ main() {
         FUCKIPV6_RUNTIME_DIR="$WORK/node2/run" FUCKIPV6_CONFIG_DIR="$WORK/node2/config")
     local headless_state="$WORK/no-desktop"
     local headless_exec="$headless_state/exec-headless"
-    mkdir -p "$headless_state/run-user" "$headless_state/x11"
+    mkdir -p "$headless_state"
     cat >"$headless_exec" <<'SH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 state=$1
 shift
+runtime_state=$(mktemp -d "$state/runtime.XXXXXX")
+mkdir -p "$runtime_state/run/user" "$runtime_state/x11" "$runtime_state/etc"
+cp /etc/resolv.conf "$runtime_state/etc/resolv.conf"
+cp /etc/nsswitch.conf "$runtime_state/etc/nsswitch.conf"
 exec unshare --mount --propagation private bash -c '
     set -Eeuo pipefail
-    mount --bind "$1" /run/user
+    mount --bind "$1" /run
     mount --bind "$2" /tmp/.X11-unix
-    shift 2
+    mount --bind "$3" /etc/resolv.conf
+    mount --bind "$4" /etc/nsswitch.conf
+    shift 4
     exec "$@"
-' bash "$state/run-user" "$state/x11" "$@"
+' bash "$runtime_state/run" "$runtime_state/x11" \
+    "$runtime_state/etc/resolv.conf" "$runtime_state/etc/nsswitch.conf" "$@"
 SH
     chmod +x "$headless_exec"
 
     info "starting Coordinator with its owner membership active"
-    "$headless_exec" "$headless_state" ip netns exec "$NSH" "${host_env[@]}" RUST_LOG=debug "$BIN" host \
+    ip netns exec "$NSH" "$headless_exec" "$headless_state" "${host_env[@]}" RUST_LOG=debug "$BIN" host \
         --name "$NETWORK" --port "$HOST_PORT" --relay-port "$RELAY_PORT" \
         --external-host 10.79.1.1 --headless --webui-port "$WEBUI_HOST" \
         >"$WORK/host/host.log" 2>&1 &
@@ -1013,6 +1133,7 @@ SH
     HOST_NODE_ID=$(jq -r '.owner // empty' "$NETWORK_JSON")
     [ -n "$NETWORK_ID" ] && [ -n "$HOST_NODE_ID" ] || fail "network record lacks network_id or owner"
     [ "$(jq -r '.join_mode' "$NETWORK_JSON")" = invite_only ] || fail "acceptance network is not InviteOnly"
+    install_owner_relay_policy
     wait_for_network_online "$HOST_SOCK" "$WORK/host-online.json" 90 || {
         tail -240 "$WORK/host/host.log" >&2 || true
         fail "Coordinator owner network did not become online"
@@ -1027,10 +1148,10 @@ SH
     set_network_file_capability yes grant-file
 
     info "starting two empty member nodes"
-    "$headless_exec" "$headless_state" ip netns exec "$NS1" "${node1_env[@]}" RUST_LOG=debug "$BIN" --headless --webui-port "$WEBUI1" \
+    ip netns exec "$NS1" "$headless_exec" "$headless_state" "${node1_env[@]}" RUST_LOG=debug "$BIN" --headless --webui-port "$WEBUI1" \
         >"$WORK/node1/node.log" 2>&1 &
     N1PID=$!
-    "$headless_exec" "$headless_state" ip netns exec "$NS2" "${node2_env[@]}" RUST_LOG=debug "$BIN" --headless --webui-port "$WEBUI2" \
+    ip netns exec "$NS2" "$headless_exec" "$headless_state" "${node2_env[@]}" RUST_LOG=debug "$BIN" --headless --webui-port "$WEBUI2" \
         >"$WORK/node2/node.log" 2>&1 &
     N2PID=$!
     NODE1_SOCK="$WORK/node1/run/node.sock"

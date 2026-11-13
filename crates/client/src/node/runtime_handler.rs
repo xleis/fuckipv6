@@ -153,6 +153,7 @@ impl NodeRuntimeHandler {
                         }
                         refresh_local_exit_owner_intent(&state, configs).await;
                     }
+                    refresh_embedded_services(&state, &services).await;
                     let (live_tun_names, runtime_problem) = match runtime.as_ref() {
                         Some(runtime) => match runtime.live_tun_names().await {
                             Ok(names) => (Some(names), None),
@@ -1861,23 +1862,34 @@ fn embedded_service_rejection(
 ) -> NodeCommandResult {
     use crate::symmetric::EmbeddedServiceError;
 
-    let (code, retryable) = match &error {
-        EmbeddedServiceError::InvalidRequest(_) => (NodeProblemCode::InvalidRequest, false),
-        EmbeddedServiceError::NotFound(_) => (NodeProblemCode::NotFound, false),
+    let (code, retryable, reason_code) = match &error {
+        EmbeddedServiceError::InvalidRequest(_) => (NodeProblemCode::InvalidRequest, false, None),
+        EmbeddedServiceError::NotFound(_) => (NodeProblemCode::NotFound, false, None),
         EmbeddedServiceError::PersistenceFailed { .. }
         | EmbeddedServiceError::OperationFailed { .. }
-        | EmbeddedServiceError::ActorClosed => (NodeProblemCode::Unavailable, true),
+        | EmbeddedServiceError::ActorClosed => (NodeProblemCode::Unavailable, true, None),
         EmbeddedServiceError::AlreadyRunning(_)
         | EmbeddedServiceError::StartFailed { .. }
         | EmbeddedServiceError::StopFailed { .. }
-        | EmbeddedServiceError::ShutdownFailed { .. } => (NodeProblemCode::Unavailable, true),
+        | EmbeddedServiceError::ShutdownFailed { .. } => (NodeProblemCode::Unavailable, true, None),
+        EmbeddedServiceError::RelayStartFailed { reason_code, .. }
+        | EmbeddedServiceError::RelayStopFailed { reason_code, .. } => match *reason_code {
+            "relay.start.platform_unsupported" => {
+                (NodeProblemCode::Unsupported, false, Some(*reason_code))
+            }
+            "relay.start.permission_denied" => {
+                (NodeProblemCode::PermissionDenied, false, Some(*reason_code))
+            }
+            _ => (NodeProblemCode::Unavailable, true, Some(*reason_code)),
+        },
     };
-    NodeCommandResult::rejected(
-        request_id,
-        NodeProblem::new(code, error.to_string())
-            .for_network(network_name)
-            .retryable(retryable),
-    )
+    let mut problem = NodeProblem::new(code, error.to_string())
+        .for_network(network_name)
+        .retryable(retryable);
+    if let Some(reason_code) = reason_code {
+        problem = problem.with_param("reason", reason_code);
+    }
+    NodeCommandResult::rejected(request_id, problem)
 }
 
 async fn start_runtime_networks(
@@ -4296,6 +4308,35 @@ fn unavailable(request_id: u64, message: impl Into<String>) -> NodeCommandResult
     )
 }
 
+async fn refresh_embedded_services(state: &NodeStateStore, services: &EmbeddedServiceManager) {
+    let runtime_services = match services.list().await {
+        Ok(services) => services,
+        Err(error) => {
+            tracing::warn!(%error, "刷新内嵌服务状态失败，保留上一份快照");
+            return;
+        }
+    };
+    state
+        .update(|snapshot| {
+            for service in &runtime_services {
+                let projected = super::NodeEmbeddedServiceSnapshot::running_from_embedded(service);
+                if let Some(existing) = snapshot
+                    .embedded_services
+                    .iter_mut()
+                    .find(|existing| existing.network_name == projected.network_name)
+                {
+                    *existing = projected;
+                } else {
+                    snapshot.embedded_services.push(projected);
+                }
+            }
+            snapshot
+                .embedded_services
+                .sort_by(|left, right| left.network_name.cmp(&right.network_name));
+        })
+        .await;
+}
+
 /// Shared command bus backed by a live node runtime.
 pub fn spawn_command_bus(
     state: NodeStateStore,
@@ -4319,6 +4360,7 @@ pub fn spawn_command_bus_with_services(
     super::NodeCommandBus::spawn_with_state(Arc::new(handler), events, 32, state)
 }
 
+#[cfg(test)]
 pub(crate) fn spawn_command_bus_with_runtime(
     state: NodeStateStore,
     registry: MultiNetworkRegistry,
@@ -4330,6 +4372,26 @@ pub(crate) fn spawn_command_bus_with_runtime(
     let handler =
         NodeRuntimeHandler::with_runtime(state.clone(), registry, services, runtime, configs);
     super::NodeCommandBus::spawn_with_state(Arc::new(handler), events, 32, state)
+}
+
+pub(crate) fn spawn_command_bus_with_runtime_and_audit(
+    state: NodeStateStore,
+    registry: MultiNetworkRegistry,
+    events: super::NodeEventBus,
+    services: EmbeddedServiceManager,
+    runtime: NetworkRuntimeManager,
+    configs: ConfigManager,
+    audit: Arc<crate::owner_security::audit::OwnerSecurityAudit>,
+) -> super::NodeCommandBus {
+    let handler =
+        NodeRuntimeHandler::with_runtime(state.clone(), registry, services, runtime, configs);
+    super::NodeCommandBus::spawn_with_state_and_durable_audit(
+        Arc::new(handler),
+        events,
+        32,
+        state,
+        audit,
+    )
 }
 
 #[cfg(test)]
@@ -4430,6 +4492,7 @@ mod tests {
                 network_scope: NodeNetworkScope::Only(vec![network_id.clone()]),
                 contribution_vetoes: Vec::new(),
                 exit_contribution: None,
+                relay_limits: Default::default(),
                 rules: vec![policy_transaction_rule(
                     "runtime-local-read",
                     PermissionEffect::Allow,
@@ -4451,6 +4514,7 @@ mod tests {
                     Vec::new(),
                 )],
                 grants: Vec::new(),
+                relay_limits: Default::default(),
             }],
         }
     }
@@ -4761,6 +4825,58 @@ mod tests {
             }
             outcome => panic!("unexpected outcome: {outcome:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn get_snapshot_refreshes_authoritative_relay_health_from_the_service_owner() {
+        let config_dir = std::env::temp_dir().join(format!(
+            "fuckipv6-runtime-handler-relay-health-{}-{}",
+            std::process::id(),
+            unix_time_ms()
+        ));
+        let _ = std::fs::remove_dir_all(&config_dir);
+        let configs = crate::config_manager::ConfigManager::new_for_dir(config_dir.clone())
+            .expect("config manager");
+        let services = EmbeddedServiceManager::spawn_with_config(2, configs);
+        services
+            .start(
+                EmbeddedServiceStartRequest::new("live-relay", 0, 0)
+                    .with_external_host("127.0.0.1"),
+            )
+            .await
+            .expect("start embedded service");
+        let bus = spawn_command_bus_with_services(
+            NodeStateStore::new(),
+            MultiNetworkRegistry::new(),
+            NodeEventBus::default(),
+            services.clone(),
+        );
+
+        let result = bus
+            .execute_test(NodeCommandRequest::new(26, NodeCommand::GetSnapshot))
+            .await
+            .expect("snapshot result");
+        let NodeCommandOutcome::Snapshot(snapshot) = result.outcome else {
+            panic!("unexpected snapshot outcome");
+        };
+        let service = snapshot
+            .embedded_services
+            .iter()
+            .find(|service| service.network_name == "live-relay")
+            .expect("embedded service projected into node state");
+        let health = service
+            .relay_health
+            .as_ref()
+            .expect("authoritative relay health");
+        assert!(health.listener_bound);
+        assert_ne!(
+            health.status,
+            fuckipv6_common::domain::RelayHealthStatus::Healthy,
+            "a bound listener must not become healthy without forwarding evidence"
+        );
+
+        services.shutdown().await.expect("shutdown services");
+        let _ = std::fs::remove_dir_all(config_dir);
     }
 
     #[tokio::test]
@@ -5195,6 +5311,7 @@ mod tests {
                 conditions: Vec::new(),
             }],
             grants: Vec::new(),
+            relay_limits: Default::default(),
         });
         input.network_acl.as_mut().expect("acl").rules[0]
             .subjects

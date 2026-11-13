@@ -48,6 +48,14 @@ const joinNetwork = manifest.pages
 const leaveNetwork = manifest.pages
   .flatMap((page) => page.actions)
   .find((action) => action.id === "leave_network") as NodeUiAction;
+const exitNodeActions = manifest.pages.find((page) => page.id === "exit_node")!
+  .actions;
+const setLocalExitCapability = exitNodeActions.find(
+  (action) => action.id === "set_local_exit_capability",
+) as NodeUiAction;
+const setExitNodeRole = exitNodeActions.find(
+  (action) => action.id === "set_exit_node_role",
+) as NodeUiAction;
 const listJoinRequests = manifest.pages
   .flatMap((page) => page.actions)
   .find((action) => action.id === "list_join_requests") as NodeUiAction;
@@ -452,6 +460,134 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+});
+
+describe("action panel Exit confirmations", () => {
+  it("requires confirmation before changing the local Exit capability", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn(async (): Promise<ActionSubmission> => ({
+      outcome: {
+        status: "completed",
+        data: {},
+      } as unknown as NodeCommandOutcome,
+    }));
+    render(
+      <ActionPanel
+        actions={[setLocalExitCapability]}
+        snapshot={snapshot}
+        selectedNetwork=""
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:action.set_local_exit_capability",
+      }),
+    );
+    const enabled = screen.getByRole("checkbox", {
+      name: "translated:field.enabled",
+    });
+    expect(enabled).not.toBeChecked();
+    await user.click(enabled);
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(
+      "translated:confirm.set_local_exit_capability.title",
+    );
+    expect(dialog).toHaveTextContent(
+      "translated:confirm.set_local_exit_capability.consequence",
+    );
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "translated:common.execute",
+      }),
+    );
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit).toHaveBeenCalledWith(
+      setLocalExitCapability,
+      { enabled: true },
+      expect.any(Function),
+    );
+  });
+
+  it("confirms the selected network and role before enabling Exit", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn(async (): Promise<ActionSubmission> => ({
+      outcome: {
+        status: "completed",
+        data: {},
+      } as unknown as NodeCommandOutcome,
+    }));
+    render(
+      <ActionPanel
+        actions={[setExitNodeRole]}
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:action.set_exit_node_role",
+      }),
+    );
+    expect(
+      screen.getByLabelText("translated:field.network_name"),
+    ).toHaveValue("home");
+    expect(screen.getByLabelText("translated:field.role")).toHaveValue(
+      "exit_node",
+    );
+    const enabled = screen.getByRole("checkbox", {
+      name: "translated:field.enabled",
+    });
+    expect(enabled).not.toBeChecked();
+    await user.click(enabled);
+    await user.click(
+      screen.getByRole("button", { name: "translated:common.execute" }),
+    );
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(
+      "translated:confirm.set_exit_node_role.title",
+    );
+    expect(dialog).toHaveTextContent(
+      "translated:confirm.set_exit_node_role.consequence",
+    );
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "translated:common.execute",
+      }),
+    );
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledOnce());
+    expect(onSubmit).toHaveBeenCalledWith(
+      setExitNodeRole,
+      { network_name: "home", role: "exit_node", enabled: true },
+      expect.any(Function),
+    );
+  });
 });
 
 describe("action panel interaction gate", () => {

@@ -15,7 +15,7 @@ use fuckipv6_common::domain::{
     MemberRemovalPreview, MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord,
     NetworkEndpoint, NetworkId, NetworkJoinMode, NetworkJoinPreview, NetworkMemberDirectory,
     NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility,
-    PermissionDenialCode, PolicyTestInput, PolicyTestResult, TrafficPolicy,
+    PermissionDenialCode, PolicyTestInput, PolicyTestResult, RelayGovernanceAction, TrafficPolicy,
     TrafficPolicyTestComparison, TrafficPolicyTestInput, TrafficPolicyTestVisibility,
     JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS, JOIN_REQUEST_MAX_REASON_CHARS,
     NETWORK_PROFILE_MAX_TAG_CHARS,
@@ -2821,7 +2821,7 @@ impl CommandAuditTrail {
             )
             .as_bytes(),
         );
-        let canonical_action = audit_for_command(request.command.kind()).action;
+        let canonical_action = audit_action_for_command(&request.command);
         let action = canonical_action.as_deref().unwrap_or("node.command");
         let mut details = BTreeMap::new();
         details.insert("command".into(), request.command.kind().as_str().into());
@@ -2835,6 +2835,10 @@ impl CommandAuditTrail {
             "actor_role".into(),
             context.roles_for_command(&request.command),
         );
+        if let NodeCommand::SetNetworkRole(role) = &request.command {
+            details.insert("role".into(), network_role_name(role.role).into());
+            details.insert("enabled".into(), role.enabled.to_string());
+        }
         let network_id = activity_network_id(&request.command, context, result, snapshot);
         let (object_kind, object_id) =
             activity_object_identity(&request.command, context, result, snapshot);
@@ -2865,8 +2869,7 @@ impl CommandAuditTrail {
             sensitive_keys: Default::default(),
         };
         if let Some(ledger) = &self.durable {
-            let should_persist = outcome == AuditOutcome::Denied
-                || audit_for_command(request.command.kind()).action.is_some();
+            let should_persist = outcome == AuditOutcome::Denied || canonical_action.is_some();
             if should_persist {
                 // Free-form denial prose can contain adapter-provided values.
                 // The stable code is sufficient evidence; typed object and
@@ -2926,6 +2929,30 @@ impl CommandAuditTrail {
             .lock()
             .map(|activity| activity.clone())
             .unwrap_or_default()
+    }
+}
+
+fn audit_action_for_command(command: &NodeCommand) -> Option<String> {
+    match command {
+        NodeCommand::SetNetworkRole(role) if role.role == NodeNetworkRole::Relay => Some(
+            if role.enabled {
+                RelayGovernanceAction::Enable
+            } else {
+                RelayGovernanceAction::Disable
+            }
+            .wire_name()
+            .into(),
+        ),
+        _ => audit_for_command(command.kind()).action,
+    }
+}
+
+fn network_role_name(role: NodeNetworkRole) -> &'static str {
+    match role {
+        NodeNetworkRole::Member => "member",
+        NodeNetworkRole::Discovery => "discovery",
+        NodeNetworkRole::Relay => "relay",
+        NodeNetworkRole::ExitNode => "exit_node",
     }
 }
 
@@ -3530,6 +3557,22 @@ impl NodeCommandBus {
         H: NodeCommandHandler,
     {
         Self::spawn_with_activity_state(handler, events, capacity, Some(state), None)
+    }
+
+    /// Spawn a command bus that publishes sanitized activity into the shared
+    /// node snapshot and commits command records to the same durable ledger as
+    /// the data plane.
+    pub(crate) fn spawn_with_state_and_durable_audit<H>(
+        handler: Arc<H>,
+        events: NodeEventBus,
+        capacity: usize,
+        state: NodeStateStore,
+        audit: Arc<OwnerSecurityAudit>,
+    ) -> Self
+    where
+        H: NodeCommandHandler,
+    {
+        Self::spawn_with_activity_state(handler, events, capacity, Some(state), Some(audit))
     }
 
     fn spawn_with_activity_state<H>(
@@ -4330,6 +4373,20 @@ mod tests {
                     NodeCommandOutcome::Completed {
                         message: "ok".into(),
                     },
+                )
+            })
+        }
+    }
+
+    struct RelayFailureHandler;
+
+    impl NodeCommandHandler for RelayFailureHandler {
+        fn handle(&self, request: NodeCommandRequest) -> NodeCommandFuture {
+            Box::pin(async move {
+                NodeCommandResult::rejected(
+                    request.request_id,
+                    NodeProblem::new(NodeProblemCode::Unavailable, "relay bind failed")
+                        .with_param("reason", "relay.bind_unavailable"),
                 )
             })
         }
@@ -5462,6 +5519,7 @@ mod tests {
             expires_at_unix_ms: now.saturating_add(60_000),
             rules: vec![deny_rule],
             grants: Vec::new(),
+            relay_limits: Default::default(),
         };
         let context = NodeCommandContext::local_owner(actor(), "gpui:owner-session")
             .with_network_scopes([(
@@ -6297,6 +6355,123 @@ mod tests {
                 .last()
                 .and_then(|entry| entry.details.get("request_id")),
             Some(&(COMMAND_AUDIT_RETENTION_LIMIT as u64 + 43).to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_lifecycle_audit_uses_distinct_actions_and_minimal_fields() {
+        let state = NodeStateStore::new();
+        let bus = NodeCommandBus::spawn_with_state(
+            Arc::new(EchoHandler),
+            NodeEventBus::default(),
+            8,
+            state.clone(),
+        );
+
+        for (request_id, enabled) in [(101, true), (102, false)] {
+            bus.execute_test(NodeCommandRequest::new(
+                request_id,
+                NodeCommand::SetNetworkRole(NodeSetNetworkRoleCommand {
+                    network_name: "home".into(),
+                    role: NodeNetworkRole::Relay,
+                    enabled,
+                }),
+            ))
+            .await
+            .expect("relay lifecycle command");
+        }
+        bus.execute_test(NodeCommandRequest::new(
+            103,
+            NodeCommand::SetNetworkRole(NodeSetNetworkRoleCommand {
+                network_name: "home".into(),
+                role: NodeNetworkRole::ExitNode,
+                enabled: true,
+            }),
+        ))
+        .await
+        .expect("exit lifecycle command");
+
+        let audit = bus.audit_entries();
+        assert_eq!(audit.len(), 3);
+        assert_eq!(audit[0].action, "relay.enable");
+        assert_eq!(audit[0].details["role"], "relay");
+        assert_eq!(audit[0].details["enabled"], "true");
+        assert_eq!(audit[1].action, "relay.disable");
+        assert_eq!(audit[1].details["enabled"], "false");
+        assert_eq!(audit[2].action, "network.role.set");
+        assert_eq!(audit[2].details["role"], "exit_node");
+        assert!(audit.iter().all(|entry| {
+            entry.details.keys().all(|key| {
+                !matches!(
+                    key.as_str(),
+                    "payload"
+                        | "private_key"
+                        | "session_key"
+                        | "member_display_name"
+                        | "source_address"
+                        | "destination_address"
+                )
+            })
+        }));
+        let activity = state.snapshot().await.recent_activity;
+        assert_eq!(activity.len(), 3);
+        assert!(activity.iter().any(|entry| {
+            entry.action == "network.role.set" && entry.details["role"] == "exit_node"
+        }));
+        assert!(activity
+            .iter()
+            .any(|entry| entry.action == "relay.disable" && entry.details["enabled"] == "false"));
+        assert!(activity
+            .iter()
+            .any(|entry| entry.action == "relay.enable" && entry.details["enabled"] == "true"));
+    }
+
+    #[tokio::test]
+    async fn relay_lifecycle_denial_and_failure_keep_action_and_reason_code() {
+        let denied = NodeCommandBus::spawn(Arc::new(EchoHandler), NodeEventBus::default(), 4);
+        denied
+            .execute(
+                NodeCommandContext::untrusted("legacy_loopback_tcp"),
+                NodeCommandRequest::new(
+                    111,
+                    NodeCommand::SetNetworkRole(NodeSetNetworkRoleCommand {
+                        network_name: "home".into(),
+                        role: NodeNetworkRole::Relay,
+                        enabled: false,
+                    }),
+                ),
+            )
+            .await
+            .expect("authorization denial result");
+        let denied_audit = denied.audit_entries();
+        assert_eq!(denied_audit.len(), 1);
+        assert_eq!(denied_audit[0].action, "relay.disable");
+        assert_eq!(denied_audit[0].outcome, AuditOutcome::Denied);
+        assert_eq!(
+            denied_audit[0].details["reason_code"],
+            "permission.authentication_required"
+        );
+
+        let failed =
+            NodeCommandBus::spawn(Arc::new(RelayFailureHandler), NodeEventBus::default(), 4);
+        failed
+            .execute_test(NodeCommandRequest::new(
+                112,
+                NodeCommand::SetNetworkRole(NodeSetNetworkRoleCommand {
+                    network_name: "home".into(),
+                    role: NodeNetworkRole::Relay,
+                    enabled: true,
+                }),
+            ))
+            .await
+            .expect("handler failure result");
+        let failed_audit = failed.audit_entries();
+        assert_eq!(failed_audit.len(), 1);
+        assert_eq!(failed_audit[0].action, "relay.enable");
+        assert_eq!(failed_audit[0].outcome, AuditOutcome::Failed);
+        assert_eq!(
+            failed_audit[0].details["reason_code"],
+            "relay.bind_unavailable"
         );
     }
 

@@ -6,18 +6,23 @@ use fuckipv6_common::domain::JoinRequestReviewAction;
 use fuckipv6_common::domain::{
     parse_policy_test_input, ActivityCategory, ActivityEntry, ActivitySeverity,
     ApplicationIdentity, AuditOutcome, CapabilityKind, CapabilityState, ContentHash,
-    ExitAvailabilitySource, ExitAvailabilityState, ExitContributionAvailability,
-    ExitContributionMode, ExitContributionObligation, ExitContributionScope,
-    ExitSelectionCandidate, ExitSelectionMode, ExitSelectionPolicy, ExitSelectionSource,
-    InvitationCode, InvitationId, InvitationRedeemRequest, MemberLifecycleAction, MembershipRole,
-    NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
-    NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId,
-    TopologyNode, TopologyNodeHealth, TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy,
-    TrafficFlow, TrafficMatch, TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput,
-    TrafficProtectionState, TrafficProtocol, TrafficRoutingHitSample, TrafficRoutingObservation,
-    TrafficRoutingPageModel, TrafficRoutingRuleActivityEffect, TrafficRoutingRuleImpactView,
-    TrafficRoutingTarget, TrafficRoutingTargetKind, TrafficRoutingTargetRef,
-    TrafficRoutingWorkflowState, TrafficSessionEventKind,
+    EffectiveAccessReason, EffectivePolicyLayer, ExitAvailabilitySource, ExitAvailabilityState,
+    ExitContributionAvailability, ExitContributionMode, ExitContributionObligation,
+    ExitContributionScope, ExitSelectionCandidate, ExitSelectionMode, ExitSelectionPolicy,
+    ExitSelectionSource, InvitationCode, InvitationId, InvitationRedeemRequest,
+    MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode, NetworkMember,
+    NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberStatus,
+    NetworkProfileUpdate, NetworkVisibility, NodeId, RelayAuthorizationAuditSnapshot,
+    RelayAuthorizationDiagnostic, RelayAuthorizationSourceDiagnostic, RelayExistingSessionPolicy,
+    RelayGovernanceAction, RelayGovernanceEvent, RelayHealthIssue, RelayHealthSnapshot,
+    RelayHealthStatus, RelayLifecycleState, RelayLimitPolicy, RelayLimitSource,
+    RelayMeasurementState, RelayReachabilityState, TopologyNode, TopologyNodeHealth,
+    TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy, TrafficFailureKind, TrafficFlow,
+    TrafficMatch, TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput, TrafficProtectionState,
+    TrafficProtocol, TrafficRoutingHitSample, TrafficRoutingObservation, TrafficRoutingPageModel,
+    TrafficRoutingRuleActivityEffect, TrafficRoutingRuleImpactView, TrafficRoutingTarget,
+    TrafficRoutingTargetKind, TrafficRoutingTargetRef, TrafficRoutingWorkflowState,
+    TrafficSessionEventKind,
 };
 use fuckipv6_common::i18n::{format_integer, t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
@@ -2017,7 +2022,9 @@ pub fn action_block_reason(
             .any(|network| network.status == crate::node::NodeNetworkStatus::Online))
         .then_some(ActionBlockReason::NoOnlineNetwork),
         NodeUiAvailability::NetworkSelected => {
-            let selected = selected_network?;
+            let Some(selected) = selected_network else {
+                return Some(ActionBlockReason::NoNetworkSelected);
+            };
             (!snapshot
                 .networks
                 .iter()
@@ -5785,6 +5792,367 @@ fn exit_selection_rows(
     rows
 }
 
+fn exit_selection_for_network<'a>(
+    snapshot: &'a NodeSnapshot,
+    network_name: &str,
+) -> Option<&'a crate::node::NodeExitSelectionSnapshot> {
+    let network_id = snapshot
+        .memberships
+        .iter()
+        .find(|membership| membership.network_name == network_name)?
+        .network_id
+        .as_str();
+    snapshot
+        .exit_selections
+        .iter()
+        .find(|selection| selection.network_id.as_str() == network_id)
+}
+
+fn selected_exit_id(
+    network: &crate::node::NodeNetworkConfigSnapshot,
+    selection: Option<&crate::node::NodeExitSelectionSnapshot>,
+) -> Option<String> {
+    selection
+        .and_then(|selection| selection.resolution.as_ref())
+        .and_then(|resolution| resolution.selected_default.as_ref())
+        .map(ToString::to_string)
+        .or_else(|| network.exit_node.clone())
+}
+
+fn exit_availability_state_key(state: ExitAvailabilityState) -> &'static str {
+    match state {
+        ExitAvailabilityState::Unknown => "member_directory.exit.state.unknown",
+        ExitAvailabilityState::Available => "member_directory.exit.state.available",
+        ExitAvailabilityState::Degraded => "member_directory.exit.state.degraded",
+        ExitAvailabilityState::Unavailable => "member_directory.exit.state.unavailable",
+    }
+}
+
+fn exit_availability_source_key(source: ExitAvailabilitySource) -> &'static str {
+    match source {
+        ExitAvailabilitySource::NotObserved => "member_directory.exit.source.not_observed",
+        ExitAvailabilitySource::LocalRuntime => "member_directory.exit.source.local_runtime",
+        ExitAvailabilitySource::CoordinatorHealth => {
+            "member_directory.exit.source.coordinator_health"
+        }
+        ExitAvailabilitySource::RemotePeerReport => {
+            "member_directory.exit.source.remote_peer_report"
+        }
+    }
+}
+
+fn traffic_failure_key(failure: TrafficFailureKind) -> &'static str {
+    match failure {
+        TrafficFailureKind::UnknownApplication => "traffic.session.failure.unknown_application",
+        TrafficFailureKind::DnsResolutionTimeout => {
+            "traffic.session.failure.dns_resolution_timeout"
+        }
+        TrafficFailureKind::DnsPollutionDetected => {
+            "traffic.session.failure.dns_pollution_detected"
+        }
+        TrafficFailureKind::ExitUnavailable => "traffic.session.failure.exit_unavailable",
+        TrafficFailureKind::NetworkSelectionUnavailable => {
+            "traffic.session.failure.network_selection_unavailable"
+        }
+        TrafficFailureKind::ConnectionTimeout => "traffic.session.failure.connection_timeout",
+        TrafficFailureKind::HandshakeInterrupted => "traffic.session.failure.handshake_interrupted",
+        TrafficFailureKind::RuntimeDisconnected => "traffic.session.failure.runtime_disconnected",
+        TrafficFailureKind::PartialConnectionFailure => {
+            "traffic.session.failure.partial_connection_failure"
+        }
+    }
+}
+
+fn exit_connection_summary_rows(snapshot: &NodeSnapshot, locale: Locale) -> Vec<RowModel> {
+    let protection = t(
+        locale,
+        traffic_protection_state_key(snapshot.traffic_session.state),
+    );
+    let changed_at = if snapshot.traffic_session.changed_at_unix_ms == 0 {
+        t(locale, "traffic.session.not_observed").to_string()
+    } else {
+        routing_timestamp_label(Some(snapshot.traffic_session.changed_at_unix_ms), locale)
+    };
+    let reason = snapshot
+        .traffic_session
+        .reason_code
+        .as_deref()
+        .unwrap_or_else(|| t(locale, "traffic.session.no_reason"));
+    let failure = snapshot
+        .traffic_session
+        .failure
+        .map(|failure| t(locale, traffic_failure_key(failure)))
+        .unwrap_or_else(|| t(locale, "common.none"));
+
+    vec![row(
+        t(locale, "exit_summary.global_session").to_string(),
+        tr(
+            locale,
+            "exit_summary.global_detail",
+            &[
+                ("protection", protection),
+                ("changed_at", &changed_at),
+                ("reason", reason),
+                ("failure", failure),
+            ],
+        ),
+    )]
+}
+
+fn exit_network_selection_rows(snapshot: &NodeSnapshot, locale: Locale) -> Vec<RowModel> {
+    snapshot
+        .configuration
+        .networks
+        .iter()
+        .map(|network| {
+            let selection = exit_selection_for_network(snapshot, &network.network_name);
+            let resolution = selection.and_then(|selection| selection.resolution.as_ref());
+            let configured_exit = selected_exit_id(network, selection)
+                .unwrap_or_else(|| t(locale, "common.none").to_string());
+            let mode = resolution
+                .map(|resolution| exit_selection_mode_label(locale, &resolution.mode).to_string())
+                .unwrap_or_else(|| t(locale, "common.not_available").to_string());
+            let default_exit = resolution
+                .and_then(|resolution| resolution.default_exit.as_ref())
+                .map_or_else(|| t(locale, "common.none").to_string(), ToString::to_string);
+            let fixed_exit = resolution
+                .and_then(|resolution| resolution.fixed_exit.as_ref())
+                .map_or_else(|| t(locale, "common.none").to_string(), ToString::to_string);
+            let source = resolution
+                .and_then(|resolution| {
+                    resolution
+                        .candidates
+                        .iter()
+                        .find(|candidate| candidate.exit.as_str() == configured_exit)
+                })
+                .map(|candidate| exit_selection_source_label(locale, &candidate.source))
+                .unwrap_or_else(|| t(locale, "common.not_available").to_string());
+            row(
+                network.network_name.clone(),
+                tr(
+                    locale,
+                    "exit_summary.selection_row_detail",
+                    &[
+                        ("configured_exit", &configured_exit),
+                        ("mode", &mode),
+                        ("default_exit", &default_exit),
+                        ("fixed_exit", &fixed_exit),
+                        ("source", &source),
+                    ],
+                ),
+            )
+        })
+        .collect()
+}
+
+fn exit_quality_rows(snapshot: &NodeSnapshot, locale: Locale) -> Vec<RowModel> {
+    let mut rows = Vec::new();
+    for selection in &snapshot.exit_selections {
+        let Some(resolution) = selection.resolution.as_ref() else {
+            continue;
+        };
+        let network_name = snapshot
+            .memberships
+            .iter()
+            .find(|membership| membership.network_id == selection.network_id.as_str())
+            .map(|membership| membership.network_name.as_str());
+        for candidate in &resolution.candidates {
+            if !candidate.selectable || !resolution.selectable_exits.contains(&candidate.exit) {
+                continue;
+            }
+            let Some(peer) = snapshot.peers.iter().find(|peer| {
+                peer.peer_id == candidate.exit.as_str()
+                    && network_name.is_none_or(|network| peer.network_name == network)
+            }) else {
+                continue;
+            };
+            let availability = t(
+                locale,
+                exit_availability_state_key(candidate.availability.state),
+            );
+            let availability_source = t(
+                locale,
+                exit_availability_source_key(candidate.availability.source),
+            );
+            let observed_at =
+                routing_timestamp_label(candidate.availability.observed_at_unix_ms, locale);
+            let freshness = match candidate.availability.observed_at_unix_ms {
+                None => t(locale, "exit_quality.evidence_not_observed"),
+                Some(observed_at)
+                    if selection.evaluated_at_unix_ms <= observed_at.saturating_add(90_000) =>
+                {
+                    t(locale, "exit_quality.evidence_fresh")
+                }
+                Some(_) => t(locale, "exit_quality.evidence_stale"),
+            };
+            let availability_reason = candidate
+                .availability
+                .reason_code
+                .as_deref()
+                .map(|reason| exit_selection_reason_label(locale, reason))
+                .unwrap_or_else(|| t(locale, "common.none").to_string());
+            let online = t(
+                locale,
+                if peer.online {
+                    "status.peer.online"
+                } else {
+                    "status.peer.offline"
+                },
+            );
+            let transport = t(
+                locale,
+                if peer.p2p_active {
+                    "peer.transport.p2p"
+                } else {
+                    "peer.transport.relay"
+                },
+            );
+            let health = t(
+                locale,
+                if peer.p2p_healthy {
+                    "peer.health.healthy"
+                } else {
+                    "peer.health.unhealthy"
+                },
+            );
+            let rtt = peer
+                .rtt_us
+                .map(|rtt| {
+                    let value = format!("{:.1}", rtt as f64 / 1000.0);
+                    tr(locale, "peer.rtt", &[("value", &value)])
+                })
+                .unwrap_or_else(|| t(locale, "common.not_available").to_string());
+            let loss = {
+                let value = format!("{:.1}", f64::from(peer.loss_rate) * 100.0);
+                tr(locale, "peer.loss", &[("value", &value)])
+            };
+            let title = network_name
+                .map(|network| format!("{network} / {}", candidate.exit.as_str()))
+                .unwrap_or_else(|| candidate.exit.to_string());
+            rows.push(row(
+                title,
+                tr(
+                    locale,
+                    "exit_quality.peer_detail",
+                    &[
+                        ("online", online),
+                        ("health", health),
+                        ("transport", transport),
+                        ("rtt", &rtt),
+                        ("loss", &loss),
+                        ("availability", availability),
+                        ("availability_source", availability_source),
+                        ("freshness", freshness),
+                        ("observed_at", &observed_at),
+                        ("availability_reason", &availability_reason),
+                    ],
+                ),
+            ));
+        }
+    }
+    if rows.is_empty() {
+        rows.push(row(
+            t(locale, "exit_quality.peers"),
+            t(locale, "exit_quality.no_peers"),
+        ));
+    }
+    rows.push(row(
+        t(locale, "exit_quality.throughput"),
+        t(locale, "exit_quality.throughput_unavailable"),
+    ));
+    rows
+}
+
+fn exit_activity_rows(snapshot: &NodeSnapshot, locale: Locale) -> Vec<RowModel> {
+    let mut events = Vec::new();
+    for event in &snapshot.traffic_session.events {
+        let reason = event
+            .reason_code
+            .as_deref()
+            .unwrap_or_else(|| t(locale, "traffic.session.no_reason"));
+        let failure = event
+            .failure
+            .map(|failure| t(locale, traffic_failure_key(failure)))
+            .unwrap_or_else(|| t(locale, "common.none"));
+        let state = t(locale, traffic_protection_state_key(event.state));
+        let occurred_at = routing_timestamp_label(Some(event.occurred_at_unix_ms), locale);
+        let id = format!(
+            "traffic:{}:{:?}:{:?}:{}",
+            event.occurred_at_unix_ms, event.kind, event.state, reason
+        );
+        events.push((
+            id,
+            event.occurred_at_unix_ms,
+            row(
+                t(locale, traffic_session_event_key(event.kind)).to_string(),
+                tr(
+                    locale,
+                    "exit_activity.session_detail",
+                    &[
+                        ("state", state),
+                        ("reason", reason),
+                        ("failure", failure),
+                        ("occurred_at", &occurred_at),
+                    ],
+                ),
+            ),
+        ));
+    }
+
+    let exit_activity_actions = [
+        "network.role.set",
+        "node.local_exit.set",
+        "routing.update",
+        "membership.change",
+        "policy.apply",
+        "policy.rollback",
+    ];
+    for entry in ordered_activity_entries(&snapshot.recent_activity) {
+        if !exit_activity_actions.contains(&entry.action.as_str()) {
+            continue;
+        }
+        let action_key = format!("activity.action.{}", entry.action);
+        let localized = t(locale, &action_key);
+        let title = if localized == action_key {
+            t(locale, "activity.action.node.command").to_string()
+        } else {
+            localized.to_string()
+        };
+        let outcome = t(locale, activity_outcome_key(entry.outcome));
+        let occurred_at = routing_timestamp_label(Some(entry.occurred_at_unix_ms), locale);
+        events.push((
+            entry.audit_id.to_string(),
+            entry.occurred_at_unix_ms,
+            row(
+                title,
+                format!(
+                    "{} · {} · {}",
+                    tr(
+                        locale,
+                        "overview.activity.detail",
+                        &[("outcome", outcome), ("resource", &entry.resource)]
+                    ),
+                    occurred_at,
+                    tr(
+                        locale,
+                        "overview.activity.audit_id",
+                        &[("audit", entry.audit_id.as_str())]
+                    )
+                ),
+            ),
+        ));
+    }
+
+    events.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| right.0.cmp(&left.0)));
+    let mut seen = HashSet::new();
+    events
+        .into_iter()
+        .filter(|(id, _, _)| seen.insert(id.clone()))
+        .take(12)
+        .map(|(_, _, row)| row)
+        .collect()
+}
+
 fn project_exit_node(
     snapshot: &NodeSnapshot,
     locale: Locale,
@@ -5932,6 +6300,10 @@ fn project_exit_node(
         .filter(|network| network.roles.contains(&NodeNetworkRole::ExitNode))
         .map(|network| row(network.name.clone(), t(locale, "gpui.value.exit_role")))
         .collect::<Vec<_>>();
+    let connection_summary_rows = exit_connection_summary_rows(snapshot, locale);
+    let network_selection_rows = exit_network_selection_rows(snapshot, locale);
+    let quality_rows = exit_quality_rows(snapshot, locale);
+    let activity_rows = exit_activity_rows(snapshot, locale);
     (
         vec![
             metric(
@@ -5952,6 +6324,16 @@ fn project_exit_node(
         ],
         vec![
             section(
+                t(locale, "exit_summary.title"),
+                t(locale, "exit_summary.session_unavailable"),
+                connection_summary_rows,
+            ),
+            section(
+                t(locale, "exit_summary.selection_title"),
+                t(locale, "exit_summary.no_network"),
+                network_selection_rows,
+            ),
+            section(
                 t(locale, "gpui.section.local_exit_status"),
                 t(locale, "gpui.empty.local_exit_status"),
                 local_exit_rows,
@@ -5960,6 +6342,16 @@ fn project_exit_node(
                 t(locale, "gpui.section.exit_governance"),
                 t(locale, "gpui.empty.exit_governance"),
                 governance_rows,
+            ),
+            section(
+                t(locale, "exit_quality.title"),
+                t(locale, "exit_quality.no_peers"),
+                quality_rows,
+            ),
+            section(
+                t(locale, "exit_activity.title"),
+                t(locale, "exit_activity.empty"),
+                activity_rows,
             ),
             section(
                 t(locale, "gpui.section.platform_capabilities"),
@@ -6054,6 +6446,8 @@ fn exit_node_unsupported_reason_key(
     }
 }
 
+const RELAY_GOVERNANCE_RENDER_LIMIT: usize = 50;
+
 fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, Vec<SectionModel>) {
     let services = snapshot
         .embedded_services
@@ -6062,6 +6456,10 @@ fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
             let status = t(locale, embedded_service_status_key(service.status));
             let signaling = display_option(locale, service.signaling_addr);
             let relay = display_option(locale, service.relay_addr);
+            let health = service.relay_health.as_ref().map_or_else(
+                || t(locale, "relay.health.unknown").to_owned(),
+                |health| relay_health_status_label(locale, health.status),
+            );
             row(
                 service.network_name.clone(),
                 tr(
@@ -6074,6 +6472,7 @@ fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
                     ],
                 ),
             )
+            .with_relay_health(health)
         })
         .collect::<Vec<_>>();
     let roles = snapshot
@@ -6082,12 +6481,208 @@ fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
         .filter(|network| network.roles.contains(&NodeNetworkRole::Relay))
         .map(|network| row(network.name.clone(), t(locale, "gpui.value.relay_role")))
         .collect::<Vec<_>>();
+    let health_rows = snapshot
+        .embedded_services
+        .iter()
+        .filter_map(|service| {
+            service.relay_health.as_ref().map(|health| {
+                row(
+                    service.network_name.clone(),
+                    relay_health_detail(locale, health),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let issue_rows = snapshot
+        .embedded_services
+        .iter()
+        .flat_map(|service| {
+            let mut rows = service
+                .relay_health
+                .as_ref()
+                .map(|health| {
+                    health
+                        .issues
+                        .iter()
+                        .map(|issue| {
+                            let reason = health
+                                .reason_code
+                                .as_deref()
+                                .unwrap_or_else(|| t(locale, "common.not_available"));
+                            row(
+                                service.network_name.clone(),
+                                tr(
+                                    locale,
+                                    "relay.issue_detail",
+                                    &[
+                                        ("issue", relay_issue_label(locale, *issue)),
+                                        ("reason_code", reason),
+                                    ],
+                                ),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if rows.is_empty() {
+                if let Some(reason) = service
+                    .relay_health
+                    .as_ref()
+                    .and_then(|health| health.reason_code.as_deref())
+                {
+                    rows.push(row(
+                        service.network_name.clone(),
+                        tr(locale, "relay.reason_code", &[("reason_code", reason)]),
+                    ));
+                }
+            }
+            rows
+        })
+        .collect::<Vec<_>>();
+    let limit_rows = snapshot
+        .embedded_services
+        .iter()
+        .filter_map(|service| {
+            service.relay_health.as_ref().map(|health| {
+                row(
+                    service.network_name.clone(),
+                    relay_limit_detail(locale, &health.limits, &health.limit_sources),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let usage_rows = snapshot
+        .embedded_services
+        .iter()
+        .filter_map(|service| {
+            service.relay_health.as_ref().map(|health| {
+                row(
+                    service.network_name.clone(),
+                    relay_usage_detail(locale, health),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let authorization_rows = snapshot
+        .embedded_services
+        .iter()
+        .flat_map(|service| {
+            let Some(audit) = service.relay_authorization.as_ref() else {
+                return Vec::new();
+            };
+            let mut rows = vec![row(
+                service.network_name.clone(),
+                relay_authorization_detail(locale, audit),
+            )];
+            rows.extend(audit.decisions.iter().map(|decision| {
+                row(
+                    format!("{} · {}", service.network_name, decision.node_id),
+                    relay_authorization_decision_detail(locale, decision),
+                )
+            }));
+            if audit.truncated {
+                rows.push(row(
+                    service.network_name.clone(),
+                    t(locale, "relay.authorization.truncated").to_owned(),
+                ));
+            }
+            rows
+        })
+        .collect::<Vec<_>>();
+    let governance_rows = snapshot
+        .embedded_services
+        .iter()
+        .flat_map(|service| {
+            let Some(audit) = service.relay_governance.as_ref() else {
+                return Vec::new();
+            };
+            let visible_events = audit
+                .events
+                .get(
+                    audit
+                        .events
+                        .len()
+                        .saturating_sub(RELAY_GOVERNANCE_RENDER_LIMIT)..,
+                )
+                .unwrap_or_default();
+            let mut rows = visible_events
+                .iter()
+                .map(|event| {
+                    row(
+                        format!(
+                            "{} · {}",
+                            service.network_name,
+                            relay_governance_action_label(locale, event.action)
+                        ),
+                        relay_governance_event_detail(locale, event),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if audit.events.len() > visible_events.len() {
+                rows.push(row(
+                    service.network_name.clone(),
+                    tr(
+                        locale,
+                        "relay.governance.bounded",
+                        &[
+                            (
+                                "shown",
+                                &relay_format_u64(locale, visible_events.len() as u64),
+                            ),
+                            (
+                                "total",
+                                &relay_format_u64(locale, audit.events.len() as u64),
+                            ),
+                        ],
+                    ),
+                ));
+            }
+            if audit.dropped_events > 0 {
+                rows.push(row(
+                    service.network_name.clone(),
+                    tr(
+                        locale,
+                        "relay.governance.dropped_detail",
+                        &[("dropped", &relay_format_u64(locale, audit.dropped_events))],
+                    ),
+                ));
+            }
+            rows
+        })
+        .collect::<Vec<_>>();
+    let healthy_services = snapshot
+        .embedded_services
+        .iter()
+        .filter(|service| {
+            service
+                .relay_health
+                .as_ref()
+                .is_some_and(|health| health.status == RelayHealthStatus::Healthy)
+        })
+        .count();
     (
         vec![
             metric(
                 t(locale, "gpui.metric.embedded_services"),
                 snapshot.embedded_services.len(),
                 "NodeSnapshot.embedded_services",
+            ),
+            metric(
+                t(locale, "gpui.metric.relay_services"),
+                snapshot
+                    .embedded_services
+                    .iter()
+                    .filter(|service| {
+                        service.relay_status != NodeEmbeddedServiceStatus::Stopped
+                            || service.relay_health.is_some()
+                    })
+                    .count(),
+                "NodeEmbeddedServiceSnapshot.relay_status",
+            ),
+            metric(
+                t(locale, "gpui.metric.relay_healthy_services"),
+                healthy_services,
+                "RelayHealthSnapshot.status",
             ),
             metric(
                 t(locale, "gpui.metric.relay_roles"),
@@ -6102,12 +6697,532 @@ fn project_relay(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, 
                 services,
             ),
             section(
+                t(locale, "gpui.section.relay_health"),
+                t(locale, "gpui.empty.relay_health"),
+                health_rows,
+            ),
+            section(
+                t(locale, "gpui.section.relay_issues"),
+                t(locale, "gpui.empty.relay_issues"),
+                issue_rows,
+            ),
+            section(
+                t(locale, "gpui.section.relay_limits"),
+                t(locale, "gpui.empty.relay_limits"),
+                limit_rows,
+            ),
+            section(
+                t(locale, "gpui.section.relay_usage"),
+                t(locale, "gpui.empty.relay_usage"),
+                usage_rows,
+            ),
+            section(
+                t(locale, "gpui.section.relay_authorization"),
+                t(locale, "gpui.empty.relay_authorization"),
+                authorization_rows,
+            ),
+            section(
+                t(locale, "gpui.section.relay_governance"),
+                t(locale, "gpui.empty.relay_governance"),
+                governance_rows,
+            ),
+            section(
                 t(locale, "gpui.section.current_roles"),
                 t(locale, "gpui.empty.relay_roles"),
                 roles,
             ),
         ],
     )
+}
+
+trait RelayHealthRowExt {
+    fn with_relay_health(self, health: String) -> Self;
+}
+
+impl RelayHealthRowExt for RowModel {
+    fn with_relay_health(mut self, health: String) -> Self {
+        self.detail.push_str(" · ");
+        self.detail.push_str(&health);
+        self
+    }
+}
+
+fn relay_health_status_label(locale: Locale, status: RelayHealthStatus) -> String {
+    t(locale, relay_health_status_key(status)).to_owned()
+}
+
+fn relay_health_status_key(status: RelayHealthStatus) -> &'static str {
+    match status {
+        RelayHealthStatus::Unknown => "relay.health.unknown",
+        RelayHealthStatus::Healthy => "relay.health.healthy",
+        RelayHealthStatus::Degraded => "relay.health.degraded",
+        RelayHealthStatus::Unavailable => "relay.health.unavailable",
+        RelayHealthStatus::QuotaExhausted => "relay.health.quota_exhausted",
+    }
+}
+
+fn relay_lifecycle_key(lifecycle: RelayLifecycleState) -> &'static str {
+    match lifecycle {
+        RelayLifecycleState::Stopped => "relay.lifecycle.stopped",
+        RelayLifecycleState::Starting => "relay.lifecycle.starting",
+        RelayLifecycleState::Running => "relay.lifecycle.running",
+        RelayLifecycleState::Stopping => "relay.lifecycle.stopping",
+        RelayLifecycleState::Failed => "relay.lifecycle.failed",
+        RelayLifecycleState::Unsupported => "relay.lifecycle.unsupported",
+    }
+}
+
+fn relay_reachability_key(reachability: RelayReachabilityState) -> &'static str {
+    match reachability {
+        RelayReachabilityState::Unknown => "relay.reachability.unknown",
+        RelayReachabilityState::Reachable => "relay.reachability.reachable",
+        RelayReachabilityState::Unreachable => "relay.reachability.unreachable",
+    }
+}
+
+fn relay_issue_key(issue: RelayHealthIssue) -> &'static str {
+    match issue {
+        RelayHealthIssue::ListenerUnavailable => "relay.issue.listener_unavailable",
+        RelayHealthIssue::NetworkReachabilityUnknown => "relay.issue.network_reachability_unknown",
+        RelayHealthIssue::NetworkUnreachable => "relay.issue.network_unreachable",
+        RelayHealthIssue::ProtocolError => "relay.issue.protocol_error",
+        RelayHealthIssue::QuotaExhausted => "relay.issue.quota_exhausted",
+        RelayHealthIssue::ResourcePressure => "relay.issue.resource_pressure",
+        RelayHealthIssue::ForwardingStalled => "relay.issue.forwarding_stalled",
+        RelayHealthIssue::ForwardingNotObserved => "relay.issue.forwarding_not_observed",
+        RelayHealthIssue::AuthorizationExpired => "relay.issue.authorization_expired",
+        RelayHealthIssue::CpuMeasurementUnsupported => "relay.issue.cpu_measurement_unsupported",
+        RelayHealthIssue::MemoryMeasurementUnsupported => {
+            "relay.issue.memory_measurement_unsupported"
+        }
+    }
+}
+
+fn relay_issue_label(locale: Locale, issue: RelayHealthIssue) -> &'static str {
+    t(locale, relay_issue_key(issue))
+}
+
+fn relay_limit_source_key(source: RelayLimitSource) -> &'static str {
+    match source {
+        RelayLimitSource::NetworkAcl => "relay.limit_source.network_acl",
+        RelayLimitSource::NodeLocal => "relay.limit_source.node_local",
+        RelayLimitSource::ProviderDefault => "relay.limit_source.provider_default",
+    }
+}
+
+fn relay_measurement_key(state: RelayMeasurementState) -> &'static str {
+    match state {
+        RelayMeasurementState::Unsupported => "relay.measurement.unsupported",
+        RelayMeasurementState::NotMeasured => "relay.measurement.not_measured",
+        RelayMeasurementState::Measured => "relay.measurement.measured",
+    }
+}
+
+fn relay_health_detail(locale: Locale, health: &RelayHealthSnapshot) -> String {
+    let status = relay_health_status_label(locale, health.status);
+    let listener = relay_listener_detail(locale, health);
+    let lifecycle = t(locale, relay_lifecycle_key(health.lifecycle));
+    let reachability = t(locale, relay_reachability_key(health.network_reachability));
+    let forwarding = t(
+        locale,
+        if health.forwarding_observed {
+            "relay.forwarding.observed"
+        } else {
+            "relay.forwarding.not_observed"
+        },
+    );
+    let authorization = t(
+        locale,
+        if health.authorization_valid {
+            "relay.authorization.valid"
+        } else {
+            "relay.authorization.invalid"
+        },
+    );
+    let quota = t(
+        locale,
+        if health.quota_limited {
+            "relay.quota.limited"
+        } else {
+            "relay.quota.available"
+        },
+    );
+    let observed_at = routing_timestamp_label(Some(health.observed_at_unix_ms), locale);
+    tr(
+        locale,
+        "relay.service_detail",
+        &[
+            ("health", &status),
+            ("lifecycle", lifecycle),
+            ("listener", &listener),
+            ("reachability", reachability),
+            ("forwarding", forwarding),
+            ("authorization", authorization),
+            ("quota", quota),
+            ("observed_at", &observed_at),
+        ],
+    )
+}
+
+fn relay_listener_detail(locale: Locale, health: &RelayHealthSnapshot) -> String {
+    let state = t(
+        locale,
+        if health.listener_bound {
+            "relay.listener.bound"
+        } else {
+            "relay.listener.unbound"
+        },
+    );
+    health.listen_addr.map_or_else(
+        || state.to_owned(),
+        |listen_addr| format!("{state} · {listen_addr}"),
+    )
+}
+
+fn relay_authorization_detail(locale: Locale, audit: &RelayAuthorizationAuditSnapshot) -> String {
+    let updated_at = routing_timestamp_label(Some(audit.policy_updated_at_unix_ms), locale);
+    tr(
+        locale,
+        "relay.authorization.snapshot_detail",
+        &[
+            ("network", &audit.network_id.to_string()),
+            ("provider", &audit.provider_node_id.to_string()),
+            ("revision", &relay_format_u64(locale, audit.policy_revision)),
+            ("updated_at", &updated_at),
+            (
+                "existing_sessions",
+                t(
+                    locale,
+                    relay_existing_session_policy_key(audit.existing_session_policy),
+                ),
+            ),
+        ],
+    )
+}
+
+fn relay_authorization_decision_detail(
+    locale: Locale,
+    decision: &RelayAuthorizationDiagnostic,
+) -> String {
+    let final_result = relay_authorization_result(locale, decision.allowed);
+    let provider = relay_authorization_source_detail(locale, &decision.provider);
+    let consumer = decision
+        .consumer
+        .as_ref()
+        .map(|source| relay_authorization_source_detail(locale, source))
+        .unwrap_or_else(|| t(locale, "relay.authorization.consumer_missing").to_owned());
+    let final_reason = decision
+        .final_reason
+        .map(|reason| relay_authorization_reason(locale, reason))
+        .unwrap_or_else(|| t(locale, "relay.authorization.reason.allowed").to_owned());
+    tr(
+        locale,
+        "relay.authorization.decision_detail",
+        &[
+            ("result", &final_result),
+            ("final_reason", &final_reason),
+            ("provider", &provider),
+            ("consumer", &consumer),
+        ],
+    )
+}
+
+fn relay_authorization_source_detail(
+    locale: Locale,
+    source: &RelayAuthorizationSourceDiagnostic,
+) -> String {
+    let result = relay_authorization_result(locale, source.allowed);
+    let reason = relay_authorization_reason(locale, source.reason);
+    let layer = source
+        .layer
+        .map(|layer| relay_authorization_layer(locale, layer))
+        .unwrap_or_else(|| t(locale, "relay.authorization.layer.none").to_owned());
+    let reauthentication = if source.reauthentication_satisfied {
+        t(locale, "relay.authorization.reauth.satisfied")
+    } else {
+        t(locale, "relay.authorization.reauth.required")
+    };
+    tr(
+        locale,
+        "relay.authorization.source_detail",
+        &[
+            ("result", &result),
+            ("reason", &reason),
+            ("layer", &layer),
+            (
+                "acl_revision",
+                &relay_format_u64(locale, source.network_acl_revision),
+            ),
+            (
+                "local_revision",
+                &relay_format_u64(locale, source.local_policy_revision),
+            ),
+            ("reauth", reauthentication),
+        ],
+    )
+}
+
+fn relay_authorization_result(locale: Locale, allowed: bool) -> String {
+    t(
+        locale,
+        if allowed {
+            "relay.authorization.allowed"
+        } else {
+            "relay.authorization.denied"
+        },
+    )
+    .to_owned()
+}
+
+fn relay_authorization_reason(locale: Locale, reason: EffectiveAccessReason) -> String {
+    t(locale, relay_authorization_reason_key(reason)).to_owned()
+}
+
+fn relay_authorization_reason_key(reason: EffectiveAccessReason) -> &'static str {
+    match reason {
+        EffectiveAccessReason::Allowed => "relay.authorization.reason.allowed",
+        EffectiveAccessReason::CrossNetworkDenied => {
+            "relay.authorization.reason.cross_network_denied"
+        }
+        EffectiveAccessReason::NetworkScopeRestricted => {
+            "relay.authorization.reason.network_scope_restricted"
+        }
+        EffectiveAccessReason::LocalContributionVeto => {
+            "relay.authorization.reason.local_contribution_veto"
+        }
+        EffectiveAccessReason::AuthorizationExpired => {
+            "relay.authorization.reason.authorization_expired"
+        }
+        EffectiveAccessReason::AuthorizationRevoked => {
+            "relay.authorization.reason.authorization_revoked"
+        }
+        EffectiveAccessReason::RecentReauthenticationRequired => {
+            "relay.authorization.reason.reauthentication_required"
+        }
+        EffectiveAccessReason::ExplicitDeny => "relay.authorization.reason.explicit_deny",
+        EffectiveAccessReason::RoleCeilingExceeded => {
+            "relay.authorization.reason.role_ceiling_exceeded"
+        }
+        EffectiveAccessReason::TemporaryCoordinatorReadOnly => {
+            "relay.authorization.reason.temporary_coordinator_read_only"
+        }
+        EffectiveAccessReason::DefaultDenied => "relay.authorization.reason.default_denied",
+        EffectiveAccessReason::InvalidPolicy => "relay.authorization.reason.invalid_policy",
+    }
+}
+
+fn relay_authorization_layer(locale: Locale, layer: EffectivePolicyLayer) -> String {
+    t(
+        locale,
+        match layer {
+            EffectivePolicyLayer::Local => "relay.authorization.layer.local",
+            EffectivePolicyLayer::Network => "relay.authorization.layer.network",
+            EffectivePolicyLayer::Request => "relay.authorization.layer.request",
+        },
+    )
+    .to_owned()
+}
+
+fn relay_existing_session_policy_key(policy: RelayExistingSessionPolicy) -> &'static str {
+    match policy {
+        RelayExistingSessionPolicy::Continue => "relay.authorization.existing.continue",
+        RelayExistingSessionPolicy::Migrate => "relay.authorization.existing.migrate",
+        RelayExistingSessionPolicy::Terminate => "relay.authorization.existing.terminate",
+        RelayExistingSessionPolicy::Reauthorize => "relay.authorization.existing.reauthorize",
+    }
+}
+
+fn relay_governance_action_key(action: RelayGovernanceAction) -> &'static str {
+    match action {
+        RelayGovernanceAction::Enable => "relay.governance.action.enable",
+        RelayGovernanceAction::Disable => "relay.governance.action.disable",
+        RelayGovernanceAction::AuthorizationChanged => {
+            "relay.governance.action.authorization_changed"
+        }
+        RelayGovernanceAction::QuotaChanged => "relay.governance.action.quota_changed",
+        RelayGovernanceAction::SessionRejected => "relay.governance.action.session_rejected",
+        RelayGovernanceAction::PacketRejected => "relay.governance.action.packet_rejected",
+        RelayGovernanceAction::Failover => "relay.governance.action.failover",
+        RelayGovernanceAction::Recovered => "relay.governance.action.recovered",
+    }
+}
+
+fn relay_governance_action_label(locale: Locale, action: RelayGovernanceAction) -> String {
+    t(locale, relay_governance_action_key(action)).to_owned()
+}
+
+fn relay_governance_event_detail(locale: Locale, event: &RelayGovernanceEvent) -> String {
+    let not_available = t(locale, "common.not_available");
+    let node_id = event
+        .node_id
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| not_available.to_owned());
+    let observed = event
+        .observed
+        .map(|value| relay_format_u64(locale, value))
+        .unwrap_or_else(|| not_available.to_owned());
+    let limit = event
+        .limit
+        .map(|value| relay_format_u64(locale, value))
+        .unwrap_or_else(|| not_available.to_owned());
+    let occurred_at = routing_timestamp_label(Some(event.occurred_at_unix_ms), locale);
+    let reset_at = routing_timestamp_label(event.reset_at_unix_ms, locale);
+    let policy_revision = event
+        .policy_revision
+        .map(|revision| {
+            let previous = event
+                .previous_policy_revision
+                .map(|previous| relay_format_u64(locale, previous))
+                .unwrap_or_else(|| not_available.to_owned());
+            let revision = relay_format_u64(locale, revision);
+            tr(
+                locale,
+                "relay.governance.event.policy_revision",
+                &[("previous", &previous), ("revision", &revision)],
+            )
+        })
+        .unwrap_or_else(|| not_available.to_owned());
+    tr(
+        locale,
+        "relay.governance.event_detail",
+        &[
+            ("occurred_at", &occurred_at),
+            ("node_id", &node_id),
+            ("reason_code", &event.reason_code),
+            ("observed", &observed),
+            ("limit", &limit),
+            ("reset_at", &reset_at),
+            ("policy_revision", &policy_revision),
+        ],
+    )
+}
+
+fn relay_limit_detail(
+    locale: Locale,
+    limits: &RelayLimitPolicy,
+    sources: &[RelayLimitSource],
+) -> String {
+    let none = t(locale, "relay.limit.none");
+    let connections = limits
+        .max_connections
+        .map(|value| format_integer(locale, i64::from(value)))
+        .unwrap_or_else(|| none.to_owned());
+    let streams = limits
+        .max_concurrent_streams
+        .map(|value| format_integer(locale, i64::from(value)))
+        .unwrap_or_else(|| none.to_owned());
+    let bandwidth = limits
+        .max_bandwidth_kbps
+        .map(|value| format!("{} kbps", relay_format_u64(locale, value)))
+        .unwrap_or_else(|| none.to_owned());
+    let bytes = limits
+        .max_bytes
+        .map(|value| format!("{} B", relay_format_u64(locale, value)))
+        .unwrap_or_else(|| none.to_owned());
+    let cpu = limits
+        .max_cpu_percent
+        .map(|value| format!("{}%", format_integer(locale, i64::from(value))))
+        .unwrap_or_else(|| none.to_owned());
+    let memory = limits
+        .max_memory_bytes
+        .map(|value| format!("{} B", relay_format_u64(locale, value)))
+        .unwrap_or_else(|| none.to_owned());
+    let duration = limits
+        .max_session_duration_secs
+        .map(|value| format!("{} s", relay_format_u64(locale, value)))
+        .unwrap_or_else(|| none.to_owned());
+    let reset_at = limits
+        .quota_reset_at_unix_ms
+        .map(|value| routing_timestamp_label(Some(value), locale))
+        .unwrap_or_else(|| none.to_owned());
+    let sources = if sources.is_empty() {
+        none.to_owned()
+    } else {
+        sources
+            .iter()
+            .map(|source| t(locale, relay_limit_source_key(*source)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    tr(
+        locale,
+        "relay.limit_detail",
+        &[
+            ("connections", &connections),
+            ("streams", &streams),
+            ("bandwidth", &bandwidth),
+            ("bytes", &bytes),
+            ("cpu", &cpu),
+            ("memory", &memory),
+            ("duration", &duration),
+            ("reset_at", &reset_at),
+            ("sources", &sources),
+        ],
+    )
+}
+
+fn relay_usage_detail(locale: Locale, health: &RelayHealthSnapshot) -> String {
+    let usage = &health.usage;
+    let connections = format_integer(locale, i64::from(usage.active_connections));
+    let streams = format_integer(locale, i64::from(usage.active_streams));
+    let sessions = format_integer(locale, i64::from(usage.active_sessions));
+    let forwarded_packets = relay_format_u64(locale, usage.forwarded_packets);
+    let forwarded_bytes = relay_format_u64(locale, usage.forwarded_bytes);
+    let rejected_packets = relay_format_u64(locale, usage.rejected_packets);
+    let rejected_connections = relay_format_u64(locale, usage.rejected_connections);
+    let cpu = relay_measurement_detail(
+        locale,
+        usage.cpu_measurement,
+        usage.observed_cpu_percent.map(u64::from),
+        "%",
+    );
+    let memory = relay_measurement_detail(
+        locale,
+        usage.memory_measurement,
+        usage.observed_memory_bytes,
+        " B",
+    );
+    let last_success = routing_timestamp_label(usage.last_forwarded_at_unix_ms, locale);
+    let last_failure = routing_timestamp_label(usage.last_forwarding_failure_at_unix_ms, locale);
+    let quota_started = routing_timestamp_label(usage.quota_started_at_unix_ms, locale);
+    let quota_reset = routing_timestamp_label(usage.quota_reset_at_unix_ms, locale);
+    tr(
+        locale,
+        "relay.usage_detail",
+        &[
+            ("connections", &connections),
+            ("streams", &streams),
+            ("sessions", &sessions),
+            ("forwarded_packets", &forwarded_packets),
+            ("forwarded_bytes", &forwarded_bytes),
+            ("rejected_packets", &rejected_packets),
+            ("rejected_connections", &rejected_connections),
+            ("cpu", &cpu),
+            ("memory", &memory),
+            ("last_success", &last_success),
+            ("last_failure", &last_failure),
+            ("quota_started", &quota_started),
+            ("quota_reset", &quota_reset),
+        ],
+    )
+}
+
+fn relay_measurement_detail(
+    locale: Locale,
+    state: RelayMeasurementState,
+    value: Option<u64>,
+    suffix: &str,
+) -> String {
+    let state = t(locale, relay_measurement_key(state));
+    value.map_or_else(
+        || state.to_owned(),
+        |value| format!("{state}: {}{suffix}", relay_format_u64(locale, value)),
+    )
+}
+
+fn relay_format_u64(locale: Locale, value: u64) -> String {
+    i64::try_from(value).map_or_else(|_| value.to_string(), |value| format_integer(locale, value))
 }
 
 fn project_logs(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, Vec<SectionModel>) {
@@ -7183,10 +8298,10 @@ mod tests {
     };
     use fuckipv6_common::domain::{
         ActivityEntry, AuditId, AuditOutcome, DomainSuffix, MembershipState, NetworkMemberPresence,
-        NodeId, PortRange, TopologyBoundary, TopologyConnection, TopologyConnectionState,
-        TopologyNode, TopologyNodeNetwork, TrafficDefaultPolicy, TrafficFailureKind,
-        TrafficFailurePolicy, TrafficMatch, TrafficRoutingHardConstraints,
-        TrafficRoutingObservedHit, TrafficRule, TrafficRuleId,
+        NodeId, PortRange, RelayGovernanceAuditSnapshot, RelayUsageSnapshot, TopologyBoundary,
+        TopologyConnection, TopologyConnectionState, TopologyNode, TopologyNodeNetwork,
+        TrafficDefaultPolicy, TrafficFailureKind, TrafficFailurePolicy, TrafficMatch,
+        TrafficRoutingHardConstraints, TrafficRoutingObservedHit, TrafficRule, TrafficRuleId,
     };
     use serde::Deserialize;
     use std::collections::BTreeMap;
@@ -8480,6 +9595,323 @@ mod tests {
             .all(|section| section.title != t(Locale::ZhCn, "runtime.section.interface_problems")));
     }
 
+    fn relay_health_fixture(
+        forwarding_observed: bool,
+        usage: RelayUsageSnapshot,
+        limits: RelayLimitPolicy,
+    ) -> RelayHealthSnapshot {
+        RelayHealthSnapshot::observe(
+            RelayLifecycleState::Running,
+            Some("127.0.0.1:6667".parse().expect("relay socket")),
+            true,
+            RelayReachabilityState::Reachable,
+            forwarding_observed,
+            true,
+            limits,
+            vec![
+                RelayLimitSource::NetworkAcl,
+                RelayLimitSource::ProviderDefault,
+            ],
+            usage,
+            1_700_000_100_000,
+            Some("relay.test".into()),
+        )
+    }
+
+    fn relay_service(
+        network_name: &str,
+        health: Option<RelayHealthSnapshot>,
+    ) -> NodeEmbeddedServiceSnapshot {
+        NodeEmbeddedServiceSnapshot {
+            network_name: network_name.into(),
+            status: NodeEmbeddedServiceStatus::Stopped,
+            signaling_addr: None,
+            relay_status: NodeEmbeddedServiceStatus::Running,
+            relay_addr: Some("127.0.0.1:6667".parse().expect("relay socket")),
+            relay_health: health,
+            relay_authorization: None,
+            relay_governance: None,
+        }
+    }
+
+    #[test]
+    fn relay_projection_renders_authoritative_health_limits_usage_and_issues() {
+        let fresh = RelayUsageSnapshot {
+            active_connections: 2,
+            active_streams: 3,
+            active_sessions: 1,
+            forwarded_packets: 12,
+            forwarded_bytes: 4_096,
+            rejected_packets: 1,
+            rejected_connections: 1,
+            last_forwarded_at_unix_ms: Some(1_700_000_099_000),
+            ..RelayUsageSnapshot::default()
+        };
+        let mut quota_usage = fresh.clone();
+        quota_usage.active_connections = 1;
+        quota_usage.forwarded_bytes = 10;
+        let mut stalled_usage = fresh.clone();
+        stalled_usage.last_forwarding_failure_at_unix_ms = Some(1_700_000_099_500);
+        let mut unsupported_usage = fresh.clone();
+        unsupported_usage.cpu_measurement = RelayMeasurementState::Unsupported;
+        unsupported_usage.memory_measurement = RelayMeasurementState::Unsupported;
+        let snapshot = NodeSnapshot {
+            embedded_services: vec![
+                relay_service(
+                    "listener-only",
+                    Some(relay_health_fixture(
+                        false,
+                        RelayUsageSnapshot::default(),
+                        RelayLimitPolicy::default(),
+                    )),
+                ),
+                relay_service(
+                    "healthy",
+                    Some(relay_health_fixture(
+                        true,
+                        fresh,
+                        RelayLimitPolicy::default(),
+                    )),
+                ),
+                relay_service(
+                    "stalled",
+                    Some(relay_health_fixture(
+                        true,
+                        stalled_usage,
+                        RelayLimitPolicy::default(),
+                    )),
+                ),
+                relay_service(
+                    "quota",
+                    Some(relay_health_fixture(
+                        true,
+                        quota_usage,
+                        RelayLimitPolicy {
+                            max_connections: Some(1),
+                            max_bytes: Some(10),
+                            ..RelayLimitPolicy::default()
+                        },
+                    )),
+                ),
+                relay_service(
+                    "unsupported-measurements",
+                    Some(relay_health_fixture(
+                        true,
+                        unsupported_usage,
+                        RelayLimitPolicy {
+                            max_cpu_percent: Some(80),
+                            max_memory_bytes: Some(1_000_000),
+                            ..RelayLimitPolicy::default()
+                        },
+                    )),
+                ),
+            ],
+            ..NodeSnapshot::default()
+        };
+
+        let (metrics, sections) = project_relay(&snapshot, Locale::ZhCn);
+        assert_eq!(
+            metrics
+                .iter()
+                .find(|metric| metric.label == t(Locale::ZhCn, "gpui.metric.relay_healthy_services"))
+                .map(|metric| metric.value.as_str()),
+            Some("1")
+        );
+        let health = sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "gpui.section.relay_health"))
+            .expect("relay health section");
+        assert_eq!(health.rows.len(), 5);
+        assert!(health.rows[0]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.health.unknown")));
+        assert!(health.rows[1]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.health.healthy")));
+        assert!(health.rows[2]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.health.degraded")));
+        assert!(health.rows[3]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.health.quota_exhausted")));
+        assert!(health.rows[4]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.health.degraded")));
+        assert!(health.rows.iter().all(|row| {
+            row.detail.contains(t(Locale::ZhCn, "relay.listener.bound"))
+                && row.detail.contains("127.0.0.1:6667")
+                && row
+                    .detail
+                    .contains(t(Locale::ZhCn, "relay.reachability.reachable"))
+                && row
+                    .detail
+                    .contains(t(Locale::ZhCn, "relay.authorization.valid"))
+        }));
+
+        let issues = sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "gpui.section.relay_issues"))
+            .expect("relay issue section");
+        let issue_text = issues
+            .rows
+            .iter()
+            .map(|row| row.detail.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(issue_text.contains(t(Locale::ZhCn, "relay.issue.forwarding_not_observed")));
+        assert!(issue_text.contains(t(Locale::ZhCn, "relay.issue.forwarding_stalled")));
+        assert!(issue_text.contains(t(Locale::ZhCn, "relay.issue.quota_exhausted")));
+        assert!(issue_text.contains(t(Locale::ZhCn, "relay.issue.cpu_measurement_unsupported")));
+        assert!(issue_text.contains(t(
+            Locale::ZhCn,
+            "relay.issue.memory_measurement_unsupported"
+        )));
+
+        let limits = sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "gpui.section.relay_limits"))
+            .expect("relay limits section");
+        assert_eq!(limits.rows.len(), 5);
+        assert!(limits.rows[3]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.limit_source.network_acl")));
+        assert!(limits.rows[3]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.limit_source.provider_default")));
+
+        let usage = sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "gpui.section.relay_usage"))
+            .expect("relay usage section");
+        assert_eq!(usage.rows.len(), 5);
+        assert!(usage.rows[1].detail.contains("12"));
+        assert!(usage.rows[1]
+            .detail
+            .contains(&format_integer(Locale::ZhCn, 4_096)));
+        assert!(usage.rows[4]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.measurement.unsupported")));
+        assert!(usage.rows[0]
+            .detail
+            .contains(t(Locale::ZhCn, "relay.measurement.not_measured")));
+    }
+
+    #[test]
+    fn relay_projection_renders_bounded_owner_governance_without_sensitive_fields() {
+        let mut service = relay_service(
+            "governed",
+            Some(relay_health_fixture(
+                true,
+                RelayUsageSnapshot::default(),
+                RelayLimitPolicy::default(),
+            )),
+        );
+        service.relay_governance = Some(RelayGovernanceAuditSnapshot {
+            events: (0..60)
+                .map(|index| RelayGovernanceEvent {
+                    action: RelayGovernanceAction::SessionRejected,
+                    occurred_at_unix_ms: 1_700_000_100_000 + index,
+                    node_id: (index == 59).then(|| NodeId::from_public_key(b"relay-member")),
+                    reason_code: format!("relay.session.quota_exhausted.{index}"),
+                    observed: Some(index),
+                    limit: Some(60),
+                    reset_at_unix_ms: Some(1_700_000_160_000),
+                    previous_policy_revision: None,
+                    policy_revision: None,
+                })
+                .collect(),
+            dropped_events: 3,
+        });
+        let snapshot = NodeSnapshot {
+            embedded_services: vec![service],
+            ..NodeSnapshot::default()
+        };
+
+        let (_, sections) = project_relay(&snapshot, Locale::En);
+        let governance = sections
+            .iter()
+            .find(|section| section.title == t(Locale::En, "gpui.section.relay_governance"))
+            .expect("relay governance section");
+        assert_eq!(governance.rows.len(), 52);
+        assert!(governance.rows[0]
+            .title
+            .contains(t(Locale::En, "relay.governance.action.session_rejected")));
+        assert!(governance.rows[0]
+            .detail
+            .contains("relay.session.quota_exhausted.10"));
+        assert!(!governance.rows[0]
+            .detail
+            .contains("relay.session.quota_exhausted.9"));
+        assert!(governance.rows[49]
+            .detail
+            .contains("relay.session.quota_exhausted.59"));
+        assert!(governance.rows[50].detail.contains(&tr(
+            Locale::En,
+            "relay.governance.bounded",
+            &[("shown", "50"), ("total", "60")],
+        )));
+        assert!(governance.rows[51].detail.contains(&tr(
+            Locale::En,
+            "relay.governance.dropped_detail",
+            &[("dropped", "3")],
+        )));
+        let rendered = governance
+            .rows
+            .iter()
+            .map(|row| format!("{} {}", row.title, row.detail))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!rendered.contains("TOP_SECRET_PAYLOAD"));
+        assert!(!rendered.contains("2001:db8::secret"));
+        assert!(!rendered.contains("private_key"));
+    }
+
+    #[test]
+    fn relay_listener_detail_uses_authoritative_bound_state_and_address() {
+        let mut health = relay_health_fixture(
+            true,
+            RelayUsageSnapshot::default(),
+            RelayLimitPolicy::default(),
+        );
+        health.listen_addr = Some("127.0.0.1:6667".parse().expect("relay socket"));
+        health.listener_bound = false;
+
+        let detail = relay_listener_detail(Locale::En, &health);
+        assert!(detail.contains(t(Locale::En, "relay.listener.unbound")));
+        assert!(detail.contains("127.0.0.1:6667"));
+        assert!(!detail.contains(t(Locale::En, "relay.listener.bound")));
+    }
+
+    #[test]
+    fn relay_projection_never_infers_health_from_a_running_listener() {
+        let snapshot = NodeSnapshot {
+            embedded_services: vec![relay_service("listener-only", None)],
+            ..NodeSnapshot::default()
+        };
+        let (metrics, sections) = project_relay(&snapshot, Locale::En);
+        assert_eq!(
+            metrics
+                .iter()
+                .find(|metric| metric.label == t(Locale::En, "gpui.metric.relay_healthy_services"))
+                .map(|metric| metric.value.as_str()),
+            Some("0")
+        );
+        let services = sections
+            .iter()
+            .find(|section| section.title == t(Locale::En, "gpui.section.embedded_services"))
+            .expect("embedded service section");
+        assert!(services.rows[0]
+            .detail
+            .contains(t(Locale::En, "relay.health.unknown")));
+        assert!(!services.rows[0]
+            .detail
+            .contains(t(Locale::En, "relay.health.healthy")));
+        assert!(sections
+            .iter()
+            .find(|section| section.title == t(Locale::En, "gpui.section.relay_health"))
+            .is_some_and(|section| section.rows.is_empty()));
+    }
+
     #[test]
     fn overview_primary_destination_is_the_runtime_page() {
         let overview = project_overview(&NodeSnapshot::default(), Locale::En);
@@ -8505,8 +9937,12 @@ mod tests {
             .push(NodeEmbeddedServiceSnapshot {
                 network_name: "home".into(),
                 status: NodeEmbeddedServiceStatus::Failed,
+                relay_status: NodeEmbeddedServiceStatus::Failed,
                 signaling_addr: None,
                 relay_addr: None,
+                relay_health: None,
+                relay_authorization: None,
+                relay_governance: None,
             });
 
         let overview = project_overview(&snapshot, Locale::En);
@@ -9591,6 +11027,62 @@ mod tests {
     }
 
     #[test]
+    fn relay_role_action_uses_shared_command_and_closes_selection_and_permission_gates() {
+        let manifest = node_ui_manifest();
+        let action = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "relay")
+            .expect("relay page")
+            .actions
+            .iter()
+            .find(|action| action.id == "set_relay_role")
+            .expect("relay role action");
+        assert_eq!(action.command, NodeCommandKind::SetNetworkRole);
+        assert_eq!(action.permission, NodePermission::ManageRoles);
+        assert_eq!(action.backend_status, NodeUiBackendStatus::Implemented);
+        assert_eq!(action.availability, NodeUiAvailability::NetworkSelected);
+
+        let snapshot = populated_snapshot();
+        assert_eq!(
+            action_block_reason(action, &snapshot, None),
+            Some(ActionBlockReason::NoNetworkSelected)
+        );
+        assert_eq!(
+            action_block_reason(action, &snapshot, Some("missing")),
+            Some(ActionBlockReason::NoNetworkSelected)
+        );
+        assert_eq!(action_block_reason(action, &snapshot, Some("home")), None);
+
+        let mut denied = snapshot;
+        denied
+            .permissions
+            .permissions
+            .retain(|permission| *permission != NodePermission::ManageRoles);
+        assert_eq!(
+            action_block_reason(action, &denied, Some("home")),
+            Some(ActionBlockReason::PermissionDenied)
+        );
+
+        let command = build_command(
+            action,
+            &HashMap::from([
+                ("network_name".into(), "home".into()),
+                ("role".into(), "relay".into()),
+                ("enabled".into(), "true".into()),
+            ]),
+        )
+        .expect("relay role command");
+        assert!(matches!(
+            command,
+            NodeCommand::SetNetworkRole(ref command)
+                if command.network_name == "home"
+                    && command.role == NodeNetworkRole::Relay
+                    && command.enabled
+        ));
+    }
+
+    #[test]
     fn exit_node_capability_blocks_exit_data_plane_actions() {
         let manifest = node_ui_manifest();
         let exit_page = manifest
@@ -10050,6 +11542,200 @@ mod tests {
         assert!(unavailable
             .detail
             .contains("exit.selection.stale_directory"));
+    }
+
+    #[test]
+    fn exit_page_separates_protection_selection_and_exit_activity() {
+        let manifest = node_ui_manifest();
+        let page = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "exit_node")
+            .expect("exit node page");
+        let mut snapshot = populated_snapshot();
+        let subject = NodeId::from_public_key(b"exit-summary-subject");
+        let exit_a = NodeId::from_public_key(b"exit-summary-a");
+        let exit_b = NodeId::from_public_key(b"exit-summary-b");
+        let network_id =
+            fuckipv6_common::domain::NetworkId::from_public_key(b"exit-summary-network");
+        let policy = ExitSelectionPolicy {
+            mode: ExitSelectionMode::Fixed {
+                exit: exit_a.clone(),
+            },
+            default_exit: Some(exit_a.clone()),
+            available_exits: vec![exit_a.clone(), exit_b.clone()],
+            ..ExitSelectionPolicy::default()
+        };
+        let observed_at = 1_700_000_000_000;
+        let resolution = policy
+            .resolve(
+                12,
+                &subject,
+                &BTreeMap::from([
+                    (
+                        exit_a.clone(),
+                        ExitContributionAvailability::observed(
+                            true,
+                            true,
+                            ExitAvailabilitySource::CoordinatorHealth,
+                            observed_at,
+                        ),
+                    ),
+                    (
+                        exit_b.clone(),
+                        ExitContributionAvailability::observed(
+                            true,
+                            true,
+                            ExitAvailabilitySource::CoordinatorHealth,
+                            observed_at,
+                        ),
+                    ),
+                ]),
+            )
+            .expect("selection resolution");
+        snapshot.exit_selections = vec![NodeExitSelectionSnapshot {
+            network_id: network_id.clone(),
+            policy_revision: 12,
+            policy: Some(policy),
+            resolution: Some(resolution),
+            directory_generated_at_unix_ms: Some(observed_at),
+            directory_received_at_unix_ms: Some(observed_at + 1),
+            evaluated_at_unix_ms: observed_at + 2,
+            reason_code: None,
+        }];
+        snapshot.memberships = vec![membership_snapshot("home", network_id.as_str())];
+        snapshot.traffic_session.state = TrafficProtectionState::FailClosed;
+        snapshot.traffic_session.changed_at_unix_ms = 1_700_000_000_500;
+        snapshot.traffic_session.reason_code = Some("traffic.session.exit_lost".into());
+        snapshot.traffic_session.failure = Some(TrafficFailureKind::ExitUnavailable);
+        snapshot.traffic_session.events = vec![
+            fuckipv6_common::domain::TrafficSessionEvent {
+                kind: TrafficSessionEventKind::FailureDetected,
+                state: TrafficProtectionState::FailClosed,
+                occurred_at_unix_ms: 1_700_000_000_300,
+                failure: Some(TrafficFailureKind::ExitUnavailable),
+                reason_code: Some("traffic.session.exit_lost".into()),
+            },
+            fuckipv6_common::domain::TrafficSessionEvent {
+                kind: TrafficSessionEventKind::MigrationStarted,
+                state: TrafficProtectionState::Migrating,
+                occurred_at_unix_ms: 1_700_000_000_400,
+                failure: None,
+                reason_code: Some("traffic.session.switching_exit".into()),
+            },
+            fuckipv6_common::domain::TrafficSessionEvent {
+                kind: TrafficSessionEventKind::ProtectionEstablished,
+                state: TrafficProtectionState::Protected,
+                occurred_at_unix_ms: 1_700_000_000_500,
+                failure: None,
+                reason_code: Some("traffic.session.validation_passed".into()),
+            },
+        ];
+        snapshot.peers.extend([
+            NodePeerSnapshot {
+                peer_id: exit_a.to_string(),
+                network_name: "home".into(),
+                virtual_ipv6: "fd00::a".parse().expect("IPv6"),
+                virtual_ipv4: None,
+                endpoints: Vec::new(),
+                online: true,
+                p2p_active: true,
+                p2p_healthy: true,
+                rtt_us: Some(12_300),
+                loss_rate: 0.125,
+                traffic: NodeTrafficSnapshot::default(),
+            },
+            NodePeerSnapshot {
+                peer_id: exit_b.to_string(),
+                network_name: "home".into(),
+                virtual_ipv6: "fd00::b".parse().expect("IPv6"),
+                virtual_ipv4: None,
+                endpoints: Vec::new(),
+                online: true,
+                p2p_active: true,
+                p2p_healthy: true,
+                rtt_us: Some(55_500),
+                loss_rate: 0.5,
+                traffic: NodeTrafficSnapshot::default(),
+            },
+        ]);
+        let mut revoked = activity_entry(b"exit-policy-revoked", 1_700_000_000_450);
+        revoked.network_id = Some(network_id);
+        revoked.action = "policy.apply".into();
+        revoked.resource = "network:home/policy/12".into();
+        revoked.outcome = AuditOutcome::Denied;
+        snapshot.recent_activity = vec![revoked.clone(), revoked];
+
+        let model =
+            build_page_model_for_page(page, &snapshot, Locale::ZhCn).expect("exit node model");
+        let summary = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "exit_summary.title"))
+            .expect("connection summary");
+        assert_eq!(summary.rows.len(), 1);
+        assert_eq!(
+            summary.rows[0].title,
+            t(Locale::ZhCn, "exit_summary.global_session")
+        );
+        assert!(summary.rows[0]
+            .detail
+            .contains(t(Locale::ZhCn, "traffic.session.state.fail_closed")));
+        assert!(!summary.rows[0].detail.contains(exit_a.as_str()));
+        assert!(!summary.rows[0].detail.contains(exit_b.as_str()));
+
+        let selection_summary = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "exit_summary.selection_title"))
+            .expect("network Exit selection summary");
+        assert_eq!(selection_summary.rows[0].title, "home");
+        assert!(selection_summary.rows[0].detail.contains(exit_a.as_str()));
+        assert!(!selection_summary.rows[0].detail.contains(exit_b.as_str()));
+        assert!(!selection_summary.rows[0]
+            .detail
+            .contains(t(Locale::ZhCn, "traffic.session.state.fail_closed")));
+        assert!(selection_summary.rows[0]
+            .detail
+            .contains(t(Locale::ZhCn, "exit_governance.mode.fixed")));
+        assert!(selection_summary.rows[0]
+            .detail
+            .contains(t(Locale::ZhCn, "exit_governance.source.network")));
+
+        let quality = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "exit_quality.title"))
+            .expect("Exit quality");
+        assert_eq!(quality.rows.len(), 2);
+        assert!(quality.rows[0].title.contains(exit_a.as_str()));
+        assert!(!quality.rows[0].title.contains(exit_b.as_str()));
+        assert!(quality.rows[0].detail.contains("12.3 ms"));
+        assert!(quality.rows[0].detail.contains("12.5%"));
+        assert!(quality.rows[1]
+            .detail
+            .contains(t(Locale::ZhCn, "exit_quality.throughput_unavailable")));
+        assert!(!quality.rows.iter().any(|row| row.detail.contains("Mbps")));
+
+        let activity = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "exit_activity.title"))
+            .expect("Exit activity");
+        assert_eq!(activity.rows.len(), 4);
+        assert!(activity.rows[0].title.contains(t(
+            Locale::ZhCn,
+            "traffic.session.event.protection_established"
+        )));
+        assert!(activity.rows[1]
+            .title
+            .contains(t(Locale::ZhCn, "activity.action.policy.apply")));
+        assert!(activity.rows[2]
+            .title
+            .contains(t(Locale::ZhCn, "traffic.session.event.migration_started")));
+        assert!(activity.rows[3]
+            .title
+            .contains(t(Locale::ZhCn, "traffic.session.event.failure_detected")));
     }
 
     #[test]

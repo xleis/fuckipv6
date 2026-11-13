@@ -12,8 +12,10 @@ use fuckipv6_common::domain::{
     ExitSelectionResolution, FieldPrivacyPolicy, MembershipRole, MembershipState, MembershipTerms,
     NetworkAcl, NetworkId, NetworkJoinMode, NetworkMemberDirectory, NetworkMemberPresence,
     NetworkMemberStatus, NetworkVisibility, NodeId, NodeLocalAccessPolicy, OperationRecovery,
-    TopologyBuilder, TopologyLinkObservation, TopologyMemberInput, TopologyNetworkInput,
-    TopologySnapshot, TopologyViewer, TrafficRoutingPageModel, TrafficSessionSnapshot,
+    RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot, RelayHealthSnapshot,
+    RelayHealthStatus, RelayLifecycleState, TopologyBuilder, TopologyLinkObservation,
+    TopologyMemberInput, TopologyNetworkInput, TopologySnapshot, TopologyViewer,
+    TrafficRoutingPageModel, TrafficSessionSnapshot,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -220,7 +222,7 @@ impl NodeSnapshot {
             });
         }
 
-        for prior in previous {
+        for prior in &previous {
             if directories.contains_key(&prior.network_id) {
                 continue;
             }
@@ -229,8 +231,19 @@ impl NodeSnapshot {
                 directory_received_at_unix_ms: prior.directory_received_at_unix_ms,
                 evaluated_at_unix_ms: now_ms,
                 reason_code: Some("exit.selection.directory_unavailable".into()),
-                ..prior
+                ..prior.clone()
             });
+        }
+
+        for entry in &mut projected {
+            if let Some(prior) = previous
+                .iter()
+                .find(|prior| prior.network_id == entry.network_id)
+            {
+                if same_exit_evaluation(entry, prior) {
+                    entry.evaluated_at_unix_ms = prior.evaluated_at_unix_ms;
+                }
+            }
         }
 
         projected.sort_by(|left, right| {
@@ -611,6 +624,19 @@ fn project_topology(
     builder.build().ok()
 }
 
+fn same_exit_evaluation(
+    left: &NodeExitSelectionSnapshot,
+    right: &NodeExitSelectionSnapshot,
+) -> bool {
+    left.network_id == right.network_id
+        && left.policy_revision == right.policy_revision
+        && left.policy == right.policy
+        && left.resolution == right.resolution
+        && left.directory_generated_at_unix_ms == right.directory_generated_at_unix_ms
+        && left.directory_received_at_unix_ms == right.directory_received_at_unix_ms
+        && left.reason_code == right.reason_code
+}
+
 /// Local fallback when no roster is cached: translate this node's own data-plane
 /// status into the shared member vocabulary instead of guessing about peers.
 fn local_membership_projection(
@@ -854,17 +880,18 @@ impl NodeCapabilityRegistrySnapshot {
     }
 
     fn from_snapshot(snapshot: &NodeSnapshot) -> Self {
-        let service_state = embedded_service_capability_state(&snapshot.embedded_services);
+        let coordinator_state = embedded_coordinator_capability_state(&snapshot.embedded_services);
+        let relay_state = embedded_relay_capability_state(&snapshot.embedded_services);
         let exit_state = exit_node_capability_state(snapshot);
         Self {
             capabilities: vec![
                 NodeCapabilitySnapshot {
                     kind: CapabilityKind::Coordinator,
-                    state: service_state,
+                    state: coordinator_state,
                 },
                 NodeCapabilitySnapshot {
                     kind: CapabilityKind::Relay,
-                    state: service_state,
+                    state: relay_state,
                 },
                 NodeCapabilitySnapshot {
                     kind: CapabilityKind::Exit,
@@ -893,7 +920,9 @@ impl Default for NodeCapabilityRegistrySnapshot {
     }
 }
 
-fn embedded_service_capability_state(services: &[NodeEmbeddedServiceSnapshot]) -> CapabilityState {
+fn embedded_coordinator_capability_state(
+    services: &[NodeEmbeddedServiceSnapshot],
+) -> CapabilityState {
     if services
         .iter()
         .any(|service| service.status == NodeEmbeddedServiceStatus::Running)
@@ -914,6 +943,71 @@ fn embedded_service_capability_state(services: &[NodeEmbeddedServiceSnapshot]) -
     } else {
         CapabilityState::Disabled
     }
+}
+
+fn embedded_relay_capability_state(services: &[NodeEmbeddedServiceSnapshot]) -> CapabilityState {
+    if services.iter().any(|service| {
+        matches!(
+            service.relay_status,
+            NodeEmbeddedServiceStatus::Starting | NodeEmbeddedServiceStatus::Stopping
+        )
+    }) {
+        return CapabilityState::Starting;
+    }
+    if services
+        .iter()
+        .any(|service| service.relay_status == NodeEmbeddedServiceStatus::Failed)
+    {
+        return CapabilityState::Unavailable;
+    }
+    let relay_services = services
+        .iter()
+        .filter(|service| {
+            service.relay_status != NodeEmbeddedServiceStatus::Stopped
+                || service.relay_health.is_some()
+        })
+        .collect::<Vec<_>>();
+    if relay_services.is_empty() {
+        return CapabilityState::Disabled;
+    }
+    let available = relay_services.iter().any(|service| {
+        !service
+            .relay_health
+            .as_ref()
+            .is_some_and(|health| health.status == RelayHealthStatus::Unavailable)
+    });
+    let unavailable = relay_services.iter().any(|service| {
+        service
+            .relay_health
+            .as_ref()
+            .is_some_and(|health| health.status == RelayHealthStatus::Unavailable)
+    });
+    if unavailable && !available {
+        return CapabilityState::Unavailable;
+    }
+    if unavailable {
+        return CapabilityState::Degraded;
+    }
+    if relay_services.iter().any(|service| {
+        service.relay_health.as_ref().is_some_and(|health| {
+            matches!(
+                health.status,
+                RelayHealthStatus::Degraded | RelayHealthStatus::QuotaExhausted
+            )
+        })
+    }) {
+        return CapabilityState::Degraded;
+    }
+    if relay_services.iter().any(|service| {
+        service.relay_health.is_none()
+            || service
+                .relay_health
+                .as_ref()
+                .is_some_and(|health| health.status == RelayHealthStatus::Unknown)
+    }) {
+        return CapabilityState::Unknown;
+    }
+    CapabilityState::Enabled
 }
 
 fn exit_node_capability_state(snapshot: &NodeSnapshot) -> CapabilityState {
@@ -1062,17 +1156,76 @@ pub struct NodeNetworkConfigSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeEmbeddedServiceSnapshot {
     pub network_name: String,
+    /// Coordinator/signaling runtime status.
     pub status: NodeEmbeddedServiceStatus,
     pub signaling_addr: Option<SocketAddr>,
+    /// Relay is an independently owned capability; it can be stopped while the
+    /// embedded Coordinator keeps running.
+    #[serde(default)]
+    pub relay_status: NodeEmbeddedServiceStatus,
     pub relay_addr: Option<SocketAddr>,
+    /// Authoritative Relay health from the node runtime. Missing means no
+    /// health evidence is available; adapters must not infer health from the
+    /// listener address or lifecycle status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_health: Option<RelayHealthSnapshot>,
+    /// Owner-visible, bounded explanation of the current Relay authorization
+    /// decision. It excludes matching rules, grants and transport metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_authorization: Option<RelayAuthorizationAuditSnapshot>,
+    /// Owner-visible, bounded Relay governance observations. This remains
+    /// absent for older snapshots, disabled Relays and non-owner projections;
+    /// adapters must not infer an empty ledger from a missing field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_governance: Option<RelayGovernanceAuditSnapshot>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+impl NodeEmbeddedServiceSnapshot {
+    pub(crate) fn running_from_embedded(
+        service: &crate::symmetric::EmbeddedServiceSnapshot,
+    ) -> Self {
+        let relay_status = match service.relay_health.as_ref().map(|health| health.lifecycle) {
+            Some(RelayLifecycleState::Running) => NodeEmbeddedServiceStatus::Running,
+            Some(RelayLifecycleState::Starting) => NodeEmbeddedServiceStatus::Starting,
+            Some(RelayLifecycleState::Stopping) => NodeEmbeddedServiceStatus::Stopping,
+            Some(RelayLifecycleState::Failed | RelayLifecycleState::Unsupported) => {
+                NodeEmbeddedServiceStatus::Failed
+            }
+            Some(RelayLifecycleState::Stopped) => {
+                if service.relay_addr.is_some() {
+                    NodeEmbeddedServiceStatus::Failed
+                } else {
+                    NodeEmbeddedServiceStatus::Stopped
+                }
+            }
+            None => {
+                if service.relay_addr.is_some() {
+                    NodeEmbeddedServiceStatus::Running
+                } else {
+                    NodeEmbeddedServiceStatus::Stopped
+                }
+            }
+        };
+        Self {
+            network_name: service.network_name.clone(),
+            status: NodeEmbeddedServiceStatus::Running,
+            signaling_addr: Some(service.signaling_addr),
+            relay_status,
+            relay_addr: service.relay_addr,
+            relay_health: service.relay_health.clone(),
+            relay_authorization: service.relay_authorization.clone(),
+            relay_governance: service.relay_governance.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeEmbeddedServiceStatus {
     Starting,
     Running,
     Stopping,
+    #[default]
     Stopped,
     Failed,
 }
@@ -1818,6 +1971,39 @@ impl NodeStateStore {
         published
     }
 
+    /// Apply an update only when it changes authoritative state.
+    ///
+    /// Periodic telemetry refreshes use this path so an unchanged runtime
+    /// projection neither increments the revision nor wakes every adapter.
+    pub async fn update_if_changed<F>(&self, update: F) -> Option<NodeSnapshot>
+    where
+        F: FnOnce(&mut NodeSnapshot),
+    {
+        let evidence = self.directory_evidence().await;
+        let now_ms = unix_time_ms();
+        let mut snapshot = self.snapshot.write().await;
+        let previous = snapshot.clone();
+        update(&mut snapshot);
+        snapshot.refresh_capability_states();
+        snapshot.refresh_topology(&evidence.directories, now_ms);
+        if self.local_directory_evidence_seen.load(Ordering::Acquire) {
+            snapshot.refresh_exit_selections(&evidence.directories, &evidence.received_at, now_ms);
+        }
+        if *snapshot == previous {
+            return None;
+        }
+        snapshot.revision = snapshot.revision.saturating_add(1);
+        let published = snapshot.clone();
+        self.updates.send_replace(published.clone());
+        if let Some(events) = &self.events {
+            events.advance_snapshot_revision(published.revision);
+            events.publish(NodeEventKind::StateChanged {
+                revision: published.revision,
+            });
+        }
+        Some(published)
+    }
+
     pub async fn set_lifecycle(&self, lifecycle: NodeLifecycleSnapshot) -> NodeSnapshot {
         self.update(|snapshot| snapshot.lifecycle = lifecycle).await
     }
@@ -1829,12 +2015,15 @@ impl NodeStateStore {
             .await;
     }
 
-    /// Merge activity from independent producers into the one product feed.
-    /// Stable audit identity deduplicates replay, and a single retention bound
-    /// prevents one producer from replacing or unboundedly growing another.
-    pub async fn merge_recent_activity(&self, activity: impl IntoIterator<Item = ActivityEntry>) {
+    /// Merge audited activity from independent producers into the canonical
+    /// bounded feed. Audit identity deduplicates retries, and the same ordering
+    /// rule is used for command and data-plane lifecycle records.
+    pub(crate) async fn merge_recent_activity(
+        &self,
+        entries: impl IntoIterator<Item = ActivityEntry>,
+    ) {
         self.update(|snapshot| {
-            for entry in activity {
+            for entry in entries {
                 if let Some(index) = snapshot
                     .recent_activity
                     .iter()
@@ -1862,8 +2051,13 @@ impl NodeStateStore {
     /// only render this value and must not derive protection from interfaces,
     /// route configuration or a successful CLI command.
     pub async fn set_traffic_session(&self, session: TrafficSessionSnapshot) -> NodeSnapshot {
-        self.update(|snapshot| snapshot.traffic_session = session)
+        match self
+            .update_if_changed(|snapshot| snapshot.traffic_session = session)
             .await
+        {
+            Some(snapshot) => snapshot,
+            None => self.snapshot().await,
+        }
     }
 
     /// Refresh the host-interface projection and reconcile live TUN names.
@@ -2068,7 +2262,10 @@ impl Default for NodeStateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fuckipv6_common::domain::{AuditId, AuditOutcome};
+    use fuckipv6_common::domain::{
+        AuditId, AuditOutcome, RelayLifecycleState, RelayLimitPolicy, RelayReachabilityState,
+        RelayUsageSnapshot,
+    };
     use fuckipv6_common::i18n::{has_key, Locale};
 
     fn activity(id: &str, occurred_at_unix_ms: u64, action: &str) -> ActivityEntry {
@@ -2169,8 +2366,131 @@ mod tests {
             network_name: name.into(),
             status: NodeEmbeddedServiceStatus::Stopped,
             signaling_addr: None,
+            relay_status: NodeEmbeddedServiceStatus::Stopped,
             relay_addr: None,
+            relay_health: None,
+            relay_authorization: None,
+            relay_governance: None,
         }
+    }
+
+    fn relay_service_health(
+        lifecycle: RelayLifecycleState,
+        forwarding_observed: bool,
+        usage: RelayUsageSnapshot,
+        limits: RelayLimitPolicy,
+    ) -> RelayHealthSnapshot {
+        RelayHealthSnapshot::observe(
+            lifecycle,
+            Some("127.0.0.1:6667".parse().expect("relay socket")),
+            true,
+            RelayReachabilityState::Reachable,
+            forwarding_observed,
+            true,
+            limits,
+            Vec::new(),
+            usage,
+            1_700_000_100_000,
+            None,
+        )
+    }
+
+    #[test]
+    fn relay_capability_is_derived_from_health_not_listener_presence() {
+        let mut service = embedded_service("home");
+        service.relay_status = NodeEmbeddedServiceStatus::Running;
+        service.relay_addr = Some("127.0.0.1:6667".parse().expect("relay socket"));
+        service.relay_health = Some(relay_service_health(
+            RelayLifecycleState::Running,
+            false,
+            RelayUsageSnapshot::default(),
+            RelayLimitPolicy::default(),
+        ));
+
+        assert_eq!(
+            embedded_relay_capability_state(&[service.clone()]),
+            CapabilityState::Unknown
+        );
+
+        service.relay_health = Some(relay_service_health(
+            RelayLifecycleState::Running,
+            true,
+            RelayUsageSnapshot {
+                active_connections: 2,
+                active_streams: 2,
+                last_forwarded_at_unix_ms: Some(1_700_000_099_000),
+                ..RelayUsageSnapshot::default()
+            },
+            RelayLimitPolicy::default(),
+        ));
+        assert_eq!(
+            embedded_relay_capability_state(&[service.clone()]),
+            CapabilityState::Enabled
+        );
+
+        service.relay_health = Some(relay_service_health(
+            RelayLifecycleState::Running,
+            true,
+            RelayUsageSnapshot {
+                active_connections: 1,
+                active_streams: 1,
+                forwarded_bytes: 10,
+                last_forwarded_at_unix_ms: Some(1_700_000_099_000),
+                ..RelayUsageSnapshot::default()
+            },
+            RelayLimitPolicy {
+                max_connections: Some(1),
+                max_bytes: Some(10),
+                ..RelayLimitPolicy::default()
+            },
+        ));
+        assert_eq!(
+            embedded_relay_capability_state(&[service]),
+            CapabilityState::Degraded
+        );
+    }
+
+    #[test]
+    fn relay_capability_degrades_when_only_some_networks_are_unavailable() {
+        let healthy = {
+            let mut service = embedded_service("healthy");
+            service.relay_status = NodeEmbeddedServiceStatus::Running;
+            service.relay_health = Some(relay_service_health(
+                RelayLifecycleState::Running,
+                true,
+                RelayUsageSnapshot {
+                    active_connections: 1,
+                    active_streams: 1,
+                    last_forwarded_at_unix_ms: Some(1_700_000_099_000),
+                    ..RelayUsageSnapshot::default()
+                },
+                RelayLimitPolicy::default(),
+            ));
+            service
+        };
+        let unavailable = {
+            let mut service = embedded_service("unavailable");
+            service.relay_status = NodeEmbeddedServiceStatus::Running;
+            service.relay_health = Some(RelayHealthSnapshot::observe(
+                RelayLifecycleState::Running,
+                None,
+                false,
+                RelayReachabilityState::Unreachable,
+                false,
+                false,
+                RelayLimitPolicy::default(),
+                Vec::new(),
+                RelayUsageSnapshot::default(),
+                1_700_000_100_000,
+                Some("authorization_invalid".into()),
+            ));
+            service
+        };
+
+        assert_eq!(
+            embedded_relay_capability_state(&[healthy, unavailable]),
+            CapabilityState::Degraded
+        );
     }
 
     fn peer(network_name: &str) -> NodePeerSnapshot {
@@ -2458,7 +2778,9 @@ mod tests {
 
     #[tokio::test]
     async fn unchanged_interface_capture_does_not_create_revisions() {
-        let state = NodeStateStore::new();
+        let events = NodeEventBus::new(8);
+        let mut event_receiver = events.subscribe();
+        let state = NodeStateStore::with_events(events);
         let capture = super::super::network_interfaces::InterfaceCapture {
             interfaces: vec![NodeInterfaceSnapshot {
                 index: 1,
@@ -2482,6 +2804,75 @@ mod tests {
         assert_eq!(first.revision, 1);
         assert_eq!(second.revision, 1);
         assert_eq!(second.interfaces.len(), 1);
+        assert_eq!(
+            event_receiver.recv().await.expect("state event").kind,
+            NodeEventKind::StateChanged { revision: 1 }
+        );
+        assert!(event_receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn unchanged_periodic_update_does_not_create_revisions_or_events() {
+        let events = NodeEventBus::new(8);
+        let mut event_receiver = events.subscribe();
+        let state = NodeStateStore::with_events(events);
+        let mut updates = state.subscribe();
+
+        state
+            .update(|snapshot| {
+                snapshot.networks.push(NodeNetworkSnapshot {
+                    name: "home".into(),
+                    tun_name: "fk-home".into(),
+                    status: NodeNetworkStatus::Online,
+                    assigned_ipv6: None,
+                    assigned_ipv4: None,
+                    p2p_listen_addr: None,
+                    uptime_secs: 1,
+                    roles: vec![NodeNetworkRole::Member],
+                    peer_count: 0,
+                    traffic: NodeTrafficSnapshot::default(),
+                });
+            })
+            .await;
+        updates.borrow_and_update();
+        assert_eq!(
+            event_receiver.recv().await.expect("state event").kind,
+            NodeEventKind::StateChanged { revision: 1 }
+        );
+
+        assert!(state.update_if_changed(|_| {}).await.is_none());
+        assert!(!updates.has_changed().expect("watch remains open"));
+        assert!(event_receiver.try_recv().is_err());
+        assert_eq!(state.snapshot().await.revision, 1);
+    }
+
+    #[tokio::test]
+    async fn unchanged_traffic_session_does_not_create_revisions_or_events() {
+        let events = NodeEventBus::new(8);
+        let mut event_receiver = events.subscribe();
+        let state = NodeStateStore::with_events(events);
+        let mut updates = state.subscribe();
+        let mut session = TrafficSessionSnapshot::default();
+        session
+            .enter_fail_closed(
+                Some(fuckipv6_common::domain::TrafficFailureKind::NetworkSelectionUnavailable),
+                1,
+                "exit.selection.network_context_missing",
+            )
+            .expect("record fail-closed session");
+
+        let first = state.set_traffic_session(session.clone()).await;
+        updates.borrow_and_update();
+        assert_eq!(first.revision, 1);
+        assert_eq!(
+            event_receiver.recv().await.expect("state event").kind,
+            NodeEventKind::StateChanged { revision: 1 }
+        );
+
+        let second = state.set_traffic_session(session).await;
+        assert_eq!(second.revision, 1);
+        assert!(!updates.has_changed().expect("watch remains open"));
+        assert!(event_receiver.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -2781,6 +3172,18 @@ mod tests {
         let updated = state
             .update(|snapshot| {
                 snapshot.embedded_services[0].status = NodeEmbeddedServiceStatus::Running;
+                snapshot.embedded_services[0].relay_status = NodeEmbeddedServiceStatus::Running;
+                snapshot.embedded_services[0].relay_health = Some(relay_service_health(
+                    RelayLifecycleState::Running,
+                    true,
+                    RelayUsageSnapshot {
+                        active_connections: 1,
+                        active_streams: 1,
+                        last_forwarded_at_unix_ms: Some(1_700_000_099_000),
+                        ..RelayUsageSnapshot::default()
+                    },
+                    RelayLimitPolicy::default(),
+                ));
                 snapshot.networks[0].roles = vec![NodeNetworkRole::ExitNode];
                 snapshot.local_exit.owner_exit_enabled = true;
                 snapshot.local_exit.stage = LocalExitCapabilityStage::Enabled;
@@ -3167,7 +3570,8 @@ mod tests {
 
     #[tokio::test]
     async fn member_directory_updates_republish_the_derived_topology() {
-        let state = NodeStateStore::new();
+        let events = NodeEventBus::new(8);
+        let state = NodeStateStore::with_events(events.clone());
         let viewer = topology_node("viewer");
         let relay = topology_node("relay");
         let network_id = topology_network("alpha");
@@ -3182,6 +3586,7 @@ mod tests {
                 snapshot.memberships = vec![membership_snapshot("alpha", &network_id, &viewer)];
             })
             .await;
+        let mut event_receiver = events.subscribe();
         let before = state.snapshot().await;
         let before_topology = before.topology.clone().expect("topology is projected");
         assert_eq!(before_topology.nodes.len(), 1);
@@ -3222,6 +3627,17 @@ mod tests {
             .await
             .expect("receipt time is cached");
         assert!(received_at > 0);
+
+        assert_eq!(
+            event_receiver.recv().await.expect("state event").kind,
+            NodeEventKind::StateChanged {
+                revision: after.revision
+            }
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let stable_read = state.snapshot().await;
+        assert_eq!(stable_read, after);
+        assert!(event_receiver.try_recv().is_err());
 
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         assert!(
@@ -3362,5 +3778,67 @@ mod tests {
         let snapshot = state.snapshot().await;
         assert_eq!(snapshot.revision, 42);
         assert_eq!(snapshot.control_health, NodeControlHealth::Available);
+    }
+
+    #[tokio::test]
+    async fn merge_recent_activity_deduplicates_sorts_and_retains_latest_256() {
+        use fuckipv6_common::domain::{AuditId, AuditOutcome};
+
+        let state = NodeStateStore::new();
+        let actor = NodeId::from_public_key(b"activity-merge-actor");
+        let entry = |index: u64, occurred_at_unix_ms: u64| ActivityEntry {
+            audit_id: AuditId::from_public_key(format!("activity-{index}").as_bytes()),
+            operation_id: None,
+            actor: actor.clone(),
+            network_id: None,
+            action: format!("test.activity.{index}"),
+            resource: "test_activity".into(),
+            outcome: AuditOutcome::Succeeded,
+            occurred_at_unix_ms,
+            summary: format!("activity {index}"),
+            category: Default::default(),
+            severity: Default::default(),
+            actor_role: None,
+            object_kind: "test_activity".into(),
+            object_id: None,
+            reason: None,
+            details: Default::default(),
+        };
+        let entries = (0..260)
+            .map(|index| entry(index, 1_000 + index))
+            .collect::<Vec<_>>();
+
+        state.merge_recent_activity(entries.clone()).await;
+        let merged = state.snapshot().await.recent_activity;
+        assert_eq!(merged.len(), 256);
+        assert_eq!(merged.first().expect("newest").occurred_at_unix_ms, 1_259);
+        assert_eq!(
+            merged.last().expect("oldest retained").occurred_at_unix_ms,
+            1_004
+        );
+
+        let mut replacement = entries[259].clone();
+        replacement.summary = "updated by another producer".into();
+        state.merge_recent_activity([replacement]).await;
+        let deduplicated = state.snapshot().await.recent_activity;
+        assert_eq!(deduplicated.len(), 256);
+        assert_eq!(
+            deduplicated
+                .iter()
+                .filter(|entry| entry.audit_id == entries[259].audit_id)
+                .count(),
+            1
+        );
+        assert_eq!(deduplicated[0].summary, "updated by another producer");
+
+        state.merge_recent_activity([entry(999, 2_000)]).await;
+        let ordered = state.snapshot().await.recent_activity;
+        assert_eq!(ordered.len(), 256);
+        assert_eq!(ordered[0].occurred_at_unix_ms, 2_000);
+        assert!(ordered.windows(2).all(|pair| {
+            pair[0].occurred_at_unix_ms > pair[1].occurred_at_unix_ms
+                || (pair[0].occurred_at_unix_ms == pair[1].occurred_at_unix_ms
+                    && pair[0].audit_id > pair[1].audit_id)
+        }));
     }
 }

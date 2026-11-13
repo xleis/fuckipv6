@@ -4,7 +4,7 @@
 //! timeouts. This module owns connection lifecycle and delegates every command
 //! to the same [`NodeCommandBus`] used by CLI, GPUI and WebUI adapters.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -58,22 +58,42 @@ pub async fn serve_node(
     events: NodeEventBus,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    serve_node_inner(server, commands, state, events, None, None, shutdown, None).await
+    serve_node_inner(
+        server,
+        commands,
+        state,
+        events,
+        None,
+        None,
+        Arc::new(AtomicBool::new(true)),
+        shutdown,
+        None,
+    )
+    .await
 }
 
 /// Serve a node whose lifecycle is owned by this process. Unlike the generic
 /// [`serve_node`] entrypoint, this variant can honor `StopNode`: it acknowledges
 /// the request only after arming the same shutdown channel that tears down the
 /// listener and all active subscriptions.
+pub(crate) struct OwnedNodeServices {
+    pub(crate) file_owner: FileOwnerService,
+    pub(crate) registry: MultiNetworkRegistry,
+}
+
 pub(crate) async fn serve_owned_node(
     server: LocalServer,
     commands: NodeCommandBus,
     state: NodeStateStore,
     events: NodeEventBus,
-    file_owner: FileOwnerService,
-    registry: MultiNetworkRegistry,
+    services: OwnedNodeServices,
+    ready: Arc<AtomicBool>,
     shutdown: watch::Sender<bool>,
 ) -> Result<()> {
+    let OwnedNodeServices {
+        file_owner,
+        registry,
+    } = services;
     let shutdown_rx = shutdown.subscribe();
     serve_node_inner(
         server,
@@ -82,6 +102,7 @@ pub(crate) async fn serve_owned_node(
         events,
         Some(file_owner),
         Some(registry),
+        ready,
         shutdown_rx,
         Some(shutdown),
     )
@@ -96,6 +117,7 @@ async fn serve_node_inner(
     events: NodeEventBus,
     file_owner: Option<FileOwnerService>,
     registry: Option<MultiNetworkRegistry>,
+    ready: Arc<AtomicBool>,
     mut shutdown: watch::Receiver<bool>,
     stop_controller: Option<watch::Sender<bool>>,
 ) -> Result<()> {
@@ -131,6 +153,7 @@ async fn serve_node_inner(
                             operations: operations.clone(),
                             file_owner: file_owner.clone(),
                             registry: registry.clone(),
+                            ready: Arc::clone(&ready),
                         };
                         let task_shutdown = shutdown.clone();
                         let task_stop_controller = stop_controller.clone();
@@ -210,6 +233,7 @@ struct ConnectionServices {
     operations: OperationService,
     file_owner: Option<FileOwnerService>,
     registry: Option<MultiNetworkRegistry>,
+    ready: Arc<AtomicBool>,
 }
 
 async fn serve_connection(
@@ -225,6 +249,7 @@ async fn serve_connection(
         operations,
         file_owner,
         registry,
+        ready,
     } = services;
     loop {
         let (kind, payload) = tokio::select! {
@@ -248,7 +273,16 @@ async fn serve_connection(
                 }
             },
             FrameKind::Ping => {
-                connection.send(FrameKind::Pong, &()).await?;
+                if ready.load(Ordering::Acquire) {
+                    connection.send(FrameKind::Pong, &()).await?;
+                } else {
+                    send_local_error(
+                        connection,
+                        LocalError::new(IpcErrorCode::BackendUnavailable, "节点数据面仍在启动")
+                            .retryable(true),
+                    )
+                    .await?;
+                }
                 continue;
             }
             other => {
@@ -1040,8 +1074,11 @@ mod tests {
                 commands,
                 state.clone(),
                 events.clone(),
-                file_owner,
-                MultiNetworkRegistry::new(),
+                OwnedNodeServices {
+                    file_owner,
+                    registry: MultiNetworkRegistry::new(),
+                },
+                Arc::new(AtomicBool::new(true)),
                 shutdown.clone(),
             ));
             Ok(Self {
@@ -1190,6 +1227,104 @@ mod tests {
         }
 
         fixture.finish().await
+    }
+
+    #[tokio::test]
+    async fn ipc_ping_does_not_execute_the_snapshot_handler() -> Result<()> {
+        let events = NodeEventBus::new(8);
+        let state = NodeStateStore::with_events(events.clone());
+        let handler = Arc::new(ClearNetworkOnSnapshotHandler {
+            state: state.clone(),
+        });
+        let fixture =
+            Fixture::with_state_and_handler("ping-health", state, events, handler).await?;
+        fixture
+            .state
+            .update(|snapshot| {
+                snapshot.networks.push(crate::node::NodeNetworkSnapshot {
+                    name: "home".into(),
+                    tun_name: "fk-home".into(),
+                    status: crate::node::NodeNetworkStatus::Online,
+                    assigned_ipv6: None,
+                    assigned_ipv4: None,
+                    p2p_listen_addr: None,
+                    uptime_secs: 1,
+                    roles: vec![crate::node::NodeNetworkRole::Member],
+                    peer_count: 0,
+                    traffic: crate::node::NodeTrafficSnapshot::default(),
+                });
+            })
+            .await;
+
+        let mut connection = crate::local_ipc::connect(&fixture.endpoint, IpcRole::Control).await?;
+        connection.send(FrameKind::Ping, &()).await?;
+        let (kind, payload): (FrameKind, serde_json::Value) = connection.receive().await?;
+        assert_eq!(kind, FrameKind::Pong);
+        assert_eq!(payload, serde_json::Value::Null);
+        assert_eq!(fixture.state.snapshot().await.networks.len(), 1);
+        drop(connection);
+
+        fixture.finish().await
+    }
+
+    #[tokio::test]
+    async fn ipc_ping_is_retryable_until_the_data_plane_is_ready() -> Result<()> {
+        let directory = std::env::temp_dir().join(format!(
+            "fuckipv6-local-service-startup-ready-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory)?;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        let endpoint = LocalEndpoint::Path(directory.join("node.sock"));
+        let events = NodeEventBus::new(8);
+        let state = NodeStateStore::with_events(events.clone());
+        let commands = NodeCommandBus::spawn(Arc::new(EchoHandler), events.clone(), 8);
+        let server = LocalServer::bind(endpoint.clone(), EndpointRole::Node).await?;
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let file_owner = FileOwnerService::new(
+            &directory,
+            fuckipv6_common::domain::NodeId::from_public_key(b"local-service-startup-ready-owner"),
+            state.clone(),
+        )?;
+        let ready = Arc::new(AtomicBool::new(false));
+        let service = tokio::spawn(serve_owned_node(
+            server,
+            commands,
+            state,
+            events,
+            OwnedNodeServices {
+                file_owner,
+                registry: MultiNetworkRegistry::new(),
+            },
+            ready.clone(),
+            shutdown_tx.clone(),
+        ));
+
+        let mut connection = crate::local_ipc::connect(&endpoint, IpcRole::Control).await?;
+        connection.send(FrameKind::Ping, &()).await?;
+        let (kind, payload): (FrameKind, serde_json::Value) = connection.receive().await?;
+        assert_eq!(kind, FrameKind::Error);
+        let error: LocalError = serde_json::from_value(payload)?;
+        assert_eq!(error.code, IpcErrorCode::BackendUnavailable);
+        assert!(error.retryable);
+
+        ready.store(true, Ordering::Release);
+        connection.send(FrameKind::Ping, &()).await?;
+        let (kind, payload): (FrameKind, serde_json::Value) = connection.receive().await?;
+        assert_eq!(kind, FrameKind::Pong);
+        assert_eq!(payload, serde_json::Value::Null);
+        drop(connection);
+
+        shutdown_tx.send(true).context("service already stopped")?;
+        timeout(Duration::from_secs(5), service)
+            .await
+            .context("startup-ready local service shutdown timed out")???;
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -1685,8 +1820,11 @@ mod tests {
             commands,
             state,
             events,
-            file_owner,
-            registry,
+            OwnedNodeServices {
+                file_owner,
+                registry,
+            },
+            Arc::new(AtomicBool::new(true)),
             shutdown.clone(),
         ));
 
@@ -1875,8 +2013,11 @@ mod tests {
             commands,
             state,
             events,
-            file_owner,
-            MultiNetworkRegistry::new(),
+            OwnedNodeServices {
+                file_owner,
+                registry: MultiNetworkRegistry::new(),
+            },
+            Arc::new(AtomicBool::new(true)),
             shutdown_tx.clone(),
         ));
 

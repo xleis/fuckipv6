@@ -9761,7 +9761,7 @@ impl GpuiShell {
                 .into_any_element();
         }
 
-        if self.selected_page == "node_runtime" {
+        if self.selected_page == "node_runtime" || self.selected_page == "exit_node" {
             content = content.child(self.operation_status_card(cx));
             content = content.child(self.diagnostics_card(cx));
         }
@@ -17482,6 +17482,42 @@ mod tests {
             leak_target_offsets.windows(2).all(|pair| pair[0] < pair[1]),
             "leak evidence must preserve server order: {leak_target_offsets:?}"
         );
+    }
+
+    #[gpui::test]
+    fn exit_node_page_reuses_the_authoritative_diagnostics_card(cx: &mut TestAppContext) {
+        let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
+            .expect("parse shared product visual fixture");
+        let diagnostics = diagnostics_fixture(&fixture.snapshot);
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = fixture.snapshot;
+                shell.locale = Locale::En;
+                shell.selected_page = "exit_node".into();
+                shell.recent_diagnostics = Some(diagnostics);
+                cx.notify();
+            })
+            .expect("install Exit page diagnostics fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        for selector in [
+            "visual-runtime-diagnostics",
+            "visual-diagnostic-layer-network",
+            "visual-diagnostic-layer-dns",
+            "visual-diagnostic-layer-tun",
+            "visual-diagnostic-layer-coordinator",
+            "visual-diagnostic-layer-relay",
+            "visual-diagnostic-layer-exit",
+            "visual-diagnostic-leak-detection",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "missing Exit page diagnostic element {selector}"
+            );
+        }
     }
 
     #[test]

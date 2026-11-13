@@ -14,7 +14,7 @@ use fuckipv6_common::{
 use futures::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -54,12 +54,47 @@ fn verify_registration(
         && Identity::verify(public_key, &challenge, signature)
 }
 
+/// Thread-safe relay directory shared by the signaling listener and the
+/// embedded-service lifecycle. The accept loop does not cache it, so a relay
+/// enabled or disabled after signaling starts is reflected by the next
+/// registration response without restarting the coordinator.
+#[derive(Clone, Debug, Default)]
+pub struct RelayEndpointDirectory {
+    endpoints: Arc<RwLock<RelayEndpoints>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RelayEndpoints {
+    primary: Option<RelayEndpoint>,
+    additional: Vec<RelayEndpoint>,
+}
+
+impl RelayEndpointDirectory {
+    pub fn set_primary(&self, endpoint: Option<RelayEndpoint>) {
+        if let Ok(mut endpoints) = self.endpoints.write() {
+            endpoints.primary = endpoint;
+        }
+    }
+
+    pub fn set_additional(&self, endpoints: Vec<RelayEndpoint>) {
+        if let Ok(mut current) = self.endpoints.write() {
+            current.additional = endpoints;
+        }
+    }
+
+    pub fn snapshot(&self) -> (Option<RelayEndpoint>, Vec<RelayEndpoint>) {
+        self.endpoints
+            .read()
+            .map(|endpoints| (endpoints.primary.clone(), endpoints.additional.clone()))
+            .unwrap_or_default()
+    }
+}
+
 /// 信令服务器
 pub struct SignalingServer {
     bind_addr: String,
     session_manager: Arc<SessionManager>,
-    relay_endpoint: Option<RelayEndpoint>,
-    relay_endpoints: Arc<Vec<RelayEndpoint>>,
+    relay_directory: RelayEndpointDirectory,
     join_request_store: Option<Arc<JoinRequestStore>>,
     invitation_store: Option<Arc<InvitationStore>>,
     member_lifecycle_store: Option<Arc<MemberLifecycleStore>>,
@@ -78,8 +113,7 @@ impl SignalingServer {
         Ok(Self {
             bind_addr,
             session_manager,
-            relay_endpoint: None,
-            relay_endpoints: Arc::new(Vec::new()),
+            relay_directory: RelayEndpointDirectory::default(),
             join_request_store: None,
             invitation_store: None,
             member_lifecycle_store: None,
@@ -95,8 +129,7 @@ impl SignalingServer {
         Self {
             bind_addr,
             session_manager,
-            relay_endpoint: None,
-            relay_endpoints: Arc::new(Vec::new()),
+            relay_directory: RelayEndpointDirectory::default(),
             join_request_store: None,
             invitation_store: None,
             member_lifecycle_store: None,
@@ -127,14 +160,18 @@ impl SignalingServer {
             .context("无法读取信令服务监听地址")
     }
 
-    pub fn with_relay_endpoint(mut self, relay_endpoint: RelayEndpoint) -> Self {
-        self.relay_endpoint = Some(relay_endpoint);
+    pub fn with_relay_endpoint(self, relay_endpoint: RelayEndpoint) -> Self {
+        self.relay_directory.set_primary(Some(relay_endpoint));
         self
     }
 
-    pub fn with_relay_endpoints(mut self, relay_endpoints: Vec<RelayEndpoint>) -> Self {
-        self.relay_endpoints = Arc::new(relay_endpoints);
+    pub fn with_relay_endpoints(self, relay_endpoints: Vec<RelayEndpoint>) -> Self {
+        self.relay_directory.set_additional(relay_endpoints);
         self
+    }
+
+    pub fn relay_endpoint_directory(&self) -> RelayEndpointDirectory {
+        self.relay_directory.clone()
     }
 
     /// Inject the authoritative owner record used for direct join disclosure.
@@ -292,8 +329,7 @@ impl SignalingServer {
                 Ok((stream, addr)) => {
                     tracing::info!("新连接来自: {}", addr);
                     let session_manager = self.session_manager.clone();
-                    let relay_endpoint = self.relay_endpoint.clone();
-                    let relay_endpoints = self.relay_endpoints.clone();
+                    let relay_directory = self.relay_directory.clone();
                     let join_request_store = self.join_request_store.clone();
                     let invitation_store = self.invitation_store.clone();
                     let member_lifecycle_store = self.member_lifecycle_store.clone();
@@ -307,8 +343,7 @@ impl SignalingServer {
                             stream,
                             addr,
                             session_manager,
-                            relay_endpoint,
-                            relay_endpoints,
+                            relay_directory,
                             join_request_store,
                             invitation_store,
                             member_lifecycle_store,
@@ -360,8 +395,7 @@ async fn handle_connection(
     stream: TcpStream,
     addr: SocketAddr,
     session_manager: Arc<SessionManager>,
-    relay_endpoint: Option<RelayEndpoint>,
-    relay_endpoints: Arc<Vec<RelayEndpoint>>,
+    relay_directory: RelayEndpointDirectory,
     join_request_store: Option<Arc<JoinRequestStore>>,
     invitation_store: Option<Arc<InvitationStore>>,
     member_lifecycle_store: Option<Arc<MemberLifecycleStore>>,
@@ -389,8 +423,7 @@ async fn handle_connection(
             &tx,
             &mut client_id,
             local_addr,
-            relay_endpoint.as_ref(),
-            &relay_endpoints,
+            &relay_directory,
             join_request_store.as_deref(),
             invitation_store.as_deref(),
             member_lifecycle_store.as_deref(),
@@ -435,8 +468,7 @@ async fn handle_connection_message(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &mut Option<String>,
     local_addr: Option<SocketAddr>,
-    relay_endpoint: Option<&RelayEndpoint>,
-    relay_endpoints: &[RelayEndpoint],
+    relay_directory: &RelayEndpointDirectory,
     join_request_store: Option<&JoinRequestStore>,
     invitation_store: Option<&InvitationStore>,
     member_lifecycle_store: Option<&MemberLifecycleStore>,
@@ -454,8 +486,7 @@ async fn handle_connection_message(
                 tx,
                 client_id,
                 local_addr,
-                relay_endpoint,
-                relay_endpoints,
+                relay_directory,
                 join_request_store,
                 invitation_store,
                 member_lifecycle_store,
@@ -488,8 +519,7 @@ async fn handle_binary_message(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &mut Option<String>,
     local_addr: Option<SocketAddr>,
-    relay_endpoint: Option<&RelayEndpoint>,
-    relay_endpoints: &[RelayEndpoint],
+    relay_directory: &RelayEndpointDirectory,
     join_request_store: Option<&JoinRequestStore>,
     invitation_store: Option<&InvitationStore>,
     member_lifecycle_store: Option<&MemberLifecycleStore>,
@@ -514,8 +544,7 @@ async fn handle_binary_message(
                 tx,
                 client_id,
                 local_addr,
-                relay_endpoint,
-                relay_endpoints,
+                relay_directory,
                 join_request_store,
                 invitation_store,
                 member_lifecycle_store,
@@ -581,8 +610,7 @@ async fn handle_signaling_message(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &mut Option<String>,
     local_addr: Option<SocketAddr>,
-    relay_endpoint: Option<&RelayEndpoint>,
-    relay_endpoints: &[RelayEndpoint],
+    relay_directory: &RelayEndpointDirectory,
     join_request_store: Option<&JoinRequestStore>,
     invitation_store: Option<&InvitationStore>,
     member_lifecycle_store: Option<&MemberLifecycleStore>,
@@ -600,8 +628,7 @@ async fn handle_signaling_message(
                 tx,
                 client_id,
                 local_addr,
-                relay_endpoint,
-                relay_endpoints,
+                relay_directory,
             )
             .await?;
         }
@@ -2253,8 +2280,7 @@ async fn handle_register_message(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &mut Option<String>,
     local_addr: Option<SocketAddr>,
-    relay_endpoint: Option<&RelayEndpoint>,
-    relay_endpoints: &[RelayEndpoint],
+    relay_directory: &RelayEndpointDirectory,
 ) -> Result<()> {
     let SignalingMessage::Register {
         client_id: id,
@@ -2355,6 +2381,7 @@ async fn handle_register_message(
         .transpose()?
         .unwrap_or(false);
 
+    let (relay_endpoint, relay_endpoints) = relay_directory.snapshot();
     let response = SignalingMessage::RegisterAck {
         assigned_ip: virtual_ips.primary_ipv6(),
         assigned_ips: Some(virtual_ips),
@@ -2362,11 +2389,7 @@ async fn handle_register_message(
         ipv4_prefix: Some(ipv4_prefix),
         peers,
         relay_endpoint: is_data_plane_member
-            .then(|| {
-                relay_endpoint
-                    .cloned()
-                    .map(|endpoint| endpoint.for_signaling_connection(local_addr))
-            })
+            .then(|| relay_endpoint.map(|endpoint| endpoint.for_signaling_connection(local_addr)))
             .flatten(),
         relay_endpoints: if is_data_plane_member {
             relay_endpoints
@@ -2682,6 +2705,48 @@ mod tests {
         };
         assert_eq!(code, ErrorCode::Internal.as_u16());
         assert!(!message.contains("filesystem"));
+    }
+
+    #[test]
+    fn relay_endpoint_directory_reflects_live_enable_and_disable() {
+        let directory = RelayEndpointDirectory::default();
+        let first = RelayEndpoint {
+            addr: "127.0.0.1:41000".parse().expect("first relay address"),
+            server_name: "fuckipv6.local".into(),
+            public_key_pin: [1; 32],
+            provider_node_id: Some(NodeId::from_public_key(b"first-relay-provider")),
+        };
+        let second = RelayEndpoint {
+            addr: "127.0.0.1:41001".parse().expect("second relay address"),
+            server_name: "fuckipv6.local".into(),
+            public_key_pin: [2; 32],
+            provider_node_id: Some(NodeId::from_public_key(b"second-relay-provider")),
+        };
+
+        directory.set_primary(Some(first.clone()));
+        assert_eq!(directory.snapshot(), (Some(first.clone()), Vec::new()));
+
+        directory.set_additional(vec![second.clone()]);
+        assert_eq!(
+            directory.snapshot(),
+            (Some(first.clone()), vec![second.clone()])
+        );
+
+        let secondary = RelayEndpoint {
+            addr: "127.0.0.1:41002".parse().expect("secondary relay address"),
+            server_name: "fuckipv6.local".into(),
+            public_key_pin: [3; 32],
+            provider_node_id: Some(NodeId::from_public_key(b"secondary-relay-provider")),
+        };
+        directory.set_additional(vec![second.clone(), secondary]);
+        let (primary, additional) = directory.snapshot();
+        assert_eq!(primary, Some(first));
+        assert_eq!(additional.len(), 2);
+        assert_eq!(additional[0], second);
+
+        directory.set_primary(None);
+        directory.set_additional(Vec::new());
+        assert_eq!(directory.snapshot(), (None, Vec::new()));
     }
 
     #[test]

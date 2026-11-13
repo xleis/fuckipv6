@@ -481,6 +481,14 @@ impl RecoveryReport {
         self.status == RecoveryStatus::Recovered
     }
 
+    /// End-to-end duration for this recovery pass. Timestamps are the durable
+    /// wire fields; this helper keeps every adapter and log record from
+    /// inventing a different subtraction or underflow policy.
+    pub fn duration_ms(&self) -> u64 {
+        self.completed_at_unix_ms
+            .saturating_sub(self.started_at_unix_ms)
+    }
+
     pub(crate) fn local_resource_validation(
         &self,
         expectations: RecoveryExpectations,
@@ -555,6 +563,7 @@ impl RecoveryCoordinator {
         }
 
         let deadline = Instant::now() + Duration::from_millis(request.hard_timeout_ms);
+        let mut expectations = request.expectations;
 
         let before = match bounded(deadline, backend.snapshot()).await {
             Ok(snapshot) => snapshot,
@@ -571,6 +580,14 @@ impl RecoveryCoordinator {
             match bounded(deadline, backend.revoke_path(path)).await {
                 Ok(()) => {
                     report.revoked_paths.push(path);
+                    // The trigger has just invalidated this path. Requiring the
+                    // same stale path to become connected again would abort
+                    // recovery before the reachability probe can establish the
+                    // required fail-closed degradation.
+                    match path {
+                        InvalidatedPath::Exit => expectations.exit_path_required = false,
+                        InvalidatedPath::Relay => expectations.relay_path_required = false,
+                    }
                     true
                 }
                 Err(BoundedError::Failed) => false,
@@ -670,8 +687,7 @@ impl RecoveryCoordinator {
         };
         report.after = Some(after.clone());
 
-        if let Some((error_code, failure)) = resource_validation_error(&after, request.expectations)
-        {
+        if let Some((error_code, failure)) = resource_validation_error(&after, expectations) {
             apply_fail_closed(backend, deadline, &request, &mut report, failure).await;
             return report.finish(RecoveryStatus::Failed, Some(error_code));
         }
@@ -770,7 +786,9 @@ fn resource_validation_error(
     snapshot: &RecoveryResourceSnapshot,
     expectations: RecoveryExpectations,
 ) -> Option<(&'static str, TrafficFailureKind)> {
-    if snapshot.dns.insecure_fallback_detected || snapshot.dns.unsecured_resolvers > 0 {
+    if expectations.dns_required
+        && (snapshot.dns.insecure_fallback_detected || snapshot.dns.unsecured_resolvers > 0)
+    {
         return Some((
             "recovery.dns_unsafe_fallback_forbidden",
             TrafficFailureKind::DnsPollutionDetected,
@@ -1076,6 +1094,12 @@ mod tests {
         assert!(report.diagnostic_id.starts_with("diag-recovery-"));
         assert!(report.completed_at_unix_ms >= report.started_at_unix_ms);
         assert_eq!(
+            report.duration_ms(),
+            report
+                .completed_at_unix_ms
+                .saturating_sub(report.started_at_unix_ms)
+        );
+        assert_eq!(
             backend.calls(),
             vec![
                 "snapshot",
@@ -1084,6 +1108,23 @@ mod tests {
                 "probe:google",
                 "probe:youtube",
             ]
+        );
+    }
+
+    #[test]
+    fn recovery_report_exposes_status_duration_and_reason() {
+        let request = request(RecoveryTrigger::RelayDisconnected);
+        let mut report = RecoveryReport::new(&request, 1_000, "diag-recovery-test".into());
+        report.started_at_unix_ms = 1_000;
+        report.completed_at_unix_ms = 1_275;
+        report.status = RecoveryStatus::DegradedFailClosed;
+        report.error_code = Some("recovery.relay_path_unhealthy".into());
+
+        assert_eq!(report.status, RecoveryStatus::DegradedFailClosed);
+        assert_eq!(report.duration_ms(), 275);
+        assert_eq!(
+            report.error_code.as_deref(),
+            Some("recovery.relay_path_unhealthy")
         );
     }
 
@@ -1250,6 +1291,104 @@ mod tests {
         assert_eq!(decision.failure, TrafficFailureKind::RuntimeDisconnected);
         assert_eq!(decision.outcome, TrafficFailureOutcome::FailClosed);
         assert!(decision.direct_fallback.is_none());
+    }
+
+    #[tokio::test]
+    async fn relay_runtime_and_exit_failure_chain_stays_bounded_and_fail_closed() {
+        // This is an in-process failure matrix, not a real three-node topology
+        // test. It proves that consecutive subsystem failures cannot turn into
+        // retry loops or an implicit direct fallback in the coordinator.
+        let mut relay_and_exit_down = healthy_snapshot();
+        relay_and_exit_down.relay_path = PathRecoveryState::Disconnected;
+        relay_and_exit_down.exit_path = PathRecoveryState::Disconnected;
+        let mut backend = FakeBackend::new(healthy_snapshot(), healthy_snapshot());
+        backend.state.lock().unwrap().snapshots.extend([
+            Ok(relay_and_exit_down.clone()),
+            Ok(healthy_snapshot()),
+            Ok(relay_and_exit_down),
+            Ok(healthy_snapshot()),
+        ]);
+        // Direct fallback is enabled only for an unrelated timeout failure. None
+        // of the failures below may be promoted to direct connectivity.
+        let policy = TrafficFailurePolicy::with_direct_fallback(
+            [TrafficFailureKind::ConnectionTimeout],
+            TrafficDefaultConfirmedBy::Owner,
+            1_700_000_000_000,
+        )
+        .unwrap();
+        let request = |trigger| {
+            RecoveryRequest::new(trigger, route_context(), policy.clone())
+                .with_probes(vec![RecoveryProbeTarget::Controlled("matrix".into())])
+                .with_hard_timeout_ms(1_000)
+        };
+
+        let relay = RecoveryCoordinator
+            .recover(&mut backend, request(RecoveryTrigger::RelayDisconnected))
+            .await;
+        let runtime = RecoveryCoordinator
+            .recover(&mut backend, request(RecoveryTrigger::RuntimeDisconnected))
+            .await;
+        let exit = RecoveryCoordinator
+            .recover(&mut backend, request(RecoveryTrigger::ExitDisconnected))
+            .await;
+
+        for report in [&relay, &runtime, &exit] {
+            assert_eq!(report.status, RecoveryStatus::DegradedFailClosed);
+            assert!(report.fail_closed_required);
+            assert!(report.traffic_session_validation.is_none());
+            assert_eq!(report.failure_decisions.len(), 1);
+            assert_eq!(
+                report.failure_decisions[0].outcome,
+                TrafficFailureOutcome::FailClosed
+            );
+            assert!(report.failure_decisions[0].direct_fallback.is_none());
+        }
+        assert_eq!(relay.revoked_paths, vec![InvalidatedPath::Relay]);
+        assert!(runtime.revoked_paths.is_empty());
+        assert_eq!(exit.revoked_paths, vec![InvalidatedPath::Exit]);
+        let before_runtime = runtime.before.as_ref().expect("runtime before snapshot");
+        assert_eq!(before_runtime.relay_path, PathRecoveryState::Disconnected);
+        assert_eq!(before_runtime.exit_path, PathRecoveryState::Disconnected);
+
+        let applications = backend.applications();
+        assert_eq!(
+            applications.len(),
+            3,
+            "each failure gets one bounded decision"
+        );
+        assert_eq!(
+            applications
+                .iter()
+                .map(|application| application.decision.failure)
+                .collect::<Vec<_>>(),
+            vec![
+                TrafficFailureKind::NetworkSelectionUnavailable,
+                TrafficFailureKind::RuntimeDisconnected,
+                TrafficFailureKind::ExitUnavailable,
+            ]
+        );
+        let calls = backend.calls();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.as_str() == "revoke:Relay")
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.as_str() == "revoke:Exit")
+                .count(),
+            1
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.starts_with("reconcile:"))
+                .count(),
+            3
+        );
     }
 
     #[tokio::test]

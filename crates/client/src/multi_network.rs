@@ -1,5 +1,6 @@
 use anyhow::Result;
 use fuckipv6_common::domain::NodeId;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::cli::commands::{self, RuntimeOptions};
@@ -8,10 +9,11 @@ use crate::file_share::FileOwnerService;
 use crate::ipc::{self, MultiNetworkRegistry};
 use crate::node::runtime_metadata;
 use crate::node::{
-    spawn_command_bus_with_runtime, NetworkRuntimeManager, NodeCommandBus, NodeEventBus,
+    spawn_command_bus_with_runtime_and_audit, NetworkRuntimeManager, NodeCommandBus, NodeEventBus,
     NodeEventKind, NodeLifecycle, NodeLifecycleSnapshot, NodeNetworkSnapshot, NodeNetworkStatus,
     NodePeerSnapshot, NodeRuntimePlan, NodeStateStore, NodeTrafficSnapshot,
 };
+use crate::owner_security::audit::OwnerSecurityAudit;
 use crate::symmetric::EmbeddedServiceManager;
 
 /// 根据网络名称与用户配置生成唯一的 TUN 虚拟网卡接口名称
@@ -97,10 +99,11 @@ impl MultiNetworkSupervisor {
         let state =
             NodeStateStore::with_events_identity_and_ui(events.clone(), Some(identity), ui_mode);
         let owner = NodeId::from_public_key(&node_identity.public_key_bytes());
-        let file_owner = FileOwnerService::new(configs.config_dir(), owner, state.clone())?;
+        let file_owner = FileOwnerService::new(configs.config_dir(), owner.clone(), state.clone())?;
+        let owner_audit = Arc::new(OwnerSecurityAudit::new(configs.config_dir(), owner)?);
         let services = EmbeddedServiceManager::spawn_with_config(8, configs.clone());
         let lifecycle = NodeLifecycle::new();
-        let runtimes = NetworkRuntimeManager::spawn(
+        let runtimes = NetworkRuntimeManager::spawn_with_failover_audit(
             configs.clone(),
             options.clone(),
             state.clone(),
@@ -109,14 +112,16 @@ impl MultiNetworkSupervisor {
             registry.clone(),
             services.clone(),
             file_owner.network_runtime(),
+            Some(owner_audit.clone()),
         );
-        let commands = spawn_command_bus_with_runtime(
+        let commands = spawn_command_bus_with_runtime_and_audit(
             state.clone(),
             registry.clone(),
             events.clone(),
             services.clone(),
             runtimes.clone(),
             configs,
+            owner_audit,
         );
         Ok(Self {
             registry,
@@ -223,7 +228,7 @@ impl MultiNetworkSupervisor {
         let runtime = ipc::multi_status_snapshot(&self.registry).await;
         let logs = runtime_metadata::recent_log_entries();
         self.state
-            .update(|snapshot| {
+            .update_if_changed(|snapshot| {
                 for network in &runtime.networks {
                     if let Some(existing) = snapshot
                         .networks

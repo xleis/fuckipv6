@@ -107,6 +107,7 @@ pub enum ResourceKind {
     SecurityPolicy,
     TrafficPolicy,
     Capability,
+    Relay,
     ExitGrant,
     FileShare,
     Audit,
@@ -115,7 +116,7 @@ pub enum ResourceKind {
 }
 
 impl ResourceKind {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Network,
         Self::Ownership,
         Self::Membership,
@@ -123,6 +124,7 @@ impl ResourceKind {
         Self::SecurityPolicy,
         Self::TrafficPolicy,
         Self::Capability,
+        Self::Relay,
         Self::ExitGrant,
         Self::FileShare,
         Self::Audit,
@@ -213,10 +215,13 @@ impl PermissionRule {
     }
 }
 
-/// One deterministic baseline rule for a durable membership role. The rule
-/// grants only within the role ceiling; both the resource network and active
-/// membership are conditions, so one network's role cannot authorize another.
-/// Runtime authorization and the policy tester consume this same baseline.
+/// One deterministic baseline rule for a durable membership role. Relay is
+/// intentionally excluded: providing or consuming Relay is an independent
+/// capability that must be granted explicitly by each authorization layer.
+/// The rule grants only within the role ceiling; both the resource network and
+/// active membership are conditions, so one network's role cannot authorize
+/// another. Runtime authorization and the policy tester consume this same
+/// baseline.
 pub fn role_baseline_policy(network_id: &NetworkId, role: NetworkRole) -> Vec<PermissionRule> {
     let role_name = match role {
         NetworkRole::Owner => "owner",
@@ -230,7 +235,10 @@ pub fn role_baseline_policy(network_id: &NetworkId, role: NetworkRole) -> Vec<Pe
         ),
         effect: PermissionEffect::Allow,
         subjects: vec![SubjectSelector::Role(role)],
-        resources: ResourceKind::ALL.to_vec(),
+        resources: ResourceKind::ALL
+            .into_iter()
+            .filter(|kind| *kind != ResourceKind::Relay)
+            .collect(),
         actions: PolicyAction::ALL.to_vec(),
         conditions: vec![
             PermissionCondition::MembershipActive,
@@ -707,7 +715,10 @@ pub fn role_ceiling_allows(
                     | ResourceKind::TrafficPolicy
             ) | (
                 PolicyAction::Use,
-                ResourceKind::Capability | ResourceKind::ExitGrant | ResourceKind::FileShare
+                ResourceKind::Capability
+                    | ResourceKind::Relay
+                    | ResourceKind::ExitGrant
+                    | ResourceKind::FileShare
             )
         ),
         NetworkRole::TemporaryCoordinator => matches!(
@@ -923,7 +934,10 @@ mod tests {
                         | ResourceKind::TrafficPolicy
                 ) | (
                     PolicyAction::Use,
-                    ResourceKind::Capability | ResourceKind::ExitGrant | ResourceKind::FileShare
+                    ResourceKind::Capability
+                        | ResourceKind::Relay
+                        | ResourceKind::ExitGrant
+                        | ResourceKind::FileShare
                 )
             ),
             NetworkRole::TemporaryCoordinator => matches!(
@@ -956,8 +970,34 @@ mod tests {
                 }
             }
         }
-        assert_eq!(checked, 4 * 13 * 12);
-        assert_eq!(checked, 624);
+        assert_eq!(checked, 4 * 13 * 13);
+        assert_eq!(checked, 676);
+    }
+
+    #[test]
+    fn durable_role_baseline_does_not_grant_relay_use() {
+        let (network_id, actor, _) = ids();
+        let request = PermissionRequest {
+            action: PolicyAction::Use,
+            resource: ResourceRef {
+                kind: ResourceKind::Relay,
+                network_id: network_id.clone(),
+                object_id: Some("relay".into()),
+            },
+            intent: PermissionIntent::ReadOnly,
+        };
+        for role in NetworkRole::ALL {
+            let baseline = role_baseline_policy(&network_id, role);
+            assert!(
+                baseline
+                    .iter()
+                    .all(|rule| !rule.resources.contains(&ResourceKind::Relay)),
+                "durable role baseline unexpectedly grants Relay to {role:?}"
+            );
+            let context = context(network_id.clone(), actor.clone(), role);
+            let decision = evaluate_permissions(&baseline, &baseline, &request, &context);
+            assert!(!decision.is_allowed());
+        }
     }
 
     #[test]

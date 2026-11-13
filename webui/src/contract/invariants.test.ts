@@ -1458,6 +1458,70 @@ describe("node UI contract invariants", () => {
     ).toThrow("member lifecycle revision invalid");
   });
 
+  it("keeps Relay role actions on the shared command and selection gates", () => {
+    const action = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((candidate) => candidate.id === "set_relay_role")!;
+    expect(action).toMatchObject({
+      command: "set_network_role",
+      backend_status: "implemented",
+      permission: "manage_roles",
+      availability: "network_selected",
+    });
+
+    const snapshot = emptySnapshot();
+    expect(executionBlockReason(action, snapshot, "home")).toBe(
+      "permission_denied",
+    );
+    snapshot.permissions!.permissions.push("manage_roles");
+    expect(executionBlockReason(action, snapshot, "home")).toBe(
+      "no_network_selected",
+    );
+
+    snapshot.networks = [
+      {
+        name: "home",
+        tun_name: "fk-home",
+        status: "online",
+        assigned_ipv6: "fd00::2",
+        assigned_ipv4: null,
+        p2p_listen_addr: null,
+        uptime_secs: 1,
+        roles: ["member"],
+        peer_count: 0,
+        traffic: {
+          tun_rx_bytes: 0,
+          tun_tx_bytes: 0,
+          tun_rx_packets: 0,
+          tun_tx_packets: 0,
+          p2p_rx_bytes: 0,
+          p2p_tx_bytes: 0,
+          p2p_rx_packets: 0,
+          p2p_tx_packets: 0,
+          error_count: 0,
+        },
+      },
+    ];
+    expect(executionBlockReason(action, snapshot, "home")).toBeNull();
+
+    const values = initialActionValues(action, snapshot, "home");
+    expect(values).toMatchObject({
+      network_name: "home",
+      role: "relay",
+      enabled: false,
+    });
+    expect(
+      buildCommand(action, { ...values, enabled: "true" }, "en"),
+    ).toEqual({
+      command: "set_network_role",
+      payload: {
+        network_name: "home",
+        role: "relay",
+        enabled: true,
+      },
+    });
+  });
+
   it("uses the shared canonical reason for unsupported exit-node actions", () => {
     const action = manifest.pages
       .flatMap((page) => page.actions)
@@ -1888,6 +1952,63 @@ describe("node UI contract invariants", () => {
       groups: [`group_${"G".repeat(43)}`, "not-a-group"],
     });
     expect(parseError(invalidArrayElement).path).toBe("/groups/1");
+
+    const withRelayLimits = {
+      ...valid,
+      local_policy: {
+        node_id: nodeId,
+        revision: 1,
+        issued_at_unix_ms: 1_700_000_000_000,
+        expires_at_unix_ms: 1_700_000_100_000,
+        network_scope: { kind: "all" },
+        relay_limits: {
+          max_connections: 32,
+          max_concurrent_streams: 128,
+          max_bandwidth_kbps: 50_000,
+          max_bytes: 1_000_000,
+          max_cpu_percent: 75,
+          max_memory_bytes: 256_000_000,
+          max_session_duration_secs: 3_600,
+          quota_reset_at_unix_ms: null,
+        },
+      },
+      network_acl: {
+        network_id: networkId,
+        revision: 1,
+        issued_at_unix_ms: 1_700_000_000_000,
+        expires_at_unix_ms: 1_700_000_100_000,
+        relay_limits: {
+          max_connections: 16,
+          max_bytes: 500_000,
+        },
+      },
+    };
+    const parsed = parsePolicyTestInputJson(JSON.stringify(withRelayLimits));
+    expect(parsed.local_policy?.relay_limits).toEqual(
+      withRelayLimits.local_policy.relay_limits,
+    );
+    expect(parsed.network_acl?.relay_limits).toEqual({
+      max_connections: 16,
+      max_bytes: 500_000,
+    });
+
+    const zeroLimit = structuredClone(withRelayLimits);
+    zeroLimit.local_policy.relay_limits.max_connections = 0;
+    expect(parseError(JSON.stringify(zeroLimit)).path).toBe(
+      "/local_policy/relay_limits/max_connections",
+    );
+    const excessiveCpu = structuredClone(withRelayLimits);
+    excessiveCpu.local_policy.relay_limits.max_cpu_percent = 101;
+    expect(parseError(JSON.stringify(excessiveCpu)).path).toBe(
+      "/local_policy/relay_limits/max_cpu_percent",
+    );
+    const unknownLimit = structuredClone(withRelayLimits) as unknown as {
+      network_acl: { relay_limits: Record<string, unknown> };
+    };
+    unknownLimit.network_acl.relay_limits.max_packets = 10;
+    expect(parseError(JSON.stringify(unknownLimit)).path).toBe(
+      "/network_acl/relay_limits/max_packets",
+    );
   });
 
   it("validates and summarizes an explainable policy test result", () => {

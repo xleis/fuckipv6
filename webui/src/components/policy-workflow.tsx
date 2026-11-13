@@ -56,6 +56,7 @@ import type {
   PolicySnapshot,
   PolicyTestInput,
   PolicyTestResult,
+  RelayLimitPolicy,
   ResourceKind,
   SubjectSelector,
 } from "../../../contracts/typescript/node-contract-v1";
@@ -153,6 +154,17 @@ export type PolicyVetoDraft = {
   contributions: string;
 };
 
+export type PolicyRelayLimitDraft = {
+  maxConnections: string;
+  maxConcurrentStreams: string;
+  maxBandwidthKbps: string;
+  maxBytes: string;
+  maxCpuPercent: string;
+  maxMemoryBytes: string;
+  maxSessionDurationSecs: string;
+  quotaResetAtUnixMs: string;
+};
+
 export type PolicyStructuredDraft = {
   networkId: string;
   actor: string;
@@ -175,12 +187,14 @@ export type PolicyStructuredDraft = {
   networkIds: string;
   localRules: PolicyRuleDraft[];
   vetoes: PolicyVetoDraft[];
+  localRelayLimits: PolicyRelayLimitDraft;
   includeNetworkAcl: boolean;
   aclRevision: string;
   aclIssuedAt: string;
   aclExpiresAt: string;
   aclRules: PolicyRuleDraft[];
   grants: PolicyGrantDraft[];
+  aclRelayLimits: PolicyRelayLimitDraft;
 };
 
 export type PolicyDraftMemo = {
@@ -255,6 +269,19 @@ function emptyVeto(index: number): PolicyVetoDraft {
   };
 }
 
+function emptyRelayLimits(): PolicyRelayLimitDraft {
+  return {
+    maxConnections: "",
+    maxConcurrentStreams: "",
+    maxBandwidthKbps: "",
+    maxBytes: "",
+    maxCpuPercent: "",
+    maxMemoryBytes: "",
+    maxSessionDurationSecs: "",
+    quotaResetAtUnixMs: "",
+  };
+}
+
 function validId(value: string | null | undefined, pattern: RegExp): string {
   return value && pattern.test(value) ? value : "";
 }
@@ -317,12 +344,35 @@ function defaultStructuredDraft(
     networkIds: networkId,
     localRules: [],
     vetoes: [],
+    localRelayLimits: emptyRelayLimits(),
     includeNetworkAcl: false,
     aclRevision: "1",
     aclIssuedAt: String(now),
     aclExpiresAt: String(now + 86_400_000),
     aclRules: [],
     grants: [],
+    aclRelayLimits: emptyRelayLimits(),
+  };
+}
+
+function restoredStructuredDraft(
+  draft: PolicyStructuredDraft | undefined,
+  fallback: PolicyStructuredDraft,
+): PolicyStructuredDraft {
+  if (!draft) return fallback;
+  const localRelayLimits = draft.localRelayLimits;
+  const aclRelayLimits = draft.aclRelayLimits;
+  return {
+    ...fallback,
+    ...draft,
+    localRelayLimits: {
+      ...fallback.localRelayLimits,
+      ...(localRelayLimits ?? {}),
+    },
+    aclRelayLimits: {
+      ...fallback.aclRelayLimits,
+      ...(aclRelayLimits ?? {}),
+    },
   };
 }
 
@@ -391,6 +441,65 @@ function scopeFromDraft(draft: PolicyStructuredDraft): NodeNetworkScope {
     : { kind: "only", network_ids: csv(draft.networkIds) as never[] };
 }
 
+function optionalLimit(value: string): number | undefined {
+  const trimmed = value.trim();
+  return trimmed ? Number(trimmed) : undefined;
+}
+
+function relayLimitsFromDraft(
+  draft: PolicyRelayLimitDraft,
+): RelayLimitPolicy {
+  const maxConnections = optionalLimit(draft.maxConnections);
+  const maxConcurrentStreams = optionalLimit(draft.maxConcurrentStreams);
+  const maxBandwidthKbps = optionalLimit(draft.maxBandwidthKbps);
+  const maxBytes = optionalLimit(draft.maxBytes);
+  const maxCpuPercent = optionalLimit(draft.maxCpuPercent);
+  const maxMemoryBytes = optionalLimit(draft.maxMemoryBytes);
+  const maxSessionDurationSecs = optionalLimit(draft.maxSessionDurationSecs);
+  const quotaResetAtUnixMs = optionalLimit(draft.quotaResetAtUnixMs);
+  return {
+    ...(maxConnections !== undefined ? { max_connections: maxConnections } : {}),
+    ...(maxConcurrentStreams !== undefined
+      ? { max_concurrent_streams: maxConcurrentStreams }
+      : {}),
+    ...(maxBandwidthKbps !== undefined
+      ? { max_bandwidth_kbps: maxBandwidthKbps }
+      : {}),
+    ...(maxBytes !== undefined ? { max_bytes: maxBytes } : {}),
+    ...(maxCpuPercent !== undefined ? { max_cpu_percent: maxCpuPercent } : {}),
+    ...(maxMemoryBytes !== undefined
+      ? { max_memory_bytes: maxMemoryBytes }
+      : {}),
+    ...(maxSessionDurationSecs !== undefined
+      ? { max_session_duration_secs: maxSessionDurationSecs }
+      : {}),
+    ...(quotaResetAtUnixMs !== undefined
+      ? { quota_reset_at_unix_ms: quotaResetAtUnixMs }
+      : {}),
+  };
+}
+
+function optionalLimitString(value: number | null | undefined): string {
+  return value === null || value === undefined ? "" : String(value);
+}
+
+function relayLimitsFromPolicy(
+  limits: RelayLimitPolicy | undefined,
+): PolicyRelayLimitDraft {
+  return {
+    maxConnections: optionalLimitString(limits?.max_connections),
+    maxConcurrentStreams: optionalLimitString(limits?.max_concurrent_streams),
+    maxBandwidthKbps: optionalLimitString(limits?.max_bandwidth_kbps),
+    maxBytes: optionalLimitString(limits?.max_bytes),
+    maxCpuPercent: optionalLimitString(limits?.max_cpu_percent),
+    maxMemoryBytes: optionalLimitString(limits?.max_memory_bytes),
+    maxSessionDurationSecs: optionalLimitString(
+      limits?.max_session_duration_secs,
+    ),
+    quotaResetAtUnixMs: optionalLimitString(limits?.quota_reset_at_unix_ms),
+  };
+}
+
 export function structuredPolicyInput(
   draft: PolicyStructuredDraft,
 ): PolicyTestInput {
@@ -410,6 +519,7 @@ export function structuredPolicyInput(
               veto.contributions,
             ) as NodeContributionVeto["contributions"],
           })),
+          relay_limits: relayLimitsFromDraft(draft.localRelayLimits),
         }
       : undefined;
   const networkAcl: NetworkAcl | undefined = draft.includeNetworkAcl
@@ -420,6 +530,7 @@ export function structuredPolicyInput(
         expires_at_unix_ms: Number(draft.aclExpiresAt),
         rules: draft.aclRules.map(ruleFromDraft),
         grants: draft.grants.map(grantFromDraft),
+        relay_limits: relayLimitsFromDraft(draft.aclRelayLimits),
       }
     : undefined;
   return {
@@ -541,6 +652,7 @@ export function structuredDraftFromPolicyInput(
         vetoId: veto.veto_id,
         contributions: veto.contributions.join(","),
       })) ?? [],
+    localRelayLimits: relayLimitsFromPolicy(localPolicy?.relay_limits),
     includeNetworkAcl: Boolean(networkAcl),
     aclRevision: String(networkAcl?.revision ?? fallback.aclRevision),
     aclIssuedAt: String(networkAcl?.issued_at_unix_ms ?? fallback.aclIssuedAt),
@@ -549,6 +661,7 @@ export function structuredDraftFromPolicyInput(
     ),
     aclRules: networkAcl?.rules?.map(ruleDraftFromRule) ?? [],
     grants: networkAcl?.grants?.map(grantDraftFromGrant) ?? [],
+    aclRelayLimits: relayLimitsFromPolicy(networkAcl?.relay_limits),
   };
 }
 
@@ -757,6 +870,60 @@ function Field({ id, labelText, children, help }: FieldProps): JSX.Element {
       <label htmlFor={id}>{labelText}</label>
       {children}
       {help ? <small>{help}</small> : null}
+    </div>
+  );
+}
+
+const RELAY_LIMIT_FIELDS: Array<{
+  draft: keyof PolicyRelayLimitDraft;
+  field: keyof RelayLimitPolicy;
+}> = [
+  { draft: "maxConnections", field: "max_connections" },
+  { draft: "maxConcurrentStreams", field: "max_concurrent_streams" },
+  { draft: "maxBandwidthKbps", field: "max_bandwidth_kbps" },
+  { draft: "maxBytes", field: "max_bytes" },
+  { draft: "maxCpuPercent", field: "max_cpu_percent" },
+  { draft: "maxMemoryBytes", field: "max_memory_bytes" },
+  { draft: "maxSessionDurationSecs", field: "max_session_duration_secs" },
+  { draft: "quotaResetAtUnixMs", field: "quota_reset_at_unix_ms" },
+];
+
+function RelayLimitsEditor({
+  idPrefix,
+  limits,
+  locale,
+  onChange,
+}: {
+  idPrefix: string;
+  limits: PolicyRelayLimitDraft;
+  locale: Locale;
+  onChange(limits: PolicyRelayLimitDraft): void;
+}): JSX.Element {
+  return (
+    <div
+      className="policy-context-grid policy-metadata-grid"
+      data-testid={idPrefix}
+    >
+      {RELAY_LIMIT_FIELDS.map(({ draft, field }) => {
+        const id = `${idPrefix}-${field.replaceAll("_", "-")}`;
+        return (
+          <Field
+            key={field}
+            id={id}
+            labelText={label(locale, `relay.limits.${field}`)}
+          >
+            <input
+              id={id}
+              inputMode="numeric"
+              placeholder={label(locale, "relay.limit.none")}
+              value={limits[draft]}
+              onChange={(event) =>
+                onChange({ ...limits, [draft]: event.target.value })
+              }
+            />
+          </Field>
+        );
+      })}
     </div>
   );
 }
@@ -1301,7 +1468,10 @@ export function PolicyWorkflow({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const initialLoadStarted = useRef(false);
   const [structured, setStructured] = useState<PolicyStructuredDraft>(
-    draft?.structured ?? defaultStructuredDraft(snapshot, selectedNetwork),
+    restoredStructuredDraft(
+      draft?.structured,
+      defaultStructuredDraft(snapshot, selectedNetwork),
+    ),
   );
   const [editor, setEditor] = useState(
     draft?.editor ?? prettyPolicy(structuredPolicyInput(structured)),
@@ -3104,6 +3274,20 @@ export function PolicyWorkflow({
                       ) : null}
                     </div>
                     <div className="policy-list-heading">
+                      <h5>{label(locale, "policy.section.relay_limits")}</h5>
+                    </div>
+                    <p className="policy-editor-help">
+                      {label(locale, "policy.help.relay_limits_local")}
+                    </p>
+                    <RelayLimitsEditor
+                      idPrefix="policy-local-relay-limit"
+                      limits={structured.localRelayLimits}
+                      locale={locale}
+                      onChange={(localRelayLimits) =>
+                        updateStructured({ ...structured, localRelayLimits })
+                      }
+                    />
+                    <div className="policy-list-heading">
                       <h5>{label(locale, "policy.section.rules")}</h5>
                       <button
                         className="secondary-button compact"
@@ -3258,6 +3442,20 @@ export function PolicyWorkflow({
                         />
                       </Field>
                     </div>
+                    <div className="policy-list-heading">
+                      <h5>{label(locale, "policy.section.relay_limits")}</h5>
+                    </div>
+                    <p className="policy-editor-help">
+                      {label(locale, "policy.help.relay_limits_acl")}
+                    </p>
+                    <RelayLimitsEditor
+                      idPrefix="policy-acl-relay-limit"
+                      limits={structured.aclRelayLimits}
+                      locale={locale}
+                      onChange={(aclRelayLimits) =>
+                        updateStructured({ ...structured, aclRelayLimits })
+                      }
+                    />
                     <div className="policy-list-heading">
                       <h5>{label(locale, "policy.section.rules")}</h5>
                       <button

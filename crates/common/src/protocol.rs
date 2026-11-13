@@ -394,6 +394,10 @@ pub struct RelayEndpoint {
     pub addr: SocketAddr,
     pub server_name: String,
     pub public_key_pin: [u8; 32],
+    /// Stable identity of the Relay provider. Legacy endpoints omit this field
+    /// and must never be treated as authorized providers.
+    #[serde(default)]
+    pub provider_node_id: Option<NodeId>,
 }
 
 impl RelayEndpoint {
@@ -998,10 +1002,23 @@ mod tests {
             addr: "0.0.0.0:6667".parse()?,
             server_name: "fuckipv6.local".to_string(),
             public_key_pin: [7; 32],
+            provider_node_id: Some(NodeId::from_public_key(b"relay-provider")),
         };
 
         let rewritten = endpoint.for_signaling_connection(Some("203.0.113.10:6666".parse()?));
         assert_eq!(rewritten.addr, "203.0.113.10:6667".parse()?);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_relay_endpoint_without_provider_identity_is_not_trusted() -> anyhow::Result<()> {
+        let endpoint: RelayEndpoint = serde_json::from_value(serde_json::json!({
+            "addr": "127.0.0.1:6667",
+            "server_name": "fuckipv6.local",
+            "public_key_pin": [7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+                               7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7]
+        }))?;
+        assert_eq!(endpoint.provider_node_id, None);
         Ok(())
     }
 

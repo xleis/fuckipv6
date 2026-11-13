@@ -43,6 +43,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type FormEvent,
   type JSX,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
@@ -50,6 +51,8 @@ import {
 } from "react";
 import type {
   ActivityEntry,
+  EffectiveAccessReason,
+  EffectivePolicyLayer,
   ExitHealthEvidence,
   ExitHealthLayer,
   ExitHealthProtocol,
@@ -62,6 +65,7 @@ import type {
   NodeDiagnosticLayer,
   NodeDiagnosticState,
   NodeDiagnosticsSnapshot,
+  NodeExitSelectionSnapshot,
   NodeLogEntry,
   NodeNetworkSnapshot,
   NodePeerSnapshot,
@@ -73,6 +77,19 @@ import type {
   NodeSnapshot,
   NodeUiAction,
   NodeUiPage,
+  RelayAuthorizationAuditSnapshot,
+  RelayAuthorizationDiagnostic,
+  RelayAuthorizationSourceDiagnostic,
+  RelayExistingSessionPolicy,
+  RelayGovernanceAction,
+  RelayGovernanceAuditSnapshot,
+  RelayGovernanceEvent,
+  RelayHealthIssue,
+  RelayHealthSnapshot,
+  RelayHealthStatus,
+  RelayLimitPolicy,
+  RelayLimitSource,
+  RelayMeasurementState,
   TrafficFailureKind,
 } from "../../../contracts/typescript/node-contract-v1";
 import {
@@ -87,6 +104,10 @@ import {
   type ActivityFilters,
   type ActivityPresentationSignals,
 } from "../activity";
+import type {
+  RelayAuditExportReceipt,
+  RelayAuditExportRequest,
+} from "../api/owner-audit";
 import {
   executionBlockReason,
   i18n,
@@ -133,6 +154,9 @@ type PageContentProps = {
   onSubmitAction?: TopologyActionSubmit;
   topologySignals?: TopologyPresentationSignals;
   activitySignals?: ActivityPresentationSignals;
+  onExportRelayAudit?: (
+    request: RelayAuditExportRequest,
+  ) => Promise<RelayAuditExportReceipt>;
 };
 
 function empty(text: string): JSX.Element {
@@ -728,8 +752,13 @@ const OVERVIEW_ACTIVITY_ACTIONS = new Set([
   "network.start",
   "network.stop",
   "network.restart",
+  "network.leave",
   "routing.update",
   "network.role.set",
+  "membership.change",
+  "policy.apply",
+  "policy.rollback",
+  "node.local_exit.set",
   "network.blacklist.ban",
   "network.blacklist.unban",
   "network.allocation.update",
@@ -3874,14 +3903,1370 @@ function ExitGovernanceCard({
   );
 }
 
+function exitSelectionForNetwork(
+  snapshot: NodeSnapshot,
+  networkName: string,
+): NodeExitSelectionSnapshot | undefined {
+  const networkId = snapshot.memberships?.find(
+    (membership) => membership.network_name === networkName,
+  )?.network_id;
+  return (snapshot.exit_selections ?? []).find(
+    (selection) => selection.network_id === networkId,
+  );
+}
+
+function evidenceFreshnessLabel(
+  locale: Locale,
+  observedAt: number | null | undefined,
+  maxAgeMs: number | null | undefined,
+  now = Date.now(),
+): string {
+  if (!observedAt) return label(locale, "exit_quality.evidence_not_observed");
+  if (maxAgeMs == null || maxAgeMs <= 0)
+    return label(locale, "exit_quality.evidence_stale");
+  return label(
+    locale,
+    now - observedAt <= maxAgeMs
+      ? "exit_quality.evidence_fresh"
+      : "exit_quality.evidence_stale",
+  );
+}
+
+function ExitConnectionSummary({
+  snapshot,
+  locale,
+}: {
+  snapshot: NodeSnapshot;
+  locale: Locale;
+}) {
+  const traffic = trafficProtectionStatus(snapshot, locale);
+  const configs = snapshot.configuration?.networks ?? [];
+  return (
+    <section
+      className="surface-card"
+      data-testid="exit-connection-summary"
+      aria-labelledby="exit-connection-summary-title"
+    >
+      <div className="card-heading">
+        <h3 id="exit-connection-summary-title">
+          {label(locale, "exit_summary.title")}
+        </h3>
+        <span
+          className={`status-pill ${traffic.tone}`}
+        >
+          {traffic.label}
+        </span>
+      </div>
+      <p className="muted-copy">{label(locale, "exit_summary.hint")}</p>
+      <dl
+        className="detail-list"
+        data-testid="exit-global-traffic-session"
+        data-traffic-state={traffic.id}
+      >
+        <div>
+          <dt>{label(locale, "exit_summary.protection")}</dt>
+          <dd data-protected={traffic.id === "protected"}>
+            {traffic.label}
+            {" · "}
+            {traffic.detail}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "traffic.session.changed_at")}</dt>
+          <dd>
+            {snapshot.traffic_session?.changed_at_unix_ms
+              ? formatTimestamp(
+                  locale,
+                  snapshot.traffic_session.changed_at_unix_ms,
+                )
+              : label(locale, "traffic.session.not_observed")}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "traffic.session.reason")}</dt>
+          <dd>
+            {snapshot.traffic_session?.reason_code ??
+              label(locale, "traffic.session.no_reason")}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "traffic.session.failure")}</dt>
+          <dd>
+            {snapshot.traffic_session?.failure
+              ? trafficFailureLabel(locale, snapshot.traffic_session.failure)
+              : label(locale, "common.none")}
+          </dd>
+        </div>
+      </dl>
+      <h4 className="exit-connection-subheading">
+        {label(locale, "exit_summary.network_selections")}
+      </h4>
+      {configs.length === 0 ? (
+        <p className="empty-copy">{label(locale, "exit_summary.no_network")}</p>
+      ) : (
+        <div className="exit-governance-networks">
+          {configs.map((config) => {
+            const selection = exitSelectionForNetwork(
+              snapshot,
+              config.network_name,
+            );
+            const resolution = selection?.resolution;
+            const selectedExit = resolution?.selected_default ?? config.exit_node;
+            const selectedCandidate = resolution?.candidates.find(
+              (candidate) => candidate.exit === selectedExit,
+            );
+            return (
+              <article
+                className="exit-governance-network"
+                data-testid={`exit-connection-${config.network_name}`}
+                key={config.network_name}
+              >
+                <div className="card-heading">
+                  <h4>{config.network_name}</h4>
+                </div>
+                <dl className="detail-list">
+                  <div>
+                    <dt>{label(locale, "exit_summary.configured_exit")}</dt>
+                    <dd>
+                      <code>{selectedExit || label(locale, "common.none")}</code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "exit_governance.mode")}</dt>
+                    <dd>
+                      {resolution
+                        ? label(locale, `exit_governance.mode.${resolution.mode.mode}`)
+                        : label(locale, "common.not_available")}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "exit_governance.default_exit")}</dt>
+                    <dd>
+                      <code>
+                        {resolution?.default_exit ?? label(locale, "common.none")}
+                      </code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "exit_governance.fixed_exit")}</dt>
+                    <dd>
+                      <code>
+                        {resolution?.fixed_exit ?? label(locale, "common.none")}
+                      </code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{label(locale, "exit_summary.selection_source")}</dt>
+                    <dd>
+                      {selectedCandidate
+                        ? exitSelectionSourceLabel(locale, selectedCandidate.source)
+                        : label(locale, "common.not_available")}
+                    </dd>
+                  </div>
+                </dl>
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ExitQualityCard({
+  snapshot,
+  locale,
+  diagnostics,
+  onRequestAction,
+}: {
+  snapshot: NodeSnapshot;
+  locale: Locale;
+  diagnostics: NodeDiagnosticsSnapshot | null;
+  onRequestAction(actionId: string): void;
+}) {
+  const peers = (snapshot.exit_selections ?? []).flatMap((selection) => {
+    const networkName = snapshot.memberships?.find(
+      (membership) => membership.network_id === selection.network_id,
+    )?.network_name;
+    const selectableExitIds = new Set(
+      selection.resolution?.selectable_exits ?? [],
+    );
+    const candidates =
+      selection.resolution?.candidates.filter(
+        (candidate) =>
+          networkName != null &&
+          candidate.selectable &&
+          selectableExitIds.has(candidate.exit),
+      ) ?? [];
+    return candidates.flatMap((candidate) => {
+      const peer = snapshot.peers.find(
+        (item) =>
+          item.network_name === networkName &&
+          item.peer_id === candidate.exit,
+      );
+      return peer ? [{ candidate, peer }] : [];
+    });
+  });
+  const health = diagnostics?.exit_health;
+  const healthAssessment = diagnostics?.exit_health_assessment;
+  const leakAssessment = diagnostics?.leak_detection_assessment;
+  const leak = diagnostics?.leak_detection;
+  return (
+    <section
+      className="surface-card"
+      data-testid="exit-quality"
+      aria-labelledby="exit-quality-title"
+    >
+      <div className="card-heading">
+        <h3 id="exit-quality-title">{label(locale, "exit_quality.title")}</h3>
+        <button
+          className="secondary-button"
+          type="button"
+          onClick={() => onRequestAction("get_node_diagnostics")}
+        >
+          {label(locale, diagnostics ? "diagnostic.run" : "exit_quality.run")}
+        </button>
+      </div>
+      {!diagnostics ? (
+        <div className="empty-state" data-testid="exit-quality-not-run">
+          <strong>{label(locale, "exit_quality.not_run")}</strong>
+          <span>{label(locale, "exit_quality.not_run_detail")}</span>
+        </div>
+      ) : (
+        <dl className="detail-list" data-testid="exit-quality-diagnostics">
+          <div>
+            <dt>{label(locale, "exit_quality.completed_at")}</dt>
+            <dd>{formatTimestamp(locale, diagnostics.completed_at_unix_ms)}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "exit_quality.health")}</dt>
+            <dd>
+              {label(
+                locale,
+                `diagnostic.exit_health.state.${healthAssessment?.state ?? "unknown"}`,
+              )}
+              {" · "}
+              {evidenceFreshnessLabel(
+                locale,
+                healthAssessment?.observed_at_unix_ms,
+                health?.max_age_ms,
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "exit_quality.leak")}</dt>
+            <dd>
+              {label(
+                locale,
+                `diagnostic.leak_detection.state.${leakAssessment?.state ?? "insufficient_evidence"}`,
+              )}
+              {" · "}
+              {evidenceFreshnessLabel(
+                locale,
+                leak?.generated_at_unix_ms,
+                leak?.max_age_ms,
+              )}
+            </dd>
+          </div>
+        </dl>
+      )}
+      <div className="exit-governance-candidates">
+        <h5>{label(locale, "exit_quality.peers")}</h5>
+        {peers.length === 0 ? (
+          <p className="empty-copy">{label(locale, "exit_quality.no_peers")}</p>
+        ) : (
+          peers.map(({ candidate, peer }) => (
+            <div
+              className={`exit-governance-candidate ${
+                peer.online && peer.p2p_healthy ? "good" : "bad"
+              }`}
+              data-testid={`exit-quality-peer-${peer.peer_id}`}
+              key={`${peer.network_name}:${peer.peer_id}`}
+            >
+              <div className="exit-governance-candidate-heading">
+                <code>
+                  {peer.network_name} / {peer.peer_id}
+                </code>
+                <span className={`status-pill ${peer.online ? "good" : "bad"}`}>
+                  {label(
+                    locale,
+                    peer.online ? "status.peer.online" : "status.peer.offline",
+                  )}
+                </span>
+              </div>
+              <dl className="detail-list">
+                <div>
+                  <dt>{label(locale, "exit_quality.availability")}</dt>
+                  <dd>
+                    {label(
+                      locale,
+                      `member_directory.exit.state.${candidate.availability.state}`,
+                    )}
+                    {" · "}
+                    {evidenceFreshnessLabel(
+                      locale,
+                      candidate.availability.observed_at_unix_ms,
+                      90_000,
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{label(locale, "exit_quality.p2p_health")}</dt>
+                  <dd>
+                    {label(
+                      locale,
+                      peer.p2p_healthy
+                        ? "peer.health.healthy"
+                        : "peer.health.unhealthy",
+                    )}
+                    {" · "}
+                    {label(
+                      locale,
+                      peer.p2p_active
+                        ? "peer.transport.p2p"
+                        : "peer.transport.relay",
+                    )}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{label(locale, "exit_quality.latency")}</dt>
+                  <dd data-rtt-us={peer.rtt_us ?? ""}>
+                    {peer.rtt_us == null
+                      ? label(locale, "common.not_available")
+                      : tr(locale, "peer.rtt", {
+                          value: (peer.rtt_us / 1000).toFixed(1),
+                        })}
+                  </dd>
+                </div>
+                <div>
+                  <dt>{label(locale, "exit_quality.loss")}</dt>
+                  <dd data-loss-rate={peer.loss_rate}>
+                    {tr(locale, "peer.loss", {
+                      value: (peer.loss_rate * 100).toFixed(1),
+                    })}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+          ))
+        )}
+        <p className="empty-copy">{label(locale, "exit_quality.throughput_unavailable")}</p>
+      </div>
+    </section>
+  );
+}
+
+function ExitActivityTimeline({
+  snapshot,
+  locale,
+}: {
+  snapshot: NodeSnapshot;
+  locale: Locale;
+}) {
+  const sessionEvents = (snapshot.traffic_session?.events ?? []).map((event) => ({
+    id: `traffic-${event.occurred_at_unix_ms}-${event.kind}`,
+    occurredAt: event.occurred_at_unix_ms,
+    title: label(locale, `traffic.session.event.${event.kind}`),
+    detail: [
+      label(locale, `traffic.session.state.${event.state}`),
+      event.reason_code,
+      event.failure ? trafficFailureLabel(locale, event.failure) : null,
+    ]
+      .filter(Boolean)
+      .join(" · "),
+  }));
+  const exitActivityActions = new Set([
+    "network.role.set",
+    "node.local_exit.set",
+    "routing.update",
+    "membership.change",
+    "policy.apply",
+    "policy.rollback",
+  ]);
+  const auditEvents = orderedActivityEntries(snapshot.recent_activity ?? [])
+    .filter((entry) => exitActivityActions.has(entry.action))
+    .map((entry) => ({
+      id: entry.audit_id,
+      occurredAt: entry.occurred_at_unix_ms,
+      title: activityTitle(entry, locale),
+      detail: tr(locale, "overview.activity.detail", {
+        outcome: label(locale, `activity.outcome.${entry.outcome}`),
+        resource: entry.resource,
+      }),
+    }));
+  const events = [...sessionEvents, ...auditEvents]
+    .sort((left, right) => right.occurredAt - left.occurredAt)
+    .slice(0, 12);
+  return (
+    <section
+      className="surface-card"
+      data-testid="exit-activity"
+      aria-labelledby="exit-activity-title"
+    >
+      <div className="card-heading">
+        <h3 id="exit-activity-title">{label(locale, "exit_activity.title")}</h3>
+        <Activity size={17} />
+      </div>
+      {events.length === 0 ? (
+        <p className="empty-copy">{label(locale, "exit_activity.empty")}</p>
+      ) : (
+        <div className="diagnostic-list">
+          {events.map((event) => (
+            <article className="diagnostic-row" key={event.id}>
+              <div>
+                <strong>{event.title}</strong>
+                <p>{event.detail}</p>
+              </div>
+              <time>{formatTimestamp(locale, event.occurredAt)}</time>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function relayHealthTone(status: RelayHealthStatus): string {
+  if (status === "healthy") return "good";
+  if (status === "degraded" || status === "quota_exhausted") return "warn";
+  if (status === "unavailable") return "bad";
+  return "neutral";
+}
+
+function relayMeasurementLabel(
+  locale: Locale,
+  state: RelayMeasurementState,
+  value: number | null | undefined,
+  suffix: string,
+): string {
+  const measurement = label(locale, `relay.measurement.${state}`);
+  return value == null
+    ? measurement
+    : `${measurement}: ${formatInteger(locale, value)}${suffix}`;
+}
+
+function relayLimitValue(
+  locale: Locale,
+  value: number | null | undefined,
+  unit: string,
+): string {
+  return value == null
+    ? label(locale, "relay.limit.none")
+    : `${formatInteger(locale, value)}${unit}`;
+}
+
+function relayLimitSourceLabel(
+  locale: Locale,
+  source: RelayLimitSource,
+): string {
+  return label(locale, `relay.limit_source.${source}`);
+}
+
+function relayIssueLabel(locale: Locale, issue: RelayHealthIssue): string {
+  const key = `relay.issue.${issue}`;
+  const localized = label(locale, key);
+  return localized === key ? issue : localized;
+}
+
+function RelayLimits({
+  locale,
+  limits,
+  sources,
+}: {
+  locale: Locale;
+  limits: RelayLimitPolicy;
+  sources: RelayLimitSource[];
+}) {
+  const values: Array<[string, string]> = [
+    ["max_connections", relayLimitValue(locale, limits.max_connections, "")],
+    [
+      "max_concurrent_streams",
+      relayLimitValue(locale, limits.max_concurrent_streams, ""),
+    ],
+    [
+      "max_bandwidth_kbps",
+      relayLimitValue(locale, limits.max_bandwidth_kbps, " kbps"),
+    ],
+    ["max_bytes", relayLimitValue(locale, limits.max_bytes, " B")],
+    ["max_cpu_percent", relayLimitValue(locale, limits.max_cpu_percent, "%")],
+    [
+      "max_memory_bytes",
+      relayLimitValue(locale, limits.max_memory_bytes, " B"),
+    ],
+    [
+      "max_session_duration_secs",
+      relayLimitValue(locale, limits.max_session_duration_secs, " s"),
+    ],
+    [
+      "quota_reset_at_unix_ms",
+      limits.quota_reset_at_unix_ms
+        ? formatTimestamp(locale, limits.quota_reset_at_unix_ms)
+        : label(locale, "relay.limit.none"),
+    ],
+  ];
+  return (
+    <section className="surface-card">
+      <div className="card-heading">
+        <h4>{label(locale, "gpui.section.relay_limits")}</h4>
+      </div>
+      <dl className="detail-list">
+        {values.map(([field, value]) => (
+          <div key={field}>
+            <dt>{label(locale, `relay.limits.${field}`)}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+        <div>
+          <dt>{label(locale, "relay.limits.sources")}</dt>
+          <dd className="chip-list">
+            {sources.length === 0
+              ? label(locale, "relay.limit.none")
+              : sources.map((source) => (
+                  <span className="chip" key={source}>
+                    {relayLimitSourceLabel(locale, source)}
+                  </span>
+                ))}
+          </dd>
+        </div>
+      </dl>
+    </section>
+  );
+}
+
+function RelayHealthDetails({
+  locale,
+  networkName,
+  health,
+}: {
+  locale: Locale;
+  networkName: string;
+  health: RelayHealthSnapshot;
+}) {
+  const usage = health.usage;
+  return (
+    <>
+      <section
+        className="surface-card"
+        data-testid="relay-health"
+        data-network={networkName}
+        data-relay-health={health.status}
+      >
+        <div className="card-heading">
+          <h3>{label(locale, "gpui.section.relay_health")}</h3>
+          <span className={`status-pill ${relayHealthTone(health.status)}`}>
+            {label(locale, `relay.health.${health.status}`)}
+          </span>
+        </div>
+        <p className="muted-copy">{networkName}</p>
+        <dl className="detail-list">
+          <div>
+            <dt>{label(locale, "relay.lifecycle")}</dt>
+            <dd data-relay-lifecycle={health.lifecycle}>
+              {label(locale, `relay.lifecycle.${health.lifecycle}`)}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.listener")}</dt>
+            <dd data-listener-bound={health.listener_bound}>
+              {label(
+                locale,
+                health.listener_bound
+                  ? "relay.listener.bound"
+                  : "relay.listener.unbound",
+              )}
+              {health.listen_addr ? ` · ${health.listen_addr}` : ""}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.reachability")}</dt>
+            <dd data-network-reachability={health.network_reachability}>
+              {label(
+                locale,
+                `relay.reachability.${health.network_reachability}`,
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.forwarding")}</dt>
+            <dd data-forwarding-observed={health.forwarding_observed}>
+              {label(
+                locale,
+                health.forwarding_observed
+                  ? "relay.forwarding.observed"
+                  : "relay.forwarding.not_observed",
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.authorization")}</dt>
+            <dd data-authorization-valid={health.authorization_valid}>
+              {label(
+                locale,
+                health.authorization_valid
+                  ? "relay.authorization.valid"
+                  : "relay.authorization.invalid",
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.quota")}</dt>
+            <dd data-quota-limited={health.quota_limited}>
+              {label(
+                locale,
+                health.quota_limited
+                  ? "relay.quota.limited"
+                  : "relay.quota.available",
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.observed_at")}</dt>
+            <dd>{formatTimestamp(locale, health.observed_at_unix_ms)}</dd>
+          </div>
+          {health.reason_code ? (
+            <div>
+              <dt>{label(locale, "relay.reason_code_label")}</dt>
+              <dd>
+                <code>{health.reason_code}</code>
+              </dd>
+            </div>
+          ) : null}
+        </dl>
+        {health.issues.length > 0 ? (
+          <div className="state-notice warn" data-testid="relay-issues">
+            <AlertTriangle size={17} aria-hidden="true" />
+            <div>
+              <strong>{label(locale, "gpui.section.relay_issues")}</strong>
+              <ul className="chip-list">
+                {health.issues.map((issue) => (
+                  <li key={issue}>{relayIssueLabel(locale, issue)}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        ) : null}
+      </section>
+      <RelayLimits
+        locale={locale}
+        limits={health.limits}
+        sources={health.limit_sources ?? []}
+      />
+      <section
+        className="surface-card"
+        data-testid="relay-usage"
+        data-network={networkName}
+      >
+        <div className="card-heading">
+          <h4>{label(locale, "gpui.section.relay_usage")}</h4>
+        </div>
+        <dl className="detail-list">
+          <div>
+            <dt>{label(locale, "relay.usage.active_connections")}</dt>
+            <dd>{formatInteger(locale, usage.active_connections)}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.active_streams")}</dt>
+            <dd>{formatInteger(locale, usage.active_streams)}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.active_sessions")}</dt>
+            <dd>{formatInteger(locale, usage.active_sessions)}</dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.forwarded")}</dt>
+            <dd>
+              {formatInteger(locale, usage.forwarded_packets)}
+              {" · "}
+              {formatBytes(locale, usage.forwarded_bytes)}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.rejected")}</dt>
+            <dd>
+              {formatInteger(locale, usage.rejected_packets)}
+              {" · "}
+              {formatInteger(locale, usage.rejected_connections)}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.cpu")}</dt>
+            <dd data-cpu-measurement={usage.cpu_measurement}>
+              {relayMeasurementLabel(
+                locale,
+                usage.cpu_measurement ?? "not_measured",
+                usage.observed_cpu_percent,
+                "%",
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.memory")}</dt>
+            <dd data-memory-measurement={usage.memory_measurement}>
+              {relayMeasurementLabel(
+                locale,
+                usage.memory_measurement ?? "not_measured",
+                usage.observed_memory_bytes,
+                " B",
+              )}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.last_forwarded")}</dt>
+            <dd>
+              {usage.last_forwarded_at_unix_ms
+                ? formatTimestamp(locale, usage.last_forwarded_at_unix_ms)
+                : label(locale, "common.not_available")}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.last_failure")}</dt>
+            <dd>
+              {usage.last_forwarding_failure_at_unix_ms
+                ? formatTimestamp(
+                    locale,
+                    usage.last_forwarding_failure_at_unix_ms,
+                  )
+                : label(locale, "common.not_available")}
+            </dd>
+          </div>
+          <div>
+            <dt>{label(locale, "relay.usage.quota_window")}</dt>
+            <dd>
+              {usage.quota_started_at_unix_ms
+                ? formatTimestamp(locale, usage.quota_started_at_unix_ms)
+                : label(locale, "common.not_available")}
+              {" – "}
+              {usage.quota_reset_at_unix_ms
+                ? formatTimestamp(locale, usage.quota_reset_at_unix_ms)
+                : label(locale, "common.not_available")}
+            </dd>
+          </div>
+        </dl>
+      </section>
+    </>
+  );
+}
+
+function relayAuthorizationReasonLabel(
+  locale: Locale,
+  reason: EffectiveAccessReason,
+): string {
+  const key = `relay.authorization.reason.${reason}`;
+  const localized = label(locale, key);
+  return localized === key ? reason : localized;
+}
+
+function relayAuthorizationLayerLabel(
+  locale: Locale,
+  layer: EffectivePolicyLayer | null | undefined,
+): string {
+  if (!layer) return label(locale, "relay.authorization.layer.none");
+  const key = `relay.authorization.layer.${layer}`;
+  const localized = label(locale, key);
+  return localized === key ? layer : localized;
+}
+
+function relayExistingSessionLabel(
+  locale: Locale,
+  policy: RelayExistingSessionPolicy,
+): string {
+  const key = `relay.authorization.existing.${policy}`;
+  const localized = label(locale, key);
+  return localized === key ? policy : localized;
+}
+
+function relayAuthorizationSourceDetail(
+  locale: Locale,
+  source: RelayAuthorizationSourceDiagnostic,
+): string {
+  return tr(locale, "relay.authorization.source_detail", {
+    result: label(
+      locale,
+      source.allowed
+        ? "relay.authorization.allowed"
+        : "relay.authorization.denied",
+    ),
+    reason: relayAuthorizationReasonLabel(locale, source.reason),
+    layer: relayAuthorizationLayerLabel(locale, source.layer),
+    acl_revision: formatInteger(locale, source.network_acl_revision),
+    local_revision: formatInteger(locale, source.local_policy_revision),
+    reauth: label(
+      locale,
+      source.reauthentication_satisfied
+        ? "relay.authorization.reauth.satisfied"
+        : "relay.authorization.reauth.required",
+    ),
+  });
+}
+
+function RelayAuthorizationDecision({
+  locale,
+  decision,
+}: {
+  locale: Locale;
+  decision: RelayAuthorizationDiagnostic;
+}) {
+  return (
+    <li
+      className="relay-authorization-decision"
+      data-allowed={decision.allowed}
+      data-consumer-allowed={decision.consumer?.allowed ?? "missing"}
+      data-consumer-layer={decision.consumer?.layer ?? "none"}
+      data-consumer-reauth={decision.consumer?.reauthentication_satisfied ?? "missing"}
+      data-consumer-reason={decision.consumer?.reason ?? "missing"}
+      data-node-id={decision.node_id}
+      data-provider-allowed={decision.provider.allowed}
+      data-provider-layer={decision.provider.layer ?? "none"}
+      data-provider-reauth={decision.provider.reauthentication_satisfied}
+      data-provider-reason={decision.provider.reason}
+      data-testid="relay-authorization-decision"
+    >
+      <div className="relay-governance-event-heading">
+        <strong>{decision.node_id}</strong>
+        <span
+          className={`status-pill ${decision.allowed ? "success" : "danger"}`}
+        >
+          {label(
+            locale,
+            decision.allowed
+              ? "relay.authorization.allowed"
+              : "relay.authorization.denied",
+          )}
+        </span>
+      </div>
+      <p>
+        {tr(locale, "relay.authorization.decision_detail", {
+          result: label(
+            locale,
+            decision.allowed
+              ? "relay.authorization.allowed"
+              : "relay.authorization.denied",
+          ),
+          final_reason: decision.final_reason
+            ? relayAuthorizationReasonLabel(locale, decision.final_reason)
+            : label(locale, "relay.authorization.reason.allowed"),
+          provider: relayAuthorizationSourceDetail(locale, decision.provider),
+          consumer: decision.consumer
+            ? relayAuthorizationSourceDetail(locale, decision.consumer)
+            : label(locale, "relay.authorization.consumer_missing"),
+        })}
+      </p>
+    </li>
+  );
+}
+
+function RelayAuthorizationDetails({
+  locale,
+  networkName,
+  audit,
+}: {
+  locale: Locale;
+  networkName: string;
+  audit: RelayAuthorizationAuditSnapshot;
+}) {
+  return (
+    <section
+      className="surface-card"
+      data-network={networkName}
+      data-testid="relay-authorization"
+    >
+      <div className="card-heading">
+        <h3>{label(locale, "gpui.section.relay_authorization")}</h3>
+        <span className="status-pill neutral">
+          {formatInteger(locale, audit.policy_revision)}
+        </span>
+      </div>
+      <p className="muted-copy">
+        {tr(locale, "relay.authorization.snapshot_detail", {
+          network: audit.network_id,
+          provider: audit.provider_node_id,
+          revision: formatInteger(locale, audit.policy_revision),
+          updated_at: formatTimestamp(locale, audit.policy_updated_at_unix_ms),
+          existing_sessions: relayExistingSessionLabel(
+            locale,
+            audit.existing_session_policy,
+          ),
+        })}
+      </p>
+      {audit.truncated ? (
+        <p className="state-notice warn" data-testid="relay-authorization-truncated">
+          {label(locale, "relay.authorization.truncated")}
+        </p>
+      ) : null}
+      {audit.decisions.length === 0 ? (
+        <p className="empty-copy">
+          {label(locale, "gpui.empty.relay_authorization")}
+        </p>
+      ) : (
+        <ol className="relay-governance-events">
+          {audit.decisions.map((decision) => (
+            <RelayAuthorizationDecision
+              key={decision.node_id}
+              locale={locale}
+              decision={decision}
+            />
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+const RELAY_GOVERNANCE_RENDER_LIMIT = 50;
+
+function relayGovernanceActionLabel(
+  locale: Locale,
+  action: RelayGovernanceAction,
+): string {
+  const key = `relay.governance.action.${action}`;
+  const localized = label(locale, key);
+  return localized === key ? action : localized;
+}
+
+function relayGovernanceEventDetail(
+  locale: Locale,
+  event: RelayGovernanceEvent,
+): string {
+  const fields = [
+    event.node_id
+      ? tr(locale, "relay.governance.event.node", { node_id: event.node_id })
+      : null,
+    tr(locale, "relay.governance.event.reason", {
+      reason_code: event.reason_code,
+    }),
+    event.observed != null
+      ? tr(locale, "relay.governance.event.observed", {
+          observed: formatInteger(locale, event.observed),
+        })
+      : null,
+    event.limit != null
+      ? tr(locale, "relay.governance.event.limit", {
+          limit: formatInteger(locale, event.limit),
+        })
+      : null,
+    event.reset_at_unix_ms != null
+      ? tr(locale, "relay.governance.event.reset", {
+          reset_at: formatTimestamp(locale, event.reset_at_unix_ms),
+        })
+      : null,
+    event.policy_revision != null
+      ? tr(locale, "relay.governance.event.policy_revision", {
+          previous:
+            event.previous_policy_revision != null
+              ? formatInteger(locale, event.previous_policy_revision)
+              : label(locale, "common.not_available"),
+          revision: formatInteger(locale, event.policy_revision),
+        })
+      : null,
+  ].filter((field): field is string => field != null);
+  return fields.join(" · ");
+}
+
+function RelayGovernanceDetails({
+  locale,
+  networkName,
+  audit,
+}: {
+  locale: Locale;
+  networkName: string;
+  audit: RelayGovernanceAuditSnapshot;
+}) {
+  const [nodeFilter, setNodeFilter] = useState("");
+  const normalizedNodeFilter = nodeFilter.trim();
+  const filteredEvents = normalizedNodeFilter
+    ? audit.events.filter((event) => event.node_id === normalizedNodeFilter)
+    : audit.events;
+  const visibleEvents = filteredEvents.slice(-RELAY_GOVERNANCE_RENDER_LIMIT);
+  return (
+    <section
+      className="surface-card"
+      data-testid="relay-governance"
+      data-network={networkName}
+    >
+      <div className="card-heading">
+        <h3>{label(locale, "gpui.section.relay_governance")}</h3>
+        <span
+          className="status-pill neutral"
+          data-testid="relay-governance-count"
+        >
+          {formatInteger(locale, filteredEvents.length)}
+        </span>
+      </div>
+      <p className="muted-copy">{label(locale, "relay.governance.hint")}</p>
+      <div className="relay-governance-filter">
+        <label>
+          <span>{label(locale, "relay.governance.node_filter.label")}</span>
+          <input
+            type="search"
+            value={nodeFilter}
+            placeholder={label(
+              locale,
+              "relay.governance.node_filter.placeholder",
+            )}
+            onChange={(event) => setNodeFilter(event.currentTarget.value)}
+            data-testid="relay-governance-node-filter"
+          />
+        </label>
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={() => setNodeFilter("")}
+          disabled={nodeFilter.length === 0}
+          data-testid="relay-governance-clear-node-filter"
+        >
+          {label(locale, "relay.governance.node_filter.clear")}
+        </button>
+      </div>
+      {normalizedNodeFilter ? (
+        <p className="muted-copy" data-testid="relay-governance-filter-count">
+          {tr(locale, "relay.governance.node_filter.matches", {
+            node_id: normalizedNodeFilter,
+            matched: formatInteger(locale, filteredEvents.length),
+          })}
+        </p>
+      ) : null}
+      {audit.dropped_events > 0 ? (
+        <p className="state-notice warn" data-testid="relay-governance-dropped">
+          {tr(locale, "relay.governance.dropped", {
+            dropped: formatInteger(locale, audit.dropped_events),
+          })}
+        </p>
+      ) : null}
+      {filteredEvents.length > visibleEvents.length ? (
+        <p className="muted-copy" data-testid="relay-governance-bounded">
+          {tr(locale, "relay.governance.bounded", {
+            shown: formatInteger(locale, visibleEvents.length),
+            total: formatInteger(locale, filteredEvents.length),
+          })}
+        </p>
+      ) : null}
+      {visibleEvents.length === 0 ? (
+        <p
+          className="empty-copy"
+          data-testid="relay-governance-filter-empty"
+        >
+          {normalizedNodeFilter
+            ? tr(locale, "relay.governance.node_filter.empty", {
+                node_id: normalizedNodeFilter,
+              })
+            : label(locale, "relay.governance.empty")}
+        </p>
+      ) : (
+        <ol className="relay-governance-events">
+          {visibleEvents.map((event, index) => (
+            <li
+              className="relay-governance-event"
+              data-action={event.action}
+              data-node-id={event.node_id ?? ""}
+              data-occurred-at={event.occurred_at_unix_ms}
+              data-testid="relay-governance-event"
+              key={`${event.occurred_at_unix_ms}-${event.action}-${index}`}
+            >
+              <div className="relay-governance-event-heading">
+                <strong>{relayGovernanceActionLabel(locale, event.action)}</strong>
+                <time>{formatTimestamp(locale, event.occurred_at_unix_ms)}</time>
+              </div>
+              <p>{relayGovernanceEventDetail(locale, event)}</p>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+function optionalUnixMs(value: string): number | undefined {
+  if (!value) return undefined;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function RelayDurableAuditDetails({
+  locale,
+  networkName,
+  networkId,
+  onExport,
+}: {
+  locale: Locale;
+  networkName: string;
+  networkId: string | null;
+  onExport?: (
+    request: RelayAuditExportRequest,
+  ) => Promise<RelayAuditExportReceipt>;
+}) {
+  const [fromValue, setFromValue] = useState("");
+  const [toValue, setToValue] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [validationFailure, setValidationFailure] = useState("");
+  const [exportFailure, setExportFailure] = useState("");
+  const [receipt, setReceipt] = useState<RelayAuditExportReceipt | null>(null);
+  const unavailableReason = !networkId
+    ? label(locale, "relay.durable_audit.network_unresolved")
+    : !onExport
+      ? label(locale, "relay.durable_audit.unavailable")
+      : "";
+
+  function clearFeedback(): void {
+    setValidationFailure("");
+    setExportFailure("");
+    setReceipt(null);
+  }
+
+  async function submitExport(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!networkId || !onExport || !confirmed || pending) return;
+    const fromUnixMs = optionalUnixMs(fromValue);
+    const toUnixMs = optionalUnixMs(toValue);
+    if ((fromValue && fromUnixMs == null) || (toValue && toUnixMs == null)) {
+      setValidationFailure(
+        label(locale, "relay.durable_audit.invalid_time"),
+      );
+      return;
+    }
+    if (
+      fromUnixMs != null &&
+      toUnixMs != null &&
+      fromUnixMs > toUnixMs
+    ) {
+      setValidationFailure(
+        label(locale, "relay.durable_audit.invalid_range"),
+      );
+      return;
+    }
+
+    setPending(true);
+    setValidationFailure("");
+    setExportFailure("");
+    setReceipt(null);
+    try {
+      const result = await onExport({
+        network_id: networkId,
+        ...(fromUnixMs != null ? { from_unix_ms: fromUnixMs } : {}),
+        ...(toUnixMs != null ? { to_unix_ms: toUnixMs } : {}),
+      });
+      setReceipt(result);
+      setConfirmed(false);
+    } catch {
+      setExportFailure(label(locale, "relay.durable_audit.failed"));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <section
+      className="surface-card"
+      data-testid="relay-durable-audit"
+      data-network={networkName}
+      aria-busy={pending}
+    >
+      <div className="card-heading">
+        <h3>{label(locale, "gpui.section.relay_durable_audit")}</h3>
+        <span className="status-pill neutral">
+          {label(locale, "relay.durable_audit.persistent")}
+        </span>
+      </div>
+      <p className="muted-copy">
+        {label(locale, "relay.durable_audit.hint")}
+      </p>
+      <p className="muted-copy" data-testid="relay-durable-audit-scope">
+        {networkId
+          ? tr(locale, "relay.durable_audit.scope", {
+              network_id: networkId,
+            })
+          : unavailableReason}
+      </p>
+      <form onSubmit={(event) => void submitExport(event)}>
+        <div className="form-grid cols-2">
+          <label className="form-field">
+            <span>{label(locale, "relay.durable_audit.from")}</span>
+            <input
+              type="datetime-local"
+              value={fromValue}
+              disabled={!networkId || !onExport || pending}
+              onChange={(event) => {
+                setFromValue(event.currentTarget.value);
+                clearFeedback();
+              }}
+            />
+          </label>
+          <label className="form-field">
+            <span>{label(locale, "relay.durable_audit.to")}</span>
+            <input
+              type="datetime-local"
+              value={toValue}
+              disabled={!networkId || !onExport || pending}
+              onChange={(event) => {
+                setToValue(event.currentTarget.value);
+                clearFeedback();
+              }}
+            />
+          </label>
+        </div>
+        <label className="check-field">
+          <input
+            type="checkbox"
+            checked={confirmed}
+            disabled={!networkId || !onExport || pending}
+            onChange={(event) => {
+              setConfirmed(event.currentTarget.checked);
+              setValidationFailure("");
+              setExportFailure("");
+            }}
+          />
+          <span>{label(locale, "relay.durable_audit.confirm")}</span>
+        </label>
+        {validationFailure ? (
+          <p className="form-error" role="alert">
+            {validationFailure}
+          </p>
+        ) : null}
+        {exportFailure ? (
+          <p
+            className="form-error"
+            role="alert"
+            data-testid="relay-durable-audit-error"
+          >
+            {exportFailure}
+          </p>
+        ) : null}
+        <button
+          className="primary-button"
+          type="submit"
+          disabled={!networkId || !onExport || !confirmed || pending}
+          data-testid="relay-durable-audit-export"
+        >
+          {pending
+            ? label(locale, "relay.durable_audit.exporting")
+            : label(locale, "relay.durable_audit.export")}
+        </button>
+        {!networkId || !onExport ? (
+          <p className="state-notice warn" data-testid="relay-durable-audit-unavailable">
+            {unavailableReason}
+          </p>
+        ) : null}
+        {receipt ? (
+          <div
+            className="form-success"
+            role="status"
+            data-testid="relay-durable-audit-success"
+          >
+            {receipt.record_count === 0 ? (
+              <p>{label(locale, "relay.durable_audit.empty_success")}</p>
+            ) : (
+              <p>
+                {tr(locale, "relay.durable_audit.success", {
+                  records: formatInteger(locale, receipt.record_count),
+                })}
+              </p>
+            )}
+            <code data-testid="relay-durable-audit-filename">
+              {receipt.filename}
+            </code>
+          </div>
+        ) : null}
+      </form>
+    </section>
+  );
+}
+
+function RelayCapabilityDetails({
+  snapshot,
+  locale,
+  onExportRelayAudit,
+}: {
+  snapshot: NodeSnapshot;
+  locale: Locale;
+  onExportRelayAudit?: (
+    request: RelayAuditExportRequest,
+  ) => Promise<RelayAuditExportReceipt>;
+}) {
+  const services = snapshot.embedded_services ?? [];
+  if (services.length === 0) {
+    return (
+      <section className="surface-card" data-testid="relay-no-services">
+        <p className="empty-copy">
+          {label(locale, "gpui.empty.embedded_services")}
+        </p>
+      </section>
+    );
+  }
+  return (
+    <>
+      {services.map((service) => (
+        <div className="relay-service-stack" key={service.network_name}>
+          {service.relay_health ? (
+            <RelayHealthDetails
+              locale={locale}
+              networkName={service.network_name}
+              health={service.relay_health}
+            />
+          ) : (
+            <section
+              className="surface-card"
+              data-testid="relay-health-missing"
+              data-network={service.network_name}
+            >
+              <div className="card-heading">
+                <h3>{label(locale, "gpui.section.relay_health")}</h3>
+                <span className="status-pill neutral">
+                  {label(locale, "relay.health.unknown")}
+                </span>
+              </div>
+              <p className="muted-copy">{service.network_name}</p>
+              <p className="empty-copy">
+                {label(locale, "relay.status.no_health")}
+              </p>
+            </section>
+          )}
+          {service.relay_authorization ? (
+            <RelayAuthorizationDetails
+              locale={locale}
+              networkName={service.network_name}
+              audit={service.relay_authorization}
+            />
+          ) : null}
+          {service.relay_governance ? (
+            <RelayDurableAuditDetails
+              locale={locale}
+              networkName={service.network_name}
+              networkId={resolveNetworkMembershipId(
+                snapshot.memberships,
+                service.network_name,
+              )}
+              onExport={onExportRelayAudit}
+            />
+          ) : null}
+          {service.relay_governance ? (
+            <RelayGovernanceDetails
+              locale={locale}
+              networkName={service.network_name}
+              audit={service.relay_governance}
+            />
+          ) : null}
+        </div>
+      ))}
+    </>
+  );
+}
+
 function CapabilityPage({
   snapshot,
   locale,
   kind,
+  recentDiagnostics,
+  onRequestAction,
+  onExportRelayAudit,
 }: {
   snapshot: NodeSnapshot;
   locale: Locale;
   kind: "exit" | "relay";
+  recentDiagnostics: NodeDiagnosticsSnapshot | null;
+  onRequestAction(actionId: string): void;
+  onExportRelayAudit?: (
+    request: RelayAuditExportRequest,
+  ) => Promise<RelayAuditExportReceipt>;
 }) {
   const capability = snapshot.capabilities?.capabilities.find(
     (item) => item.kind === kind,
@@ -4009,7 +5394,17 @@ function CapabilityPage({
         </section>
       ) : null}
       {kind === "exit" ? (
-        <ExitGovernanceCard snapshot={snapshot} locale={locale} />
+        <>
+          <ExitConnectionSummary snapshot={snapshot} locale={locale} />
+          <ExitQualityCard
+            snapshot={snapshot}
+            locale={locale}
+            diagnostics={recentDiagnostics}
+            onRequestAction={onRequestAction}
+          />
+          <ExitGovernanceCard snapshot={snapshot} locale={locale} />
+          <ExitActivityTimeline snapshot={snapshot} locale={locale} />
+        </>
       ) : null}
       {kind === "exit" && snapshot.exit_node_capabilities ? (
         <section className="surface-card">
@@ -4056,6 +5451,13 @@ function CapabilityPage({
               : "Relay capability is not active."}
           </p>
         </section>
+      ) : null}
+      {kind === "relay" ? (
+        <RelayCapabilityDetails
+          snapshot={snapshot}
+          locale={locale}
+          onExportRelayAudit={onExportRelayAudit}
+        />
       ) : null}
     </div>
   );
@@ -4635,12 +6037,25 @@ export function PageContent(props: PageContentProps) {
       break;
     case "exit_node":
       content = (
-        <CapabilityPage snapshot={snapshot} locale={locale} kind="exit" />
+        <CapabilityPage
+          snapshot={snapshot}
+          locale={locale}
+          kind="exit"
+          recentDiagnostics={props.recentDiagnostics}
+          onRequestAction={props.onRequestAction}
+        />
       );
       break;
     case "relay":
       content = (
-        <CapabilityPage snapshot={snapshot} locale={locale} kind="relay" />
+        <CapabilityPage
+          snapshot={snapshot}
+          locale={locale}
+          kind="relay"
+          recentDiagnostics={props.recentDiagnostics}
+          onRequestAction={props.onRequestAction}
+          onExportRelayAudit={props.onExportRelayAudit}
+        />
       );
       break;
     case "logs":

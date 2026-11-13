@@ -9,11 +9,13 @@
 
 use anyhow::{bail, Context, Result};
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
+use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::{symlink, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,6 +35,7 @@ const NSSWITCH_CONF_PATH: &str = "/etc/nsswitch.conf";
 const LOCK_PATH: &str = "/run/fuckipv6-dns.lock";
 const BACKUP_PATH: &str = "/run/fuckipv6-resolv.conf.backup";
 const NSSWITCH_BACKUP_PATH: &str = "/run/fuckipv6-nsswitch.conf.backup";
+const RESOLV_SYMLINK_BACKUP_PREFIX: &[u8] = b"fuckipv6-resolv-symlink-v1\0";
 const DNS_MESSAGE_LIMIT: usize = 65_535;
 const DNS_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -105,6 +108,7 @@ fn recovery_snapshot_at(
 #[derive(Debug)]
 pub(crate) struct DohDnsGuard {
     previous_resolv_conf: Vec<u8>,
+    previous_resolv_symlink: Option<PathBuf>,
     previous_nsswitch_conf: Option<Vec<u8>>,
     shutdown: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
@@ -126,6 +130,19 @@ impl DohDnsGuard {
         Self::install_inner()
             .await
             .map_err(|error| ensure_stage(error, NetworkSetupStage::DnsSetup))
+    }
+
+    /// Restore resolver files left behind by an abnormal process exit before
+    /// startup performs any network work. The lock distinguishes a stale backup
+    /// from one still owned by a live runtime.
+    pub(crate) fn restore_stale_host_configuration() -> Result<()> {
+        restore_stale_host_configuration_at(
+            Path::new(LOCK_PATH),
+            Path::new(NSSWITCH_BACKUP_PATH),
+            Path::new(NSSWITCH_CONF_PATH),
+            Path::new(BACKUP_PATH),
+            Path::new(RESOLV_CONF_PATH),
+        )
     }
 
     async fn install_inner() -> Result<Option<Self>> {
@@ -151,35 +168,52 @@ impl DohDnsGuard {
 
         let previous_resolv_conf =
             std::fs::read(RESOLV_CONF_PATH).context("读取 /etc/resolv.conf 失败")?;
+        let previous_resolv_symlink = resolv_conf_symlink_target(Path::new(RESOLV_CONF_PATH))?;
         let previous_nsswitch_conf =
             std::fs::read(NSSWITCH_CONF_PATH).context("读取 /etc/nsswitch.conf 失败")?;
         let managed = managed_resolv_conf(&previous_resolv_conf, listen_addr.ip());
         let managed_nsswitch = managed_nsswitch_conf(&previous_nsswitch_conf);
-        if let Some(managed_nsswitch) = managed_nsswitch.as_ref() {
+        if managed_nsswitch.is_some() {
             if let Err(error) =
                 save_backup_at(Path::new(NSSWITCH_BACKUP_PATH), &previous_nsswitch_conf)
             {
                 let _ = std::fs::remove_file(NSSWITCH_BACKUP_PATH);
                 return Err(error).context("创建 NSS 主机解析配置备份失败");
             }
-            if let Err(error) = save_backup(&previous_resolv_conf) {
+            if let Err(error) =
+                save_resolv_backup(&previous_resolv_conf, previous_resolv_symlink.as_deref())
+            {
                 let _ = std::fs::remove_file(NSSWITCH_BACKUP_PATH);
                 return Err(error);
             }
-            if let Err(error) = std::fs::write(RESOLV_CONF_PATH, &managed) {
+            if let Err(error) = install_resolv_conf(
+                Path::new(RESOLV_CONF_PATH),
+                &managed,
+                previous_resolv_symlink.is_some(),
+            ) {
                 let _ = std::fs::remove_file(BACKUP_PATH);
                 let _ = std::fs::remove_file(NSSWITCH_BACKUP_PATH);
                 return Err(error).context("写入 DoH 本地 DNS 配置失败");
             }
-            if let Err(error) = std::fs::write(NSSWITCH_CONF_PATH, managed_nsswitch) {
-                let _ = std::fs::write(RESOLV_CONF_PATH, &previous_resolv_conf);
-                let _ = std::fs::remove_file(BACKUP_PATH);
-                let _ = std::fs::remove_file(NSSWITCH_BACKUP_PATH);
-                return Err(error).context("禁用绕过 DoH 的 systemd-resolved NSS 服务失败");
+            if let Some(managed_nsswitch) = managed_nsswitch.as_ref() {
+                if let Err(error) = std::fs::write(NSSWITCH_CONF_PATH, managed_nsswitch) {
+                    let _ = restore_resolv_conf(
+                        Path::new(RESOLV_CONF_PATH),
+                        &previous_resolv_conf,
+                        previous_resolv_symlink.as_deref(),
+                    );
+                    let _ = std::fs::remove_file(BACKUP_PATH);
+                    let _ = std::fs::remove_file(NSSWITCH_BACKUP_PATH);
+                    return Err(error).context("禁用绕过 DoH 的 systemd-resolved NSS 服务失败");
+                }
             }
         } else {
-            save_backup(&previous_resolv_conf)?;
-            if let Err(error) = std::fs::write(RESOLV_CONF_PATH, &managed) {
+            save_resolv_backup(&previous_resolv_conf, previous_resolv_symlink.as_deref())?;
+            if let Err(error) = install_resolv_conf(
+                Path::new(RESOLV_CONF_PATH),
+                &managed,
+                previous_resolv_symlink.is_some(),
+            ) {
                 let _ = std::fs::remove_file(BACKUP_PATH);
                 return Err(error).context("写入 DoH 本地 DNS 配置失败");
             }
@@ -204,6 +238,7 @@ impl DohDnsGuard {
 
         Ok(Some(Self {
             previous_resolv_conf,
+            previous_resolv_symlink,
             previous_nsswitch_conf: managed_nsswitch.map(|_| previous_nsswitch_conf),
             shutdown,
             tasks,
@@ -284,10 +319,13 @@ impl DohDnsGuard {
                 failures.push("恢复 DNS 配置超过总期限".to_string());
                 return finish_shutdown(failures);
             };
-            match timeout(
-                remaining,
-                tokio::fs::write(&self.resolv_conf_path, &self.previous_resolv_conf),
-            )
+            match timeout(remaining, async {
+                restore_resolv_conf(
+                    &self.resolv_conf_path,
+                    &self.previous_resolv_conf,
+                    self.previous_resolv_symlink.as_deref(),
+                )
+            })
             .await
             {
                 Ok(Ok(())) => {}
@@ -358,7 +396,11 @@ impl Drop for DohDnsGuard {
                 let _ = std::fs::remove_file(&self.nsswitch_backup_path);
             }
         }
-        if let Err(error) = std::fs::write(&self.resolv_conf_path, &self.previous_resolv_conf) {
+        if let Err(error) = restore_resolv_conf(
+            &self.resolv_conf_path,
+            &self.previous_resolv_conf,
+            self.previous_resolv_symlink.as_deref(),
+        ) {
             tracing::warn!("恢复 /etc/resolv.conf 失败: {error:#}");
         } else if restored {
             let _ = std::fs::remove_file(&self.backup_path);
@@ -383,14 +425,18 @@ fn finish_shutdown(mut failures: Vec<String>) -> Result<()> {
 }
 
 fn acquire_lock() -> Result<Option<File>> {
+    acquire_lock_at(Path::new(LOCK_PATH))
+}
+
+fn acquire_lock_at(path: &Path) -> Result<Option<File>> {
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .mode(0o600)
-        .open(LOCK_PATH)
-        .with_context(|| format!("打开 DNS 配置锁失败: {LOCK_PATH}"))?;
+        .open(path)
+        .with_context(|| format!("打开 DNS 配置锁失败: {}", path.display()))?;
     let result = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if result == 0 {
         return Ok(Some(lock));
@@ -399,7 +445,21 @@ fn acquire_lock() -> Result<Option<File>> {
     if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
         return Ok(None);
     }
-    Err(error).with_context(|| format!("锁定 DNS 配置文件失败: {LOCK_PATH}"))
+    Err(error).with_context(|| format!("锁定 DNS 配置文件失败: {}", path.display()))
+}
+
+fn restore_stale_host_configuration_at(
+    lock_path: &Path,
+    nsswitch_backup: &Path,
+    nsswitch_conf: &Path,
+    resolv_backup: &Path,
+    resolv_conf: &Path,
+) -> Result<()> {
+    let Some(_lock) = acquire_lock_at(lock_path)? else {
+        return Ok(());
+    };
+    restore_stale_backup_at(nsswitch_backup, nsswitch_conf, "NSS 主机解析")?;
+    restore_stale_resolv_backup_at(resolv_backup, resolv_conf)
 }
 
 fn restore_stale_backup() -> Result<()> {
@@ -408,7 +468,25 @@ fn restore_stale_backup() -> Result<()> {
         Path::new(NSSWITCH_CONF_PATH),
         "NSS 主机解析",
     )?;
-    restore_stale_backup_at(Path::new(BACKUP_PATH), Path::new(RESOLV_CONF_PATH), "DNS")?;
+    restore_stale_resolv_backup_at(Path::new(BACKUP_PATH), Path::new(RESOLV_CONF_PATH))?;
+    Ok(())
+}
+
+fn restore_stale_resolv_backup_at(backup: &Path, target: &Path) -> Result<()> {
+    if !backup.exists() {
+        return Ok(());
+    }
+    let previous = std::fs::read(backup).context("读取残留 DNS 配置备份失败")?;
+    if let Some(symlink_target) = previous
+        .strip_prefix(RESOLV_SYMLINK_BACKUP_PREFIX)
+        .map(|path| PathBuf::from(OsString::from_vec(path.to_vec())))
+    {
+        restore_resolv_symlink(target, &symlink_target).context("恢复残留 DNS 符号链接失败")?;
+    } else {
+        std::fs::write(target, previous).context("恢复残留 DNS 配置失败")?;
+    }
+    std::fs::remove_file(backup).context("删除残留 DNS 配置备份失败")?;
+    tracing::warn!("检测到上次异常退出，已先恢复原 DNS 配置");
     Ok(())
 }
 
@@ -424,8 +502,21 @@ fn restore_stale_backup_at(backup: &Path, target: &Path, label: &str) -> Result<
     Ok(())
 }
 
-fn save_backup(previous: &[u8]) -> Result<()> {
-    save_backup_at(Path::new(BACKUP_PATH), previous)
+fn save_resolv_backup(previous: &[u8], symlink_target: Option<&Path>) -> Result<()> {
+    let mut contents = Vec::with_capacity(
+        previous.len()
+            + symlink_target
+                .map(|path| path.as_os_str().as_bytes().len())
+                .unwrap_or_default()
+            + RESOLV_SYMLINK_BACKUP_PREFIX.len(),
+    );
+    if let Some(target) = symlink_target {
+        contents.extend_from_slice(RESOLV_SYMLINK_BACKUP_PREFIX);
+        contents.extend_from_slice(target.as_os_str().as_bytes());
+    } else {
+        contents.extend_from_slice(previous);
+    }
+    save_backup_at(Path::new(BACKUP_PATH), &contents)
 }
 
 fn save_backup_at(path: &Path, previous: &[u8]) -> Result<()> {
@@ -438,6 +529,72 @@ fn save_backup_at(path: &Path, previous: &[u8]) -> Result<()> {
         .context("创建 DNS 配置备份失败")?;
     file.write_all(previous).context("写入 DNS 配置备份失败")?;
     file.sync_all().context("同步 DNS 配置备份失败")
+}
+
+fn resolv_conf_symlink_target(path: &Path) -> Result<Option<PathBuf>> {
+    let metadata = std::fs::symlink_metadata(path).context("读取 /etc/resolv.conf 元数据失败")?;
+    if metadata.file_type().is_symlink() {
+        Ok(Some(
+            std::fs::read_link(path).context("读取 /etc/resolv.conf 符号链接目标失败")?,
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
+fn install_resolv_conf(path: &Path, managed: &[u8], replace_symlink: bool) -> Result<()> {
+    if replace_symlink {
+        replace_with_regular_file(path, managed)
+    } else {
+        std::fs::write(path, managed).context("写入 DNS 配置失败")
+    }
+}
+
+fn restore_resolv_conf(path: &Path, previous: &[u8], symlink_target: Option<&Path>) -> Result<()> {
+    match symlink_target {
+        Some(target) => restore_resolv_symlink(path, target),
+        None => std::fs::write(path, previous).context("恢复 DNS 配置失败"),
+    }
+}
+
+fn restore_resolv_symlink(path: &Path, target: &Path) -> Result<()> {
+    let temporary = temporary_resolver_path(path, "restore");
+    let _ = std::fs::remove_file(&temporary);
+    symlink(target, &temporary).context("创建待恢复的 DNS 符号链接失败")?;
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error).context("原子恢复 DNS 符号链接失败");
+    }
+    Ok(())
+}
+
+fn replace_with_regular_file(path: &Path, contents: &[u8]) -> Result<()> {
+    let temporary = temporary_resolver_path(path, "managed");
+    let _ = std::fs::remove_file(&temporary);
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&temporary)
+        .context("创建待接管的 DNS 配置失败")?;
+    if let Err(error) = file.write_all(contents).and_then(|_| file.sync_all()) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error).context("写入待接管的 DNS 配置失败");
+    }
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error).context("原子接管 DNS 配置失败");
+    }
+    Ok(())
+}
+
+fn temporary_resolver_path(path: &Path, purpose: &str) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(OsStr::as_bytes)
+        .and_then(|name| std::str::from_utf8(name).ok())
+        .unwrap_or("resolv.conf");
+    path.with_file_name(format!(".{name}.fuckipv6-{purpose}-{}", std::process::id()))
 }
 
 fn listen_addr_from_env() -> Result<SocketAddr> {
@@ -762,6 +919,7 @@ mod tests {
         let (shutdown, _) = watch::channel(false);
         DohDnsGuard {
             previous_resolv_conf: previous.to_vec(),
+            previous_resolv_symlink: None,
             previous_nsswitch_conf: None,
             shutdown,
             tasks: vec![tokio::spawn(std::future::pending())],
@@ -786,6 +944,7 @@ mod tests {
         let (shutdown, _) = watch::channel(false);
         DohDnsGuard {
             previous_resolv_conf: previous_resolv.to_vec(),
+            previous_resolv_symlink: None,
             previous_nsswitch_conf: Some(previous_nsswitch.to_vec()),
             shutdown,
             tasks: vec![tokio::spawn(std::future::pending())],
@@ -808,6 +967,55 @@ mod tests {
         assert!(managed.contains("nameserver 127.0.0.2"));
         assert!(!managed.contains("nameserver 10.0.0.1"));
         assert!(!managed.contains("nameserver 2001:db8::1"));
+    }
+
+    #[test]
+    fn managed_resolv_conf_replaces_and_restores_systemd_symlink() {
+        let directory = std::env::temp_dir().join(format!(
+            "fuckipv6-doh-dns-symlink-{}-{}",
+            std::process::id(),
+            NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let stub = directory.join("stub-resolv.conf");
+        let resolv_conf = directory.join("resolv.conf");
+        let original = b"nameserver 10.0.0.1\n";
+        std::fs::write(&stub, original).expect("write resolver target");
+        symlink(&stub, &resolv_conf).expect("create resolver symlink");
+        let symlink_target = resolv_conf_symlink_target(&resolv_conf)
+            .expect("read resolver symlink")
+            .expect("resolver must be a symlink");
+        let managed = managed_resolv_conf(original, "127.0.0.2".parse().unwrap());
+
+        install_resolv_conf(&resolv_conf, &managed, true).expect("replace resolver symlink");
+        assert!(!std::fs::symlink_metadata(&resolv_conf)
+            .expect("managed resolver metadata")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read(&resolv_conf).expect("read managed resolver"),
+            managed
+        );
+        assert_eq!(
+            std::fs::read(&stub).expect("read untouched resolver target"),
+            original
+        );
+
+        restore_resolv_conf(&resolv_conf, original, Some(&symlink_target))
+            .expect("restore resolver symlink");
+        assert!(std::fs::symlink_metadata(&resolv_conf)
+            .expect("restored resolver metadata")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_link(&resolv_conf).expect("read restored resolver link"),
+            stub
+        );
+        assert_eq!(
+            std::fs::read(&resolv_conf).expect("read restored resolver"),
+            original
+        );
+        std::fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]
@@ -1084,6 +1292,62 @@ mod tests {
             previous_nsswitch
         );
         assert!(!backup.exists());
+        assert!(!nsswitch_backup.exists());
+        std::fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn startup_restores_stale_resolver_and_nsswitch_backups() {
+        let directory = std::env::temp_dir().join(format!(
+            "fuckipv6-doh-dns-startup-{}-{}",
+            std::process::id(),
+            NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).expect("create test directory");
+        let lock = directory.join("dns.lock");
+        let resolv_conf = directory.join("resolv.conf");
+        let resolv_backup = directory.join("resolv.conf.backup");
+        let nsswitch_conf = directory.join("nsswitch.conf");
+        let nsswitch_backup = directory.join("nsswitch.conf.backup");
+        std::fs::write(
+            &resolv_conf,
+            b"nameserver 127.0.0.2
+",
+        )
+        .expect("write managed resolver");
+        std::fs::write(
+            &nsswitch_conf,
+            b"hosts: files dns
+",
+        )
+        .expect("write managed nsswitch");
+        std::fs::write(
+            &resolv_backup,
+            b"nameserver 9.9.9.9
+",
+        )
+        .expect("write resolver backup");
+        std::fs::write(&nsswitch_backup, b"hosts: files resolve dns\n")
+            .expect("write nsswitch backup");
+
+        restore_stale_host_configuration_at(
+            &lock,
+            &nsswitch_backup,
+            &nsswitch_conf,
+            &resolv_backup,
+            &resolv_conf,
+        )
+        .expect("restore stale startup configuration");
+
+        assert_eq!(
+            std::fs::read(&resolv_conf).expect("read restored resolver"),
+            b"nameserver 9.9.9.9\n"
+        );
+        assert_eq!(
+            std::fs::read(&nsswitch_conf).expect("read restored nsswitch"),
+            b"hosts: files resolve dns\n"
+        );
+        assert!(!resolv_backup.exists());
         assert!(!nsswitch_backup.exists());
         std::fs::remove_dir_all(directory).expect("remove test directory");
     }

@@ -1702,6 +1702,7 @@ mod tests {
             )]),
             contribution_vetoes: Vec::new(),
             exit_contribution: None,
+            relay_limits: Default::default(),
             rules,
         }
     }
@@ -1715,6 +1716,7 @@ mod tests {
             expires_at_unix_ms: now + 86_400_000,
             rules,
             grants: Vec::new(),
+            relay_limits: Default::default(),
         }
     }
 

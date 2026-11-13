@@ -1029,6 +1029,30 @@ async fn handle_signaling_message(
             )
             .await?;
         }
+        SignalingMessage::CoordinatorEmergencyLeaderIssue { network_id } => {
+            handle_coordinator_emergency_leader_issue(
+                network_id,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
+        SignalingMessage::CoordinatorEmergencyLeaderRenew {
+            network_id,
+            credential,
+        } => {
+            handle_coordinator_emergency_leader_renew(
+                network_id,
+                credential,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
         SignalingMessage::CoordinatorCandidateConfigUpdateAuthorized {
             expected_revision,
             config,
@@ -1162,6 +1186,8 @@ fn is_server_originated_response(message: &SignalingMessage) -> bool {
             | SignalingMessage::CoordinatorElectionTimeoutAck { .. }
             | SignalingMessage::CoordinatorElectionChanged { .. }
             | SignalingMessage::CoordinatorRecoveryResponse { .. }
+            | SignalingMessage::CoordinatorEmergencyLeaderIssueAck { .. }
+            | SignalingMessage::CoordinatorEmergencyLeaderRenewAck { .. }
     )
 }
 
@@ -1664,6 +1690,124 @@ async fn handle_coordinator_recovery(
                 session_manager,
                 coordinator_candidate_protocol_error(&error),
             )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_emergency_leader_issue(
+    network_id: NetworkId,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let now_unix_ms = unix_time_ms();
+    let presence = session_manager.member_presence(now_unix_ms).await;
+    let online_members = match store.emergency_online_members(&network_id, &presence) {
+        Ok(online_members) => online_members,
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "无法计算紧急 Leader 在线成员集");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+            return Ok(());
+        }
+    };
+
+    match store.issue_emergency_leader(&actor, &network_id, &online_members, now_unix_ms) {
+        Ok(response) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorEmergencyLeaderIssueAck { response },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝紧急 Coordinator Leader 签发");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_emergency_leader_renew(
+    network_id: NetworkId,
+    credential: fuckipv6_common::domain::CoordinatorEmergencyWriteCredential,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let now_unix_ms = unix_time_ms();
+    let presence = session_manager.member_presence(now_unix_ms).await;
+    let online_members = match store.emergency_online_members(&network_id, &presence) {
+        Ok(online_members) => online_members,
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "无法计算紧急 Leader 在线成员集");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+            return Ok(());
+        }
+    };
+
+    match store.renew_emergency_leader(
+        &actor,
+        &credential,
+        &network_id,
+        &online_members,
+        now_unix_ms,
+    ) {
+        Ok(response) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorEmergencyLeaderRenewAck { response },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝紧急 Coordinator Leader 续租");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+            let text = error.to_string();
+            if text.contains("domain.coordinator_emergency_candidate_online")
+                || text.contains("domain.coordinator_emergency_leader_offline")
+            {
+                broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                    .await?;
+            }
         }
     }
     Ok(())
@@ -3329,23 +3473,23 @@ mod tests {
     fn coordinator_recovery_response_is_rejected_as_a_client_message() {
         let network_id = NetworkId::from_public_key(b"recovery-response-spoof");
         let leader = NodeId::from_public_key(b"recovery-response-leader");
+        let status = fuckipv6_common::domain::CoordinatorCandidateStatus {
+            network_id: network_id.clone(),
+            generated_at_unix_ms: 1,
+            config_state: fuckipv6_common::domain::CoordinatorCandidateConfigState::Missing,
+            config: None,
+            candidates: Vec::new(),
+            current_leader: None,
+            latest_term: None,
+            lease: fuckipv6_common::domain::CoordinatorLeaseStatus::no_term(),
+            control_plane: Default::default(),
+            emergency: fuckipv6_common::domain::CoordinatorEmergencyState::NoCandidatesConfigured,
+            emergency_leader: None,
+            latest_election: None,
+        };
         let message = SignalingMessage::CoordinatorRecoveryResponse {
             response: fuckipv6_common::domain::CoordinatorRecoveryResponse {
-                status: fuckipv6_common::domain::CoordinatorCandidateStatus {
-                    network_id: network_id.clone(),
-                    generated_at_unix_ms: 1,
-                    config_state: fuckipv6_common::domain::CoordinatorCandidateConfigState::Missing,
-                    config: None,
-                    candidates: Vec::new(),
-                    current_leader: None,
-                    latest_term: None,
-                    lease: fuckipv6_common::domain::CoordinatorLeaseStatus::no_term(),
-                    control_plane: Default::default(),
-                    emergency:
-                        fuckipv6_common::domain::CoordinatorEmergencyState::NoCandidatesConfigured,
-                    emergency_leader: None,
-                    latest_election: None,
-                },
+                status: status.clone(),
                 recovery: fuckipv6_common::domain::CoordinatorRecoveryStatus {
                     network_id,
                     stage: fuckipv6_common::domain::CoordinatorRecoveryStage::ReadOnly,
@@ -3365,6 +3509,22 @@ mod tests {
         };
 
         assert!(is_server_originated_response(&message));
+        assert!(is_server_originated_response(
+            &SignalingMessage::CoordinatorEmergencyLeaderIssueAck {
+                response: fuckipv6_common::domain::CoordinatorEmergencyLeaderResponse {
+                    status: status.clone(),
+                    renewed: false,
+                },
+            }
+        ));
+        assert!(is_server_originated_response(
+            &SignalingMessage::CoordinatorEmergencyLeaderRenewAck {
+                response: fuckipv6_common::domain::CoordinatorEmergencyLeaderResponse {
+                    status,
+                    renewed: true,
+                },
+            }
+        ));
     }
 
     #[test]

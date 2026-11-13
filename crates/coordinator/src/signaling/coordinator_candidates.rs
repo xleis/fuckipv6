@@ -7,8 +7,8 @@ use fuckipv6_common::domain::{
     CoordinatorEmergencyLeaderResponse, CoordinatorEmergencyLeaderStatus,
     CoordinatorEmergencyWriteCredential, CoordinatorRecoveryReport, CoordinatorRecoveryResponse,
     CoordinatorRecoveryRole, CoordinatorRecoveryStage, CoordinatorRecoveryStatus, CoordinatorTerm,
-    CoordinatorWriteCredential, CoordinatorWriteKind, NetworkId, NetworkRecord, NodeId,
-    COORDINATOR_MAX_LEASE_DURATION_MS,
+    CoordinatorWriteCredential, CoordinatorWriteKind, NetworkId, NetworkMemberOnlineState,
+    NetworkMemberPresence, NetworkRecord, NodeId, COORDINATOR_MAX_LEASE_DURATION_MS,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -1273,6 +1273,26 @@ impl CoordinatorCandidateStore {
         let _profile_lock = lock_profile(&self.network_record_path, false)?;
         let network = read_network_record(&self.network_record_path, network_id)?;
         Ok(network.members)
+    }
+
+    /// Intersect the session-derived presence snapshot with the authoritative
+    /// network roster. A missing session is offline, and a session for a node
+    /// outside this network can never justify emergency authority.
+    pub(crate) fn emergency_online_members(
+        &self,
+        network_id: &NetworkId,
+        presence: &BTreeMap<NodeId, NetworkMemberPresence>,
+    ) -> Result<Vec<NodeId>> {
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
+        let network = read_network_record(&self.network_record_path, network_id)?;
+        Ok(presence
+            .iter()
+            .filter(|(node_id, presence)| {
+                presence.state == NetworkMemberOnlineState::Online
+                    && network.members.contains(*node_id)
+            })
+            .map(|(node_id, _)| node_id.clone())
+            .collect())
     }
 
     /// Election events are control-plane traffic for current candidates only.
@@ -3541,6 +3561,34 @@ mod tests {
             entry.action == "coordinator.term.lease.renew.rejected"
                 && entry.outcome == AuditOutcome::Denied
         }));
+    }
+
+    #[test]
+    fn emergency_online_members_only_uses_live_sessions_for_current_members() {
+        let fixture = Fixture::new("emergency-online-members");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_two_id = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        let ordinary_id = NodeId::from_public_key(&fixture.ordinary.public_key());
+        let outsider_id = NodeId::from_public_key(&Identity::generate().unwrap().public_key());
+        let presence = BTreeMap::from([
+            (owner_id.clone(), NetworkMemberPresence::live(NOW)),
+            (
+                candidate_one_id.clone(),
+                NetworkMemberPresence::disconnected(NOW),
+            ),
+            (candidate_two_id.clone(), NetworkMemberPresence::live(NOW)),
+            (ordinary_id.clone(), NetworkMemberPresence::unknown()),
+            (outsider_id, NetworkMemberPresence::live(NOW)),
+        ]);
+
+        let online = store
+            .emergency_online_members(&fixture.network.network_id, &presence)
+            .unwrap();
+        let mut expected = vec![owner_id, candidate_two_id];
+        expected.sort();
+        assert_eq!(online, expected);
     }
 
     #[test]

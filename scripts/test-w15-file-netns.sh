@@ -969,6 +969,11 @@ SH
     }
     info "network_id=$NETWORK_ID owner=$HOST_NODE_ID join_mode=invite_only"
 
+    # Invitation capability policy is checked against the current signed network
+    # profile at issuance time, so File must be declared before accepting members.
+    info "declaring the signed network File capability before invitation issuance"
+    set_network_file_capability yes grant-file
+
     info "starting two empty member nodes"
     "$headless_exec" "$headless_state" ip netns exec "$NS1" "${node1_env[@]}" RUST_LOG=debug "$BIN" --headless --webui-port "$WEBUI1" \
         >"$WORK/node1/node.log" 2>&1 &
@@ -1053,9 +1058,7 @@ SH
         fail "node2 did not report node1 as active/healthy P2P peer"
     }
 
-    info "granting the signed network File capability"
-    set_network_file_capability yes grant-file
-    info "owner-authoritative network File profile is current and signed; the host currently sees it as enabled"
+    info "owner-authoritative network File profile is current and signed; File members were admitted under it"
 
     NODE1_UPLOAD_SOURCE="$NODE1_WORK/node1-upload.bin"
     NODE1_CANCEL_UPLOAD_SOURCE="$NODE1_WORK/cancel-upload-source.bin"

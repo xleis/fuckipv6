@@ -1,5 +1,7 @@
 use anyhow::{bail, Context, Result};
+use fuckipv6_common::domain::NodeId;
 use fuckipv6_common::{recent_error_log_lines, PeerInfo};
+use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -325,11 +327,13 @@ pub struct PeerSnapshot {
 #[derive(Clone)]
 pub struct NetworkSessionHandle {
     pub network_name: String,
+    pub(crate) network_id: Option<String>,
     pub tun_name: String,
     pub assigned_ip: Ipv6Addr,
     pub assigned_ipv4: Option<Ipv4Addr>,
     pub p2p: P2pEngine,
     pub stats: StatsCollector,
+    pub(crate) control_tx: Option<mpsc::UnboundedSender<RuntimeCommand>>,
 }
 
 #[derive(Clone, Default)]
@@ -374,6 +378,13 @@ impl MultiNetworkRegistry {
         }
     }
 
+    fn control_sender(&self) -> Option<mpsc::UnboundedSender<RuntimeCommand>> {
+        self.control_tx
+            .read()
+            .expect("IPC control sender lock poisoned")
+            .clone()
+    }
+
     pub fn set_stop_sender(&self, tx: mpsc::UnboundedSender<Option<String>>) {
         *self.stop_tx.write().expect("IPC stop sender lock poisoned") = Some(tx);
     }
@@ -393,6 +404,18 @@ impl MultiNetworkRegistry {
         let mut list: Vec<_> = r.values().cloned().collect();
         list.sort_by(|a, b| a.network_name.cmp(&b.network_name));
         list
+    }
+
+    async fn file_transfer_control_senders(&self) -> Vec<mpsc::UnboundedSender<RuntimeCommand>> {
+        let sessions = self.get_all().await;
+        let mut senders: Vec<_> = sessions
+            .iter()
+            .filter_map(|session| session.control_tx.clone())
+            .collect();
+        if senders.is_empty() {
+            senders.extend(self.control_sender());
+        }
+        senders
     }
 
     pub async fn is_empty(&self) -> bool {
@@ -466,11 +489,13 @@ pub fn spawn_server(
 ) -> JoinHandle<()> {
     let handle = NetworkSessionHandle {
         network_name: "default".to_string(),
+        network_id: None,
         tun_name: "fuckipv6".to_string(),
         assigned_ip,
         assigned_ipv4: None,
         p2p,
         stats,
+        control_tx: None,
     };
     let registry = MultiNetworkRegistry::new_with_session(handle);
     spawn_multi_server_at(default_addr(), registry)
@@ -484,11 +509,13 @@ pub(crate) fn spawn_server_with_control(
 ) -> JoinHandle<()> {
     let handle = NetworkSessionHandle {
         network_name: "default".to_string(),
+        network_id: None,
         tun_name: "fuckipv6".to_string(),
         assigned_ip,
         assigned_ipv4: None,
         p2p,
         stats,
+        control_tx: None,
     };
     let registry = MultiNetworkRegistry::new_with_session(handle);
     spawn_multi_server_with_control_at(default_addr(), registry, control_tx)
@@ -502,11 +529,13 @@ pub fn spawn_server_at(
 ) -> JoinHandle<()> {
     let handle = NetworkSessionHandle {
         network_name: "default".to_string(),
+        network_id: None,
         tun_name: "fuckipv6".to_string(),
         assigned_ip,
         assigned_ipv4: None,
         p2p,
         stats,
+        control_tx: None,
     };
     let registry = MultiNetworkRegistry::new_with_session(handle);
     spawn_multi_server_at(addr, registry)
@@ -556,11 +585,13 @@ fn spawn_server_on_listener(
 ) -> JoinHandle<()> {
     let handle = NetworkSessionHandle {
         network_name: "default".to_string(),
+        network_id: None,
         tun_name: "fuckipv6".to_string(),
         assigned_ip,
         assigned_ipv4: None,
         p2p,
         stats,
+        control_tx: None,
     };
     spawn_multi_server_with_commands_on_listener(
         listener,
@@ -818,8 +849,14 @@ pub(crate) async fn start_file_transfer(
     registry: &MultiNetworkRegistry,
     request: Box<StartFileTransferRequest>,
 ) -> Result<FileTransferHandle, FileTransferControlError> {
+    let control_tx =
+        select_file_transfer_control_sender(registry, request.network_id.as_deref(), &request.peer)
+            .await?;
     let (reply, response) = oneshot::channel();
-    if !registry.send_control(RuntimeCommand::StartFileTransfer { request, reply }) {
+    if control_tx
+        .send(RuntimeCommand::StartFileTransfer { request, reply })
+        .is_err()
+    {
         return Err(FileTransferControlError::RuntimeUnavailable);
     }
 
@@ -831,26 +868,176 @@ pub(crate) async fn start_file_transfer(
     }
 }
 
+async fn select_file_transfer_control_sender(
+    registry: &MultiNetworkRegistry,
+    network_id: Option<&str>,
+    peer: &str,
+) -> Result<mpsc::UnboundedSender<RuntimeCommand>, FileTransferControlError> {
+    let sessions = registry.get_all().await;
+    if sessions.is_empty() {
+        return registry
+            .control_sender()
+            .ok_or(FileTransferControlError::RuntimeUnavailable);
+    }
+
+    if let Some(network_id) = network_id {
+        let matching: Vec<_> = sessions
+            .iter()
+            .filter(|session| session.network_id.as_deref() == Some(network_id))
+            .collect();
+        return match matching.as_slice() {
+            [] => Err(FileTransferControlError::Rejected(
+                "file_transfer_network_not_found".to_string(),
+            )),
+            [session] => session
+                .control_tx
+                .clone()
+                .ok_or(FileTransferControlError::RuntimeUnavailable),
+            _ => Err(FileTransferControlError::Rejected(
+                "file_transfer_network_ambiguous".to_string(),
+            )),
+        };
+    }
+
+    let peer_node_id = NodeId::parse(peer.to_string()).map_err(|_| {
+        FileTransferControlError::Rejected("file_transfer_peer_invalid".to_string())
+    })?;
+    let matching: Vec<_> = join_all(sessions.iter().map(|session| {
+        let peer_node_id = peer_node_id.clone();
+        async move {
+            (
+                session,
+                session
+                    .p2p
+                    .peer_route_by_node_id(&peer_node_id)
+                    .await
+                    .is_some(),
+            )
+        }
+    }))
+    .await
+    .into_iter()
+    .filter_map(|(session, matched)| matched.then_some(session))
+    .collect();
+
+    match matching.as_slice() {
+        [session] => session
+            .control_tx
+            .clone()
+            .or_else(|| {
+                (sessions.len() == 1)
+                    .then(|| registry.control_sender())
+                    .flatten()
+            })
+            .ok_or(FileTransferControlError::RuntimeUnavailable),
+        [] if sessions.len() == 1 => registry
+            .control_sender()
+            .ok_or(FileTransferControlError::RuntimeUnavailable),
+        [] => Err(FileTransferControlError::RuntimeUnavailable),
+        _ => Err(FileTransferControlError::Rejected(
+            "file_transfer_network_ambiguous".to_string(),
+        )),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FileTransferOperation {
+    Cancel,
+    Pause,
+    Resume,
+}
+
+impl FileTransferOperation {
+    fn command(
+        self,
+        transfer_id: &str,
+        operation_id: &str,
+        reply: oneshot::Sender<Result<(), String>>,
+    ) -> RuntimeCommand {
+        match self {
+            Self::Cancel => RuntimeCommand::CancelFileTransfer {
+                transfer_id: transfer_id.to_string(),
+                operation_id: operation_id.to_string(),
+                reply,
+            },
+            Self::Pause => RuntimeCommand::PauseFileTransfer {
+                transfer_id: transfer_id.to_string(),
+                operation_id: operation_id.to_string(),
+                reply,
+            },
+            Self::Resume => RuntimeCommand::ResumeFileTransfer {
+                transfer_id: transfer_id.to_string(),
+                operation_id: operation_id.to_string(),
+                reply,
+            },
+        }
+    }
+}
+
+async fn fan_out_file_transfer_control(
+    registry: &MultiNetworkRegistry,
+    operation: FileTransferOperation,
+    transfer_id: String,
+    operation_id: String,
+) -> Result<(), FileTransferControlError> {
+    let senders = registry.file_transfer_control_senders().await;
+    if senders.is_empty() {
+        return Err(FileTransferControlError::RuntimeUnavailable);
+    }
+
+    let mut requests = Vec::with_capacity(senders.len());
+    for sender in senders {
+        let (reply, response) = oneshot::channel();
+        let command = operation.command(&transfer_id, &operation_id, reply);
+        requests.push(async move {
+            if sender.send(command).is_err() {
+                return Err(FileTransferControlError::RuntimeUnavailable);
+            }
+            match tokio::time::timeout(Duration::from_secs(10), response).await {
+                Ok(Ok(Ok(()))) => Ok(()),
+                Ok(Ok(Err(code))) => Err(FileTransferControlError::Rejected(code)),
+                Ok(Err(_)) => Err(FileTransferControlError::RuntimeUnavailable),
+                Err(_) => Err(FileTransferControlError::Timeout),
+            }
+        });
+    }
+
+    let mut rejected = None;
+    let mut timed_out = false;
+    for result in join_all(requests).await {
+        match result {
+            Ok(()) => return Ok(()),
+            Err(FileTransferControlError::Rejected(code)) if rejected.is_none() => {
+                rejected = Some(code);
+            }
+            Err(FileTransferControlError::Timeout) => timed_out = true,
+            Err(
+                FileTransferControlError::RuntimeUnavailable
+                | FileTransferControlError::Rejected(_),
+            ) => {}
+        }
+    }
+    if let Some(code) = rejected {
+        Err(FileTransferControlError::Rejected(code))
+    } else if timed_out {
+        Err(FileTransferControlError::Timeout)
+    } else {
+        Err(FileTransferControlError::RuntimeUnavailable)
+    }
+}
+
 pub(crate) async fn cancel_file_transfer(
     registry: &MultiNetworkRegistry,
     transfer_id: String,
     operation_id: String,
 ) -> Result<(), FileTransferControlError> {
-    let (reply, response) = oneshot::channel();
-    if !registry.send_control(RuntimeCommand::CancelFileTransfer {
+    fan_out_file_transfer_control(
+        registry,
+        FileTransferOperation::Cancel,
         transfer_id,
         operation_id,
-        reply,
-    }) {
-        return Err(FileTransferControlError::RuntimeUnavailable);
-    }
-
-    match tokio::time::timeout(Duration::from_secs(10), response).await {
-        Ok(Ok(Ok(()))) => Ok(()),
-        Ok(Ok(Err(code))) => Err(FileTransferControlError::Rejected(code)),
-        Ok(Err(_)) => Err(FileTransferControlError::RuntimeUnavailable),
-        Err(_) => Err(FileTransferControlError::Timeout),
-    }
+    )
+    .await
 }
 
 pub(crate) async fn pause_file_transfer(
@@ -858,21 +1045,13 @@ pub(crate) async fn pause_file_transfer(
     transfer_id: String,
     operation_id: String,
 ) -> Result<(), FileTransferControlError> {
-    let (reply, response) = oneshot::channel();
-    if !registry.send_control(RuntimeCommand::PauseFileTransfer {
+    fan_out_file_transfer_control(
+        registry,
+        FileTransferOperation::Pause,
         transfer_id,
         operation_id,
-        reply,
-    }) {
-        return Err(FileTransferControlError::RuntimeUnavailable);
-    }
-
-    match tokio::time::timeout(Duration::from_secs(10), response).await {
-        Ok(Ok(Ok(()))) => Ok(()),
-        Ok(Ok(Err(code))) => Err(FileTransferControlError::Rejected(code)),
-        Ok(Err(_)) => Err(FileTransferControlError::RuntimeUnavailable),
-        Err(_) => Err(FileTransferControlError::Timeout),
-    }
+    )
+    .await
 }
 
 pub(crate) async fn resume_file_transfer(
@@ -880,21 +1059,13 @@ pub(crate) async fn resume_file_transfer(
     transfer_id: String,
     operation_id: String,
 ) -> Result<(), FileTransferControlError> {
-    let (reply, response) = oneshot::channel();
-    if !registry.send_control(RuntimeCommand::ResumeFileTransfer {
+    fan_out_file_transfer_control(
+        registry,
+        FileTransferOperation::Resume,
         transfer_id,
         operation_id,
-        reply,
-    }) {
-        return Err(FileTransferControlError::RuntimeUnavailable);
-    }
-
-    match tokio::time::timeout(Duration::from_secs(10), response).await {
-        Ok(Ok(Ok(()))) => Ok(()),
-        Ok(Ok(Err(code))) => Err(FileTransferControlError::Rejected(code)),
-        Ok(Err(_)) => Err(FileTransferControlError::RuntimeUnavailable),
-        Err(_) => Err(FileTransferControlError::Timeout),
-    }
+    )
+    .await
 }
 
 async fn disconnect_runtime(registry: &MultiNetworkRegistry) -> IpcResponse {
@@ -1398,6 +1569,7 @@ mod tests {
     fn start_file_transfer_request() -> Box<StartFileTransferRequest> {
         Box::new(StartFileTransferRequest {
             peer: "peer".to_string(),
+            network_id: None,
             direction: FileTransferDirection::Upload,
             share_id: "share".to_string(),
             transfer_id: "transfer".to_string(),
@@ -1406,6 +1578,231 @@ mod tests {
             local_path: "file.bin".to_string(),
             chunk_size: DEFAULT_FILE_TRANSFER_CHUNK_SIZE,
         })
+    }
+
+    async fn test_network_session(
+        network_name: &str,
+        network_id: Option<&str>,
+        control_tx: mpsc::UnboundedSender<RuntimeCommand>,
+        peer: Option<PeerInfo>,
+    ) -> NetworkSessionHandle {
+        let p2p = P2pEngine::new_loopback_for_test()
+            .await
+            .expect("create loopback p2p engine");
+        p2p.set_identity(
+            fuckipv6_common::crypto::Identity::generate().expect("generated identity"),
+        )
+        .await;
+        p2p.set_local_ip(Ipv6Addr::LOCALHOST).await;
+        if let Some(peer) = peer {
+            p2p.add_peer(peer).await.expect("add test peer");
+        }
+        NetworkSessionHandle {
+            network_name: network_name.to_string(),
+            network_id: network_id.map(str::to_string),
+            tun_name: format!("tun-{network_name}"),
+            assigned_ip: Ipv6Addr::LOCALHOST,
+            assigned_ipv4: None,
+            p2p,
+            stats: StatsCollector::new(),
+            control_tx: Some(control_tx),
+        }
+    }
+
+    fn test_peer(label: &str, virtual_ip: Ipv6Addr) -> (NodeId, PeerInfo) {
+        let identity =
+            fuckipv6_common::crypto::Identity::generate().expect("generated peer identity");
+        let public_key = identity.public_key();
+        let node_id = NodeId::from_public_key(&public_key);
+        (
+            node_id,
+            PeerInfo::new(
+                format!("client-{label}"),
+                virtual_ip,
+                public_key,
+                vec![SocketAddr::from(([127, 0, 0, 1], 49_152))],
+                NatType::Open,
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn file_transfer_start_routes_by_explicit_network_id() {
+        let registry = MultiNetworkRegistry::new();
+        let (tx_a, mut rx_a) = mpsc::unbounded_channel();
+        let (tx_b, mut rx_b) = mpsc::unbounded_channel();
+        registry
+            .register(test_network_session("a", Some("network-a"), tx_a, None).await)
+            .await;
+        registry
+            .register(test_network_session("b", Some("network-b"), tx_b, None).await)
+            .await;
+
+        let mut request = start_file_transfer_request();
+        request.network_id = Some("network-b".to_string());
+        let task = tokio::spawn({
+            let registry = registry.clone();
+            async move { start_file_transfer(&registry, request).await }
+        });
+        let RuntimeCommand::StartFileTransfer { reply, .. } =
+            tokio::time::timeout(Duration::from_secs(1), rx_b.recv())
+                .await
+                .expect("start command timeout")
+                .expect("start command")
+        else {
+            panic!("expected start command on network-b");
+        };
+        assert!(rx_a.try_recv().is_err());
+        let handle = FileTransferHandle {
+            transfer_id: "transfer".to_string(),
+            operation_id: "operation".to_string(),
+        };
+        reply.send(Ok(handle.clone())).expect("reply start");
+        assert_eq!(task.await.expect("start task"), Ok(handle));
+    }
+
+    #[tokio::test]
+    async fn file_transfer_start_routes_to_the_unique_peer_network() {
+        let registry = MultiNetworkRegistry::new();
+        let (peer_node_id, peer) = test_peer("unique", Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 1, 2));
+        let (tx_a, mut rx_a) = mpsc::unbounded_channel();
+        let (tx_b, mut rx_b) = mpsc::unbounded_channel();
+        registry
+            .register(test_network_session("a", Some("network-a"), tx_a, Some(peer)).await)
+            .await;
+        registry
+            .register(test_network_session("b", Some("network-b"), tx_b, None).await)
+            .await;
+
+        let mut request = start_file_transfer_request();
+        request.peer = peer_node_id.to_string();
+        let task = tokio::spawn({
+            let registry = registry.clone();
+            async move { start_file_transfer(&registry, request).await }
+        });
+        let RuntimeCommand::StartFileTransfer { reply, .. } =
+            tokio::time::timeout(Duration::from_secs(1), rx_a.recv())
+                .await
+                .expect("start command timeout")
+                .expect("start command")
+        else {
+            panic!("expected start command on network-a");
+        };
+        assert!(rx_b.try_recv().is_err());
+        let handle = FileTransferHandle {
+            transfer_id: "transfer".to_string(),
+            operation_id: "operation".to_string(),
+        };
+        reply.send(Ok(handle.clone())).expect("reply start");
+        assert_eq!(task.await.expect("start task"), Ok(handle));
+    }
+
+    #[tokio::test]
+    async fn file_transfer_start_rejects_ambiguous_peer_networks() {
+        let registry = MultiNetworkRegistry::new();
+        let (peer_node_id, peer) =
+            test_peer("ambiguous", Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 1, 3));
+        let (tx_a, _rx_a) = mpsc::unbounded_channel();
+        let (tx_b, _rx_b) = mpsc::unbounded_channel();
+        registry
+            .register(test_network_session("a", Some("network-a"), tx_a, Some(peer.clone())).await)
+            .await;
+        registry
+            .register(test_network_session("b", Some("network-b"), tx_b, Some(peer)).await)
+            .await;
+
+        let mut request = start_file_transfer_request();
+        request.peer = peer_node_id.to_string();
+        assert_eq!(
+            start_file_transfer(&registry, request).await,
+            Err(FileTransferControlError::Rejected(
+                "file_transfer_network_ambiguous".to_string()
+            ))
+        );
+    }
+
+    fn file_transfer_operation_reply(
+        operation: FileTransferOperation,
+        command: RuntimeCommand,
+    ) -> oneshot::Sender<Result<(), String>> {
+        match (operation, command) {
+            (
+                FileTransferOperation::Cancel,
+                RuntimeCommand::CancelFileTransfer {
+                    transfer_id,
+                    operation_id,
+                    reply,
+                },
+            )
+            | (
+                FileTransferOperation::Pause,
+                RuntimeCommand::PauseFileTransfer {
+                    transfer_id,
+                    operation_id,
+                    reply,
+                },
+            )
+            | (
+                FileTransferOperation::Resume,
+                RuntimeCommand::ResumeFileTransfer {
+                    transfer_id,
+                    operation_id,
+                    reply,
+                },
+            ) => {
+                assert_eq!(transfer_id, "transfer");
+                assert_eq!(operation_id, "operation");
+                reply
+            }
+            _ => panic!("unexpected File transfer control command"),
+        }
+    }
+
+    async fn assert_file_transfer_control_fanout(operation: FileTransferOperation) {
+        let registry = MultiNetworkRegistry::new();
+        let (tx_a, mut rx_a) = mpsc::unbounded_channel();
+        let (tx_b, mut rx_b) = mpsc::unbounded_channel();
+        registry
+            .register(test_network_session("a", Some("network-a"), tx_a, None).await)
+            .await;
+        registry
+            .register(test_network_session("b", Some("network-b"), tx_b, None).await)
+            .await;
+
+        let task = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                fan_out_file_transfer_control(
+                    &registry,
+                    operation,
+                    "transfer".to_string(),
+                    "operation".to_string(),
+                )
+                .await
+            }
+        });
+        let command_a = tokio::time::timeout(Duration::from_secs(1), rx_a.recv())
+            .await
+            .expect("network-a command timeout")
+            .expect("network-a command");
+        let command_b = tokio::time::timeout(Duration::from_secs(1), rx_b.recv())
+            .await
+            .expect("network-b command timeout")
+            .expect("network-b command");
+        file_transfer_operation_reply(operation, command_a)
+            .send(Err("file_transfer_not_found".to_string()))
+            .expect("reply network-a");
+        file_transfer_operation_reply(operation, command_b)
+            .send(Ok(()))
+            .expect("reply network-b");
+        assert_eq!(task.await.expect("fanout task"), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn file_transfer_controls_fan_out_and_accept_one_runtime_success() {
+        assert_file_transfer_control_fanout(FileTransferOperation::Cancel).await;
+        assert_file_transfer_control_fanout(FileTransferOperation::Pause).await;
+        assert_file_transfer_control_fanout(FileTransferOperation::Resume).await;
     }
 
     #[tokio::test]

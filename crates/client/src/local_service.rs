@@ -1692,6 +1692,7 @@ mod tests {
 
         let request = StartFileTransferRequest {
             peer: "peer".into(),
+            network_id: None,
             direction: FileTransferDirection::Upload,
             share_id: "share".into(),
             transfer_id: "transfer".into(),
@@ -1793,6 +1794,7 @@ mod tests {
             IpcRole::Cli,
             StartFileTransferRequest {
                 peer: "peer".into(),
+                network_id: None,
                 direction: FileTransferDirection::Download,
                 share_id: "share".into(),
                 transfer_id: "transfer".into(),

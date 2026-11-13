@@ -25,6 +25,11 @@ pub enum FileTransferDirection {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StartFileTransferRequest {
     pub peer: String,
+    /// Optional stable network selector for multi-network nodes. A local caller
+    /// that already knows the share can supply this to avoid ambiguity when the
+    /// same peer is online through more than one network.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_id: Option<String>,
     pub direction: FileTransferDirection,
     pub share_id: String,
     pub transfer_id: String,
@@ -40,6 +45,7 @@ impl fmt::Debug for StartFileTransferRequest {
         formatter
             .debug_struct("StartFileTransferRequest")
             .field("peer", &self.peer)
+            .field("network_id", &self.network_id)
             .field("direction", &self.direction)
             .field("share_id", &self.share_id)
             .field("transfer_id", &self.transfer_id)
@@ -84,6 +90,7 @@ mod tests {
     fn request_debug_redacts_local_path() {
         let request = StartFileTransferRequest {
             peer: "peer".into(),
+            network_id: None,
             direction: FileTransferDirection::Upload,
             share_id: "share".into(),
             transfer_id: "transfer".into(),

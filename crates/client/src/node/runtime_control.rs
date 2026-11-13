@@ -805,6 +805,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
             let signaling = Some(runtime.signaling.clone());
             let p2p = runtime.p2p.clone();
             let stats = runtime.stats.clone();
+            let network_id = request.network_id.as_ref().map(ToString::to_string);
 
             // Multi-network nodes disable each runtime's private IPC listener.
             // Replace its unused control receiver with the actor-owned channel so
@@ -815,11 +816,13 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
             registry
                 .register(NetworkSessionHandle {
                     network_name: request.network_name.clone(),
+                    network_id,
                     tun_name: tun_name.clone(),
                     assigned_ip: assigned_ipv6,
                     assigned_ipv4,
                     p2p,
                     stats,
+                    control_tx: Some(routing_control.clone()),
                 })
                 .await;
             runtime.attach_node_state(state.clone()).await;
@@ -7279,21 +7282,24 @@ mod tests {
                     .await
                     .expect("create loopback p2p engine");
                 let p2p_listen_addr = p2p.local_addr();
+                let network_id = request.network_id.as_ref().map(ToString::to_string);
+                let (routing_control, mut routing_control_rx) = mpsc::unbounded_channel();
                 if let Some(registry) = &registry {
                     registry
                         .register(NetworkSessionHandle {
                             network_name: network_name.clone(),
+                            network_id,
                             tun_name: tun_name.clone(),
                             assigned_ip: Ipv6Addr::LOCALHOST,
                             assigned_ipv4: Some(Ipv4Addr::LOCALHOST),
                             p2p: p2p.clone(),
                             stats: StatsCollector::new(),
+                            control_tx: Some(routing_control.clone()),
                         })
                         .await;
                 }
                 let cleanup_registry = registry.clone();
                 let cleanup_p2p = p2p.clone();
-                let (routing_control, mut routing_control_rx) = mpsc::unbounded_channel();
                 let (shutdown, mut shutdown_rx) = watch::channel(false);
                 let handle = tokio::spawn(async move {
                     loop {
@@ -7866,6 +7872,21 @@ mod tests {
             }
         }
         statuses
+    }
+
+    #[tokio::test]
+    async fn launched_network_session_owns_its_control_channel_until_shutdown() {
+        let harness = TestHarness::new("session-control-channel").await;
+        start_fake_network(&harness, "session-control-channel").await;
+
+        let sessions = harness.registry.get_all().await;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].network_name, "session-control-channel");
+        assert!(sessions[0].control_tx.is_some());
+
+        let _ = harness.runtime.shutdown().await;
+        assert!(harness.registry.get_all().await.is_empty());
+        harness.shutdown().await;
     }
 
     #[tokio::test]

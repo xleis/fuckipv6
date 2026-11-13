@@ -1285,14 +1285,108 @@ impl CoordinatorCandidateStore {
     ) -> Result<Vec<NodeId>> {
         let _profile_lock = lock_profile(&self.network_record_path, false)?;
         let network = read_network_record(&self.network_record_path, network_id)?;
-        Ok(presence
+        Ok(emergency_online_members_for_network(&network, presence))
+    }
+
+    /// Reconcile every persisted emergency lease against one authenticated
+    /// presence snapshot. Only leases whose authority has become invalid are
+    /// removed, so an idle ticker does not create repeated audit records.
+    pub(crate) fn reconcile_emergency_leases(
+        &self,
+        presence: &BTreeMap<NodeId, NetworkMemberPresence>,
+        now_unix_ms: u64,
+    ) -> Result<Vec<NetworkId>> {
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
+        self.ensure_parent()?;
+        let _file_lock = lock_candidate_file(&self.path)?;
+        let mut file = self.load_unlocked()?;
+        let leased_networks = file
+            .networks
             .iter()
-            .filter(|(node_id, presence)| {
-                presence.state == NetworkMemberOnlineState::Online
-                    && network.members.contains(*node_id)
-            })
-            .map(|(node_id, _)| node_id.clone())
-            .collect())
+            .filter(|(_, stored)| stored.emergency_leader.is_some())
+            .map(|(network_id, _)| network_id.clone())
+            .collect::<Vec<_>>();
+        let mut changed = Vec::new();
+
+        for network_id in leased_networks {
+            let network = read_network_record(&self.network_record_path, &network_id)?;
+            let online_members = emergency_online_members_for_network(&network, presence);
+            let stored = file
+                .networks
+                .get_mut(&network_id)
+                .expect("leased network must remain in candidate file");
+            let lease = stored
+                .emergency_leader
+                .as_ref()
+                .expect("leased network must retain emergency lease")
+                .clone();
+            let mut refreshed = lease.clone();
+            refreshed.refresh_at(now_unix_ms)?;
+
+            let config = stored.config.as_ref();
+            let candidate_recovered = config.is_some_and(|config| {
+                config
+                    .candidates
+                    .iter()
+                    .any(|candidate| online_members.contains(&candidate.node_id))
+            });
+            let leader_offline =
+                !network.members.contains(&lease.leader) || !online_members.contains(&lease.leader);
+            let config_unavailable =
+                config.is_none_or(|config| !config.is_effective_at(now_unix_ms));
+            let context_invalid = config
+                .is_some_and(|config| lease.validate_against_context(&network, config).is_err());
+            let reason_code = if candidate_recovered {
+                Some("coordinator.emergency.reason.candidate_recovered")
+            } else if leader_offline {
+                Some("coordinator.emergency.reason.leader_offline")
+            } else if now_unix_ms >= lease.hard_expires_at_unix_ms {
+                Some("coordinator.emergency.reason.hard_deadline_reached")
+            } else if config_unavailable {
+                Some("coordinator.emergency.reason.configuration_unavailable")
+            } else if now_unix_ms >= lease.expires_at_unix_ms {
+                Some("coordinator.emergency.reason.lease_expired")
+            } else if context_invalid {
+                Some("coordinator.emergency.reason.context_invalid")
+            } else {
+                None
+            };
+            let Some(reason_code) = reason_code else {
+                continue;
+            };
+
+            stored.emergency_leader = None;
+            append_audit(
+                &mut file.audit_log,
+                &emergency_reconciler_actor(),
+                &network.network_id,
+                "coordinator.emergency.leader.revoked",
+                format!("network/{}/coordinator-emergency", network.network_id),
+                AuditOutcome::Succeeded,
+                now_unix_ms,
+                "emergency runtime Leader revoked by presence reconciliation",
+                BTreeMap::from([
+                    ("actor_role".into(), "system".into()),
+                    (
+                        "observation".into(),
+                        "authenticated_session_presence".into(),
+                    ),
+                    ("reason_code".into(), reason_code.into()),
+                    ("emergency_epoch".into(), lease.emergency_epoch.to_string()),
+                    ("leader".into(), lease.leader.to_string()),
+                ]),
+            )?;
+            changed.push(network_id);
+        }
+
+        if !changed.is_empty() {
+            self.persist(&file)?;
+        }
+        Ok(changed)
     }
 
     /// Election events are control-plane traffic for current candidates only.
@@ -1941,6 +2035,23 @@ fn network_audit_entries<'a>(
 
 fn network_audit_sequence(file: &CoordinatorCandidateFile, network_id: &NetworkId) -> u64 {
     network_audit_entries(file, network_id).count() as u64
+}
+
+fn emergency_online_members_for_network(
+    network: &NetworkRecord,
+    presence: &BTreeMap<NodeId, NetworkMemberPresence>,
+) -> Vec<NodeId> {
+    presence
+        .iter()
+        .filter(|(node_id, presence)| {
+            presence.state == NetworkMemberOnlineState::Online && network.members.contains(*node_id)
+        })
+        .map(|(node_id, _)| node_id.clone())
+        .collect()
+}
+
+fn emergency_reconciler_actor() -> NodeId {
+    NodeId::from_public_key(b"fuckipv6-coordinator-emergency-reconciler")
 }
 
 fn recovery_audit_details(
@@ -3589,6 +3700,117 @@ mod tests {
         let mut expected = vec![owner_id, candidate_two_id];
         expected.sort();
         assert_eq!(online, expected);
+    }
+
+    #[test]
+    fn presence_reconciliation_revokes_each_invalid_emergency_authority() {
+        let fixture = Fixture::new("emergency-presence-reconciliation");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let ordinary_id = NodeId::from_public_key(&fixture.ordinary.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        let both_non_candidates = [owner_id.clone(), ordinary_id.clone()];
+
+        let issued = store
+            .issue_emergency_leader(
+                &owner_id,
+                &fixture.network.network_id,
+                &both_non_candidates,
+                NOW,
+            )
+            .unwrap();
+        let first_lease = issued.status.emergency_leader.unwrap();
+        let candidate_recovered = BTreeMap::from([
+            (owner_id.clone(), NetworkMemberPresence::live(NOW + 1)),
+            (ordinary_id.clone(), NetworkMemberPresence::live(NOW + 1)),
+            (candidate_one_id, NetworkMemberPresence::live(NOW + 1)),
+        ]);
+        assert_eq!(
+            store
+                .reconcile_emergency_leases(&candidate_recovered, NOW + 1)
+                .unwrap(),
+            vec![fixture.network.network_id.clone()]
+        );
+
+        let issued = store
+            .issue_emergency_leader(
+                &owner_id,
+                &fixture.network.network_id,
+                &both_non_candidates,
+                NOW + 2,
+            )
+            .unwrap();
+        let second_lease = issued.status.emergency_leader.unwrap();
+        let surviving_non_candidate = if second_lease.leader == owner_id {
+            ordinary_id.clone()
+        } else {
+            owner_id.clone()
+        };
+        let leader_offline = BTreeMap::from([(
+            surviving_non_candidate,
+            NetworkMemberPresence::live(NOW + 3),
+        )]);
+        assert_eq!(
+            store
+                .reconcile_emergency_leases(&leader_offline, NOW + 3)
+                .unwrap(),
+            vec![fixture.network.network_id.clone()]
+        );
+
+        let issued = store
+            .issue_emergency_leader(
+                &owner_id,
+                &fixture.network.network_id,
+                &both_non_candidates,
+                NOW + 4,
+            )
+            .unwrap();
+        let third_lease = issued.status.emergency_leader.unwrap();
+        let live_non_candidates = BTreeMap::from([
+            (owner_id, NetworkMemberPresence::live(NOW + 4)),
+            (ordinary_id, NetworkMemberPresence::live(NOW + 4)),
+        ]);
+        assert_eq!(
+            store
+                .reconcile_emergency_leases(&live_non_candidates, third_lease.expires_at_unix_ms,)
+                .unwrap(),
+            vec![fixture.network.network_id.clone()]
+        );
+
+        let status = store
+            .status(
+                &NodeId::from_public_key(&fixture.owner.public_key()),
+                &fixture.network.network_id,
+                third_lease.expires_at_unix_ms,
+            )
+            .unwrap();
+        assert!(status.emergency_leader.is_none());
+
+        let audit = store.audit_entries().unwrap();
+        for (epoch, reason_code) in [
+            (
+                first_lease.emergency_epoch,
+                "coordinator.emergency.reason.candidate_recovered",
+            ),
+            (
+                second_lease.emergency_epoch,
+                "coordinator.emergency.reason.leader_offline",
+            ),
+            (
+                third_lease.emergency_epoch,
+                "coordinator.emergency.reason.lease_expired",
+            ),
+        ] {
+            assert!(audit.iter().any(|entry| {
+                entry.action == "coordinator.emergency.leader.revoked"
+                    && entry.details.get("reason_code") == Some(&reason_code.into())
+                    && entry.details.get("emergency_epoch") == Some(&epoch.to_string())
+                    && entry.details.get("actor_role") == Some(&"system".into())
+            }));
+        }
     }
 
     #[test]

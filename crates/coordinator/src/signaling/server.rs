@@ -34,6 +34,8 @@ use super::member_lifecycle::MemberLifecycleStore;
 use super::members::build_member_directory;
 use super::session::SessionManager;
 
+const COORDINATOR_EMERGENCY_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
+
 fn verify_registration(
     client_id: &str,
     public_key: &[u8],
@@ -415,6 +417,22 @@ impl SignalingServer {
                 }
             }
         });
+
+        if let Some(store) = self.coordinator_candidate_store.clone() {
+            let session_manager = self.session_manager.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(COORDINATOR_EMERGENCY_RECONCILE_INTERVAL);
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    if let Err(error) =
+                        reconcile_coordinator_emergency_leases(&store, &session_manager).await
+                    {
+                        tracing::warn!(%error, "协调紧急 Coordinator Leader 在线状态失败");
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -673,6 +691,13 @@ async fn handle_signaling_message(
                 relay_directory,
             )
             .await?;
+            if let Some(store) = coordinator_candidate_store {
+                if let Err(error) =
+                    reconcile_coordinator_emergency_leases(store, session_manager).await
+                {
+                    tracing::warn!(%error, "注册后协调紧急 Coordinator Leader 在线状态失败");
+                }
+            }
         }
         SignalingMessage::ConnectRequest { target_id } => {
             handle_connect_request(target_id, session_manager, tx, client_id).await?;
@@ -1251,6 +1276,19 @@ async fn broadcast_coordinator_candidate_status_changed(
                 .send_to_client(&peer.client_id, message.clone())
                 .await?;
         }
+    }
+    Ok(())
+}
+
+async fn reconcile_coordinator_emergency_leases(
+    store: &CoordinatorCandidateStore,
+    session_manager: &SessionManager,
+) -> Result<()> {
+    let now_unix_ms = unix_time_ms();
+    let presence = session_manager.member_presence(now_unix_ms).await;
+    let changed_networks = store.reconcile_emergency_leases(&presence, now_unix_ms)?;
+    for network_id in changed_networks {
+        broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id).await?;
     }
     Ok(())
 }

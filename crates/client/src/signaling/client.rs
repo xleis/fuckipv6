@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
-    CoordinatorCandidateConfig, CoordinatorCandidateDeclaration, CoordinatorCandidateStatus,
+    ContentHash, CoordinatorCandidateConfig, CoordinatorCandidateDeclaration,
+    CoordinatorCandidateStatus, CoordinatorElectionProposal, CoordinatorElectionVote,
     CoordinatorTerm, CoordinatorWriteCredential, InvitationCode, InvitationCreateRequest,
     InvitationId, InvitationPreview, InvitationRedeemRequest, InvitationRedemption,
     InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestId,
@@ -334,6 +335,7 @@ impl CoordinatorCandidateControlError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // The runtime takeover loop consumes these pending variants.
 enum PendingCoordinatorCandidate {
     Config {
         network_id: NetworkId,
@@ -354,6 +356,19 @@ enum PendingCoordinatorCandidate {
         term: u64,
         fencing_token: u64,
         expires_at_unix_ms: u64,
+    },
+    ElectionPropose {
+        network_id: NetworkId,
+        proposal_id: ContentHash,
+    },
+    ElectionVote {
+        network_id: NetworkId,
+        proposal_id: ContentHash,
+        vote: CoordinatorElectionVote,
+    },
+    ElectionTimeout {
+        network_id: NetworkId,
+        proposal_id: ContentHash,
     },
 }
 
@@ -461,6 +476,50 @@ impl CoordinatorCandidateResponseHub {
                     _ => false,
                 })
             }
+            SignalingMessage::CoordinatorElectionProposeAck { status } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::ElectionPropose {
+                        network_id,
+                        proposal_id,
+                    } => {
+                        status.network_id == *network_id
+                            && status.latest_election.as_ref().is_some_and(|election| {
+                                election.proposal.proposal_id == *proposal_id
+                            })
+                    }
+                    _ => false,
+                })
+            }
+            SignalingMessage::CoordinatorElectionVoteAck { status } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::ElectionVote {
+                        network_id,
+                        proposal_id,
+                        vote,
+                    } => {
+                        status.network_id == *network_id
+                            && status.latest_election.as_ref().is_some_and(|election| {
+                                election.proposal.proposal_id == *proposal_id
+                                    && election.votes.contains(vote)
+                            })
+                    }
+                    _ => false,
+                })
+            }
+            SignalingMessage::CoordinatorElectionTimeoutAck { status } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::ElectionTimeout {
+                        network_id,
+                        proposal_id,
+                    } => {
+                        status.network_id == *network_id
+                            && status.latest_election.as_ref().is_some_and(|election| {
+                                election.proposal.proposal_id == *proposal_id
+                            })
+                    }
+                    _ => false,
+                })
+            }
             _ => return false,
         };
 
@@ -471,6 +530,9 @@ impl CoordinatorCandidateResponseHub {
                 | SignalingMessage::CoordinatorCandidateStatusAck { .. }
                 | SignalingMessage::CoordinatorTermInstallAck { .. }
                 | SignalingMessage::CoordinatorTermLeaseRenewAck { .. }
+                | SignalingMessage::CoordinatorElectionProposeAck { .. }
+                | SignalingMessage::CoordinatorElectionVoteAck { .. }
+                | SignalingMessage::CoordinatorElectionTimeoutAck { .. }
         );
         if !matches {
             return is_candidate_response;
@@ -481,7 +543,10 @@ impl CoordinatorCandidateResponseHub {
             | SignalingMessage::CoordinatorCandidateDeclarationAck { status }
             | SignalingMessage::CoordinatorCandidateStatusAck { status }
             | SignalingMessage::CoordinatorTermInstallAck { status }
-            | SignalingMessage::CoordinatorTermLeaseRenewAck { status } => status.clone(),
+            | SignalingMessage::CoordinatorTermLeaseRenewAck { status }
+            | SignalingMessage::CoordinatorElectionProposeAck { status }
+            | SignalingMessage::CoordinatorElectionVoteAck { status }
+            | SignalingMessage::CoordinatorElectionTimeoutAck { status } => status.clone(),
             SignalingMessage::Error { code, .. } => {
                 return self.finish(Err(CoordinatorCandidateControlError::Rejected(*code)));
             }
@@ -1352,6 +1417,60 @@ impl SignalingClient {
         .await
     }
 
+    #[allow(dead_code)] // Called by the runtime takeover loop.
+    pub(crate) async fn propose_coordinator_election(
+        &self,
+        proposal: CoordinatorElectionProposal,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        let expected = PendingCoordinatorCandidate::ElectionPropose {
+            network_id: proposal.network_id.clone(),
+            proposal_id: proposal.proposal_id.clone(),
+        };
+        self.send_coordinator_candidate_operation(
+            SignalingMessage::CoordinatorElectionPropose { proposal },
+            expected,
+        )
+        .await
+    }
+
+    #[allow(dead_code)] // Called by the runtime takeover loop.
+    pub(crate) async fn vote_coordinator_election(
+        &self,
+        proposal_id: ContentHash,
+        vote: CoordinatorElectionVote,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        let expected = PendingCoordinatorCandidate::ElectionVote {
+            network_id: vote.network_id.clone(),
+            proposal_id: proposal_id.clone(),
+            vote: vote.clone(),
+        };
+        self.send_coordinator_candidate_operation(
+            SignalingMessage::CoordinatorElectionVote { proposal_id, vote },
+            expected,
+        )
+        .await
+    }
+
+    #[allow(dead_code)] // Called by the runtime takeover loop.
+    pub(crate) async fn timeout_coordinator_election(
+        &self,
+        network_id: NetworkId,
+        proposal_id: ContentHash,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        let expected = PendingCoordinatorCandidate::ElectionTimeout {
+            network_id: network_id.clone(),
+            proposal_id: proposal_id.clone(),
+        };
+        self.send_coordinator_candidate_operation(
+            SignalingMessage::CoordinatorElectionTimeout {
+                network_id,
+                proposal_id,
+            },
+            expected,
+        )
+        .await
+    }
+
     pub(crate) async fn publish_coordinator_candidate_declaration(
         &self,
         declaration: CoordinatorCandidateDeclaration,
@@ -2211,7 +2330,13 @@ fn signaling_message_to_event(msg: SignalingMessage) -> Option<SignalingEvent> {
         | SignalingMessage::CoordinatorTermInstall { .. }
         | SignalingMessage::CoordinatorTermInstallAck { .. }
         | SignalingMessage::CoordinatorTermLeaseRenew { .. }
-        | SignalingMessage::CoordinatorTermLeaseRenewAck { .. } => None,
+        | SignalingMessage::CoordinatorTermLeaseRenewAck { .. }
+        | SignalingMessage::CoordinatorElectionPropose { .. }
+        | SignalingMessage::CoordinatorElectionProposeAck { .. }
+        | SignalingMessage::CoordinatorElectionVote { .. }
+        | SignalingMessage::CoordinatorElectionVoteAck { .. }
+        | SignalingMessage::CoordinatorElectionTimeout { .. }
+        | SignalingMessage::CoordinatorElectionTimeoutAck { .. } => None,
 
         _ => None,
     }
@@ -2313,10 +2438,10 @@ mod tests {
     use super::*;
     use fuckipv6_common::domain::{
         CoordinatorAuthority, CoordinatorCandidateConfigState, CoordinatorCandidateStatus,
-        CoordinatorElectionVote, CoordinatorEmergencyState, CoordinatorLeaseState,
-        CoordinatorPhase, CoordinatorTerm, ExitContributionMode, ExitContributionObligation,
-        ExitContributionScope, FencingToken, MembershipRole, NetworkCreateProfile, NetworkJoinMode,
-        NetworkRecord, NetworkVisibility, NodeId, PublicKey,
+        CoordinatorElectionSession, CoordinatorElectionVote, CoordinatorEmergencyState,
+        CoordinatorLeaseState, CoordinatorPhase, CoordinatorTerm, ExitContributionMode,
+        ExitContributionObligation, ExitContributionScope, FencingToken, MembershipRole,
+        NetworkCreateProfile, NetworkJoinMode, NetworkRecord, NetworkVisibility, NodeId, PublicKey,
     };
     use fuckipv6_common::Identity;
     use futures::SinkExt;
@@ -2372,6 +2497,58 @@ mod tests {
             emergency: CoordinatorEmergencyState::NoCandidatesConfigured,
             latest_election: None,
         }
+    }
+
+    fn coordinator_election_material() -> (CoordinatorElectionProposal, CoordinatorElectionVote) {
+        let proposer = Identity::generate().unwrap();
+        let voter = Identity::generate().unwrap();
+        let candidate_group = vec![
+            NodeId::from_public_key(&proposer.public_key()),
+            NodeId::from_public_key(&voter.public_key()),
+        ];
+        let proposal = CoordinatorElectionProposal::signed(
+            NetworkId::from_public_key(b"coordinator-election-response-network"),
+            1,
+            2,
+            candidate_group.clone(),
+            1_000,
+            2_000,
+            &proposer,
+        )
+        .unwrap();
+        let vote = CoordinatorElectionVote::signed(
+            proposal.network_id.clone(),
+            proposal.candidate_config_revision,
+            proposal.term,
+            proposal.leader.clone(),
+            candidate_group,
+            1_000,
+            2_000,
+            &voter,
+        )
+        .unwrap();
+        (proposal, vote)
+    }
+
+    fn coordinator_election_status(
+        proposal: &CoordinatorElectionProposal,
+        votes: Vec<CoordinatorElectionVote>,
+        generated_at_unix_ms: u64,
+    ) -> CoordinatorCandidateStatus {
+        let mut session = CoordinatorElectionSession::started(proposal.clone(), 1_100)
+            .expect("valid coordinator election session");
+        session
+            .begin_voting(1_100)
+            .expect("coordinator election must enter voting");
+        for vote in votes {
+            session
+                .record_vote(vote, 1_100)
+                .expect("vote must belong to the election");
+        }
+        let mut status = coordinator_status(&coordinator_term(1, 10, 2_000), generated_at_unix_ms);
+        status.network_id = proposal.network_id.clone();
+        status.latest_election = Some(session);
+        status
     }
 
     #[tokio::test]
@@ -2673,6 +2850,99 @@ mod tests {
         }));
         assert_eq!(
             receiver.await.expect("matching renewal response"),
+            Ok(status)
+        );
+    }
+
+    #[tokio::test]
+    async fn election_proposal_ack_requires_the_exact_proposal() {
+        let (proposal, _) = coordinator_election_material();
+        let (other_proposal, _) = coordinator_election_material();
+        let hub = CoordinatorCandidateResponseHub::default();
+        let mut receiver = hub
+            .register(PendingCoordinatorCandidate::ElectionPropose {
+                network_id: proposal.network_id.clone(),
+                proposal_id: proposal.proposal_id.clone(),
+            })
+            .expect("register election proposal");
+
+        assert!(hub.route(&SignalingMessage::CoordinatorElectionProposeAck {
+            status: coordinator_election_status(&other_proposal, Vec::new(), 1_100),
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "a different election proposal must not complete the pending request"
+        );
+
+        let status = coordinator_election_status(&proposal, Vec::new(), 1_100);
+        assert!(hub.route(&SignalingMessage::CoordinatorElectionProposeAck {
+            status: status.clone(),
+        }));
+        assert_eq!(
+            receiver.await.expect("matching proposal response"),
+            Ok(status)
+        );
+    }
+
+    #[tokio::test]
+    async fn election_vote_ack_requires_the_exact_proposal_and_recorded_vote() {
+        let (proposal, vote) = coordinator_election_material();
+        let hub = CoordinatorCandidateResponseHub::default();
+        let mut receiver = hub
+            .register(PendingCoordinatorCandidate::ElectionVote {
+                network_id: proposal.network_id.clone(),
+                proposal_id: proposal.proposal_id.clone(),
+                vote: vote.clone(),
+            })
+            .expect("register election vote");
+
+        assert!(hub.route(&SignalingMessage::CoordinatorElectionVoteAck {
+            status: coordinator_election_status(&proposal, Vec::new(), 1_100),
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "an acknowledgement without the submitted vote must not complete the request"
+        );
+
+        let status = coordinator_election_status(&proposal, vec![vote], 1_100);
+        assert!(hub.route(&SignalingMessage::CoordinatorElectionVoteAck {
+            status: status.clone(),
+        }));
+        assert_eq!(receiver.await.expect("matching vote response"), Ok(status));
+    }
+
+    #[tokio::test]
+    async fn election_timeout_ack_requires_the_exact_proposal() {
+        let (proposal, _) = coordinator_election_material();
+        let (other_proposal, _) = coordinator_election_material();
+        let hub = CoordinatorCandidateResponseHub::default();
+        let mut receiver = hub
+            .register(PendingCoordinatorCandidate::ElectionTimeout {
+                network_id: proposal.network_id.clone(),
+                proposal_id: proposal.proposal_id.clone(),
+            })
+            .expect("register election timeout");
+
+        assert!(hub.route(&SignalingMessage::CoordinatorElectionTimeoutAck {
+            status: coordinator_election_status(&other_proposal, Vec::new(), 1_100),
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "a different election timeout must not complete the pending request"
+        );
+
+        let status = coordinator_election_status(&proposal, Vec::new(), 1_100);
+        assert!(hub.route(&SignalingMessage::CoordinatorElectionTimeoutAck {
+            status: status.clone(),
+        }));
+        assert_eq!(
+            receiver.await.expect("matching timeout response"),
             Ok(status)
         );
     }

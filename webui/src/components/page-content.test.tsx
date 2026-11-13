@@ -996,6 +996,37 @@ describe("Relay capability status", () => {
     expect(healthyUsage).toHaveTextContent("4096 B");
   });
 
+  it("renders listener binding from health instead of the running service flag", () => {
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      embedded_services: [
+        {
+          network_name: "running-but-unbound",
+          status: "running",
+          relay_status: "running",
+          relay_addr: "127.0.0.1:6667",
+          relay_health: relayHealth({
+            status: "unknown",
+            listener_bound: false,
+            listen_addr: "127.0.0.2:7777",
+            forwarding_observed: false,
+            issues: ["listener_unavailable", "forwarding_not_observed"],
+          }),
+        },
+      ],
+    };
+
+    render(relayElement(snapshot));
+
+    const health = screen.getByTestId("relay-health");
+    const listener = health.querySelector("[data-listener-bound]");
+    expect(listener).toHaveAttribute("data-listener-bound", "false");
+    expect(listener).toHaveTextContent(translated("relay.listener.unbound"));
+    expect(listener).toHaveTextContent("127.0.0.2:7777");
+    expect(listener).not.toHaveTextContent(translated("relay.listener.bound"));
+    expect(health).not.toHaveTextContent("127.0.0.1:6667");
+  });
+
   it("explains the provider/consumer authorization intersection without exposing sensitive internals", () => {
     const authorization: RelayAuthorizationAuditSnapshot = {
       network_id: "net_owner_relay",

@@ -3341,12 +3341,12 @@ mod tests {
         {
             match frame {
                 FileNetworkFrame::Chunk {
-                    chunk_index,
+                    chunk_index: 0,
                     offset,
                     data,
                     ..
-                } if chunk_index == 0 => {
-                    assert_eq!(offset + data.len() as u64 <= first_chunk_end, true);
+                } => {
+                    assert!(offset + data.len() as u64 <= first_chunk_end);
                 }
                 FileNetworkFrame::Chunk { chunk_index, .. } => {
                     panic!("unexpected transfer chunk {chunk_index} before the first chunk was complete")

@@ -68,6 +68,8 @@ pub(crate) enum FileNetworkOriginError {
     ChunkOutOfOrder,
     #[error("File download chunk checksum or length is invalid")]
     ChunkCorrupt,
+    #[error("File download resume buffering exceeded its bounded capacity")]
+    ResumeBufferFull,
     #[error("File transfer filesystem operation failed: {0}")]
     Io(#[from] std::io::Error),
     #[error("File transfer session operation failed: {0}")]
@@ -93,6 +95,7 @@ impl FileNetworkOriginError {
             Self::AccessRevoked => "file_transfer_access_revoked",
             Self::ChunkOutOfOrder => "file_transfer_chunk_out_of_order",
             Self::ChunkCorrupt => "file_transfer_chunk_corrupt",
+            Self::ResumeBufferFull => "file_transfer_resume_buffer_full",
             Self::Io(_) => "file_transfer_io",
             Self::Transfer(error) => error.code(),
             Self::Persistence(_) => "file_transfer_storage",
@@ -243,9 +246,18 @@ struct DownloadOriginState {
     session: Option<Box<TransferSession>>,
     staging: Option<DownloadStaging>,
     assembly: Option<DownloadAssembly>,
+    deferred_resume_fragments: VecDeque<DeferredDownloadFragment>,
+    deferred_resume_bytes: usize,
     hasher: blake3::Hasher,
     received_bytes: u64,
     received_chunks: u32,
+}
+
+#[derive(Debug)]
+struct DeferredDownloadFragment {
+    chunk_index: u32,
+    offset: u64,
+    data: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -682,6 +694,8 @@ impl FileNetworkOrigin {
                 session: None,
                 staging: None,
                 assembly: None,
+                deferred_resume_fragments: VecDeque::new(),
+                deferred_resume_bytes: 0,
                 hasher: blake3::Hasher::new(),
                 received_bytes: 0,
                 received_chunks: 0,
@@ -992,9 +1006,6 @@ impl FileNetworkOrigin {
                 );
                 return Err(FileNetworkOriginError::ChunkOutOfOrder);
             }
-            if transfer.paused {
-                return Ok(());
-            }
             // Receiving the final fragment queues a Finish request. Signal
             // even for intermediate fragments so events are drained promptly.
             self.outbound_notify.notify_one();
@@ -1021,6 +1032,32 @@ impl FileNetworkOrigin {
                     true,
                 );
                 return Err(FileNetworkOriginError::ChunkOutOfOrder);
+            }
+            if transfer.paused {
+                let resuming = transfer
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.kind == OriginRequestKind::ResumeDownload);
+                if !resuming {
+                    return Ok(());
+                }
+                if let Err(failure) = defer_download_fragment(transfer, chunk_index, offset, data) {
+                    log_download_fragment_rejection(
+                        transfer,
+                        transfer_id,
+                        operation_id,
+                        resume_generation,
+                        chunk_index,
+                        offset,
+                        data.len(),
+                        request_id == expected_request_id,
+                        failure.reason,
+                    );
+                    let code = failure.error.code();
+                    self.fail_transfer_at(&key, now_unix_ms, code, true);
+                    return Err(failure.error);
+                }
+                return Ok(());
             }
             if let Err(failure) =
                 apply_download_fragment(transfer, chunk_index, offset, data, now_unix_ms)
@@ -1554,15 +1591,75 @@ impl FileNetworkOrigin {
             transfer.event(TransferState::Active, None)
         };
         self.push_event(event);
-        let finished = self
-            .transfers
-            .get_mut(key)
-            .is_some_and(|transfer| transfer.download_finished_receiving());
+        let finished = self.drain_deferred_resume_fragments(key, now_unix_ms)?;
         if finished {
             self.finish_download_receiving(key, now_unix_ms)?;
         }
         self.save_paused(now_unix_ms)?;
         Ok(())
+    }
+
+    fn drain_deferred_resume_fragments(
+        &mut self,
+        key: &OriginTransferKey,
+        now_unix_ms: u64,
+    ) -> Result<bool, FileNetworkOriginError> {
+        loop {
+            let fragment = {
+                let transfer = self
+                    .transfers
+                    .get_mut(key)
+                    .ok_or(FileNetworkOriginError::UnknownResponse)?;
+                let OriginTransferState::Download(download) = &mut transfer.state else {
+                    return Err(FileNetworkOriginError::UnexpectedResponse);
+                };
+                let Some(fragment) = download.deferred_resume_fragments.pop_front() else {
+                    break;
+                };
+                download.deferred_resume_bytes = download
+                    .deferred_resume_bytes
+                    .checked_sub(fragment.data.len())
+                    .ok_or(FileNetworkOriginError::ChunkCorrupt)?;
+                fragment
+            };
+            let result = {
+                let transfer = self
+                    .transfers
+                    .get_mut(key)
+                    .ok_or(FileNetworkOriginError::UnknownResponse)?;
+                apply_download_fragment(
+                    transfer,
+                    fragment.chunk_index,
+                    fragment.offset,
+                    &fragment.data,
+                    now_unix_ms,
+                )
+            };
+            if let Err(failure) = result {
+                let transfer = self
+                    .transfers
+                    .get(key)
+                    .ok_or(FileNetworkOriginError::UnknownResponse)?;
+                log_download_fragment_rejection(
+                    transfer,
+                    &transfer.transfer_id,
+                    &transfer.operation_id,
+                    transfer.resume_generation,
+                    fragment.chunk_index,
+                    fragment.offset,
+                    fragment.data.len(),
+                    true,
+                    failure.reason,
+                );
+                let code = failure.error.code();
+                self.fail_transfer_at(key, now_unix_ms, code, true);
+                return Err(failure.error);
+            }
+        }
+        Ok(self
+            .transfers
+            .get(key)
+            .is_some_and(|transfer| transfer.download_finished_receiving()))
     }
 
     fn apply_pause(
@@ -2134,6 +2231,8 @@ fn restore_download(
                 expected_checksum: metadata.expected_checksum,
                 bytes: assembly_bytes,
             }),
+            deferred_resume_fragments: VecDeque::new(),
+            deferred_resume_bytes: 0,
             hasher,
             received_bytes: download.received_bytes,
             received_chunks: download.received_chunks,
@@ -2494,6 +2593,10 @@ fn queue_resume(
         .resume_generation
         .checked_add(1)
         .ok_or(FileNetworkOriginError::InvalidRequest)?;
+    if let OriginTransferState::Download(download) = &mut transfer.state {
+        download.deferred_resume_fragments.clear();
+        download.deferred_resume_bytes = 0;
+    }
     let request = ResumeRequest {
         transfer_id: transfer.transfer_id.clone(),
         operation_id: transfer.operation_id.clone(),
@@ -2819,6 +2922,7 @@ enum DownloadFragmentFailureReason {
     StagingWrite,
     SessionRecord,
     RequestIdMismatch,
+    ResumeBufferFull,
 }
 
 impl DownloadFragmentFailureReason {
@@ -2839,6 +2943,7 @@ impl DownloadFragmentFailureReason {
             Self::StagingWrite => "staging_write",
             Self::SessionRecord => "session_record",
             Self::RequestIdMismatch => "request_id_mismatch",
+            Self::ResumeBufferFull => "resume_buffer_full",
         }
     }
 }
@@ -2868,6 +2973,7 @@ struct DownloadFragmentDiagnostics {
     expected_chunk_length: Option<u64>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn log_download_fragment_rejection(
     transfer: &OriginTransfer,
     transfer_id: &TransferId,
@@ -3074,6 +3180,127 @@ fn apply_download_fragment(
                 DownloadFragmentFailureReason::SessionRecord,
             )
         })?;
+    Ok(())
+}
+
+/// Resume and generation-1 fragments can overtake the Resume response on the
+/// same transport. Keep at most the remaining bytes of the next transfer chunk
+/// while the response is applied. The buffered fragments are contiguous and
+/// still pass through the normal offset, checksum and session checks on drain.
+fn defer_download_fragment(
+    transfer: &mut OriginTransfer,
+    chunk_index: u32,
+    offset: u64,
+    data: &[u8],
+) -> Result<(), DownloadFragmentFailure> {
+    let OriginTransferState::Download(download) = &mut transfer.state else {
+        return Err(DownloadFragmentFailure::new(
+            FileNetworkOriginError::UnexpectedResponse,
+            DownloadFragmentFailureReason::StateMismatch,
+        ));
+    };
+    if data.is_empty() || data.len() > MAX_FILE_NETWORK_FRAGMENT_BYTES {
+        return Err(DownloadFragmentFailure::new(
+            FileNetworkOriginError::ChunkCorrupt,
+            DownloadFragmentFailureReason::EmptyOrOversizedFragment,
+        ));
+    }
+    let session = download.session.as_ref().ok_or_else(|| {
+        DownloadFragmentFailure::new(
+            FileNetworkOriginError::ChunkOutOfOrder,
+            DownloadFragmentFailureReason::SessionUnavailable,
+        )
+    })?;
+    if u32::try_from(session.received_chunk_count()).ok() != Some(download.received_chunks) {
+        return Err(DownloadFragmentFailure::new(
+            FileNetworkOriginError::ChunkOutOfOrder,
+            DownloadFragmentFailureReason::ReceivedCountMismatch,
+        ));
+    }
+    let expected_chunk_index = download
+        .assembly
+        .as_ref()
+        .map_or(download.received_chunks, |assembly| assembly.chunk_index);
+    if chunk_index != expected_chunk_index {
+        return Err(DownloadFragmentFailure::new(
+            FileNetworkOriginError::ChunkOutOfOrder,
+            DownloadFragmentFailureReason::InitialChunkMismatch,
+        ));
+    }
+    let expected = session
+        .manifest
+        .chunks
+        .get(chunk_index as usize)
+        .filter(|chunk| chunk.index == chunk_index)
+        .ok_or_else(|| {
+            DownloadFragmentFailure::new(
+                FileNetworkOriginError::ChunkOutOfOrder,
+                DownloadFragmentFailureReason::ChunkUnavailable,
+            )
+        })?;
+    let incoming_end = offset.checked_add(data.len() as u64).ok_or_else(|| {
+        DownloadFragmentFailure::new(
+            FileNetworkOriginError::ChunkCorrupt,
+            DownloadFragmentFailureReason::FragmentOutsideChunk,
+        )
+    })?;
+    let expected_end = expected.offset.saturating_add(expected.length);
+    if offset < expected.offset || incoming_end > expected_end {
+        return Err(DownloadFragmentFailure::new(
+            FileNetworkOriginError::ChunkCorrupt,
+            DownloadFragmentFailureReason::FragmentOutsideChunk,
+        ));
+    }
+    let next_offset = download
+        .deferred_resume_fragments
+        .back()
+        .map(|fragment| fragment.offset.saturating_add(fragment.data.len() as u64))
+        .or_else(|| {
+            download.assembly.as_ref().map(|assembly| {
+                assembly
+                    .expected_offset
+                    .saturating_add(assembly.bytes.len() as u64)
+            })
+        })
+        .unwrap_or(expected.offset);
+    if offset != next_offset {
+        return Err(DownloadFragmentFailure::new(
+            FileNetworkOriginError::ChunkOutOfOrder,
+            if download.deferred_resume_fragments.is_empty() {
+                DownloadFragmentFailureReason::InitialOffsetMismatch
+            } else {
+                DownloadFragmentFailureReason::AssemblyOffsetGap
+            },
+        ));
+    }
+    let assembly_bytes = download
+        .assembly
+        .as_ref()
+        .map_or(0, |assembly| assembly.bytes.len());
+    let buffered_end = assembly_bytes
+        .checked_add(download.deferred_resume_bytes)
+        .and_then(|bytes| bytes.checked_add(data.len()))
+        .ok_or_else(|| {
+            DownloadFragmentFailure::new(
+                FileNetworkOriginError::ResumeBufferFull,
+                DownloadFragmentFailureReason::ResumeBufferFull,
+            )
+        })?;
+    if buffered_end > MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES || buffered_end as u64 > expected.length
+    {
+        return Err(DownloadFragmentFailure::new(
+            FileNetworkOriginError::ResumeBufferFull,
+            DownloadFragmentFailureReason::ResumeBufferFull,
+        ));
+    }
+    download.deferred_resume_bytes = buffered_end - assembly_bytes;
+    download
+        .deferred_resume_fragments
+        .push_back(DeferredDownloadFragment {
+            chunk_index,
+            offset,
+            data: data.to_vec(),
+        });
     Ok(())
 }
 
@@ -5604,6 +5831,253 @@ mod tests {
         );
         assert_eq!(std::fs::read(&destination).expect("download"), data);
         assert_eq!(origin.active_count(), 0);
+    }
+
+    #[test]
+    fn resumed_download_buffers_fragments_that_arrive_before_resume_response() {
+        let temporary = TempDir::new().expect("tempdir");
+        let destination = temporary.path().join("download.bin");
+        let chunk_size = MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES;
+        let fragment_size = MAX_FILE_NETWORK_FRAGMENT_BYTES;
+        let data: Vec<u8> = (0..(chunk_size + fragment_size * 4))
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) = start_download(
+            &mut origin,
+            &local_node_id,
+            &destination,
+            2,
+            &data,
+            chunk_size as u64,
+        );
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+
+        for (fragment_index, fragment) in data[..chunk_size].chunks(fragment_size).enumerate() {
+            let offset = fragment_index * fragment_size;
+            origin
+                .handle_chunk(
+                    &peer(),
+                    download_fragment_request_id(&operation(2), 0, offset as u64),
+                    &transfer(2),
+                    &operation(2),
+                    0,
+                    0,
+                    offset as u64,
+                    fragment,
+                    NOW + 2,
+                )
+                .expect("first chunk fragment");
+        }
+        origin
+            .pause(&transfer(2), &operation(2), NOW + 3)
+            .expect("pause after first chunk");
+        let (pause_request_id, _) = take_request(&mut origin);
+        origin
+            .handle_response(
+                &peer(),
+                pause_request_id,
+                FileNetworkResponse::Progress {
+                    progress: progress(
+                        TransferState::Paused,
+                        chunk_size as u64,
+                        data.len() as u64,
+                        1,
+                        2,
+                    ),
+                },
+                NOW + 4,
+            )
+            .expect("pause response");
+
+        origin
+            .resume(&transfer(2), &operation(2), NOW + 5)
+            .expect("queue resume");
+        let (resume_request_id, resume_request) = take_request(&mut origin);
+        let FileNetworkRequest::Resume {
+            request: resume_request,
+        } = resume_request
+        else {
+            panic!("expected resume request");
+        };
+        assert_eq!(resume_request.resume_chunk_index, 1);
+        assert_eq!(resume_request.resume_offset, chunk_size as u64);
+        assert_eq!(resume_request.resume_generation, 1);
+
+        let mut resumed_session = active_session(
+            &local_node_id,
+            TransferDirection::Download,
+            transfer(2),
+            operation(2),
+            manifest(&data, chunk_size as u64),
+        );
+        resumed_session
+            .record_chunk(0, &data[..chunk_size], NOW + 6)
+            .expect("record completed first chunk");
+
+        // A delayed fragment from the paused generation is harmless.
+        origin
+            .handle_chunk(
+                &peer(),
+                download_fragment_request_id(&operation(2), 0, 0),
+                &transfer(2),
+                &operation(2),
+                0,
+                0,
+                0,
+                &data[..fragment_size],
+                NOW + 6,
+            )
+            .expect("stale generation fragment");
+
+        // The real failure sequence: these fragments overtake the Resume
+        // response. They must be retained and applied once the response binds
+        // generation 1 instead of being discarded while paused.
+        for fragment_index in 0..3 {
+            let offset = chunk_size + fragment_index * fragment_size;
+            origin
+                .handle_chunk(
+                    &peer(),
+                    download_fragment_request_id(&operation(2), 1, offset as u64),
+                    &transfer(2),
+                    &operation(2),
+                    1,
+                    1,
+                    offset as u64,
+                    &data[offset..offset + fragment_size],
+                    NOW + 7 + fragment_index as u64,
+                )
+                .expect("fragment before resume response");
+        }
+        assert!(!destination.exists());
+
+        origin
+            .handle_response(
+                &peer(),
+                resume_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(resumed_session),
+                },
+                NOW + 10,
+            )
+            .expect("resume response drains deferred fragments");
+
+        let final_offset = chunk_size + fragment_size * 3;
+        origin
+            .handle_chunk(
+                &peer(),
+                download_fragment_request_id(&operation(2), 1, final_offset as u64),
+                &transfer(2),
+                &operation(2),
+                1,
+                1,
+                final_offset as u64,
+                &data[final_offset..final_offset + fragment_size],
+                NOW + 11,
+            )
+            .expect("fragment after resume response");
+        let (finish_request_id, finish_request) = take_request(&mut origin);
+        assert!(matches!(finish_request, FileNetworkRequest::Finish { .. }));
+        origin
+            .handle_response(
+                &peer(),
+                finish_request_id,
+                FileNetworkResponse::Completed {
+                    progress: progress(
+                        TransferState::Completed,
+                        data.len() as u64,
+                        data.len() as u64,
+                        2,
+                        2,
+                    ),
+                },
+                NOW + 12,
+            )
+            .expect("finish response");
+
+        assert_eq!(std::fs::read(&destination).expect("download"), data);
+        assert_eq!(origin.active_count(), 0);
+    }
+
+    #[test]
+    fn deferred_resume_fragment_replay_fails_closed_before_response() {
+        let temporary = TempDir::new().expect("tempdir");
+        let destination = temporary.path().join("download.bin");
+        let data = b"deferred replay must fail closed";
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) =
+            start_download(&mut origin, &local_node_id, &destination, 2, data, 32);
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+        origin
+            .pause(&transfer(2), &operation(2), NOW + 2)
+            .expect("pause");
+        let (pause_request_id, _) = take_request(&mut origin);
+        origin
+            .handle_response(
+                &peer(),
+                pause_request_id,
+                FileNetworkResponse::Progress {
+                    progress: progress(TransferState::Paused, 0, data.len() as u64, 0, 1),
+                },
+                NOW + 3,
+            )
+            .expect("pause response");
+        origin
+            .resume(&transfer(2), &operation(2), NOW + 4)
+            .expect("resume");
+        let _ = take_request(&mut origin);
+
+        let fragment = &data[..8];
+        let request_id = download_fragment_request_id(&operation(2), 0, 0);
+        origin
+            .handle_chunk(
+                &peer(),
+                request_id,
+                &transfer(2),
+                &operation(2),
+                1,
+                0,
+                0,
+                fragment,
+                NOW + 5,
+            )
+            .expect("first deferred fragment");
+        assert!(matches!(
+            origin.handle_chunk(
+                &peer(),
+                request_id,
+                &transfer(2),
+                &operation(2),
+                1,
+                0,
+                0,
+                fragment,
+                NOW + 6,
+            ),
+            Err(FileNetworkOriginError::ChunkOutOfOrder)
+        ));
+        assert_eq!(origin.active_count(), 0);
+        assert!(!destination.exists());
     }
 
     #[test]

@@ -5,7 +5,8 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use crate::domain::{
     ContentHash, CoordinatorCandidateConfig, CoordinatorCandidateDeclaration,
     CoordinatorCandidateStatus, CoordinatorElectionProposal, CoordinatorElectionStage,
-    CoordinatorElectionVote, CoordinatorRecoveryReport,
+    CoordinatorElectionVote, CoordinatorEmergencyLeaderResponse,
+    CoordinatorEmergencyWriteCredential, CoordinatorRecoveryReport,
     CoordinatorRecoveryResponse as CoordinatorRecoveryResult, CoordinatorTerm,
     CoordinatorWriteCredential, ExitContributionAuthorizationSnapshot, ExitContributionRequest,
     ExitContributionRequestId, ExitContributionRequestState, ExitContributionReviewAction,
@@ -461,6 +462,24 @@ pub enum SignalingMessage {
     },
     CoordinatorRecoveryResponse {
         response: CoordinatorRecoveryResult,
+    },
+
+    // Bounded emergency runtime coordination. Appended after every earlier
+    // variant so postcard tags remain stable. The Coordinator derives the
+    // online set from authenticated sessions and never accepts a client claim
+    // that every candidate is offline.
+    CoordinatorEmergencyLeaderIssue {
+        network_id: NetworkId,
+    },
+    CoordinatorEmergencyLeaderIssueAck {
+        response: CoordinatorEmergencyLeaderResponse,
+    },
+    CoordinatorEmergencyLeaderRenew {
+        network_id: NetworkId,
+        credential: CoordinatorEmergencyWriteCredential,
+    },
+    CoordinatorEmergencyLeaderRenewAck {
+        response: CoordinatorEmergencyLeaderResponse,
     },
 }
 
@@ -1362,10 +1381,10 @@ mod tests {
         use crate::domain::{
             CoordinatorAuthority, CoordinatorCandidate, CoordinatorCandidateConfigState,
             CoordinatorCandidateStatus, CoordinatorElectionProposal, CoordinatorElectionStage,
-            CoordinatorElectionVote, CoordinatorEmergencyState, CoordinatorPhase,
-            CoordinatorRecoveryReport, CoordinatorRecoveryResponse, CoordinatorRecoveryRole,
-            CoordinatorRecoveryStage, CoordinatorRecoveryStatus, CoordinatorTerm,
-            CoordinatorWriteCredential, FencingToken,
+            CoordinatorElectionVote, CoordinatorEmergencyLeaderResponse, CoordinatorEmergencyState,
+            CoordinatorEmergencyWriteCredential, CoordinatorPhase, CoordinatorRecoveryReport,
+            CoordinatorRecoveryResponse, CoordinatorRecoveryRole, CoordinatorRecoveryStage,
+            CoordinatorRecoveryStatus, CoordinatorTerm, CoordinatorWriteCredential, FencingToken,
         };
 
         let identity = crate::Identity::generate()?;
@@ -1633,16 +1652,81 @@ mod tests {
         let encoded = crate::codec::encode(&status)?;
         let _: CoordinatorCandidateStatus = crate::codec::decode(&encoded)
             .map_err(|error| anyhow::anyhow!("candidate status round trip failed: {error:#}"))?;
-        assert_signaling_round_trip(SignalingMessage::CoordinatorCandidateStatusAck { status })
-            .map_err(|error| {
-                anyhow::anyhow!("candidate status ack round trip failed: {error:#}")
-            })?;
+        assert_signaling_round_trip(SignalingMessage::CoordinatorCandidateStatusAck {
+            status: status.clone(),
+        })
+        .map_err(|error| anyhow::anyhow!("candidate status ack round trip failed: {error:#}"))?;
         let decoded = assert_signaling_round_trip(SignalingMessage::CoordinatorRecoveryResponse {
             response: response.clone(),
         })
         .map_err(|error| anyhow::anyhow!("recovery response round trip failed: {error:#}"))?;
         let SignalingMessage::CoordinatorRecoveryResponse { response: decoded } = decoded else {
             panic!("expected coordinator recovery response");
+        };
+        assert_eq!(decoded, response);
+
+        let credential = CoordinatorEmergencyWriteCredential {
+            network_id: network_id.clone(),
+            leader: candidate_id.clone(),
+            emergency_epoch: 1,
+            candidate_config_revision: 1,
+        };
+        let decoded =
+            assert_signaling_round_trip(SignalingMessage::CoordinatorEmergencyLeaderIssue {
+                network_id: network_id.clone(),
+            })
+            .map_err(|error| anyhow::anyhow!("emergency issue round trip failed: {error:#}"))?;
+        let SignalingMessage::CoordinatorEmergencyLeaderIssue {
+            network_id: decoded_network_id,
+        } = decoded
+        else {
+            panic!("expected emergency leader issue");
+        };
+        assert_eq!(decoded_network_id, network_id);
+
+        let response = CoordinatorEmergencyLeaderResponse {
+            status,
+            renewed: false,
+        };
+        let decoded =
+            assert_signaling_round_trip(SignalingMessage::CoordinatorEmergencyLeaderIssueAck {
+                response: response.clone(),
+            })
+            .map_err(|error| anyhow::anyhow!("emergency issue ack round trip failed: {error:#}"))?;
+        let SignalingMessage::CoordinatorEmergencyLeaderIssueAck { response: decoded } = decoded
+        else {
+            panic!("expected emergency leader issue ack");
+        };
+        assert_eq!(decoded, response);
+
+        let decoded =
+            assert_signaling_round_trip(SignalingMessage::CoordinatorEmergencyLeaderRenew {
+                network_id: network_id.clone(),
+                credential: credential.clone(),
+            })
+            .map_err(|error| anyhow::anyhow!("emergency renew round trip failed: {error:#}"))?;
+        let SignalingMessage::CoordinatorEmergencyLeaderRenew {
+            network_id: decoded_network_id,
+            credential: decoded_credential,
+        } = decoded
+        else {
+            panic!("expected emergency leader renew");
+        };
+        assert_eq!(decoded_network_id, network_id);
+        assert_eq!(decoded_credential, credential);
+
+        let response = CoordinatorEmergencyLeaderResponse {
+            status: response.status,
+            renewed: true,
+        };
+        let decoded =
+            assert_signaling_round_trip(SignalingMessage::CoordinatorEmergencyLeaderRenewAck {
+                response: response.clone(),
+            })
+            .map_err(|error| anyhow::anyhow!("emergency renew ack round trip failed: {error:#}"))?;
+        let SignalingMessage::CoordinatorEmergencyLeaderRenewAck { response: decoded } = decoded
+        else {
+            panic!("expected emergency leader renew ack");
         };
         assert_eq!(decoded, response);
         Ok(())

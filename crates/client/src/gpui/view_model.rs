@@ -7,8 +7,9 @@ use fuckipv6_common::domain::{
     parse_policy_test_input, ActivityCategory, ActivityEntry, ActivitySeverity,
     ApplicationIdentity, AuditOutcome, CapabilityKind, CapabilityState, ContentHash,
     CoordinatorCandidate, CoordinatorCandidateResources, CoordinatorCandidateWillingness,
-    CoordinatorControlPlaneState, CoordinatorControlPlaneStatus, CoordinatorPublicReachability,
-    EffectiveAccessReason, EffectivePolicyLayer, ExitAvailabilitySource, ExitAvailabilityState,
+    CoordinatorControlPlaneState, CoordinatorControlPlaneStatus, CoordinatorEmergencyLeaderState,
+    CoordinatorEmergencyLeaderStatus, CoordinatorPublicReachability, EffectiveAccessReason,
+    EffectivePolicyLayer, ExitAvailabilitySource, ExitAvailabilityState,
     ExitContributionAvailability, ExitContributionMode, ExitContributionObligation,
     ExitContributionScope, ExitSelectionCandidate, ExitSelectionMode, ExitSelectionPolicy,
     ExitSelectionSource, InvitationCode, InvitationId, InvitationRedeemRequest,
@@ -26,7 +27,7 @@ use fuckipv6_common::domain::{
     TrafficRoutingTargetKind, TrafficRoutingTargetRef, TrafficRoutingWorkflowState,
     TrafficSessionEventKind,
 };
-use fuckipv6_common::i18n::{format_integer, t, tr, Locale};
+use fuckipv6_common::i18n::{format_decimal, format_integer, t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
 use fuckipv6_common::NetworkMode;
 
@@ -4605,17 +4606,23 @@ fn project_node_runtime(
             )
         })
         .collect::<Vec<_>>();
+    let local_node_id = snapshot
+        .identity
+        .as_ref()
+        .map(|identity| identity.node_id.as_str());
     let control_plane_rows = snapshot
         .embedded_services
         .iter()
         .map(|service| {
-            let control_plane = service
-                .coordinator_candidates
-                .as_ref()
-                .map(|status| &status.control_plane);
+            let coordinator = service.coordinator_candidates.as_ref();
             row(
                 service.network_name.clone(),
-                coordinator_control_plane_detail(locale, control_plane),
+                coordinator_control_plane_detail(
+                    locale,
+                    coordinator.map(|status| &status.control_plane),
+                    coordinator.and_then(|status| status.emergency_leader.as_ref()),
+                    local_node_id,
+                ),
             )
         })
         .collect::<Vec<_>>();
@@ -4753,6 +4760,8 @@ fn project_node_runtime(
 fn coordinator_control_plane_detail(
     locale: Locale,
     control_plane: Option<&CoordinatorControlPlaneStatus>,
+    emergency_leader: Option<&CoordinatorEmergencyLeaderStatus>,
+    local_node_id: Option<&str>,
 ) -> String {
     let unobserved = CoordinatorControlPlaneStatus::default();
     let control_plane = control_plane.unwrap_or(&unobserved);
@@ -4771,7 +4780,7 @@ fn coordinator_control_plane_detail(
     let received = relay_format_u64(locale, control_plane.quorum.received_votes as u64);
     let required = relay_format_u64(locale, control_plane.quorum.required_votes as u64);
     let participants = relay_format_u64(locale, control_plane.quorum.participant_count as u64);
-    tr(
+    let detail = tr(
         locale,
         "runtime.control_plane.detail",
         &[
@@ -4782,6 +4791,75 @@ fn coordinator_control_plane_detail(
             ("participants", &participants),
             ("reason_code", control_plane.reason_code.as_str()),
         ],
+    );
+    let Some(emergency_leader) = emergency_leader else {
+        return detail;
+    };
+
+    let active = emergency_leader.state == CoordinatorEmergencyLeaderState::Active
+        && emergency_leader.remaining_ms > 0;
+    let state = if !active {
+        t(locale, "runtime.emergency.expired")
+    } else {
+        match local_node_id {
+            Some(local_node_id) if local_node_id == emergency_leader.leader.as_str() => {
+                t(locale, "runtime.emergency.active_local")
+            }
+            Some(_) => t(locale, "runtime.emergency.active_remote"),
+            None => t(locale, "runtime.emergency.active"),
+        }
+    };
+    let remaining = runtime_duration_label(locale, emergency_leader.remaining_ms);
+    let hard_deadline =
+        routing_timestamp_label(Some(emergency_leader.hard_expires_at_unix_ms), locale);
+    let epoch = relay_format_u64(locale, emergency_leader.emergency_epoch);
+    let revision = relay_format_u64(locale, emergency_leader.candidate_config_revision);
+    let mut parts = vec![
+        state.to_string(),
+        format!(
+            "{} {}",
+            t(locale, "runtime.emergency.leader"),
+            emergency_leader.leader
+        ),
+        format!("{} {epoch}", t(locale, "runtime.emergency.epoch")),
+        format!(
+            "{} {revision}",
+            t(locale, "runtime.emergency.candidate_revision")
+        ),
+        format!("{} {remaining}", t(locale, "runtime.emergency.remaining")),
+        format!(
+            "{} {hard_deadline}",
+            t(locale, "runtime.emergency.hard_deadline")
+        ),
+    ];
+    if !emergency_leader.governance_writable {
+        parts.push(t(locale, "runtime.emergency.governance_frozen").to_string());
+    }
+    if active {
+        parts.push(t(locale, "runtime.emergency.handoff_on_recovery").to_string());
+    }
+    format!("{detail} · {}", parts.join(" · "))
+}
+
+fn runtime_duration_label(locale: Locale, duration_ms: u64) -> String {
+    if duration_ms < 1_000 {
+        let duration = relay_format_u64(locale, duration_ms);
+        return tr(
+            locale,
+            "diagnostic.duration_ms_value",
+            &[("duration", &duration)],
+        );
+    }
+    let precision = if duration_ms.is_multiple_of(1_000) {
+        0
+    } else {
+        1
+    };
+    let duration = format_decimal(locale, duration_ms as f64 / 1_000.0, precision);
+    tr(
+        locale,
+        "diagnostic.duration_value",
+        &[("duration", &duration)],
     )
 }
 
@@ -8512,12 +8590,13 @@ mod tests {
     use fuckipv6_common::domain::{
         ActivityEntry, AuditId, AuditOutcome, CoordinatorCandidateConfigState,
         CoordinatorCandidateStatus, CoordinatorControlPlaneState, CoordinatorControlPlaneStatus,
-        CoordinatorEmergencyState, CoordinatorQuorumStatus, DomainSuffix, MembershipState,
-        NetworkMemberPresence, NodeId, PortRange, RelayGovernanceAuditSnapshot, RelayUsageSnapshot,
-        TopologyBoundary, TopologyConnection, TopologyConnectionState, TopologyNode,
-        TopologyNodeNetwork, TrafficDefaultPolicy, TrafficFailureKind, TrafficFailurePolicy,
-        TrafficMatch, TrafficRoutingHardConstraints, TrafficRoutingObservedHit, TrafficRule,
-        TrafficRuleId,
+        CoordinatorEmergencyLeaderState, CoordinatorEmergencyLeaderStatus,
+        CoordinatorEmergencyState, CoordinatorQuorumStatus, CoordinatorWriteKind, DomainSuffix,
+        MembershipState, NetworkMemberPresence, NodeId, PortRange, RelayGovernanceAuditSnapshot,
+        RelayUsageSnapshot, TopologyBoundary, TopologyConnection, TopologyConnectionState,
+        TopologyNode, TopologyNodeNetwork, TrafficDefaultPolicy, TrafficFailureKind,
+        TrafficFailurePolicy, TrafficMatch, TrafficRoutingHardConstraints,
+        TrafficRoutingObservedHit, TrafficRule, TrafficRuleId,
     };
     use serde::Deserialize;
     use std::collections::BTreeMap;
@@ -9799,6 +9878,177 @@ mod tests {
             .sections
             .iter()
             .all(|section| section.title != t(Locale::ZhCn, "runtime.section.interface_problems")));
+    }
+
+    fn emergency_leader_fixture(
+        network_seed: &[u8],
+        leader: NodeId,
+        state: CoordinatorEmergencyLeaderState,
+        remaining_ms: u64,
+    ) -> CoordinatorEmergencyLeaderStatus {
+        CoordinatorEmergencyLeaderStatus {
+            network_id: NetworkId::from_public_key(network_seed),
+            leader,
+            emergency_epoch: 7,
+            candidate_config_revision: 11,
+            unavailable_candidates: vec![NodeId::from_public_key(b"offline-candidate")],
+            issued_at_unix_ms: 1_700_000_000_000,
+            expires_at_unix_ms: 1_700_000_030_000,
+            hard_expires_at_unix_ms: 1_700_000_300_000,
+            state,
+            remaining_ms,
+            runtime_coordination_allowed: true,
+            governance_writable: false,
+            data_plane_allowed: true,
+            health_checks_allowed: true,
+            allowed_writes: vec![
+                CoordinatorWriteKind::PublishOwnTerm,
+                CoordinatorWriteKind::SyncLastPolicy,
+                CoordinatorWriteKind::ConnectionCoordination,
+                CoordinatorWriteKind::HealthCheck,
+                CoordinatorWriteKind::RejectStaleState,
+            ],
+        }
+    }
+
+    fn coordinator_service_fixture(
+        network_name: &str,
+        network_seed: &[u8],
+        emergency_leader: Option<CoordinatorEmergencyLeaderStatus>,
+    ) -> NodeEmbeddedServiceSnapshot {
+        let emergency = emergency_leader.is_some();
+        NodeEmbeddedServiceSnapshot {
+            network_name: network_name.into(),
+            status: NodeEmbeddedServiceStatus::Running,
+            signaling_addr: Some("127.0.0.1:6666".parse().expect("signaling socket")),
+            relay_status: NodeEmbeddedServiceStatus::Stopped,
+            relay_addr: None,
+            relay_health: None,
+            relay_authorization: None,
+            relay_governance: None,
+            coordinator_candidates: Some(CoordinatorCandidateStatus {
+                network_id: NetworkId::from_public_key(network_seed),
+                generated_at_unix_ms: 1_700_000_100_000,
+                config_state: CoordinatorCandidateConfigState::Current,
+                config: None,
+                candidates: Vec::new(),
+                current_leader: None,
+                latest_term: None,
+                lease: Default::default(),
+                control_plane: CoordinatorControlPlaneStatus {
+                    state: if emergency {
+                        CoordinatorControlPlaneState::ReadOnly
+                    } else {
+                        CoordinatorControlPlaneState::Available
+                    },
+                    governance_writable: !emergency,
+                    reason_code: if emergency {
+                        "coordinator.control_plane.emergency_runtime_only".into()
+                    } else {
+                        "coordinator.control_plane.available".into()
+                    },
+                    quorum: CoordinatorQuorumStatus {
+                        received_votes: 2,
+                        required_votes: 2,
+                        participant_count: 3,
+                    },
+                },
+                emergency: if emergency {
+                    CoordinatorEmergencyState::AllCandidatesUnavailable
+                } else {
+                    CoordinatorEmergencyState::None
+                },
+                emergency_leader,
+                latest_election: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn runtime_control_plane_displays_bounded_emergency_authority() {
+        let mut snapshot = populated_snapshot();
+        let local_leader = NodeId::from_public_key(b"local-emergency-leader");
+        let remote_leader = NodeId::from_public_key(b"remote-emergency-leader");
+        snapshot
+            .identity
+            .as_mut()
+            .expect("identity fixture")
+            .node_id = local_leader.to_string();
+        snapshot.embedded_services = vec![
+            coordinator_service_fixture(
+                "local",
+                b"emergency-local-network",
+                Some(emergency_leader_fixture(
+                    b"emergency-local-network",
+                    local_leader.clone(),
+                    CoordinatorEmergencyLeaderState::Active,
+                    20_000,
+                )),
+            ),
+            coordinator_service_fixture(
+                "remote",
+                b"emergency-remote-network",
+                Some(emergency_leader_fixture(
+                    b"emergency-remote-network",
+                    remote_leader.clone(),
+                    CoordinatorEmergencyLeaderState::Active,
+                    15_500,
+                )),
+            ),
+            coordinator_service_fixture(
+                "expired",
+                b"emergency-expired-network",
+                Some(emergency_leader_fixture(
+                    b"emergency-expired-network",
+                    local_leader.clone(),
+                    CoordinatorEmergencyLeaderState::Expired,
+                    0,
+                )),
+            ),
+            coordinator_service_fixture("none", b"emergency-none-network", None),
+        ];
+
+        let page = node_ui_manifest()
+            .pages
+            .into_iter()
+            .find(|page| page.id == "node_runtime")
+            .expect("runtime page");
+        let model =
+            build_page_model_for_page(&page, &snapshot, Locale::ZhCn).expect("runtime model");
+        let control_plane = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "runtime.section.control_plane"))
+            .expect("control plane section");
+
+        assert_eq!(control_plane.rows.len(), 4);
+        let local = &control_plane.rows[0].detail;
+        assert!(local.contains(t(Locale::ZhCn, "runtime.emergency.active_local")));
+        assert!(local.contains(t(Locale::ZhCn, "runtime.emergency.leader")));
+        assert!(local.contains(local_leader.as_str()));
+        assert!(local.contains(t(Locale::ZhCn, "runtime.emergency.epoch")));
+        assert!(local.contains(t(Locale::ZhCn, "runtime.emergency.candidate_revision")));
+        assert!(local.contains("20 秒"));
+        assert!(local.contains(&routing_timestamp_label(
+            Some(1_700_000_300_000),
+            Locale::ZhCn
+        )));
+        assert!(local.contains(t(Locale::ZhCn, "runtime.emergency.governance_frozen")));
+        assert!(local.contains(t(Locale::ZhCn, "runtime.emergency.handoff_on_recovery")));
+
+        let remote = &control_plane.rows[1].detail;
+        assert!(remote.contains(t(Locale::ZhCn, "runtime.emergency.active_remote")));
+        assert!(remote.contains(remote_leader.as_str()));
+        assert!(remote.contains("15.5 秒"));
+
+        let expired = &control_plane.rows[2].detail;
+        assert!(expired.contains(t(Locale::ZhCn, "runtime.emergency.expired")));
+        assert!(!expired.contains(t(Locale::ZhCn, "runtime.emergency.active_local")));
+        assert!(!expired.contains(t(Locale::ZhCn, "runtime.emergency.active_remote")));
+        assert!(!expired.contains(t(Locale::ZhCn, "runtime.emergency.handoff_on_recovery")));
+        assert!(!control_plane.rows[3]
+            .detail
+            .contains(t(Locale::ZhCn, "runtime.emergency.expired")));
     }
 
     #[test]

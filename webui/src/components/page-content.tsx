@@ -2437,7 +2437,9 @@ function NodeRuntime({
         {embeddedServices.length === 0
           ? empty(label(locale, "runtime.empty.control_plane"))
           : embeddedServices.map((service) => {
-              const controlPlane = service.coordinator_candidates?.control_plane;
+              const coordinator = service.coordinator_candidates;
+              const controlPlane = coordinator?.control_plane;
+              const emergencyLeader = coordinator?.emergency_leader;
               const unobserved = controlPlane == null;
               const stateLabel = controlPlane?.state === "available"
                 ? label(locale, "runtime.control_plane.available")
@@ -2457,10 +2459,36 @@ function NodeRuntime({
               const reasonCode =
                 controlPlane?.reason_code ??
                 "coordinator.control_plane.unobserved";
+              const emergencyActive =
+                emergencyLeader?.state === "active" &&
+                emergencyLeader.remaining_ms > 0;
+              const emergencyScope = !emergencyActive
+                ? "none"
+                : snapshot.identity?.node_id == null
+                  ? "unknown"
+                  : emergencyLeader.leader === snapshot.identity.node_id
+                    ? "local"
+                    : "remote";
+              const emergencyState = !emergencyLeader
+                ? "none"
+                : emergencyActive
+                  ? "active"
+                  : "expired";
+              const emergencyLabel = !emergencyLeader
+                ? null
+                : !emergencyActive
+                  ? label(locale, "runtime.emergency.expired")
+                  : emergencyScope === "local"
+                    ? label(locale, "runtime.emergency.active_local")
+                    : emergencyScope === "remote"
+                      ? label(locale, "runtime.emergency.active_remote")
+                      : label(locale, "runtime.emergency.active");
               return (
                 <div
                   className="compact-row"
                   data-control-plane-state={controlPlane?.state ?? "unobserved"}
+                  data-emergency-scope={emergencyScope}
+                  data-emergency-state={emergencyState}
                   data-governance-writable={writable ? "true" : "false"}
                   data-testid={`runtime-control-plane-${service.network_name}`}
                   key={service.network_name}
@@ -2477,6 +2505,58 @@ function NodeRuntime({
                       {label(locale, "runtime.control_plane.participants")}{" "}
                       {participants} · <code>{reasonCode}</code>
                     </small>
+                    {emergencyLeader ? (
+                      <small
+                        data-testid={`runtime-emergency-${service.network_name}`}
+                      >
+                        <strong>{emergencyLabel}</strong> ·{" "}
+                        {label(locale, "runtime.emergency.leader")}{" "}
+                        <code>{emergencyLeader.leader}</code> ·{" "}
+                        {label(locale, "runtime.emergency.epoch")}{" "}
+                        <code>{emergencyLeader.emergency_epoch}</code> ·{" "}
+                        {label(
+                          locale,
+                          "runtime.emergency.candidate_revision",
+                        )}{" "}
+                        <code>{emergencyLeader.candidate_config_revision}</code>
+                      </small>
+                    ) : null}
+                    {emergencyLeader ? (
+                      <small>
+                        {label(locale, "runtime.emergency.remaining")}{" "}
+                        {diagnosticDuration(
+                          locale,
+                          emergencyLeader.remaining_ms,
+                        )}{" "}
+                        · {label(locale, "runtime.emergency.hard_deadline")}{" "}
+                        <time
+                          dateTime={new Date(
+                            emergencyLeader.hard_expires_at_unix_ms,
+                          ).toISOString()}
+                        >
+                          {formatTimestamp(
+                            locale,
+                            emergencyLeader.hard_expires_at_unix_ms,
+                          )}
+                        </time>{" "}
+                        ·{" "}
+                        {emergencyLeader.governance_writable
+                          ? label(
+                              locale,
+                              "runtime.control_plane.governance_writable",
+                            )
+                          : label(
+                              locale,
+                              "runtime.emergency.governance_frozen",
+                            )}
+                        {emergencyActive
+                          ? ` · ${label(
+                              locale,
+                              "runtime.emergency.handoff_on_recovery",
+                            )}`
+                          : null}
+                      </small>
+                    ) : null}
                   </span>
                   <span
                     className={`status-pill ${writable ? "good" : "warn"}`}

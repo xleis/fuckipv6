@@ -11,7 +11,9 @@ import manifestFixture from "../../../contracts/typescript/fixtures/node-manifes
 import productFixture from "../../../contracts/typescript/fixtures/product-visual-snapshot.json";
 import type {
   ActivityEntry,
+  CoordinatorEmergencyLeaderStatus,
   NodeDiagnosticsSnapshot,
+  NodeEmbeddedServiceSnapshot,
   NodeExitSelectionSnapshot,
   NodeProblem,
   NodeSnapshot,
@@ -144,6 +146,69 @@ function renderRuntime(snapshot: NodeSnapshot) {
       onRunAction={async () => {}}
     />,
   );
+}
+
+function emergencyLeaseFixture(
+  leader: string,
+  state: "active" | "expired",
+  remainingMs: number,
+): CoordinatorEmergencyLeaderStatus {
+  return {
+    network_id: "net_emergency_runtime",
+    leader,
+    emergency_epoch: 7,
+    candidate_config_revision: 11,
+    unavailable_candidates: ["node_offline_candidate"],
+    issued_at_unix_ms: Date.UTC(2023, 10, 14, 22, 13, 20),
+    expires_at_unix_ms: Date.UTC(2023, 10, 14, 22, 13, 50),
+    hard_expires_at_unix_ms: Date.UTC(2023, 10, 14, 22, 18, 20),
+    state,
+    remaining_ms: remainingMs,
+    runtime_coordination_allowed: true,
+    governance_writable: false,
+    data_plane_allowed: true,
+    health_checks_allowed: true,
+    allowed_writes: [
+      "publish_own_term",
+      "sync_last_policy",
+      "connection_coordination",
+      "health_check",
+      "reject_stale_state",
+    ],
+  };
+}
+
+function coordinatorServiceFixture(
+  networkName: string,
+  emergencyLeader?: CoordinatorEmergencyLeaderStatus,
+): NodeEmbeddedServiceSnapshot {
+  const emergency = emergencyLeader != null;
+  return {
+    network_name: networkName,
+    status: "running",
+    coordinator_candidates: {
+      network_id: `net_${networkName}`,
+      generated_at_unix_ms: Date.UTC(2023, 10, 14, 22, 14),
+      config_state: "current",
+      candidates: [],
+      current_leader: null,
+      latest_term: null,
+      emergency: emergency ? "all_candidates_unavailable" : "none",
+      emergency_leader: emergencyLeader ?? null,
+      control_plane: {
+        state: emergency ? "read_only" : "available",
+        governance_writable: !emergency,
+        reason_code: emergency
+          ? "coordinator.control_plane.emergency_runtime_only"
+          : "coordinator.control_plane.available",
+        quorum: {
+          received_votes: 2,
+          required_votes: 2,
+          participant_count: 3,
+        },
+      },
+    },
+  };
 }
 
 function activity(overrides: Partial<ActivityEntry> = {}): ActivityEntry {
@@ -1182,6 +1247,109 @@ describe("Coordinator control-plane runtime state", () => {
     expect(unobserved).toHaveTextContent(
       "coordinator.control_plane.unobserved",
     );
+  });
+
+  it("shows local and remote emergency runtime authority with bounded lease details", () => {
+    const localLeader = "node_local_emergency";
+    const remoteLeader = "node_remote_emergency";
+    const hardDeadline = Date.UTC(2023, 10, 14, 22, 18, 20);
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      identity: {
+        node_id: localLeader,
+        public_key_fingerprint: "local-emergency-fingerprint",
+      },
+      embedded_services: [
+        coordinatorServiceFixture(
+          "local",
+          emergencyLeaseFixture(localLeader, "active", 20_000),
+        ),
+        coordinatorServiceFixture(
+          "remote",
+          emergencyLeaseFixture(remoteLeader, "active", 15_500),
+        ),
+      ],
+    };
+
+    renderRuntime(snapshot);
+
+    const controlPlane = screen.getByTestId("runtime-control-plane");
+    const local = within(controlPlane).getByTestId(
+      "runtime-control-plane-local",
+    );
+    expect(local).toHaveAttribute("data-emergency-state", "active");
+    expect(local).toHaveAttribute("data-emergency-scope", "local");
+    expect(local).toHaveAttribute("data-governance-writable", "false");
+    expect(local).toHaveTextContent(
+      translated("runtime.emergency.active_local"),
+    );
+    expect(local).toHaveTextContent(
+      translated("runtime.emergency.governance_frozen"),
+    );
+    expect(local).toHaveTextContent(
+      translated("runtime.emergency.handoff_on_recovery"),
+    );
+    expect(local).toHaveTextContent(localLeader);
+    expect(local).toHaveTextContent("7");
+    expect(local).toHaveTextContent("11");
+    expect(local).toHaveTextContent(new Date(hardDeadline).toISOString());
+    expect(local).toHaveTextContent(
+      translated("runtime.emergency.remaining"),
+    );
+
+    const remote = within(controlPlane).getByTestId(
+      "runtime-control-plane-remote",
+    );
+    expect(remote).toHaveAttribute("data-emergency-state", "active");
+    expect(remote).toHaveAttribute("data-emergency-scope", "remote");
+    expect(remote).toHaveTextContent(
+      translated("runtime.emergency.active_remote"),
+    );
+    expect(remote).toHaveTextContent(remoteLeader);
+  });
+
+  it("does not report active emergency authority for expired or missing leases", () => {
+    const expiredLeader = "node_expired_emergency";
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      embedded_services: [
+        coordinatorServiceFixture(
+          "expired",
+          emergencyLeaseFixture(expiredLeader, "expired", 0),
+        ),
+        coordinatorServiceFixture("none"),
+      ],
+    };
+
+    renderRuntime(snapshot);
+
+    const controlPlane = screen.getByTestId("runtime-control-plane");
+    const expired = within(controlPlane).getByTestId(
+      "runtime-control-plane-expired",
+    );
+    expect(expired).toHaveAttribute("data-emergency-state", "expired");
+    expect(expired).toHaveAttribute("data-emergency-scope", "none");
+    expect(expired).toHaveTextContent(
+      translated("runtime.emergency.expired"),
+    );
+    expect(expired).not.toHaveTextContent(
+      translated("runtime.emergency.active_local"),
+    );
+    expect(expired).not.toHaveTextContent(
+      translated("runtime.emergency.active_remote"),
+    );
+    expect(expired).not.toHaveTextContent(
+      translated("runtime.emergency.handoff_on_recovery"),
+    );
+
+    const none = within(controlPlane).getByTestId(
+      "runtime-control-plane-none",
+    );
+    expect(none).toHaveAttribute("data-emergency-state", "none");
+    expect(none).toHaveAttribute("data-emergency-scope", "none");
+    expect(
+      within(none).queryByTestId("runtime-emergency-none"),
+    ).not.toBeInTheDocument();
   });
 });
 

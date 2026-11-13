@@ -4736,33 +4736,7 @@ async fn trusted_file_request_member(
         actor,
         now_unix_ms,
     )?;
-    let snapshot = state.snapshot().await;
-    let network_enabled = network_file_capability_enabled(&snapshot, network_id, now_unix_ms);
-    if !network_enabled {
-        return Err(file_network_error("file_capability_unavailable"));
-    }
-    Ok((member, network_enabled))
-}
-
-fn network_file_capability_enabled(
-    snapshot: &NodeSnapshot,
-    network_id: &NetworkId,
-    now_unix_ms: u64,
-) -> bool {
-    snapshot
-        .network_profiles
-        .iter()
-        .find(|profile| profile.network_id == network_id.as_str())
-        .is_some_and(|profile| {
-            profile
-                .capability_declarations
-                .contains(&CapabilityKind::File)
-                && profile.signed_profile.as_ref().is_some_and(|profile| {
-                    profile.issued_at_unix_ms > 0
-                        && profile.issued_at_unix_ms <= now_unix_ms
-                        && now_unix_ms < profile.expires_at_unix_ms
-                })
-        })
+    Ok((member, true))
 }
 
 fn cancel_file_network_session(
@@ -10233,6 +10207,8 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
             can_manage_members: false,
             exit_selection_policy: Default::default(),
             exit_selection_policy_revision: 0,
+            network_revision: 1,
+            capability_declarations: Vec::new(),
             members: vec![
                 member(requester.clone(), MembershipRole::Member, 8),
                 member(owner.clone(), MembershipRole::Owner, 9),

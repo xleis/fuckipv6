@@ -1921,6 +1921,8 @@ mod tests {
             can_manage_members: false,
             exit_selection_policy: Default::default(),
             exit_selection_policy_revision: 0,
+            network_revision: 1,
+            capability_declarations: Vec::new(),
             members: vec![
                 directory_member("member-a", "hidden-member-a", "hidden-fingerprint-a"),
                 directory_member("member-b", "hidden-member-b", "hidden-fingerprint-b"),

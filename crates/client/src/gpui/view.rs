@@ -16136,6 +16136,8 @@ mod tests {
             can_manage_members: true,
             exit_selection_policy: Default::default(),
             exit_selection_policy_revision: 0,
+            network_revision: 1,
+            capability_declarations: Vec::new(),
             members,
         }
     }
@@ -16243,6 +16245,8 @@ mod tests {
             can_manage_members: true,
             exit_selection_policy: Default::default(),
             exit_selection_policy_revision: 0,
+            network_revision: 1,
+            capability_declarations: Vec::new(),
             members: vec![
                 NetworkMember {
                     node_id: relay_id.clone(),
@@ -16374,6 +16378,8 @@ mod tests {
                 can_manage_members: false,
                 exit_selection_policy: Default::default(),
                 exit_selection_policy_revision: 0,
+                network_revision: 1,
+                capability_declarations: Vec::new(),
                 members: Vec::new(),
             },
             network_id: boundary.network_id.clone(),

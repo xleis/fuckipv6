@@ -962,6 +962,8 @@ pub fn project_member_directory(
             can_manage_members: false,
             exit_selection_policy: Default::default(),
             exit_selection_policy_revision: 0,
+            network_revision: directory.network_revision,
+            capability_declarations: Vec::new(),
             members: Vec::new(),
         };
     }
@@ -1097,6 +1099,8 @@ pub fn project_member_directory(
         can_manage_members: directory.can_manage_members && viewer.principal.is_network_manager(),
         exit_selection_policy,
         exit_selection_policy_revision: directory.exit_selection_policy_revision,
+        network_revision: directory.network_revision,
+        capability_declarations: directory.capability_declarations.clone(),
         members,
     }
 }
@@ -1639,6 +1643,8 @@ mod tests {
             can_manage_members: false,
             exit_selection_policy: Default::default(),
             exit_selection_policy_revision: 0,
+            network_revision: 1,
+            capability_declarations: Vec::new(),
             members,
         }
     }

@@ -381,10 +381,17 @@ pub(crate) fn trusted_file_member(
     let received_at_unix_ms = received_at_unix_ms
         .ok_or_else(|| network_error("file_member_directory_unavailable", None))?;
     if directory.network_id != *expected_network_id
+        || directory.network_revision == 0
         || received_at_unix_ms > now_unix_ms
         || now_unix_ms.saturating_sub(received_at_unix_ms) > FILE_MEMBER_DIRECTORY_MAX_AGE_MS
     {
         return Err(network_error("file_member_directory_unavailable", None));
+    }
+    if !directory
+        .capability_declarations
+        .contains(&CapabilityKind::File)
+    {
+        return Err(network_error("file_capability_unavailable", None));
     }
     let member = directory
         .members
@@ -1908,6 +1915,8 @@ mod tests {
             can_manage_members: false,
             exit_selection_policy: Default::default(),
             exit_selection_policy_revision: 0,
+            network_revision: 1,
+            capability_declarations: vec![CapabilityKind::File],
             members: vec![member],
         }
     }
@@ -2385,6 +2394,51 @@ mod tests {
             ),
             "file_member_directory_unavailable"
         );
+        let mut missing_network_file = authoritative.clone();
+        missing_network_file.capability_declarations = vec![CapabilityKind::Relay];
+        assert_eq!(
+            response_code(
+                trusted_file_member(
+                    &network_id,
+                    Some(&missing_network_file),
+                    Some(1_000),
+                    &actor,
+                    2_000
+                )
+                .expect_err("network lacks File")
+            ),
+            "file_capability_unavailable"
+        );
+
+        let mut missing_network_revision = authoritative.clone();
+        missing_network_revision.network_revision = 0;
+        assert_eq!(
+            response_code(
+                trusted_file_member(
+                    &network_id,
+                    Some(&missing_network_revision),
+                    Some(1_000),
+                    &actor,
+                    2_000
+                )
+                .expect_err("missing network revision")
+            ),
+            "file_member_directory_unavailable"
+        );
+
+        let restored_network_file = authoritative.clone();
+        assert!(
+            trusted_file_member(
+                &network_id,
+                Some(&restored_network_file),
+                Some(1_000),
+                &actor,
+                2_000,
+            )
+            .is_ok(),
+            "restoring the authoritative network capability restores authorization"
+        );
+
         let other_network = NetworkId::from_public_key(b"other-network");
         assert_eq!(
             response_code(
@@ -3284,6 +3338,119 @@ mod tests {
         assert!(activity
             .iter()
             .any(|entry| { entry.details["direction"] == "download" }));
+    }
+
+    #[test]
+    fn network_capability_revocation_cancels_active_upload_and_restore_reauthorizes() {
+        let temporary = TempDir::new().expect("tempdir");
+        let share = upload_share();
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = FileRuntime::new(FileShareCapability::new());
+        runtime
+            .enable(
+                &share,
+                &share.owner,
+                temporary.path().to_str().expect("utf8 path"),
+                1,
+            )
+            .expect("enable File runtime");
+        let mut data_plane = FileNetworkDataPlane::new(runtime.clone());
+        let content = b"network-revoked-upload";
+        let open = |transfer_byte, operation_byte| FileNetworkRequest::OpenUpload {
+            share_id: share.id.clone(),
+            transfer_id: transfer(transfer_byte),
+            operation_id: operation(operation_byte),
+            path: SharedPath::parse(format!("network-{transfer_byte}.bin")).expect("path"),
+            manifest: manifest(content, 8),
+        };
+
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                open(70, 71),
+                10
+            ),
+            FileNetworkResponse::Opened { .. }
+        ));
+        assert!(
+            data_plane
+                .handle_chunk(
+                    &actor,
+                    7,
+                    &transfer(70),
+                    &operation(71),
+                    0,
+                    0,
+                    &content[..8],
+                    11
+                )
+                .expect("stage first upload chunk")
+                .0
+        );
+        assert_eq!(data_plane.session_count(), 1);
+        assert_eq!(runtime.active_transfer_count(), 1);
+        assert_eq!(staging_file_count(temporary.path()), 1);
+
+        let directory = directory(share.network_id.clone(), member(&actor, 7));
+        assert_eq!(
+            data_plane.cancel_sessions_without_member_access(
+                &share.network_id,
+                Some(&directory),
+                Some(10),
+                20,
+            ),
+            0
+        );
+
+        let mut revoked = directory.clone();
+        revoked.network_revision = 2;
+        revoked.capability_declarations.clear();
+        assert_eq!(
+            data_plane.cancel_sessions_without_member_access(
+                &share.network_id,
+                Some(&revoked),
+                Some(10),
+                21,
+            ),
+            1
+        );
+        assert_eq!(data_plane.session_count(), 0);
+        assert_eq!(runtime.active_transfer_count(), 0);
+        assert_eq!(staging_file_count(temporary.path()), 0);
+        assert!(!temporary.path().join("network-70.bin").exists());
+        let activity = data_plane.drain_activity();
+        assert_eq!(activity.len(), 1);
+        assert_eq!(
+            activity[0].reason.as_deref(),
+            Some("file_capability_unavailable")
+        );
+        assert_eq!(activity[0].outcome, AuditOutcome::Denied);
+        assert_eq!(
+            activity[0].details["cleanup_code"],
+            "file_transfer_cleanup_completed"
+        );
+
+        let restored = directory;
+        assert!(
+            trusted_file_member(&share.network_id, Some(&restored), Some(10), &actor, 22).is_ok()
+        );
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                open(72, 73),
+                23
+            ),
+            FileNetworkResponse::Opened { .. }
+        ));
     }
 
     #[test]

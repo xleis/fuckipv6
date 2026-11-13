@@ -1739,11 +1739,13 @@ impl NodeStateStore {
         {
             let mut directories = self.directories.write().await;
             if let Some(current) = directories.get(&network_id) {
-                let incoming_is_older = directory.exit_selection_policy_revision
-                    < current.exit_selection_policy_revision
-                    || (directory.exit_selection_policy_revision
-                        == current.exit_selection_policy_revision
-                        && directory.generated_at_unix_ms < current.generated_at_unix_ms);
+                let incoming_is_older = directory.network_revision < current.network_revision
+                    || (directory.network_revision == current.network_revision
+                        && (directory.exit_selection_policy_revision
+                            < current.exit_selection_policy_revision
+                            || (directory.exit_selection_policy_revision
+                                == current.exit_selection_policy_revision
+                                && directory.generated_at_unix_ms < current.generated_at_unix_ms)));
                 if current == &directory || incoming_is_older {
                     return false;
                 }
@@ -3072,6 +3074,8 @@ mod tests {
             can_manage_members: false,
             exit_selection_policy: Default::default(),
             exit_selection_policy_revision: 0,
+            network_revision: 1,
+            capability_declarations: Vec::new(),
             members: vec![
                 directory_member(&viewer, "me", MembershipRole::Member, Vec::new()),
                 directory_member(
@@ -3130,6 +3134,8 @@ mod tests {
             can_manage_members: false,
             exit_selection_policy: Default::default(),
             exit_selection_policy_revision: 0,
+            network_revision: 1,
+            capability_declarations: Vec::new(),
             members: vec![
                 directory_member(&viewer, "me", MembershipRole::Member, Vec::new()),
                 directory_member(&relay, "relay", MembershipRole::Member, Vec::new()),
@@ -3188,6 +3194,8 @@ mod tests {
                 can_manage_members: false,
                 exit_selection_policy: Default::default(),
                 exit_selection_policy_revision: 0,
+                network_revision: 1,
+                capability_declarations: Vec::new(),
                 members: vec![
                     directory_member(&viewer, "me", MembershipRole::Member, Vec::new()),
                     directory_member(&relay, "relay", MembershipRole::Member, Vec::new()),
@@ -3261,6 +3269,8 @@ mod tests {
             can_manage_members: false,
             exit_selection_policy: Default::default(),
             exit_selection_policy_revision: 7,
+            network_revision: 7,
+            capability_declarations: vec![CapabilityKind::File],
             members: vec![directory_member(
                 &viewer,
                 "current",
@@ -3275,6 +3285,21 @@ mod tests {
             .expect("receipt time is cached");
 
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let mut stale_network = current.clone();
+        stale_network.network_revision = 6;
+        stale_network.generated_at_unix_ms = 4_200;
+        stale_network.exit_selection_policy_revision = 99;
+        stale_network.members[0].display_name = Some("stale network".into());
+        assert!(!state.set_member_directory(stale_network).await);
+        assert_eq!(
+            state.member_directory(&network_id).await,
+            Some(current.clone())
+        );
+        assert_eq!(
+            state.member_directory_received_at(&network_id).await,
+            Some(received_at)
+        );
+
         let mut older_revision = current.clone();
         older_revision.generated_at_unix_ms = 4_100;
         older_revision.exit_selection_policy_revision = 6;
@@ -3293,10 +3318,31 @@ mod tests {
         older_generation.generated_at_unix_ms = 3_999;
         older_generation.members[0].display_name = Some("stale generation".into());
         assert!(!state.set_member_directory(older_generation).await);
-        assert_eq!(state.member_directory(&network_id).await, Some(current));
+        assert_eq!(
+            state.member_directory(&network_id).await,
+            Some(current.clone())
+        );
         assert_eq!(
             state.member_directory_received_at(&network_id).await,
             Some(received_at)
+        );
+
+        let mut newer_network = current.clone();
+        newer_network.network_revision = 8;
+        newer_network.generated_at_unix_ms = 4_001;
+        newer_network.capability_declarations.clear();
+        newer_network.members[0].display_name = Some("revoked network capability".into());
+        assert!(state.set_member_directory(newer_network.clone()).await);
+        assert_eq!(
+            state.member_directory(&network_id).await,
+            Some(newer_network)
+        );
+        assert!(
+            state
+                .member_directory_received_at(&network_id)
+                .await
+                .expect("newer directory refresh")
+                > received_at
         );
     }
 

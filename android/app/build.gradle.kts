@@ -29,6 +29,7 @@ android {
             assets.srcDir("../../crates/common/assets")
         }
         getByName("test") {
+            resources.srcDir("../../crates/common/assets")
             resources.srcDir("../../contracts/typescript/fixtures")
         }
         getByName("androidTest") {

@@ -27,10 +27,13 @@ use fuckipv6_common::{
 use futures::future::join_all;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, timeout, Instant};
+use tokio::time::{interval, sleep, timeout, Instant, MissedTickBehavior};
 
 use super::command::{
     NodePublishCoordinatorCandidateDeclarationCommand, NodeUpdateCoordinatorCandidatesCommand,
+};
+use super::coordinator_takeover::{
+    decide_coordinator_takeover, CoordinatorTakeoverDecision, COORDINATOR_TAKEOVER_POLL_INTERVAL,
 };
 use super::state::effective_membership_state;
 use super::{
@@ -3024,8 +3027,15 @@ async fn run_actor(
     mut actor: NetworkRuntimeActor,
 ) {
     actor.refresh_local_exit_capability_state().await;
-    while let Some(command) = receiver.recv().await {
-        match command {
+    let mut takeover_tick = interval(COORDINATOR_TAKEOVER_POLL_INTERVAL);
+    takeover_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            command = receiver.recv() => {
+                let Some(command) = command else {
+                    break;
+                };
+                match command {
             RuntimeControlCommand::Diagnostics { cancel, reply } => {
                 let result = actor.diagnostics_cancellable(cancel).await;
                 let _ = reply.send(result);
@@ -3153,6 +3163,11 @@ async fn run_actor(
                 let result = actor.shutdown().await;
                 let _ = reply.send(result);
                 break;
+            }
+                }
+            }
+            _ = takeover_tick.tick() => {
+                actor.refresh_coordinator_takeover().await;
             }
         }
     }
@@ -3893,6 +3908,122 @@ impl NetworkRuntimeActor {
                 self.close_ephemeral_coordinator_candidate_signaling(&signaling, ephemeral)
                     .await;
                 result
+            }
+        }
+    }
+
+    /// Poll only live data-plane registrations. Candidate events are hints;
+    /// every round fetches authoritative status before signing a proposal or
+    /// vote. A missed acknowledgement is therefore repaired by the next poll
+    /// instead of being inferred from a replayed event.
+    async fn refresh_coordinator_takeover(&mut self) {
+        if self
+            .sessions
+            .values()
+            .any(|session| session.handle.is_finished())
+        {
+            self.reconcile_finished_sessions().await;
+        }
+        let sessions =
+            self.sessions
+                .iter()
+                .filter_map(|(network_name, session)| {
+                    session.signaling.clone().map(|signaling| {
+                        (network_name.clone(), signaling, session.network_id.clone())
+                    })
+                })
+                .collect::<Vec<_>>();
+        if sessions.is_empty() {
+            return;
+        }
+        let identity = match self.configs.load_node_identity() {
+            Ok(identity) => identity,
+            Err(error) => {
+                tracing::debug!(%error, "Coordinator 接管轮次无法加载本机身份");
+                return;
+            }
+        };
+
+        for (network_name, signaling, network_id) in sessions {
+            let Some(network_id) = network_id.as_deref() else {
+                tracing::warn!(network = %network_name, "Coordinator 接管轮次缺少网络 ID");
+                continue;
+            };
+            let network_id = match NetworkId::parse(network_id.to_owned()) {
+                Ok(network_id) => network_id,
+                Err(error) => {
+                    tracing::warn!(
+                        network = %network_name,
+                        %error,
+                        "Coordinator 接管轮次跳过无效网络 ID"
+                    );
+                    continue;
+                }
+            };
+            let status = match signaling
+                .coordinator_candidate_status(network_id.clone())
+                .await
+            {
+                Ok(status) => status,
+                Err(error) => {
+                    tracing::debug!(
+                        network = %network_name,
+                        %error,
+                        "Coordinator 接管轮次无法刷新权威候选状态"
+                    );
+                    continue;
+                }
+            };
+            let decision = match decide_coordinator_takeover(&status, &identity, unix_time_ms()) {
+                Ok(decision) => decision,
+                Err(error) => {
+                    tracing::debug!(
+                        network = %network_name,
+                        %error,
+                        "Coordinator 接管轮次拒绝不可信的候选状态"
+                    );
+                    continue;
+                }
+            };
+            let (action, result) = match decision {
+                CoordinatorTakeoverDecision::Wait => continue,
+                CoordinatorTakeoverDecision::Propose(proposal) => (
+                    "propose",
+                    signaling.propose_coordinator_election(proposal).await,
+                ),
+                CoordinatorTakeoverDecision::Vote { proposal_id, vote } => (
+                    "vote",
+                    signaling.vote_coordinator_election(proposal_id, vote).await,
+                ),
+                CoordinatorTakeoverDecision::Timeout {
+                    network_id,
+                    proposal_id,
+                } => (
+                    "timeout",
+                    signaling
+                        .timeout_coordinator_election(network_id, proposal_id)
+                        .await,
+                ),
+            };
+            match result {
+                Ok(status) => {
+                    tracing::debug!(
+                        network = %network_name,
+                        action,
+                        leader = ?status.current_leader,
+                        term = ?status.latest_term.as_ref().map(|term| term.term),
+                        election_stage = ?status.latest_election.as_ref().map(|election| election.stage),
+                        "Coordinator 接管轮次已刷新权威状态"
+                    );
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        network = %network_name,
+                        action,
+                        %error,
+                        "Coordinator 接管动作失败，将在下一轮重新读取权威状态"
+                    );
+                }
             }
         }
     }

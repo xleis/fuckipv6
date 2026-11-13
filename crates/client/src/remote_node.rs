@@ -12,7 +12,9 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
 use crate::cli::commands::RuntimeOptions;
-use crate::file_share::{FileShareConfiguration, FileSharePreview};
+use crate::file_share::{
+    FileShareConfiguration, FileSharePreview, FileTransferHandle, StartFileTransferRequest,
+};
 use crate::local_ipc::{
     self, EndpointRole, FrameKind, IpcErrorCode, IpcRole, LocalCommand, LocalError, LocalEvent,
     LocalRequest, LocalResponse,
@@ -34,6 +36,7 @@ pub struct RemoteNodeSession {
     runtime: Option<Runtime>,
     operations: RemoteOperationClient,
     file_owner: RemoteFileOwnerClient,
+    file_transfer: RemoteFileTransferClient,
     state: NodeStateStore,
     commands: NodeCommandBus,
     events: NodeEventBus,
@@ -67,12 +70,18 @@ impl RemoteNodeSession {
             role.clone(),
             Some(runtime_handle.clone()),
         );
-        let file_owner = RemoteFileOwnerClient::new(endpoint, role, Some(runtime_handle));
+        let file_owner = RemoteFileOwnerClient::new(
+            endpoint.clone(),
+            role.clone(),
+            Some(runtime_handle.clone()),
+        );
+        let file_transfer = RemoteFileTransferClient::new(endpoint, role, Some(runtime_handle));
 
         Ok(Self {
             runtime: Some(runtime),
             operations,
             file_owner,
+            file_transfer,
             state,
             commands,
             events,
@@ -89,7 +98,8 @@ impl RemoteNodeSession {
         Ok(Self {
             runtime: None,
             operations: RemoteOperationClient::new(endpoint.clone(), role.clone(), None),
-            file_owner: RemoteFileOwnerClient::new(endpoint, role, None),
+            file_owner: RemoteFileOwnerClient::new(endpoint.clone(), role.clone(), None),
+            file_transfer: RemoteFileTransferClient::new(endpoint, role, None),
             state,
             commands,
             events,
@@ -168,6 +178,12 @@ impl RemoteNodeSession {
     /// action or ordinary node command.
     pub fn file_owner(&self) -> RemoteFileOwnerClient {
         self.file_owner.clone()
+    }
+
+    /// Requester-side File transfer controls. Paths stay on the authenticated
+    /// local IPC boundary and are never routed through node commands.
+    pub fn file_transfer(&self) -> RemoteFileTransferClient {
+        self.file_transfer.clone()
     }
 
     /// Disconnect the UI. The control and node processes deliberately keep
@@ -332,6 +348,93 @@ impl RemoteFileOwnerClient {
             None => future.await,
         }
     }
+}
+
+/// UI/CLI adapter for requester-side File transfers. The peer-visible share
+/// path and the requester-local filesystem path are submitted only over the
+/// same-user authenticated local IPC transport.
+#[derive(Clone)]
+pub struct RemoteFileTransferClient {
+    endpoint: local_ipc::LocalEndpoint,
+    role: IpcRole,
+    runtime: Option<Handle>,
+}
+
+impl RemoteFileTransferClient {
+    fn new(endpoint: local_ipc::LocalEndpoint, role: IpcRole, runtime: Option<Handle>) -> Self {
+        Self {
+            endpoint,
+            role,
+            runtime,
+        }
+    }
+
+    pub async fn start(&self, request: StartFileTransferRequest) -> Result<FileTransferHandle> {
+        let endpoint = self.endpoint.clone();
+        let role = self.role.clone();
+        let future = async move { local_ipc::start_file_transfer(&endpoint, role, request).await };
+        match &self.runtime {
+            Some(runtime) => runtime
+                .spawn(future)
+                .await
+                .context("File transfer start task failed")?,
+            None => future.await,
+        }
+    }
+
+    pub async fn cancel(&self, transfer_id: String, operation_id: String) -> Result<()> {
+        self.control(transfer_id, operation_id, FileTransferControl::Cancel)
+            .await
+    }
+
+    pub async fn pause(&self, transfer_id: String, operation_id: String) -> Result<()> {
+        self.control(transfer_id, operation_id, FileTransferControl::Pause)
+            .await
+    }
+
+    pub async fn resume(&self, transfer_id: String, operation_id: String) -> Result<()> {
+        self.control(transfer_id, operation_id, FileTransferControl::Resume)
+            .await
+    }
+
+    async fn control(
+        &self,
+        transfer_id: String,
+        operation_id: String,
+        command: FileTransferControl,
+    ) -> Result<()> {
+        let endpoint = self.endpoint.clone();
+        let role = self.role.clone();
+        let future = async move {
+            match command {
+                FileTransferControl::Cancel => {
+                    local_ipc::cancel_file_transfer(&endpoint, role, transfer_id, operation_id)
+                        .await
+                }
+                FileTransferControl::Pause => {
+                    local_ipc::pause_file_transfer(&endpoint, role, transfer_id, operation_id).await
+                }
+                FileTransferControl::Resume => {
+                    local_ipc::resume_file_transfer(&endpoint, role, transfer_id, operation_id)
+                        .await
+                }
+            }
+        };
+        match &self.runtime {
+            Some(runtime) => runtime
+                .spawn(future)
+                .await
+                .context("File transfer control task failed")?,
+            None => future.await,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FileTransferControl {
+    Cancel,
+    Pause,
+    Resume,
 }
 
 struct RemoteNodeHandler {

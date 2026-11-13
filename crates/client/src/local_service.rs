@@ -16,6 +16,11 @@ use tokio::time::{sleep, timeout};
 use tracing::{debug, warn};
 
 use crate::file_share::FileOwnerService;
+use crate::file_share::FileTransferCommand;
+use crate::ipc::{
+    cancel_file_transfer, pause_file_transfer, resume_file_transfer, start_file_transfer,
+    MultiNetworkRegistry,
+};
 use crate::local_ipc::{
     EndpointRole, FrameKind, IpcErrorCode, LocalConnection, LocalError, LocalEvent, LocalRequest,
     LocalResponse, LocalServer,
@@ -53,7 +58,7 @@ pub async fn serve_node(
     events: NodeEventBus,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    serve_node_inner(server, commands, state, events, None, shutdown, None).await
+    serve_node_inner(server, commands, state, events, None, None, shutdown, None).await
 }
 
 /// Serve a node whose lifecycle is owned by this process. Unlike the generic
@@ -66,6 +71,7 @@ pub(crate) async fn serve_owned_node(
     state: NodeStateStore,
     events: NodeEventBus,
     file_owner: FileOwnerService,
+    registry: MultiNetworkRegistry,
     shutdown: watch::Sender<bool>,
 ) -> Result<()> {
     let shutdown_rx = shutdown.subscribe();
@@ -75,18 +81,21 @@ pub(crate) async fn serve_owned_node(
         state,
         events,
         Some(file_owner),
+        Some(registry),
         shutdown_rx,
         Some(shutdown),
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_node_inner(
     server: LocalServer,
     commands: NodeCommandBus,
     state: NodeStateStore,
     events: NodeEventBus,
     file_owner: Option<FileOwnerService>,
+    registry: Option<MultiNetworkRegistry>,
     mut shutdown: watch::Receiver<bool>,
     stop_controller: Option<watch::Sender<bool>>,
 ) -> Result<()> {
@@ -121,6 +130,7 @@ async fn serve_node_inner(
                             events: events.clone(),
                             operations: operations.clone(),
                             file_owner: file_owner.clone(),
+                            registry: registry.clone(),
                         };
                         let task_shutdown = shutdown.clone();
                         let task_stop_controller = stop_controller.clone();
@@ -199,6 +209,7 @@ struct ConnectionServices {
     events: NodeEventBus,
     operations: OperationService,
     file_owner: Option<FileOwnerService>,
+    registry: Option<MultiNetworkRegistry>,
 }
 
 async fn serve_connection(
@@ -213,6 +224,7 @@ async fn serve_connection(
         events,
         operations,
         file_owner,
+        registry,
     } = services;
     loop {
         let (kind, payload) = tokio::select! {
@@ -578,6 +590,50 @@ async fn serve_connection(
                     }
                 }
             }
+            crate::local_ipc::LocalCommand::FileTransfer(command) => {
+                let Some(registry) = registry.as_ref() else {
+                    send_local_error(
+                        connection,
+                        LocalError::new(
+                            IpcErrorCode::Unsupported,
+                            "当前节点服务未启用 File 传输控制面",
+                        ),
+                    )
+                    .await?;
+                    continue;
+                };
+                let result = match command {
+                    FileTransferCommand::Start(request) => {
+                        start_file_transfer(registry, Box::new(request))
+                            .await
+                            .map(LocalResponse::FileTransferStarted)
+                    }
+                    FileTransferCommand::Cancel {
+                        transfer_id,
+                        operation_id,
+                    } => cancel_file_transfer(registry, transfer_id, operation_id)
+                        .await
+                        .map(|()| LocalResponse::FileTransferAccepted),
+                    FileTransferCommand::Pause {
+                        transfer_id,
+                        operation_id,
+                    } => pause_file_transfer(registry, transfer_id, operation_id)
+                        .await
+                        .map(|()| LocalResponse::FileTransferAccepted),
+                    FileTransferCommand::Resume {
+                        transfer_id,
+                        operation_id,
+                    } => resume_file_transfer(registry, transfer_id, operation_id)
+                        .await
+                        .map(|()| LocalResponse::FileTransferAccepted),
+                };
+                match result {
+                    Ok(response) => connection.send_response(&response).await?,
+                    Err(error) => {
+                        send_local_error(connection, LocalError::file_transfer(error)).await?;
+                    }
+                }
+            }
             crate::local_ipc::LocalCommand::Subscribe { after_sequence } => {
                 stream_events(
                     connection,
@@ -821,7 +877,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use anyhow::Context;
-    use tokio::sync::watch;
+    use tokio::sync::{mpsc, watch};
 
     use crate::file_share::FileOwnerService;
     use crate::local_ipc::{
@@ -985,6 +1041,7 @@ mod tests {
                 state.clone(),
                 events.clone(),
                 file_owner,
+                MultiNetworkRegistry::new(),
                 shutdown.clone(),
             ));
             Ok(Self {
@@ -1589,6 +1646,184 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_transfer_commands_round_trip_through_authenticated_ipc() -> Result<()> {
+        use crate::file_share::{
+            FileTransferDirection, FileTransferHandle, StartFileTransferRequest,
+            DEFAULT_FILE_TRANSFER_CHUNK_SIZE,
+        };
+        use crate::ipc::RuntimeCommand;
+        use crate::local_ipc::{
+            cancel_file_transfer, pause_file_transfer, resume_file_transfer, start_file_transfer,
+        };
+
+        let directory = std::env::temp_dir().join(format!(
+            "fuckipv6-file-transfer-ipc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory)?;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        let endpoint = LocalEndpoint::Path(directory.join("node.sock"));
+        let events = NodeEventBus::new(8);
+        let state = NodeStateStore::with_events(events.clone());
+        let commands = NodeCommandBus::spawn(Arc::new(EchoHandler), events.clone(), 8);
+        let server = LocalServer::bind(endpoint.clone(), EndpointRole::Node).await?;
+        let (shutdown, _shutdown_rx) = watch::channel(false);
+        let file_owner = FileOwnerService::new(
+            &directory,
+            fuckipv6_common::domain::NodeId::from_public_key(b"file-transfer-ipc-owner"),
+            state.clone(),
+        )?;
+        let registry = MultiNetworkRegistry::new();
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        registry.set_control_sender(control_tx);
+        let service = tokio::spawn(serve_owned_node(
+            server,
+            commands,
+            state,
+            events,
+            file_owner,
+            registry,
+            shutdown.clone(),
+        ));
+
+        let request = StartFileTransferRequest {
+            peer: "peer".into(),
+            direction: FileTransferDirection::Upload,
+            share_id: "share".into(),
+            transfer_id: "transfer".into(),
+            operation_id: "operation".into(),
+            path: "docs/report.bin".into(),
+            local_path: "/home/owner/private/report.bin".into(),
+            chunk_size: DEFAULT_FILE_TRANSFER_CHUNK_SIZE,
+        };
+        let start_task = tokio::spawn({
+            let endpoint = endpoint.clone();
+            let request = request.clone();
+            async move { start_file_transfer(&endpoint, IpcRole::Cli, request).await }
+        });
+        let RuntimeCommand::StartFileTransfer {
+            request: forwarded,
+            reply,
+        } = control_rx.recv().await.expect("start control command")
+        else {
+            panic!("expected start file transfer control command");
+        };
+        assert_eq!(forwarded.peer, request.peer);
+        assert_eq!(forwarded.local_path, request.local_path);
+        assert!(!format!("{forwarded:?}").contains(request.local_path.as_str()));
+        let handle = FileTransferHandle {
+            transfer_id: "transfer".into(),
+            operation_id: "operation".into(),
+        };
+        reply
+            .send(Ok(handle.clone()))
+            .expect("reply to start transfer");
+        assert_eq!(start_task.await.expect("start transfer task")?, handle);
+
+        for (control, expected_action) in [(0_u8, "cancel"), (1_u8, "pause"), (2_u8, "resume")] {
+            let task = tokio::spawn({
+                let endpoint = endpoint.clone();
+                async move {
+                    match control {
+                        0 => {
+                            cancel_file_transfer(
+                                &endpoint,
+                                IpcRole::Cli,
+                                "transfer".into(),
+                                "operation".into(),
+                            )
+                            .await
+                        }
+                        1 => {
+                            pause_file_transfer(
+                                &endpoint,
+                                IpcRole::Cli,
+                                "transfer".into(),
+                                "operation".into(),
+                            )
+                            .await
+                        }
+                        _ => {
+                            resume_file_transfer(
+                                &endpoint,
+                                IpcRole::Cli,
+                                "transfer".into(),
+                                "operation".into(),
+                            )
+                            .await
+                        }
+                    }
+                }
+            });
+            let command = control_rx.recv().await.expect("transfer control command");
+            let reply = match (expected_action, command) {
+                ("cancel", RuntimeCommand::CancelFileTransfer { reply, .. }) => reply,
+                ("pause", RuntimeCommand::PauseFileTransfer { reply, .. }) => reply,
+                ("resume", RuntimeCommand::ResumeFileTransfer { reply, .. }) => reply,
+                (_, _) => panic!("unexpected File transfer command"),
+            };
+            reply.send(Ok(())).expect("reply to transfer control");
+            task.await.expect("transfer control task")?;
+        }
+
+        shutdown.send(true).context("service already stopped")?;
+        timeout(Duration::from_secs(5), service)
+            .await
+            .context("local service shutdown timed out")???;
+        assert!(!socket_path(&endpoint).exists());
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_transfer_runtime_failure_is_stable_and_path_free() -> Result<()> {
+        use crate::file_share::{
+            FileTransferDirection, StartFileTransferRequest, DEFAULT_FILE_TRANSFER_CHUNK_SIZE,
+        };
+        use crate::local_ipc::start_file_transfer;
+
+        let fixture = Fixture::with_owned_file_service("file-transfer-runtime", 8).await?;
+        let secret_path = "/home/owner/private/not-for-logs.bin";
+        let error = start_file_transfer(
+            &fixture.endpoint,
+            IpcRole::Cli,
+            StartFileTransferRequest {
+                peer: "peer".into(),
+                direction: FileTransferDirection::Download,
+                share_id: "share".into(),
+                transfer_id: "transfer".into(),
+                operation_id: "operation".into(),
+                path: "docs/report.bin".into(),
+                local_path: secret_path.into(),
+                chunk_size: DEFAULT_FILE_TRANSFER_CHUNK_SIZE,
+            },
+        )
+        .await
+        .expect_err("missing runtime control channel must fail");
+        let local = error
+            .downcast_ref::<LocalError>()
+            .expect("runtime failure must preserve LocalError");
+        assert_eq!(local.code, IpcErrorCode::BackendUnavailable);
+        assert_eq!(
+            local
+                .file_transfer_error
+                .as_ref()
+                .map(|detail| detail.code.as_str()),
+            Some("file_transfer_runtime_unavailable")
+        );
+        assert!(local.retryable);
+        let encoded = serde_json::to_string(local)?;
+        assert!(!encoded.contains(secret_path));
+        assert!(!format!("{local:?}").contains(secret_path));
+
+        fixture.finish().await
+    }
+
+    #[tokio::test]
     async fn stop_node_is_typed_unsupported_without_process_ownership() -> Result<()> {
         let fixture = Fixture::new("stop-node", 8).await?;
         let error = request(
@@ -1639,6 +1874,7 @@ mod tests {
             state,
             events,
             file_owner,
+            MultiNetworkRegistry::new(),
             shutdown_tx.clone(),
         ));
 

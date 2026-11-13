@@ -17,45 +17,14 @@ use crate::node::{
 use crate::p2p::connection::{P2pEngine, PeerProbeOutcome};
 use crate::stats::StatsCollector;
 
+pub use crate::file_share::{
+    FileTransferDirection, FileTransferHandle, StartFileTransferRequest,
+    DEFAULT_FILE_TRANSFER_CHUNK_SIZE,
+};
+
 pub const DEFAULT_IPC_ADDR: &str = "127.0.0.1:6668";
 pub const ENV_IPC_ADDR: &str = "FUCKIPV6_IPC_ADDR";
 pub const ENV_IPC_ALLOW_REMOTE: &str = "FUCKIPV6_IPC_ALLOW_REMOTE";
-pub const DEFAULT_FILE_TRANSFER_CHUNK_SIZE: u64 = 4 * 1024 * 1024;
-
-fn default_file_transfer_chunk_size() -> u64 {
-    DEFAULT_FILE_TRANSFER_CHUNK_SIZE
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FileTransferDirection {
-    Upload,
-    Download,
-}
-
-/// Local-only request to start a requester-side File operation.
-///
-/// `path` is the peer's shared path. `local_path` is the source file for an
-/// upload or the non-existing final destination for a download. Paths are
-/// carried only through loopback IPC and are never logged by the runtime.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StartFileTransferRequest {
-    pub peer: String,
-    pub direction: FileTransferDirection,
-    pub share_id: String,
-    pub transfer_id: String,
-    pub operation_id: String,
-    pub path: String,
-    pub local_path: String,
-    #[serde(default = "default_file_transfer_chunk_size")]
-    pub chunk_size: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileTransferHandle {
-    pub transfer_id: String,
-    pub operation_id: String,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum IpcRequest {
@@ -76,19 +45,6 @@ pub enum IpcRequest {
         exit_node: Option<String>,
         is_exit_node: bool,
     },
-    StartFileTransfer(Box<StartFileTransferRequest>),
-    CancelFileTransfer {
-        transfer_id: String,
-        operation_id: String,
-    },
-    PauseFileTransfer {
-        transfer_id: String,
-        operation_id: String,
-    },
-    ResumeFileTransfer {
-        transfer_id: String,
-        operation_id: String,
-    },
     Disconnect,
     NodeCommand(Box<NodeCommandRequest>),
 }
@@ -103,7 +59,6 @@ pub enum IpcResponse {
     MultiStatus(Vec<NetworkSessionSnapshot>),
     PeerProbe(PeerProbeOutcome),
     RoutingUpdated(RoutingUpdateResult),
-    FileTransferStarted(FileTransferHandle),
     NodeCommand(NodeCommandResult),
     Success { message: String },
     Error { message: String },
@@ -738,21 +693,6 @@ async fn handle_client(
             exit_node,
             is_exit_node,
         }) => update_runtime_routing(&registry, mode, exit_node, is_exit_node).await,
-        Ok(IpcRequest::StartFileTransfer(request)) => {
-            start_runtime_file_transfer(&registry, request).await
-        }
-        Ok(IpcRequest::CancelFileTransfer {
-            transfer_id,
-            operation_id,
-        }) => cancel_runtime_file_transfer(&registry, transfer_id, operation_id).await,
-        Ok(IpcRequest::PauseFileTransfer {
-            transfer_id,
-            operation_id,
-        }) => pause_runtime_file_transfer(&registry, transfer_id, operation_id).await,
-        Ok(IpcRequest::ResumeFileTransfer {
-            transfer_id,
-            operation_id,
-        }) => resume_runtime_file_transfer(&registry, transfer_id, operation_id).await,
         Ok(IpcRequest::Disconnect) => disconnect_runtime(&registry).await,
         Ok(IpcRequest::NodeCommand(request)) => match commands {
             Some(commands) => match commands
@@ -856,112 +796,104 @@ async fn update_runtime_routing(
     }
 }
 
-async fn start_runtime_file_transfer(
-    registry: &MultiNetworkRegistry,
-    request: Box<StartFileTransferRequest>,
-) -> IpcResponse {
-    let (reply, response) = oneshot::channel();
-    if !registry.send_control(RuntimeCommand::StartFileTransfer { request, reply }) {
-        return IpcResponse::Error {
-            message: "运行时不支持 File 传输或控制通道已关闭".to_string(),
-        };
-    }
+/// Stable, path-free failure from the requester-side File control plane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FileTransferControlError {
+    RuntimeUnavailable,
+    Timeout,
+    Rejected(String),
+}
 
-    match tokio::time::timeout(Duration::from_secs(30), response).await {
-        Ok(Ok(Ok(handle))) => IpcResponse::FileTransferStarted(handle),
-        Ok(Ok(Err(code))) => IpcResponse::Error {
-            message: format!("File 传输启动失败: {code}"),
-        },
-        Ok(Err(_)) | Err(_) => IpcResponse::Error {
-            message: "File 传输启动请求未收到运行时响应".to_string(),
-        },
+impl FileTransferControlError {
+    pub(crate) fn code(&self) -> &str {
+        match self {
+            Self::RuntimeUnavailable => "file_transfer_runtime_unavailable",
+            Self::Timeout => "file_transfer_runtime_timeout",
+            Self::Rejected(code) => code,
+        }
     }
 }
 
-async fn cancel_runtime_file_transfer(
+pub(crate) async fn start_file_transfer(
+    registry: &MultiNetworkRegistry,
+    request: Box<StartFileTransferRequest>,
+) -> Result<FileTransferHandle, FileTransferControlError> {
+    let (reply, response) = oneshot::channel();
+    if !registry.send_control(RuntimeCommand::StartFileTransfer { request, reply }) {
+        return Err(FileTransferControlError::RuntimeUnavailable);
+    }
+
+    match tokio::time::timeout(Duration::from_secs(30), response).await {
+        Ok(Ok(Ok(handle))) => Ok(handle),
+        Ok(Ok(Err(code))) => Err(FileTransferControlError::Rejected(code)),
+        Ok(Err(_)) => Err(FileTransferControlError::RuntimeUnavailable),
+        Err(_) => Err(FileTransferControlError::Timeout),
+    }
+}
+
+pub(crate) async fn cancel_file_transfer(
     registry: &MultiNetworkRegistry,
     transfer_id: String,
     operation_id: String,
-) -> IpcResponse {
+) -> Result<(), FileTransferControlError> {
     let (reply, response) = oneshot::channel();
     if !registry.send_control(RuntimeCommand::CancelFileTransfer {
         transfer_id,
         operation_id,
         reply,
     }) {
-        return IpcResponse::Error {
-            message: "运行时不支持 File 传输取消或控制通道已关闭".to_string(),
-        };
+        return Err(FileTransferControlError::RuntimeUnavailable);
     }
 
     match tokio::time::timeout(Duration::from_secs(10), response).await {
-        Ok(Ok(Ok(()))) => IpcResponse::Success {
-            message: "File 传输已取消".to_string(),
-        },
-        Ok(Ok(Err(code))) => IpcResponse::Error {
-            message: format!("File 传输取消失败: {code}"),
-        },
-        Ok(Err(_)) | Err(_) => IpcResponse::Error {
-            message: "File 传输取消请求未收到运行时响应".to_string(),
-        },
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(code))) => Err(FileTransferControlError::Rejected(code)),
+        Ok(Err(_)) => Err(FileTransferControlError::RuntimeUnavailable),
+        Err(_) => Err(FileTransferControlError::Timeout),
     }
 }
 
-async fn pause_runtime_file_transfer(
+pub(crate) async fn pause_file_transfer(
     registry: &MultiNetworkRegistry,
     transfer_id: String,
     operation_id: String,
-) -> IpcResponse {
+) -> Result<(), FileTransferControlError> {
     let (reply, response) = oneshot::channel();
     if !registry.send_control(RuntimeCommand::PauseFileTransfer {
         transfer_id,
         operation_id,
         reply,
     }) {
-        return IpcResponse::Error {
-            message: "运行时不支持 File 传输暂停或控制通道已关闭".to_string(),
-        };
+        return Err(FileTransferControlError::RuntimeUnavailable);
     }
 
     match tokio::time::timeout(Duration::from_secs(10), response).await {
-        Ok(Ok(Ok(()))) => IpcResponse::Success {
-            message: "File 传输已暂停".to_string(),
-        },
-        Ok(Ok(Err(code))) => IpcResponse::Error {
-            message: format!("File 传输暂停失败: {code}"),
-        },
-        Ok(Err(_)) | Err(_) => IpcResponse::Error {
-            message: "File 传输暂停请求未收到运行时响应".to_string(),
-        },
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(code))) => Err(FileTransferControlError::Rejected(code)),
+        Ok(Err(_)) => Err(FileTransferControlError::RuntimeUnavailable),
+        Err(_) => Err(FileTransferControlError::Timeout),
     }
 }
 
-async fn resume_runtime_file_transfer(
+pub(crate) async fn resume_file_transfer(
     registry: &MultiNetworkRegistry,
     transfer_id: String,
     operation_id: String,
-) -> IpcResponse {
+) -> Result<(), FileTransferControlError> {
     let (reply, response) = oneshot::channel();
     if !registry.send_control(RuntimeCommand::ResumeFileTransfer {
         transfer_id,
         operation_id,
         reply,
     }) {
-        return IpcResponse::Error {
-            message: "运行时不支持 File 传输恢复或控制通道已关闭".to_string(),
-        };
+        return Err(FileTransferControlError::RuntimeUnavailable);
     }
 
     match tokio::time::timeout(Duration::from_secs(10), response).await {
-        Ok(Ok(Ok(()))) => IpcResponse::Success {
-            message: "File 传输已恢复".to_string(),
-        },
-        Ok(Ok(Err(code))) => IpcResponse::Error {
-            message: format!("File 传输恢复失败: {code}"),
-        },
-        Ok(Err(_)) | Err(_) => IpcResponse::Error {
-            message: "File 传输恢复请求未收到运行时响应".to_string(),
-        },
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(code))) => Err(FileTransferControlError::Rejected(code)),
+        Ok(Err(_)) => Err(FileTransferControlError::RuntimeUnavailable),
+        Err(_) => Err(FileTransferControlError::Timeout),
     }
 }
 
@@ -1448,48 +1380,19 @@ mod tests {
         let registry = MultiNetworkRegistry::new();
         let request = start_file_transfer_request();
 
-        match start_runtime_file_transfer(&registry, request).await {
-            IpcResponse::Error { message } => {
-                assert_eq!(message, "运行时不支持 File 传输或控制通道已关闭");
-            }
-            other => panic!("unexpected response: {other:?}"),
-        }
-        match cancel_runtime_file_transfer(
-            &registry,
-            "transfer".to_string(),
-            "operation".to_string(),
-        )
-        .await
-        {
-            IpcResponse::Error { message } => {
-                assert_eq!(message, "运行时不支持 File 传输取消或控制通道已关闭");
-            }
-            other => panic!("unexpected response: {other:?}"),
-        }
-        match pause_runtime_file_transfer(
-            &registry,
-            "transfer".to_string(),
-            "operation".to_string(),
-        )
-        .await
-        {
-            IpcResponse::Error { message } => {
-                assert_eq!(message, "运行时不支持 File 传输暂停或控制通道已关闭");
-            }
-            other => panic!("unexpected response: {other:?}"),
-        }
-        match resume_runtime_file_transfer(
-            &registry,
-            "transfer".to_string(),
-            "operation".to_string(),
-        )
-        .await
-        {
-            IpcResponse::Error { message } => {
-                assert_eq!(message, "运行时不支持 File 传输恢复或控制通道已关闭");
-            }
-            other => panic!("unexpected response: {other:?}"),
-        }
+        assert_eq!(
+            start_file_transfer(&registry, request).await,
+            Err(FileTransferControlError::RuntimeUnavailable)
+        );
+        let result =
+            cancel_file_transfer(&registry, "transfer".to_string(), "operation".to_string()).await;
+        assert_eq!(result, Err(FileTransferControlError::RuntimeUnavailable));
+        let result =
+            pause_file_transfer(&registry, "transfer".to_string(), "operation".to_string()).await;
+        assert_eq!(result, Err(FileTransferControlError::RuntimeUnavailable));
+        let result =
+            resume_file_transfer(&registry, "transfer".to_string(), "operation".to_string()).await;
+        assert_eq!(result, Err(FileTransferControlError::RuntimeUnavailable));
     }
 
     fn start_file_transfer_request() -> Box<StartFileTransferRequest> {
@@ -1512,7 +1415,7 @@ mod tests {
         registry.set_control_sender(control_tx);
         let task = tokio::spawn({
             let registry = registry.clone();
-            async move { start_runtime_file_transfer(&registry, start_file_transfer_request()).await }
+            async move { start_file_transfer(&registry, start_file_transfer_request()).await }
         });
         let RuntimeCommand::StartFileTransfer { request, reply } =
             control_rx.recv().await.expect("start command")
@@ -1526,16 +1429,13 @@ mod tests {
             operation_id: "operation-started".to_string(),
         };
         reply.send(Ok(handle.clone())).expect("reply start");
-        match task.await.expect("start task") {
-            IpcResponse::FileTransferStarted(actual) => assert_eq!(actual, handle),
-            other => panic!("unexpected response: {other:?}"),
-        }
+        assert_eq!(task.await.expect("start task"), Ok(handle));
 
         let (control_tx, mut control_rx) = mpsc::unbounded_channel();
         registry.set_control_sender(control_tx);
         let task = tokio::spawn({
             let registry = registry.clone();
-            async move { start_runtime_file_transfer(&registry, start_file_transfer_request()).await }
+            async move { start_file_transfer(&registry, start_file_transfer_request()).await }
         });
         let RuntimeCommand::StartFileTransfer { reply, .. } =
             control_rx.recv().await.expect("start command")
@@ -1545,21 +1445,18 @@ mod tests {
         reply
             .send(Err("file_transfer_session_unavailable".to_string()))
             .expect("reply start error");
-        match task.await.expect("start task") {
-            IpcResponse::Error { message } => {
-                assert_eq!(
-                    message,
-                    "File 传输启动失败: file_transfer_session_unavailable"
-                );
-            }
-            other => panic!("unexpected response: {other:?}"),
-        }
+        assert_eq!(
+            task.await.expect("start task"),
+            Err(FileTransferControlError::Rejected(
+                "file_transfer_session_unavailable".to_string()
+            ))
+        );
 
         let (control_tx, mut control_rx) = mpsc::unbounded_channel();
         registry.set_control_sender(control_tx);
         let task = tokio::spawn({
             let registry = registry.clone();
-            async move { start_runtime_file_transfer(&registry, start_file_transfer_request()).await }
+            async move { start_file_transfer(&registry, start_file_transfer_request()).await }
         });
         let RuntimeCommand::StartFileTransfer { reply, .. } =
             control_rx.recv().await.expect("start command")
@@ -1567,12 +1464,10 @@ mod tests {
             panic!("expected start file transfer command");
         };
         drop(reply);
-        match task.await.expect("start task") {
-            IpcResponse::Error { message } => {
-                assert_eq!(message, "File 传输启动请求未收到运行时响应");
-            }
-            other => panic!("unexpected response: {other:?}"),
-        }
+        assert_eq!(
+            task.await.expect("start task"),
+            Err(FileTransferControlError::RuntimeUnavailable)
+        );
     }
 
     #[tokio::test]
@@ -1583,12 +1478,8 @@ mod tests {
         let task = tokio::spawn({
             let registry = registry.clone();
             async move {
-                cancel_runtime_file_transfer(
-                    &registry,
-                    "transfer".to_string(),
-                    "operation".to_string(),
-                )
-                .await
+                cancel_file_transfer(&registry, "transfer".to_string(), "operation".to_string())
+                    .await
             }
         });
         let RuntimeCommand::CancelFileTransfer {
@@ -1602,22 +1493,15 @@ mod tests {
         assert_eq!(transfer_id, "transfer");
         assert_eq!(operation_id, "operation");
         reply.send(Ok(())).expect("reply cancel");
-        match task.await.expect("cancel task") {
-            IpcResponse::Success { message } => assert_eq!(message, "File 传输已取消"),
-            other => panic!("unexpected response: {other:?}"),
-        }
+        assert_eq!(task.await.expect("cancel task"), Ok(()));
 
         let (control_tx, mut control_rx) = mpsc::unbounded_channel();
         registry.set_control_sender(control_tx);
         let task = tokio::spawn({
             let registry = registry.clone();
             async move {
-                cancel_runtime_file_transfer(
-                    &registry,
-                    "transfer".to_string(),
-                    "operation".to_string(),
-                )
-                .await
+                cancel_file_transfer(&registry, "transfer".to_string(), "operation".to_string())
+                    .await
             }
         });
         let RuntimeCommand::CancelFileTransfer { reply, .. } =
@@ -1628,24 +1512,20 @@ mod tests {
         reply
             .send(Err("file_transfer_not_found".to_string()))
             .expect("reply cancel error");
-        match task.await.expect("cancel task") {
-            IpcResponse::Error { message } => {
-                assert_eq!(message, "File 传输取消失败: file_transfer_not_found");
-            }
-            other => panic!("unexpected response: {other:?}"),
-        }
+        assert_eq!(
+            task.await.expect("cancel task"),
+            Err(FileTransferControlError::Rejected(
+                "file_transfer_not_found".to_string()
+            ))
+        );
 
         let (control_tx, mut control_rx) = mpsc::unbounded_channel();
         registry.set_control_sender(control_tx);
         let task = tokio::spawn({
             let registry = registry.clone();
             async move {
-                cancel_runtime_file_transfer(
-                    &registry,
-                    "transfer".to_string(),
-                    "operation".to_string(),
-                )
-                .await
+                cancel_file_transfer(&registry, "transfer".to_string(), "operation".to_string())
+                    .await
             }
         });
         let RuntimeCommand::CancelFileTransfer { reply, .. } =
@@ -1654,12 +1534,10 @@ mod tests {
             panic!("expected cancel file transfer command");
         };
         drop(reply);
-        match task.await.expect("cancel task") {
-            IpcResponse::Error { message } => {
-                assert_eq!(message, "File 传输取消请求未收到运行时响应");
-            }
-            other => panic!("unexpected response: {other:?}"),
-        }
+        assert_eq!(
+            task.await.expect("cancel task"),
+            Err(FileTransferControlError::RuntimeUnavailable)
+        );
     }
 
     #[tokio::test]
@@ -1670,12 +1548,8 @@ mod tests {
         let task = tokio::spawn({
             let registry = registry.clone();
             async move {
-                pause_runtime_file_transfer(
-                    &registry,
-                    "transfer".to_string(),
-                    "operation".to_string(),
-                )
-                .await
+                pause_file_transfer(&registry, "transfer".to_string(), "operation".to_string())
+                    .await
             }
         });
         let RuntimeCommand::PauseFileTransfer {
@@ -1689,22 +1563,15 @@ mod tests {
         assert_eq!(transfer_id, "transfer");
         assert_eq!(operation_id, "operation");
         reply.send(Ok(())).expect("reply pause");
-        match task.await.expect("pause task") {
-            IpcResponse::Success { message } => assert_eq!(message, "File 传输已暂停"),
-            other => panic!("unexpected response: {other:?}"),
-        }
+        assert_eq!(task.await.expect("pause task"), Ok(()));
 
         let (control_tx, mut control_rx) = mpsc::unbounded_channel();
         registry.set_control_sender(control_tx);
         let task = tokio::spawn({
             let registry = registry.clone();
             async move {
-                pause_runtime_file_transfer(
-                    &registry,
-                    "transfer".to_string(),
-                    "operation".to_string(),
-                )
-                .await
+                pause_file_transfer(&registry, "transfer".to_string(), "operation".to_string())
+                    .await
             }
         });
         let RuntimeCommand::PauseFileTransfer { reply, .. } =
@@ -1715,24 +1582,20 @@ mod tests {
         reply
             .send(Err("file_transfer_invalid_state".to_string()))
             .expect("reply pause error");
-        match task.await.expect("pause task") {
-            IpcResponse::Error { message } => {
-                assert_eq!(message, "File 传输暂停失败: file_transfer_invalid_state");
-            }
-            other => panic!("unexpected response: {other:?}"),
-        }
+        assert_eq!(
+            task.await.expect("pause task"),
+            Err(FileTransferControlError::Rejected(
+                "file_transfer_invalid_state".to_string()
+            ))
+        );
 
         let (control_tx, mut control_rx) = mpsc::unbounded_channel();
         registry.set_control_sender(control_tx);
         let task = tokio::spawn({
             let registry = registry.clone();
             async move {
-                pause_runtime_file_transfer(
-                    &registry,
-                    "transfer".to_string(),
-                    "operation".to_string(),
-                )
-                .await
+                pause_file_transfer(&registry, "transfer".to_string(), "operation".to_string())
+                    .await
             }
         });
         let RuntimeCommand::PauseFileTransfer { reply, .. } =
@@ -1741,12 +1604,10 @@ mod tests {
             panic!("expected pause file transfer command");
         };
         drop(reply);
-        match task.await.expect("pause task") {
-            IpcResponse::Error { message } => {
-                assert_eq!(message, "File 传输暂停请求未收到运行时响应");
-            }
-            other => panic!("unexpected response: {other:?}"),
-        }
+        assert_eq!(
+            task.await.expect("pause task"),
+            Err(FileTransferControlError::RuntimeUnavailable)
+        );
     }
 
     #[tokio::test]
@@ -1757,12 +1618,8 @@ mod tests {
         let task = tokio::spawn({
             let registry = registry.clone();
             async move {
-                resume_runtime_file_transfer(
-                    &registry,
-                    "transfer".to_string(),
-                    "operation".to_string(),
-                )
-                .await
+                resume_file_transfer(&registry, "transfer".to_string(), "operation".to_string())
+                    .await
             }
         });
         let RuntimeCommand::ResumeFileTransfer {
@@ -1776,22 +1633,15 @@ mod tests {
         assert_eq!(transfer_id, "transfer");
         assert_eq!(operation_id, "operation");
         reply.send(Ok(())).expect("reply resume");
-        match task.await.expect("resume task") {
-            IpcResponse::Success { message } => assert_eq!(message, "File 传输已恢复"),
-            other => panic!("unexpected response: {other:?}"),
-        }
+        assert_eq!(task.await.expect("resume task"), Ok(()));
 
         let (control_tx, mut control_rx) = mpsc::unbounded_channel();
         registry.set_control_sender(control_tx);
         let task = tokio::spawn({
             let registry = registry.clone();
             async move {
-                resume_runtime_file_transfer(
-                    &registry,
-                    "transfer".to_string(),
-                    "operation".to_string(),
-                )
-                .await
+                resume_file_transfer(&registry, "transfer".to_string(), "operation".to_string())
+                    .await
             }
         });
         let RuntimeCommand::ResumeFileTransfer { reply, .. } =
@@ -1802,24 +1652,20 @@ mod tests {
         reply
             .send(Err("file_transfer_not_found".to_string()))
             .expect("reply resume error");
-        match task.await.expect("resume task") {
-            IpcResponse::Error { message } => {
-                assert_eq!(message, "File 传输恢复失败: file_transfer_not_found");
-            }
-            other => panic!("unexpected response: {other:?}"),
-        }
+        assert_eq!(
+            task.await.expect("resume task"),
+            Err(FileTransferControlError::Rejected(
+                "file_transfer_not_found".to_string()
+            ))
+        );
 
         let (control_tx, mut control_rx) = mpsc::unbounded_channel();
         registry.set_control_sender(control_tx);
         let task = tokio::spawn({
             let registry = registry.clone();
             async move {
-                resume_runtime_file_transfer(
-                    &registry,
-                    "transfer".to_string(),
-                    "operation".to_string(),
-                )
-                .await
+                resume_file_transfer(&registry, "transfer".to_string(), "operation".to_string())
+                    .await
             }
         });
         let RuntimeCommand::ResumeFileTransfer { reply, .. } =
@@ -1828,12 +1674,10 @@ mod tests {
             panic!("expected resume file transfer command");
         };
         drop(reply);
-        match task.await.expect("resume task") {
-            IpcResponse::Error { message } => {
-                assert_eq!(message, "File 传输恢复请求未收到运行时响应");
-            }
-            other => panic!("unexpected response: {other:?}"),
-        }
+        assert_eq!(
+            task.await.expect("resume task"),
+            Err(FileTransferControlError::RuntimeUnavailable)
+        );
     }
 
     #[tokio::test]

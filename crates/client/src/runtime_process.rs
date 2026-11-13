@@ -331,6 +331,7 @@ async fn run_node(options: InternalOptions) -> Result<()> {
     .context("无法启动节点 IPC 服务")?;
     let commands = supervisor.commands();
     let file_owner = supervisor.file_owner();
+    let registry = supervisor.registry().clone();
     let (shutdown_tx, _shutdown_rx) = watch::channel(false);
     let mut service = tokio::spawn(serve_owned_node(
         server,
@@ -338,6 +339,7 @@ async fn run_node(options: InternalOptions) -> Result<()> {
         supervisor.state().clone(),
         supervisor.event_bus(),
         file_owner.clone(),
+        registry,
         shutdown_tx.clone(),
     ));
 

@@ -19,6 +19,7 @@ mod root;
 mod runtime;
 mod temp;
 mod transfer;
+mod transfer_control;
 
 pub use capability::{
     FileCapabilityError, FileCapabilityLease, FileCapabilityPermit, FileCapabilitySnapshot,
@@ -46,4 +47,8 @@ pub use temp::TemporaryUpload;
 pub use transfer::{
     DownloadTransfer, FileTransferAdapter, FileTransferAdapterError, TransferOperationCancellation,
     TransferProgress, UploadAdmission, UploadTransfer,
+};
+pub use transfer_control::{
+    FileTransferCommand, FileTransferDirection, FileTransferHandle, StartFileTransferRequest,
+    DEFAULT_FILE_TRANSFER_CHUNK_SIZE,
 };

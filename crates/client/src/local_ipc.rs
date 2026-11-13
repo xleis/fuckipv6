@@ -22,14 +22,17 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
-use crate::file_share::{FileOwnerServiceError, FileShareConfiguration, FileSharePreview};
+use crate::file_share::{
+    FileOwnerServiceError, FileShareConfiguration, FileSharePreview, FileTransferCommand,
+    FileTransferHandle, StartFileTransferRequest,
+};
 use crate::node::{
     NodeCommandRequest, NodeCommandResult, NodeEvent, NodeFileCapabilitySnapshot,
     NodeOperationSnapshot, NodeProblem, NodeSnapshot, OperationSubmitError,
 };
 use fuckipv6_common::domain::IdempotencyKey;
 
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -43,6 +46,9 @@ pub const COMMAND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 /// client alive past that boundary so the service can return its structured
 /// failure instead of the caller observing a transport timeout first.
 pub const FILE_OWNER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(150);
+/// Runtime File controls make bounded in-process round trips; keep the client
+/// alive longer than the actor's own operations so structured failures win.
+pub const FILE_TRANSFER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(45);
 const FRAME_MAGIC: [u8; 4] = *b"FKIP";
 const FRAME_HEADER_LEN: usize = 12;
 
@@ -159,6 +165,8 @@ pub enum LocalCommand {
     },
     /// Owner-only. Never exposed as a node command or network API.
     DisableFileShare,
+    /// Requester-side File controls. Local paths remain on this boundary.
+    FileTransfer(FileTransferCommand),
     StopNode,
 }
 
@@ -181,6 +189,8 @@ pub enum LocalResponse {
     FileSharePreview(Box<FileSharePreview>),
     FileShareConfigured(Box<NodeFileCapabilitySnapshot>),
     FileShareDisabled(Box<NodeFileCapabilitySnapshot>),
+    FileTransferStarted(FileTransferHandle),
+    FileTransferAccepted,
     Pong,
 }
 
@@ -218,11 +228,20 @@ pub struct LocalError {
     pub problem: Option<NodeProblem>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_share_error: Option<FileShareErrorDetail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_transfer_error: Option<FileTransferErrorDetail>,
 }
 
 /// Stable, path-free File configuration failure returned over owner-only IPC.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileShareErrorDetail {
+    pub code: String,
+    pub retryable: bool,
+}
+
+/// Stable, path-free requester-side File failure returned over local IPC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileTransferErrorDetail {
     pub code: String,
     pub retryable: bool,
 }
@@ -236,6 +255,7 @@ impl LocalError {
             operation_error: None,
             problem: None,
             file_share_error: None,
+            file_transfer_error: None,
         }
     }
 
@@ -262,6 +282,7 @@ impl LocalError {
             operation_error: Some(error),
             problem: None,
             file_share_error: None,
+            file_transfer_error: None,
         }
     }
 
@@ -286,6 +307,7 @@ impl LocalError {
             operation_error: None,
             problem: Some(problem),
             file_share_error: None,
+            file_transfer_error: None,
         }
     }
 
@@ -320,6 +342,39 @@ impl LocalError {
                 code: error.code().into(),
                 retryable,
             }),
+            file_transfer_error: None,
+        }
+    }
+
+    pub(crate) fn file_transfer(error: crate::ipc::FileTransferControlError) -> Self {
+        let code = error.code().to_owned();
+        let (ipc_code, retryable) = match code.as_str() {
+            "file_transfer_not_found" => (IpcErrorCode::NotFound, false),
+            "file_transfer_invalid_state" | "file_transfer_operation_active" => {
+                (IpcErrorCode::Conflict, false)
+            }
+            "file_transfer_peer_invalid"
+            | "file_transfer_share_invalid"
+            | "file_transfer_transfer_id_invalid"
+            | "file_transfer_operation_id_invalid"
+            | "file_transfer_path_invalid"
+            | "file_transfer_invalid_request"
+            | "file_transfer_source_invalid"
+            | "file_transfer_destination_invalid" => (IpcErrorCode::MalformedRequest, false),
+            "file_transfer_access_revoked"
+            | "file_transfer_authorization_lost"
+            | "file_transfer_permission_revoked" => (IpcErrorCode::Unauthorized, false),
+            "file_transfer_runtime_timeout" => (IpcErrorCode::Timeout, true),
+            _ => (IpcErrorCode::BackendUnavailable, true),
+        };
+        Self {
+            code: ipc_code,
+            message: "File 传输命令未完成".into(),
+            retryable,
+            operation_error: None,
+            problem: None,
+            file_share_error: None,
+            file_transfer_error: Some(FileTransferErrorDetail { code, retryable }),
         }
     }
 
@@ -806,6 +861,99 @@ pub async fn disable_file_share(
     }
 }
 
+pub async fn start_file_transfer(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    request: StartFileTransferRequest,
+) -> Result<FileTransferHandle> {
+    let response = request_with_timeout(
+        endpoint,
+        role,
+        &LocalRequest {
+            request_id: 1,
+            command: LocalCommand::FileTransfer(FileTransferCommand::Start(request)),
+        },
+        FILE_TRANSFER_RESPONSE_TIMEOUT,
+    )
+    .await?;
+    match response {
+        LocalResponse::FileTransferStarted(handle) => Ok(handle),
+        other => bail!("本地 IPC 返回了意外 File 传输启动响应: {other:?}"),
+    }
+}
+
+pub async fn cancel_file_transfer(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    transfer_id: String,
+    operation_id: String,
+) -> Result<()> {
+    file_transfer_control(
+        endpoint,
+        role,
+        FileTransferCommand::Cancel {
+            transfer_id,
+            operation_id,
+        },
+    )
+    .await
+}
+
+pub async fn pause_file_transfer(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    transfer_id: String,
+    operation_id: String,
+) -> Result<()> {
+    file_transfer_control(
+        endpoint,
+        role,
+        FileTransferCommand::Pause {
+            transfer_id,
+            operation_id,
+        },
+    )
+    .await
+}
+
+pub async fn resume_file_transfer(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    transfer_id: String,
+    operation_id: String,
+) -> Result<()> {
+    file_transfer_control(
+        endpoint,
+        role,
+        FileTransferCommand::Resume {
+            transfer_id,
+            operation_id,
+        },
+    )
+    .await
+}
+
+async fn file_transfer_control(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    command: FileTransferCommand,
+) -> Result<()> {
+    let response = request_with_timeout(
+        endpoint,
+        role,
+        &LocalRequest {
+            request_id: 1,
+            command: LocalCommand::FileTransfer(command),
+        },
+        FILE_TRANSFER_RESPONSE_TIMEOUT,
+    )
+    .await?;
+    match response {
+        LocalResponse::FileTransferAccepted => Ok(()),
+        other => bail!("本地 IPC 返回了意外 File 传输控制响应: {other:?}"),
+    }
+}
+
 pub async fn execute(
     endpoint: &LocalEndpoint,
     role: IpcRole,
@@ -1247,7 +1395,7 @@ mod tests {
 
     #[test]
     fn protocol_version_is_explicit() {
-        assert_eq!(PROTOCOL_VERSION, 4);
+        assert_eq!(PROTOCOL_VERSION, 5);
         const { assert!(MAX_FRAME_BYTES <= 16 * 1024 * 1024) };
     }
 

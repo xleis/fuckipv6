@@ -157,9 +157,9 @@ def recv_frame(stream):
 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
     stream.settimeout(30)
     stream.connect(socket_path)
-    send_frame(stream, 1, {"protocol_version": 3, "role": "cli"})
+    send_frame(stream, 1, {"protocol_version": 5, "role": "cli"})
     kind, hello = recv_frame(stream)
-    if kind != 2 or hello.get("protocol_version") != 3:
+    if kind != 2 or hello.get("protocol_version") != 5:
         raise RuntimeError(f"local IPC handshake failed: {hello}")
     send_frame(
         stream,

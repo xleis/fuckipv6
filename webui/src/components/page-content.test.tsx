@@ -410,6 +410,62 @@ describe("security and privacy settings", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("renders path-free File capability state without inventing content controls", () => {
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      file_capability: {
+        state: "degraded",
+        network_id: "net_file_home",
+        access_epoch: 12,
+        share_revision: 7,
+        available_bytes: 2_147_483_648,
+        root_error: "file_root_unavailable",
+        active_transfers: 3,
+      },
+    };
+    const { container } = renderSettings(snapshot);
+    const section = container.querySelector(
+      '[data-settings-group="file-share"]',
+    ) as HTMLElement | null;
+    const card = screen.getByTestId("file-capability-status");
+
+    expect(section).not.toBeNull();
+    expect(section).toHaveTextContent(translated("settings.section.file_share"));
+    expect(card).toHaveTextContent(translated("status.capability.degraded"));
+    expect(card).toHaveTextContent("net_file_home");
+    expect(card).toHaveTextContent("file_root_unavailable");
+    expect(card).toHaveTextContent(translated("settings.file.owner_only_detail"));
+    expect(card.querySelector("[data-file-state]")).toHaveAttribute(
+      "data-file-state",
+      "degraded",
+    );
+    expect(card.querySelector("[data-file-network]")).toHaveAttribute(
+      "data-file-network",
+      "net_file_home",
+    );
+    expect(card.querySelector("[data-file-share-revision]")).toHaveAttribute(
+      "data-file-share-revision",
+      "7",
+    );
+    expect(card.querySelector("[data-file-access-epoch]")).toHaveAttribute(
+      "data-file-access-epoch",
+      "12",
+    );
+    expect(card.querySelector("[data-file-available-bytes]")).toHaveAttribute(
+      "data-file-available-bytes",
+      "2147483648",
+    );
+    expect(card.querySelector("[data-file-active-transfers]")).toHaveAttribute(
+      "data-file-active-transfers",
+      "3",
+    );
+    expect(card.querySelector("[data-file-root-error]")).toHaveAttribute(
+      "data-file-root-error",
+      "file_root_unavailable",
+    );
+    expect(within(card).queryByRole("button")).not.toBeInTheDocument();
+  });
+
   it("shows the read-only policy reason, permission, request path, and command", () => {
     const permissions = baseSnapshot.permissions;
     if (!permissions) throw new Error("fixture permissions missing");

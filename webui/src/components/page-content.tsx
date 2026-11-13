@@ -4218,6 +4218,11 @@ function Settings({
   );
   const capabilities = snapshot.capabilities?.capabilities ?? [];
   const embeddedServices = snapshot.embedded_services ?? [];
+  const fileCapability = snapshot.file_capability;
+  const fileState =
+    fileCapability?.state ??
+    capabilities.find((capability) => capability.kind === "file")?.state ??
+    "unknown";
   const unsupportedCapabilities = capabilities
     .filter((capability) => capability.state === "unsupported")
     .map((capability) => label(locale, `capability.${capability.kind}`));
@@ -4379,6 +4384,81 @@ function Settings({
             <div>
               <dt>{label(locale, "settings.row.platform_limitations")}</dt>
               <dd>{platformLimitations}</dd>
+            </div>
+          </dl>
+        </SettingsSection>
+
+        <SettingsSection
+          group="file-share"
+          title={label(locale, "settings.section.file_share")}
+          icon={Boxes}
+        >
+          <dl className="detail-list" data-testid="file-capability-status">
+            <div>
+              <dt>{label(locale, "settings.row.file_state")}</dt>
+              <dd data-file-state={fileState}>
+                {label(locale, `status.capability.${fileState}`)}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.file_network")}</dt>
+              <dd data-file-network={fileCapability?.network_id ?? ""}>
+                {fileCapability?.network_id ??
+                  label(locale, "settings.file.not_configured")}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.file_revision")}</dt>
+              <dd
+                data-file-share-revision={fileCapability?.share_revision ?? ""}
+                data-file-access-epoch={fileCapability?.access_epoch ?? ""}
+              >
+                {fileCapability?.share_revision !== null &&
+                fileCapability?.share_revision !== undefined
+                  ? tr(locale, "settings.file.revision_detail", {
+                      share: String(fileCapability.share_revision),
+                      epoch:
+                        fileCapability.access_epoch === null ||
+                        fileCapability.access_epoch === undefined
+                          ? label(locale, "common.not_available")
+                          : String(fileCapability.access_epoch),
+                    })
+                  : label(locale, "settings.file.not_configured")}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.file_available")}</dt>
+              <dd
+                data-file-available-bytes={fileCapability?.available_bytes ?? ""}
+              >
+                {fileCapability?.available_bytes !== null &&
+                fileCapability?.available_bytes !== undefined
+                  ? formatBytes(locale, fileCapability.available_bytes)
+                  : label(locale, "common.not_available")}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.file_active_transfers")}</dt>
+              <dd
+                data-file-active-transfers={
+                  fileCapability?.active_transfers ?? ""
+                }
+              >
+                {fileCapability
+                  ? formatInteger(locale, fileCapability.active_transfers ?? 0)
+                  : label(locale, "common.unknown")}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.file_error")}</dt>
+              <dd data-file-root-error={fileCapability?.root_error ?? ""}>
+                {fileCapability?.root_error ??
+                  label(locale, "settings.file.no_root_error")}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.file_scope")}</dt>
+              <dd>{label(locale, "settings.file.owner_only_detail")}</dd>
             </div>
           </dl>
         </SettingsSection>

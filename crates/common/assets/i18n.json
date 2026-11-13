@@ -2808,7 +2808,19 @@
       "traffic.routing.test.title": "规则测试",
       "traffic.routing.title": "流量路由",
       "traffic.routing.transaction.description": "预览展示差异、影响对象与风险；应用需要显式确认并锁定同一权威 revision。",
-      "traffic.routing.transaction.title": "预览、原子应用与回滚"
+      "traffic.routing.transaction.title": "预览、原子应用与回滚",
+      "settings.section.file_share": "File 共享能力",
+      "settings.row.file_state": "能力状态",
+      "settings.row.file_network": "绑定网络",
+      "settings.row.file_revision": "共享 revision",
+      "settings.row.file_available": "可用空间",
+      "settings.row.file_active_transfers": "活动传输",
+      "settings.row.file_error": "根目录问题",
+      "settings.row.file_scope": "WebUI 边界",
+      "settings.file.not_configured": "尚未配置",
+      "settings.file.revision_detail": "share {share} · access epoch {epoch}",
+      "settings.file.no_root_error": "未报告根目录问题",
+      "settings.file.owner_only_detail": "此页只显示权威 File 能力状态。共享根选择、启停、ACL 与配额配置仅在节点本机的 owner 流程中完成；WebUI 不提供文件浏览、上传、下载、暂停恢复或远程目录替换。"
     },
     "en": {
       "nav.overview": "Overview",
@@ -5616,7 +5628,19 @@
       "traffic.routing.test.title": "Rule test",
       "traffic.routing.title": "Traffic routing",
       "traffic.routing.transaction.description": "Preview changes, affected objects, and risks. Apply requires explicit confirmation and the same authoritative revision.",
-      "traffic.routing.transaction.title": "Preview, atomic apply, and rollback"
+      "traffic.routing.transaction.title": "Preview, atomic apply, and rollback",
+      "settings.section.file_share": "File sharing capability",
+      "settings.row.file_state": "Capability state",
+      "settings.row.file_network": "Bound network",
+      "settings.row.file_revision": "Share revision",
+      "settings.row.file_available": "Available space",
+      "settings.row.file_active_transfers": "Active transfers",
+      "settings.row.file_error": "Root problem",
+      "settings.row.file_scope": "WebUI boundary",
+      "settings.file.not_configured": "Not configured",
+      "settings.file.revision_detail": "share {share} · access epoch {epoch}",
+      "settings.file.no_root_error": "No root problem reported",
+      "settings.file.owner_only_detail": "This page only displays authoritative File capability state. Share-root selection, enable/disable, ACL, and quota configuration remain in the owner workflow on the node host; the WebUI does not provide file browsing, upload, download, pause/resume, or remote-directory replacement."
     }
   }
 }

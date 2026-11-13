@@ -638,18 +638,75 @@ impl CoordinatorElectionProposal {
             latest_term,
             now_unix_ms,
         )?;
-        let mut eligible = status
-            .candidates
-            .iter()
-            .filter(|candidate| candidate.eligible_for_election)
-            .filter(|candidate| latest_term.is_none_or(|term| term.leader != candidate.node_id))
-            .collect::<Vec<_>>();
-        eligible.sort_by(|left, right| {
-            left.priority
-                .cmp(&right.priority)
-                .then_with(|| left.node_id.cmp(&right.node_id))
-        });
-        let Some(preferred) = eligible.first() else {
+        self.validate_for_status(&status, now_unix_ms)
+    }
+
+    /// Validate a proposal against the authoritative status projection. This is
+    /// the same decision used by runtimes before they sign a vote or start an
+    /// election; the Coordinator still revalidates the live store and health
+    /// evidence before admitting the request.
+    pub fn validate_for_status(
+        &self,
+        status: &CoordinatorCandidateStatus,
+        now_unix_ms: u64,
+    ) -> DomainResult<()> {
+        self.validate_at(now_unix_ms)?;
+        if status.network_id != self.network_id
+            || status.config_state != CoordinatorCandidateConfigState::Current
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_election_candidate_group_mismatch",
+                "coordinator election proposal does not bind the current candidate group",
+            ));
+        }
+        let config = status
+            .config
+            .as_ref()
+            .ok_or_else(|| DomainError::invariant("current candidate status has no config"))?;
+        if self.candidate_config_revision != config.revision
+            || self.candidate_group.len() != config.candidates.len()
+            || self.candidate_group.iter().collect::<BTreeSet<_>>()
+                != config
+                    .candidates
+                    .iter()
+                    .map(|candidate| &candidate.node_id)
+                    .collect::<BTreeSet<_>>()
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_election_candidate_group_mismatch",
+                "coordinator election proposal does not bind the active candidate group",
+            ));
+        }
+
+        let expected_term = match &status.latest_term {
+            Some(term) => {
+                term.validate_definition()?;
+                if term.network_id != self.network_id {
+                    return Err(DomainError::new(
+                        "domain.coordinator_election_term_mismatch",
+                        "coordinator election proposal conflicts with another network term",
+                    ));
+                }
+                if term.lease_status_at(now_unix_ms).is_writable() {
+                    return Err(DomainError::new(
+                        "domain.coordinator_election_lease_active",
+                        "coordinator election cannot start while the current lease is writable",
+                    ));
+                }
+                term.term
+                    .checked_add(1)
+                    .ok_or_else(|| DomainError::invariant("coordinator term overflow"))?
+            }
+            None => 1,
+        };
+        if self.term != expected_term {
+            return Err(DomainError::new(
+                "domain.coordinator_election_term_not_next",
+                "coordinator election term must be the next durable high-water mark",
+            ));
+        }
+
+        let Some(preferred) = status.preferred_election_candidate() else {
             return Err(DomainError::new(
                 "domain.coordinator_election_no_eligible_candidate",
                 "coordinator election has no healthy willing candidate",
@@ -1752,6 +1809,22 @@ pub struct CoordinatorCandidateStatus {
 }
 
 impl CoordinatorCandidateStatus {
+    /// Deterministic preferred candidate after the current lease expires. The
+    /// previous Leader is excluded so a stale process cannot immediately win a
+    /// new term without the rest of the group first observing the failure.
+    pub fn preferred_election_candidate(&self) -> Option<&CoordinatorCandidateStatusEntry> {
+        let previous_leader = self.latest_term.as_ref().map(|term| &term.leader);
+        self.candidates
+            .iter()
+            .filter(|candidate| candidate.eligible_for_election)
+            .filter(|candidate| previous_leader != Some(&candidate.node_id))
+            .min_by(|left, right| {
+                left.priority
+                    .cmp(&right.priority)
+                    .then_with(|| left.node_id.cmp(&right.node_id))
+            })
+    }
+
     pub fn assess(
         network: &NetworkRecord,
         config: Option<&CoordinatorCandidateConfig>,

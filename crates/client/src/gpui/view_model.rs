@@ -2022,7 +2022,9 @@ pub fn action_block_reason(
             .any(|network| network.status == crate::node::NodeNetworkStatus::Online))
         .then_some(ActionBlockReason::NoOnlineNetwork),
         NodeUiAvailability::NetworkSelected => {
-            let selected = selected_network?;
+            let Some(selected) = selected_network else {
+                return Some(ActionBlockReason::NoNetworkSelected);
+            };
             (!snapshot
                 .networks
                 .iter()
@@ -10626,6 +10628,62 @@ mod tests {
         assert!(matches!(
             build_command(&action, &HashMap::new()),
             Err(CommandBuildError::UnknownAction { .. })
+        ));
+    }
+
+    #[test]
+    fn relay_role_action_uses_shared_command_and_closes_selection_and_permission_gates() {
+        let manifest = node_ui_manifest();
+        let action = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "relay")
+            .expect("relay page")
+            .actions
+            .iter()
+            .find(|action| action.id == "set_relay_role")
+            .expect("relay role action");
+        assert_eq!(action.command, NodeCommandKind::SetNetworkRole);
+        assert_eq!(action.permission, NodePermission::ManageRoles);
+        assert_eq!(action.backend_status, NodeUiBackendStatus::Implemented);
+        assert_eq!(action.availability, NodeUiAvailability::NetworkSelected);
+
+        let snapshot = populated_snapshot();
+        assert_eq!(
+            action_block_reason(action, &snapshot, None),
+            Some(ActionBlockReason::NoNetworkSelected)
+        );
+        assert_eq!(
+            action_block_reason(action, &snapshot, Some("missing")),
+            Some(ActionBlockReason::NoNetworkSelected)
+        );
+        assert_eq!(action_block_reason(action, &snapshot, Some("home")), None);
+
+        let mut denied = snapshot;
+        denied
+            .permissions
+            .permissions
+            .retain(|permission| *permission != NodePermission::ManageRoles);
+        assert_eq!(
+            action_block_reason(action, &denied, Some("home")),
+            Some(ActionBlockReason::PermissionDenied)
+        );
+
+        let command = build_command(
+            action,
+            &HashMap::from([
+                ("network_name".into(), "home".into()),
+                ("role".into(), "relay".into()),
+                ("enabled".into(), "true".into()),
+            ]),
+        )
+        .expect("relay role command");
+        assert!(matches!(
+            command,
+            NodeCommand::SetNetworkRole(ref command)
+                if command.network_name == "home"
+                    && command.role == NodeNetworkRole::Relay
+                    && command.enabled
         ));
     }
 

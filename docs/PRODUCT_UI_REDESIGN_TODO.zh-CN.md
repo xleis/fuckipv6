@@ -3889,7 +3889,7 @@ netns/iptables 测试覆盖。三端 Relay UI 的权限、网络选择、健康�
 - [ ] W10 权限、隐私、策略和活动完成；
 - [ ] W11 流量路由完成；
 - [ ] W12 Exit 完成；
-- [ ] W13 Relay 完成；
+- [x] W13 Relay 完成；
 - [ ] W14 Coordinator 自动接管完成。
 
 **完成标志**：用户可以创建/发现/加入网络，管理员治理成员与权限，节点 owner 配置路由并选择可用 Exit，Relay 独立治理，Coordinator 可安全接管。

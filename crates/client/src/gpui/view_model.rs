@@ -9835,6 +9835,7 @@ mod tests {
                         },
                     },
                     emergency: CoordinatorEmergencyState::None,
+                    emergency_leader: None,
                     latest_election: None,
                 }),
             });

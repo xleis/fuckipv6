@@ -57,7 +57,7 @@ public final class NodeContractV1Test {
 
     public static void main(String[] args) throws Exception {
         assertTrue(
-                NodeContractV1.DTO_CLASS_NAMES.length == 307,
+                NodeContractV1.DTO_CLASS_NAMES.length == 308,
                 "generated DTO inventory changed without updating the contract test");
         for (String name : NodeContractV1.DTO_CLASS_NAMES) {
             Class.forName("cc.xlei.fuckipv6.contract.NodeContractV1$" + name);
@@ -996,8 +996,18 @@ public final class NodeContractV1Test {
         }) {
             NodeContractV1.CoordinatorLeaseStatus.class.getDeclaredField(field);
         }
+        NodeContractV1.CoordinatorCandidateStatus.class.getDeclaredField("emergency_leader");
         NodeContractV1.CoordinatorCandidateStatus.class.getDeclaredField("lease");
         NodeContractV1.CoordinatorCandidateStatus.class.getDeclaredField("latest_election");
+        for (String field : new String[] {
+            "allowed_writes", "candidate_config_revision", "data_plane_allowed",
+            "emergency_epoch", "expires_at_unix_ms", "governance_writable",
+            "hard_expires_at_unix_ms", "health_checks_allowed", "issued_at_unix_ms",
+            "leader", "network_id", "remaining_ms", "runtime_coordination_allowed",
+            "state", "unavailable_candidates"
+        }) {
+            NodeContractV1.CoordinatorEmergencyLeaderStatus.class.getDeclaredField(field);
+        }
         for (String field : new String[] {
             "candidate_config_revision", "candidate_group", "expires_at_unix_ms", "leader",
             "network_id", "proposal_id", "proposed_at_unix_ms", "proposer",

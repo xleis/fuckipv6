@@ -170,6 +170,7 @@ export type CoordinatorCandidateStatus = {
   "control_plane"?: CoordinatorControlPlaneStatus;
   "current_leader"?: NodeId | null;
   "emergency": CoordinatorEmergencyState;
+  "emergency_leader"?: CoordinatorEmergencyLeaderStatus | null;
   "generated_at_unix_ms": number;
   "latest_election"?: CoordinatorElectionSession | null;
   "latest_term"?: CoordinatorTerm | null;
@@ -241,6 +242,26 @@ export type CoordinatorElectionVote = {
   "voter_public_key": PublicKey;
 };
 
+export type CoordinatorEmergencyLeaderState = "active" | "expired";
+
+export type CoordinatorEmergencyLeaderStatus = {
+  "allowed_writes": Array<CoordinatorWriteKind>;
+  "candidate_config_revision": number;
+  "data_plane_allowed": boolean;
+  "emergency_epoch": number;
+  "expires_at_unix_ms": number;
+  "governance_writable": boolean;
+  "hard_expires_at_unix_ms": number;
+  "health_checks_allowed": boolean;
+  "issued_at_unix_ms": number;
+  "leader": NodeId;
+  "network_id": NetworkId;
+  "remaining_ms": number;
+  "runtime_coordination_allowed": boolean;
+  "state": CoordinatorEmergencyLeaderState;
+  "unavailable_candidates": Array<NodeId>;
+};
+
 export type CoordinatorEmergencyState = "none" | "no_candidates_configured" | "configuration_pending" | "configuration_expired" | "all_candidates_unavailable";
 
 export type CoordinatorLeaseState = "active" | "no_term" | "renewal_due" | "read_only";
@@ -288,6 +309,8 @@ export type CoordinatorWriteCredential = {
   "network_id": NetworkId;
   "term": number;
 };
+
+export type CoordinatorWriteKind = "publish_own_term" | "sync_last_policy" | "connection_coordination" | "health_check" | "reject_stale_state" | "membership" | "ownership" | "security_policy" | "traffic_policy" | "keys" | "candidate_set" | "audit_deletion" | "self_promotion";
 
 export type DiscoveryTransport = "quic" | "tcp" | "websocket" | "local";
 

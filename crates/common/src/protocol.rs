@@ -1602,6 +1602,7 @@ mod tests {
             lease: Default::default(),
             control_plane: Default::default(),
             emergency: CoordinatorEmergencyState::None,
+            emergency_leader: None,
             latest_election: None,
         };
         let recovery = CoordinatorRecoveryStatus {

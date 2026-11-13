@@ -3343,6 +3343,7 @@ mod tests {
                     control_plane: Default::default(),
                     emergency:
                         fuckipv6_common::domain::CoordinatorEmergencyState::NoCandidatesConfigured,
+                    emergency_leader: None,
                     latest_election: None,
                 },
                 recovery: fuckipv6_common::domain::CoordinatorRecoveryStatus {

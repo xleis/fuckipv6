@@ -2644,6 +2644,7 @@ mod tests {
             lease: term.lease_status_at(generated_at_unix_ms),
             control_plane: Default::default(),
             emergency: CoordinatorEmergencyState::NoCandidatesConfigured,
+            emergency_leader: None,
             latest_election: None,
         }
     }

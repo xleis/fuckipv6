@@ -756,6 +756,18 @@
         "emergency": {
           "$ref": "#/$defs/CoordinatorEmergencyState"
         },
+        "emergency_leader": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoordinatorEmergencyLeaderStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Independent bounded runtime-coordination authority used only when every\nconfigured candidate is offline. This is never a normal Leader term and\nnever enables governance writes."
+        },
         "generated_at_unix_ms": {
           "format": "uint64",
           "minimum": 0,
@@ -1133,6 +1145,99 @@
       ],
       "type": "object"
     },
+    "CoordinatorEmergencyLeaderState": {
+      "enum": [
+        "active",
+        "expired"
+      ],
+      "type": "string"
+    },
+    "CoordinatorEmergencyLeaderStatus": {
+      "description": "A bounded, non-governance authority granted only after the Coordinator has\nobserved every configured candidate offline. The leader is selected\ndeterministically from online non-candidate members and cannot inherit or\nmanufacture a normal term.",
+      "properties": {
+        "allowed_writes": {
+          "items": {
+            "$ref": "#/$defs/CoordinatorWriteKind"
+          },
+          "type": "array"
+        },
+        "candidate_config_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "data_plane_allowed": {
+          "type": "boolean"
+        },
+        "emergency_epoch": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "governance_writable": {
+          "type": "boolean"
+        },
+        "hard_expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "health_checks_allowed": {
+          "type": "boolean"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "leader": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "remaining_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runtime_coordination_allowed": {
+          "type": "boolean"
+        },
+        "state": {
+          "$ref": "#/$defs/CoordinatorEmergencyLeaderState"
+        },
+        "unavailable_candidates": {
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "network_id",
+        "leader",
+        "emergency_epoch",
+        "candidate_config_revision",
+        "unavailable_candidates",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms",
+        "hard_expires_at_unix_ms",
+        "state",
+        "remaining_ms",
+        "runtime_coordination_allowed",
+        "governance_writable",
+        "data_plane_allowed",
+        "health_checks_allowed",
+        "allowed_writes"
+      ],
+      "type": "object"
+    },
     "CoordinatorEmergencyState": {
       "enum": [
         "none",
@@ -1337,6 +1442,24 @@
         "expires_at_unix_ms"
       ],
       "type": "object"
+    },
+    "CoordinatorWriteKind": {
+      "enum": [
+        "publish_own_term",
+        "sync_last_policy",
+        "connection_coordination",
+        "health_check",
+        "reject_stale_state",
+        "membership",
+        "ownership",
+        "security_policy",
+        "traffic_policy",
+        "keys",
+        "candidate_set",
+        "audit_deletion",
+        "self_promotion"
+      ],
+      "type": "string"
     },
     "DiscoveryTransport": {
       "enum": [

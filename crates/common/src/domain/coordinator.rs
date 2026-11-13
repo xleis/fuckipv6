@@ -2382,6 +2382,11 @@ pub struct CoordinatorCandidateStatus {
     #[serde(default)]
     pub control_plane: CoordinatorControlPlaneStatus,
     pub emergency: CoordinatorEmergencyState,
+    /// Independent bounded runtime-coordination authority used only when every
+    /// configured candidate is offline. This is never a normal Leader term and
+    /// never enables governance writes.
+    #[serde(default)]
+    pub emergency_leader: Option<CoordinatorEmergencyLeaderStatus>,
     /// Most recent persisted election, including terminal outcomes. Keeping the
     /// full signed proposal and vote set makes takeover decisions auditable from
     /// the same projection used by clients and operators.
@@ -2649,6 +2654,83 @@ impl CoordinatorCandidateStatus {
         self.control_plane = self.project_control_plane();
     }
 
+    /// Attach the server-issued emergency lease to the shared projection. The
+    /// caller supplies authoritative time so an old cached snapshot cannot
+    /// extend its own authority.
+    pub fn attach_emergency_leader(
+        &mut self,
+        mut emergency_leader: Option<CoordinatorEmergencyLeaderStatus>,
+        now_unix_ms: u64,
+    ) -> DomainResult<()> {
+        if let Some(lease) = emergency_leader.as_mut() {
+            lease.refresh_at(now_unix_ms)?;
+            self.validate_emergency_leader_context(lease, now_unix_ms)?;
+        }
+        self.emergency_leader = emergency_leader;
+        if self.emergency_leader.is_some() {
+            self.emergency = CoordinatorEmergencyState::AllCandidatesUnavailable;
+        }
+        self.refresh_control_plane();
+        Ok(())
+    }
+
+    fn validate_emergency_leader_context(
+        &self,
+        lease: &CoordinatorEmergencyLeaderStatus,
+        now_unix_ms: u64,
+    ) -> DomainResult<()> {
+        if self.config_state != CoordinatorCandidateConfigState::Current {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_config_unavailable",
+                "emergency coordination requires a current candidate configuration",
+            ));
+        }
+        let config = self.config.as_ref().ok_or_else(|| {
+            DomainError::invariant("current coordinator status has no candidate configuration")
+        })?;
+        if lease.network_id != self.network_id
+            || lease.network_id != config.network_id
+            || lease.candidate_config_revision != config.revision
+            || lease.emergency_epoch == 0
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_context_mismatch",
+                "emergency lease does not bind the current network and candidate revision",
+            ));
+        }
+        let configured = config
+            .candidates
+            .iter()
+            .map(|candidate| candidate.node_id.clone())
+            .collect::<BTreeSet<_>>();
+        let unavailable = lease
+            .unavailable_candidates
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if configured != unavailable || configured.contains(&lease.leader) {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_context_mismatch",
+                "emergency lease does not cover the current candidate group",
+            ));
+        }
+        if let Some(term) = &self.latest_term {
+            if term.network_id != self.network_id {
+                return Err(DomainError::new(
+                    "domain.coordinator_emergency_context_mismatch",
+                    "emergency status contains a term from another network",
+                ));
+            }
+            if term.lease_status_at(now_unix_ms).is_writable() {
+                return Err(DomainError::new(
+                    "domain.coordinator_emergency_term_conflict",
+                    "emergency coordination cannot coexist with a writable normal term",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn project_control_plane(&self) -> CoordinatorControlPlaneStatus {
         let quorum = self.project_quorum();
         let limited = |state, reason_code: &str| CoordinatorControlPlaneStatus {
@@ -2678,6 +2760,19 @@ impl CoordinatorCandidateStatus {
                 );
             }
             CoordinatorCandidateConfigState::Current => {}
+        }
+
+        if let Some(emergency) = &self.emergency_leader {
+            return match emergency.state {
+                CoordinatorEmergencyLeaderState::Active => limited(
+                    CoordinatorControlPlaneState::ReadOnly,
+                    "coordinator.control_plane.emergency_runtime_only",
+                ),
+                CoordinatorEmergencyLeaderState::Expired => limited(
+                    CoordinatorControlPlaneState::NoLeader,
+                    "coordinator.control_plane.emergency_expired",
+                ),
+            };
         }
 
         if self.lease.is_writable() && self.current_leader.is_some() {
@@ -2943,6 +3038,7 @@ impl CoordinatorCandidateStatus {
             lease,
             control_plane: CoordinatorControlPlaneStatus::default(),
             emergency,
+            emergency_leader: None,
             latest_election: None,
         };
         status.refresh_control_plane();
@@ -3423,6 +3519,7 @@ mod tests {
                 quorum: CoordinatorQuorumStatus::default(),
             },
             emergency: CoordinatorEmergencyState::NoCandidatesConfigured,
+            emergency_leader: None,
             latest_election: None,
         };
         let current = CoordinatorGovernanceEvent {
@@ -3836,6 +3933,110 @@ mod tests {
                 },
             ],
         )
+    }
+
+    #[test]
+    fn legacy_coordinator_status_without_emergency_leader_deserializes_safely() {
+        let fixture = candidate_fixture();
+        let candidates = emergency_candidate_config(&fixture);
+        let status = CoordinatorCandidateStatus::assess(
+            &fixture.network,
+            Some(&candidates),
+            &[],
+            None,
+            2_000,
+        )
+        .unwrap();
+        let mut legacy = serde_json::to_value(status).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("emergency_leader")
+            .expect("new status includes emergency_leader");
+        let decoded: CoordinatorCandidateStatus = serde_json::from_value(legacy).unwrap();
+        assert!(decoded.emergency_leader.is_none());
+        assert_eq!(
+            decoded.control_plane.reason_code,
+            "coordinator.control_plane.no_term"
+        );
+    }
+
+    #[test]
+    fn emergency_leader_is_projected_separately_and_never_enables_governance() {
+        let fixture = candidate_fixture();
+        let candidates = emergency_candidate_config(&fixture);
+        let owner = NodeId::from_public_key(&fixture.owner.public_key());
+        let ordinary = NodeId::from_public_key(&fixture.ordinary.public_key());
+        let lease = CoordinatorEmergencyLeaderStatus::issue(
+            &fixture.network,
+            &candidates,
+            &[ordinary, owner],
+            6,
+            2_000,
+        )
+        .unwrap();
+        let mut status = CoordinatorCandidateStatus::assess(
+            &fixture.network,
+            Some(&candidates),
+            &[],
+            None,
+            2_000,
+        )
+        .unwrap();
+        assert_eq!(
+            status.emergency,
+            CoordinatorEmergencyState::AllCandidatesUnavailable
+        );
+
+        status
+            .attach_emergency_leader(Some(lease.clone()), 2_000)
+            .unwrap();
+        assert_eq!(
+            status
+                .emergency_leader
+                .as_ref()
+                .map(|emergency| &emergency.leader),
+            Some(&lease.leader)
+        );
+        assert_eq!(status.current_leader, None);
+        assert_eq!(
+            status.control_plane.state,
+            CoordinatorControlPlaneState::ReadOnly
+        );
+        assert_eq!(
+            status.control_plane.reason_code,
+            "coordinator.control_plane.emergency_runtime_only"
+        );
+        assert!(!status.control_plane.governance_writable);
+        assert!(status
+            .emergency_leader
+            .as_ref()
+            .is_some_and(|emergency| emergency.data_plane_allowed));
+
+        status
+            .attach_emergency_leader(Some(lease.clone()), lease.expires_at_unix_ms)
+            .unwrap();
+        assert_eq!(
+            status
+                .emergency_leader
+                .as_ref()
+                .map(|emergency| emergency.state),
+            Some(CoordinatorEmergencyLeaderState::Expired)
+        );
+        assert_eq!(
+            status.control_plane.reason_code,
+            "coordinator.control_plane.emergency_expired"
+        );
+
+        let mut wrong_revision = lease;
+        wrong_revision.candidate_config_revision += 1;
+        assert_eq!(
+            status
+                .attach_emergency_leader(Some(wrong_revision), 2_000)
+                .unwrap_err()
+                .code(),
+            "domain.coordinator_emergency_context_mismatch"
+        );
     }
 
     #[test]

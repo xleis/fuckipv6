@@ -9066,6 +9066,7 @@ mod tests {
                 lease: CoordinatorLeaseStatus::no_term(),
                 control_plane: Default::default(),
                 emergency: CoordinatorEmergencyState::NoCandidatesConfigured,
+                emergency_leader: None,
                 latest_election: None,
             };
             for (round, expected_cursor) in [0, 7].into_iter().enumerate() {

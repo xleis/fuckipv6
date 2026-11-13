@@ -1744,6 +1744,11 @@ pub struct CoordinatorCandidateStatus {
     #[serde(default)]
     pub lease: CoordinatorLeaseStatus,
     pub emergency: CoordinatorEmergencyState,
+    /// Most recent persisted election, including terminal outcomes. Keeping the
+    /// full signed proposal and vote set makes takeover decisions auditable from
+    /// the same projection used by clients and operators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_election: Option<CoordinatorElectionSession>,
 }
 
 impl CoordinatorCandidateStatus {
@@ -1906,6 +1911,7 @@ impl CoordinatorCandidateStatus {
             latest_term: latest_term.cloned(),
             lease,
             emergency,
+            latest_election: None,
         })
     }
 }

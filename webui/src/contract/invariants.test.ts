@@ -198,7 +198,7 @@ beforeEach(() => {
 });
 
 describe("node UI contract invariants", () => {
-  it("accepts the frozen thirteen-page manifest fixture", () => {
+  it("accepts the frozen fourteen-page manifest fixture", () => {
     const validated = validateManifestResponse(manifestResponse(manifest));
     expect(validated.pages.map((page) => page.id)).toEqual([
       "overview",
@@ -212,6 +212,7 @@ describe("node UI contract invariants", () => {
       "exit_node",
       "relay",
       "logs",
+      "files",
       "identity",
       "settings",
     ]);

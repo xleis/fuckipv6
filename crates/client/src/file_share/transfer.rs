@@ -20,7 +20,7 @@ use super::capability::{
 use super::error::FileShareError;
 use super::quota::{self, QuotaScanLimits};
 use super::rate_limit::TransferRateLimiter;
-use super::root::{LocalFileMetadata, LocalShareRoot};
+use super::root::{LocalDirectoryListing, LocalFileMetadata, LocalShareRoot};
 use super::temp::TemporaryUpload;
 
 /// Authenticated server-side accounting supplied at upload admission. These
@@ -165,6 +165,63 @@ impl FileTransferAdapter {
         let metadata = lease.root().read_metadata(&path)?;
         lease.permit().ensure_current()?;
         Ok(metadata)
+    }
+
+    /// Enumerate one shared directory under the parent's `List` permission.
+    /// Every child is independently authorized before its name or metadata is
+    /// included in the response; denied children are indistinguishable from
+    /// entries that do not exist. A capability revocation during enumeration
+    /// discards the complete page rather than returning stale content.
+    pub fn list_directory(
+        &self,
+        context: &AccessContext,
+        network_enabled: bool,
+        share_id: &FileShareId,
+        path: SharedPath,
+        limit: u32,
+        cursor: Option<&str>,
+    ) -> Result<LocalDirectoryListing, FileTransferAdapterError> {
+        let lease = self.capability.authorize(
+            &FileAccessRequest {
+                path: path.clone(),
+                action: FileAction::List,
+            },
+            context,
+            network_enabled,
+        )?;
+        if &lease.share().id != share_id {
+            return Err(FileTransferAdapterError::ShareMismatch);
+        }
+        lease.permit().ensure_current()?;
+        let listing = lease.root().list_directory(&path, limit, cursor)?;
+        let mut entries = Vec::with_capacity(listing.entries.len());
+        for entry in listing.entries {
+            let decision = lease.share().authorize(
+                &FileAccessRequest {
+                    path: entry.path.clone(),
+                    action: FileAction::List,
+                },
+                context,
+                network_enabled,
+            );
+            match decision {
+                Ok(()) => entries.push(entry),
+                Err(denial)
+                    if matches!(
+                        denial.code,
+                        FileAccessDenialCode::AclDenied | FileAccessDenialCode::AclNoAllow
+                    ) => {}
+                Err(denial) => {
+                    return Err(FileCapabilityError::AccessDenied(denial).into());
+                }
+            }
+        }
+        lease.permit().ensure_current()?;
+        Ok(LocalDirectoryListing {
+            entries,
+            next_cursor: listing.next_cursor,
+            truncated: listing.truncated,
+        })
     }
 
     /// Build the server-authoritative download manifest and binding for one
@@ -1555,6 +1612,89 @@ mod tests {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
             Err(error) => panic!("read temporary directory: {error}"),
         }
+    }
+
+    #[test]
+    fn directory_listing_filters_denied_children_without_leaking_names() {
+        let mut restricted = share();
+        for acl in [&mut restricted.network_acl, &mut restricted.local_acl] {
+            for path_prefix in ["private.txt", "private-dir"] {
+                acl.rules.push(FileAclRule {
+                    id: format!("deny-{path_prefix}"),
+                    subjects: BTreeSet::from([SubjectSelector::AnyMember]),
+                    path_prefix: SharedPath::parse(path_prefix).expect("path"),
+                    actions: BTreeSet::from([FileAction::List]),
+                    effect: FileAclEffect::Deny,
+                });
+            }
+        }
+        let (temporary, capability, share) = setup_with(restricted);
+        std::fs::write(temporary.path().join("public.txt"), b"public").expect("public file");
+        std::fs::write(temporary.path().join("private.txt"), b"secret").expect("private file");
+        std::fs::create_dir(temporary.path().join("visible-dir")).expect("visible directory");
+        std::fs::create_dir(temporary.path().join("private-dir")).expect("private directory");
+        let adapter = FileTransferAdapter::new(capability);
+
+        let listing = adapter
+            .list_directory(
+                &context(&share),
+                true,
+                &share.id,
+                SharedPath::root(),
+                16,
+                None,
+            )
+            .expect("listing");
+        assert_eq!(
+            listing
+                .entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["public.txt", "visible-dir"]
+        );
+        assert!(listing
+            .entries
+            .iter()
+            .all(|entry| !entry.path.as_str().contains("private")));
+    }
+
+    #[test]
+    fn directory_listing_requires_explicit_list_permission_and_matching_share() {
+        let mut restricted = share();
+        for acl in [&mut restricted.network_acl, &mut restricted.local_acl] {
+            for rule in &mut acl.rules {
+                rule.actions.remove(&FileAction::List);
+            }
+        }
+        let (temporary, capability, share) = setup_with(restricted);
+        std::fs::write(temporary.path().join("visible.txt"), b"visible").expect("file");
+        let denied = FileTransferAdapter::new(capability);
+        let error = denied
+            .list_directory(
+                &context(&share),
+                true,
+                &share.id,
+                SharedPath::root(),
+                16,
+                None,
+            )
+            .expect_err("List permission must be explicit");
+        assert_eq!(error.code(), "file_acl_no_allow");
+
+        let (_temporary, capability, share) = setup();
+        let adapter = FileTransferAdapter::new(capability);
+        let error = adapter
+            .list_directory(
+                &context(&share),
+                true,
+                &FileShareId::from_public_key(b"other-share"),
+                SharedPath::root(),
+                16,
+                None,
+            )
+            .expect_err("mismatched share must fail");
+        assert_eq!(error.code(), "file_transfer_share_mismatch");
     }
 
     #[test]

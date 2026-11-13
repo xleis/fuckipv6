@@ -10,7 +10,7 @@ class SharedContractsTest {
         requireNotNull(javaClass.getResource("/$name")) { "missing test resource $name" }.readText()
 
     @Test
-    fun sharedNavigationDefinesFiveModulesAndThirteenUniquePages() {
+    fun sharedNavigationDefinesFiveModulesAndFourteenUniquePages() {
         val navigation = NavigationContract.parse(resource("ui-navigation.json"))
 
         assertEquals(1, navigation.schemaVersion)
@@ -23,13 +23,13 @@ class SharedContractsTest {
                 "overview" to listOf("overview"),
                 "nodes" to listOf("peers", "node_runtime", "routing", "identity"),
                 "networks" to listOf("networks", "topology", "exit_node", "relay"),
-                "activity" to listOf("traffic", "activity", "logs"),
+                "activity" to listOf("traffic", "activity", "logs", "files"),
                 "settings" to listOf("settings"),
             ),
             navigation.modules.associate { it.id to it.pageIds },
         )
-        assertEquals(13, navigation.modules.sumOf { it.pageIds.size })
-        assertEquals(13, navigation.modules.flatMap { it.pageIds }.toSet().size)
+        assertEquals(14, navigation.modules.sumOf { it.pageIds.size })
+        assertEquals(14, navigation.modules.flatMap { it.pageIds }.toSet().size)
     }
 
     @Test

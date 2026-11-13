@@ -13,7 +13,8 @@ use tokio::time::{sleep, timeout};
 
 use crate::cli::commands::RuntimeOptions;
 use crate::file_share::{
-    FileShareConfiguration, FileSharePreview, FileTransferHandle, StartFileTransferRequest,
+    FileDirectoryListing, FileShareConfiguration, FileSharePreview, FileTransferHandle,
+    FileTransferStatus, ListFileDirectoryRequest, StartFileTransferRequest,
 };
 use crate::local_ipc::{
     self, EndpointRole, FrameKind, IpcErrorCode, IpcRole, LocalCommand, LocalError, LocalEvent,
@@ -400,6 +401,35 @@ impl RemoteFileTransferClient {
                 .spawn(future)
                 .await
                 .context("File transfer start task failed")?,
+            None => future.await,
+        }
+    }
+
+    pub async fn list_directory(
+        &self,
+        request: ListFileDirectoryRequest,
+    ) -> Result<FileDirectoryListing> {
+        let endpoint = self.endpoint.clone();
+        let role = self.role.clone();
+        let future = async move { local_ipc::list_file_directory(&endpoint, role, request).await };
+        match &self.runtime {
+            Some(runtime) => runtime
+                .spawn(future)
+                .await
+                .context("File directory browse task failed")?,
+            None => future.await,
+        }
+    }
+
+    pub async fn list_transfers(&self) -> Result<Vec<FileTransferStatus>> {
+        let endpoint = self.endpoint.clone();
+        let role = self.role.clone();
+        let future = async move { local_ipc::list_file_transfers(&endpoint, role).await };
+        match &self.runtime {
+            Some(runtime) => runtime
+                .spawn(future)
+                .await
+                .context("File transfer status task failed")?,
             None => future.await,
         }
     }

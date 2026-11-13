@@ -10,6 +10,7 @@ mod capability;
 mod config;
 mod error;
 mod network;
+mod network_browser;
 mod network_origin;
 mod origin_store;
 mod owner_service;
@@ -20,6 +21,7 @@ mod runtime;
 mod temp;
 mod transfer;
 mod transfer_control;
+mod transfer_status;
 
 pub use capability::{
     FileCapabilityError, FileCapabilityLease, FileCapabilityPermit, FileCapabilitySnapshot,
@@ -31,6 +33,11 @@ pub(crate) use network::{
     trusted_file_member, FileNetworkDataPlane, FileNetworkFrame, FileNetworkRequest,
     FileNetworkResponse, TrustedFileMember,
 };
+pub(crate) use network_browser::FileNetworkBrowser;
+pub use network_browser::{
+    FileDirectoryEntry, FileDirectoryListing, ListFileDirectoryRequest,
+    DEFAULT_FILE_DIRECTORY_LIST_LIMIT,
+};
 pub(crate) use network_origin::{
     FileNetworkOrigin, FileNetworkOriginError, OriginPeer, OriginTransferEvent,
 };
@@ -38,7 +45,10 @@ pub(crate) use origin_store::FileOriginStore;
 pub(crate) use owner_service::FileOwnerService;
 pub use owner_service::{FileOwnerServiceError, FileShareConfiguration, FileSharePreview};
 pub use quota::{DirectoryUsage, QuotaScanLimits, UploadQuotaRequest};
-pub use root::{LocalFileMetadata, LocalShareRoot, FILE_TEMP_DIRECTORY};
+pub use root::{
+    LocalDirectoryEntry, LocalDirectoryListing, LocalFileMetadata, LocalShareRoot,
+    FILE_TEMP_DIRECTORY, MAX_DIRECTORY_LIST_LIMIT,
+};
 pub use runtime::{
     FileRuntime, FileRuntimeError, FileRuntimeSnapshot, RuntimeDownloadTransfer,
     RuntimeUploadTransfer,
@@ -52,3 +62,5 @@ pub use transfer_control::{
     FileTransferCommand, FileTransferDirection, FileTransferHandle, StartFileTransferRequest,
     DEFAULT_FILE_TRANSFER_CHUNK_SIZE,
 };
+pub use transfer_status::FileTransferStatus;
+pub(crate) use transfer_status::FileTransferStatusCache;

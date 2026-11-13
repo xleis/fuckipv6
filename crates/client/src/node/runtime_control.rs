@@ -8004,9 +8004,18 @@ mod tests {
                                     ipc::RuntimeCommand::ProbePeer { reply, .. } => {
                                         let _ = reply.send(Err("测试运行时不支持探测".into()));
                                     }
+                                    ipc::RuntimeCommand::ListFileDirectory { reply, .. } => {
+                                        let _ = reply.send(Err(
+                                            "测试运行时不支持 File 目录浏览".into(),
+                                        ));
+                                    }
                                     ipc::RuntimeCommand::StartFileTransfer { reply, .. } => {
                                         let _ =
                                             reply.send(Err("测试运行时不支持 File 传输".into()));
+                                    }
+                                    ipc::RuntimeCommand::ListFileTransfers { reply } => {
+                                        let _ =
+                                            reply.send(Err("测试运行时不支持 File 传输状态".into()));
                                     }
                                     ipc::RuntimeCommand::CancelFileTransfer { reply, .. } => {
                                         let _ =

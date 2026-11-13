@@ -14,7 +14,7 @@ use fuckipv6_common::domain::{
 };
 
 use super::capability::{FileCapabilityError, FileCapabilitySnapshot, FileShareCapability};
-use super::root::LocalFileMetadata;
+use super::root::{LocalDirectoryListing, LocalFileMetadata};
 use super::transfer::{
     DownloadTransfer, FileTransferAdapter, FileTransferAdapterError, TransferOperationCancellation,
     TransferProgress, UploadAdmission, UploadTransfer,
@@ -110,6 +110,22 @@ impl FileRuntime {
     ) -> Result<LocalFileMetadata, FileRuntimeError> {
         self.adapter
             .read_metadata(context, network_enabled, share_id, path)
+            .map_err(Into::into)
+    }
+
+    /// Authorize and enumerate one directory without admitting a transfer.
+    /// The adapter checks the parent and every visible child independently.
+    pub fn list_directory(
+        &self,
+        context: &AccessContext,
+        network_enabled: bool,
+        share_id: &FileShareId,
+        path: SharedPath,
+        limit: u32,
+        cursor: Option<&str>,
+    ) -> Result<LocalDirectoryListing, FileRuntimeError> {
+        self.adapter
+            .list_directory(context, network_enabled, share_id, path, limit, cursor)
             .map_err(Into::into)
     }
 

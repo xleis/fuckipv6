@@ -25,9 +25,9 @@ use thiserror::Error;
 use tokio::sync::{watch, Notify};
 
 use super::{
-    FileCapabilityError, FileRuntime, FileRuntimeError, FileTransferAdapterError,
-    RuntimeDownloadTransfer, RuntimeUploadTransfer, TransferOperationCancellation,
-    TransferProgress, UploadAdmission,
+    root::MAX_DIRECTORY_LIST_LIMIT, FileCapabilityError, FileRuntime, FileRuntimeError,
+    FileTransferAdapterError, RuntimeDownloadTransfer, RuntimeUploadTransfer,
+    TransferOperationCancellation, TransferProgress, UploadAdmission,
 };
 
 const FRAME_MAGIC: &[u8; 8] = b"FKFILE01";
@@ -55,6 +55,7 @@ pub(crate) const MAX_FILE_NETWORK_TRANSFER_BYTES: u64 =
 
 const MAX_FILE_NETWORK_ERROR_CODE_LEN: usize = 96;
 const MAX_ACTIVE_FILE_NETWORK_SESSIONS: usize = 16;
+pub(crate) const MAX_FILE_NETWORK_DIRECTORY_CURSOR_LEN: usize = 32;
 const FILE_NETWORK_ACTIVITY_RETENTION_LIMIT: usize = 256;
 const FILE_NETWORK_TRANSFER_TTL_MS: u64 = 30 * 60 * 1_000;
 const FILE_MEMBER_DIRECTORY_MAX_AGE_MS: u64 = 90_000;
@@ -77,6 +78,8 @@ pub(crate) enum FileNetworkError {
     InvalidFragment,
     #[error("File network error code is invalid")]
     InvalidErrorCode,
+    #[error("File network directory listing is invalid")]
+    InvalidListing,
 }
 
 /// One peer-visible operation. The authenticated source node is never carried
@@ -99,6 +102,12 @@ pub(crate) enum FileNetworkRequest {
     ReadMetadata {
         share_id: FileShareId,
         path: SharedPath,
+    },
+    ListDirectory {
+        share_id: FileShareId,
+        path: SharedPath,
+        limit: u32,
+        cursor: Option<String>,
     },
     Resume {
         request: ResumeRequest,
@@ -126,6 +135,11 @@ pub(crate) enum FileNetworkResponse {
     },
     Metadata {
         metadata: FileNetworkMetadata,
+    },
+    DirectoryEntries {
+        entries: Vec<FileNetworkDirectoryEntry>,
+        next_cursor: Option<String>,
+        truncated: bool,
     },
     Progress {
         progress: FileNetworkProgress,
@@ -158,6 +172,17 @@ pub(crate) struct FileNetworkProgress {
 /// path, local root, content digest and filesystem error text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FileNetworkMetadata {
+    pub is_directory: bool,
+    pub size: u64,
+    pub modified_at_unix_ms: Option<u64>,
+}
+
+/// One user-safe directory projection. The logical [`SharedPath`] is the only
+/// path-like value sent to the requester; local roots and OS error data stay
+/// behind the capability boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FileNetworkDirectoryEntry {
+    pub path: SharedPath,
     pub is_directory: bool,
     pub size: u64,
     pub modified_at_unix_ms: Option<u64>,
@@ -203,8 +228,14 @@ impl FileNetworkFrame {
         request_id: [u8; 16],
         request: FileNetworkRequest,
     ) -> Result<Self, FileNetworkError> {
-        if let FileNetworkRequest::OpenUpload { manifest, .. } = &request {
-            validate_network_manifest(manifest)?;
+        match &request {
+            FileNetworkRequest::OpenUpload { manifest, .. } => {
+                validate_network_manifest(manifest)?;
+            }
+            FileNetworkRequest::ListDirectory { limit, cursor, .. } => {
+                validate_directory_request(*limit, cursor.as_deref())?;
+            }
+            _ => {}
         }
         Ok(Self::Request {
             request_id,
@@ -642,6 +673,21 @@ impl FileNetworkDataPlane {
                 share_id,
                 path,
             ),
+            FileNetworkRequest::ListDirectory {
+                share_id,
+                path,
+                limit,
+                cursor,
+            } => self.list_directory(
+                actor,
+                context,
+                network_enabled,
+                member_access_epoch,
+                share_id,
+                path,
+                limit,
+                cursor,
+            ),
             FileNetworkRequest::Resume { request } => self.resume(
                 actor,
                 member_access_epoch,
@@ -705,6 +751,47 @@ impl FileNetworkDataPlane {
                     size: metadata.size,
                     modified_at_unix_ms: metadata.modified_at_unix_ms,
                 },
+            },
+            Err(error) => runtime_error(&error),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn list_directory(
+        &self,
+        actor: &NodeId,
+        context: &AccessContext,
+        network_enabled: bool,
+        member_access_epoch: u64,
+        share_id: FileShareId,
+        path: SharedPath,
+        limit: u32,
+        cursor: Option<String>,
+    ) -> FileNetworkResponse {
+        if &context.actor != actor || member_access_epoch == 0 {
+            return network_error("file_listing_peer_mismatch", None);
+        }
+        match self.runtime.list_directory(
+            context,
+            network_enabled,
+            &share_id,
+            path,
+            limit,
+            cursor.as_deref(),
+        ) {
+            Ok(listing) => FileNetworkResponse::DirectoryEntries {
+                entries: listing
+                    .entries
+                    .into_iter()
+                    .map(|entry| FileNetworkDirectoryEntry {
+                        path: entry.path,
+                        is_directory: entry.is_directory,
+                        size: entry.size,
+                        modified_at_unix_ms: entry.modified_at_unix_ms,
+                    })
+                    .collect(),
+                next_cursor: listing.next_cursor,
+                truncated: listing.truncated,
             },
             Err(error) => runtime_error(&error),
         }
@@ -1846,11 +1933,15 @@ pub(crate) fn validate_fragment(offset: u64, data: &[u8]) -> Result<(), FileNetw
 
 fn validate_frame(frame: &FileNetworkFrame) -> Result<(), FileNetworkError> {
     match frame {
-        FileNetworkFrame::Request { request, .. } => {
-            if let FileNetworkRequest::OpenUpload { manifest, .. } = request {
+        FileNetworkFrame::Request { request, .. } => match request {
+            FileNetworkRequest::OpenUpload { manifest, .. } => {
                 validate_network_manifest(manifest)?;
             }
-        }
+            FileNetworkRequest::ListDirectory { limit, cursor, .. } => {
+                validate_directory_request(*limit, cursor.as_deref())?;
+            }
+            _ => {}
+        },
         FileNetworkFrame::Response { response, .. } => {
             validate_network_response(response)?;
         }
@@ -1871,11 +1962,45 @@ fn validate_network_response(response: &FileNetworkResponse) -> Result<(), FileN
             }
             Ok(())
         }
+        FileNetworkResponse::DirectoryEntries {
+            entries,
+            next_cursor,
+            truncated,
+        } => {
+            if entries.len() > MAX_DIRECTORY_LIST_LIMIT as usize
+                || next_cursor
+                    .as_deref()
+                    .is_some_and(|cursor| !valid_directory_cursor(cursor))
+                || (*truncated != next_cursor.is_some())
+                || entries
+                    .iter()
+                    .any(|entry| entry.is_directory && entry.size != 0)
+            {
+                return Err(FileNetworkError::InvalidListing);
+            }
+            Ok(())
+        }
         FileNetworkResponse::Progress { .. }
         | FileNetworkResponse::ChunkAccepted { .. }
         | FileNetworkResponse::Completed { .. }
         | FileNetworkResponse::Metadata { .. } => Ok(()),
     }
+}
+
+fn valid_directory_cursor(cursor: &str) -> bool {
+    !cursor.is_empty()
+        && cursor.len() <= MAX_FILE_NETWORK_DIRECTORY_CURSOR_LEN
+        && cursor.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn validate_directory_request(limit: u32, cursor: Option<&str>) -> Result<(), FileNetworkError> {
+    if limit == 0
+        || limit > MAX_DIRECTORY_LIST_LIMIT
+        || cursor.is_some_and(|cursor| !valid_directory_cursor(cursor))
+    {
+        return Err(FileNetworkError::InvalidListing);
+    }
+    Ok(())
 }
 
 fn valid_error_code(code: &str) -> bool {
@@ -1925,8 +2050,9 @@ mod tests {
                 subjects: BTreeSet::from([SubjectSelector::AnyMember]),
                 path_prefix: SharedPath::root(),
                 actions: BTreeSet::from([
-                    fuckipv6_common::domain::FileAction::Download,
-                    fuckipv6_common::domain::FileAction::ReadMetadata,
+                    FileAction::List,
+                    FileAction::Download,
+                    FileAction::ReadMetadata,
                 ]),
                 effect: FileAclEffect::Allow,
             }],
@@ -2170,6 +2296,12 @@ mod tests {
                 share_id: share_id(1),
                 path: SharedPath::parse("docs/readme.txt").expect("path"),
             },
+            FileNetworkRequest::ListDirectory {
+                share_id: share_id(1),
+                path: SharedPath::parse("docs").expect("path"),
+                limit: 64,
+                cursor: Some("128".into()),
+            },
             FileNetworkRequest::Resume {
                 request: ResumeRequest {
                     transfer_id: transfer(2),
@@ -2221,6 +2353,24 @@ mod tests {
                     modified_at_unix_ms: Some(1_700_000_000_000),
                 },
             },
+            FileNetworkResponse::DirectoryEntries {
+                entries: vec![
+                    FileNetworkDirectoryEntry {
+                        path: SharedPath::parse("docs/readme.txt").expect("path"),
+                        is_directory: false,
+                        size: 42,
+                        modified_at_unix_ms: Some(1_700_000_000_000),
+                    },
+                    FileNetworkDirectoryEntry {
+                        path: SharedPath::parse("docs/nested").expect("path"),
+                        is_directory: true,
+                        size: 0,
+                        modified_at_unix_ms: None,
+                    },
+                ],
+                next_cursor: Some("64".into()),
+                truncated: true,
+            },
             FileNetworkResponse::Progress { progress },
             FileNetworkResponse::ChunkAccepted {
                 chunk_index: 0,
@@ -2236,6 +2386,80 @@ mod tests {
         for response in responses {
             round_trip(FileNetworkFrame::response(request_id, response).expect("response"));
         }
+    }
+
+    #[test]
+    fn directory_listing_requests_and_responses_are_strictly_bounded() {
+        for (limit, cursor) in [
+            (0, None),
+            (MAX_DIRECTORY_LIST_LIMIT + 1, None),
+            (1, Some(String::new())),
+            (1, Some("not-a-cursor".into())),
+            (
+                1,
+                Some("1".repeat(MAX_FILE_NETWORK_DIRECTORY_CURSOR_LEN + 1)),
+            ),
+        ] {
+            assert_eq!(
+                FileNetworkFrame::request(
+                    [1; 16],
+                    FileNetworkRequest::ListDirectory {
+                        share_id: share_id(1),
+                        path: SharedPath::root(),
+                        limit,
+                        cursor,
+                    }
+                ),
+                Err(FileNetworkError::InvalidListing)
+            );
+        }
+
+        assert_eq!(
+            FileNetworkFrame::response(
+                [1; 16],
+                FileNetworkResponse::DirectoryEntries {
+                    entries: Vec::new(),
+                    next_cursor: Some("1".into()),
+                    truncated: false,
+                }
+            ),
+            Err(FileNetworkError::InvalidListing)
+        );
+        assert_eq!(
+            FileNetworkFrame::response(
+                [1; 16],
+                FileNetworkResponse::DirectoryEntries {
+                    entries: vec![FileNetworkDirectoryEntry {
+                        path: SharedPath::parse("nested").expect("path"),
+                        is_directory: true,
+                        size: 1,
+                        modified_at_unix_ms: None,
+                    }],
+                    next_cursor: None,
+                    truncated: false,
+                }
+            ),
+            Err(FileNetworkError::InvalidListing)
+        );
+        let entries = (0..=MAX_DIRECTORY_LIST_LIMIT)
+            .map(|index| FileNetworkDirectoryEntry {
+                path: SharedPath::parse(format!("entry-{index:03}")).expect("path"),
+                is_directory: false,
+                size: 0,
+                modified_at_unix_ms: None,
+            })
+            .collect();
+        assert_eq!(
+            FileNetworkFrame::response(
+                [1; 16],
+                FileNetworkResponse::DirectoryEntries {
+                    entries,
+                    next_cursor: None,
+                    truncated: false,
+                }
+            ),
+            Err(FileNetworkError::InvalidListing)
+        );
     }
 
     #[test]
@@ -4834,6 +5058,84 @@ mod tests {
         assert_eq!(
             activity[0].details["cleanup_code"],
             "file_transfer_cleanup_completed"
+        );
+    }
+
+    #[test]
+    fn network_directory_listing_returns_only_authorized_safe_entries() {
+        let temporary = TempDir::new().expect("tempdir");
+        std::fs::write(temporary.path().join("public.txt"), b"public").expect("public");
+        std::fs::create_dir(temporary.path().join("docs")).expect("directory");
+        let share = share();
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = enable_download_runtime(&temporary, &share);
+        let mut data_plane = FileNetworkDataPlane::new(runtime);
+
+        let response = data_plane.handle_request(
+            &actor,
+            &context,
+            true,
+            7,
+            Ipv6Addr::LOCALHOST,
+            FileNetworkRequest::ListDirectory {
+                share_id: share.id.clone(),
+                path: SharedPath::root(),
+                limit: 16,
+                cursor: None,
+            },
+            9,
+        );
+        let FileNetworkResponse::DirectoryEntries {
+            entries,
+            next_cursor,
+            truncated,
+        } = response
+        else {
+            panic!("expected directory entries, got {response:?}");
+        };
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["docs", "public.txt"]
+        );
+        assert!(entries[0].is_directory);
+        assert_eq!(entries[1].size, 6);
+        assert!(!next_cursor.is_some());
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn network_directory_listing_requires_explicit_list_acl_action() {
+        let temporary = TempDir::new().expect("tempdir");
+        std::fs::write(temporary.path().join("public.txt"), b"public").expect("public");
+        let mut share = share();
+        for acl in [&mut share.network_acl, &mut share.local_acl] {
+            acl.rules[0].actions.remove(&FileAction::List);
+        }
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = enable_download_runtime(&temporary, &share);
+        let mut data_plane = FileNetworkDataPlane::new(runtime);
+
+        assert_eq!(
+            response_code(data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::ListDirectory {
+                    share_id: share.id.clone(),
+                    path: SharedPath::root(),
+                    limit: 16,
+                    cursor: None,
+                },
+                9,
+            )),
+            "file_acl_no_allow"
         );
     }
 

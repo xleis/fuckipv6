@@ -50,7 +50,7 @@ data class NavigationContract(val schemaVersion: Int, val modules: List<Navigati
                     add(NavigationModule(id, labelKey, defaultPageId, pages))
                 }
             }
-            require(pageIds.size == 13) { "navigation must contain exactly thirteen pages" }
+            require(pageIds.size == 14) { "navigation must contain exactly fourteen pages" }
             return NavigationContract(schemaVersion, modules)
         }
     }

@@ -23,8 +23,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
 use crate::file_share::{
-    FileOwnerServiceError, FileShareConfiguration, FileSharePreview, FileTransferCommand,
-    FileTransferHandle, StartFileTransferRequest,
+    FileDirectoryListing, FileOwnerServiceError, FileShareConfiguration, FileSharePreview,
+    FileTransferCommand, FileTransferHandle, FileTransferStatus, ListFileDirectoryRequest,
+    StartFileTransferRequest,
 };
 use crate::node::{
     NodeCommandRequest, NodeCommandResult, NodeEvent, NodeFileCapabilitySnapshot,
@@ -49,6 +50,9 @@ pub const FILE_OWNER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(150);
 /// Runtime File controls make bounded in-process round trips; keep the client
 /// alive longer than the actor's own operations so structured failures win.
 pub const FILE_TRANSFER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(45);
+/// Directory browsing is a one-shot RPC with a 15-second runtime deadline.
+/// Leave enough transport time for the structured timeout to win.
+pub const FILE_DIRECTORY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(20);
 const FRAME_MAGIC: [u8; 4] = *b"FKIP";
 const FRAME_HEADER_LEN: usize = 12;
 
@@ -167,6 +171,12 @@ pub enum LocalCommand {
     DisableFileShare,
     /// Requester-side File controls. Local paths remain on this boundary.
     FileTransfer(FileTransferCommand),
+    /// Requester-side logical directory browsing. No local owner root is
+    /// accepted or returned on this boundary.
+    ListFileDirectory(ListFileDirectoryRequest),
+    /// Requester-side latest transfer status. The runtime projection contains
+    /// no peer address, local filesystem path or wire frame.
+    ListFileTransfers,
     StopNode,
 }
 
@@ -191,6 +201,8 @@ pub enum LocalResponse {
     FileShareDisabled(Box<NodeFileCapabilitySnapshot>),
     FileTransferStarted(FileTransferHandle),
     FileTransferAccepted,
+    FileDirectoryListing(Box<FileDirectoryListing>),
+    FileTransfers(Vec<FileTransferStatus>),
     Pong,
 }
 
@@ -343,6 +355,31 @@ impl LocalError {
                 retryable,
             }),
             file_transfer_error: None,
+        }
+    }
+
+    pub(crate) fn file_directory(error: crate::ipc::FileDirectoryControlError) -> Self {
+        let code = error.code().to_owned();
+        let (ipc_code, retryable) = match code.as_str() {
+            "file_browse_invalid_request" | "file_browse_invalid_response" => {
+                (IpcErrorCode::MalformedRequest, false)
+            }
+            "file_browse_peer_mismatch"
+            | "file_browse_access_revoked"
+            | "file_transfer_access_revoked"
+            | "file_transfer_permission_revoked" => (IpcErrorCode::Unauthorized, false),
+            "file_browse_timeout" | "file_browse_runtime_timeout" => (IpcErrorCode::Timeout, true),
+            "file_browse_limit" => (IpcErrorCode::BackendUnavailable, true),
+            _ => (IpcErrorCode::BackendUnavailable, true),
+        };
+        Self {
+            code: ipc_code,
+            message: "File 目录浏览未完成".into(),
+            retryable,
+            operation_error: None,
+            problem: None,
+            file_share_error: None,
+            file_transfer_error: Some(FileTransferErrorDetail { code, retryable }),
         }
     }
 
@@ -881,6 +918,47 @@ pub async fn start_file_transfer(
     match response {
         LocalResponse::FileTransferStarted(handle) => Ok(handle),
         other => bail!("本地 IPC 返回了意外 File 传输启动响应: {other:?}"),
+    }
+}
+
+pub async fn list_file_directory(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    request: ListFileDirectoryRequest,
+) -> Result<FileDirectoryListing> {
+    let response = request_with_timeout(
+        endpoint,
+        role,
+        &LocalRequest {
+            request_id: 1,
+            command: LocalCommand::ListFileDirectory(request),
+        },
+        FILE_DIRECTORY_RESPONSE_TIMEOUT,
+    )
+    .await?;
+    match response {
+        LocalResponse::FileDirectoryListing(listing) => Ok(*listing),
+        other => bail!("本地 IPC 返回了意外 File 目录浏览响应: {other:?}"),
+    }
+}
+
+pub async fn list_file_transfers(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+) -> Result<Vec<FileTransferStatus>> {
+    let response = request_with_timeout(
+        endpoint,
+        role,
+        &LocalRequest {
+            request_id: 1,
+            command: LocalCommand::ListFileTransfers,
+        },
+        FILE_TRANSFER_RESPONSE_TIMEOUT,
+    )
+    .await?;
+    match response {
+        LocalResponse::FileTransfers(statuses) => Ok(statuses),
+        other => bail!("本地 IPC 返回了意外 File 传输状态响应: {other:?}"),
     }
 }
 

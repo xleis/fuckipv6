@@ -3,7 +3,7 @@ use fuckipv6_common::domain::NodeId;
 use fuckipv6_common::{recent_error_log_lines, PeerInfo};
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -20,8 +20,9 @@ use crate::p2p::connection::{P2pEngine, PeerProbeOutcome};
 use crate::stats::StatsCollector;
 
 pub use crate::file_share::{
-    FileTransferDirection, FileTransferHandle, StartFileTransferRequest,
-    DEFAULT_FILE_TRANSFER_CHUNK_SIZE,
+    FileDirectoryEntry, FileDirectoryListing, FileTransferDirection, FileTransferHandle,
+    FileTransferStatus, ListFileDirectoryRequest, StartFileTransferRequest,
+    DEFAULT_FILE_DIRECTORY_LIST_LIMIT, DEFAULT_FILE_TRANSFER_CHUNK_SIZE,
 };
 
 pub const DEFAULT_IPC_ADDR: &str = "127.0.0.1:6668";
@@ -112,6 +113,13 @@ pub(crate) enum RuntimeCommand {
     StartFileTransfer {
         request: Box<StartFileTransferRequest>,
         reply: oneshot::Sender<Result<FileTransferHandle, String>>,
+    },
+    ListFileDirectory {
+        request: Box<ListFileDirectoryRequest>,
+        reply: oneshot::Sender<Result<FileDirectoryListing, String>>,
+    },
+    ListFileTransfers {
+        reply: oneshot::Sender<Result<Vec<FileTransferStatus>, String>>,
     },
     CancelFileTransfer {
         transfer_id: String,
@@ -845,6 +853,48 @@ impl FileTransferControlError {
     }
 }
 
+/// Stable, path-free failure from the requester-side directory browser.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FileDirectoryControlError {
+    RuntimeUnavailable,
+    Timeout,
+    Rejected(String),
+}
+
+impl FileDirectoryControlError {
+    pub(crate) fn code(&self) -> &str {
+        match self {
+            Self::RuntimeUnavailable => "file_browse_runtime_unavailable",
+            Self::Timeout => "file_browse_runtime_timeout",
+            Self::Rejected(code) => code,
+        }
+    }
+}
+
+pub(crate) async fn list_file_directory(
+    registry: &MultiNetworkRegistry,
+    request: Box<ListFileDirectoryRequest>,
+) -> Result<FileDirectoryListing, FileDirectoryControlError> {
+    let control_tx =
+        select_file_transfer_control_sender(registry, request.network_id.as_deref(), &request.peer)
+            .await
+            .map_err(|error| FileDirectoryControlError::Rejected(error.code().to_owned()))?;
+    let (reply, response) = oneshot::channel();
+    if control_tx
+        .send(RuntimeCommand::ListFileDirectory { request, reply })
+        .is_err()
+    {
+        return Err(FileDirectoryControlError::RuntimeUnavailable);
+    }
+
+    match tokio::time::timeout(Duration::from_secs(20), response).await {
+        Ok(Ok(Ok(listing))) => Ok(listing),
+        Ok(Ok(Err(code))) => Err(FileDirectoryControlError::Rejected(code)),
+        Ok(Err(_)) => Err(FileDirectoryControlError::RuntimeUnavailable),
+        Err(_) => Err(FileDirectoryControlError::Timeout),
+    }
+}
+
 pub(crate) async fn start_file_transfer(
     registry: &MultiNetworkRegistry,
     request: Box<StartFileTransferRequest>,
@@ -866,6 +916,80 @@ pub(crate) async fn start_file_transfer(
         Ok(Err(_)) => Err(FileTransferControlError::RuntimeUnavailable),
         Err(_) => Err(FileTransferControlError::Timeout),
     }
+}
+
+pub(crate) async fn list_file_transfers(
+    registry: &MultiNetworkRegistry,
+) -> Result<Vec<FileTransferStatus>, FileTransferControlError> {
+    let senders = registry.file_transfer_control_senders().await;
+    if senders.is_empty() {
+        return Err(FileTransferControlError::RuntimeUnavailable);
+    }
+
+    let mut requests = Vec::with_capacity(senders.len());
+    for sender in senders {
+        let (reply, response) = oneshot::channel();
+        requests.push(async move {
+            if sender
+                .send(RuntimeCommand::ListFileTransfers { reply })
+                .is_err()
+            {
+                return Err(FileTransferControlError::RuntimeUnavailable);
+            }
+            match tokio::time::timeout(Duration::from_secs(10), response).await {
+                Ok(Ok(Ok(statuses))) => Ok(statuses),
+                Ok(Ok(Err(code))) => Err(FileTransferControlError::Rejected(code)),
+                Ok(Err(_)) => Err(FileTransferControlError::RuntimeUnavailable),
+                Err(_) => Err(FileTransferControlError::Timeout),
+            }
+        });
+    }
+
+    let mut statuses = BTreeMap::new();
+    let mut successful_runtimes = 0usize;
+    let mut rejected = None;
+    let mut timed_out = false;
+    for result in join_all(requests).await {
+        match result {
+            Ok(batch) => {
+                successful_runtimes += 1;
+                for status in batch {
+                    statuses.insert(
+                        (status.transfer_id.clone(), status.operation_id.clone()),
+                        status,
+                    );
+                }
+            }
+            Err(FileTransferControlError::Rejected(code)) if rejected.is_none() => {
+                rejected = Some(code);
+            }
+            Err(FileTransferControlError::Timeout) => timed_out = true,
+            Err(
+                FileTransferControlError::RuntimeUnavailable
+                | FileTransferControlError::Rejected(_),
+            ) => {}
+        }
+    }
+
+    if successful_runtimes == 0 {
+        return if let Some(code) = rejected {
+            Err(FileTransferControlError::Rejected(code))
+        } else if timed_out {
+            Err(FileTransferControlError::Timeout)
+        } else {
+            Err(FileTransferControlError::RuntimeUnavailable)
+        };
+    }
+
+    let mut statuses = statuses.into_values().collect::<Vec<_>>();
+    statuses.sort_by(|left, right| {
+        right
+            .updated_at_unix_ms
+            .cmp(&left.updated_at_unix_ms)
+            .then_with(|| right.transfer_id.cmp(&left.transfer_id))
+            .then_with(|| right.operation_id.cmp(&left.operation_id))
+    });
+    Ok(statuses)
 }
 
 async fn select_file_transfer_control_sender(
@@ -1436,6 +1560,7 @@ async fn peer_snapshot(stats: &StatsCollector, p2p: &P2pEngine, peer: PeerInfo) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fuckipv6_common::domain::{TransferDirection, TransferState};
     use fuckipv6_common::{NatType, PeerInfo};
     use std::net::IpAddr;
 
@@ -1624,6 +1749,101 @@ mod tests {
                 NatType::Open,
             ),
         )
+    }
+
+    fn test_transfer_status(
+        transfer: &str,
+        operation: &str,
+        state: TransferState,
+        updated_at_unix_ms: u64,
+    ) -> FileTransferStatus {
+        FileTransferStatus {
+            transfer_id: transfer.to_string(),
+            operation_id: operation.to_string(),
+            direction: TransferDirection::Upload,
+            state,
+            transferred_bytes: updated_at_unix_ms,
+            total_bytes: 10_000,
+            received_chunks: 1,
+            total_chunks: 3,
+            error_code: None,
+            failure_kind: None,
+            updated_at_unix_ms,
+        }
+    }
+
+    #[tokio::test]
+    async fn file_transfer_list_fans_out_deduplicates_sorts_and_tolerates_partial_failure() {
+        let registry = MultiNetworkRegistry::new();
+        let (tx_a, mut rx_a) = mpsc::unbounded_channel();
+        let (tx_b, mut rx_b) = mpsc::unbounded_channel();
+        let (tx_c, mut rx_c) = mpsc::unbounded_channel();
+        registry
+            .register(test_network_session("a", Some("network-a"), tx_a, None).await)
+            .await;
+        registry
+            .register(test_network_session("b", Some("network-b"), tx_b, None).await)
+            .await;
+        registry
+            .register(test_network_session("c", Some("network-c"), tx_c, None).await)
+            .await;
+
+        let task = tokio::spawn({
+            let registry = registry.clone();
+            async move { list_file_transfers(&registry).await }
+        });
+        let RuntimeCommand::ListFileTransfers { reply: reply_a } =
+            tokio::time::timeout(Duration::from_secs(1), rx_a.recv())
+                .await
+                .expect("network-a command timeout")
+                .expect("network-a command")
+        else {
+            panic!("expected network-a list command");
+        };
+        let RuntimeCommand::ListFileTransfers { reply: reply_b } =
+            tokio::time::timeout(Duration::from_secs(1), rx_b.recv())
+                .await
+                .expect("network-b command timeout")
+                .expect("network-b command")
+        else {
+            panic!("expected network-b list command");
+        };
+        let RuntimeCommand::ListFileTransfers { reply: reply_c } =
+            tokio::time::timeout(Duration::from_secs(1), rx_c.recv())
+                .await
+                .expect("network-c command timeout")
+                .expect("network-c command")
+        else {
+            panic!("expected network-c list command");
+        };
+
+        reply_a
+            .send(Ok(vec![test_transfer_status(
+                "shared",
+                "shared-op",
+                TransferState::Active,
+                100,
+            )]))
+            .expect("reply network-a statuses");
+        reply_b
+            .send(Ok(vec![
+                test_transfer_status("shared", "shared-op", TransferState::Active, 200),
+                test_transfer_status("older", "older-op", TransferState::Completed, 90),
+            ]))
+            .expect("reply network-b statuses");
+        // One runtime failing must not hide authoritative status from another.
+        reply_c
+            .send(Err("file_transfer_status_unavailable".to_string()))
+            .expect("reply network-c error");
+
+        let statuses = task
+            .await
+            .expect("list task")
+            .expect("partial list success");
+        assert_eq!(statuses.len(), 2);
+        assert_eq!(statuses[0].transfer_id, "shared");
+        assert_eq!(statuses[0].transferred_bytes, 200);
+        assert_eq!(statuses[1].transfer_id, "older");
     }
 
     #[tokio::test]

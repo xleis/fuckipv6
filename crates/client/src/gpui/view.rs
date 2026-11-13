@@ -194,6 +194,7 @@ fn page_icon_data(id: &str) -> &'static [u8] {
         Some(PageKind::ExitNode) => include_bytes!("../../assets/icons/door-open.svg"),
         Some(PageKind::Relay) => include_bytes!("../../assets/icons/radio-tower.svg"),
         Some(PageKind::Logs) => include_bytes!("../../assets/icons/boxes.svg"),
+        Some(PageKind::Files) => include_bytes!("../../assets/icons/folder-open.svg"),
         Some(PageKind::Identity) => include_bytes!("../../assets/icons/key-round.svg"),
         Some(PageKind::Settings) => include_bytes!("../../assets/icons/cpu.svg"),
         None => include_bytes!("../../assets/icons/circle-dot.svg"),

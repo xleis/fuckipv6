@@ -74,6 +74,7 @@ pub enum PageKind {
     ExitNode,
     Relay,
     Logs,
+    Files,
     Identity,
     Settings,
 }
@@ -322,7 +323,7 @@ pub fn network_membership_id<'a>(
 }
 
 impl PageKind {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Overview,
         Self::Networks,
         Self::Peers,
@@ -334,6 +335,7 @@ impl PageKind {
         Self::ExitNode,
         Self::Relay,
         Self::Logs,
+        Self::Files,
         Self::Identity,
         Self::Settings,
     ];
@@ -351,6 +353,7 @@ impl PageKind {
             "exit_node" => Some(Self::ExitNode),
             "relay" => Some(Self::Relay),
             "logs" => Some(Self::Logs),
+            "files" => Some(Self::Files),
             "identity" => Some(Self::Identity),
             "settings" => Some(Self::Settings),
             _ => None,
@@ -370,6 +373,7 @@ impl PageKind {
             Self::ExitNode => "exit_node",
             Self::Relay => "relay",
             Self::Logs => "logs",
+            Self::Files => "files",
             Self::Identity => "identity",
             Self::Settings => "settings",
         }
@@ -3699,6 +3703,10 @@ fn project_page(
         }
         PageKind::Logs => {
             let (metrics, sections) = project_logs(snapshot, locale);
+            (metrics, sections, None)
+        }
+        PageKind::Files => {
+            let (metrics, sections) = project_files(snapshot, locale);
             (metrics, sections, None)
         }
         PageKind::Identity => {
@@ -7250,6 +7258,71 @@ fn project_logs(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, V
     )
 }
 
+fn project_files(snapshot: &NodeSnapshot, locale: Locale) -> (Vec<MetricModel>, Vec<SectionModel>) {
+    let capability = &snapshot.file_capability;
+    let network = capability
+        .network_id
+        .as_ref()
+        .map(NetworkId::as_str)
+        .unwrap_or_else(|| t(locale, "settings.file.not_configured"));
+    let revision = match (capability.share_revision, capability.access_epoch) {
+        (Some(share), Some(epoch)) => tr(
+            locale,
+            "settings.file.revision_detail",
+            &[("share", &share.to_string()), ("epoch", &epoch.to_string())],
+        ),
+        _ => t(locale, "settings.file.not_configured").to_string(),
+    };
+    let available = capability.available_bytes.map_or_else(
+        || t(locale, "common.unknown").to_string(),
+        |bytes| {
+            i64::try_from(bytes)
+                .map_or_else(|_| bytes.to_string(), |bytes| format_integer(locale, bytes))
+        },
+    );
+    let root_error = capability
+        .root_error
+        .clone()
+        .unwrap_or_else(|| t(locale, "settings.file.no_root_error").to_string());
+    let rows = vec![
+        row(
+            t(locale, "settings.row.file_state"),
+            t(locale, capability_state_key(capability.state)),
+        ),
+        row(t(locale, "settings.row.file_network"), network),
+        row(t(locale, "settings.row.file_revision"), revision),
+        row(t(locale, "settings.row.file_available"), available),
+        row(
+            t(locale, "settings.row.file_active_transfers"),
+            format_integer(locale, i64::from(capability.active_transfers)),
+        ),
+        row(t(locale, "settings.row.file_error"), root_error),
+        row(
+            t(locale, "settings.row.file_scope"),
+            t(locale, "file.page.local_state.note"),
+        ),
+    ];
+    (
+        vec![
+            metric(
+                t(locale, "settings.row.file_state"),
+                t(locale, capability_state_key(capability.state)),
+                "NodeSnapshot.file_capability.state",
+            ),
+            metric(
+                t(locale, "settings.row.file_active_transfers"),
+                format_integer(locale, i64::from(capability.active_transfers)),
+                "NodeSnapshot.file_capability.active_transfers",
+            ),
+        ],
+        vec![section(
+            t(locale, "file.page.local_state.title"),
+            t(locale, "file.page.local_state.detail"),
+            rows,
+        )],
+    )
+}
+
 fn project_identity(
     snapshot: &NodeSnapshot,
     locale: Locale,
@@ -9179,6 +9252,49 @@ mod tests {
             Some("refresh_discovery_index")
         );
         assert!(discover.unavailable_reason.is_none());
+    }
+
+    #[test]
+    fn files_projects_authoritative_capability_without_requester_paths() {
+        let manifest = node_ui_manifest();
+        let page = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "files")
+            .expect("files page");
+        let mut snapshot = populated_snapshot();
+        let network_id = NetworkId::from_public_key(b"net_file_home");
+        snapshot.file_capability.state = CapabilityState::Degraded;
+        snapshot.file_capability.network_id = Some(network_id.clone());
+        snapshot.file_capability.access_epoch = Some(12);
+        snapshot.file_capability.share_revision = Some(7);
+        snapshot.file_capability.available_bytes = Some(2_147_483_648);
+        snapshot.file_capability.root_error = Some("file_root_unavailable".into());
+        snapshot.file_capability.active_transfers = 3;
+
+        let model = build_page_model_for_page(page, &snapshot, Locale::ZhCn).expect("files model");
+        let rendered = model
+            .sections
+            .iter()
+            .flat_map(|section| {
+                std::iter::once(section.title.as_str()).chain(
+                    section
+                        .rows
+                        .iter()
+                        .flat_map(|row| [row.title.as_str(), row.detail.as_str()]),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(model.kind, PageKind::Files);
+        assert!(rendered.contains(t(Locale::ZhCn, "status.capability.degraded")));
+        assert!(rendered.contains(network_id.as_str()));
+        assert!(rendered.contains("share 7"));
+        assert!(rendered.contains(&format_integer(Locale::ZhCn, 2_147_483_648)));
+        assert!(rendered.contains("file_root_unavailable"));
+        assert!(rendered.contains(t(Locale::ZhCn, "file.page.local_state.note")));
+        assert!(!rendered.contains('/'));
     }
 
     #[test]

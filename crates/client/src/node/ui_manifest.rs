@@ -117,7 +117,7 @@ impl NodeUiManifest {
     /// A malformed manifest must fail closed instead of allowing each renderer
     /// to invent a different page set, field rule, permission, or backend state.
     pub fn validate(&self) -> Result<(), Vec<String>> {
-        const REQUIRED_PAGES: [&str; 13] = [
+        const REQUIRED_PAGES: [&str; 14] = [
             "overview",
             "networks",
             "peers",
@@ -129,6 +129,7 @@ impl NodeUiManifest {
             "exit_node",
             "relay",
             "logs",
+            "files",
             "identity",
             "settings",
         ];
@@ -2373,6 +2374,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                 )],
             ),
             page("logs", "nav.logs", "page.logs", vec![]),
+            page("files", "nav.files", "page.files", vec![]),
             page(
                 "identity",
                 "nav.identity",
@@ -3104,6 +3106,7 @@ mod tests {
             "exit_node",
             "relay",
             "logs",
+            "files",
             "identity",
             "settings",
         ]);

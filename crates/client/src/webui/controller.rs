@@ -1,7 +1,7 @@
 use anyhow::Result;
 use fuckipv6_common::domain::{
     default_network_icon, default_network_language, default_network_purpose,
-    default_network_region, CapabilityKind, NetworkJoinMode, NetworkVisibility,
+    default_network_region, CapabilityKind, FileShareId, NetworkJoinMode, NetworkVisibility,
 };
 #[cfg(test)]
 use fuckipv6_common::domain::{MembershipRole, MembershipState, NetworkId};
@@ -15,6 +15,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::file_share::{
+    FileDirectoryListing, FileTransferHandle, FileTransferStatus, ListFileDirectoryRequest,
+    StartFileTransferRequest,
+};
+use crate::local_ipc::{IpcErrorCode, LocalError};
 use crate::node::{
     NodeBlacklistSnapshot, NodeClientBlacklistCommand, NodeCommand, NodeCommandBus,
     NodeCommandBusError, NodeCommandContext, NodeCommandOutcome, NodeCommandRequest,
@@ -26,7 +31,20 @@ use crate::node::{
 #[cfg(test)]
 use crate::node::{NodeCommandFuture, NodeCommandHandler, NodeCommandResult};
 use crate::p2p::connection::PeerProbeOutcome;
-use crate::remote_node::RemoteNodeSession;
+use crate::remote_node::{RemoteFileTransferClient, RemoteNodeSession};
+
+/// Path- and address-free selector for an online File peer.
+///
+/// The share id is deterministic for the authenticated owner/network pair and
+/// is only an opaque selector. The remote owner still enforces its signed share
+/// revision, ACL, member epoch and capability state for every request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FilePeerTarget {
+    pub peer: String,
+    pub network_id: String,
+    pub network_name: String,
+    pub share_id: String,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LogsResponse {
@@ -234,6 +252,7 @@ pub struct UpdateRoutingRequest {
 struct NodeBackend {
     state: NodeStateStore,
     commands: NodeCommandBus,
+    file_transfer: Option<RemoteFileTransferClient>,
     /// Keep the UI-owned node session alive exactly as long as this adapter.
     /// Dropping it only disconnects the adapter; the node process continues.
     _session: Option<Arc<RemoteNodeSession>>,
@@ -430,6 +449,7 @@ impl AppController {
         Self::from_backend(NodeBackend {
             state,
             commands,
+            file_transfer: None,
             _session: None,
         })
     }
@@ -496,6 +516,7 @@ impl AppController {
         Self::from_backend(NodeBackend {
             state,
             commands,
+            file_transfer: None,
             _session: None,
         })
     }
@@ -503,9 +524,11 @@ impl AppController {
     /// Attach a WebUI controller to the shared node state and command bus while
     /// keeping ownership of the local node session guard.
     pub fn from_node_session(session: RemoteNodeSession) -> Self {
+        let file_transfer = Some(session.file_transfer());
         let backend = NodeBackend {
             state: session.state(),
             commands: session.commands(),
+            file_transfer,
             _session: Some(Arc::new(session)),
         };
         Self::from_backend(backend)
@@ -949,6 +972,115 @@ impl AppController {
         blacklist_outcome(outcome, &network_name).map(|snapshot| snapshot.clients)
     }
 
+    fn file_transfer_client(&self) -> Result<&RemoteFileTransferClient, AppControllerError> {
+        self.node
+            .file_transfer
+            .as_ref()
+            .ok_or_else(|| AppControllerError::unsupported("当前节点会话未提供 File 传输能力"))
+    }
+
+    pub async fn list_file_targets(&self) -> Result<Vec<FilePeerTarget>, AppControllerError> {
+        self.file_transfer_client()?;
+        let snapshot = self.node.state.snapshot().await;
+        let mut network_ids = std::collections::BTreeMap::new();
+        for membership in &snapshot.memberships {
+            if membership.network_id.trim().is_empty() || membership.network_name.trim().is_empty()
+            {
+                continue;
+            }
+            network_ids.insert(
+                membership.network_name.as_str(),
+                membership.network_id.as_str(),
+            );
+        }
+        let mut targets = std::collections::BTreeMap::new();
+        for peer in &snapshot.peers {
+            if !peer.online || peer.peer_id.trim().is_empty() {
+                continue;
+            }
+            let Some(network_id) = network_ids.get(peer.network_name.as_str()).copied() else {
+                continue;
+            };
+            let share_id = FileShareId::from_public_key(
+                format!("file-share:{}:{}", peer.peer_id, network_id).as_bytes(),
+            );
+            targets.insert(
+                (
+                    peer.network_name.clone(),
+                    peer.peer_id.clone(),
+                    network_id.to_owned(),
+                ),
+                FilePeerTarget {
+                    peer: peer.peer_id.clone(),
+                    network_id: network_id.to_owned(),
+                    network_name: peer.network_name.clone(),
+                    share_id: share_id.as_str().to_owned(),
+                },
+            );
+        }
+        Ok(targets.into_values().collect())
+    }
+
+    pub async fn list_file_directory(
+        &self,
+        request: ListFileDirectoryRequest,
+    ) -> Result<FileDirectoryListing, AppControllerError> {
+        self.file_transfer_client()?
+            .list_directory(request)
+            .await
+            .map_err(file_transfer_controller_error)
+    }
+
+    pub async fn start_file_transfer(
+        &self,
+        request: StartFileTransferRequest,
+    ) -> Result<FileTransferHandle, AppControllerError> {
+        self.file_transfer_client()?
+            .start(request)
+            .await
+            .map_err(file_transfer_controller_error)
+    }
+
+    pub async fn list_file_transfers(&self) -> Result<Vec<FileTransferStatus>, AppControllerError> {
+        self.file_transfer_client()?
+            .list_transfers()
+            .await
+            .map_err(file_transfer_controller_error)
+    }
+
+    pub async fn cancel_file_transfer(
+        &self,
+        transfer_id: String,
+        operation_id: String,
+    ) -> Result<(), AppControllerError> {
+        self.file_transfer_client()?
+            .cancel(transfer_id, operation_id)
+            .await
+            .map_err(file_transfer_controller_error)
+    }
+
+    pub async fn pause_file_transfer(
+        &self,
+        transfer_id: String,
+        operation_id: String,
+    ) -> Result<(), AppControllerError> {
+        self.file_transfer_client()?
+            .pause(transfer_id, operation_id)
+            .await
+            .map_err(file_transfer_controller_error)
+    }
+
+    pub async fn resume_file_transfer(
+        &self,
+        transfer_id: String,
+        operation_id: String,
+    ) -> Result<(), AppControllerError> {
+        self.file_transfer_client()?
+            .resume(transfer_id, operation_id)
+            .await
+            .map_err(file_transfer_controller_error)
+    }
+
     async fn coordinator_network_name(&self) -> Result<String, AppControllerError> {
         let snapshot = self.node.state.snapshot().await;
         active_coordinator_service(&snapshot)
@@ -1021,6 +1153,39 @@ impl AppController {
             }
         }
     }
+}
+
+fn file_transfer_controller_error(error: anyhow::Error) -> AppControllerError {
+    let Some(local) = error.downcast_ref::<LocalError>() else {
+        return AppControllerError::from_problem(
+            NodeProblem::new(NodeProblemCode::Unavailable, error.to_string()).retryable(true),
+        );
+    };
+    if let Some(problem) = &local.problem {
+        return AppControllerError::from_problem(problem.clone());
+    }
+    let code = match local.code {
+        IpcErrorCode::Unauthorized => NodeProblemCode::PermissionDenied,
+        IpcErrorCode::VersionMismatch
+        | IpcErrorCode::OversizedFrame
+        | IpcErrorCode::MalformedFrame
+        | IpcErrorCode::MalformedRequest
+        | IpcErrorCode::RequestIdMismatch => NodeProblemCode::InvalidRequest,
+        IpcErrorCode::BackendUnavailable | IpcErrorCode::EventGap | IpcErrorCode::Timeout => {
+            NodeProblemCode::Unavailable
+        }
+        IpcErrorCode::NotFound => NodeProblemCode::NotFound,
+        IpcErrorCode::Conflict => NodeProblemCode::Conflict,
+        IpcErrorCode::Unsupported => NodeProblemCode::Unsupported,
+        IpcErrorCode::Internal => NodeProblemCode::Internal,
+    };
+    let mut problem = NodeProblem::new(code, local.message.clone()).retryable(local.retryable);
+    if let Some(detail) = &local.file_transfer_error {
+        problem = problem
+            .with_message_key("error.file_transfer")
+            .with_param("file_error_code", detail.code.clone());
+    }
+    AppControllerError::from_problem(problem)
 }
 
 fn project_node_snapshot(snapshot: &NodeSnapshot, local_ticket: Option<String>) -> AppUiState {
@@ -1621,5 +1786,55 @@ mod tests {
             config_routing_mode(&snapshot, Some("new-network")),
             Some(NodeRoutingMode::GlobalProxy)
         );
+    }
+
+    #[tokio::test]
+    async fn test_controller_file_adapters_fail_with_stable_unsupported_problem() {
+        let controller = AppController::new();
+
+        let directory_error = controller
+            .list_file_directory(ListFileDirectoryRequest {
+                peer: "peer".to_string(),
+                network_id: None,
+                share_id: "share".to_string(),
+                path: String::new(),
+                limit: 100,
+                cursor: None,
+            })
+            .await
+            .expect_err("directory browsing must be unsupported without a node session");
+        assert_eq!(directory_error.problem().code, NodeProblemCode::Unsupported);
+
+        let transfer_error = controller
+            .start_file_transfer(StartFileTransferRequest {
+                peer: "peer".to_string(),
+                network_id: None,
+                direction: crate::file_share::FileTransferDirection::Upload,
+                share_id: "share".to_string(),
+                transfer_id: "transfer".to_string(),
+                operation_id: "operation".to_string(),
+                path: "file.bin".to_string(),
+                local_path: "file.bin".to_string(),
+                chunk_size: crate::file_share::DEFAULT_FILE_TRANSFER_CHUNK_SIZE,
+            })
+            .await
+            .expect_err("transfers must be unsupported without a node session");
+        assert_eq!(transfer_error.problem().code, NodeProblemCode::Unsupported);
+
+        for result in [
+            controller.list_file_transfers().await.map(|_| ()),
+            controller
+                .pause_file_transfer("transfer".to_string(), "operation".to_string())
+                .await,
+            controller
+                .resume_file_transfer("transfer".to_string(), "operation".to_string())
+                .await,
+            controller
+                .cancel_file_transfer("transfer".to_string(), "operation".to_string())
+                .await,
+        ] {
+            let error = result.expect_err("File adapter must be unsupported");
+            assert_eq!(error.problem().code, NodeProblemCode::Unsupported);
+        }
     }
 }

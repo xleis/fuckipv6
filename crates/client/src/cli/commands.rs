@@ -36,9 +36,9 @@ use tokio::time::{sleep, Duration, Instant};
 use crate::config_manager::ConfigManager;
 use crate::file_share::{
     decode_file_network_frame, encode_file_network_frame, is_file_network_frame,
-    trusted_file_member, FileNetworkDataPlane, FileNetworkFrame, FileNetworkOrigin,
-    FileNetworkOriginError, FileNetworkRequest, FileNetworkResponse, FileOriginStore, OriginPeer,
-    OriginTransferEvent,
+    trusted_file_member, FileNetworkBrowser, FileNetworkDataPlane, FileNetworkFrame,
+    FileNetworkOrigin, FileNetworkOriginError, FileNetworkRequest, FileNetworkResponse,
+    FileOriginStore, FileTransferStatusCache, OriginPeer, OriginTransferEvent,
 };
 use crate::ipc::{self, IpcRequest, IpcResponse};
 use crate::local_ipc::IpcRole;
@@ -575,6 +575,8 @@ pub(crate) struct ClientRuntime {
     fallback: Arc<dyn FallbackTransport>,
     file_network: Option<FileNetworkDataPlane>,
     file_origin: FileNetworkOrigin,
+    file_browser: FileNetworkBrowser,
+    file_transfer_status: FileTransferStatusCache,
     pub(crate) identity: Identity,
     pub(crate) network_id: Option<NetworkId>,
     pub(crate) outbound: OutboundDispatcher,
@@ -1757,6 +1759,8 @@ pub(crate) async fn prepare_client_runtime_ext(
         fallback,
         file_network,
         file_origin,
+        file_browser: FileNetworkBrowser::new(),
+        file_transfer_status: FileTransferStatusCache::new(),
         identity: relay_identity,
         network_id,
         outbound,
@@ -3138,6 +3142,7 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
         .as_ref()
         .map(FileNetworkDataPlane::subscribe_capability_epoch);
     let file_origin_notify = runtime.file_origin.outbound_notify();
+    let file_browser_notify = runtime.file_browser.outbound_notify();
     let mut file_origin_expiry = tokio::time::interval(Duration::from_secs(1));
     file_origin_expiry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut exit_connection_watchdog = tokio::time::interval(EXIT_CONNECTION_WATCHDOG_INTERVAL);
@@ -3215,6 +3220,10 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                 drive_pending_file_origin(runtime).await;
             }
 
+            _ = file_browser_notify.notified() => {
+                drive_pending_file_browser(runtime).await;
+            }
+
             _ = file_origin_retry => {
                 let now_unix_ms = unix_time_ms();
                 runtime.file_origin.expire(now_unix_ms);
@@ -3230,6 +3239,7 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                 let now_unix_ms = unix_time_ms();
                 runtime.file_origin.expire(now_unix_ms);
                 runtime.file_origin.queue_due_retries(now_unix_ms);
+                runtime.file_browser.expire(now_unix_ms);
                 drive_pending_file_origin(runtime).await;
             }
 
@@ -3697,6 +3707,68 @@ async fn publish_file_network_activity(runtime: &mut ClientRuntime) {
 /// epoch must still match the binding; the owner is checked independently as
 /// an active File-capable peer. The state machine keeps at most one outstanding
 /// request per operation, so this pump remains bounded.
+async fn drive_pending_file_browser(runtime: &mut ClientRuntime) {
+    while let Some(outbound) = runtime.file_browser.pop_outbound() {
+        let now_unix_ms = unix_time_ms();
+        let FileNetworkFrame::Request { request_id, .. } = &outbound.frame else {
+            runtime
+                .file_browser
+                .fail_request(&[0; 16], "file_browse_invalid_request");
+            continue;
+        };
+        let request_id = *request_id;
+        if let Err(code) = authorize_file_origin_send(
+            runtime,
+            &outbound.peer,
+            Some(outbound.actor_access_epoch),
+            now_unix_ms,
+        )
+        .await
+        {
+            tracing::warn!(
+                peer = %outbound.peer.node_id,
+                request_id = ?request_id,
+                error_code = %code,
+                "File 目录浏览发送前授权复核失败"
+            );
+            runtime.file_browser.fail_request(&request_id, &code);
+            continue;
+        }
+        let encoded = match encode_file_network_frame(&outbound.frame) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                tracing::warn!(
+                    peer = %outbound.peer.node_id,
+                    request_id = ?request_id,
+                    "File 目录浏览帧编码失败: {error}"
+                );
+                runtime
+                    .file_browser
+                    .fail_request(&request_id, "file_browse_send_failed");
+                continue;
+            }
+        };
+        tracing::debug!(
+            peer = %outbound.peer.node_id,
+            request_id = ?request_id,
+            "File requester 发送目录浏览请求"
+        );
+        if let Err(error) = runtime
+            .send_file_network_payload(outbound.peer.virtual_ip, &encoded)
+            .await
+        {
+            tracing::debug!(
+                peer = %outbound.peer.node_id,
+                request_id = ?request_id,
+                "File 目录浏览帧发送失败: {error:#}"
+            );
+            runtime
+                .file_browser
+                .fail_request(&request_id, "file_browse_send_failed");
+        }
+    }
+}
+
 async fn drive_pending_file_origin(runtime: &mut ClientRuntime) {
     while let Some(outbound) = runtime.file_origin.pop_outbound() {
         let now_unix_ms = unix_time_ms();
@@ -3776,7 +3848,13 @@ async fn drive_pending_file_origin(runtime: &mut ClientRuntime) {
         }
     }
 
+    collect_file_origin_events(runtime);
+}
+
+fn collect_file_origin_events(runtime: &mut ClientRuntime) {
+    let now_unix_ms = unix_time_ms();
     for event in runtime.file_origin.drain_events() {
+        runtime.file_transfer_status.ingest(&event, now_unix_ms);
         log_file_origin_event(&event);
     }
 }
@@ -3963,6 +4041,63 @@ async fn complete_local_exit_drain(runtime: &mut ClientRuntime) {
     }
 }
 
+async fn start_runtime_file_directory_listing(
+    runtime: &mut ClientRuntime,
+    request: Box<ipc::ListFileDirectoryRequest>,
+    reply: &mut Option<tokio::sync::oneshot::Sender<Result<ipc::FileDirectoryListing, String>>>,
+) -> Result<(), String> {
+    let request = *request;
+    let peer_node_id =
+        NodeId::parse(request.peer).map_err(|_| "file_browse_peer_invalid".to_owned())?;
+    let share_id =
+        FileShareId::parse(request.share_id).map_err(|_| "file_browse_share_invalid".to_owned())?;
+    let path = if request.path.is_empty() {
+        SharedPath::root()
+    } else {
+        SharedPath::parse(request.path).map_err(|_| "file_browse_path_invalid".to_owned())?
+    };
+    let now_unix_ms = unix_time_ms();
+
+    let local_node_id = runtime.file_origin.local_node_id().clone();
+    let (local_member, _) = trusted_file_request_member(runtime, &local_node_id, now_unix_ms)
+        .await
+        .map_err(|response| file_network_error_code(&response).to_owned())?;
+
+    let Some(peer) = runtime.p2p.peer_route_by_node_id(&peer_node_id).await else {
+        return Err("file_browse_peer_unavailable".to_owned());
+    };
+    if peer.node_id != peer_node_id
+        || !runtime
+            .p2p
+            .has_established_session_by_ip(IpAddr::V6(peer.virtual_ip))
+            .await
+    {
+        return Err("file_browse_peer_unavailable".to_owned());
+    }
+    trusted_file_request_member(runtime, &peer_node_id, now_unix_ms)
+        .await
+        .map_err(|response| file_network_error_code(&response).to_owned())?;
+
+    let origin_peer = OriginPeer {
+        node_id: peer_node_id,
+        virtual_ip: peer.virtual_ip,
+    };
+    runtime
+        .file_browser
+        .start_list(
+            origin_peer,
+            local_member.member_access_epoch,
+            share_id,
+            path,
+            request.limit,
+            request.cursor,
+            now_unix_ms,
+            reply,
+        )
+        .map_err(|error| error.code().to_owned())?;
+    Ok(())
+}
+
 async fn start_runtime_file_origin_transfer(
     runtime: &mut ClientRuntime,
     request: Box<ipc::StartFileTransferRequest>,
@@ -4145,7 +4280,25 @@ async fn handle_runtime_command(
         }
         ipc::RuntimeCommand::StartFileTransfer { request, reply } => {
             let result = start_runtime_file_origin_transfer(runtime, request).await;
+            collect_file_origin_events(runtime);
             let _ = reply.send(result);
+            RuntimeCommandOutcome::Continue
+        }
+        ipc::RuntimeCommand::ListFileDirectory { request, reply } => {
+            let mut reply = Some(reply);
+            if let Err(code) =
+                start_runtime_file_directory_listing(runtime, request, &mut reply).await
+            {
+                if let Some(reply) = reply {
+                    let _ = reply.send(Err(code));
+                }
+            }
+            RuntimeCommandOutcome::Continue
+        }
+        ipc::RuntimeCommand::ListFileTransfers { reply } => {
+            collect_file_origin_events(runtime);
+            let statuses = runtime.file_transfer_status.list(unix_time_ms());
+            let _ = reply.send(Ok(statuses));
             RuntimeCommandOutcome::Continue
         }
         ipc::RuntimeCommand::CancelFileTransfer {
@@ -4154,6 +4307,7 @@ async fn handle_runtime_command(
             reply,
         } => {
             let result = cancel_runtime_file_origin_transfer(runtime, transfer_id, operation_id);
+            collect_file_origin_events(runtime);
             let _ = reply.send(result);
             RuntimeCommandOutcome::Continue
         }
@@ -4163,6 +4317,7 @@ async fn handle_runtime_command(
             reply,
         } => {
             let result = pause_runtime_file_origin_transfer(runtime, transfer_id, operation_id);
+            collect_file_origin_events(runtime);
             let _ = reply.send(result);
             RuntimeCommandOutcome::Continue
         }
@@ -4173,6 +4328,7 @@ async fn handle_runtime_command(
         } => {
             let result =
                 resume_runtime_file_origin_transfer(runtime, transfer_id, operation_id).await;
+            collect_file_origin_events(runtime);
             let _ = reply.send(result);
             RuntimeCommandOutcome::Continue
         }
@@ -5487,6 +5643,9 @@ async fn handle_file_network_frame(
                 trusted_file_request_member(runtime, &peer.node_id, now_unix_ms).await
             {
                 let code = file_network_error_code(&response);
+                runtime
+                    .file_browser
+                    .fail_request(&request_id, "file_browse_authorization_lost");
                 runtime.file_origin.fail_pending_request(
                     request_id,
                     now_unix_ms,
@@ -5497,8 +5656,24 @@ async fn handle_file_network_frame(
                     %src_ip,
                     request_id = ?request_id,
                     error_code = code,
-                    "File requester 响应授权复核失败，已失败关闭对应传输"
+                    "File requester 响应授权复核失败，已失败关闭对应请求"
                 );
+                return;
+            }
+            if runtime.file_browser.owns_request(&request_id) {
+                if let Err(error) =
+                    runtime
+                        .file_browser
+                        .handle_response(&peer, request_id, response, now_unix_ms)
+                {
+                    tracing::debug!(
+                        peer = %peer.node_id,
+                        %src_ip,
+                        request_id = ?request_id,
+                        error_code = error.code(),
+                        "File 目录浏览响应关联失败"
+                    );
+                }
                 return;
             }
             if let Err(error) =
@@ -5552,7 +5727,7 @@ fn file_network_request_ids(request: &FileNetworkRequest) -> Option<(TransferId,
         FileNetworkRequest::Resume { request } => {
             Some((request.transfer_id.clone(), request.operation_id.clone()))
         }
-        FileNetworkRequest::ReadMetadata { .. } => None,
+        FileNetworkRequest::ReadMetadata { .. } | FileNetworkRequest::ListDirectory { .. } => None,
     }
 }
 
@@ -5561,6 +5736,7 @@ fn file_network_request_kind(request: &FileNetworkRequest) -> &'static str {
         FileNetworkRequest::OpenUpload { .. } => "open_upload",
         FileNetworkRequest::OpenDownload { .. } => "open_download",
         FileNetworkRequest::ReadMetadata { .. } => "read_metadata",
+        FileNetworkRequest::ListDirectory { .. } => "list_directory",
         FileNetworkRequest::Resume { .. } => "resume",
         FileNetworkRequest::Pause { .. } => "pause",
         FileNetworkRequest::Cancel { .. } => "cancel",
@@ -5702,6 +5878,7 @@ fn file_network_response_kind(response: &FileNetworkResponse) -> &'static str {
     match response {
         FileNetworkResponse::Opened { .. } => "opened",
         FileNetworkResponse::Metadata { .. } => "metadata",
+        FileNetworkResponse::DirectoryEntries { .. } => "directory_entries",
         FileNetworkResponse::Progress { .. } => "progress",
         FileNetworkResponse::ChunkAccepted { .. } => "chunk_accepted",
         FileNetworkResponse::Completed { .. } => "completed",

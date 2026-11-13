@@ -21,6 +21,12 @@ use super::quota::{DirectoryUsage, QuotaScanLimits};
 
 pub const FILE_TEMP_DIRECTORY: &str = ".fuckipv6-tmp";
 
+/// A listing is deliberately capped below the owner's default quota scan
+/// limit. The adapter can request additional pages, but one request can never
+/// allocate an unbounded directory projection.
+pub const MAX_DIRECTORY_LIST_LIMIT: u32 = 256;
+pub const MAX_DIRECTORY_LIST_ENUMERATED_ENTRIES: usize = 100_000;
+
 /// User-safe metadata obtained from an anchored share path. The local root and
 /// any filesystem error details remain outside this projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +34,28 @@ pub struct LocalFileMetadata {
     pub is_directory: bool,
     pub size: u64,
     pub modified_at_unix_ms: Option<u64>,
+}
+
+/// One regular file or directory below an authorized shared directory. The
+/// filesystem adapter never returns symbolic links, special files, staging
+/// entries, or names that cannot be represented as a portable [`SharedPath`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalDirectoryEntry {
+    pub path: SharedPath,
+    pub is_directory: bool,
+    pub size: u64,
+    pub modified_at_unix_ms: Option<u64>,
+}
+
+/// A deterministic, bounded page of a shared directory. `next_cursor` is an
+/// opaque server-side offset and remains valid only while callers keep the
+/// same directory generation. Authorization is applied separately by the
+/// capability adapter to every entry in this page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalDirectoryListing {
+    pub entries: Vec<LocalDirectoryEntry>,
+    pub next_cursor: Option<String>,
+    pub truncated: bool,
 }
 
 /// Crashed uploads cannot outlive the network transfer TTL. Re-enabling a
@@ -300,6 +328,58 @@ impl LocalShareRoot {
             is_directory: metadata.is_dir(),
             size: metadata.len(),
             modified_at_unix_ms: metadata.modified().ok().and_then(unix_millis),
+        })
+    }
+
+    /// Enumerate one authorized shared directory without following symbolic
+    /// links or exposing the internal staging directory. Entries are sorted by
+    /// portable path so an opaque numeric cursor produces stable pages while
+    /// the adapter performs a fresh ACL check for every returned child.
+    pub fn list_directory(
+        &self,
+        path: &SharedPath,
+        limit: u32,
+        cursor: Option<&str>,
+    ) -> FileShareResult<LocalDirectoryListing> {
+        if limit == 0 || limit > MAX_DIRECTORY_LIST_LIMIT {
+            return Err(FileShareError::new(
+                FileShareErrorCode::PathRejected,
+                "directory listing limit is invalid",
+            ));
+        }
+        if !path.is_root() {
+            self.reject_root_io(path)?;
+        }
+        let directory = self.open_directory(path)?;
+        #[cfg(unix)]
+        let mut entries = enumerate_directory_unix(&directory, path)?;
+        #[cfg(not(unix))]
+        let mut entries = self.enumerate_directory_portable(path)?;
+        entries.sort_by(|left, right| left.path.as_str().cmp(right.path.as_str()));
+
+        let offset = match cursor {
+            Some(cursor) => cursor.parse::<usize>().map_err(|_| {
+                FileShareError::new(
+                    FileShareErrorCode::PathRejected,
+                    "directory listing cursor is invalid",
+                )
+            })?,
+            None => 0,
+        };
+        if offset > entries.len() {
+            return Err(FileShareError::new(
+                FileShareErrorCode::PathRejected,
+                "directory listing cursor is stale",
+            ));
+        }
+        let end = offset.saturating_add(limit as usize).min(entries.len());
+        let truncated = end < entries.len();
+        entries.truncate(end);
+        entries.drain(..offset);
+        Ok(LocalDirectoryListing {
+            entries,
+            next_cursor: truncated.then(|| end.to_string()),
+            truncated,
         })
     }
 
@@ -1078,6 +1158,195 @@ fn is_generated_temporary_name(name: &str) -> bool {
 }
 
 #[cfg(unix)]
+fn enumerate_directory_unix(
+    directory: &File,
+    parent: &SharedPath,
+) -> FileShareResult<Vec<LocalDirectoryEntry>> {
+    let stream = DirectoryStream::open(directory.as_raw_fd())?;
+    let directory_fd = unsafe { libc::dirfd(stream.0) };
+    if directory_fd < 0 {
+        return Err(FileShareError::io(
+            FileShareErrorCode::Io,
+            "shared directory descriptor is unavailable",
+            io::Error::last_os_error(),
+        ));
+    }
+
+    let mut entries = Vec::new();
+    let mut scanned = 0_usize;
+    loop {
+        clear_errno();
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            if let Some(error) = take_errno_error() {
+                return Err(FileShareError::io(
+                    FileShareErrorCode::Io,
+                    "shared directory could not be listed",
+                    error,
+                ));
+            }
+            break;
+        }
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        let name_bytes = name.to_bytes();
+        if name_bytes == b"." || name_bytes == b".." {
+            continue;
+        }
+        scanned = scanned.saturating_add(1);
+        if scanned > MAX_DIRECTORY_LIST_ENUMERATED_ENTRIES {
+            return Err(FileShareError::new(
+                FileShareErrorCode::ScanLimitExceeded,
+                "shared directory has too many entries to list safely",
+            ));
+        }
+        if parent.is_root() && name_bytes.eq_ignore_ascii_case(FILE_TEMP_DIRECTORY.as_bytes()) {
+            continue;
+        }
+        let Ok(name) = name.to_str() else {
+            continue;
+        };
+        let relative = if parent.is_root() {
+            name.to_owned()
+        } else {
+            format!("{}/{name}", parent.as_str())
+        };
+        let Ok(path) = SharedPath::parse(relative) else {
+            continue;
+        };
+
+        let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+        let stat_result = unsafe {
+            libc::fstatat(
+                directory_fd,
+                (*entry).d_name.as_ptr(),
+                &mut metadata,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if stat_result != 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::NotFound {
+                continue;
+            }
+            return Err(FileShareError::io(
+                FileShareErrorCode::Io,
+                "shared directory entry could not be inspected safely",
+                error,
+            ));
+        }
+        let file_type = metadata.st_mode & libc::S_IFMT;
+        if !matches!(file_type, libc::S_IFREG | libc::S_IFDIR) {
+            continue;
+        }
+        entries.push(LocalDirectoryEntry {
+            path,
+            is_directory: file_type == libc::S_IFDIR,
+            size: if file_type == libc::S_IFREG {
+                u64::try_from(metadata.st_size).unwrap_or(0)
+            } else {
+                0
+            },
+            modified_at_unix_ms: stat_modified_at_unix_ms(&metadata),
+        });
+    }
+    Ok(entries)
+}
+
+#[cfg(unix)]
+fn stat_modified_at_unix_ms(metadata: &libc::stat) -> Option<u64> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let (seconds, nanos) = (metadata.st_mtime, metadata.st_mtime_nsec);
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    let (seconds, nanos) = (metadata.st_mtimespec.tv_sec, metadata.st_mtimespec.tv_nsec);
+    if seconds < 0 || !(0..1_000_000_000).contains(&nanos) {
+        return None;
+    }
+    u64::try_from(seconds)
+        .ok()?
+        .checked_mul(1_000)?
+        .checked_add(u64::try_from(nanos).ok()? / 1_000_000)
+}
+
+#[cfg(not(unix))]
+impl LocalShareRoot {
+    fn enumerate_directory_portable(
+        &self,
+        path: &SharedPath,
+    ) -> FileShareResult<Vec<LocalDirectoryEntry>> {
+        let directory_path = if path.is_root() {
+            self.canonical_root.clone()
+        } else {
+            self.canonical_root.join(path.as_str())
+        };
+        let directory = fs::read_dir(&directory_path).map_err(|error| {
+            FileShareError::io(
+                FileShareErrorCode::Io,
+                "shared directory could not be listed",
+                error,
+            )
+        })?;
+        let mut entries = Vec::new();
+        let mut scanned = 0_usize;
+        for entry in directory {
+            let entry = entry.map_err(|error| {
+                FileShareError::io(
+                    FileShareErrorCode::Io,
+                    "shared directory entry could not be read",
+                    error,
+                )
+            })?;
+            scanned = scanned.saturating_add(1);
+            if scanned > MAX_DIRECTORY_LIST_ENUMERATED_ENTRIES {
+                return Err(FileShareError::new(
+                    FileShareErrorCode::ScanLimitExceeded,
+                    "shared directory has too many entries to list safely",
+                ));
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if path.is_root() && name.eq_ignore_ascii_case(FILE_TEMP_DIRECTORY) {
+                continue;
+            }
+            let relative = if path.is_root() {
+                name.to_owned()
+            } else {
+                format!("{}/{name}", path.as_str())
+            };
+            let Ok(shared_path) = SharedPath::parse(relative) else {
+                continue;
+            };
+            let metadata = fs::symlink_metadata(entry.path()).map_err(|error| {
+                FileShareError::io(
+                    FileShareErrorCode::Io,
+                    "shared directory entry could not be inspected safely",
+                    error,
+                )
+            })?;
+            if metadata.file_type().is_symlink() || (!metadata.is_file() && !metadata.is_dir()) {
+                continue;
+            }
+            entries.push(LocalDirectoryEntry {
+                path: shared_path,
+                is_directory: metadata.is_dir(),
+                size: if metadata.is_file() {
+                    metadata.len()
+                } else {
+                    0
+                },
+                modified_at_unix_ms: metadata.modified().ok().and_then(unix_millis),
+            });
+        }
+        // Re-probe and re-open the directory after enumeration so a replacement
+        // cannot turn a portable listing into an unanchored traversal.
+        self.open_directory(path)?;
+        self.probe()?;
+        Ok(entries)
+    }
+}
+
+#[cfg(unix)]
 struct DirectoryStream(*mut libc::DIR);
 
 #[cfg(unix)]
@@ -1172,7 +1441,7 @@ fn scan_directory_unix(
         let stat_result = unsafe {
             libc::fstatat(
                 directory_fd,
-                name.as_ptr(),
+                (*entry).d_name.as_ptr(),
                 &mut metadata,
                 libc::AT_SYMLINK_NOFOLLOW,
             )
@@ -1761,6 +2030,103 @@ mod tests {
             .open_write_new(&path)
             .expect_err("existing file must not be replaced");
         assert_eq!(error.code(), FileShareErrorCode::TargetExists);
+    }
+
+    #[test]
+    fn directory_listing_is_sorted_bounded_and_hides_staging() {
+        let (temporary, share) = root();
+        fs::create_dir(temporary.path().join("docs")).expect("directory");
+        fs::write(temporary.path().join("a.txt"), b"alpha").expect("file");
+        fs::write(temporary.path().join("z.txt"), b"zulu").expect("file");
+        let staging = temporary.path().join(FILE_TEMP_DIRECTORY);
+        fs::create_dir(&staging).expect("staging");
+        fs::write(staging.join("partial"), b"hidden").expect("staged file");
+
+        let first = share
+            .list_directory(&SharedPath::root(), 2, None)
+            .expect("first page");
+        assert_eq!(
+            first
+                .entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a.txt", "docs"]
+        );
+        assert!(first.truncated);
+        let cursor = first.next_cursor.expect("next cursor");
+
+        let second = share
+            .list_directory(&SharedPath::root(), 2, Some(&cursor))
+            .expect("second page");
+        assert_eq!(
+            second
+                .entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["z.txt"]
+        );
+        assert!(!second.truncated);
+        assert!(second
+            .entries
+            .iter()
+            .all(|entry| !entry.path.as_str().contains(FILE_TEMP_DIRECTORY)));
+        assert_eq!(second.entries[0].size, 4);
+    }
+
+    #[test]
+    fn directory_listing_handles_nested_paths_and_rejects_bad_cursors() {
+        let (temporary, share) = root();
+        fs::create_dir_all(temporary.path().join("docs/private")).expect("directories");
+        fs::write(temporary.path().join("docs/readme.md"), b"readme").expect("file");
+
+        let listing = share
+            .list_directory(&SharedPath::parse("docs").expect("path"), 16, None)
+            .expect("listing");
+        assert_eq!(listing.entries.len(), 2);
+        assert_eq!(listing.entries[0].path.as_str(), "docs/private");
+        assert!(listing.entries[0].is_directory);
+        assert_eq!(listing.entries[1].path.as_str(), "docs/readme.md");
+        assert!(share
+            .list_directory(&SharedPath::parse("docs").expect("path"), 16, Some("999"),)
+            .is_err());
+        assert!(share.list_directory(&SharedPath::root(), 0, None).is_err());
+        assert!(share
+            .list_directory(&SharedPath::root(), MAX_DIRECTORY_LIST_LIMIT + 1, None)
+            .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_listing_skips_links_special_files_and_non_utf8_names() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let (temporary, share) = root();
+        let outside = tempfile::tempdir().expect("outside");
+        fs::write(outside.path().join("secret"), b"secret").expect("outside file");
+        std::os::unix::fs::symlink(outside.path(), temporary.path().join("outside-link"))
+            .expect("symlink");
+        std::os::unix::fs::symlink(
+            outside.path().join("secret"),
+            temporary.path().join("secret-link"),
+        )
+        .expect("file symlink");
+        fs::write(
+            temporary
+                .path()
+                .join(OsString::from_vec(vec![b'b', b'a', b'd', 0xff])),
+            b"invalid",
+        )
+        .expect("non-utf8 file");
+        fs::write(temporary.path().join("visible.txt"), b"visible").expect("visible file");
+
+        let listing = share
+            .list_directory(&SharedPath::root(), 16, None)
+            .expect("listing");
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!(listing.entries[0].path.as_str(), "visible.txt");
     }
 
     #[test]

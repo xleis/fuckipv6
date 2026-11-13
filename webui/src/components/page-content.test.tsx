@@ -35,6 +35,9 @@ const activityPage = manifest.pages.find(
 const settingsPage = manifest.pages.find(
   (page) => page.id === "settings",
 ) as NodeUiPage;
+const filesPage = manifest.pages.find(
+  (page) => page.id === "files",
+) as NodeUiPage;
 const exitNodePage = manifest.pages.find(
   (page) => page.id === "exit_node",
 ) as NodeUiPage;
@@ -383,6 +386,63 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe("File page wiring", () => {
+  it("routes the canonical files page to the File workspace", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      const payloads: Record<string, unknown> = {
+        "/api/v1/file/targets": [
+          {
+            peer: "node_file_peer",
+            network_id: "net_home",
+            network_name: "home",
+            share_id: "share_home",
+          },
+        ],
+        "/api/v1/file/directory": {
+          entries: [],
+          next_cursor: null,
+          truncated: false,
+        },
+        "/api/v1/file/transfers": [],
+      };
+      const payload = payloads[url.pathname];
+      if (payload === undefined) throw new Error(`unexpected request ${url}`);
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <PageContent
+        page={filesPage}
+        snapshot={baseSnapshot}
+        locale="zh-CN"
+        selectedNetwork="home"
+        recentDiagnostics={null}
+        onSelectNetwork={() => {}}
+        onNavigate={() => {}}
+        onRequestAction={() => {}}
+        onRunAction={async () => {}}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: translated("page.files") }),
+    ).toBeVisible();
+    expect(await screen.findByTestId("file-directory-empty")).toHaveTextContent(
+      translated("file.page.directory.empty"),
+    );
+    expect(await screen.findByTestId("file-transfers-empty")).toHaveTextContent(
+      translated("file.page.transfers.empty"),
+    );
+    expect(fetchMock).toHaveBeenCalled();
+  });
 });
 
 describe("administrator Exit governance", () => {

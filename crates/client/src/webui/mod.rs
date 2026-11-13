@@ -1,4 +1,5 @@
 pub mod controller;
+mod file_api;
 mod node_surface;
 mod owner_bootstrap;
 mod public_claim;
@@ -29,9 +30,10 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 pub use controller::{
     AppController, AppControllerError, AppUiState, BanRequest, ConnectRequest, CoordinatorPeerDto,
-    CoordinatorTrafficDto, HostRequest, LogsResponse, PeerUiInfo, RuntimeTrafficDto,
-    UnifiedSnapshotResponse, UpdateRoutingRequest,
+    CoordinatorTrafficDto, FilePeerTarget, HostRequest, LogsResponse, PeerUiInfo,
+    RuntimeTrafficDto, UnifiedSnapshotResponse, UpdateRoutingRequest,
 };
+use file_api::FileWebState;
 use fuckipv6_common::domain::{AuditExportFilter, PasskeyCredentialId};
 use fuckipv6_common::i18n::{LanguagePreference, Locale};
 use fuckipv6_coordinator::signaling::session::PeerSnapshot;
@@ -154,10 +156,35 @@ fn create_app_web_router_with_mutation_limiter(
         .route("/api/host", post(handle_host))
         .route("/api/stop_host", post(handle_stop_host))
         .route("/api/routing", post(handle_routing))
+        .route("/api/v1/file/targets", get(file_api::handle_targets))
+        .route("/api/v1/file/directory", get(file_api::handle_directory))
+        .route("/api/v1/file/transfers", get(file_api::handle_transfers))
+        .route("/api/v1/file/uploads", post(file_api::handle_upload))
+        .route(
+            "/api/v1/file/downloads",
+            post(file_api::handle_start_download),
+        )
+        .route(
+            "/api/v1/file/downloads/{token}",
+            get(file_api::handle_download),
+        )
+        .route(
+            "/api/v1/file/transfers/{transfer_id}/{operation_id}/pause",
+            post(file_api::handle_pause),
+        )
+        .route(
+            "/api/v1/file/transfers/{transfer_id}/{operation_id}/resume",
+            post(file_api::handle_resume),
+        )
+        .route(
+            "/api/v1/file/transfers/{transfer_id}/{operation_id}",
+            delete(file_api::handle_cancel),
+        )
         // 兼容接口
         .route("/api/coordinator/ban", post(handle_coordinator_ban))
         .route("/api/coordinator/unban", post(handle_coordinator_unban))
-        .with_state(controller);
+        .with_state(controller)
+        .layer(Extension(FileWebState::default()));
     let node_state = node_adapter.as_ref().map(NodeHttpAdapter::state_store);
     let protected = match node_adapter {
         Some(adapter) => protected.merge(adapter.router()),

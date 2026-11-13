@@ -18,8 +18,8 @@ use tracing::{debug, warn};
 use crate::file_share::FileOwnerService;
 use crate::file_share::FileTransferCommand;
 use crate::ipc::{
-    cancel_file_transfer, pause_file_transfer, resume_file_transfer, start_file_transfer,
-    MultiNetworkRegistry,
+    cancel_file_transfer, list_file_directory, list_file_transfers, pause_file_transfer,
+    resume_file_transfer, start_file_transfer, MultiNetworkRegistry,
 };
 use crate::local_ipc::{
     EndpointRole, FrameKind, IpcErrorCode, LocalConnection, LocalError, LocalEvent, LocalRequest,
@@ -663,6 +663,52 @@ async fn serve_connection(
                 };
                 match result {
                     Ok(response) => connection.send_response(&response).await?,
+                    Err(error) => {
+                        send_local_error(connection, LocalError::file_transfer(error)).await?;
+                    }
+                }
+            }
+            crate::local_ipc::LocalCommand::ListFileDirectory(request) => {
+                let Some(registry) = registry.as_ref() else {
+                    send_local_error(
+                        connection,
+                        LocalError::new(
+                            IpcErrorCode::Unsupported,
+                            "当前节点服务未启用 File 目录浏览控制面",
+                        ),
+                    )
+                    .await?;
+                    continue;
+                };
+                match list_file_directory(registry, Box::new(request)).await {
+                    Ok(listing) => {
+                        connection
+                            .send_response(&LocalResponse::FileDirectoryListing(Box::new(listing)))
+                            .await?;
+                    }
+                    Err(error) => {
+                        send_local_error(connection, LocalError::file_directory(error)).await?;
+                    }
+                }
+            }
+            crate::local_ipc::LocalCommand::ListFileTransfers => {
+                let Some(registry) = registry.as_ref() else {
+                    send_local_error(
+                        connection,
+                        LocalError::new(
+                            IpcErrorCode::Unsupported,
+                            "当前节点服务未启用 File 传输控制面",
+                        ),
+                    )
+                    .await?;
+                    continue;
+                };
+                match list_file_transfers(registry).await {
+                    Ok(statuses) => {
+                        connection
+                            .send_response(&LocalResponse::FileTransfers(statuses))
+                            .await?;
+                    }
                     Err(error) => {
                         send_local_error(connection, LocalError::file_transfer(error)).await?;
                     }

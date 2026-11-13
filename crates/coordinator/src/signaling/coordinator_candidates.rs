@@ -777,6 +777,35 @@ impl CoordinatorCandidateStore {
         Ok(network.members)
     }
 
+    /// Election events are control-plane traffic for current candidates only.
+    /// Membership is intersected again because a candidate may have been
+    /// removed after the administrator-signed configuration was admitted.
+    pub(crate) fn election_notification_recipients(
+        &self,
+        network_id: &NetworkId,
+    ) -> Result<Vec<NodeId>> {
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
+        self.ensure_parent()?;
+        let _file_lock = lock_candidate_file(&self.path)?;
+        let file = self.load_unlocked()?;
+        let network = read_network_record(&self.network_record_path, network_id)?;
+        let candidates = file
+            .networks
+            .get(network_id)
+            .and_then(|stored| stored.config.as_ref())
+            .map(|config| config.candidates.as_slice())
+            .unwrap_or_default();
+        Ok(candidates
+            .iter()
+            .map(|candidate| candidate.node_id.clone())
+            .filter(|candidate| network.members.contains(candidate))
+            .collect())
+    }
+
     pub fn audit_entries(&self) -> Result<Vec<AuditEntry>> {
         let _process_guard = self
             .process_lock
@@ -1727,6 +1756,31 @@ mod tests {
                 .unwrap_err()
                 .to_string(),
             "coordinator_candidate.error.revision_gap"
+        );
+    }
+
+    #[test]
+    fn election_notifications_target_only_current_candidates() {
+        let fixture = Fixture::new("election-notification-recipients");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+
+        let recipients = store
+            .election_notification_recipients(&fixture.network.network_id)
+            .unwrap();
+        assert_eq!(
+            recipients
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                NodeId::from_public_key(&fixture.candidate_one.public_key()),
+                NodeId::from_public_key(&fixture.candidate_two.public_key()),
+            ]
+            .into_iter()
+            .collect()
         );
     }
 

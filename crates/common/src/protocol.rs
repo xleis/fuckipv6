@@ -4,15 +4,15 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 use crate::domain::{
     ContentHash, CoordinatorCandidateConfig, CoordinatorCandidateDeclaration,
-    CoordinatorCandidateStatus, CoordinatorElectionProposal, CoordinatorElectionVote,
-    CoordinatorTerm, CoordinatorWriteCredential, ExitContributionAuthorizationSnapshot,
-    ExitContributionRequest, ExitContributionRequestId, ExitContributionRequestState,
-    ExitContributionReviewAction, InvitationCreateRequest, InvitationId, InvitationPreviewRequest,
-    InvitationRedeemRequest, InvitationRedemption, InvitationState, InvitationStatusView,
-    IssuedInvitation, JoinRequest, JoinRequestId, JoinRequestReviewAction, JoinRequestState,
-    MemberLifecycleChange, MemberLifecycleChangeRequest, MemberRemovalPreview,
-    MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview, NetworkJoinPreviewRequest,
-    NetworkMemberDirectory, NodeId,
+    CoordinatorCandidateStatus, CoordinatorElectionProposal, CoordinatorElectionStage,
+    CoordinatorElectionVote, CoordinatorTerm, CoordinatorWriteCredential,
+    ExitContributionAuthorizationSnapshot, ExitContributionRequest, ExitContributionRequestId,
+    ExitContributionRequestState, ExitContributionReviewAction, InvitationCreateRequest,
+    InvitationId, InvitationPreviewRequest, InvitationRedeemRequest, InvitationRedemption,
+    InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestId,
+    JoinRequestReviewAction, JoinRequestState, MemberLifecycleChange, MemberLifecycleChangeRequest,
+    MemberRemovalPreview, MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview,
+    NetworkJoinPreviewRequest, NetworkMemberDirectory, NodeId,
 };
 use crate::types::{ClientId, NatType, PeerInfo, RouteEntry, VirtualIps};
 
@@ -443,6 +443,13 @@ pub enum SignalingMessage {
     },
     CoordinatorElectionTimeoutAck {
         status: CoordinatorCandidateStatus,
+    },
+    /// Candidate-only notification that an election transitioned. The status
+    /// projection remains authoritative; runtimes must fetch it before voting.
+    CoordinatorElectionChanged {
+        network_id: NetworkId,
+        proposal_id: ContentHash,
+        stage: CoordinatorElectionStage,
     },
 }
 
@@ -1343,8 +1350,8 @@ mod tests {
     fn coordinator_candidate_messages_are_postcard_safe() -> anyhow::Result<()> {
         use crate::domain::{
             CoordinatorAuthority, CoordinatorCandidate, CoordinatorElectionProposal,
-            CoordinatorElectionVote, CoordinatorPhase, CoordinatorTerm, CoordinatorWriteCredential,
-            FencingToken,
+            CoordinatorElectionStage, CoordinatorElectionVote, CoordinatorPhase, CoordinatorTerm,
+            CoordinatorWriteCredential, FencingToken,
         };
 
         let identity = crate::Identity::generate()?;
@@ -1463,6 +1470,23 @@ mod tests {
         };
         assert_eq!(decoded_network_id, network_id);
         assert_eq!(decoded_proposal_id, proposal.proposal_id);
+
+        let decoded = assert_signaling_round_trip(SignalingMessage::CoordinatorElectionChanged {
+            network_id: network_id.clone(),
+            proposal_id: proposal.proposal_id.clone(),
+            stage: CoordinatorElectionStage::Voting,
+        })?;
+        let SignalingMessage::CoordinatorElectionChanged {
+            network_id: decoded_network_id,
+            proposal_id: decoded_proposal_id,
+            stage,
+        } = decoded
+        else {
+            panic!("expected coordinator election changed notification");
+        };
+        assert_eq!(decoded_network_id, network_id);
+        assert_eq!(decoded_proposal_id, proposal.proposal_id);
+        assert_eq!(stage, CoordinatorElectionStage::Voting);
 
         let vote = CoordinatorElectionVote::signed(
             network_id.clone(),

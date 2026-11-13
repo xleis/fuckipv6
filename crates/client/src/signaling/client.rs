@@ -2298,6 +2298,16 @@ fn signaling_message_to_event(msg: SignalingMessage) -> Option<SignalingEvent> {
             Some(SignalingEvent::CoordinatorCandidateStatusChanged { network_id })
         }
 
+        SignalingMessage::CoordinatorElectionChanged {
+            network_id,
+            proposal_id,
+            stage,
+        } => Some(SignalingEvent::CoordinatorElectionChanged {
+            network_id,
+            proposal_id,
+            stage,
+        }),
+
         SignalingMessage::MemberDirectoryList { .. }
         | SignalingMessage::MemberDirectoryListAck { .. }
         | SignalingMessage::JoinRequestSubmit { .. }
@@ -2428,6 +2438,14 @@ pub enum SignalingEvent {
     /// event carries only the network scope; consumers must fetch authoritative
     /// status instead of inferring a Leader.
     CoordinatorCandidateStatusChanged { network_id: NetworkId },
+
+    /// Candidate-only election transition. Runtime consumers must fetch
+    /// authoritative status before signing a vote or activating Leader duties.
+    CoordinatorElectionChanged {
+        network_id: NetworkId,
+        proposal_id: ContentHash,
+        stage: fuckipv6_common::domain::CoordinatorElectionStage,
+    },
 
     /// 错误
     Error { code: u16, message: String },

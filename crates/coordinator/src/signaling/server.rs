@@ -1128,7 +1128,8 @@ async fn handle_signaling_message(
         | SignalingMessage::CoordinatorTermLeaseRenewAck { .. }
         | SignalingMessage::CoordinatorElectionProposeAck { .. }
         | SignalingMessage::CoordinatorElectionVoteAck { .. }
-        | SignalingMessage::CoordinatorElectionTimeoutAck { .. } => {
+        | SignalingMessage::CoordinatorElectionTimeoutAck { .. }
+        | SignalingMessage::CoordinatorElectionChanged { .. } => {
             send_binary(
                 tx,
                 session_manager,
@@ -1198,6 +1199,31 @@ async fn broadcast_coordinator_candidate_status_changed(
     let recipients = store.notification_recipients(network_id)?;
     let message = SignalingMessage::CoordinatorCandidateStatusChanged {
         network_id: network_id.clone(),
+    };
+    for peer in session_manager.get_all_peers().await {
+        let node_id = NodeId::from_public_key(&peer.public_key);
+        if recipients.contains(&node_id) {
+            session_manager
+                .send_to_client(&peer.client_id, message.clone())
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn broadcast_coordinator_election_changed(
+    store: &CoordinatorCandidateStore,
+    session_manager: &SessionManager,
+    status: &fuckipv6_common::domain::CoordinatorCandidateStatus,
+) -> Result<()> {
+    let Some(election) = status.latest_election.as_ref() else {
+        return Ok(());
+    };
+    let recipients = store.election_notification_recipients(&status.network_id)?;
+    let message = SignalingMessage::CoordinatorElectionChanged {
+        network_id: status.network_id.clone(),
+        proposal_id: election.proposal.proposal_id.clone(),
+        stage: election.stage,
     };
     for peer in session_manager.get_all_peers().await {
         let node_id = NodeId::from_public_key(&peer.public_key);
@@ -1393,6 +1419,7 @@ async fn handle_coordinator_election_propose(
             )?;
             broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
                 .await?;
+            broadcast_coordinator_election_changed(store, session_manager, &status).await?;
         }
         Err(error) => {
             tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 选举提案");
@@ -1445,6 +1472,7 @@ async fn handle_coordinator_election_vote(
             )?;
             broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
                 .await?;
+            broadcast_coordinator_election_changed(store, session_manager, &status).await?;
         }
         Err(error) => {
             tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 选举投票");
@@ -1485,6 +1513,7 @@ async fn handle_coordinator_election_timeout(
             )?;
             broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
                 .await?;
+            broadcast_coordinator_election_changed(store, session_manager, &status).await?;
         }
         Err(error) => {
             tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 选举超时");

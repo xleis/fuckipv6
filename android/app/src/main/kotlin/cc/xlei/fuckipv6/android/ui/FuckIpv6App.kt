@@ -34,7 +34,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
@@ -44,8 +44,11 @@ import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FuckIpv6App(contracts: SharedContracts) {
-    val systemLocale = LocalConfiguration.current.locales[0] ?: Locale.getDefault()
+fun FuckIpv6App(
+    contracts: SharedContracts,
+    relay: RelayPageData? = null,
+) {
+    val systemLocale = LocalLocale.current.platformLocale
     val initialModule = contracts.navigation.modules.first()
     var selectedModuleId by rememberSaveable { mutableStateOf(initialModule.id) }
     var selectedPageId by rememberSaveable { mutableStateOf(initialModule.defaultPageId) }
@@ -119,6 +122,7 @@ fun FuckIpv6App(contracts: SharedContracts) {
                 pageId = selectedPageId,
                 state = unavailable,
                 modifier = Modifier.weight(1f),
+                relay = relay,
             )
         }
     }
@@ -143,6 +147,7 @@ fun PageContent(
     pageId: String,
     state: SurfaceState,
     modifier: Modifier = Modifier,
+    relay: RelayPageData? = null,
 ) {
     Column(
         modifier = modifier
@@ -156,7 +161,11 @@ fun PageContent(
             text = contracts.i18n.translate(locale, "page.$pageId"),
             style = MaterialTheme.typography.headlineSmall,
         )
-        SurfaceNotice(state = state, locale = locale, contracts = contracts)
+        if (pageId == "relay" && relay != null && relay.backendAvailable) {
+            RelayPageContent(contracts = contracts, locale = locale, data = relay)
+        } else {
+            SurfaceNotice(state = state, locale = locale, contracts = contracts)
+        }
     }
 }
 

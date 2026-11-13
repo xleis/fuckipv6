@@ -81,11 +81,15 @@ data class RelayGovernanceProjection(
 data class RelayHealthProjection(
     val statusKey: String,
     val lifecycleKey: String,
+    val reachabilityKey: String,
     val listenerBound: Boolean,
     val listenAddr: String?,
     val forwardingObserved: Boolean,
     val authorizationValid: Boolean,
     val quotaLimited: Boolean,
+    val observedAtUnixMs: Long?,
+    val reasonCode: String?,
+    val issueKeys: List<String>,
 ) {
     companion object {
         fun from(health: RelayHealthSnapshot): RelayHealthProjection {
@@ -94,11 +98,15 @@ data class RelayHealthProjection(
             return RelayHealthProjection(
                 statusKey = "relay.health.${health.status.wireName()}",
                 lifecycleKey = "relay.lifecycle.${health.lifecycle.wireName()}",
+                reachabilityKey = "relay.reachability.${health.network_reachability?.wireName() ?: "unknown"}",
                 listenerBound = health.listener_bound == true,
                 listenAddr = health.listen_addr,
                 forwardingObserved = health.forwarding_observed == true,
                 authorizationValid = health.authorization_valid == true,
                 quotaLimited = health.quota_limited == true,
+                observedAtUnixMs = health.observed_at_unix_ms,
+                reasonCode = health.reason_code,
+                issueKeys = health.issues.orEmpty().map { "relay.issue.${it.wireName()}" },
             )
         }
     }

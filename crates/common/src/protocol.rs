@@ -4,14 +4,15 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 use crate::domain::{
     ContentHash, CoordinatorCandidateConfig, CoordinatorCandidateDeclaration,
-    CoordinatorCandidateStatus, CoordinatorTerm, CoordinatorWriteCredential,
-    ExitContributionAuthorizationSnapshot, ExitContributionRequest, ExitContributionRequestId,
-    ExitContributionRequestState, ExitContributionReviewAction, InvitationCreateRequest,
-    InvitationId, InvitationPreviewRequest, InvitationRedeemRequest, InvitationRedemption,
-    InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestId,
-    JoinRequestReviewAction, JoinRequestState, MemberLifecycleChange, MemberLifecycleChangeRequest,
-    MemberRemovalPreview, MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview,
-    NetworkJoinPreviewRequest, NetworkMemberDirectory, NodeId,
+    CoordinatorCandidateStatus, CoordinatorElectionProposal, CoordinatorElectionVote,
+    CoordinatorTerm, CoordinatorWriteCredential, ExitContributionAuthorizationSnapshot,
+    ExitContributionRequest, ExitContributionRequestId, ExitContributionRequestState,
+    ExitContributionReviewAction, InvitationCreateRequest, InvitationId, InvitationPreviewRequest,
+    InvitationRedeemRequest, InvitationRedemption, InvitationState, InvitationStatusView,
+    IssuedInvitation, JoinRequest, JoinRequestId, JoinRequestReviewAction, JoinRequestState,
+    MemberLifecycleChange, MemberLifecycleChangeRequest, MemberRemovalPreview,
+    MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview, NetworkJoinPreviewRequest,
+    NetworkMemberDirectory, NodeId,
 };
 use crate::types::{ClientId, NatType, PeerInfo, RouteEntry, VirtualIps};
 
@@ -417,6 +418,30 @@ pub enum SignalingMessage {
         new_expires_at_unix_ms: u64,
     },
     CoordinatorTermLeaseRenewAck {
+        status: CoordinatorCandidateStatus,
+    },
+
+    // Coordinator election protocol. Appended after every earlier variant so
+    // postcard tags remain stable. Proposals and votes are independently
+    // signed; the Coordinator authenticates the transport actor as well.
+    CoordinatorElectionPropose {
+        proposal: CoordinatorElectionProposal,
+    },
+    CoordinatorElectionProposeAck {
+        status: CoordinatorCandidateStatus,
+    },
+    CoordinatorElectionVote {
+        proposal_id: ContentHash,
+        vote: CoordinatorElectionVote,
+    },
+    CoordinatorElectionVoteAck {
+        status: CoordinatorCandidateStatus,
+    },
+    CoordinatorElectionTimeout {
+        network_id: NetworkId,
+        proposal_id: ContentHash,
+    },
+    CoordinatorElectionTimeoutAck {
         status: CoordinatorCandidateStatus,
     },
 }
@@ -1317,8 +1342,9 @@ mod tests {
     #[test]
     fn coordinator_candidate_messages_are_postcard_safe() -> anyhow::Result<()> {
         use crate::domain::{
-            CoordinatorAuthority, CoordinatorCandidate, CoordinatorElectionVote, CoordinatorPhase,
-            CoordinatorTerm, CoordinatorWriteCredential, FencingToken,
+            CoordinatorAuthority, CoordinatorCandidate, CoordinatorElectionProposal,
+            CoordinatorElectionVote, CoordinatorPhase, CoordinatorTerm, CoordinatorWriteCredential,
+            FencingToken,
         };
 
         let identity = crate::Identity::generate()?;
@@ -1379,6 +1405,64 @@ mod tests {
             panic!("expected coordinator candidate declaration");
         };
         assert_eq!(decoded, declaration);
+
+        let proposal = CoordinatorElectionProposal::signed(
+            network_id.clone(),
+            1,
+            1,
+            vec![candidate_id.clone()],
+            100,
+            200,
+            &identity,
+        )?;
+        let decoded = assert_signaling_round_trip(SignalingMessage::CoordinatorElectionPropose {
+            proposal: proposal.clone(),
+        })?;
+        let SignalingMessage::CoordinatorElectionPropose {
+            proposal: decoded_proposal,
+        } = decoded
+        else {
+            panic!("expected coordinator election proposal");
+        };
+        assert_eq!(decoded_proposal, proposal);
+
+        let election_vote = CoordinatorElectionVote::signed(
+            network_id.clone(),
+            1,
+            1,
+            candidate_id.clone(),
+            vec![candidate_id.clone()],
+            100,
+            200,
+            &identity,
+        )?;
+        let decoded = assert_signaling_round_trip(SignalingMessage::CoordinatorElectionVote {
+            proposal_id: proposal.proposal_id.clone(),
+            vote: election_vote.clone(),
+        })?;
+        let SignalingMessage::CoordinatorElectionVote {
+            proposal_id,
+            vote: decoded_vote,
+        } = decoded
+        else {
+            panic!("expected coordinator election vote");
+        };
+        assert_eq!(proposal_id, proposal.proposal_id);
+        assert_eq!(decoded_vote, election_vote);
+
+        let decoded = assert_signaling_round_trip(SignalingMessage::CoordinatorElectionTimeout {
+            network_id: network_id.clone(),
+            proposal_id: proposal.proposal_id.clone(),
+        })?;
+        let SignalingMessage::CoordinatorElectionTimeout {
+            network_id: decoded_network_id,
+            proposal_id: decoded_proposal_id,
+        } = decoded
+        else {
+            panic!("expected coordinator election timeout");
+        };
+        assert_eq!(decoded_network_id, network_id);
+        assert_eq!(decoded_proposal_id, proposal.proposal_id);
 
         let vote = CoordinatorElectionVote::signed(
             network_id.clone(),

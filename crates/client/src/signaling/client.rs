@@ -2313,11 +2313,12 @@ mod tests {
     use super::*;
     use fuckipv6_common::domain::{
         CoordinatorAuthority, CoordinatorCandidateConfigState, CoordinatorCandidateStatus,
-        CoordinatorEmergencyState, CoordinatorLeaseState, CoordinatorPhase, CoordinatorTerm,
-        ExitContributionMode, ExitContributionObligation, ExitContributionScope, FencingToken,
-        MembershipRole, NetworkCreateProfile, NetworkJoinMode, NetworkRecord, NetworkVisibility,
-        NodeId, PublicKey,
+        CoordinatorElectionVote, CoordinatorEmergencyState, CoordinatorLeaseState,
+        CoordinatorPhase, CoordinatorTerm, ExitContributionMode, ExitContributionObligation,
+        ExitContributionScope, FencingToken, MembershipRole, NetworkCreateProfile, NetworkJoinMode,
+        NetworkRecord, NetworkVisibility, NodeId, PublicKey,
     };
+    use fuckipv6_common::Identity;
     use futures::SinkExt;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::net::TcpListener;
@@ -2325,13 +2326,28 @@ mod tests {
 
     fn coordinator_term(term: u64, fencing_token: u64, expires_at_unix_ms: u64) -> CoordinatorTerm {
         let network_id = NetworkId::from_public_key(b"coordinator-ack-network");
-        let leader = NodeId::from_public_key(b"coordinator-ack-leader");
+        let identity = Identity::generate().unwrap();
+        let leader = NodeId::from_public_key(&identity.public_key());
+        let voter = identity;
+        let vote = CoordinatorElectionVote::signed(
+            network_id.clone(),
+            1,
+            term,
+            leader.clone(),
+            vec![leader.clone()],
+            expires_at_unix_ms.saturating_sub(60_000),
+            expires_at_unix_ms,
+            &voter,
+        )
+        .unwrap();
         CoordinatorTerm {
             network_id,
             term,
             leader: leader.clone(),
             candidate_group: vec![leader.clone()],
+            candidate_config_revision: 1,
             majority_proof: vec![leader],
+            majority_votes: vec![vote],
             authority: CoordinatorAuthority::Full,
             phase: CoordinatorPhase::Stable,
             fencing_token: FencingToken(fencing_token),

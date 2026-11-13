@@ -1317,8 +1317,8 @@ mod tests {
     #[test]
     fn coordinator_candidate_messages_are_postcard_safe() -> anyhow::Result<()> {
         use crate::domain::{
-            CoordinatorAuthority, CoordinatorCandidate, CoordinatorPhase, CoordinatorTerm,
-            CoordinatorWriteCredential, FencingToken,
+            CoordinatorAuthority, CoordinatorCandidate, CoordinatorElectionVote, CoordinatorPhase,
+            CoordinatorTerm, CoordinatorWriteCredential, FencingToken,
         };
 
         let identity = crate::Identity::generate()?;
@@ -1380,12 +1380,24 @@ mod tests {
         };
         assert_eq!(decoded, declaration);
 
+        let vote = CoordinatorElectionVote::signed(
+            network_id.clone(),
+            1,
+            1,
+            candidate_id.clone(),
+            vec![candidate_id.clone()],
+            100,
+            200,
+            &identity,
+        )?;
         let term = CoordinatorTerm {
             network_id: network_id.clone(),
             term: 1,
             leader: candidate_id.clone(),
             candidate_group: vec![candidate_id.clone()],
+            candidate_config_revision: 1,
             majority_proof: vec![candidate_id.clone()],
+            majority_votes: vec![vote],
             authority: CoordinatorAuthority::Full,
             phase: CoordinatorPhase::Stable,
             fencing_token: FencingToken(1),

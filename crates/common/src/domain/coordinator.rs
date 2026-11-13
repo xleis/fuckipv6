@@ -44,6 +44,13 @@ pub const COORDINATOR_LEASE_RENEWAL_WINDOW_MS: u64 = 30_000;
 /// newly validated term rather than repeatedly renewing an old Leader.
 pub const COORDINATOR_MAX_LEASE_DURATION_MS: u64 = 5 * 60 * 1000;
 
+/// A vote is intentionally short-lived and cannot be replayed into a later
+/// election. The proof must remain valid for at least the term lease it backs.
+pub const COORDINATOR_ELECTION_VOTE_SCHEMA_VERSION: u16 = 1;
+pub const COORDINATOR_ELECTION_VOTE_MAX_VALIDITY_MS: u64 = 5 * 60 * 1000;
+
+const COORDINATOR_ELECTION_VOTE_SIGNING_DOMAIN: &[u8] = b"fuckipv6.coordinator-election-vote.v1\0";
+
 impl CoordinatorPhase {
     pub fn can_transition_to(self, target: Self) -> bool {
         matches!(
@@ -169,13 +176,199 @@ impl Default for CoordinatorLeaseStatus {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct CoordinatorElectionVotePayload<'a> {
+    schema_version: u16,
+    network_id: &'a NetworkId,
+    candidate_config_revision: u64,
+    term: u64,
+    leader: &'a NodeId,
+    candidate_group: &'a [NodeId],
+    voter: &'a NodeId,
+    voter_public_key: &'a PublicKey,
+    issued_at_unix_ms: u64,
+    expires_at_unix_ms: u64,
+}
+
+/// A candidate-signed vote for one exact term and Leader. The signature binds
+/// the network, candidate configuration revision, complete candidate group,
+/// Leader and validity interval so a vote cannot be replayed for another term.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct CoordinatorElectionVote {
+    pub schema_version: u16,
+    pub network_id: NetworkId,
+    pub candidate_config_revision: u64,
+    pub term: u64,
+    pub leader: NodeId,
+    pub candidate_group: Vec<NodeId>,
+    pub voter: NodeId,
+    pub voter_public_key: PublicKey,
+    pub issued_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+    pub signature: Signature,
+}
+
+impl CoordinatorElectionVote {
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed(
+        network_id: NetworkId,
+        candidate_config_revision: u64,
+        term: u64,
+        leader: NodeId,
+        candidate_group: Vec<NodeId>,
+        issued_at_unix_ms: u64,
+        expires_at_unix_ms: u64,
+        voter: &Identity,
+    ) -> DomainResult<Self> {
+        let mut vote = Self {
+            schema_version: COORDINATOR_ELECTION_VOTE_SCHEMA_VERSION,
+            network_id,
+            candidate_config_revision,
+            term,
+            leader,
+            candidate_group,
+            voter: NodeId::from_public_key(&voter.public_key()),
+            voter_public_key: PublicKey::from_bytes(voter.public_key_bytes()),
+            issued_at_unix_ms,
+            expires_at_unix_ms,
+            signature: Signature::from_bytes([0; 64]),
+        };
+        vote.validate_structure()?;
+        let signature = voter.sign(&vote.signing_payload()?);
+        vote.signature = Signature::from_bytes(signature.to_bytes());
+        vote.validate_definition()?;
+        Ok(vote)
+    }
+
+    fn payload(&self) -> CoordinatorElectionVotePayload<'_> {
+        CoordinatorElectionVotePayload {
+            schema_version: self.schema_version,
+            network_id: &self.network_id,
+            candidate_config_revision: self.candidate_config_revision,
+            term: self.term,
+            leader: &self.leader,
+            candidate_group: &self.candidate_group,
+            voter: &self.voter,
+            voter_public_key: &self.voter_public_key,
+            issued_at_unix_ms: self.issued_at_unix_ms,
+            expires_at_unix_ms: self.expires_at_unix_ms,
+        }
+    }
+
+    pub fn signing_payload(&self) -> DomainResult<Vec<u8>> {
+        let encoded = serde_json::to_vec(&self.payload()).map_err(|error| {
+            DomainError::invalid_value(format!(
+                "coordinator election vote is not serializable: {error}"
+            ))
+        })?;
+        let mut payload =
+            Vec::with_capacity(COORDINATOR_ELECTION_VOTE_SIGNING_DOMAIN.len() + encoded.len());
+        payload.extend_from_slice(COORDINATOR_ELECTION_VOTE_SIGNING_DOMAIN);
+        payload.extend_from_slice(&encoded);
+        Ok(payload)
+    }
+
+    pub fn verify_signature(&self) -> DomainResult<()> {
+        let public_key = self.voter_public_key.to_bytes()?;
+        if NodeId::from_public_key(&public_key) != self.voter {
+            return Err(DomainError::new(
+                "domain.coordinator_election_voter_mismatch",
+                "coordinator election vote voter does not match its public key",
+            ));
+        }
+        let signature = self.signature.to_bytes()?;
+        if !Identity::verify(&public_key, &self.signing_payload()?, signature.as_slice()) {
+            return Err(DomainError::new(
+                "domain.invalid_signature",
+                "coordinator election vote signature is invalid",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_structure(&self) -> DomainResult<()> {
+        if self.schema_version != COORDINATOR_ELECTION_VOTE_SCHEMA_VERSION {
+            return Err(DomainError::invalid_value(
+                "unsupported coordinator election vote schema",
+            ));
+        }
+        if self.candidate_config_revision == 0 || self.term == 0 {
+            return Err(DomainError::invalid_value(
+                "coordinator election config revision and term must be positive",
+            ));
+        }
+        if self.issued_at_unix_ms >= self.expires_at_unix_ms {
+            return Err(DomainError::invalid_value(
+                "coordinator election vote validity interval is empty",
+            ));
+        }
+        if self.expires_at_unix_ms - self.issued_at_unix_ms
+            > COORDINATOR_ELECTION_VOTE_MAX_VALIDITY_MS
+        {
+            return Err(DomainError::invalid_value(
+                "coordinator election vote validity exceeds the maximum lease",
+            ));
+        }
+        let candidates = self.candidate_group.iter().collect::<BTreeSet<_>>();
+        if candidates.is_empty() || candidates.len() != self.candidate_group.len() {
+            return Err(DomainError::invalid_value(
+                "coordinator election candidate group must be non-empty and unique",
+            ));
+        }
+        if !candidates.contains(&self.leader) {
+            return Err(DomainError::invalid_value(
+                "coordinator election Leader must belong to the candidate group",
+            ));
+        }
+        if !candidates.contains(&self.voter) {
+            return Err(DomainError::invalid_value(
+                "coordinator election voter must belong to the candidate group",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn validate_definition(&self) -> DomainResult<()> {
+        self.validate_structure()?;
+        self.verify_signature()
+    }
+
+    pub fn validate_for_term(&self, term: &CoordinatorTerm) -> DomainResult<()> {
+        self.validate_definition()?;
+        if self.network_id != term.network_id
+            || self.candidate_config_revision != term.candidate_config_revision
+            || self.term != term.term
+            || self.leader != term.leader
+            || self.candidate_group.iter().collect::<BTreeSet<_>>()
+                != term.candidate_group.iter().collect::<BTreeSet<_>>()
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_election_vote_mismatch",
+                "coordinator election vote does not match the term",
+            ));
+        }
+        if self.issued_at_unix_ms > term.issued_at_unix_ms
+            || self.expires_at_unix_ms < term.expires_at_unix_ms
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_election_vote_expiry",
+                "coordinator election vote does not cover the term lease",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct CoordinatorTerm {
     pub network_id: NetworkId,
     pub term: u64,
     pub leader: NodeId,
     pub candidate_group: Vec<NodeId>,
+    pub candidate_config_revision: u64,
     pub majority_proof: Vec<NodeId>,
+    #[serde(default)]
+    pub majority_votes: Vec<CoordinatorElectionVote>,
     pub authority: CoordinatorAuthority,
     pub phase: CoordinatorPhase,
     pub fencing_token: FencingToken,
@@ -188,6 +381,11 @@ impl CoordinatorTerm {
         if self.term == 0 || self.fencing_token.0 == 0 {
             return Err(DomainError::invalid_value(
                 "coordinator term and fencing token must be positive",
+            ));
+        }
+        if self.candidate_config_revision == 0 {
+            return Err(DomainError::invalid_value(
+                "coordinator term candidate configuration revision must be positive",
             ));
         }
         if self.issued_at_unix_ms >= self.expires_at_unix_ms {
@@ -206,9 +404,29 @@ impl CoordinatorTerm {
                 "coordinator leader must belong to the candidate group",
             ));
         }
+        if self.majority_votes.is_empty() {
+            return Err(DomainError::invariant(
+                "coordinator majority proof is empty",
+            ));
+        }
+        let mut voters = BTreeSet::new();
+        for vote in &self.majority_votes {
+            vote.validate_for_term(self)?;
+            if !voters.insert(vote.voter.clone()) {
+                return Err(DomainError::invariant(
+                    "coordinator majority proof contains a duplicate voter",
+                ));
+            }
+        }
+        if !voters.contains(&self.leader) {
+            return Err(DomainError::invariant(
+                "coordinator Leader must vote for its own term",
+            ));
+        }
         let proofs: BTreeSet<_> = self.majority_proof.iter().collect();
         if proofs.len() != self.majority_proof.len()
             || proofs.iter().any(|node| !candidates.contains(node))
+            || proofs != voters.iter().collect()
             || proofs.len() <= candidates.len() / 2
         {
             return Err(DomainError::invariant(
@@ -297,6 +515,12 @@ impl CoordinatorTerm {
         if self.network_id != config.network_id {
             return Err(DomainError::invariant(
                 "coordinator term belongs to another network",
+            ));
+        }
+        if self.candidate_config_revision != config.revision {
+            return Err(DomainError::new(
+                "domain.coordinator_term_candidate_config_revision_mismatch",
+                "coordinator term does not bind the active candidate configuration revision",
             ));
         }
         let configured = config
@@ -1115,47 +1339,300 @@ impl CoordinatorCandidateStatus {
 mod tests {
     use super::*;
 
-    fn term(term: u64, token: u64, leader: NodeId) -> CoordinatorTerm {
-        let first = NodeId::from_public_key(b"candidate-1");
-        let second = NodeId::from_public_key(b"candidate-2");
-        CoordinatorTerm {
-            network_id: NetworkId::from_public_key(b"network"),
-            term,
-            leader,
-            candidate_group: vec![first.clone(), second.clone()],
-            majority_proof: vec![first, second],
-            authority: CoordinatorAuthority::Full,
-            phase: CoordinatorPhase::Stable,
-            fencing_token: FencingToken(token),
-            issued_at_unix_ms: 10,
-            expires_at_unix_ms: 1_000,
+    struct TermFixture {
+        network_id: NetworkId,
+        candidate_one: Identity,
+        candidate_two: Identity,
+    }
+
+    impl TermFixture {
+        fn new() -> Self {
+            Self {
+                network_id: NetworkId::from_public_key(b"coordinator-election-test-network"),
+                candidate_one: Identity::generate().unwrap(),
+                candidate_two: Identity::generate().unwrap(),
+            }
+        }
+
+        fn candidate_group(&self) -> Vec<NodeId> {
+            vec![
+                NodeId::from_public_key(&self.candidate_one.public_key()),
+                NodeId::from_public_key(&self.candidate_two.public_key()),
+            ]
+        }
+
+        fn term(&self, term: u64, token: u64, leader: &Identity) -> CoordinatorTerm {
+            self.term_with_window(term, token, leader, 10, 1_000)
+        }
+
+        fn term_with_window(
+            &self,
+            term: u64,
+            token: u64,
+            leader: &Identity,
+            issued_at_unix_ms: u64,
+            expires_at_unix_ms: u64,
+        ) -> CoordinatorTerm {
+            let leader = NodeId::from_public_key(&leader.public_key());
+            let candidate_group = self.candidate_group();
+            let majority_votes = [&self.candidate_one, &self.candidate_two]
+                .into_iter()
+                .map(|voter| {
+                    CoordinatorElectionVote::signed(
+                        self.network_id.clone(),
+                        1,
+                        term,
+                        leader.clone(),
+                        candidate_group.clone(),
+                        issued_at_unix_ms,
+                        expires_at_unix_ms,
+                        voter,
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            CoordinatorTerm {
+                network_id: self.network_id.clone(),
+                term,
+                leader,
+                candidate_group,
+                candidate_config_revision: 1,
+                majority_proof: majority_votes
+                    .iter()
+                    .map(|vote| vote.voter.clone())
+                    .collect(),
+                majority_votes,
+                authority: CoordinatorAuthority::Full,
+                phase: CoordinatorPhase::Stable,
+                fencing_token: FencingToken(token),
+                issued_at_unix_ms,
+                expires_at_unix_ms,
+            }
         }
     }
 
     #[test]
     fn majority_proof_and_leader_are_checked() {
-        let leader = NodeId::from_public_key(b"candidate-1");
-        let mut valid = term(1, 1, leader.clone());
+        let fixture = TermFixture::new();
+        let mut valid = fixture.term(1, 1, &fixture.candidate_one);
         valid.validate_at(100).unwrap();
         valid.majority_proof.clear();
         assert!(valid.validate_at(100).is_err());
 
-        let outsider = NodeId::from_public_key(b"outsider");
-        let mut invalid = term(1, 1, outsider);
-        invalid.majority_proof = vec![NodeId::from_public_key(b"candidate-1")];
+        let mut invalid = fixture.term(1, 1, &fixture.candidate_one);
+        invalid.leader = NodeId::from_public_key(b"outsider");
         assert!(invalid.validate_at(100).is_err());
     }
 
     #[test]
+    fn election_votes_reject_forgery_and_impersonation() {
+        let fixture = TermFixture::new();
+
+        let mut forged = fixture.term(1, 1, &fixture.candidate_one);
+        forged.majority_votes[0].signature = Signature::from_bytes([0; 64]);
+        assert_eq!(
+            forged.validate_at(100).unwrap_err().code(),
+            "domain.invalid_signature"
+        );
+
+        let mut impersonated = fixture.term(1, 1, &fixture.candidate_one);
+        impersonated.majority_votes[0].voter_public_key =
+            PublicKey::from_bytes(fixture.candidate_two.public_key_bytes());
+        assert_eq!(
+            impersonated.validate_at(100).unwrap_err().code(),
+            "domain.coordinator_election_voter_mismatch"
+        );
+    }
+
+    #[test]
+    fn election_votes_require_unique_voters_and_matching_proof() {
+        let fixture = TermFixture::new();
+
+        let mut duplicate = fixture.term(1, 1, &fixture.candidate_one);
+        duplicate
+            .majority_votes
+            .push(duplicate.majority_votes[0].clone());
+        assert_eq!(
+            duplicate.validate_at(100).unwrap_err().code(),
+            "domain.invariant_violation"
+        );
+
+        let mut mismatched = fixture.term(1, 1, &fixture.candidate_one);
+        mismatched.majority_proof = vec![mismatched.leader.clone()];
+        assert_eq!(
+            mismatched.validate_at(100).unwrap_err().code(),
+            "domain.invariant_violation"
+        );
+
+        let mut self_appointed = fixture.term(1, 1, &fixture.candidate_one);
+        self_appointed.majority_proof = vec![fixture.candidate_group()[0].clone()];
+        self_appointed.majority_votes.remove(1);
+        assert_eq!(
+            self_appointed.validate_at(100).unwrap_err().code(),
+            "domain.invariant_violation"
+        );
+    }
+
+    #[test]
+    fn election_votes_bind_network_revision_term_leader_and_candidate_group() {
+        let fixture = TermFixture::new();
+        let leader = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_group = fixture.candidate_group();
+
+        let mut wrong_network = fixture.term(1, 1, &fixture.candidate_one);
+        wrong_network.majority_votes[0] = CoordinatorElectionVote::signed(
+            NetworkId::from_public_key(b"another-network"),
+            1,
+            1,
+            leader.clone(),
+            candidate_group.clone(),
+            10,
+            1_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        assert_eq!(
+            wrong_network.validate_at(100).unwrap_err().code(),
+            "domain.coordinator_election_vote_mismatch"
+        );
+
+        let mut wrong_revision = fixture.term(1, 1, &fixture.candidate_one);
+        wrong_revision.majority_votes[0] = CoordinatorElectionVote::signed(
+            fixture.network_id.clone(),
+            2,
+            1,
+            leader.clone(),
+            candidate_group.clone(),
+            10,
+            1_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        assert_eq!(
+            wrong_revision.validate_at(100).unwrap_err().code(),
+            "domain.coordinator_election_vote_mismatch"
+        );
+
+        let mut wrong_term = fixture.term(1, 1, &fixture.candidate_one);
+        wrong_term.majority_votes[0] = CoordinatorElectionVote::signed(
+            fixture.network_id.clone(),
+            1,
+            2,
+            leader.clone(),
+            candidate_group.clone(),
+            10,
+            1_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        assert_eq!(
+            wrong_term.validate_at(100).unwrap_err().code(),
+            "domain.coordinator_election_vote_mismatch"
+        );
+
+        let other_leader = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        let mut wrong_leader = fixture.term(1, 1, &fixture.candidate_one);
+        wrong_leader.majority_votes[0] = CoordinatorElectionVote::signed(
+            fixture.network_id.clone(),
+            1,
+            1,
+            other_leader,
+            candidate_group.clone(),
+            10,
+            1_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        assert_eq!(
+            wrong_leader.validate_at(100).unwrap_err().code(),
+            "domain.coordinator_election_vote_mismatch"
+        );
+
+        let mut wrong_group = fixture.term(1, 1, &fixture.candidate_one);
+        wrong_group.majority_votes[0] = CoordinatorElectionVote::signed(
+            fixture.network_id.clone(),
+            1,
+            1,
+            leader,
+            vec![fixture.candidate_group()[0].clone()],
+            10,
+            1_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        assert_eq!(
+            wrong_group.validate_at(100).unwrap_err().code(),
+            "domain.coordinator_election_vote_mismatch"
+        );
+    }
+
+    #[test]
+    fn election_vote_must_cover_the_term_lease_and_be_short_lived() {
+        let fixture = TermFixture::new();
+        let leader = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_group = fixture.candidate_group();
+
+        let mut expires_early = fixture.term(1, 1, &fixture.candidate_one);
+        expires_early.majority_votes[0] = CoordinatorElectionVote::signed(
+            fixture.network_id.clone(),
+            1,
+            1,
+            leader.clone(),
+            candidate_group.clone(),
+            10,
+            999,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        assert_eq!(
+            expires_early.validate_at(100).unwrap_err().code(),
+            "domain.coordinator_election_vote_expiry"
+        );
+
+        let mut issued_late = fixture.term(1, 1, &fixture.candidate_one);
+        issued_late.majority_votes[0] = CoordinatorElectionVote::signed(
+            fixture.network_id.clone(),
+            1,
+            1,
+            leader,
+            candidate_group,
+            11,
+            1_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        assert_eq!(
+            issued_late.validate_at(100).unwrap_err().code(),
+            "domain.coordinator_election_vote_expiry"
+        );
+
+        assert_eq!(
+            CoordinatorElectionVote::signed(
+                fixture.network_id.clone(),
+                1,
+                1,
+                NodeId::from_public_key(&fixture.candidate_one.public_key()),
+                fixture.candidate_group(),
+                10,
+                10 + COORDINATOR_ELECTION_VOTE_MAX_VALIDITY_MS + 1,
+                &fixture.candidate_one,
+            )
+            .unwrap_err()
+            .code(),
+            "domain.invalid_value"
+        );
+    }
+
+    #[test]
     fn stale_terms_and_fencing_tokens_are_rejected_after_recovery() {
-        let leader = NodeId::from_public_key(b"candidate-1");
-        let current = term(3, 30, leader.clone());
-        let stale = term(2, 20, leader.clone());
+        let fixture = TermFixture::new();
+        let current = fixture.term(3, 30, &fixture.candidate_one);
+        let stale = fixture.term(2, 20, &fixture.candidate_one);
         assert_eq!(
             current.validate_successor(&stale, 100).unwrap_err().code(),
             "domain.coordinator_term_rollback"
         );
-        let same_term = term(3, 31, NodeId::from_public_key(b"candidate-2"));
+        let same_term = fixture.term(3, 31, &fixture.candidate_two);
         assert_eq!(
             current
                 .validate_successor(&same_term, 100)
@@ -1163,7 +1640,7 @@ mod tests {
                 .code(),
             "domain.coordinator_term_conflict"
         );
-        let mut next = term(4, 30, leader);
+        let mut next = fixture.term(4, 30, &fixture.candidate_one);
         assert_eq!(
             current.validate_successor(&next, 100).unwrap_err().code(),
             "domain.fencing_token_rollback"
@@ -1174,8 +1651,8 @@ mod tests {
 
     #[test]
     fn emergency_leader_cannot_write_governance_or_promote_itself() {
-        let leader = NodeId::from_public_key(b"candidate-1");
-        let mut emergency = term(4, 40, leader);
+        let fixture = TermFixture::new();
+        let mut emergency = fixture.term(4, 40, &fixture.candidate_one);
         emergency.authority = CoordinatorAuthority::Emergency;
         emergency.phase = CoordinatorPhase::EmergencyLeader;
         assert!(emergency.allows_write(CoordinatorWriteKind::HealthCheck));
@@ -1194,8 +1671,8 @@ mod tests {
 
     #[test]
     fn emergency_handoff_keeps_governance_frozen_until_full_successor_recovers() {
-        let leader = NodeId::from_public_key(b"candidate-1");
-        let mut emergency = term(4, 40, leader.clone());
+        let fixture = TermFixture::new();
+        let mut emergency = fixture.term(4, 40, &fixture.candidate_one);
         emergency.authority = CoordinatorAuthority::Emergency;
         emergency.phase = CoordinatorPhase::EmergencyLeader;
 
@@ -1217,7 +1694,11 @@ mod tests {
             assert!(!emergency.allows_write(forbidden));
         }
 
-        let successor = term(emergency.term + 1, emergency.fencing_token.0 + 1, leader);
+        let successor = fixture.term(
+            emergency.term + 1,
+            emergency.fencing_token.0 + 1,
+            &fixture.candidate_one,
+        );
         emergency.validate_successor(&successor, 100).unwrap();
         assert_eq!(successor.authority, CoordinatorAuthority::Full);
         assert_eq!(successor.phase, CoordinatorPhase::Stable);
@@ -1233,8 +1714,8 @@ mod tests {
 
     #[test]
     fn illegal_phase_transitions_fail_closed() {
-        let leader = NodeId::from_public_key(b"candidate-1");
-        let mut coordinator = term(1, 1, leader);
+        let fixture = TermFixture::new();
+        let mut coordinator = fixture.term(1, 1, &fixture.candidate_one);
         assert!(coordinator
             .transition_phase(CoordinatorPhase::EmergencyLeader, 100)
             .is_err());
@@ -1260,8 +1741,8 @@ mod tests {
 
     #[test]
     fn expired_term_is_rejected() {
-        let leader = NodeId::from_public_key(b"candidate-1");
-        let coordinator = term(1, 1, leader);
+        let fixture = TermFixture::new();
+        let coordinator = fixture.term(1, 1, &fixture.candidate_one);
         assert_eq!(
             coordinator.validate_at(1_000).unwrap_err().code(),
             "domain.coordinator_term_expired"
@@ -1270,21 +1751,19 @@ mod tests {
 
     #[test]
     fn lease_projection_distinguishes_renewal_expiry_and_clock_skew() {
-        let leader = NodeId::from_public_key(b"candidate-1");
-        let mut coordinator = term(1, 1, leader);
-        coordinator.issued_at_unix_ms = 100_000;
-        coordinator.expires_at_unix_ms = 1_000_000;
+        let fixture = TermFixture::new();
+        let coordinator = fixture.term_with_window(1, 1, &fixture.candidate_one, 100_000, 400_000);
 
         assert_eq!(
             coordinator.lease_status_at(200_000).state,
             CoordinatorLeaseState::Active
         );
         assert_eq!(
-            coordinator.lease_status_at(980_000).state,
+            coordinator.lease_status_at(380_000).state,
             CoordinatorLeaseState::RenewalDue
         );
         assert_eq!(
-            coordinator.lease_status_at(1_000_000).state,
+            coordinator.lease_status_at(400_000).state,
             CoordinatorLeaseState::ReadOnly
         );
 
@@ -1300,17 +1779,22 @@ mod tests {
 
     #[test]
     fn stale_and_expired_write_credentials_fail_closed() {
-        let leader = NodeId::from_public_key(b"candidate-1");
-        let current = term(3, 30, leader.clone());
+        let fixture = TermFixture::new();
+        let current = fixture.term(3, 30, &fixture.candidate_one);
         let stale = CoordinatorWriteCredential {
             network_id: current.network_id.clone(),
             term: 2,
-            leader: leader.clone(),
+            leader: current.leader.clone(),
             fencing_token: FencingToken(30),
         };
         assert_eq!(
             current
-                .authorize_write(&leader, &stale, CoordinatorWriteKind::Membership, 100,)
+                .authorize_write(
+                    &current.leader,
+                    &stale,
+                    CoordinatorWriteKind::Membership,
+                    100,
+                )
                 .unwrap_err()
                 .code(),
             "domain.coordinator_term_rollback"
@@ -1319,7 +1803,7 @@ mod tests {
         let valid = CoordinatorWriteCredential {
             network_id: current.network_id.clone(),
             term: current.term,
-            leader,
+            leader: current.leader.clone(),
             fencing_token: current.fencing_token,
         };
         assert_eq!(
@@ -1338,8 +1822,9 @@ mod tests {
 
     #[test]
     fn emergency_authority_cannot_use_governance_credential() {
-        let leader = NodeId::from_public_key(b"candidate-1");
-        let mut emergency = term(4, 40, leader.clone());
+        let fixture = TermFixture::new();
+        let mut emergency = fixture.term(4, 40, &fixture.candidate_one);
+        let leader = emergency.leader.clone();
         emergency.authority = CoordinatorAuthority::Emergency;
         emergency.phase = CoordinatorPhase::EmergencyLeader;
         let credential = CoordinatorWriteCredential {
@@ -1796,10 +2281,31 @@ mod tests {
             CoordinatorCandidateWillingness::Willing,
             2_000,
         );
-        let mut latest_term = term(4, 40, candidate_one);
-        latest_term.network_id = fixture.network.network_id.clone();
-        latest_term.issued_at_unix_ms = 1_000;
-        latest_term.expires_at_unix_ms = 2_500;
+        let vote = CoordinatorElectionVote::signed(
+            fixture.network.network_id.clone(),
+            1,
+            4,
+            candidate_one.clone(),
+            vec![candidate_one.clone()],
+            1_000,
+            2_500,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        let latest_term = CoordinatorTerm {
+            network_id: fixture.network.network_id.clone(),
+            term: 4,
+            leader: candidate_one.clone(),
+            candidate_group: vec![candidate_one.clone()],
+            candidate_config_revision: 1,
+            majority_proof: vec![candidate_one],
+            majority_votes: vec![vote],
+            authority: CoordinatorAuthority::Full,
+            phase: CoordinatorPhase::Stable,
+            fencing_token: FencingToken(40),
+            issued_at_unix_ms: 1_000,
+            expires_at_unix_ms: 2_500,
+        };
         let status = CoordinatorCandidateStatus::assess(
             &fixture.network,
             Some(&config),

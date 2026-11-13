@@ -826,6 +826,72 @@
       ],
       "type": "string"
     },
+    "CoordinatorElectionVote": {
+      "description": "A candidate-signed vote for one exact term and Leader. The signature binds\nthe network, candidate configuration revision, complete candidate group,\nLeader and validity interval so a vote cannot be replayed for another term.",
+      "properties": {
+        "candidate_config_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "candidate_group": {
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "leader": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signature": {
+          "$ref": "#/$defs/Signature"
+        },
+        "term": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "voter": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "voter_public_key": {
+          "$ref": "#/$defs/PublicKey"
+        }
+      },
+      "required": [
+        "schema_version",
+        "network_id",
+        "candidate_config_revision",
+        "term",
+        "leader",
+        "candidate_group",
+        "voter",
+        "voter_public_key",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms",
+        "signature"
+      ],
+      "type": "object"
+    },
     "CoordinatorEmergencyState": {
       "enum": [
         "none",
@@ -937,6 +1003,11 @@
         "authority": {
           "$ref": "#/$defs/CoordinatorAuthority"
         },
+        "candidate_config_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "candidate_group": {
           "items": {
             "$ref": "#/$defs/NodeId"
@@ -965,6 +1036,13 @@
           },
           "type": "array"
         },
+        "majority_votes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CoordinatorElectionVote"
+          },
+          "type": "array"
+        },
         "network_id": {
           "$ref": "#/$defs/NetworkId"
         },
@@ -982,6 +1060,7 @@
         "term",
         "leader",
         "candidate_group",
+        "candidate_config_revision",
         "majority_proof",
         "authority",
         "phase",

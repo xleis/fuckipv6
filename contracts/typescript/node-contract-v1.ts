@@ -186,6 +186,20 @@ export type CoordinatorCandidateStatusEntry = {
 
 export type CoordinatorCandidateWillingness = "willing" | "unwilling";
 
+export type CoordinatorElectionVote = {
+  "candidate_config_revision": number;
+  "candidate_group": Array<NodeId>;
+  "expires_at_unix_ms": number;
+  "issued_at_unix_ms": number;
+  "leader": NodeId;
+  "network_id": NetworkId;
+  "schema_version": number;
+  "signature": Signature;
+  "term": number;
+  "voter": NodeId;
+  "voter_public_key": PublicKey;
+};
+
 export type CoordinatorEmergencyState = "none" | "no_candidates_configured" | "configuration_pending" | "configuration_expired" | "all_candidates_unavailable";
 
 export type CoordinatorLeaseState = "active" | "no_term" | "renewal_due" | "read_only";
@@ -208,12 +222,14 @@ export type CoordinatorPublicReachability = {
 
 export type CoordinatorTerm = {
   "authority": CoordinatorAuthority;
+  "candidate_config_revision": number;
   "candidate_group": Array<NodeId>;
   "expires_at_unix_ms": number;
   "fencing_token": FencingToken;
   "issued_at_unix_ms": number;
   "leader": NodeId;
   "majority_proof": Array<NodeId>;
+  "majority_votes"?: Array<CoordinatorElectionVote>;
   "network_id": NetworkId;
   "phase": CoordinatorPhase;
   "term": number;

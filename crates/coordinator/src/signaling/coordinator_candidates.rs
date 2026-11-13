@@ -730,6 +730,15 @@ impl CoordinatorCandidateStore {
         if new_expires_at_unix_ms > maximum_expiry {
             bail!("coordinator_term.error.lease_too_long");
         }
+        let election_expiry = current
+            .majority_votes
+            .iter()
+            .map(|vote| vote.expires_at_unix_ms)
+            .min()
+            .context("coordinator_term.error.election_vote_missing")?;
+        if new_expires_at_unix_ms > election_expiry {
+            bail!("coordinator_term.error.election_vote_expiry");
+        }
 
         let mut renewed = current.clone();
         renewed.expires_at_unix_ms = new_expires_at_unix_ms;
@@ -987,7 +996,7 @@ mod tests {
         CoordinatorCandidateWillingness, CoordinatorPhase, CoordinatorPublicReachability,
         ExitContributionMode, ExitContributionObligation, ExitContributionScope,
         ExitSelectionPolicy, FencingToken, NetworkCreateProfile, NetworkJoinMode,
-        NetworkVisibility, PublicKey,
+        NetworkVisibility, PublicKey, COORDINATOR_ELECTION_VOTE_MAX_VALIDITY_MS,
     };
     use fuckipv6_common::Identity;
     use std::sync::Arc;
@@ -1130,18 +1139,41 @@ mod tests {
             issued_at_unix_ms: u64,
             expires_at_unix_ms: u64,
         ) -> CoordinatorTerm {
+            let candidate_group = vec![
+                NodeId::from_public_key(&self.candidate_one.public_key()),
+                NodeId::from_public_key(&self.candidate_two.public_key()),
+            ];
+            let leader = NodeId::from_public_key(&leader.public_key());
+            let election_expiry = issued_at_unix_ms
+                .saturating_add(COORDINATOR_ELECTION_VOTE_MAX_VALIDITY_MS)
+                .max(expires_at_unix_ms);
+            let majority_votes = [&self.candidate_one, &self.candidate_two]
+                .into_iter()
+                .map(|voter| {
+                    fuckipv6_common::domain::CoordinatorElectionVote::signed(
+                        self.network.network_id.clone(),
+                        1,
+                        term,
+                        leader.clone(),
+                        candidate_group.clone(),
+                        issued_at_unix_ms,
+                        election_expiry,
+                        voter,
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
             CoordinatorTerm {
                 network_id: self.network.network_id.clone(),
                 term,
-                leader: NodeId::from_public_key(&leader.public_key()),
-                candidate_group: vec![
-                    NodeId::from_public_key(&self.candidate_one.public_key()),
-                    NodeId::from_public_key(&self.candidate_two.public_key()),
-                ],
-                majority_proof: vec![
-                    NodeId::from_public_key(&self.candidate_one.public_key()),
-                    NodeId::from_public_key(&self.candidate_two.public_key()),
-                ],
+                leader,
+                candidate_group,
+                candidate_config_revision: 1,
+                majority_proof: majority_votes
+                    .iter()
+                    .map(|vote| vote.voter.clone())
+                    .collect(),
+                majority_votes,
                 authority: CoordinatorAuthority::Full,
                 phase: CoordinatorPhase::Stable,
                 fencing_token: FencingToken(fencing_token),
@@ -1545,10 +1577,37 @@ mod tests {
             ],
         );
         store.update_config(&owner_id, 0, config_one, NOW).unwrap();
-        let mut term = fixture.term(1, 10, &fixture.candidate_one, NOW, NOW + 60_000);
-        term.leader = owner_id.clone();
-        term.candidate_group = vec![owner_id.clone(), candidate_one_id.clone()];
-        term.majority_proof = vec![owner_id.clone(), candidate_one_id.clone()];
+        let candidate_group = vec![owner_id.clone(), candidate_one_id.clone()];
+        let majority_votes = [&fixture.owner, &fixture.candidate_one]
+            .into_iter()
+            .map(|voter| {
+                fuckipv6_common::domain::CoordinatorElectionVote::signed(
+                    fixture.network.network_id.clone(),
+                    1,
+                    1,
+                    owner_id.clone(),
+                    candidate_group.clone(),
+                    NOW,
+                    NOW + COORDINATOR_ELECTION_VOTE_MAX_VALIDITY_MS,
+                    voter,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let term = CoordinatorTerm {
+            network_id: fixture.network.network_id.clone(),
+            term: 1,
+            leader: owner_id.clone(),
+            candidate_group,
+            candidate_config_revision: 1,
+            majority_proof: vec![owner_id.clone(), candidate_one_id.clone()],
+            majority_votes,
+            authority: fuckipv6_common::domain::CoordinatorAuthority::Full,
+            phase: fuckipv6_common::domain::CoordinatorPhase::Stable,
+            fencing_token: fuckipv6_common::domain::FencingToken(10),
+            issued_at_unix_ms: NOW,
+            expires_at_unix_ms: NOW + 60_000,
+        };
         let credential = fixture.credential(&term);
         store.install_term(&owner_id, term, NOW).unwrap();
 

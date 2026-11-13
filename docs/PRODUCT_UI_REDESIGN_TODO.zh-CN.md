@@ -3209,7 +3209,7 @@ GPUI 的 `relay_listener_detail_uses_authoritative_bound_state_and_address` 和 
 `cargo test -p fuckipv6-coordinator existing_session --lib`（5 passed）、
 `cargo test -p fuckipv6-client routing::recovery --lib`（18 passed）、
 `cargo clippy -p fuckipv6-client -p fuckipv6-common -p fuckipv6-coordinator --all-targets --all-features -- -D warnings`、
-`./scripts/check-contracts.sh`（DTO inventory 289）、WebUI `npm test -- --run`（23 files / 297 tests）、
+`./scripts/check-contracts.sh`（DTO inventory 289）、WebUI `npm test -- --run`（23 files / 299 tests）、
 `npm run typecheck`、`npm run lint`、`npm run build`、`cargo fmt --all -- --check` 和 `git diff --check`。
 平台不支持项通过注入 `io::ErrorKind::Unsupported` 验证的是解释状态和失败关闭，不是 Windows/macOS 实机验收。
 本证据覆盖 Linux 单 Relay 进程崩溃/重启后的监听与旧会话清理，以及单机 loopback 连接风暴、资源边界和

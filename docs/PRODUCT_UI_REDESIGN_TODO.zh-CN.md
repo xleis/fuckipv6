@@ -61,7 +61,7 @@
 | W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05 已完成：本机启停、贡献治理、管理员选择、分层健康与故障切换/撤权均有权威状态和自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收；两侧 Exit 可达、Peer 级统计映射和 W12-09 的 24 小时稳定性/自动清理仍待完成 |
 | W13 Relay | `[ ]` | P1 | W10 | 授权、配额、健康、回退 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
-| W15 File | `[~]` | P2 | W10 | 本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、WebUI 权威只读状态面、并发/速率/磁盘/扫描/审计上界已落地；Android File 表面、WebUI 内容浏览/传输、真实网络传输、跨平台竞态与性能/OS 资源基线仍未完成 |
+| W15 File | `[~]` | P2 | W10 | 本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、WebUI 权威只读状态面、并发/速率/磁盘/扫描/审计上界已落地；Linux 独立三节点真实网络传输与恢复验收已完成，Android File 表面、WebUI 内容浏览/传输、Windows/macOS 实机竞态与性能/OS 资源基线仍未完成 |
 | W16 Android | `[ ]` | P2 | W2,W4,W5,W7-W15 | Compose、VpnService、全能力 |
 | W17 跨平台硬化 | `[ ]` | P2 | W6-W16 | Linux/macOS/Windows 实机证据 |
 | W18 发布门禁 | `[ ]` | P0 | 全部 | 自动化、实测、安全和发布证据 |
@@ -3331,6 +3331,8 @@ Coordinator owner 节点和两个真实成员节点，通过 veth 建立真实 P
 `/tmp/w15-file.<UTC时间>.<PID>`。该结果覆盖 Linux 真实网络链路、撤权中断和完整 node supervisor 重启，不替代 Windows/macOS
 实机、WebUI/Android File 内容表面或跨平台性能验收。
 
+**补充（2026-11-13，恢复分片乱序 handoff 与最终 netns 复验）**：真实低带宽重启续传暴露出 Resume 响应应用后恢复块分片仍可能乱序到达。requester 现在从排队 Resume 请求开始到恢复块完整落地，只缓存同一 resume generation、同一 transfer chunk 的分片，并按从 resume offset 起的连续前缀 drain；缓存上限为一个 4 MiB transfer chunk 和 4,096 个分片。旧 generation 继续丢弃，重复、重叠、跳号和非恢复块仍失败关闭，避免放宽正常严格顺序校验。`resume_handoff_buffers_post_response_fragments_until_prefix_is_contiguous` 确定性覆盖“响应后第 3 片先到、第 1/2 片后到”。`cargo test -p fuckipv6-client --lib file_share::`（177 passed）、`cargo clippy -p fuckipv6-client --lib --tests -- -D warnings` 与 `cargo build --release` 均通过；基于 `d5cc4ca` 重新执行 `sudo -n scripts/test-w15-file-netns.sh`，完整验收 PASS，证据目录为 `/tmp/w15-file.20261113T115402Z.190353`。为消除 ACL 用例误报，验收脚本还固定撤销前带宽并把实际终止码 `file_capability_revoked` 纳入匹配（`9507a64`）。
+
 ### W15-04 canonicalize 与路径边界 `[~]`
 
 - [x] 所有路径在服务端规范化并验证位于共享根目录；
@@ -3513,7 +3515,7 @@ owner 本地共享文件不在失败路径中；owner 下载/上传侧撤权取�
 依次覆盖 capability 撤权、成员 epoch 撤权和 TTL 到期，后者记录 `file.transfer.interrupted` / `Failed`。上述断言同时核对稳定
 `reason_code` 与 `cleanup_code`。活动详情只包含 transfer/operation/share ID、方向、稳定原因、actor/network 和结果，不包含
 路径、文件名、文件内容、原始 OS 错误或凭据；序列化断言确认分享根路径和文件名不会进入活动记录。该证据覆盖数据面状态机和
-自动化活动发布，不代表真实双节点撤权或完整 node 服务重启已经演练，故 W15-07 继续保持 `[~]`。
+自动化活动发布；真实双节点撤权和完整 node supervisor 重启已由下方独立 netns 验收补充。
 
 **补充（2026-11-13，无未授权断点续传恢复）**：resume IPC 不再直接使用 journal 中的旧 binding 排队续传，而是在恢复前把
 binding 中的 requester `access_epoch` 与 requester 本地当前成员目录 epoch 比对，并独立验证 owner 仍在线、仍是有效成员且具备
@@ -3524,7 +3526,7 @@ requester 当前 epoch 比较，避免不同成员 epoch 偶然相同或不同�
 `restored_upload_with_revoked_epoch_fails_closed_without_resume_frame` 验证暂停上传跨进程状态恢复后遇到撤权 epoch 时源文件不变、
 无 outbound 帧且 paused journal 清空；`restored_download_with_revoked_epoch_removes_staging_without_resume_frame` 验证暂停下载恢复后
 遇到撤权 epoch 时删除 staging、不发布目标文件、无 outbound 帧且 journal 清空。两者均确认最终事件为
-`file_transfer_access_revoked`。该自动化证据覆盖 journal 恢复和发送边界，但仍不替代真实双节点撤权演练，因此 W15-07 保持 `[~]`。
+`file_transfer_access_revoked`。该自动化证据覆盖 journal 恢复和发送边界；真实双节点撤权演练已由下方独立 netns 验收补充。
 
 **补充（2026-11-13，owner 关闭与 ACL 重配置主动撤权）**：节点事件循环现在订阅本地 File capability epoch；owner 关闭能力或用新
 ACL 替换共享时，会在下一次 peer 帧之前主动调用 `cancel_all_for_authorization_loss`，取消上传和下载会话、释放并发 admission、

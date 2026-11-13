@@ -1313,6 +1313,9 @@ SH
     info "upload/download cancellation cleanup passed"
 
     info "revoking local ACLs during an active upload"
+    make_share_configuration "$config_low" full 512
+    configure_share "$config_low" enable-acl-rate
+    wait_for_file_state "$HOST_SOCK" "$WORK/host-file-acl.json" enabled 60 || fail "ACL-rate reconfigure did not settle"
     start_transfer "$NODE1_SOCK" acl-revoke "$HOST_NODE_ID" upload "$SHARE_ID" acl-revoke.bin "$NODE1_ACL_UPLOAD_SOURCE" 262144
     transfer_id=$STARTED_TRANSFER_ID
     operation_id=$STARTED_OPERATION_ID
@@ -1322,7 +1325,7 @@ SH
     make_share_configuration "$config_revoked" revoked 512
     configure_share "$config_revoked" revoke-acl
     terminal_line=$(wait_for_terminal_log "$WORK/node1/node.log" "$transfer_id" \
-        'file_transfer_(access_revoked|permission_revoked|session_unavailable|capability_revoked|send_failed)' 180) \
+        'file_(capability_revoked|transfer_(access_revoked|permission_revoked|session_unavailable|capability_revoked|send_failed))' 180) \
         || { tail -240 "$WORK/node1/node.log" >&2 || true; fail "ACL revocation did not terminate the active requester transfer"; }
     printf '%s\n' "$terminal_line" >"$WORK/acl-revoke-terminal.log"
     wait_for_upload_staging_absent 90 || fail "ACL revocation did not clean owner upload staging"

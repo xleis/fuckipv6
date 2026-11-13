@@ -44,6 +44,12 @@ pub const COORDINATOR_LEASE_RENEWAL_WINDOW_MS: u64 = 30_000;
 /// newly validated term rather than repeatedly renewing an old Leader.
 pub const COORDINATOR_MAX_LEASE_DURATION_MS: u64 = 5 * 60 * 1000;
 
+/// Emergency authority is deliberately much shorter than a normal Leader
+/// term. Every renewal is bounded by the same hard deadline so an isolated
+/// partition cannot turn temporary control into permanent governance.
+pub const COORDINATOR_EMERGENCY_LEASE_DURATION_MS: u64 = 30 * 1000;
+pub const COORDINATOR_EMERGENCY_MAX_DURATION_MS: u64 = 5 * 60 * 1000;
+
 /// A vote is intentionally short-lived and cannot be replayed into a later
 /// election. The proof must remain valid for at least the term lease it backs.
 pub const COORDINATOR_ELECTION_VOTE_SCHEMA_VERSION: u16 = 1;
@@ -1851,6 +1857,421 @@ pub enum CoordinatorEmergencyState {
     AllCandidatesUnavailable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinatorEmergencyLeaderState {
+    Active,
+    Expired,
+}
+
+/// A bounded, non-governance authority granted only after the Coordinator has
+/// observed every configured candidate offline. The leader is selected
+/// deterministically from online non-candidate members and cannot inherit or
+/// manufacture a normal term.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct CoordinatorEmergencyLeaderStatus {
+    pub network_id: NetworkId,
+    pub leader: NodeId,
+    pub emergency_epoch: u64,
+    pub candidate_config_revision: u64,
+    pub unavailable_candidates: Vec<NodeId>,
+    pub issued_at_unix_ms: u64,
+    pub expires_at_unix_ms: u64,
+    pub hard_expires_at_unix_ms: u64,
+    pub state: CoordinatorEmergencyLeaderState,
+    pub remaining_ms: u64,
+    pub runtime_coordination_allowed: bool,
+    pub governance_writable: bool,
+    pub data_plane_allowed: bool,
+    pub health_checks_allowed: bool,
+    pub allowed_writes: Vec<CoordinatorWriteKind>,
+}
+
+impl CoordinatorEmergencyLeaderStatus {
+    pub fn allowed_runtime_writes() -> Vec<CoordinatorWriteKind> {
+        vec![
+            CoordinatorWriteKind::PublishOwnTerm,
+            CoordinatorWriteKind::SyncLastPolicy,
+            CoordinatorWriteKind::ConnectionCoordination,
+            CoordinatorWriteKind::HealthCheck,
+            CoordinatorWriteKind::RejectStaleState,
+        ]
+    }
+
+    /// Issue one bounded emergency lease from an authoritative online-member
+    /// observation. Callers must only pass server-observed sessions; a client
+    /// assertion is not sufficient evidence that the candidate group is down.
+    pub fn issue(
+        network: &NetworkRecord,
+        config: &CoordinatorCandidateConfig,
+        online_members: &[NodeId],
+        emergency_epoch: u64,
+        issued_at_unix_ms: u64,
+    ) -> DomainResult<Self> {
+        if emergency_epoch == 0 {
+            return Err(DomainError::invalid_value(
+                "coordinator emergency epoch must be positive",
+            ));
+        }
+        Self::validate_observation_context(network, config, online_members, issued_at_unix_ms)?;
+        let leader = Self::select_leader(network, config, online_members)?;
+        let expires_at_unix_ms = issued_at_unix_ms
+            .checked_add(COORDINATOR_EMERGENCY_LEASE_DURATION_MS)
+            .ok_or_else(|| {
+                DomainError::invalid_value("coordinator emergency lease expiry overflowed")
+            })?;
+        let hard_expires_at_unix_ms = issued_at_unix_ms
+            .checked_add(COORDINATOR_EMERGENCY_MAX_DURATION_MS)
+            .ok_or_else(|| {
+                DomainError::invalid_value("coordinator emergency hard expiry overflowed")
+            })?;
+        let mut unavailable_candidates = config
+            .candidates
+            .iter()
+            .map(|candidate| candidate.node_id.clone())
+            .collect::<Vec<_>>();
+        unavailable_candidates.sort();
+        let status = Self {
+            network_id: network.network_id.clone(),
+            leader,
+            emergency_epoch,
+            candidate_config_revision: config.revision,
+            unavailable_candidates,
+            issued_at_unix_ms,
+            expires_at_unix_ms,
+            hard_expires_at_unix_ms,
+            state: CoordinatorEmergencyLeaderState::Active,
+            remaining_ms: COORDINATOR_EMERGENCY_LEASE_DURATION_MS,
+            runtime_coordination_allowed: true,
+            governance_writable: false,
+            data_plane_allowed: true,
+            health_checks_allowed: true,
+            allowed_writes: Self::allowed_runtime_writes(),
+        };
+        status.validate_definition()?;
+        Ok(status)
+    }
+
+    fn validate_observation_context(
+        network: &NetworkRecord,
+        config: &CoordinatorCandidateConfig,
+        online_members: &[NodeId],
+        now_unix_ms: u64,
+    ) -> DomainResult<()> {
+        config.validate_against_network(network)?;
+        if !config.is_effective_at(now_unix_ms) {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_config_unavailable",
+                "coordinator candidate configuration is not current",
+            ));
+        }
+        let candidates = config
+            .candidates
+            .iter()
+            .map(|candidate| &candidate.node_id)
+            .collect::<BTreeSet<_>>();
+        let online = online_members.iter().collect::<BTreeSet<_>>();
+        if online.iter().any(|node_id| candidates.contains(node_id)) {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_candidate_online",
+                "emergency coordination requires every candidate to be offline",
+            ));
+        }
+        Ok(())
+    }
+
+    fn select_leader(
+        network: &NetworkRecord,
+        config: &CoordinatorCandidateConfig,
+        online_members: &[NodeId],
+    ) -> DomainResult<NodeId> {
+        let candidates = config
+            .candidates
+            .iter()
+            .map(|candidate| &candidate.node_id)
+            .collect::<BTreeSet<_>>();
+        online_members
+            .iter()
+            .filter(|node_id| network.members.contains(node_id))
+            .filter(|node_id| !candidates.contains(node_id))
+            .min()
+            .cloned()
+            .ok_or_else(|| {
+                DomainError::new(
+                    "domain.coordinator_emergency_no_eligible_leader",
+                    "no online non-candidate network member can become emergency Leader",
+                )
+            })
+    }
+
+    /// Recompute the projection from the authoritative clock. This can retire
+    /// a lease but can never revive one because time only moves forward.
+    pub fn refresh_at(&mut self, now_unix_ms: u64) -> DomainResult<()> {
+        self.validate_definition()?;
+        if now_unix_ms < self.issued_at_unix_ms {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_clock_rollback",
+                "coordinator emergency clock predates the lease issuance",
+            ));
+        }
+        if self.state == CoordinatorEmergencyLeaderState::Expired {
+            self.remaining_ms = 0;
+            return Ok(());
+        }
+        self.remaining_ms = self.expires_at_unix_ms.saturating_sub(now_unix_ms);
+        self.state = if now_unix_ms < self.expires_at_unix_ms {
+            CoordinatorEmergencyLeaderState::Active
+        } else {
+            CoordinatorEmergencyLeaderState::Expired
+        };
+        Ok(())
+    }
+
+    /// Extend a live lease by at most one short lease duration. Renewal never
+    /// moves the original hard deadline and cannot resurrect an expired lease.
+    pub fn renew(
+        &mut self,
+        candidate_config_revision: u64,
+        online_members: &[NodeId],
+        unavailable_candidates: &[NodeId],
+        now_unix_ms: u64,
+    ) -> DomainResult<()> {
+        self.validate_definition()?;
+        if now_unix_ms < self.issued_at_unix_ms {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_clock_rollback",
+                "coordinator emergency clock predates the lease issuance",
+            ));
+        }
+        if now_unix_ms >= self.expires_at_unix_ms
+            || now_unix_ms >= self.hard_expires_at_unix_ms
+            || self.state != CoordinatorEmergencyLeaderState::Active
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_lease_expired",
+                "coordinator emergency lease has expired and cannot be renewed",
+            ));
+        }
+        if candidate_config_revision != self.candidate_config_revision {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_config_mismatch",
+                "coordinator emergency lease belongs to another candidate revision",
+            ));
+        }
+        let observed_unavailable = unavailable_candidates.iter().collect::<BTreeSet<_>>();
+        let recorded_unavailable = self.unavailable_candidates.iter().collect::<BTreeSet<_>>();
+        if observed_unavailable.len() != unavailable_candidates.len()
+            || observed_unavailable != recorded_unavailable
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_unavailable_proof_mismatch",
+                "coordinator emergency unavailable candidate proof changed without a new epoch",
+            ));
+        }
+        let online = online_members.iter().collect::<BTreeSet<_>>();
+        if observed_unavailable
+            .iter()
+            .any(|node_id| online.contains(node_id))
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_candidate_online",
+                "an emergency lease cannot be renewed after a candidate recovers",
+            ));
+        }
+        if !online.contains(&&self.leader) {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_leader_offline",
+                "the emergency Leader is no longer online",
+            ));
+        }
+        let proposed_expiry = now_unix_ms
+            .checked_add(COORDINATOR_EMERGENCY_LEASE_DURATION_MS)
+            .ok_or_else(|| {
+                DomainError::invalid_value("coordinator emergency renewal overflowed")
+            })?;
+        self.expires_at_unix_ms = proposed_expiry.min(self.hard_expires_at_unix_ms);
+        self.remaining_ms = self.expires_at_unix_ms.saturating_sub(now_unix_ms);
+        self.state = CoordinatorEmergencyLeaderState::Active;
+        self.validate_definition()
+    }
+
+    /// Validate immutable lease bounds and the deliberately narrow authority.
+    pub fn validate_definition(&self) -> DomainResult<()> {
+        if self.emergency_epoch == 0 || self.candidate_config_revision == 0 {
+            return Err(DomainError::invalid_value(
+                "coordinator emergency epoch and candidate revision must be positive",
+            ));
+        }
+        if self.issued_at_unix_ms >= self.expires_at_unix_ms
+            || self.expires_at_unix_ms > self.hard_expires_at_unix_ms
+            || self
+                .hard_expires_at_unix_ms
+                .checked_sub(self.issued_at_unix_ms)
+                != Some(COORDINATOR_EMERGENCY_MAX_DURATION_MS)
+            || self.remaining_ms > COORDINATOR_EMERGENCY_LEASE_DURATION_MS
+        {
+            return Err(DomainError::invariant(
+                "coordinator emergency lease bounds are invalid",
+            ));
+        }
+        if self.unavailable_candidates.is_empty()
+            || self
+                .unavailable_candidates
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(DomainError::invariant(
+                "coordinator emergency unavailable candidate proof is not canonical",
+            ));
+        }
+        if self.unavailable_candidates.contains(&self.leader) {
+            return Err(DomainError::invariant(
+                "coordinator emergency leader must not be a candidate",
+            ));
+        }
+        let allowed = Self::allowed_runtime_writes();
+        if self.allowed_writes != allowed
+            || self
+                .allowed_writes
+                .iter()
+                .any(|write| write.is_governance())
+            || !self.runtime_coordination_allowed
+            || self.governance_writable
+            || !self.data_plane_allowed
+            || !self.health_checks_allowed
+        {
+            return Err(DomainError::invariant(
+                "coordinator emergency authority exceeds runtime coordination",
+            ));
+        }
+        let expected_state = if self.remaining_ms == 0 {
+            CoordinatorEmergencyLeaderState::Expired
+        } else {
+            CoordinatorEmergencyLeaderState::Active
+        };
+        if self.state != expected_state {
+            return Err(DomainError::invariant(
+                "coordinator emergency lease state does not match its remaining duration",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Bind a persisted lease to the exact network and candidate revision that
+    /// justified it. This does not grant authority; it only catches stale or
+    /// cross-network emergency projections.
+    pub fn validate_against_context(
+        &self,
+        network: &NetworkRecord,
+        config: &CoordinatorCandidateConfig,
+    ) -> DomainResult<()> {
+        self.validate_definition()?;
+        config.validate_against_network(network)?;
+        if self.network_id != network.network_id
+            || self.network_id != config.network_id
+            || self.candidate_config_revision != config.revision
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_context_mismatch",
+                "coordinator emergency lease does not match the authoritative context",
+            ));
+        }
+        if !network.members.contains(&self.leader) {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_no_eligible_leader",
+                "coordinator emergency Leader is not a current network member",
+            ));
+        }
+        let candidates = config
+            .candidates
+            .iter()
+            .map(|candidate| candidate.node_id.clone())
+            .collect::<BTreeSet<_>>();
+        let unavailable = self
+            .unavailable_candidates
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if candidates != unavailable || candidates.contains(&self.leader) {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_context_mismatch",
+                "coordinator emergency unavailable proof does not match the candidate group",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.state == CoordinatorEmergencyLeaderState::Active
+            && self.runtime_coordination_allowed
+            && !self.governance_writable
+            && self.remaining_ms > 0
+    }
+
+    pub fn allows_write(&self, write: CoordinatorWriteKind) -> bool {
+        self.is_active() && !write.is_governance() && self.allowed_writes.contains(&write)
+    }
+
+    pub fn authorize_runtime_write(
+        &self,
+        actor: &NodeId,
+        credential: &CoordinatorEmergencyWriteCredential,
+        write: CoordinatorWriteKind,
+        now_unix_ms: u64,
+    ) -> DomainResult<()> {
+        self.validate_definition()?;
+        if credential.network_id != self.network_id
+            || credential.leader != self.leader
+            || credential.emergency_epoch != self.emergency_epoch
+            || credential.candidate_config_revision != self.candidate_config_revision
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_credential_mismatch",
+                "coordinator emergency credential does not match the active grant",
+            ));
+        }
+        if actor != &self.leader {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_leader_mismatch",
+                "only the selected emergency Leader may coordinate runtime writes",
+            ));
+        }
+        if now_unix_ms < self.issued_at_unix_ms {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_clock_rollback",
+                "coordinator emergency clock predates the lease issuance",
+            ));
+        }
+        if now_unix_ms >= self.expires_at_unix_ms || now_unix_ms >= self.hard_expires_at_unix_ms {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_lease_expired",
+                "coordinator emergency lease has expired",
+            ));
+        }
+        if write.is_governance() || !self.allows_write(write) {
+            return Err(DomainError::new(
+                "domain.coordinator_emergency_governance_forbidden",
+                "coordinator emergency authority permits runtime coordination only",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct CoordinatorEmergencyWriteCredential {
+    pub network_id: NetworkId,
+    pub leader: NodeId,
+    pub emergency_epoch: u64,
+    pub candidate_config_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct CoordinatorEmergencyLeaderResponse {
+    pub status: CoordinatorCandidateStatus,
+    pub renewed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct CoordinatorCandidateStatusEntry {
     pub node_id: NodeId,
@@ -3396,6 +3817,292 @@ mod tests {
             candidate,
         )
         .unwrap()
+    }
+
+    fn emergency_candidate_config(fixture: &CandidateFixture) -> CoordinatorCandidateConfig {
+        let candidate_one = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_two = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        config(
+            fixture,
+            &fixture.owner,
+            vec![
+                CoordinatorCandidate {
+                    node_id: candidate_one,
+                    priority: 10,
+                },
+                CoordinatorCandidate {
+                    node_id: candidate_two,
+                    priority: 20,
+                },
+            ],
+        )
+    }
+
+    #[test]
+    fn emergency_lease_requires_all_candidates_offline_and_selects_leader_stably() {
+        let fixture = candidate_fixture();
+        let candidates = emergency_candidate_config(&fixture);
+        let owner = NodeId::from_public_key(&fixture.owner.public_key());
+        let ordinary = NodeId::from_public_key(&fixture.ordinary.public_key());
+        let online = vec![ordinary.clone(), owner.clone()];
+        let expected_leader = online.iter().min().unwrap().clone();
+        let lease = CoordinatorEmergencyLeaderStatus::issue(
+            &fixture.network,
+            &candidates,
+            &online,
+            11,
+            2_000,
+        )
+        .unwrap();
+
+        assert_eq!(lease.leader, expected_leader);
+        assert_eq!(lease.expires_at_unix_ms, 32_000);
+        assert_eq!(lease.hard_expires_at_unix_ms, 302_000);
+        assert_eq!(lease.remaining_ms, COORDINATOR_EMERGENCY_LEASE_DURATION_MS);
+        assert!(!lease.governance_writable);
+        assert!(lease.data_plane_allowed);
+        assert!(lease.is_active());
+        lease
+            .validate_against_context(&fixture.network, &candidates)
+            .unwrap();
+
+        let unavailable = lease
+            .unavailable_candidates
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let configured = candidates
+            .candidates
+            .iter()
+            .map(|candidate| candidate.node_id.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(unavailable, configured);
+        assert!(!configured.contains(&lease.leader));
+    }
+
+    #[test]
+    fn emergency_lease_fails_closed_without_a_valid_offline_candidate_snapshot() {
+        let fixture = candidate_fixture();
+        let candidates = emergency_candidate_config(&fixture);
+        let candidate_one = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let ordinary = NodeId::from_public_key(&fixture.ordinary.public_key());
+
+        assert_eq!(
+            CoordinatorEmergencyLeaderStatus::issue(
+                &fixture.network,
+                &candidates,
+                &[ordinary, candidate_one],
+                1,
+                2_000,
+            )
+            .unwrap_err()
+            .code(),
+            "domain.coordinator_emergency_candidate_online"
+        );
+        assert_eq!(
+            CoordinatorEmergencyLeaderStatus::issue(&fixture.network, &candidates, &[], 1, 2_000)
+                .unwrap_err()
+                .code(),
+            "domain.coordinator_emergency_no_eligible_leader"
+        );
+        assert_eq!(
+            CoordinatorEmergencyLeaderStatus::issue(&fixture.network, &candidates, &[], 0, 2_000)
+                .unwrap_err()
+                .code(),
+            "domain.invalid_value"
+        );
+        assert_eq!(
+            CoordinatorEmergencyLeaderStatus::issue(&fixture.network, &candidates, &[], 1, 20_000)
+                .unwrap_err()
+                .code(),
+            "domain.coordinator_emergency_config_unavailable"
+        );
+    }
+
+    #[test]
+    fn emergency_lease_renewal_never_extends_the_original_hard_deadline() {
+        let fixture = candidate_fixture();
+        let candidates = emergency_candidate_config(&fixture);
+        let owner = NodeId::from_public_key(&fixture.owner.public_key());
+        let ordinary = NodeId::from_public_key(&fixture.ordinary.public_key());
+        let mut lease = CoordinatorEmergencyLeaderStatus::issue(
+            &fixture.network,
+            &candidates,
+            &[owner, ordinary],
+            3,
+            2_000,
+        )
+        .unwrap();
+        let leader = lease.leader.clone();
+        let unavailable = lease.unavailable_candidates.clone();
+        let hard_expiry = lease.hard_expires_at_unix_ms;
+        let mut now = 2_000;
+        loop {
+            now += 25_000;
+            if now >= hard_expiry {
+                break;
+            }
+            lease
+                .renew(7, std::slice::from_ref(&leader), &unavailable, now)
+                .unwrap();
+        }
+
+        assert_eq!(lease.expires_at_unix_ms, hard_expiry);
+        assert!(lease.remaining_ms > 0);
+        assert!(lease.remaining_ms <= COORDINATOR_EMERGENCY_LEASE_DURATION_MS);
+        assert_eq!(
+            lease
+                .renew(7, &[leader], &unavailable, hard_expiry)
+                .unwrap_err()
+                .code(),
+            "domain.coordinator_emergency_lease_expired"
+        );
+
+        lease.refresh_at(hard_expiry).unwrap();
+        assert_eq!(lease.state, CoordinatorEmergencyLeaderState::Expired);
+        assert_eq!(lease.remaining_ms, 0);
+        lease.refresh_at(2_000).unwrap();
+        assert_eq!(lease.state, CoordinatorEmergencyLeaderState::Expired);
+        assert_eq!(lease.remaining_ms, 0);
+    }
+
+    #[test]
+    fn emergency_renewal_rejects_recovered_candidates_and_revision_changes() {
+        let fixture = candidate_fixture();
+        let candidates = emergency_candidate_config(&fixture);
+        let candidate_one = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let owner = NodeId::from_public_key(&fixture.owner.public_key());
+        let ordinary = NodeId::from_public_key(&fixture.ordinary.public_key());
+        let mut lease = CoordinatorEmergencyLeaderStatus::issue(
+            &fixture.network,
+            &candidates,
+            &[ordinary.clone(), owner],
+            4,
+            2_000,
+        )
+        .unwrap();
+        let unavailable = lease.unavailable_candidates.clone();
+        let leader = lease.leader.clone();
+
+        assert_eq!(
+            lease
+                .renew(8, std::slice::from_ref(&leader), &unavailable, 3_000)
+                .unwrap_err()
+                .code(),
+            "domain.coordinator_emergency_config_mismatch"
+        );
+        assert_eq!(
+            lease
+                .renew(7, &[leader.clone(), candidate_one], &unavailable, 3_000)
+                .unwrap_err()
+                .code(),
+            "domain.coordinator_emergency_candidate_online"
+        );
+        assert_eq!(
+            lease.renew(7, &[], &unavailable, 3_000).unwrap_err().code(),
+            "domain.coordinator_emergency_leader_offline"
+        );
+    }
+
+    #[test]
+    fn emergency_credentials_allow_runtime_only_and_reject_forgery() {
+        let fixture = candidate_fixture();
+        let candidates = emergency_candidate_config(&fixture);
+        let owner = NodeId::from_public_key(&fixture.owner.public_key());
+        let ordinary = NodeId::from_public_key(&fixture.ordinary.public_key());
+        let administrator = NodeId::from_public_key(&fixture.administrator.public_key());
+        let lease = CoordinatorEmergencyLeaderStatus::issue(
+            &fixture.network,
+            &candidates,
+            &[owner, ordinary],
+            5,
+            2_000,
+        )
+        .unwrap();
+        let leader = lease.leader.clone();
+        let credential = CoordinatorEmergencyWriteCredential {
+            network_id: lease.network_id.clone(),
+            leader: leader.clone(),
+            emergency_epoch: lease.emergency_epoch,
+            candidate_config_revision: lease.candidate_config_revision,
+        };
+
+        for write in CoordinatorEmergencyLeaderStatus::allowed_runtime_writes() {
+            lease
+                .authorize_runtime_write(&leader, &credential, write, 3_000)
+                .unwrap();
+        }
+        for forbidden in [
+            CoordinatorWriteKind::Membership,
+            CoordinatorWriteKind::Ownership,
+            CoordinatorWriteKind::SecurityPolicy,
+            CoordinatorWriteKind::TrafficPolicy,
+            CoordinatorWriteKind::Keys,
+            CoordinatorWriteKind::CandidateSet,
+            CoordinatorWriteKind::AuditDeletion,
+            CoordinatorWriteKind::SelfPromotion,
+        ] {
+            assert_eq!(
+                lease
+                    .authorize_runtime_write(&leader, &credential, forbidden, 3_000)
+                    .unwrap_err()
+                    .code(),
+                "domain.coordinator_emergency_governance_forbidden"
+            );
+        }
+        assert_eq!(
+            lease
+                .authorize_runtime_write(
+                    &administrator,
+                    &credential,
+                    CoordinatorWriteKind::HealthCheck,
+                    3_000,
+                )
+                .unwrap_err()
+                .code(),
+            "domain.coordinator_emergency_leader_mismatch"
+        );
+
+        let mut forged_epoch = credential.clone();
+        forged_epoch.emergency_epoch += 1;
+        assert_eq!(
+            lease
+                .authorize_runtime_write(
+                    &leader,
+                    &forged_epoch,
+                    CoordinatorWriteKind::HealthCheck,
+                    3_000,
+                )
+                .unwrap_err()
+                .code(),
+            "domain.coordinator_emergency_credential_mismatch"
+        );
+        let mut forged_revision = credential.clone();
+        forged_revision.candidate_config_revision += 1;
+        assert_eq!(
+            lease
+                .authorize_runtime_write(
+                    &leader,
+                    &forged_revision,
+                    CoordinatorWriteKind::HealthCheck,
+                    3_000,
+                )
+                .unwrap_err()
+                .code(),
+            "domain.coordinator_emergency_credential_mismatch"
+        );
+        assert_eq!(
+            lease
+                .authorize_runtime_write(
+                    &leader,
+                    &credential,
+                    CoordinatorWriteKind::HealthCheck,
+                    lease.expires_at_unix_ms,
+                )
+                .unwrap_err()
+                .code(),
+            "domain.coordinator_emergency_lease_expired"
+        );
     }
 
     #[test]

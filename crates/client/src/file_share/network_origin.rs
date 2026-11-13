@@ -957,6 +957,7 @@ impl FileNetworkOrigin {
         now_unix_ms: u64,
     ) -> Result<(), FileNetworkOriginError> {
         let key = OriginTransferKey::new(transfer_id, operation_id);
+        let expected_request_id = download_fragment_request_id(operation_id, chunk_index, offset);
         let finished = {
             let transfer = self
                 .transfers
@@ -1001,7 +1002,18 @@ impl FileNetworkOrigin {
                 self.fail_transfer_at(&key, now_unix_ms, "file_transfer_expired", false);
                 return Ok(());
             }
-            if request_id != download_fragment_request_id(operation_id, chunk_index, offset) {
+            if request_id != expected_request_id {
+                log_download_fragment_rejection(
+                    transfer,
+                    transfer_id,
+                    operation_id,
+                    resume_generation,
+                    chunk_index,
+                    offset,
+                    data.len(),
+                    request_id == expected_request_id,
+                    DownloadFragmentFailureReason::RequestIdMismatch,
+                );
                 self.fail_transfer_at(
                     &key,
                     now_unix_ms,
@@ -1010,12 +1022,23 @@ impl FileNetworkOrigin {
                 );
                 return Err(FileNetworkOriginError::ChunkOutOfOrder);
             }
-            if let Err(error) =
+            if let Err(failure) =
                 apply_download_fragment(transfer, chunk_index, offset, data, now_unix_ms)
             {
-                let code = error.code();
+                log_download_fragment_rejection(
+                    transfer,
+                    transfer_id,
+                    operation_id,
+                    resume_generation,
+                    chunk_index,
+                    offset,
+                    data.len(),
+                    request_id == expected_request_id,
+                    failure.reason,
+                );
+                let code = failure.error.code();
                 self.fail_transfer_at(&key, now_unix_ms, code, true);
-                return Err(error);
+                return Err(failure.error);
             }
             transfer.download_finished_receiving()
         };
@@ -2779,38 +2802,190 @@ fn validate_finish(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy)]
+enum DownloadFragmentFailureReason {
+    StateMismatch,
+    EmptyOrOversizedFragment,
+    SessionUnavailable,
+    ChunkUnavailable,
+    ReceivedCountMismatch,
+    FragmentOutsideChunk,
+    AssemblyChunkMismatch,
+    AssemblyOffsetGap,
+    InitialChunkMismatch,
+    InitialOffsetMismatch,
+    ChecksumMismatch,
+    StagingUnavailable,
+    StagingWrite,
+    SessionRecord,
+    RequestIdMismatch,
+}
+
+impl DownloadFragmentFailureReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::StateMismatch => "state_mismatch",
+            Self::EmptyOrOversizedFragment => "empty_or_oversized_fragment",
+            Self::SessionUnavailable => "session_unavailable",
+            Self::ChunkUnavailable => "chunk_unavailable",
+            Self::ReceivedCountMismatch => "received_count_mismatch",
+            Self::FragmentOutsideChunk => "fragment_outside_chunk",
+            Self::AssemblyChunkMismatch => "assembly_chunk_mismatch",
+            Self::AssemblyOffsetGap => "assembly_offset_gap",
+            Self::InitialChunkMismatch => "initial_chunk_mismatch",
+            Self::InitialOffsetMismatch => "initial_offset_mismatch",
+            Self::ChecksumMismatch => "checksum_mismatch",
+            Self::StagingUnavailable => "staging_unavailable",
+            Self::StagingWrite => "staging_write",
+            Self::SessionRecord => "session_record",
+            Self::RequestIdMismatch => "request_id_mismatch",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DownloadFragmentFailure {
+    error: FileNetworkOriginError,
+    reason: DownloadFragmentFailureReason,
+}
+
+impl DownloadFragmentFailure {
+    fn new(error: FileNetworkOriginError, reason: DownloadFragmentFailureReason) -> Self {
+        Self { error, reason }
+    }
+}
+
+#[derive(Debug)]
+struct DownloadFragmentDiagnostics {
+    current_generation: u64,
+    paused: bool,
+    local_received_chunks: Option<u32>,
+    local_received_bytes: Option<u64>,
+    session_received_chunks: Option<usize>,
+    assembly_chunk_index: Option<u32>,
+    assembly_bytes: Option<usize>,
+    expected_chunk_offset: Option<u64>,
+    expected_chunk_length: Option<u64>,
+}
+
+fn log_download_fragment_rejection(
+    transfer: &OriginTransfer,
+    transfer_id: &TransferId,
+    operation_id: &OperationId,
+    requested_generation: u64,
+    chunk_index: u32,
+    offset: u64,
+    data_len: usize,
+    request_id_matches: bool,
+    reason: DownloadFragmentFailureReason,
+) {
+    let mut diagnostics = DownloadFragmentDiagnostics {
+        current_generation: transfer.resume_generation,
+        paused: transfer.paused,
+        local_received_chunks: None,
+        local_received_bytes: None,
+        session_received_chunks: None,
+        assembly_chunk_index: None,
+        assembly_bytes: None,
+        expected_chunk_offset: None,
+        expected_chunk_length: None,
+    };
+    if let OriginTransferState::Download(download) = &transfer.state {
+        diagnostics.local_received_chunks = Some(download.received_chunks);
+        diagnostics.local_received_bytes = Some(download.received_bytes);
+        diagnostics.assembly_chunk_index = download
+            .assembly
+            .as_ref()
+            .map(|assembly| assembly.chunk_index);
+        diagnostics.assembly_bytes = download
+            .assembly
+            .as_ref()
+            .map(|assembly| assembly.bytes.len());
+        if let Some(session) = download.session.as_ref() {
+            diagnostics.session_received_chunks = Some(session.received_chunk_count());
+            if let Some(expected) = session.manifest.chunks.get(chunk_index as usize) {
+                diagnostics.expected_chunk_offset = Some(expected.offset);
+                diagnostics.expected_chunk_length = Some(expected.length);
+            }
+        }
+    }
+    tracing::warn!(
+        peer = %transfer.peer.node_id,
+        %transfer_id,
+        %operation_id,
+        reason = reason.as_str(),
+        requested_generation,
+        current_generation = diagnostics.current_generation,
+        paused = diagnostics.paused,
+        chunk_index,
+        offset,
+        data_len,
+        request_id_matches,
+        local_received_chunks = ?diagnostics.local_received_chunks,
+        local_received_bytes = ?diagnostics.local_received_bytes,
+        session_received_chunks = ?diagnostics.session_received_chunks,
+        assembly_chunk_index = ?diagnostics.assembly_chunk_index,
+        assembly_bytes = ?diagnostics.assembly_bytes,
+        expected_chunk_offset = ?diagnostics.expected_chunk_offset,
+        expected_chunk_length = ?diagnostics.expected_chunk_length,
+        "File download fragment rejected"
+    );
+}
+
 fn apply_download_fragment(
     transfer: &mut OriginTransfer,
     chunk_index: u32,
     offset: u64,
     data: &[u8],
     now_unix_ms: u64,
-) -> Result<(), FileNetworkOriginError> {
+) -> Result<(), DownloadFragmentFailure> {
     let OriginTransferState::Download(download) = &mut transfer.state else {
-        return Err(FileNetworkOriginError::UnexpectedResponse);
+        return Err(DownloadFragmentFailure::new(
+            FileNetworkOriginError::UnexpectedResponse,
+            DownloadFragmentFailureReason::StateMismatch,
+        ));
     };
     if data.is_empty() || data.len() > MAX_FILE_NETWORK_FRAGMENT_BYTES {
-        return Err(FileNetworkOriginError::ChunkCorrupt);
+        return Err(DownloadFragmentFailure::new(
+            FileNetworkOriginError::ChunkCorrupt,
+            DownloadFragmentFailureReason::EmptyOrOversizedFragment,
+        ));
     }
-    let session = download
-        .session
-        .as_ref()
-        .ok_or(FileNetworkOriginError::ChunkOutOfOrder)?;
+    let session = download.session.as_ref().ok_or_else(|| {
+        DownloadFragmentFailure::new(
+            FileNetworkOriginError::ChunkOutOfOrder,
+            DownloadFragmentFailureReason::SessionUnavailable,
+        )
+    })?;
     let expected = session
         .manifest
         .chunks
         .get(chunk_index as usize)
         .filter(|chunk| chunk.index == chunk_index)
-        .ok_or(FileNetworkOriginError::ChunkOutOfOrder)?;
+        .ok_or_else(|| {
+            DownloadFragmentFailure::new(
+                FileNetworkOriginError::ChunkOutOfOrder,
+                DownloadFragmentFailureReason::ChunkUnavailable,
+            )
+        })?;
     if u32::try_from(session.received_chunk_count()).ok() != Some(download.received_chunks) {
-        return Err(FileNetworkOriginError::ChunkOutOfOrder);
+        return Err(DownloadFragmentFailure::new(
+            FileNetworkOriginError::ChunkOutOfOrder,
+            DownloadFragmentFailureReason::ReceivedCountMismatch,
+        ));
     }
     let expected_end = expected.offset.saturating_add(expected.length);
-    let incoming_end = offset
-        .checked_add(data.len() as u64)
-        .ok_or(FileNetworkOriginError::ChunkCorrupt)?;
+    let incoming_end = offset.checked_add(data.len() as u64).ok_or_else(|| {
+        DownloadFragmentFailure::new(
+            FileNetworkOriginError::ChunkCorrupt,
+            DownloadFragmentFailureReason::FragmentOutsideChunk,
+        )
+    })?;
     if offset < expected.offset || incoming_end > expected_end {
-        return Err(FileNetworkOriginError::ChunkCorrupt);
+        return Err(DownloadFragmentFailure::new(
+            FileNetworkOriginError::ChunkCorrupt,
+            DownloadFragmentFailureReason::FragmentOutsideChunk,
+        ));
     }
     let assembly = match download.assembly.as_mut() {
         Some(assembly) if assembly.chunk_index == chunk_index => {
@@ -2818,14 +2993,31 @@ fn apply_download_fragment(
                 .expected_offset
                 .saturating_add(assembly.bytes.len() as u64);
             if offset != next_offset {
-                return Err(FileNetworkOriginError::ChunkOutOfOrder);
+                return Err(DownloadFragmentFailure::new(
+                    FileNetworkOriginError::ChunkOutOfOrder,
+                    DownloadFragmentFailureReason::AssemblyOffsetGap,
+                ));
             }
             assembly
         }
-        Some(_) => return Err(FileNetworkOriginError::ChunkOutOfOrder),
+        Some(_) => {
+            return Err(DownloadFragmentFailure::new(
+                FileNetworkOriginError::ChunkOutOfOrder,
+                DownloadFragmentFailureReason::AssemblyChunkMismatch,
+            ));
+        }
         None => {
-            if chunk_index != download.received_chunks || offset != expected.offset {
-                return Err(FileNetworkOriginError::ChunkOutOfOrder);
+            if chunk_index != download.received_chunks {
+                return Err(DownloadFragmentFailure::new(
+                    FileNetworkOriginError::ChunkOutOfOrder,
+                    DownloadFragmentFailureReason::InitialChunkMismatch,
+                ));
+            }
+            if offset != expected.offset {
+                return Err(DownloadFragmentFailure::new(
+                    FileNetworkOriginError::ChunkOutOfOrder,
+                    DownloadFragmentFailureReason::InitialOffsetMismatch,
+                ));
             }
             download.assembly.insert(DownloadAssembly {
                 chunk_index,
@@ -2846,23 +3038,42 @@ fn apply_download_fragment(
         .expect("completed download assembly");
     let checksum = ContentHash::from_bytes(&assembly.bytes);
     if checksum != assembly.expected_checksum {
-        return Err(FileNetworkOriginError::ChunkCorrupt);
+        return Err(DownloadFragmentFailure::new(
+            FileNetworkOriginError::ChunkCorrupt,
+            DownloadFragmentFailureReason::ChecksumMismatch,
+        ));
     }
-    let staging = download
-        .staging
-        .as_mut()
-        .ok_or(FileNetworkOriginError::BindingMismatch)?;
-    staging.write_all(&assembly.bytes)?;
+    let staging = download.staging.as_mut().ok_or_else(|| {
+        DownloadFragmentFailure::new(
+            FileNetworkOriginError::BindingMismatch,
+            DownloadFragmentFailureReason::StagingUnavailable,
+        )
+    })?;
+    staging.write_all(&assembly.bytes).map_err(|error| {
+        DownloadFragmentFailure::new(
+            FileNetworkOriginError::Io(error),
+            DownloadFragmentFailureReason::StagingWrite,
+        )
+    })?;
     download.hasher.update(&assembly.bytes);
     download.received_bytes = download
         .received_bytes
         .saturating_add(assembly.expected_length);
     download.received_chunks = download.received_chunks.saturating_add(1);
-    let session = download
-        .session
-        .as_mut()
-        .ok_or(FileNetworkOriginError::BindingMismatch)?;
-    session.record_chunk(assembly.chunk_index, &assembly.bytes, now_unix_ms)?;
+    let session = download.session.as_mut().ok_or_else(|| {
+        DownloadFragmentFailure::new(
+            FileNetworkOriginError::BindingMismatch,
+            DownloadFragmentFailureReason::SessionUnavailable,
+        )
+    })?;
+    session
+        .record_chunk(assembly.chunk_index, &assembly.bytes, now_unix_ms)
+        .map_err(|error| {
+            DownloadFragmentFailure::new(
+                FileNetworkOriginError::Transfer(error),
+                DownloadFragmentFailureReason::SessionRecord,
+            )
+        })?;
     Ok(())
 }
 

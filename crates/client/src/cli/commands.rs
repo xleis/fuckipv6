@@ -2995,6 +2995,25 @@ async fn drive_pending_file_downloads(runtime: &mut ClientRuntime) {
             );
             continue;
         };
+        if let FileNetworkFrame::Chunk {
+            resume_generation,
+            chunk_index,
+            offset,
+            data,
+            ..
+        } = &frame
+        {
+            tracing::debug!(
+                peer = %download.actor,
+                transfer_id = %download.transfer_id,
+                operation_id = %download.operation_id,
+                resume_generation,
+                chunk_index,
+                offset,
+                data_len = data.len(),
+                "File owner 发送下载分片"
+            );
+        }
         let Ok(encoded) = encode_file_network_frame(&frame) else {
             cancel_file_network_session(
                 runtime,
@@ -3111,6 +3130,21 @@ async fn drive_pending_file_origin(runtime: &mut ClientRuntime) {
                 continue;
             }
         };
+        if let FileNetworkFrame::Request {
+            request_id,
+            request,
+        } = &outbound.frame
+        {
+            tracing::debug!(
+                peer = %outbound.peer.node_id,
+                transfer_id = %outbound.transfer_id,
+                operation_id = %outbound.operation_id,
+                request = file_network_request_kind(request),
+                resume = ?file_network_resume_diagnostics(request),
+                request_id = ?request_id,
+                "File requester 发送网络请求"
+            );
+        }
         if let Err(error) = runtime
             .send_file_network_payload(outbound.peer.virtual_ip, &encoded)
             .await
@@ -4596,6 +4630,8 @@ async fn handle_file_network_frame(
             request_id,
             request,
         } => {
+            let request_kind = file_network_request_kind(&request);
+            let resume = file_network_resume_diagnostics(&request);
             let request_ids = file_network_request_ids(&request);
             let now_unix_ms = unix_time_ms();
             let response =
@@ -4634,6 +4670,9 @@ async fn handle_file_network_frame(
                     %src_ip,
                     %transfer_id,
                     %operation_id,
+                    request = request_kind,
+                    resume = ?resume,
+                    request_id = ?request_id,
                     response = file_network_response_kind(&response),
                     error_code = ?response_error_code,
                     "已处理认证 File 网络请求"
@@ -4641,6 +4680,9 @@ async fn handle_file_network_frame(
                 None => tracing::debug!(
                     peer = %peer.node_id,
                     %src_ip,
+                    request = request_kind,
+                    resume = ?resume,
+                    request_id = ?request_id,
                     response = file_network_response_kind(&response),
                     error_code = ?response_error_code,
                     "已处理认证 File 元数据请求"
@@ -4705,7 +4747,7 @@ async fn handle_file_network_frame(
                 virtual_ip: peer.virtual_ip,
             };
             if owns_download {
-                let _ = runtime.file_origin.handle_chunk(
+                if let Err(error) = runtime.file_origin.handle_chunk(
                     &origin_peer,
                     request_id,
                     &transfer_id,
@@ -4715,7 +4757,20 @@ async fn handle_file_network_frame(
                     offset,
                     &data,
                     now_unix_ms,
-                );
+                ) {
+                    tracing::debug!(
+                        peer = %peer.node_id,
+                        %src_ip,
+                        %transfer_id,
+                        %operation_id,
+                        resume_generation,
+                        chunk_index,
+                        offset,
+                        data_len = data.len(),
+                        error_code = error.code(),
+                        "File requester 下载分片已失败关闭传输"
+                    );
+                }
                 // Download fragments are pushed by the owner and deliberately
                 // have no per-fragment acknowledgement in the wire protocol.
                 return;
@@ -4833,6 +4888,31 @@ fn file_network_request_ids(request: &FileNetworkRequest) -> Option<(TransferId,
         }
         FileNetworkRequest::ReadMetadata { .. } => None,
     }
+}
+
+fn file_network_request_kind(request: &FileNetworkRequest) -> &'static str {
+    match request {
+        FileNetworkRequest::OpenUpload { .. } => "open_upload",
+        FileNetworkRequest::OpenDownload { .. } => "open_download",
+        FileNetworkRequest::ReadMetadata { .. } => "read_metadata",
+        FileNetworkRequest::Resume { .. } => "resume",
+        FileNetworkRequest::Pause { .. } => "pause",
+        FileNetworkRequest::Cancel { .. } => "cancel",
+        FileNetworkRequest::Finish { .. } => "finish",
+    }
+}
+
+fn file_network_resume_diagnostics(request: &FileNetworkRequest) -> Option<String> {
+    let FileNetworkRequest::Resume { request } = request else {
+        return None;
+    };
+    Some(format!(
+        "direction={:?} generation={} chunk_index={} offset={}",
+        request.direction,
+        request.resume_generation,
+        request.resume_chunk_index,
+        request.resume_offset
+    ))
 }
 
 async fn trusted_file_request_member(

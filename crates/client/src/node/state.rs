@@ -1943,15 +1943,15 @@ impl NodeStateStore {
         let mut snapshot = self.snapshot.write().await;
         let previous = snapshot.clone();
         update(&mut snapshot);
+        if *snapshot == previous {
+            return None;
+        }
         snapshot.refresh_capability_states();
+        snapshot.revision = snapshot.revision.saturating_add(1);
         snapshot.refresh_topology(&evidence.directories, now_ms);
         if self.local_directory_evidence_seen.load(Ordering::Acquire) {
             snapshot.refresh_exit_selections(&evidence.directories, &evidence.received_at, now_ms);
         }
-        if *snapshot == previous {
-            return None;
-        }
-        snapshot.revision = snapshot.revision.saturating_add(1);
         let published = snapshot.clone();
         self.updates.send_replace(published.clone());
         if let Some(events) = &self.events {
@@ -1970,7 +1970,7 @@ impl NodeStateStore {
     /// Replace the short activity feed after a command has been audited.
     /// Callers provide the domain projection, never raw command payloads.
     pub async fn set_recent_activity(&self, activity: Vec<ActivityEntry>) {
-        self.update(|snapshot| snapshot.recent_activity = activity)
+        self.update_if_changed(|snapshot| snapshot.recent_activity = activity)
             .await;
     }
 
@@ -1981,7 +1981,7 @@ impl NodeStateStore {
         &self,
         entries: impl IntoIterator<Item = ActivityEntry>,
     ) {
-        self.update(|snapshot| {
+        self.update_if_changed(|snapshot| {
             for entry in entries {
                 if let Some(index) = snapshot
                     .recent_activity
@@ -3669,5 +3669,66 @@ mod tests {
                 || (pair[0].occurred_at_unix_ms == pair[1].occurred_at_unix_ms
                     && pair[0].audit_id > pair[1].audit_id)
         }));
+    }
+
+    #[tokio::test]
+    async fn unchanged_activity_merge_does_not_create_revisions_or_events() {
+        use fuckipv6_common::domain::{AuditId, AuditOutcome};
+
+        let events = NodeEventBus::new(8);
+        let mut event_receiver = events.subscribe();
+        let state = NodeStateStore::with_events(events);
+        let viewer = topology_node("unchanged-activity-viewer");
+        state
+            .update(|snapshot| {
+                snapshot.identity = Some(NodeIdentitySnapshot {
+                    node_id: viewer.to_string(),
+                    display_name: None,
+                    public_key_fingerprint: "fingerprint".into(),
+                    created_at_unix_ms: None,
+                });
+            })
+            .await;
+        assert!(state.snapshot().await.topology.is_some());
+        assert!(matches!(
+            event_receiver.recv().await.expect("identity event").kind,
+            NodeEventKind::StateChanged { revision: 1 }
+        ));
+        let entry = ActivityEntry {
+            audit_id: AuditId::from_public_key(b"unchanged-activity"),
+            operation_id: None,
+            actor: NodeId::from_public_key(b"unchanged-activity-actor"),
+            network_id: None,
+            action: "test.activity".into(),
+            resource: "test_activity".into(),
+            outcome: AuditOutcome::Succeeded,
+            occurred_at_unix_ms: 1_000,
+            summary: "activity".into(),
+            category: Default::default(),
+            severity: Default::default(),
+            actor_role: None,
+            object_kind: "test_activity".into(),
+            object_id: None,
+            reason: None,
+            details: Default::default(),
+        };
+
+        state.merge_recent_activity([entry.clone()]).await;
+        assert_eq!(state.snapshot().await.revision, 2);
+        assert!(matches!(
+            event_receiver
+                .recv()
+                .await
+                .expect("initial activity event")
+                .kind,
+            NodeEventKind::StateChanged { revision: 2 }
+        ));
+
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        state.merge_recent_activity([entry]).await;
+        let after = state.snapshot().await;
+        assert_eq!(after.revision, 2);
+        assert!(after.topology.is_some());
+        assert!(event_receiver.try_recv().is_err());
     }
 }

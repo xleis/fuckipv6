@@ -3,6 +3,7 @@ use bytes::Bytes;
 use fuckipv6_common::domain::{
     ContentHash, CoordinatorCandidateConfig, CoordinatorCandidateDeclaration,
     CoordinatorCandidateStatus, CoordinatorElectionProposal, CoordinatorElectionVote,
+    CoordinatorEmergencyLeaderResponse, CoordinatorEmergencyWriteCredential,
     CoordinatorRecoveryReport, CoordinatorRecoveryResponse, CoordinatorTerm,
     CoordinatorWriteCredential, InvitationCode, InvitationCreateRequest, InvitationId,
     InvitationPreview, InvitationRedeemRequest, InvitationRedemption, InvitationState,
@@ -374,12 +375,22 @@ enum PendingCoordinatorCandidate {
     Recovery {
         network_id: NetworkId,
     },
+    EmergencyIssue {
+        network_id: NetworkId,
+    },
+    EmergencyRenew {
+        network_id: NetworkId,
+        leader: NodeId,
+        emergency_epoch: u64,
+        candidate_config_revision: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CoordinatorCandidateOperationResponse {
     Status(CoordinatorCandidateStatus),
     Recovery(CoordinatorRecoveryResponse),
+    Emergency(CoordinatorEmergencyLeaderResponse),
 }
 
 impl CoordinatorCandidateOperationResponse {
@@ -388,7 +399,9 @@ impl CoordinatorCandidateOperationResponse {
     ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
         match self {
             Self::Status(status) => Ok(status),
-            Self::Recovery(_) => Err(CoordinatorCandidateControlError::Unavailable),
+            Self::Recovery(_) | Self::Emergency(_) => {
+                Err(CoordinatorCandidateControlError::Unavailable)
+            }
         }
     }
 
@@ -397,7 +410,21 @@ impl CoordinatorCandidateOperationResponse {
     ) -> std::result::Result<CoordinatorRecoveryResponse, CoordinatorCandidateControlError> {
         match self {
             Self::Recovery(response) => Ok(response),
-            Self::Status(_) => Err(CoordinatorCandidateControlError::Unavailable),
+            Self::Status(_) | Self::Emergency(_) => {
+                Err(CoordinatorCandidateControlError::Unavailable)
+            }
+        }
+    }
+
+    fn into_emergency(
+        self,
+    ) -> std::result::Result<CoordinatorEmergencyLeaderResponse, CoordinatorCandidateControlError>
+    {
+        match self {
+            Self::Emergency(response) => Ok(response),
+            Self::Status(_) | Self::Recovery(_) => {
+                Err(CoordinatorCandidateControlError::Unavailable)
+            }
         }
     }
 }
@@ -565,6 +592,35 @@ impl CoordinatorCandidateResponseHub {
                     _ => false,
                 })
             }
+            SignalingMessage::CoordinatorEmergencyLeaderIssueAck { response } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::EmergencyIssue { network_id } => {
+                        response.status.network_id == *network_id
+                            && response.status.emergency_leader.is_some()
+                    }
+                    _ => false,
+                })
+            }
+            SignalingMessage::CoordinatorEmergencyLeaderRenewAck { response } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::EmergencyRenew {
+                        network_id,
+                        leader,
+                        emergency_epoch,
+                        candidate_config_revision,
+                    } => {
+                        response.renewed
+                            && response.status.network_id == *network_id
+                            && response.status.emergency_leader.as_ref().is_some_and(|lease| {
+                                lease.leader == *leader
+                                    && lease.emergency_epoch == *emergency_epoch
+                                    && lease.candidate_config_revision
+                                        == *candidate_config_revision
+                            })
+                    }
+                    _ => false,
+                })
+            }
             _ => return false,
         };
 
@@ -579,6 +635,8 @@ impl CoordinatorCandidateResponseHub {
                 | SignalingMessage::CoordinatorElectionVoteAck { .. }
                 | SignalingMessage::CoordinatorElectionTimeoutAck { .. }
                 | SignalingMessage::CoordinatorRecoveryResponse { .. }
+                | SignalingMessage::CoordinatorEmergencyLeaderIssueAck { .. }
+                | SignalingMessage::CoordinatorEmergencyLeaderRenewAck { .. }
         );
         if !matches {
             return is_candidate_response;
@@ -597,6 +655,10 @@ impl CoordinatorCandidateResponseHub {
             }
             SignalingMessage::CoordinatorRecoveryResponse { response } => {
                 CoordinatorCandidateOperationResponse::Recovery(response.clone())
+            }
+            SignalingMessage::CoordinatorEmergencyLeaderIssueAck { response }
+            | SignalingMessage::CoordinatorEmergencyLeaderRenewAck { response } => {
+                CoordinatorCandidateOperationResponse::Emergency(response.clone())
             }
             SignalingMessage::Error { code, .. } => {
                 return self.finish(Err(CoordinatorCandidateControlError::Rejected(*code)));
@@ -1440,6 +1502,46 @@ impl SignalingClient {
             PendingCoordinatorCandidate::Status(network_id),
         )
         .await
+    }
+
+    #[allow(dead_code)] // Called by the runtime takeover loop.
+    pub(crate) async fn issue_emergency_leader(
+        &self,
+        network_id: NetworkId,
+    ) -> std::result::Result<CoordinatorEmergencyLeaderResponse, CoordinatorCandidateControlError>
+    {
+        self.send_coordinator_candidate_operation_response(
+            SignalingMessage::CoordinatorEmergencyLeaderIssue {
+                network_id: network_id.clone(),
+            },
+            PendingCoordinatorCandidate::EmergencyIssue { network_id },
+        )
+        .await?
+        .into_emergency()
+    }
+
+    #[allow(dead_code)] // Called by the runtime takeover loop.
+    pub(crate) async fn renew_emergency_leader(
+        &self,
+        network_id: NetworkId,
+        credential: CoordinatorEmergencyWriteCredential,
+    ) -> std::result::Result<CoordinatorEmergencyLeaderResponse, CoordinatorCandidateControlError>
+    {
+        let expected = PendingCoordinatorCandidate::EmergencyRenew {
+            network_id: network_id.clone(),
+            leader: credential.leader.clone(),
+            emergency_epoch: credential.emergency_epoch,
+            candidate_config_revision: credential.candidate_config_revision,
+        };
+        self.send_coordinator_candidate_operation_response(
+            SignalingMessage::CoordinatorEmergencyLeaderRenew {
+                network_id,
+                credential,
+            },
+            expected,
+        )
+        .await?
+        .into_emergency()
     }
 
     pub(crate) async fn recover_coordinator(
@@ -2476,7 +2578,11 @@ fn signaling_message_to_event(msg: SignalingMessage) -> Option<SignalingEvent> {
         | SignalingMessage::CoordinatorElectionTimeout { .. }
         | SignalingMessage::CoordinatorElectionTimeoutAck { .. }
         | SignalingMessage::CoordinatorRecoveryRequest { .. }
-        | SignalingMessage::CoordinatorRecoveryResponse { .. } => None,
+        | SignalingMessage::CoordinatorRecoveryResponse { .. }
+        | SignalingMessage::CoordinatorEmergencyLeaderIssue { .. }
+        | SignalingMessage::CoordinatorEmergencyLeaderIssueAck { .. }
+        | SignalingMessage::CoordinatorEmergencyLeaderRenew { .. }
+        | SignalingMessage::CoordinatorEmergencyLeaderRenewAck { .. } => None,
 
         _ => None,
     }
@@ -2586,10 +2692,11 @@ mod tests {
     use super::*;
     use fuckipv6_common::domain::{
         CoordinatorAuthority, CoordinatorCandidateConfigState, CoordinatorCandidateStatus,
-        CoordinatorElectionSession, CoordinatorElectionVote, CoordinatorEmergencyState,
-        CoordinatorLeaseState, CoordinatorPhase, CoordinatorTerm, ExitContributionMode,
-        ExitContributionObligation, ExitContributionScope, FencingToken, MembershipRole,
-        NetworkCreateProfile, NetworkJoinMode, NetworkRecord, NetworkVisibility, NodeId, PublicKey,
+        CoordinatorElectionSession, CoordinatorElectionVote, CoordinatorEmergencyLeaderState,
+        CoordinatorEmergencyLeaderStatus, CoordinatorEmergencyState, CoordinatorLeaseState,
+        CoordinatorPhase, CoordinatorTerm, ExitContributionMode, ExitContributionObligation,
+        ExitContributionScope, FencingToken, MembershipRole, NetworkCreateProfile, NetworkJoinMode,
+        NetworkRecord, NetworkVisibility, NodeId, PublicKey,
     };
     use fuckipv6_common::Identity;
     use futures::SinkExt;
@@ -2647,6 +2754,38 @@ mod tests {
             emergency_leader: None,
             latest_election: None,
         }
+    }
+
+    fn coordinator_emergency_response(
+        network_id: NetworkId,
+        leader: NodeId,
+        emergency_epoch: u64,
+        candidate_config_revision: u64,
+        renewed: bool,
+    ) -> CoordinatorEmergencyLeaderResponse {
+        let term = coordinator_term(2, 20, 1_700_000_060_000);
+        let mut status = coordinator_status(&term, 1_700_000_001_000);
+        status.network_id = network_id.clone();
+        status.emergency = CoordinatorEmergencyState::AllCandidatesUnavailable;
+        status.emergency_leader = Some(CoordinatorEmergencyLeaderStatus {
+            network_id,
+            leader,
+            emergency_epoch,
+            candidate_config_revision,
+            unavailable_candidates: vec![NodeId::from_public_key(b"offline-candidate")],
+            issued_at_unix_ms: 1_700_000_000_000,
+            expires_at_unix_ms: 1_700_000_030_000,
+            hard_expires_at_unix_ms: 1_700_000_300_000,
+            state: CoordinatorEmergencyLeaderState::Active,
+            remaining_ms: 20_000,
+            runtime_coordination_allowed: true,
+            governance_writable: false,
+            data_plane_allowed: true,
+            health_checks_allowed: true,
+            allowed_writes: CoordinatorEmergencyLeaderStatus::allowed_runtime_writes(),
+        });
+        status.refresh_control_plane();
+        CoordinatorEmergencyLeaderResponse { status, renewed }
     }
 
     fn coordinator_election_material() -> (CoordinatorElectionProposal, CoordinatorElectionVote) {
@@ -3097,6 +3236,108 @@ mod tests {
         assert_eq!(
             receiver.await.expect("matching timeout response"),
             Ok(CoordinatorCandidateOperationResponse::Status(status))
+        );
+    }
+
+    #[tokio::test]
+    async fn emergency_issue_ack_requires_the_matching_network_and_lease() {
+        let network_id = NetworkId::from_public_key(b"emergency-issue-network");
+        let leader = NodeId::from_public_key(b"emergency-issue-leader");
+        let hub = CoordinatorCandidateResponseHub::default();
+        let mut receiver = hub
+            .register(PendingCoordinatorCandidate::EmergencyIssue {
+                network_id: network_id.clone(),
+            })
+            .expect("register emergency issue");
+
+        assert!(
+            hub.route(&SignalingMessage::CoordinatorEmergencyLeaderIssueAck {
+                response: coordinator_emergency_response(
+                    NetworkId::from_public_key(b"other-emergency-issue-network"),
+                    leader.clone(),
+                    7,
+                    1,
+                    false,
+                ),
+            })
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "an emergency issue for another network must not complete the request"
+        );
+
+        let response = coordinator_emergency_response(network_id, leader, 8, 1, false);
+        assert!(
+            hub.route(&SignalingMessage::CoordinatorEmergencyLeaderIssueAck {
+                response: response.clone(),
+            })
+        );
+        assert_eq!(
+            receiver.await.expect("matching emergency issue response"),
+            Ok(CoordinatorCandidateOperationResponse::Emergency(response))
+        );
+    }
+
+    #[tokio::test]
+    async fn emergency_renew_ack_requires_the_exact_lease_and_renewal() {
+        let network_id = NetworkId::from_public_key(b"emergency-renew-network");
+        let leader = NodeId::from_public_key(b"emergency-renew-leader");
+        let hub = CoordinatorCandidateResponseHub::default();
+        let mut receiver = hub
+            .register(PendingCoordinatorCandidate::EmergencyRenew {
+                network_id: network_id.clone(),
+                leader: leader.clone(),
+                emergency_epoch: 9,
+                candidate_config_revision: 3,
+            })
+            .expect("register emergency renew");
+
+        assert!(
+            hub.route(&SignalingMessage::CoordinatorEmergencyLeaderRenewAck {
+                response: coordinator_emergency_response(
+                    network_id.clone(),
+                    leader.clone(),
+                    8,
+                    3,
+                    true,
+                ),
+            })
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "an emergency renewal for another epoch must not complete the request"
+        );
+        assert!(
+            hub.route(&SignalingMessage::CoordinatorEmergencyLeaderRenewAck {
+                response: coordinator_emergency_response(
+                    network_id.clone(),
+                    leader.clone(),
+                    9,
+                    3,
+                    false,
+                ),
+            })
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "an emergency response that did not renew must not complete the request"
+        );
+
+        let response = coordinator_emergency_response(network_id, leader, 9, 3, true);
+        assert!(
+            hub.route(&SignalingMessage::CoordinatorEmergencyLeaderRenewAck {
+                response: response.clone(),
+            })
+        );
+        assert_eq!(
+            receiver.await.expect("matching emergency renewal response"),
+            Ok(CoordinatorCandidateOperationResponse::Emergency(response))
         );
     }
 

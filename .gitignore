@@ -48,3 +48,9 @@ __pycache__/
 /fuzz/artifacts/
 /fuzz/coverage/
 /fuzz/corpus/
+
+# Android/Gradle local state
+/android/.gradle/
+/android/.kotlin/
+/android/local.properties
+/android/**/build/

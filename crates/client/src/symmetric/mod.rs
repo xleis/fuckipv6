@@ -1,27 +1,113 @@
 use anyhow::{Context, Result};
-use fuckipv6_common::domain::{NetworkRecord, NodeId};
+use fuckipv6_common::domain::{
+    NetworkRecord, NodeId, RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot,
+    RelayHealthSnapshot, RelayLifecycleState,
+};
 use fuckipv6_common::{
     CoordinatorConfig, Identity, NetworkAllocation, NetworkTicket, RelayEndpoint,
 };
 use fuckipv6_coordinator::{
-    relay::server::RelayServer, signaling::blacklist::CoordinatorConfigBlacklistStore,
+    relay::server::{RelayPolicyAuthority, RelayServer},
+    signaling::blacklist::CoordinatorConfigBlacklistStore,
     signaling::exit_contribution::ExitContributionRequestStore,
-    signaling::invitations::InvitationStore, signaling::join_requests::JoinRequestStore,
-    signaling::member_lifecycle::MemberLifecycleStore, signaling::server::SignalingServer,
+    signaling::invitations::InvitationStore,
+    signaling::join_requests::JoinRequestStore,
+    signaling::member_lifecycle::MemberLifecycleStore,
+    signaling::server::{RelayEndpointDirectory, SignalingServer},
     signaling::session::SessionManager,
 };
+use std::io::ErrorKind as IoErrorKind;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::task::JoinHandle;
 
 use crate::config_manager::ConfigManager;
+use crate::policy_transaction::PolicySnapshot;
+use relay_policy::DurableRelayPolicyAuthority;
 
 mod actor;
+mod relay_policy;
 
 pub use actor::{
     EmbeddedServiceError, EmbeddedServiceManager, EmbeddedServiceSnapshot,
     EmbeddedServiceStartRequest,
 };
+
+/// Stable explanation for a failed Relay lifecycle transition. The health
+/// snapshot is retained with the coordinator so a failed start remains
+/// observable after the command returns and stale healthy evidence is removed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("Relay 生命周期操作失败 [{reason_code}]: {message}")]
+pub struct RelayLifecycleError {
+    pub reason_code: &'static str,
+    pub message: String,
+    pub health: Box<RelayHealthSnapshot>,
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
+fn classify_relay_start_error(error: &anyhow::Error) -> (&'static str, RelayLifecycleState) {
+    let kind = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .map(std::io::Error::kind);
+    match kind {
+        Some(IoErrorKind::Unsupported) => (
+            "relay.start.platform_unsupported",
+            RelayLifecycleState::Unsupported,
+        ),
+        Some(IoErrorKind::AddrInUse) => ("relay.start.address_in_use", RelayLifecycleState::Failed),
+        Some(IoErrorKind::PermissionDenied) => {
+            ("relay.start.permission_denied", RelayLifecycleState::Failed)
+        }
+        Some(
+            IoErrorKind::NetworkUnreachable
+            | IoErrorKind::HostUnreachable
+            | IoErrorKind::AddrNotAvailable
+            | IoErrorKind::ConnectionRefused
+            | IoErrorKind::ConnectionAborted
+            | IoErrorKind::ConnectionReset
+            | IoErrorKind::NotConnected
+            | IoErrorKind::TimedOut,
+        ) => (
+            "relay.start.network_unreachable",
+            RelayLifecycleState::Failed,
+        ),
+        _ => ("relay.start.unknown", RelayLifecycleState::Failed),
+    }
+}
+
+fn relay_start_failure(error: anyhow::Error) -> RelayLifecycleError {
+    let (reason_code, lifecycle) = classify_relay_start_error(&error);
+    RelayLifecycleError {
+        reason_code,
+        message: format!("{error:#}"),
+        health: Box::new(RelayHealthSnapshot::failed(
+            lifecycle,
+            reason_code,
+            now_unix_ms(),
+        )),
+    }
+}
+
+fn relay_stop_failure(error: anyhow::Error) -> RelayLifecycleError {
+    const REASON_CODE: &str = "relay.stop.cleanup_incomplete";
+    RelayLifecycleError {
+        reason_code: REASON_CODE,
+        message: format!("{error:#}"),
+        health: Box::new(RelayHealthSnapshot::failed(
+            RelayLifecycleState::Failed,
+            REASON_CODE,
+            now_unix_ms(),
+        )),
+    }
+}
 
 /// 内嵌协调端 Actor
 ///
@@ -30,11 +116,18 @@ pub use actor::{
 pub struct EmbeddedCoordinator {
     pub ticket: NetworkTicket,
     pub signaling_addr: SocketAddr,
-    pub relay_addr: SocketAddr,
+    pub relay_addr: Option<SocketAddr>,
     pub session_manager: Arc<SessionManager>,
     blacklist_store: Arc<CoordinatorConfigBlacklistStore>,
     signaling_task: Option<JoinHandle<Result<()>>>,
+    relay_directory: RelayEndpointDirectory,
+    relay_server: Option<RelayServer>,
     relay_task: Option<JoinHandle<Result<()>>>,
+    relay_health: Option<RelayHealthSnapshot>,
+    relay_bind_port: u16,
+    external_host: Option<String>,
+    relay_policy_authority: Arc<DurableRelayPolicyAuthority>,
+    relay_provider_node_id: NodeId,
 }
 
 impl EmbeddedCoordinator {
@@ -48,16 +141,16 @@ impl EmbeddedCoordinator {
         ip_pool: Option<&str>,
     ) -> Result<Self> {
         let config_manager = ConfigManager::new().context("无法确定节点配置目录")?;
-        Self::start_with_config_manager(
-            network_name,
+        let request = EmbeddedServiceStartRequest {
+            network_name: network_name.to_string(),
             signaling_port,
             relay_port,
+            relay_enabled: true,
             host_public_key,
             external_host,
-            ip_pool,
-            config_manager,
-        )
-        .await
+            ip_pool: ip_pool.map(str::to_string),
+        };
+        Self::start_with_config_manager(&request, config_manager).await
     }
 
     /// Start an embedded coordinator using an explicitly isolated config
@@ -74,28 +167,24 @@ impl EmbeddedCoordinator {
     ) -> Result<Self> {
         let config_manager =
             ConfigManager::new_for_dir(config_dir).context("无法初始化内嵌协调端配置目录")?;
-        Self::start_with_config_manager(
-            network_name,
+        let request = EmbeddedServiceStartRequest {
+            network_name: network_name.to_string(),
             signaling_port,
             relay_port,
+            relay_enabled: true,
             host_public_key,
             external_host,
-            ip_pool,
-            config_manager,
-        )
-        .await
+            ip_pool: ip_pool.map(str::to_string),
+        };
+        Self::start_with_config_manager(&request, config_manager).await
     }
 
     pub(crate) async fn start_with_config_manager(
-        network_name: &str,
-        signaling_port: u16,
-        relay_port: u16,
-        host_public_key: Option<[u8; 32]>,
-        external_host: Option<String>,
-        ip_pool: Option<&str>,
+        request: &EmbeddedServiceStartRequest,
         config_manager: ConfigManager,
     ) -> Result<Self> {
-        let pool = ip_pool.unwrap_or("fd00::1000/120");
+        let network_name = request.network_name.as_str();
+        let pool = request.ip_pool.as_deref().unwrap_or("fd00::1000/120");
         let blacklist_path = config_manager
             .coordinator_config_path(network_name)
             .context("无法确定协调端持久化路径")?;
@@ -127,7 +216,8 @@ impl EmbeddedCoordinator {
         let node_identity = config_manager
             .load_node_identity()
             .context("无法加载内嵌协调器 owner 身份")?;
-        let owner_node_id = NodeId::from_public_key(&node_identity.public_key()).to_string();
+        let provider_node_id = NodeId::from_public_key(&node_identity.public_key());
+        let owner_node_id = provider_node_id.to_string();
         let mut default_coordinator_config = if blacklist_path.exists() {
             CoordinatorConfig::from_file(&blacklist_path).context("无法加载内嵌协调端持久配置")?
         } else {
@@ -205,7 +295,7 @@ impl EmbeddedCoordinator {
             .await
             .context("无法加载节点持久黑名单")?;
 
-        let signaling_bind = format!("0.0.0.0:{signaling_port}");
+        let signaling_bind = format!("0.0.0.0:{}", request.signaling_port);
         let signaling_server =
             SignalingServer::new_with_manager(signaling_bind, session_manager.clone())
                 .with_join_request_store(join_request_store)
@@ -218,38 +308,22 @@ impl EmbeddedCoordinator {
                 .await
                 .context("无法绑定内嵌信令服务")?;
         let actual_signaling_addr = signaling_server.local_addr()?;
-
-        let relay_bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), relay_port);
-        let relay_server =
-            RelayServer::bind_with_generated_certificate(relay_bind, session_manager.clone())
-                .context("无法启动内嵌 QUIC 中继服务")?;
-
-        let actual_relay_addr = relay_server.local_addr();
-        let relay_pin = relay_server.certificate().public_key_pin;
-        let advertised_relay_addr =
-            resolve_relay_advertisement(external_host.as_deref(), actual_relay_addr).await?;
-        let relay_endpoint = RelayEndpoint {
-            addr: advertised_relay_addr,
-            server_name: "fuckipv6.local".to_string(),
-            public_key_pin: relay_pin,
-        };
-
-        let signaling_server = signaling_server.with_relay_endpoint(relay_endpoint);
+        let relay_directory = signaling_server.relay_endpoint_directory();
         signaling_server.spawn_timeout_cleanup(120);
 
         // Runtime-owned services supply the node-wide persisted public key so
         // recreating a service keeps the invitation identity stable. Direct
         // embedders that omit it retain the old ephemeral-ticket behavior.
-        let host_pubkey = match host_public_key {
+        let host_pubkey = match request.host_public_key {
             Some(public_key) => public_key,
             None => Identity::generate()?.public_key_bytes(),
         };
 
         // 确定票据暴露的接入地址
         let actual_signaling_port = actual_signaling_addr.port();
-        let ticket_endpoint = if let Some(host) = external_host {
+        let ticket_endpoint = if let Some(host) = request.external_host.as_deref() {
             if host.contains(':') {
-                host
+                host.to_string()
             } else {
                 format!("{host}:{actual_signaling_port}")
             }
@@ -268,29 +342,181 @@ impl EmbeddedCoordinator {
 
         let signaling_task = tokio::spawn(async move { signaling_server.run().await });
 
-        let relay_task = tokio::spawn(async move { relay_server.run().await });
-
         let signaling_addr = actual_signaling_addr;
+        let relay_policy_authority = Arc::new(DurableRelayPolicyAuthority::new(
+            config_manager.clone(),
+            network_name,
+            PolicySnapshot::default(),
+        ));
+        let mut coordinator = Self {
+            ticket,
+            signaling_addr,
+            relay_addr: None,
+            session_manager,
+            blacklist_store,
+            signaling_task: Some(signaling_task),
+            relay_directory,
+            relay_server: None,
+            relay_task: None,
+            relay_health: None,
+            relay_bind_port: request.relay_port,
+            external_host: request.external_host.clone(),
+            relay_policy_authority,
+            relay_provider_node_id: provider_node_id,
+        };
+
+        if request.relay_enabled {
+            if let Err(error) = coordinator.enable_relay().await {
+                let _ = coordinator.shutdown().await;
+                return Err(error.into());
+            }
+        }
 
         tracing::info!(
             "🚀 内嵌协调 Actor 启动成功: 信令={}, QUIC中继={}",
             signaling_addr,
-            actual_relay_addr
+            coordinator
+                .relay_addr
+                .map(|addr| addr.to_string())
+                .unwrap_or_else(|| "已由节点 owner 禁用".to_string())
         );
         tracing::info!(
             "🎫 网络 [{}] 邀请票据已生成（敏感值不写入日志）",
             network_name
         );
 
-        Ok(Self {
-            ticket,
-            signaling_addr,
-            relay_addr: actual_relay_addr,
-            session_manager,
-            blacklist_store,
-            signaling_task: Some(signaling_task),
-            relay_task: Some(relay_task),
-        })
+        Ok(coordinator)
+    }
+
+    pub fn relay_addr(&self) -> Option<SocketAddr> {
+        self.relay_addr
+    }
+
+    /// Return the Relay server's authoritative health projection. A disabled
+    /// Relay has no health snapshot; callers must not infer health from the
+    /// advertised address or the owner's enable intent.
+    pub async fn relay_health(&self) -> Option<RelayHealthSnapshot> {
+        match self.relay_server.as_ref() {
+            Some(server) => Some(server.health_snapshot().await),
+            None => self.relay_health.clone(),
+        }
+    }
+
+    /// Return the owner-visible, sanitized authorization projection for the
+    /// current Relay policy. A missing or invalid policy remains visible as a
+    /// health failure and never produces a fabricated allow decision.
+    pub fn relay_authorization_audit_snapshot(&self) -> Option<RelayAuthorizationAuditSnapshot> {
+        self.relay_server.as_ref()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_millis()
+            .try_into()
+            .ok()?;
+        match self
+            .relay_policy_authority
+            .current_policy()
+            .and_then(|policy| policy.authorization_audit_snapshot(now).map_err(Into::into))
+        {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                tracing::warn!("无法读取 Relay 授权诊断: {error:#}");
+                None
+            }
+        }
+    }
+
+    /// Return the Relay's bounded, payload-free governance ledger. The ledger
+    /// is owned by the current Relay instance and therefore disappears when the
+    /// Relay is explicitly disabled; durable lifecycle evidence remains in the
+    /// node command audit.
+    pub fn relay_governance_snapshot(&self) -> Option<RelayGovernanceAuditSnapshot> {
+        self.relay_server
+            .as_ref()
+            .map(RelayServer::governance_snapshot)
+    }
+
+    /// Start the local Relay independently of signaling and other node
+    /// capabilities. Re-enabling after a stop restores the last bound port.
+    pub async fn enable_relay(&mut self) -> Result<SocketAddr, RelayLifecycleError> {
+        if let Some(addr) = self.relay_addr {
+            return Ok(addr);
+        }
+
+        let relay_bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), self.relay_bind_port);
+        let relay_server = match RelayServer::bind_with_generated_certificate(
+            relay_bind,
+            self.session_manager.clone(),
+            self.relay_policy_authority.clone(),
+        ) {
+            Ok(server) => server,
+            Err(error) => {
+                let failure = relay_start_failure(error.context("无法启动内嵌 QUIC 中继服务"));
+                self.relay_health = Some((*failure.health).clone());
+                return Err(failure);
+            }
+        };
+        let actual_relay_addr = relay_server.local_addr();
+        let relay_pin = relay_server.certificate().public_key_pin;
+        let advertised_relay_addr =
+            match resolve_relay_advertisement(self.external_host.as_deref(), actual_relay_addr)
+                .await
+            {
+                Ok(addr) => addr,
+                Err(error) => {
+                    let failure = relay_start_failure(error);
+                    self.relay_health = Some((*failure.health).clone());
+                    drop(relay_server);
+                    return Err(failure);
+                }
+            };
+        let relay_endpoint = RelayEndpoint {
+            addr: advertised_relay_addr,
+            server_name: "fuckipv6.local".to_string(),
+            public_key_pin: relay_pin,
+            provider_node_id: Some(self.relay_provider_node_id.clone()),
+        };
+
+        let run_server = relay_server.clone();
+        let relay_task = tokio::spawn(async move { run_server.run().await });
+        self.relay_directory.set_primary(Some(relay_endpoint));
+        self.relay_server = Some(relay_server);
+        self.relay_task = Some(relay_task);
+        self.relay_addr = Some(actual_relay_addr);
+        self.relay_health = None;
+        self.relay_bind_port = actual_relay_addr.port();
+        Ok(actual_relay_addr)
+    }
+
+    /// Withdraw this node's Relay endpoint, stop accepting new sessions, close
+    /// existing QUIC sessions, and release the listener before returning.
+    pub async fn disable_relay(&mut self) -> Result<(), RelayLifecycleError> {
+        self.relay_directory.set_primary(None);
+        let Some(server) = self.relay_server.take() else {
+            self.relay_addr = None;
+            return Ok(());
+        };
+
+        server.shutdown().await;
+        let task_result = match self.relay_task.take() {
+            Some(task) => match task.await {
+                Ok(result) => result,
+                Err(error) if error.is_cancelled() => Ok(()),
+                Err(error) => Err(anyhow::anyhow!("QUIC 中继任务异常退出: {error}")),
+            },
+            None => Ok(()),
+        };
+        drop(server);
+        self.relay_addr = None;
+        self.relay_health = None;
+        match task_result {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let failure = relay_stop_failure(error);
+                self.relay_health = Some((*failure.health).clone());
+                Err(failure)
+            }
+        }
     }
 
     pub async fn persisted_network_allocation(&self) -> Result<NetworkAllocation> {
@@ -331,23 +557,21 @@ impl EmbeddedCoordinator {
         Ok(())
     }
 
-    /// Stop and join both listener tasks so their TCP/UDP ports are released
-    /// before the caller treats the service as stopped.
+    /// Stop Relay independently, then stop signaling. Both listener ports are
+    /// released before the caller treats the embedded service as stopped.
     pub async fn shutdown(&mut self) -> Result<()> {
         let mut failures = Vec::new();
-        for (name, task) in [
-            ("信令", self.signaling_task.take()),
-            ("QUIC 中继", self.relay_task.take()),
-        ] {
-            let Some(task) = task else {
-                continue;
-            };
+        if let Err(error) = self.disable_relay().await {
+            failures.push(format!("QUIC 中继服务关闭失败: {error:#}"));
+        }
+
+        if let Some(task) = self.signaling_task.take() {
             task.abort();
             match task.await {
                 Ok(Ok(())) => {}
-                Ok(Err(error)) => failures.push(format!("{name}服务异常退出: {error:#}")),
+                Ok(Err(error)) => failures.push(format!("信令服务异常退出: {error:#}")),
                 Err(error) if error.is_cancelled() => {}
-                Err(error) => failures.push(format!("{name}服务任务异常: {error}")),
+                Err(error) => failures.push(format!("信令服务任务异常: {error}")),
             }
         }
         if failures.is_empty() {
@@ -403,15 +627,65 @@ impl Drop for EmbeddedCoordinator {
         if let Some(task) = self.signaling_task.take() {
             task.abort();
         }
+        self.relay_directory.set_primary(None);
         if let Some(task) = self.relay_task.take() {
             task.abort();
         }
+        self.relay_server.take();
+        self.relay_health = None;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_start_errors_have_stable_explanations() {
+        let cases = [
+            (
+                std::io::ErrorKind::Unsupported,
+                "relay.start.platform_unsupported",
+                RelayLifecycleState::Unsupported,
+            ),
+            (
+                std::io::ErrorKind::AddrInUse,
+                "relay.start.address_in_use",
+                RelayLifecycleState::Failed,
+            ),
+            (
+                std::io::ErrorKind::PermissionDenied,
+                "relay.start.permission_denied",
+                RelayLifecycleState::Failed,
+            ),
+            (
+                std::io::ErrorKind::NetworkUnreachable,
+                "relay.start.network_unreachable",
+                RelayLifecycleState::Failed,
+            ),
+            (
+                std::io::ErrorKind::InvalidInput,
+                "relay.start.unknown",
+                RelayLifecycleState::Failed,
+            ),
+            (
+                std::io::ErrorKind::Other,
+                "relay.start.unknown",
+                RelayLifecycleState::Failed,
+            ),
+        ];
+
+        for (kind, expected_reason, expected_lifecycle) in cases {
+            let error = anyhow::Error::new(std::io::Error::new(kind, "relay bind failed"))
+                .context("start Relay");
+            let (reason_code, lifecycle) = classify_relay_start_error(&error);
+            assert_eq!(reason_code, expected_reason, "unexpected code for {kind:?}");
+            assert_eq!(
+                lifecycle, expected_lifecycle,
+                "unexpected state for {kind:?}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn relay_advertisement_uses_external_ipv4_host() {
@@ -575,7 +849,13 @@ mod tests {
         assert_eq!(coordinator.ticket.network_name, "test-mesh");
         assert!(coordinator.ticket.to_string().starts_with("fk://"));
         assert_ne!(coordinator.signaling_addr.port(), 0);
-        assert_ne!(coordinator.relay_addr.port(), 0);
+        assert_ne!(
+            coordinator
+                .relay_addr()
+                .expect("relay should be enabled by default")
+                .port(),
+            0
+        );
         coordinator.shutdown().await.expect("shutdown coordinator");
         let _ = std::fs::remove_dir_all(config_dir);
     }

@@ -498,6 +498,16 @@ describe("explainable policy workflow", () => {
             contributions: ["relay"],
           },
         ],
+        relay_limits: {
+          max_connections: 12,
+          max_concurrent_streams: 64,
+          max_bandwidth_kbps: 9_000,
+          max_bytes: 1_000_000,
+          max_cpu_percent: 60,
+          max_memory_bytes: 200_000_000,
+          max_session_duration_secs: 1_800,
+          quota_reset_at_unix_ms: 1_800_000_100_000,
+        },
       },
       network_acl: {
         network_id: networkId,
@@ -524,6 +534,16 @@ describe("explainable policy workflow", () => {
             requires_recent_reauthentication: true,
           },
         ],
+        relay_limits: {
+          max_connections: 8,
+          max_concurrent_streams: 32,
+          max_bandwidth_kbps: 4_000,
+          max_bytes: 500_000,
+          max_cpu_percent: 50,
+          max_memory_bytes: 100_000_000,
+          max_session_duration_secs: 900,
+          quota_reset_at_unix_ms: 1_800_000_200_000,
+        },
       },
     };
     const raw = JSON.stringify(document, null, 2);
@@ -562,6 +582,54 @@ describe("explainable policy workflow", () => {
     ).toHaveValue("9");
     expect(screen.getAllByDisplayValue(ruleId)).toHaveLength(2);
     expect(screen.getByDisplayValue(grantId)).toBeInTheDocument();
+    const localConnections = container.querySelector(
+      "#policy-local-relay-limit-max-connections",
+    ) as HTMLInputElement;
+    const aclBytes = container.querySelector(
+      "#policy-acl-relay-limit-max-bytes",
+    ) as HTMLInputElement;
+    expect(localConnections).toHaveValue("12");
+    expect(aclBytes).toHaveValue("500000");
+    expect(
+      container.querySelector("#policy-local-relay-limit-max-cpu-percent"),
+    ).toHaveValue("60");
+    expect(
+      container.querySelector("#policy-acl-relay-limit-quota-reset-at-unix-ms"),
+    ).toHaveValue("1800000200000");
+
+    await user.clear(localConnections);
+    await user.type(localConnections, "6");
+    await user.clear(aclBytes);
+    await user.type(aclBytes, "250000");
+    await user.click(
+      screen.getByRole("button", { name: "translated:policy.run" }),
+    );
+    await waitFor(() =>
+      expect(callsFor(onSubmit, "test_policy")).toHaveLength(1),
+    );
+    const candidate = JSON.parse(
+      String(callsFor(onSubmit, "test_policy")[0][1].policy_json),
+    ) as PolicyTestInput;
+    expect(candidate.local_policy?.relay_limits).toMatchObject({
+      max_connections: 6,
+      max_concurrent_streams: 64,
+      max_bandwidth_kbps: 9_000,
+      max_bytes: 1_000_000,
+      max_cpu_percent: 60,
+      max_memory_bytes: 200_000_000,
+      max_session_duration_secs: 1_800,
+      quota_reset_at_unix_ms: 1_800_000_100_000,
+    });
+    expect(candidate.network_acl?.relay_limits).toMatchObject({
+      max_connections: 8,
+      max_concurrent_streams: 32,
+      max_bandwidth_kbps: 4_000,
+      max_bytes: 250_000,
+      max_cpu_percent: 50,
+      max_memory_bytes: 100_000_000,
+      max_session_duration_secs: 900,
+      quota_reset_at_unix_ms: 1_800_000_200_000,
+    });
   });
 
   it("rejects duplicate JSON keys and exposes the exact field path", async () => {

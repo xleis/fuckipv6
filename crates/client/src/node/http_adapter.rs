@@ -154,7 +154,7 @@ pub enum NodeApiObject {
     },
     EmbeddedService {
         id: String,
-        service: ProjectedNodeEmbeddedServiceSnapshot,
+        service: Box<ProjectedNodeEmbeddedServiceSnapshot>,
     },
     NetworkConfiguration {
         id: String,
@@ -2130,7 +2130,7 @@ async fn handle_v1_object(
             .find(|service| service.network_name == id)
             .map(|service| NodeApiObject::EmbeddedService {
                 id: id.clone(),
-                service,
+                service: Box::new(service),
             }),
         "network_configuration" => snapshot
             .configuration

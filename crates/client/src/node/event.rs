@@ -33,6 +33,10 @@ pub enum NodeEventKind {
         network_name: String,
         status: NodeEmbeddedServiceStatus,
     },
+    RelayChanged {
+        network_name: String,
+        status: NodeEmbeddedServiceStatus,
+    },
     LogAppended {
         level: NodeLogLevel,
         message: String,

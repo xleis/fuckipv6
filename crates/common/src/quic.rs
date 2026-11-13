@@ -19,6 +19,7 @@ use x509_parser::oid_registry::OID_SIG_ED25519;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::crypto::Identity;
+use crate::domain::RelayMemberGrant;
 use crate::{ClientId, ErrorCode};
 
 pub const FUCKIPV6_QUIC_ALPN: &[u8] = b"fuckipv6-quic-v1";
@@ -711,6 +712,10 @@ pub enum RelayMessage {
         client_certificate_public_key_pin: [u8; 32],
         tls_channel_binding: [u8; 32],
         signature: Vec<u8>,
+        /// Consumer-authored short-lived authorization. It is optional only for
+        /// wire compatibility; Relay servers must reject registrations without it.
+        #[serde(default)]
+        member_grant: Option<Box<RelayMemberGrant>>,
     },
     RegisterAck {
         accepted: bool,
@@ -724,6 +729,16 @@ pub enum RelayMessage {
     },
     Error {
         code: u16,
+        message: String,
+    },
+    /// Replace the signed authorization on an already authenticated Relay
+    /// connection. The update is bound to the same consumer, network, provider
+    /// and QUIC connection as the original registration.
+    UpdateAuthorization {
+        member_grant: Box<RelayMemberGrant>,
+    },
+    AuthorizationAck {
+        accepted: bool,
         message: String,
     },
 }

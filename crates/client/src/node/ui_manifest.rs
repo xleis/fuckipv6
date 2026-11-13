@@ -197,8 +197,8 @@ impl NodeUiManifest {
                         action.audit.clone(),
                     ),
                 ) {
-                    // SetNetworkRole is role-scoped: Exit Node is implemented,
-                    // while Discovery and Relay hot toggles remain unavailable.
+                    // SetNetworkRole is role-scoped: Exit Node and Relay hot
+                    // toggles are implemented, while Discovery remains unavailable.
                     let backend_status_is_role_scoped =
                         action.command == NodeCommandKind::SetNetworkRole;
                     if !backend_status_is_role_scoped && backend_status != action.backend_status {
@@ -2338,7 +2338,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                     "set_relay_role",
                     "action.set_relay_role",
                     NodeCommandKind::SetNetworkRole,
-                    NodeUiBackendStatus::Unavailable,
+                    NodeUiBackendStatus::Implemented,
                     NodePermission::ManageRoles,
                     NodeUiAvailability::NetworkSelected,
                     vec![
@@ -3217,10 +3217,7 @@ mod tests {
         );
         assert_eq!(
             status(NodeCommandKind::SetNetworkRole),
-            HashSet::from([
-                NodeUiBackendStatus::Implemented,
-                NodeUiBackendStatus::Unavailable,
-            ])
+            HashSet::from([NodeUiBackendStatus::Implemented])
         );
     }
 
@@ -3274,6 +3271,39 @@ mod tests {
             crate::node::audit_for_command(NodeCommandKind::SetLocalExitCapability),
             NodeUiAudit::record("node.local_exit.set")
         );
+    }
+
+    #[test]
+    fn relay_role_action_uses_the_canonical_manage_roles_command() {
+        let manifest = node_ui_manifest();
+        let relay = manifest
+            .pages
+            .iter()
+            .find(|page| page.id == "relay")
+            .expect("relay page");
+        assert_eq!(relay.actions.len(), 1);
+        let action = &relay.actions[0];
+        assert_eq!(action.id, "set_relay_role");
+        assert_eq!(action.command, NodeCommandKind::SetNetworkRole);
+        assert_eq!(action.backend_status, NodeUiBackendStatus::Implemented);
+        assert_eq!(action.permission, NodePermission::ManageRoles);
+        assert_eq!(action.availability, NodeUiAvailability::NetworkSelected);
+        assert_eq!(action.audit, NodeUiAudit::record("network.role.set"));
+        assert_eq!(
+            action
+                .fields
+                .iter()
+                .map(|field| field.id.as_str())
+                .collect::<Vec<_>>(),
+            ["network_name", "role", "enabled"]
+        );
+        let confirmation = action.confirmation.as_ref().expect("confirmation");
+        assert_eq!(confirmation.title_key, "confirm.set_relay_role.title");
+        assert_eq!(
+            confirmation.consequence_key,
+            "confirm.set_relay_role.consequence"
+        );
+        assert!(!confirmation.destructive);
     }
 
     #[test]

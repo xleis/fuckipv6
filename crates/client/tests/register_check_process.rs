@@ -44,7 +44,13 @@ async fn register_check_command_registers_with_embedded_host() -> Result<()> {
         config_dir.clone(),
     )
     .await?;
-    let advertised_relay_addr = SocketAddr::new(signaling_addr.ip(), coordinator.relay_addr.port());
+    let advertised_relay_addr = SocketAddr::new(
+        signaling_addr.ip(),
+        coordinator
+            .relay_addr
+            .expect("default embedded Relay must be listening")
+            .port(),
+    );
 
     wait_for_tcp(signaling_addr).await?;
 

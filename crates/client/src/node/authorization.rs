@@ -1146,6 +1146,7 @@ mod tests {
             expires_at_unix_ms: now.saturating_add(60_000),
             rules,
             grants,
+            relay_limits: Default::default(),
         }
     }
 
@@ -1183,6 +1184,7 @@ mod tests {
             network_scope,
             contribution_vetoes,
             exit_contribution: None,
+            relay_limits: Default::default(),
             rules,
         }
     }
@@ -1626,6 +1628,42 @@ mod tests {
             },
         )
         .expect("temporary coordinator can read network state");
+    }
+
+    #[test]
+    fn temporary_coordinator_cannot_start_or_stop_relay() {
+        let relay_policies = (
+            vec![allow(
+                b"local-relay-capability",
+                SubjectSelector::AnyMember,
+                PolicyAction::Update,
+                ResourceKind::Capability,
+            )],
+            vec![allow(
+                b"network-relay-capability",
+                SubjectSelector::AnyMember,
+                PolicyAction::Update,
+                ResourceKind::Capability,
+            )],
+        );
+        for enabled in [true, false] {
+            assert_denied(
+                &network_context(
+                    NetworkRole::TemporaryCoordinator,
+                    [NodePermission::ManageRoles],
+                    &["home"],
+                    MembershipState::Active,
+                    relay_policies.0.clone(),
+                    relay_policies.1.clone(),
+                ),
+                NodeCommand::SetNetworkRole(crate::node::NodeSetNetworkRoleCommand {
+                    network_name: "home".into(),
+                    role: crate::node::NodeNetworkRole::Relay,
+                    enabled,
+                }),
+                "permission.temporary_coordinator_read_only",
+            );
+        }
     }
 
     #[test]

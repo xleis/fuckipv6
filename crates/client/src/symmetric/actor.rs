@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 
+use fuckipv6_common::domain::{
+    RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot, RelayHealthSnapshot,
+};
 use tokio::sync::{mpsc, oneshot};
 
 use super::EmbeddedCoordinator;
@@ -13,6 +16,9 @@ pub struct EmbeddedServiceStartRequest {
     pub network_name: String,
     pub signaling_port: u16,
     pub relay_port: u16,
+    /// Whether the owner wants this embedded network to provide Relay service.
+    /// Signaling remains available when Relay is disabled.
+    pub relay_enabled: bool,
     pub host_public_key: Option<[u8; 32]>,
     pub external_host: Option<String>,
     pub ip_pool: Option<String>,
@@ -24,6 +30,7 @@ impl EmbeddedServiceStartRequest {
             network_name: network_name.into(),
             signaling_port,
             relay_port,
+            relay_enabled: true,
             host_public_key: None,
             external_host: None,
             ip_pool: None,
@@ -42,6 +49,11 @@ impl EmbeddedServiceStartRequest {
 
     pub fn with_ip_pool(mut self, ip_pool: impl Into<String>) -> Self {
         self.ip_pool = Some(ip_pool.into());
+        self
+    }
+
+    pub fn with_relay_enabled(mut self, relay_enabled: bool) -> Self {
+        self.relay_enabled = relay_enabled;
         self
     }
 
@@ -100,7 +112,10 @@ pub struct EmbeddedServiceSnapshot {
     pub network_name: String,
     pub ticket: String,
     pub signaling_addr: SocketAddr,
-    pub relay_addr: SocketAddr,
+    pub relay_addr: Option<SocketAddr>,
+    pub relay_health: Option<RelayHealthSnapshot>,
+    pub relay_authorization: Option<RelayAuthorizationAuditSnapshot>,
+    pub relay_governance: Option<RelayGovernanceAuditSnapshot>,
 }
 
 impl From<&EmbeddedCoordinator> for EmbeddedServiceSnapshot {
@@ -110,6 +125,9 @@ impl From<&EmbeddedCoordinator> for EmbeddedServiceSnapshot {
             ticket: coordinator.ticket.to_string(),
             signaling_addr: coordinator.signaling_addr,
             relay_addr: coordinator.relay_addr,
+            relay_health: None,
+            relay_authorization: None,
+            relay_governance: None,
         }
     }
 }
@@ -144,6 +162,20 @@ pub enum EmbeddedServiceError {
         network_name: String,
         message: String,
     },
+    #[error("网络 [{network_name}] 的 Relay 启动失败 [{reason_code}]: {message}")]
+    RelayStartFailed {
+        network_name: String,
+        reason_code: &'static str,
+        message: String,
+        health: Box<RelayHealthSnapshot>,
+    },
+    #[error("网络 [{network_name}] 的 Relay 停止失败 [{reason_code}]: {message}")]
+    RelayStopFailed {
+        network_name: String,
+        reason_code: &'static str,
+        message: String,
+        health: Box<RelayHealthSnapshot>,
+    },
     #[error("内嵌网络服务 actor 已关闭")]
     ActorClosed,
 }
@@ -157,8 +189,20 @@ enum EmbeddedServiceCommand {
         network_name: String,
         reply: oneshot::Sender<Result<EmbeddedServiceSnapshot, EmbeddedServiceError>>,
     },
+    EnableRelay {
+        network_name: String,
+        reply: oneshot::Sender<Result<EmbeddedServiceSnapshot, EmbeddedServiceError>>,
+    },
+    DisableRelay {
+        network_name: String,
+        reply: oneshot::Sender<Result<EmbeddedServiceSnapshot, EmbeddedServiceError>>,
+    },
     List {
         reply: oneshot::Sender<Vec<EmbeddedServiceSnapshot>>,
+    },
+    GetRelayStatus {
+        network_name: String,
+        reply: oneshot::Sender<Result<Option<RelayHealthSnapshot>, EmbeddedServiceError>>,
     },
     GetBlacklist {
         network_name: String,
@@ -233,7 +277,7 @@ impl EmbeddedServiceManager {
                         reply,
                     } => {
                         let result = if let Some(mut coordinator) = services.remove(&network_name) {
-                            let snapshot = EmbeddedServiceSnapshot::from(&coordinator);
+                            let snapshot = embedded_service_snapshot(&coordinator).await;
                             match coordinator.shutdown().await {
                                 Ok(()) => Ok(snapshot),
                                 Err(error) => Err(EmbeddedServiceError::StopFailed {
@@ -246,13 +290,59 @@ impl EmbeddedServiceManager {
                         };
                         let _ = reply.send(result);
                     }
+                    EmbeddedServiceCommand::EnableRelay {
+                        network_name,
+                        reply,
+                    } => {
+                        let result = match services.get_mut(&network_name) {
+                            Some(coordinator) => match coordinator.enable_relay().await {
+                                Ok(_) => Ok(embedded_service_snapshot(coordinator).await),
+                                Err(error) => Err(EmbeddedServiceError::RelayStartFailed {
+                                    network_name: network_name.clone(),
+                                    reason_code: error.reason_code,
+                                    message: error.message,
+                                    health: error.health,
+                                }),
+                            },
+                            None => Err(EmbeddedServiceError::NotFound(network_name)),
+                        };
+                        let _ = reply.send(result);
+                    }
+                    EmbeddedServiceCommand::DisableRelay {
+                        network_name,
+                        reply,
+                    } => {
+                        let result = match services.get_mut(&network_name) {
+                            Some(coordinator) => match coordinator.disable_relay().await {
+                                Ok(()) => Ok(embedded_service_snapshot(coordinator).await),
+                                Err(error) => Err(EmbeddedServiceError::RelayStopFailed {
+                                    network_name: network_name.clone(),
+                                    reason_code: error.reason_code,
+                                    message: error.message,
+                                    health: error.health,
+                                }),
+                            },
+                            None => Err(EmbeddedServiceError::NotFound(network_name)),
+                        };
+                        let _ = reply.send(result);
+                    }
                     EmbeddedServiceCommand::List { reply } => {
-                        let mut snapshots: Vec<_> = services
-                            .values()
-                            .map(EmbeddedServiceSnapshot::from)
-                            .collect();
+                        let mut snapshots = Vec::with_capacity(services.len());
+                        for coordinator in services.values() {
+                            snapshots.push(embedded_service_snapshot(coordinator).await);
+                        }
                         snapshots.sort_by(|a, b| a.network_name.cmp(&b.network_name));
                         let _ = reply.send(snapshots);
+                    }
+                    EmbeddedServiceCommand::GetRelayStatus {
+                        network_name,
+                        reply,
+                    } => {
+                        let result = match services.get(&network_name) {
+                            Some(coordinator) => Ok(coordinator.relay_health().await),
+                            None => Err(EmbeddedServiceError::NotFound(network_name)),
+                        };
+                        let _ = reply.send(result);
                     }
                     EmbeddedServiceCommand::GetBlacklist {
                         network_name,
@@ -426,6 +516,40 @@ impl EmbeddedServiceManager {
             .map_err(|_| EmbeddedServiceError::ActorClosed)?
     }
 
+    pub async fn enable_relay(
+        &self,
+        network_name: impl Into<String>,
+    ) -> Result<EmbeddedServiceSnapshot, EmbeddedServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(EmbeddedServiceCommand::EnableRelay {
+                network_name: network_name.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?;
+        response
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?
+    }
+
+    pub async fn disable_relay(
+        &self,
+        network_name: impl Into<String>,
+    ) -> Result<EmbeddedServiceSnapshot, EmbeddedServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(EmbeddedServiceCommand::DisableRelay {
+                network_name: network_name.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?;
+        response
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?
+    }
+
     pub async fn list(&self) -> Result<Vec<EmbeddedServiceSnapshot>, EmbeddedServiceError> {
         let (reply, response) = oneshot::channel();
         self.sender
@@ -435,6 +559,23 @@ impl EmbeddedServiceManager {
         response
             .await
             .map_err(|_| EmbeddedServiceError::ActorClosed)
+    }
+
+    pub async fn get_relay_status(
+        &self,
+        network_name: impl Into<String>,
+    ) -> Result<Option<RelayHealthSnapshot>, EmbeddedServiceError> {
+        let (reply, response) = oneshot::channel();
+        self.sender
+            .send(EmbeddedServiceCommand::GetRelayStatus {
+                network_name: network_name.into(),
+                reply,
+            })
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?;
+        response
+            .await
+            .map_err(|_| EmbeddedServiceError::ActorClosed)?
     }
 
     pub async fn get_blacklist(
@@ -562,30 +703,60 @@ async fn start_service(
         return Err(EmbeddedServiceError::AlreadyRunning(request.network_name));
     }
 
-    let coordinator = EmbeddedCoordinator::start_with_config_manager(
-        &request.network_name,
-        request.signaling_port,
-        request.relay_port,
-        request.host_public_key,
-        request.external_host,
-        request.ip_pool.as_deref(),
-        configs.clone(),
-    )
-    .await
-    .map_err(|error| EmbeddedServiceError::StartFailed {
-        network_name: request.network_name.clone(),
-        message: format!("{error:#}"),
-    })?;
+    let network_name = request.network_name.clone();
+    let relay_enabled = request.relay_enabled;
+    // Signaling and Relay are independent capabilities. Register signaling
+    // first so a Relay bind failure remains observable and retryable instead
+    // of tearing down the entire embedded service.
+    let mut signaling_request = request;
+    signaling_request.relay_enabled = false;
+    let coordinator =
+        EmbeddedCoordinator::start_with_config_manager(&signaling_request, configs.clone())
+            .await
+            .map_err(|error| EmbeddedServiceError::StartFailed {
+                network_name: network_name.clone(),
+                message: format!("{error:#}"),
+            })?;
 
-    let snapshot = EmbeddedServiceSnapshot::from(&coordinator);
-    services.insert(request.network_name, coordinator);
-    Ok(snapshot)
+    services.insert(network_name.clone(), coordinator);
+    if relay_enabled {
+        if let Err(error) = services
+            .get_mut(&network_name)
+            .expect("inserted embedded service must be present")
+            .enable_relay()
+            .await
+        {
+            return Err(EmbeddedServiceError::RelayStartFailed {
+                network_name,
+                reason_code: error.reason_code,
+                message: error.message,
+                health: error.health,
+            });
+        }
+    }
+
+    Ok(embedded_service_snapshot(
+        services
+            .get(&network_name)
+            .expect("started embedded service must remain registered"),
+    )
+    .await)
+}
+
+async fn embedded_service_snapshot(coordinator: &EmbeddedCoordinator) -> EmbeddedServiceSnapshot {
+    let mut snapshot = EmbeddedServiceSnapshot::from(coordinator);
+    snapshot.relay_health = coordinator.relay_health().await;
+    snapshot.relay_authorization = coordinator.relay_authorization_audit_snapshot();
+    snapshot.relay_governance = coordinator.relay_governance_snapshot();
+    snapshot
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fuckipv6_common::domain::RelayLifecycleState;
     use std::ops::Deref;
+    use std::time::Duration;
 
     struct TestManager {
         services: EmbeddedServiceManager,
@@ -786,7 +957,10 @@ mod tests {
             .await
             .expect("start service on OS-assigned ports");
         let signaling_port = started.signaling_addr.port();
-        let relay_port = started.relay_addr.port();
+        let relay_port = started
+            .relay_addr
+            .expect("relay should be enabled by default")
+            .port();
 
         manager.stop("port-release").await.expect("stop service");
 
@@ -796,5 +970,271 @@ mod tests {
         tokio::net::UdpSocket::bind(("127.0.0.1", relay_port))
             .await
             .expect("relay UDP port must be released after stop");
+    }
+
+    #[tokio::test]
+    async fn initial_relay_start_failure_keeps_signaling_observable_and_retryable() {
+        let manager = test_manager(2);
+        let occupied = tokio::net::UdpSocket::bind(("127.0.0.1", 0))
+            .await
+            .expect("occupy relay UDP port");
+        let relay_port = occupied
+            .local_addr()
+            .expect("occupied relay address")
+            .port();
+
+        let failure = manager
+            .start(
+                EmbeddedServiceStartRequest::new("initial-relay-failure", 0, relay_port)
+                    .with_external_host("127.0.0.1"),
+            )
+            .await
+            .expect_err("occupied UDP port must reject initial Relay start");
+        let EmbeddedServiceError::RelayStartFailed {
+            reason_code,
+            health,
+            ..
+        } = failure
+        else {
+            panic!("expected a typed Relay start failure");
+        };
+        assert_eq!(reason_code, "relay.start.address_in_use");
+        assert_eq!(health.lifecycle, RelayLifecycleState::Failed);
+        assert_eq!(health.reason_code.as_deref(), Some(reason_code));
+
+        let failed_service = manager
+            .list()
+            .await
+            .expect("list services")
+            .into_iter()
+            .find(|service| service.network_name == "initial-relay-failure")
+            .expect("signaling-only service must remain registered");
+        assert!(failed_service.relay_addr.is_none());
+        assert_eq!(
+            failed_service
+                .relay_health
+                .as_ref()
+                .and_then(|health| health.reason_code.as_deref()),
+            Some(reason_code)
+        );
+        tokio::net::TcpListener::bind(("127.0.0.1", failed_service.signaling_addr.port()))
+            .await
+            .expect_err("signaling listener must remain active after Relay start fails");
+
+        drop(occupied);
+        let recovered = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match manager.enable_relay("initial-relay-failure").await {
+                    Ok(snapshot) => break snapshot,
+                    Err(EmbeddedServiceError::RelayStartFailed {
+                        reason_code: "relay.start.address_in_use",
+                        ..
+                    }) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("unexpected Relay retry failure: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("Relay retry after initial start failure timed out");
+        assert_eq!(
+            recovered.relay_addr.map(|addr| addr.port()),
+            Some(relay_port)
+        );
+        assert_eq!(
+            recovered
+                .relay_health
+                .as_ref()
+                .map(|health| health.lifecycle),
+            Some(RelayLifecycleState::Running)
+        );
+
+        manager.shutdown().await.expect("shutdown services");
+        tokio::net::UdpSocket::bind(("127.0.0.1", relay_port))
+            .await
+            .expect("relay port must be released after shutdown");
+    }
+
+    #[tokio::test]
+    async fn relay_start_failure_is_explained_and_retryable_after_port_release() {
+        let manager = test_manager(2);
+        let occupied = tokio::net::UdpSocket::bind(("127.0.0.1", 0))
+            .await
+            .expect("occupy relay UDP port");
+        let relay_port = occupied
+            .local_addr()
+            .expect("occupied relay address")
+            .port();
+        manager
+            .start(
+                EmbeddedServiceStartRequest::new("relay-bind-failure", 0, relay_port)
+                    .with_external_host("127.0.0.1")
+                    .with_relay_enabled(false),
+            )
+            .await
+            .expect("start signaling with Relay disabled");
+
+        let failure = manager
+            .enable_relay("relay-bind-failure")
+            .await
+            .expect_err("occupied UDP port must reject Relay start");
+        let EmbeddedServiceError::RelayStartFailed {
+            reason_code,
+            health,
+            ..
+        } = failure
+        else {
+            panic!("expected a typed Relay start failure");
+        };
+        assert_eq!(reason_code, "relay.start.address_in_use");
+        assert_eq!(health.lifecycle, RelayLifecycleState::Failed);
+        assert_eq!(health.reason_code.as_deref(), Some(reason_code));
+        assert!(!health.listener_bound);
+        assert!(health.listen_addr.is_none());
+
+        let failed_status = manager
+            .get_relay_status("relay-bind-failure")
+            .await
+            .expect("read failed Relay status")
+            .expect("failed health must remain observable");
+        assert_eq!(failed_status.lifecycle, RelayLifecycleState::Failed);
+        assert_eq!(failed_status.reason_code.as_deref(), Some(reason_code));
+
+        let failed_service = manager
+            .list()
+            .await
+            .expect("list services")
+            .into_iter()
+            .find(|service| service.network_name == "relay-bind-failure")
+            .expect("failed service remains running");
+        assert!(failed_service.relay_addr.is_none());
+        assert_eq!(
+            failed_service
+                .relay_health
+                .as_ref()
+                .and_then(|health| health.reason_code.as_deref()),
+            Some(reason_code)
+        );
+
+        drop(occupied);
+        let relay_addr = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match manager.enable_relay("relay-bind-failure").await {
+                    Ok(snapshot) => break snapshot,
+                    Err(EmbeddedServiceError::RelayStartFailed {
+                        reason_code: "relay.start.address_in_use",
+                        ..
+                    }) => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("unexpected Relay retry failure: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("Relay retry after port release timed out")
+        .relay_addr
+        .expect("retry must bind a listener");
+        assert_eq!(relay_addr.port(), relay_port);
+        let recovered = manager
+            .get_relay_status("relay-bind-failure")
+            .await
+            .expect("read recovered Relay status")
+            .expect("recovered Relay health");
+        assert_eq!(recovered.lifecycle, RelayLifecycleState::Running);
+        assert_ne!(
+            recovered.reason_code.as_deref(),
+            Some("relay.start.address_in_use"),
+            "a successful retry must clear stale start-failure evidence"
+        );
+
+        manager.shutdown().await.expect("shutdown services");
+        tokio::net::UdpSocket::bind(("127.0.0.1", relay_port))
+            .await
+            .expect("shutdown must release the recovered Relay port");
+    }
+
+    #[tokio::test]
+    async fn relay_can_be_disabled_and_reenabled_without_stopping_signaling() {
+        let manager = test_manager(2);
+        let started = manager
+            .start(
+                EmbeddedServiceStartRequest::new("relay-lifecycle", 0, 0)
+                    .with_external_host("127.0.0.1")
+                    .with_relay_enabled(false),
+            )
+            .await
+            .expect("start service with relay disabled");
+        let signaling_addr = started.signaling_addr;
+        assert!(started.relay_addr.is_none(), "owner disabled startup relay");
+        assert!(started.relay_health.is_none());
+        assert!(manager
+            .get_relay_status("relay-lifecycle")
+            .await
+            .expect("read disabled relay status")
+            .is_none());
+
+        let enabled = manager
+            .enable_relay("relay-lifecycle")
+            .await
+            .expect("enable relay independently");
+        let relay_addr = enabled.relay_addr.expect("relay address after enable");
+        assert_eq!(enabled.signaling_addr, signaling_addr);
+        let health = enabled.relay_health.expect("enabled relay health");
+        assert_ne!(
+            health.status,
+            fuckipv6_common::domain::RelayHealthStatus::Healthy,
+            "binding a listener is not evidence that forwarding works"
+        );
+        assert!(health.listener_bound);
+        assert_eq!(
+            health.network_reachability,
+            fuckipv6_common::domain::RelayReachabilityState::Unknown
+        );
+        let current = manager
+            .get_relay_status("relay-lifecycle")
+            .await
+            .expect("read enabled relay status")
+            .expect("authoritative enabled relay status");
+        assert_eq!(current.lifecycle, health.lifecycle);
+        assert_eq!(current.listen_addr, health.listen_addr);
+        assert_eq!(current.status, health.status);
+        assert_eq!(current.network_reachability, health.network_reachability);
+
+        let disabled = manager
+            .disable_relay("relay-lifecycle")
+            .await
+            .expect("disable relay independently");
+        assert_eq!(disabled.signaling_addr, signaling_addr);
+        assert!(disabled.relay_addr.is_none());
+        assert!(disabled.relay_health.is_none());
+        assert!(manager
+            .get_relay_status("relay-lifecycle")
+            .await
+            .expect("read disabled relay status")
+            .is_none());
+        assert_eq!(
+            manager.list().await.expect("list services").len(),
+            1,
+            "signaling service must remain running"
+        );
+        tokio::net::TcpListener::bind(("127.0.0.1", signaling_addr.port()))
+            .await
+            .expect_err("signaling port must remain owned while Relay is disabled");
+        tokio::net::UdpSocket::bind(("127.0.0.1", relay_addr.port()))
+            .await
+            .expect("relay UDP port must be released while signaling remains running");
+
+        let reenabled = manager
+            .enable_relay("relay-lifecycle")
+            .await
+            .expect("reenable relay independently");
+        assert_eq!(
+            reenabled.relay_addr.map(|addr| addr.port()),
+            Some(relay_addr.port())
+        );
+
+        manager.stop("relay-lifecycle").await.expect("stop service");
     }
 }

@@ -2002,7 +2002,7 @@
           "id": "set_relay_role",
           "label_key": "action.set_relay_role",
           "command": "set_network_role",
-          "backend_status": "unavailable",
+          "backend_status": "implemented",
           "permission": "manage_roles",
           "audit": {
             "policy": "record_outcome",

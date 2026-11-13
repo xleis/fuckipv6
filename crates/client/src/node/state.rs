@@ -12,8 +12,10 @@ use fuckipv6_common::domain::{
     ExitSelectionResolution, FieldPrivacyPolicy, MembershipRole, MembershipState, MembershipTerms,
     NetworkAcl, NetworkId, NetworkJoinMode, NetworkMemberDirectory, NetworkMemberPresence,
     NetworkMemberStatus, NetworkVisibility, NodeId, NodeLocalAccessPolicy, OperationRecovery,
-    TopologyBuilder, TopologyLinkObservation, TopologyMemberInput, TopologyNetworkInput,
-    TopologySnapshot, TopologyViewer, TrafficRoutingPageModel, TrafficSessionSnapshot,
+    RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot, RelayHealthSnapshot,
+    RelayHealthStatus, RelayLifecycleState, TopologyBuilder, TopologyLinkObservation,
+    TopologyMemberInput, TopologyNetworkInput, TopologySnapshot, TopologyViewer,
+    TrafficRoutingPageModel, TrafficSessionSnapshot,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -837,17 +839,18 @@ impl NodeCapabilityRegistrySnapshot {
     }
 
     fn from_snapshot(snapshot: &NodeSnapshot) -> Self {
-        let service_state = embedded_service_capability_state(&snapshot.embedded_services);
+        let coordinator_state = embedded_coordinator_capability_state(&snapshot.embedded_services);
+        let relay_state = embedded_relay_capability_state(&snapshot.embedded_services);
         let exit_state = exit_node_capability_state(snapshot);
         Self {
             capabilities: vec![
                 NodeCapabilitySnapshot {
                     kind: CapabilityKind::Coordinator,
-                    state: service_state,
+                    state: coordinator_state,
                 },
                 NodeCapabilitySnapshot {
                     kind: CapabilityKind::Relay,
-                    state: service_state,
+                    state: relay_state,
                 },
                 NodeCapabilitySnapshot {
                     kind: CapabilityKind::Exit,
@@ -878,7 +881,9 @@ impl Default for NodeCapabilityRegistrySnapshot {
     }
 }
 
-fn embedded_service_capability_state(services: &[NodeEmbeddedServiceSnapshot]) -> CapabilityState {
+fn embedded_coordinator_capability_state(
+    services: &[NodeEmbeddedServiceSnapshot],
+) -> CapabilityState {
     if services
         .iter()
         .any(|service| service.status == NodeEmbeddedServiceStatus::Running)
@@ -899,6 +904,71 @@ fn embedded_service_capability_state(services: &[NodeEmbeddedServiceSnapshot]) -
     } else {
         CapabilityState::Disabled
     }
+}
+
+fn embedded_relay_capability_state(services: &[NodeEmbeddedServiceSnapshot]) -> CapabilityState {
+    if services.iter().any(|service| {
+        matches!(
+            service.relay_status,
+            NodeEmbeddedServiceStatus::Starting | NodeEmbeddedServiceStatus::Stopping
+        )
+    }) {
+        return CapabilityState::Starting;
+    }
+    if services
+        .iter()
+        .any(|service| service.relay_status == NodeEmbeddedServiceStatus::Failed)
+    {
+        return CapabilityState::Unavailable;
+    }
+    let relay_services = services
+        .iter()
+        .filter(|service| {
+            service.relay_status != NodeEmbeddedServiceStatus::Stopped
+                || service.relay_health.is_some()
+        })
+        .collect::<Vec<_>>();
+    if relay_services.is_empty() {
+        return CapabilityState::Disabled;
+    }
+    let available = relay_services.iter().any(|service| {
+        !service
+            .relay_health
+            .as_ref()
+            .is_some_and(|health| health.status == RelayHealthStatus::Unavailable)
+    });
+    let unavailable = relay_services.iter().any(|service| {
+        service
+            .relay_health
+            .as_ref()
+            .is_some_and(|health| health.status == RelayHealthStatus::Unavailable)
+    });
+    if unavailable && !available {
+        return CapabilityState::Unavailable;
+    }
+    if unavailable {
+        return CapabilityState::Degraded;
+    }
+    if relay_services.iter().any(|service| {
+        service.relay_health.as_ref().is_some_and(|health| {
+            matches!(
+                health.status,
+                RelayHealthStatus::Degraded | RelayHealthStatus::QuotaExhausted
+            )
+        })
+    }) {
+        return CapabilityState::Degraded;
+    }
+    if relay_services.iter().any(|service| {
+        service.relay_health.is_none()
+            || service
+                .relay_health
+                .as_ref()
+                .is_some_and(|health| health.status == RelayHealthStatus::Unknown)
+    }) {
+        return CapabilityState::Unknown;
+    }
+    CapabilityState::Enabled
 }
 
 fn exit_node_capability_state(snapshot: &NodeSnapshot) -> CapabilityState {
@@ -1047,17 +1117,76 @@ pub struct NodeNetworkConfigSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeEmbeddedServiceSnapshot {
     pub network_name: String,
+    /// Coordinator/signaling runtime status.
     pub status: NodeEmbeddedServiceStatus,
     pub signaling_addr: Option<SocketAddr>,
+    /// Relay is an independently owned capability; it can be stopped while the
+    /// embedded Coordinator keeps running.
+    #[serde(default)]
+    pub relay_status: NodeEmbeddedServiceStatus,
     pub relay_addr: Option<SocketAddr>,
+    /// Authoritative Relay health from the node runtime. Missing means no
+    /// health evidence is available; adapters must not infer health from the
+    /// listener address or lifecycle status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_health: Option<RelayHealthSnapshot>,
+    /// Owner-visible, bounded explanation of the current Relay authorization
+    /// decision. It excludes matching rules, grants and transport metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_authorization: Option<RelayAuthorizationAuditSnapshot>,
+    /// Owner-visible, bounded Relay governance observations. This remains
+    /// absent for older snapshots, disabled Relays and non-owner projections;
+    /// adapters must not infer an empty ledger from a missing field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_governance: Option<RelayGovernanceAuditSnapshot>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+impl NodeEmbeddedServiceSnapshot {
+    pub(crate) fn running_from_embedded(
+        service: &crate::symmetric::EmbeddedServiceSnapshot,
+    ) -> Self {
+        let relay_status = match service.relay_health.as_ref().map(|health| health.lifecycle) {
+            Some(RelayLifecycleState::Running) => NodeEmbeddedServiceStatus::Running,
+            Some(RelayLifecycleState::Starting) => NodeEmbeddedServiceStatus::Starting,
+            Some(RelayLifecycleState::Stopping) => NodeEmbeddedServiceStatus::Stopping,
+            Some(RelayLifecycleState::Failed | RelayLifecycleState::Unsupported) => {
+                NodeEmbeddedServiceStatus::Failed
+            }
+            Some(RelayLifecycleState::Stopped) => {
+                if service.relay_addr.is_some() {
+                    NodeEmbeddedServiceStatus::Failed
+                } else {
+                    NodeEmbeddedServiceStatus::Stopped
+                }
+            }
+            None => {
+                if service.relay_addr.is_some() {
+                    NodeEmbeddedServiceStatus::Running
+                } else {
+                    NodeEmbeddedServiceStatus::Stopped
+                }
+            }
+        };
+        Self {
+            network_name: service.network_name.clone(),
+            status: NodeEmbeddedServiceStatus::Running,
+            signaling_addr: Some(service.signaling_addr),
+            relay_status,
+            relay_addr: service.relay_addr,
+            relay_health: service.relay_health.clone(),
+            relay_authorization: service.relay_authorization.clone(),
+            relay_governance: service.relay_governance.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeEmbeddedServiceStatus {
     Starting,
     Running,
     Stopping,
+    #[default]
     Stopped,
     Failed,
 }
@@ -1845,6 +1974,36 @@ impl NodeStateStore {
             .await;
     }
 
+    /// Merge audited activity from independent producers into the canonical
+    /// bounded feed. Audit identity deduplicates retries, and the same ordering
+    /// rule is used for command and data-plane lifecycle records.
+    pub(crate) async fn merge_recent_activity(
+        &self,
+        entries: impl IntoIterator<Item = ActivityEntry>,
+    ) {
+        self.update(|snapshot| {
+            for entry in entries {
+                if let Some(index) = snapshot
+                    .recent_activity
+                    .iter()
+                    .position(|existing| existing.audit_id == entry.audit_id)
+                {
+                    snapshot.recent_activity[index] = entry;
+                } else {
+                    snapshot.recent_activity.push(entry);
+                }
+            }
+            snapshot.recent_activity.sort_by(|left, right| {
+                right
+                    .occurred_at_unix_ms
+                    .cmp(&left.occurred_at_unix_ms)
+                    .then_with(|| right.audit_id.cmp(&left.audit_id))
+            });
+            snapshot.recent_activity.truncate(256);
+        })
+        .await;
+    }
+
     /// Publish the runtime-authoritative traffic-protection session. Adapters
     /// only render this value and must not derive protection from interfaces,
     /// route configuration or a successful CLI command.
@@ -2060,6 +2219,9 @@ impl Default for NodeStateStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fuckipv6_common::domain::{
+        RelayLifecycleState, RelayLimitPolicy, RelayReachabilityState, RelayUsageSnapshot,
+    };
     use fuckipv6_common::i18n::{has_key, Locale};
 
     fn network(name: &str, status: NodeNetworkStatus) -> NodeNetworkSnapshot {
@@ -2139,8 +2301,131 @@ mod tests {
             network_name: name.into(),
             status: NodeEmbeddedServiceStatus::Stopped,
             signaling_addr: None,
+            relay_status: NodeEmbeddedServiceStatus::Stopped,
             relay_addr: None,
+            relay_health: None,
+            relay_authorization: None,
+            relay_governance: None,
         }
+    }
+
+    fn relay_service_health(
+        lifecycle: RelayLifecycleState,
+        forwarding_observed: bool,
+        usage: RelayUsageSnapshot,
+        limits: RelayLimitPolicy,
+    ) -> RelayHealthSnapshot {
+        RelayHealthSnapshot::observe(
+            lifecycle,
+            Some("127.0.0.1:6667".parse().expect("relay socket")),
+            true,
+            RelayReachabilityState::Reachable,
+            forwarding_observed,
+            true,
+            limits,
+            Vec::new(),
+            usage,
+            1_700_000_100_000,
+            None,
+        )
+    }
+
+    #[test]
+    fn relay_capability_is_derived_from_health_not_listener_presence() {
+        let mut service = embedded_service("home");
+        service.relay_status = NodeEmbeddedServiceStatus::Running;
+        service.relay_addr = Some("127.0.0.1:6667".parse().expect("relay socket"));
+        service.relay_health = Some(relay_service_health(
+            RelayLifecycleState::Running,
+            false,
+            RelayUsageSnapshot::default(),
+            RelayLimitPolicy::default(),
+        ));
+
+        assert_eq!(
+            embedded_relay_capability_state(&[service.clone()]),
+            CapabilityState::Unknown
+        );
+
+        service.relay_health = Some(relay_service_health(
+            RelayLifecycleState::Running,
+            true,
+            RelayUsageSnapshot {
+                active_connections: 2,
+                active_streams: 2,
+                last_forwarded_at_unix_ms: Some(1_700_000_099_000),
+                ..RelayUsageSnapshot::default()
+            },
+            RelayLimitPolicy::default(),
+        ));
+        assert_eq!(
+            embedded_relay_capability_state(&[service.clone()]),
+            CapabilityState::Enabled
+        );
+
+        service.relay_health = Some(relay_service_health(
+            RelayLifecycleState::Running,
+            true,
+            RelayUsageSnapshot {
+                active_connections: 1,
+                active_streams: 1,
+                forwarded_bytes: 10,
+                last_forwarded_at_unix_ms: Some(1_700_000_099_000),
+                ..RelayUsageSnapshot::default()
+            },
+            RelayLimitPolicy {
+                max_connections: Some(1),
+                max_bytes: Some(10),
+                ..RelayLimitPolicy::default()
+            },
+        ));
+        assert_eq!(
+            embedded_relay_capability_state(&[service]),
+            CapabilityState::Degraded
+        );
+    }
+
+    #[test]
+    fn relay_capability_degrades_when_only_some_networks_are_unavailable() {
+        let healthy = {
+            let mut service = embedded_service("healthy");
+            service.relay_status = NodeEmbeddedServiceStatus::Running;
+            service.relay_health = Some(relay_service_health(
+                RelayLifecycleState::Running,
+                true,
+                RelayUsageSnapshot {
+                    active_connections: 1,
+                    active_streams: 1,
+                    last_forwarded_at_unix_ms: Some(1_700_000_099_000),
+                    ..RelayUsageSnapshot::default()
+                },
+                RelayLimitPolicy::default(),
+            ));
+            service
+        };
+        let unavailable = {
+            let mut service = embedded_service("unavailable");
+            service.relay_status = NodeEmbeddedServiceStatus::Running;
+            service.relay_health = Some(RelayHealthSnapshot::observe(
+                RelayLifecycleState::Running,
+                None,
+                false,
+                RelayReachabilityState::Unreachable,
+                false,
+                false,
+                RelayLimitPolicy::default(),
+                Vec::new(),
+                RelayUsageSnapshot::default(),
+                1_700_000_100_000,
+                Some("authorization_invalid".into()),
+            ));
+            service
+        };
+
+        assert_eq!(
+            embedded_relay_capability_state(&[healthy, unavailable]),
+            CapabilityState::Degraded
+        );
     }
 
     fn peer(network_name: &str) -> NodePeerSnapshot {
@@ -2760,6 +3045,18 @@ mod tests {
         let updated = state
             .update(|snapshot| {
                 snapshot.embedded_services[0].status = NodeEmbeddedServiceStatus::Running;
+                snapshot.embedded_services[0].relay_status = NodeEmbeddedServiceStatus::Running;
+                snapshot.embedded_services[0].relay_health = Some(relay_service_health(
+                    RelayLifecycleState::Running,
+                    true,
+                    RelayUsageSnapshot {
+                        active_connections: 1,
+                        active_streams: 1,
+                        last_forwarded_at_unix_ms: Some(1_700_000_099_000),
+                        ..RelayUsageSnapshot::default()
+                    },
+                    RelayLimitPolicy::default(),
+                ));
                 snapshot.networks[0].roles = vec![NodeNetworkRole::ExitNode];
                 snapshot.local_exit.owner_exit_enabled = true;
                 snapshot.local_exit.stage = LocalExitCapabilityStage::Enabled;
@@ -3310,5 +3607,67 @@ mod tests {
         let snapshot = state.snapshot().await;
         assert_eq!(snapshot.revision, 42);
         assert_eq!(snapshot.control_health, NodeControlHealth::Available);
+    }
+
+    #[tokio::test]
+    async fn merge_recent_activity_deduplicates_sorts_and_retains_latest_256() {
+        use fuckipv6_common::domain::{AuditId, AuditOutcome};
+
+        let state = NodeStateStore::new();
+        let actor = NodeId::from_public_key(b"activity-merge-actor");
+        let entry = |index: u64, occurred_at_unix_ms: u64| ActivityEntry {
+            audit_id: AuditId::from_public_key(format!("activity-{index}").as_bytes()),
+            operation_id: None,
+            actor: actor.clone(),
+            network_id: None,
+            action: format!("test.activity.{index}"),
+            resource: "test_activity".into(),
+            outcome: AuditOutcome::Succeeded,
+            occurred_at_unix_ms,
+            summary: format!("activity {index}"),
+            category: Default::default(),
+            severity: Default::default(),
+            actor_role: None,
+            object_kind: "test_activity".into(),
+            object_id: None,
+            reason: None,
+            details: Default::default(),
+        };
+        let entries = (0..260)
+            .map(|index| entry(index, 1_000 + index))
+            .collect::<Vec<_>>();
+
+        state.merge_recent_activity(entries.clone()).await;
+        let merged = state.snapshot().await.recent_activity;
+        assert_eq!(merged.len(), 256);
+        assert_eq!(merged.first().expect("newest").occurred_at_unix_ms, 1_259);
+        assert_eq!(
+            merged.last().expect("oldest retained").occurred_at_unix_ms,
+            1_004
+        );
+
+        let mut replacement = entries[259].clone();
+        replacement.summary = "updated by another producer".into();
+        state.merge_recent_activity([replacement]).await;
+        let deduplicated = state.snapshot().await.recent_activity;
+        assert_eq!(deduplicated.len(), 256);
+        assert_eq!(
+            deduplicated
+                .iter()
+                .filter(|entry| entry.audit_id == entries[259].audit_id)
+                .count(),
+            1
+        );
+        assert_eq!(deduplicated[0].summary, "updated by another producer");
+
+        state.merge_recent_activity([entry(999, 2_000)]).await;
+        let ordered = state.snapshot().await.recent_activity;
+        assert_eq!(ordered.len(), 256);
+        assert_eq!(ordered[0].occurred_at_unix_ms, 2_000);
+        assert!(ordered.windows(2).all(|pair| {
+            pair[0].occurred_at_unix_ms > pair[1].occurred_at_unix_ms
+                || (pair[0].occurred_at_unix_ms == pair[1].occurred_at_unix_ms
+                    && pair[0].audit_id > pair[1].audit_id)
+        }));
     }
 }

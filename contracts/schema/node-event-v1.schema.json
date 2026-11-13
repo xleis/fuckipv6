@@ -98,6 +98,34 @@
           "properties": {
             "data": {
               "properties": {
+                "network_name": {
+                  "type": "string"
+                },
+                "status": {
+                  "$ref": "#/$defs/NodeEmbeddedServiceStatus"
+                }
+              },
+              "required": [
+                "network_name",
+                "status"
+              ],
+              "type": "object"
+            },
+            "type": {
+              "const": "relay_changed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "data": {
+              "properties": {
                 "level": {
                   "$ref": "#/$defs/NodeLogLevel"
                 },

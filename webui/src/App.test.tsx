@@ -47,6 +47,11 @@ import {
   loadOwnerSession,
   reauthenticateWithPasskey,
 } from "./api/session";
+import {
+  downloadOwnerAuditExport,
+  requestOwnerAuditExport,
+  type OwnerAuditExport,
+} from "./api/owner-audit";
 import { installTestI18nRuntime } from "./test/runtime";
 
 vi.mock("./api/client", async (importOriginal) => {
@@ -74,8 +79,104 @@ vi.mock("./api/session", async (importOriginal) => {
   };
 });
 
+vi.mock("./api/owner-audit", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./api/owner-audit")>();
+  return {
+    ...original,
+    requestOwnerAuditExport: vi.fn(),
+    downloadOwnerAuditExport: vi.fn(),
+  };
+});
+
 const manifest = manifestFixture as NodeUiManifest;
 const populatedSnapshot = productFixture.snapshot as NodeSnapshot;
+
+function relayExportSnapshot(): NodeSnapshot {
+  return {
+    ...populatedSnapshot,
+    memberships: [
+      {
+        network_name: "home",
+        network_id: "net_home_relay",
+        node_id: "node-visual-01",
+        state: "active",
+        role: "member",
+        local_policy_revision: 4,
+        network_policy_revision: 4,
+        privacy_policy_revision: 2,
+        member_limit: 16,
+        exit_contribution: "not_required",
+        exit_contribution_scope: "all_members",
+        terms_hash: null,
+        current_terms: null,
+        current_terms_hash: null,
+        policy_confirmation_required: false,
+        acknowledged_at_unix_ms: null,
+        created_at_unix_ms: 1_700_000_000_000,
+        updated_at_unix_ms: 1_700_000_100_000,
+        suspension_reason: null,
+      },
+    ],
+    embedded_services: [
+      {
+        network_name: "home",
+        status: "running",
+        relay_status: "running",
+        relay_addr: "127.0.0.1:16667",
+        relay_health: null,
+        relay_governance: { events: [], dropped_events: 0 },
+      },
+    ],
+  };
+}
+
+function ownerAuditExportFixture(): OwnerAuditExport {
+  return {
+    bundle: {
+      manifest: {
+        schema_version: 1,
+        generated_at_unix_ms: 1_700_000_100_000,
+        filter: {
+          network_id: "net_home_relay",
+          resource_prefix: "node_command:",
+        },
+        verification: {
+          first_sequence: 1,
+          last_sequence: 1,
+          last_hash: "a".repeat(64),
+          record_count: 1,
+        },
+        checkpoint: {
+          schema_version: 1,
+          sequence: 1,
+          entry_hash: "a".repeat(64),
+          record_count: 1,
+        },
+      },
+      records: [
+        {
+          schema_version: 1,
+          sequence: 1,
+          previous_hash: "0".repeat(64),
+          entry: {
+            audit_id: "audit-relay-enable",
+            actor: "node-owner",
+            network_id: "net_home_relay",
+            action: "relay.enable",
+            resource: "node_command:enable_relay",
+            outcome: "succeeded",
+            occurred_at_unix_ms: 1_700_000_000_000,
+            summary: "Relay enabled",
+            details: {},
+            sensitive_keys: [],
+          },
+          entry_hash: "b".repeat(64),
+        },
+      ],
+    },
+    filename: "owner-security-audit-export.json",
+  };
+}
 
 function trafficRoutingPageFixture(): TrafficRoutingPageModel {
   return {
@@ -2131,6 +2232,103 @@ describe("React WebUI shell", () => {
     await waitFor(() =>
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
     );
+  });
+
+  it("retries Relay durable audit export after Passkey reauthentication and downloads once", async () => {
+    authenticate(relayExportSnapshot());
+    vi.mocked(requestOwnerAuditExport)
+      .mockRejectedValueOnce(new ReauthenticationRequiredError())
+      .mockResolvedValueOnce(ownerAuditExportFixture());
+    vi.mocked(reauthenticateWithPasskey).mockResolvedValue({
+      authenticated: true,
+    });
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    await user.click(
+      screen.getByRole("button", { name: "translated:nav.networks" }),
+    );
+    await user.click(screen.getByRole("tab", { name: "translated:nav.relay" }));
+    await user.click(
+      await screen.findByRole("checkbox", {
+        name: "translated:relay.durable_audit.confirm",
+      }),
+    );
+    await user.click(screen.getByTestId("relay-durable-audit-export"));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(
+      within(dialog).getByRole("heading", {
+        name: "translated:owner_auth.reauth.title",
+      }),
+    ).toBeInTheDocument();
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "translated:owner_auth.passkey.reauth_button",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(requestOwnerAuditExport).toHaveBeenCalledTimes(2),
+    );
+    expect(reauthenticateWithPasskey).toHaveBeenCalledTimes(1);
+    const first = vi.mocked(requestOwnerAuditExport).mock.calls[0][0];
+    const second = vi.mocked(requestOwnerAuditExport).mock.calls[1][0];
+    expect(first).toEqual({
+      network_id: "net_home_relay",
+      resource_prefix: "node_command:",
+    });
+    expect(second).toEqual(first);
+    expect(downloadOwnerAuditExport).toHaveBeenCalledOnce();
+    expect(downloadOwnerAuditExport).toHaveBeenCalledWith(
+      ownerAuditExportFixture(),
+    );
+    const success = await screen.findByTestId("relay-durable-audit-success");
+    expect(success).toHaveTextContent(
+      "translated:relay.durable_audit.success",
+    );
+    expect(
+      screen.getByTestId("relay-durable-audit-filename"),
+    ).toHaveTextContent("owner-security-audit-export.json");
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("does not retry or download Relay audit export when reauthentication is cancelled", async () => {
+    authenticate(relayExportSnapshot());
+    vi.mocked(requestOwnerAuditExport).mockRejectedValueOnce(
+      new ReauthenticationRequiredError(),
+    );
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    await user.click(
+      screen.getByRole("button", { name: "translated:nav.networks" }),
+    );
+    await user.click(screen.getByRole("tab", { name: "translated:nav.relay" }));
+    await user.click(
+      await screen.findByRole("checkbox", {
+        name: "translated:relay.durable_audit.confirm",
+      }),
+    );
+    await user.click(screen.getByTestId("relay-durable-audit-export"));
+
+    const dialog = await screen.findByRole("dialog");
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "translated:common.cancel",
+      }),
+    );
+
+    expect(
+      await screen.findByTestId("relay-durable-audit-error"),
+    ).toHaveTextContent("translated:relay.durable_audit.failed");
+    expect(requestOwnerAuditExport).toHaveBeenCalledOnce();
+    expect(reauthenticateWithPasskey).not.toHaveBeenCalled();
+    expect(downloadOwnerAuditExport).not.toHaveBeenCalled();
   });
 
   it("cancels reauthentication without retrying or creating an operation", async () => {

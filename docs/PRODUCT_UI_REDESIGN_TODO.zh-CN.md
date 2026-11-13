@@ -59,7 +59,7 @@
 | W10 安全与隐私 | `[x]` | P1 | W9 | 权限模型与矩阵、ACL/拒绝优先/本地否决、字段级隐私、策略编辑器与测试器、差异预览/原子应用/回滚、权威活动时间线、可验证长期审计、安全页面状态和可重复治理证据闭环均已完成 |
 | W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约和 W11-09 隔离路由 E2E/失败关闭/网络报告已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，GPUI 已接入同一页面的权威投影、规则/目标/影响展示和精确跳转，真实命中观测、GPUI/WebUI/Android 三端一致、生产后端接线及真实平台监听/适配待完成 |
 | W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05 已完成：本机启停、贡献治理、管理员选择、分层健康与故障切换/撤权均有权威状态和自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收；两侧 Exit 可达、Peer 级统计映射和 W12-09 的 24 小时稳定性/自动清理仍待完成 |
-| W13 Relay | `[~]` | P1 | W10 | W13-01、W13-02、W13-03、W13-04、W13-05 和 W13-06 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；真实 Relay 子进程运营者导出已验证只含最小 usage/health/governance 字段，不包含载荷、虚拟地址、密钥或显示名；生产数据面故障转移现会写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复已有真实进程测试；真实 Relay 子进程压力测试已覆盖连接风暴、慢连接/资源上限、恢复、吞吐、延迟、CPU 和 RSS，并输出绑定 commit/平台/拓扑的报告；真实 `__control/__node` 进程级测试已验证 Relay 持续满载时 Snapshot 与 UI Manifest 仍可用并在卸载后恢复。W13-04 已补齐 Relay 切换使用分配虚拟源地址、未授权 Exit 失败关闭以及真实套接字/进程/iptables 拓扑下 Relay、Coordinator、Exit 同时故障后的有界失败关闭、资源清理与三组件恢复证据。W13-07 的数据面故障与性能证据及 GPUI/WebUI 状态与操作对等已完成；Android 应用尚未实现，三端一致仍无法验收，因此 W13 整体保持未完成 |
+| W13 Relay | `[x]` | P1 | W10 | W13-01 至 W13-07 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；真实 Relay 子进程运营者导出只含最小 usage/health/governance 字段，不包含载荷、虚拟地址、密钥或显示名；生产数据面故障转移写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复、真实子进程连接风暴/慢连接/资源上限/吞吐/延迟/CPU/RSS、满载期间 Snapshot/Manifest 可用性及 Relay/Coordinator/Exit 同时故障恢复均有进程或 netns 证据。GPUI、WebUI 与 Android Compose Relay 页面现统一消费共享 Manifest、`NodeSnapshot`、健康/治理投影和 `SetNetworkRole` 命令；Android 在快照或真实命令回调缺失时失败关闭，不注入示例状态。Android 的 VpnService、节点 IPC 和真机 E2E 仍归 W16，不在本项冒充平台数据面完成 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
 | W15 File | `[ ]` | P2 | W10 | ACL、配额、上传下载、续传 |
 | W16 Android | `[ ]` | P2 | W2,W4,W5,W7-W15 | Compose、VpnService、全能力 |
@@ -3073,7 +3073,7 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 
 **验收**：Relay 使用和提供均可追责，同时不产生超出威胁模型的元数据。
 
-### W13-07 Relay 集成与性能测试 `[~]`
+### W13-07 Relay 集成与性能测试 `[x]`
 
 - [x] 覆盖双边授权交集和拒绝优先；
 - [x] 覆盖配额、连接风暴、慢连接和资源耗尽；
@@ -3081,7 +3081,7 @@ socket、路由、进程和两侧快照）。本地二进制 SHA-256 为
 - [x] 覆盖与 Exit/Coordinator 同时故障；
 - [x] 测量吞吐、延迟、并发、CPU 和内存；
 - [x] 验证满载时节点其他能力仍可用；
-- [ ] GPUI/WebUI/Android 状态与操作一致；
+- [x] GPUI/WebUI/Android 状态与操作一致；
 - [x] 报告绑定 commit、平台和测试拓扑。
 
 **证据（2026-11-12）**：Relay 启停现在返回带稳定原因码的
@@ -3185,20 +3185,25 @@ Manifest 在应用层 Relay 压载下仍可用，不等同于多主机网络损�
 durable 持久化和命令/数据面活动合并。该证据是本地进程内审计与恢复测试，本身不等同于正式压力；
 三组件同时故障验收已由上述真实 netns/iptables 测试单独覆盖，运营者导出字段边界另由真实子进程隐私测试覆盖。
 
-**GPUI/WebUI 状态与操作对等（2026-11-13）**：Relay 页面两端消费同一 manifest action
+**GPUI/WebUI/Android 状态与操作对等（2026-11-13）**：Relay 页面三端消费同一 manifest action
 `set_relay_role -> NodeCommandKind::SetNetworkRole`，统一要求 `ManageRoles` 权限、`NetworkSelected` 可用性和
 `role=relay` 载荷；后端 manifest 测试锁定命令、审计 `network.role.set`、字段和确认语义。GPUI 修复了
 `network_selected` 动作在未选择网络时未被阻断的缺口（`7e72cfc`），并以
 `relay_role_action_uses_shared_command_and_closes_selection_and_permission_gates` 和
 `relay_role_action_uses_the_canonical_manage_roles_command` 覆盖权限拒绝、无网络/错误网络失败关闭和命令映射；
 WebUI 以 `keeps Relay role actions on the shared command and selection gates` 锁定相同语义（`82f692d`、`dde624f`）。
-健康详情在两端都只消费 `RelayHealthSnapshot::listener_bound` 与 `listen_addr`，不会因服务显示 running 就推断监听成功；
-GPUI 的 `relay_listener_detail_uses_authoritative_bound_state_and_address` 和 WebUI 的
-`renders listener binding from health instead of the running service flag` 覆盖 bound/unbound 与实际地址；权限拒绝由上述 role 命令门禁测试单独覆盖
-（`b9c714a`、`f2efe84`）。治理事件两端均只渲染最近 50 条并显示 shown/total 与 dropped 提示，GPUI
-`relay_projection_renders_bounded_owner_governance_without_sensitive_fields` 和 WebUI 治理/筛选测试确认不展示载荷、
-虚拟地址或密钥字段。Android 目前只有生成的 DTO/命令契约（`contracts/android`），没有 Compose 页面、VpnService
-或可运行的状态/操作入口，归 W16 实现；因此本条不能勾选，W13-07 继续保持 `[~]`。
+健康详情在三端都只消费 `RelayHealthSnapshot::listener_bound` 与 `listen_addr`，不会因服务显示 running 就推断监听成功；
+GPUI 的 `relay_listener_detail_uses_authoritative_bound_state_and_address`、WebUI 的
+`renders listener binding from health instead of the running service flag` 和 Android 的
+`listenerProjectionReadsOnlyAuthoritativeHealthBindingAndAddress` 覆盖 bound/unbound 与实际地址；权限拒绝由上述 role 命令门禁测试单独覆盖
+（`b9c714a`、`f2efe84`）。治理事件在三端均只渲染最近 50 条并显示 shown/total 与 dropped 提示，GPUI
+`relay_projection_renders_bounded_owner_governance_without_sensitive_fields`、WebUI 治理/筛选测试和 Android
+`governanceProjectionKeepsOnlyFiftyMostRecentEvents` 确认不展示载荷、虚拟地址或密钥字段。Android 新增可组合
+Relay 页面（`b6b8ccf`），只从共享 `NodeSnapshot` 的网络角色、`relay_health`、`relay_governance` 和权限快照投影；
+启停目标值作为明确参数生成 `NodeSetNetworkRoleCommand(role=relay)`，快照网络不存在、后端不可用、权限不足或真实命令回调
+缺失时失败关闭，不注入示例数据。健康、可达性、监听地址、问题码、观察时间和治理事件均有 Kotlin 投影测试；Android
+单测、`lintDebug` 与 debug APK 构建通过。该证据完成三端 UI 契约和操作语义对等，不宣称 Android VpnService、本地节点
+IPC 或真机端到端已实现，这些仍由 W16 跟踪。
 
 此前门禁通过：`cargo test -p fuckipv6-client --all-targets --all-features`（库 1190 passed、3 ignored；register 进程 1 passed；运行时进程 11 passed；7 项特权拓扑测试 ignored）、
 `cargo test -p fuckipv6-common --lib`（396 passed）、
@@ -3210,13 +3215,15 @@ GPUI 的 `relay_listener_detail_uses_authoritative_bound_state_and_address` 和 
 `cargo test -p fuckipv6-client routing::recovery --lib`（18 passed）、
 `cargo clippy -p fuckipv6-client -p fuckipv6-common -p fuckipv6-coordinator --all-targets --all-features -- -D warnings`、
 `./scripts/check-contracts.sh`（DTO inventory 289）、WebUI `npm test -- --run`（23 files / 299 tests）、
-`npm run typecheck`、`npm run lint`、`npm run build`、`cargo fmt --all -- --check` 和 `git diff --check`。
+`npm run typecheck`、`npm run lint`、`npm run build`、Android `./gradlew :app:testDebugUnitTest --rerun-tasks`、
+`./gradlew :app:lintDebug`、`./gradlew :app:assembleDebug`、`cargo fmt --all -- --check` 和 `git diff --check`。
 平台不支持项通过注入 `io::ErrorKind::Unsupported` 验证的是解释状态和失败关闭，不是 Windows/macOS 实机验收。
 本证据覆盖 Linux 单 Relay 进程崩溃/重启后的监听与旧会话清理，以及单机 loopback 连接风暴、资源边界和
 吞吐/延迟/CPU/RSS 测量，以及单机真实子进程的运营者导出字段边界；三组件同时故障与完整拓扑恢复另由上述
-netns/iptables 测试覆盖。仍不覆盖 Windows/macOS 实机崩溃恢复、多主机正式压测、Coordinator/Exit/WebUI
-全能力并发验收或 Android 对等；W13-04 已完成，W13-07 的 GPUI/WebUI 状态与操作对等已通过上述契约、
-listener 和治理测试，但 Android 应用尚未实现，三端一致仍不可验收，不能据此声明 W13 已全量完成。
+netns/iptables 测试覆盖。三端 Relay UI 的权限、网络选择、健康、监听、治理和命令语义对等亦已通过上述契约、
+投影与 Android 构建测试。仍不覆盖 Windows/macOS 实机崩溃恢复、多主机正式压测、Coordinator/Exit/WebUI
+全能力并发验收及 Android VpnService/真机 E2E；这些平台和 W16 范围不阻塞本项已定义的 Relay 功能、隐私、资源、
+故障回退和三端 UI 验收。
 
 **验收**：Relay 独立能力通过功能、隐私、资源和故障测试后才可声明可用。
 

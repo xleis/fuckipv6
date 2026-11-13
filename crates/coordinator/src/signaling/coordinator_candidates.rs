@@ -1,8 +1,9 @@
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use fuckipv6_common::domain::{
-    AuditEntry, AuditId, AuditLog, AuditOutcome, CoordinatorCandidateConfig,
-    CoordinatorCandidateDeclaration, CoordinatorCandidateStatus, CoordinatorTerm,
+    AuditEntry, AuditId, AuditLog, AuditOutcome, ContentHash, CoordinatorCandidateConfig,
+    CoordinatorCandidateDeclaration, CoordinatorCandidateStatus, CoordinatorElectionProposal,
+    CoordinatorElectionSession, CoordinatorElectionStage, CoordinatorElectionVote, CoordinatorTerm,
     CoordinatorWriteCredential, CoordinatorWriteKind, NetworkId, NetworkRecord, NodeId,
     COORDINATOR_MAX_LEASE_DURATION_MS,
 };
@@ -14,7 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-const COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION: u16 = 1;
+const COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION: u16 = 2;
+const COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION_V1: u16 = 1;
 static AUDIT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct ConfigUpdate<'a> {
@@ -37,6 +39,11 @@ struct StoredCoordinatorCandidates {
     /// can never make an older term appear current again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     latest_term: Option<CoordinatorTerm>,
+    /// The most recent election is retained in full so status readers can
+    /// verify its proposal, votes and terminal outcome without trusting an
+    /// in-memory quorum calculation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    latest_election: Option<CoordinatorElectionSession>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,7 +68,11 @@ impl Default for CoordinatorCandidateFile {
 
 impl CoordinatorCandidateFile {
     fn validate(&self) -> Result<()> {
-        if self.schema_version != COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION {
+        if !matches!(
+            self.schema_version,
+            COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION_V1
+                | COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION
+        ) {
             bail!("coordinator_candidate.error.unsupported_schema");
         }
         for (network_id, stored) in &self.networks {
@@ -75,6 +86,18 @@ impl CoordinatorCandidateFile {
                 term.validate_definition()?;
                 if term.network_id != *network_id {
                     bail!("coordinator_candidate.error.term_network_mismatch");
+                }
+            }
+            if let Some(election) = &stored.latest_election {
+                election.validate_definition()?;
+                if election.proposal.network_id != *network_id {
+                    bail!("coordinator_candidate.error.election_network_mismatch");
+                }
+                if let Some(term) = &election.result_term {
+                    term.validate_definition()?;
+                    if term.network_id != *network_id {
+                        bail!("coordinator_candidate.error.election_term_network_mismatch");
+                    }
                 }
             }
             for (node_id, declaration) in &stored.declarations {
@@ -176,6 +199,200 @@ impl CoordinatorCandidateStore {
                     audit_outcome_for_error(&error),
                     now_unix_ms,
                     "coordinator term rejected",
+                    BTreeMap::from([("error".into(), error.to_string())]),
+                )?;
+                self.persist(&file)?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Persist a candidate-signed proposal and open its voting window. The
+    /// proposal is validated against the current configuration, health
+    /// declarations and durable term high-water mark before any vote is
+    /// accepted.
+    pub fn propose_election(
+        &self,
+        actor: &NodeId,
+        proposal: CoordinatorElectionProposal,
+        now_unix_ms: u64,
+    ) -> Result<CoordinatorCandidateStatus> {
+        let network_id = proposal.network_id.clone();
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
+        self.ensure_parent()?;
+        let _file_lock = lock_candidate_file(&self.path)?;
+        let mut file = self.load_unlocked()?;
+        let network = read_network_record(&self.network_record_path, &network_id)?;
+
+        let outcome =
+            self.apply_election_proposal(&mut file, actor, proposal, &network, now_unix_ms);
+        match outcome {
+            Ok(status) => {
+                append_audit(
+                    &mut file.audit_log,
+                    actor,
+                    &network.network_id,
+                    "coordinator.election.started",
+                    format!("network/{}/coordinator-election", network.network_id),
+                    AuditOutcome::Succeeded,
+                    now_unix_ms,
+                    "coordinator election proposal accepted",
+                    election_audit_details(status.latest_election.as_ref()),
+                )?;
+                self.persist(&file)?;
+                Ok(status)
+            }
+            Err(error) => {
+                append_audit(
+                    &mut file.audit_log,
+                    actor,
+                    &network.network_id,
+                    "coordinator.election.started",
+                    format!("network/{}/coordinator-election", network.network_id),
+                    audit_outcome_for_error(&error),
+                    now_unix_ms,
+                    "coordinator election proposal rejected",
+                    BTreeMap::from([("error".into(), error.to_string())]),
+                )?;
+                self.persist(&file)?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Record one independently signed election vote. When the strict-majority
+    /// threshold is reached, the committed term and fencing token are installed
+    /// in the same file-locked transaction as the deciding vote.
+    pub fn record_election_vote(
+        &self,
+        actor: &NodeId,
+        proposal_id: &ContentHash,
+        vote: CoordinatorElectionVote,
+        now_unix_ms: u64,
+    ) -> Result<CoordinatorCandidateStatus> {
+        let network_id = vote.network_id.clone();
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
+        self.ensure_parent()?;
+        let _file_lock = lock_candidate_file(&self.path)?;
+        let mut file = self.load_unlocked()?;
+        let network = read_network_record(&self.network_record_path, &network_id)?;
+
+        let outcome =
+            self.apply_election_vote(&mut file, actor, proposal_id, vote, &network, now_unix_ms);
+        match outcome {
+            Ok((status, committed)) => {
+                append_audit(
+                    &mut file.audit_log,
+                    actor,
+                    &network.network_id,
+                    "coordinator.election.vote.accepted",
+                    format!(
+                        "network/{}/coordinator-election/{proposal_id:?}",
+                        network.network_id
+                    ),
+                    AuditOutcome::Succeeded,
+                    now_unix_ms,
+                    "coordinator election vote accepted",
+                    election_audit_details(status.latest_election.as_ref()),
+                )?;
+                if committed {
+                    append_audit(
+                        &mut file.audit_log,
+                        actor,
+                        &network.network_id,
+                        "coordinator.election.committed",
+                        format!("network/{}/coordinator-term", network.network_id),
+                        AuditOutcome::Succeeded,
+                        now_unix_ms,
+                        "coordinator election reached a strict majority",
+                        election_audit_details(status.latest_election.as_ref()),
+                    )?;
+                }
+                self.persist(&file)?;
+                Ok(status)
+            }
+            Err(error) => {
+                append_audit(
+                    &mut file.audit_log,
+                    actor,
+                    &network.network_id,
+                    "coordinator.election.vote.rejected",
+                    format!(
+                        "network/{}/coordinator-election/{proposal_id:?}",
+                        network.network_id
+                    ),
+                    audit_outcome_for_error(&error),
+                    now_unix_ms,
+                    "coordinator election vote rejected",
+                    BTreeMap::from([("error".into(), error.to_string())]),
+                )?;
+                self.persist(&file)?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Mark an expired election as timed out. Any participant may drive the
+    /// transition, but ordinary network members cannot mutate election state.
+    pub fn timeout_election(
+        &self,
+        actor: &NodeId,
+        network_id: &NetworkId,
+        proposal_id: &ContentHash,
+        now_unix_ms: u64,
+    ) -> Result<CoordinatorCandidateStatus> {
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
+        self.ensure_parent()?;
+        let _file_lock = lock_candidate_file(&self.path)?;
+        let mut file = self.load_unlocked()?;
+        let network = read_network_record(&self.network_record_path, network_id)?;
+
+        let outcome =
+            self.apply_election_timeout(&mut file, actor, proposal_id, &network, now_unix_ms);
+        match outcome {
+            Ok(status) => {
+                append_audit(
+                    &mut file.audit_log,
+                    actor,
+                    &network.network_id,
+                    "coordinator.election.timed_out",
+                    format!(
+                        "network/{}/coordinator-election/{proposal_id:?}",
+                        network.network_id
+                    ),
+                    AuditOutcome::Succeeded,
+                    now_unix_ms,
+                    "coordinator election timed out",
+                    election_audit_details(status.latest_election.as_ref()),
+                )?;
+                self.persist(&file)?;
+                Ok(status)
+            }
+            Err(error) => {
+                append_audit(
+                    &mut file.audit_log,
+                    actor,
+                    &network.network_id,
+                    "coordinator.election.timed_out",
+                    format!(
+                        "network/{}/coordinator-election/{proposal_id:?}",
+                        network.network_id
+                    ),
+                    audit_outcome_for_error(&error),
+                    now_unix_ms,
+                    "coordinator election timeout rejected",
                     BTreeMap::from([("error".into(), error.to_string())]),
                 )?;
                 self.persist(&file)?;
@@ -570,6 +787,163 @@ impl CoordinatorCandidateStore {
         Ok(self.load_unlocked()?.audit_log.entries().to_vec())
     }
 
+    fn apply_election_proposal(
+        &self,
+        file: &mut CoordinatorCandidateFile,
+        actor: &NodeId,
+        proposal: CoordinatorElectionProposal,
+        network: &NetworkRecord,
+        now_unix_ms: u64,
+    ) -> Result<CoordinatorCandidateStatus> {
+        proposal.validate_definition()?;
+        if proposal.proposer != *actor {
+            bail!("coordinator_candidate.error.authenticated_actor_mismatch");
+        }
+        if proposal.network_id != network.network_id {
+            bail!("coordinator_candidate.error.network_mismatch");
+        }
+        if !network.members.contains(actor) {
+            bail!("coordinator_candidate.error.permission_denied");
+        }
+
+        let stored = file.networks.entry(network.network_id.clone()).or_default();
+        let config = stored
+            .config
+            .clone()
+            .context("coordinator_candidate.error.config_missing")?;
+        let declarations = stored.declarations.values().cloned().collect::<Vec<_>>();
+        proposal.validate_for_election(
+            network,
+            &config,
+            &declarations,
+            stored.latest_term.as_ref(),
+            now_unix_ms,
+        )?;
+
+        if let Some(existing) = &stored.latest_election {
+            if existing.proposal.proposal_id == proposal.proposal_id {
+                return status_from_file(network, Some(stored), now_unix_ms);
+            }
+            if matches!(
+                existing.stage,
+                CoordinatorElectionStage::Started | CoordinatorElectionStage::Voting
+            ) {
+                bail!("coordinator_candidate.error.election_in_progress");
+            }
+        }
+
+        let mut session = CoordinatorElectionSession::started(proposal, now_unix_ms)?;
+        session.begin_voting(now_unix_ms)?;
+        stored.latest_election = Some(session);
+        status_from_file(network, Some(stored), now_unix_ms)
+    }
+
+    fn apply_election_vote(
+        &self,
+        file: &mut CoordinatorCandidateFile,
+        actor: &NodeId,
+        proposal_id: &ContentHash,
+        vote: CoordinatorElectionVote,
+        network: &NetworkRecord,
+        now_unix_ms: u64,
+    ) -> Result<(CoordinatorCandidateStatus, bool)> {
+        vote.validate_definition()?;
+        if vote.voter != *actor {
+            bail!("coordinator_candidate.error.authenticated_actor_mismatch");
+        }
+        if vote.network_id != network.network_id {
+            bail!("coordinator_candidate.error.network_mismatch");
+        }
+        if !network.members.contains(actor) {
+            bail!("coordinator_candidate.error.permission_denied");
+        }
+
+        let stored = file.networks.entry(network.network_id.clone()).or_default();
+        let config = stored
+            .config
+            .as_ref()
+            .context("coordinator_candidate.error.config_missing")?;
+        let session = stored
+            .latest_election
+            .as_ref()
+            .context("coordinator_candidate.error.election_missing")?;
+        if session.proposal.proposal_id != *proposal_id {
+            bail!("coordinator_candidate.error.election_proposal_mismatch");
+        }
+        if session.proposal.candidate_config_revision != config.revision {
+            bail!("coordinator_candidate.error.election_config_stale");
+        }
+
+        let mut updated = session.clone();
+        updated.record_vote(vote, now_unix_ms)?;
+        let mut committed = false;
+        if updated.stage == CoordinatorElectionStage::Voting
+            && updated.votes.len() >= updated.proposal.majority_threshold()
+        {
+            let fencing_token = stored
+                .latest_term
+                .as_ref()
+                .map(|term| {
+                    term.fencing_token
+                        .0
+                        .checked_add(1)
+                        .context("coordinator_term.error.fencing_token_overflow")
+                })
+                .transpose()?
+                .unwrap_or(1);
+            let mut candidate = updated.clone();
+            let term = candidate.commit(
+                fuckipv6_common::domain::FencingToken(fencing_token),
+                now_unix_ms,
+            )?;
+            term.validate_against_candidate_config(config)?;
+            if let Some(current) = &stored.latest_term {
+                current.validate_successor(&term, now_unix_ms)?;
+            }
+            updated = candidate;
+            stored.latest_term = Some(term);
+            committed = true;
+        }
+        stored.latest_election = Some(updated);
+        let status = status_from_file(network, Some(stored), now_unix_ms)?;
+        Ok((status, committed))
+    }
+
+    fn apply_election_timeout(
+        &self,
+        file: &mut CoordinatorCandidateFile,
+        actor: &NodeId,
+        proposal_id: &ContentHash,
+        network: &NetworkRecord,
+        now_unix_ms: u64,
+    ) -> Result<CoordinatorCandidateStatus> {
+        if !network.members.contains(actor) {
+            bail!("coordinator_candidate.error.permission_denied");
+        }
+        let stored = file.networks.entry(network.network_id.clone()).or_default();
+        let session = stored
+            .latest_election
+            .as_ref()
+            .context("coordinator_candidate.error.election_missing")?;
+        if session.proposal.proposal_id != *proposal_id {
+            bail!("coordinator_candidate.error.election_proposal_mismatch");
+        }
+        if !session.participants.contains(actor) {
+            bail!("coordinator_candidate.error.permission_denied");
+        }
+        if session.stage == CoordinatorElectionStage::TimedOut {
+            return status_from_file(network, Some(stored), now_unix_ms);
+        }
+
+        let mut updated = session.clone();
+        if updated.stage == CoordinatorElectionStage::Started {
+            updated.begin_voting(now_unix_ms)?;
+        }
+        updated.timed_out(now_unix_ms)?;
+        stored.latest_election = Some(updated);
+        status_from_file(network, Some(stored), now_unix_ms)
+    }
+
     fn apply_config_update(
         &self,
         file: &mut CoordinatorCandidateFile,
@@ -813,8 +1187,11 @@ impl CoordinatorCandidateStore {
         }
         let content = std::fs::read(&self.path)
             .with_context(|| format!("无法读取协调器候选存储: {}", self.path.display()))?;
-        let file: CoordinatorCandidateFile = serde_json::from_slice(&content)
+        let mut file: CoordinatorCandidateFile = serde_json::from_slice(&content)
             .with_context(|| format!("无法解析协调器候选存储: {}", self.path.display()))?;
+        if file.schema_version == COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION_V1 {
+            file.schema_version = COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION;
+        }
         file.validate()?;
         Ok(file)
     }
@@ -836,8 +1213,53 @@ fn status_from_file(
     let declarations = stored
         .map(|stored| stored.declarations.values().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
-    CoordinatorCandidateStatus::assess(network, config, &declarations, latest_term, now_unix_ms)
-        .context("coordinator_candidate.error.status_projection_failed")
+    let mut status = CoordinatorCandidateStatus::assess(
+        network,
+        config,
+        &declarations,
+        latest_term,
+        now_unix_ms,
+    )
+    .context("coordinator_candidate.error.status_projection_failed")?;
+    status.latest_election = stored.and_then(|stored| stored.latest_election.clone());
+    Ok(status)
+}
+
+fn election_audit_details(
+    election: Option<&CoordinatorElectionSession>,
+) -> BTreeMap<String, String> {
+    let Some(election) = election else {
+        return BTreeMap::new();
+    };
+    let mut details = BTreeMap::from([
+        (
+            "proposal_id".into(),
+            format!("{:?}", election.proposal.proposal_id),
+        ),
+        ("stage".into(), format!("{:?}", election.stage)),
+        ("term".into(), election.proposal.term.to_string()),
+        ("leader".into(), election.proposal.leader.to_string()),
+        (
+            "participant_count".into(),
+            election.participants.len().to_string(),
+        ),
+        ("vote_count".into(), election.votes.len().to_string()),
+        (
+            "majority_threshold".into(),
+            election.proposal.majority_threshold().to_string(),
+        ),
+    ]);
+    if let Some(term) = &election.result_term {
+        details.insert("fencing_token".into(), term.fencing_token.0.to_string());
+        details.insert(
+            "lease_expires_at_unix_ms".into(),
+            term.expires_at_unix_ms.to_string(),
+        );
+    }
+    if let Some(reason) = &election.rejection_reason {
+        details.insert("rejection_reason".into(), reason.clone());
+    }
+    details
 }
 
 fn term_audit_details(term: Option<&CoordinatorTerm>) -> BTreeMap<String, String> {
@@ -871,6 +1293,12 @@ fn audit_outcome_for_error(error: &anyhow::Error) -> AuditOutcome {
         || code.contains("clock_skew")
         || code.contains("lease_expired")
         || code.contains("write_requires_term")
+        || code.contains("election_")
+        || code.contains("self_appointment")
+        || code.contains("no_eligible_candidate")
+        || code.contains("leader_not_preferred")
+        || code.contains("conflicting_vote")
+        || code.contains("invalid_stage")
     {
         AuditOutcome::Denied
     } else {
@@ -1190,6 +1618,50 @@ mod tests {
                 fencing_token: term.fencing_token,
             }
         }
+
+        fn election_proposal(
+            &self,
+            term: u64,
+            leader: &Identity,
+            expires_at_unix_ms: u64,
+        ) -> CoordinatorElectionProposal {
+            CoordinatorElectionProposal::signed(
+                self.network.network_id.clone(),
+                1,
+                term,
+                vec![
+                    NodeId::from_public_key(&self.candidate_one.public_key()),
+                    NodeId::from_public_key(&self.candidate_two.public_key()),
+                ],
+                NOW,
+                expires_at_unix_ms,
+                leader,
+            )
+            .unwrap()
+        }
+
+        fn election_vote(
+            &self,
+            term: u64,
+            leader: &Identity,
+            voter: &Identity,
+            expires_at_unix_ms: u64,
+        ) -> CoordinatorElectionVote {
+            CoordinatorElectionVote::signed(
+                self.network.network_id.clone(),
+                1,
+                term,
+                NodeId::from_public_key(&leader.public_key()),
+                vec![
+                    NodeId::from_public_key(&self.candidate_one.public_key()),
+                    NodeId::from_public_key(&self.candidate_two.public_key()),
+                ],
+                NOW,
+                expires_at_unix_ms,
+                voter,
+            )
+            .unwrap()
+        }
     }
 
     #[test]
@@ -1319,6 +1791,160 @@ mod tests {
         assert_eq!(
             status.candidates[0].health,
             fuckipv6_common::domain::CoordinatorCandidateHealth::Missing
+        );
+    }
+
+    #[test]
+    fn persisted_election_commits_only_after_strict_majority() {
+        let fixture = Fixture::new("persisted-election");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_two_id = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        for candidate in [&fixture.candidate_one, &fixture.candidate_two] {
+            store
+                .publish_declaration(
+                    &NodeId::from_public_key(&candidate.public_key()),
+                    fixture.declaration(candidate, 1),
+                    NOW,
+                )
+                .unwrap();
+        }
+
+        let proposal = fixture.election_proposal(1, &fixture.candidate_one, NOW + 30_000);
+        let proposal_id = proposal.proposal_id.clone();
+        let proposed = store
+            .propose_election(&candidate_one_id, proposal.clone(), NOW)
+            .unwrap();
+        assert_eq!(
+            proposed.latest_election.as_ref().unwrap().stage,
+            CoordinatorElectionStage::Voting
+        );
+
+        let first_vote = fixture.election_vote(
+            1,
+            &fixture.candidate_one,
+            &fixture.candidate_one,
+            NOW + 30_000,
+        );
+        let voting = store
+            .record_election_vote(&candidate_one_id, &proposal_id, first_vote.clone(), NOW + 1)
+            .unwrap();
+        assert_eq!(voting.latest_term, None);
+        assert_eq!(voting.latest_election.as_ref().unwrap().votes.len(), 1);
+        let retry = store
+            .record_election_vote(&candidate_one_id, &proposal_id, first_vote, NOW + 2)
+            .unwrap();
+        assert_eq!(retry.latest_election.as_ref().unwrap().votes.len(), 1);
+
+        let deciding_vote = fixture.election_vote(
+            1,
+            &fixture.candidate_one,
+            &fixture.candidate_two,
+            NOW + 30_000,
+        );
+        let committed = store
+            .record_election_vote(&candidate_two_id, &proposal_id, deciding_vote, NOW + 3)
+            .unwrap();
+        let election = committed.latest_election.as_ref().unwrap();
+        assert_eq!(election.stage, CoordinatorElectionStage::Committed);
+        assert_eq!(election.votes.len(), 2);
+        let term = committed.latest_term.as_ref().unwrap();
+        assert_eq!(term.term, 1);
+        assert_eq!(term.leader, candidate_one_id);
+        assert_eq!(term.fencing_token, FencingToken(1));
+        assert_eq!(term.expires_at_unix_ms, NOW + 30_000);
+
+        let restored = fixture
+            .store()
+            .status(&owner_id, &fixture.network.network_id, NOW + 4)
+            .unwrap();
+        assert_eq!(restored.latest_election.as_ref(), Some(election));
+        assert_eq!(restored.latest_term.as_ref(), Some(term));
+        let audit = store.audit_entries().unwrap();
+        for action in [
+            "coordinator.election.started",
+            "coordinator.election.vote.accepted",
+            "coordinator.election.committed",
+        ] {
+            assert!(
+                audit
+                    .iter()
+                    .any(|entry| entry.action == action && entry.outcome == AuditOutcome::Succeeded),
+                "missing {action}: {audit:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn election_timeout_is_durable_and_rejects_late_votes() {
+        let fixture = Fixture::new("election-timeout");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        for candidate in [&fixture.candidate_one, &fixture.candidate_two] {
+            store
+                .publish_declaration(
+                    &NodeId::from_public_key(&candidate.public_key()),
+                    fixture.declaration(candidate, 1),
+                    NOW,
+                )
+                .unwrap();
+        }
+        let proposal = fixture.election_proposal(1, &fixture.candidate_one, NOW + 30_000);
+        let proposal_id = proposal.proposal_id.clone();
+        store
+            .propose_election(&candidate_one_id, proposal, NOW)
+            .unwrap();
+        let early_timeout_error = store
+            .timeout_election(
+                &candidate_one_id,
+                &fixture.network.network_id,
+                &proposal_id,
+                NOW + 29_999,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            early_timeout_error.contains("domain.coordinator_election_not_timed_out"),
+            "{early_timeout_error}"
+        );
+        let timed_out = store
+            .timeout_election(
+                &candidate_one_id,
+                &fixture.network.network_id,
+                &proposal_id,
+                NOW + 30_000,
+            )
+            .unwrap();
+        assert_eq!(
+            timed_out.latest_election.as_ref().unwrap().stage,
+            CoordinatorElectionStage::TimedOut
+        );
+        let late_vote = fixture.election_vote(
+            1,
+            &fixture.candidate_one,
+            &fixture.candidate_one,
+            NOW + 30_000,
+        );
+        let error = store
+            .record_election_vote(&candidate_one_id, &proposal_id, late_vote, NOW + 30_001)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid_stage"), "{error}");
+        let restored = fixture
+            .store()
+            .status(&owner_id, &fixture.network.network_id, NOW + 30_001)
+            .unwrap();
+        assert_eq!(
+            restored.latest_election.as_ref().unwrap().stage,
+            CoordinatorElectionStage::TimedOut
         );
     }
 

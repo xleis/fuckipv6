@@ -4,8 +4,9 @@ use fuckipv6_common::domain::{
     AuditEntry, AuditId, AuditLog, AuditOutcome, ContentHash, CoordinatorCandidateConfig,
     CoordinatorCandidateDeclaration, CoordinatorCandidateStatus, CoordinatorElectionProposal,
     CoordinatorElectionSession, CoordinatorElectionStage, CoordinatorElectionVote,
-    CoordinatorRecoveryReport, CoordinatorRecoveryResponse, CoordinatorRecoveryRole,
-    CoordinatorRecoveryStage, CoordinatorRecoveryStatus, CoordinatorTerm,
+    CoordinatorEmergencyLeaderResponse, CoordinatorEmergencyLeaderStatus,
+    CoordinatorEmergencyWriteCredential, CoordinatorRecoveryReport, CoordinatorRecoveryResponse,
+    CoordinatorRecoveryRole, CoordinatorRecoveryStage, CoordinatorRecoveryStatus, CoordinatorTerm,
     CoordinatorWriteCredential, CoordinatorWriteKind, NetworkId, NetworkRecord, NodeId,
     COORDINATOR_MAX_LEASE_DURATION_MS,
 };
@@ -17,7 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-const COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION: u16 = 2;
+const COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION: u16 = 3;
+const COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION_V2: u16 = 2;
 const COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION_V1: u16 = 1;
 const COORDINATOR_RECOVERY_AUDIT_REPLAY_LIMIT: usize = 128;
 static AUDIT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -51,6 +53,15 @@ struct StoredCoordinatorCandidates {
     /// not authority: it can never make a node writable or install a term.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     recoveries: BTreeMap<NodeId, CoordinatorRecoveryStatus>,
+    /// A bounded emergency lease issued only after the server observed every
+    /// configured candidate offline. This is independent from `latest_term`
+    /// and can never authorize a governance write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    emergency_leader: Option<CoordinatorEmergencyLeaderStatus>,
+    /// Durable emergency epoch high-water mark. It is retained after renewal,
+    /// expiry and revocation so a restart can never reuse emergency authority.
+    #[serde(default)]
+    emergency_epoch: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +89,7 @@ impl CoordinatorCandidateFile {
         if !matches!(
             self.schema_version,
             COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION_V1
+                | COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION_V2
                 | COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION
         ) {
             bail!("coordinator_candidate.error.unsupported_schema");
@@ -106,6 +118,35 @@ impl CoordinatorCandidateFile {
                         bail!("coordinator_candidate.error.election_term_network_mismatch");
                     }
                 }
+            }
+            if let Some(emergency) = &stored.emergency_leader {
+                emergency.validate_definition()?;
+                let config = stored
+                    .config
+                    .as_ref()
+                    .context("coordinator_candidate.error.emergency_config_missing")?;
+                if emergency.network_id != *network_id
+                    || emergency.candidate_config_revision != config.revision
+                    || emergency.emergency_epoch > stored.emergency_epoch
+                {
+                    bail!("coordinator_candidate.error.emergency_context_mismatch");
+                }
+                let configured = config
+                    .candidates
+                    .iter()
+                    .map(|candidate| candidate.node_id.clone())
+                    .collect::<std::collections::BTreeSet<_>>();
+                let unavailable = emergency
+                    .unavailable_candidates
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>();
+                if configured != unavailable || configured.contains(&emergency.leader) {
+                    bail!("coordinator_candidate.error.emergency_proof_mismatch");
+                }
+            }
+            if stored.emergency_leader.is_some() && stored.emergency_epoch == 0 {
+                bail!("coordinator_candidate.error.emergency_epoch_missing");
             }
             for (node_id, declaration) in &stored.declarations {
                 declaration.validate_definition()?;
@@ -523,6 +564,216 @@ impl CoordinatorCandidateStore {
                 Err(error)
             }
         }
+    }
+
+    /// Issue or idempotently observe the bounded emergency runtime authority.
+    /// `online_members` must come from the Coordinator's authenticated session
+    /// snapshot and is never accepted from a client message.
+    pub fn issue_emergency_leader(
+        &self,
+        actor: &NodeId,
+        network_id: &NetworkId,
+        online_members: &[NodeId],
+        now_unix_ms: u64,
+    ) -> Result<CoordinatorEmergencyLeaderResponse> {
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
+        self.ensure_parent()?;
+        let _file_lock = lock_candidate_file(&self.path)?;
+        let mut file = self.load_unlocked()?;
+        let network = read_network_record(&self.network_record_path, network_id)?;
+
+        let outcome =
+            self.apply_emergency_issue(&mut file, actor, &network, online_members, now_unix_ms);
+        match outcome {
+            Ok((response, changed)) => {
+                if changed {
+                    append_audit(
+                        &mut file.audit_log,
+                        actor,
+                        &network.network_id,
+                        "coordinator.emergency.leader.issued",
+                        format!("network/{}/coordinator-emergency", network.network_id),
+                        AuditOutcome::Succeeded,
+                        now_unix_ms,
+                        "bounded emergency runtime Leader issued",
+                        emergency_audit_details(response.status.emergency_leader.as_ref()),
+                    )?;
+                    self.persist(&file)?;
+                }
+                Ok(response)
+            }
+            Err(error) => {
+                append_audit(
+                    &mut file.audit_log,
+                    actor,
+                    &network.network_id,
+                    "coordinator.emergency.leader.issue.rejected",
+                    format!("network/{}/coordinator-emergency", network.network_id),
+                    audit_outcome_for_error(&error),
+                    now_unix_ms,
+                    "emergency runtime Leader issuance rejected",
+                    BTreeMap::from([("error".into(), error.to_string())]),
+                )?;
+                self.persist(&file)?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Renew one live emergency lease. Candidate recovery or Leader disconnect
+    /// revokes the lease in the same file-locked transaction as the rejection.
+    pub fn renew_emergency_leader(
+        &self,
+        actor: &NodeId,
+        credential: &CoordinatorEmergencyWriteCredential,
+        network_id: &NetworkId,
+        online_members: &[NodeId],
+        now_unix_ms: u64,
+    ) -> Result<CoordinatorEmergencyLeaderResponse> {
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
+        self.ensure_parent()?;
+        let _file_lock = lock_candidate_file(&self.path)?;
+        let mut file = self.load_unlocked()?;
+        let network = read_network_record(&self.network_record_path, network_id)?;
+
+        let outcome = self.apply_emergency_renew(
+            &mut file,
+            actor,
+            credential,
+            &network,
+            online_members,
+            now_unix_ms,
+        );
+        match outcome {
+            Ok(response) => {
+                append_audit(
+                    &mut file.audit_log,
+                    actor,
+                    &network.network_id,
+                    "coordinator.emergency.leader.renewed",
+                    format!("network/{}/coordinator-emergency", network.network_id),
+                    AuditOutcome::Succeeded,
+                    now_unix_ms,
+                    "bounded emergency runtime Leader renewed",
+                    emergency_audit_details(response.status.emergency_leader.as_ref()),
+                )?;
+                self.persist(&file)?;
+                Ok(response)
+            }
+            Err(error) => {
+                append_audit(
+                    &mut file.audit_log,
+                    actor,
+                    &network.network_id,
+                    "coordinator.emergency.leader.renew.rejected",
+                    format!("network/{}/coordinator-emergency", network.network_id),
+                    audit_outcome_for_error(&error),
+                    now_unix_ms,
+                    "emergency runtime Leader renewal rejected",
+                    BTreeMap::from([
+                        ("error".into(), error.to_string()),
+                        (
+                            "emergency_epoch".into(),
+                            credential.emergency_epoch.to_string(),
+                        ),
+                        (
+                            "candidate_config_revision".into(),
+                            credential.candidate_config_revision.to_string(),
+                        ),
+                    ]),
+                )?;
+                if file
+                    .networks
+                    .get(network_id)
+                    .is_some_and(|stored| stored.emergency_leader.is_none())
+                    && error
+                        .to_string()
+                        .contains("domain.coordinator_emergency_candidate_online")
+                {
+                    append_audit(
+                        &mut file.audit_log,
+                        actor,
+                        &network.network_id,
+                        "coordinator.emergency.leader.revoked",
+                        format!("network/{}/coordinator-emergency", network.network_id),
+                        AuditOutcome::Succeeded,
+                        now_unix_ms,
+                        "emergency runtime Leader revoked after candidate recovery",
+                        BTreeMap::from([
+                            (
+                                "reason_code".into(),
+                                "coordinator.emergency.reason.candidate_recovered".into(),
+                            ),
+                            (
+                                "emergency_epoch".into(),
+                                credential.emergency_epoch.to_string(),
+                            ),
+                        ]),
+                    )?;
+                }
+                self.persist(&file)?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Revoke emergency authority without changing the durable epoch. This is
+    /// safe to call from the presence reconciler or an authenticated operator.
+    pub fn revoke_emergency_leader(
+        &self,
+        actor: &NodeId,
+        network_id: &NetworkId,
+        reason_code: &str,
+        now_unix_ms: u64,
+    ) -> Result<CoordinatorCandidateStatus> {
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
+        self.ensure_parent()?;
+        let _file_lock = lock_candidate_file(&self.path)?;
+        let mut file = self.load_unlocked()?;
+        let network = read_network_record(&self.network_record_path, network_id)?;
+        if !network.members.contains(actor) {
+            bail!("coordinator_candidate.error.permission_denied");
+        }
+
+        let stored = file.networks.get_mut(network_id);
+        let lease = stored
+            .as_ref()
+            .and_then(|stored| stored.emergency_leader.as_ref())
+            .cloned();
+        if let Some(lease) = lease {
+            stored
+                .expect("lease requires stored state")
+                .emergency_leader = None;
+            append_audit(
+                &mut file.audit_log,
+                actor,
+                &network.network_id,
+                "coordinator.emergency.leader.revoked",
+                format!("network/{}/coordinator-emergency", network.network_id),
+                AuditOutcome::Succeeded,
+                now_unix_ms,
+                "bounded emergency runtime Leader revoked",
+                BTreeMap::from([
+                    ("reason_code".into(), reason_code.into()),
+                    ("emergency_epoch".into(), lease.emergency_epoch.to_string()),
+                    ("leader".into(), lease.leader.to_string()),
+                ]),
+            )?;
+            self.persist(&file)?;
+        }
+        status_from_file(&network, file.networks.get(network_id), now_unix_ms)
     }
 
     /// Central write gate for callers that already have a governance payload.
@@ -1063,6 +1314,149 @@ impl CoordinatorCandidateStore {
         Ok(self.load_unlocked()?.audit_log.entries().to_vec())
     }
 
+    fn apply_emergency_issue(
+        &self,
+        file: &mut CoordinatorCandidateFile,
+        actor: &NodeId,
+        network: &NetworkRecord,
+        online_members: &[NodeId],
+        now_unix_ms: u64,
+    ) -> Result<(CoordinatorEmergencyLeaderResponse, bool)> {
+        if !network.members.contains(actor) {
+            bail!("coordinator_candidate.error.permission_denied");
+        }
+        let stored = file.networks.entry(network.network_id.clone()).or_default();
+        let config = stored
+            .config
+            .as_ref()
+            .context("coordinator_candidate.error.config_missing")?
+            .clone();
+        config.validate_against_network(network)?;
+        let online = online_members
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+
+        if let Some(existing) = stored.emergency_leader.clone() {
+            let mut refreshed = existing;
+            refreshed.refresh_at(now_unix_ms)?;
+            if refreshed.is_active() && online.contains(&refreshed.leader) {
+                if stored
+                    .latest_term
+                    .as_ref()
+                    .is_some_and(|term| term.lease_status_at(now_unix_ms).is_writable())
+                {
+                    bail!("coordinator_candidate.error.emergency_term_conflict");
+                }
+                let status = status_from_file(network, Some(stored), now_unix_ms)?;
+                return Ok((
+                    CoordinatorEmergencyLeaderResponse {
+                        status,
+                        renewed: false,
+                    },
+                    false,
+                ));
+            }
+        }
+
+        if stored
+            .latest_term
+            .as_ref()
+            .is_some_and(|term| term.lease_status_at(now_unix_ms).is_writable())
+        {
+            bail!("coordinator_candidate.error.emergency_term_conflict");
+        }
+        let emergency_epoch = stored
+            .emergency_epoch
+            .checked_add(1)
+            .context("coordinator_candidate.error.emergency_epoch_overflow")?;
+        let lease = CoordinatorEmergencyLeaderStatus::issue(
+            network,
+            &config,
+            online_members,
+            emergency_epoch,
+            now_unix_ms,
+        )?;
+        stored.emergency_epoch = emergency_epoch;
+        stored.emergency_leader = Some(lease);
+        let status = status_from_file(network, Some(stored), now_unix_ms)?;
+        Ok((
+            CoordinatorEmergencyLeaderResponse {
+                status,
+                renewed: false,
+            },
+            true,
+        ))
+    }
+
+    fn apply_emergency_renew(
+        &self,
+        file: &mut CoordinatorCandidateFile,
+        actor: &NodeId,
+        credential: &CoordinatorEmergencyWriteCredential,
+        network: &NetworkRecord,
+        online_members: &[NodeId],
+        now_unix_ms: u64,
+    ) -> Result<CoordinatorEmergencyLeaderResponse> {
+        if !network.members.contains(actor) {
+            bail!("coordinator_candidate.error.permission_denied");
+        }
+        if credential.network_id != network.network_id {
+            bail!("coordinator_candidate.error.emergency_context_mismatch");
+        }
+        let stored = file
+            .networks
+            .get_mut(&network.network_id)
+            .context("coordinator_candidate.error.emergency_missing")?;
+        let config = stored
+            .config
+            .as_ref()
+            .context("coordinator_candidate.error.config_missing")?
+            .clone();
+        let mut lease = stored
+            .emergency_leader
+            .as_ref()
+            .context("coordinator_candidate.error.emergency_missing")?
+            .clone();
+        lease.refresh_at(now_unix_ms)?;
+
+        let online = online_members
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        if config
+            .candidates
+            .iter()
+            .any(|candidate| online.contains(&candidate.node_id))
+        {
+            stored.emergency_leader = None;
+            bail!("domain.coordinator_emergency_candidate_online");
+        }
+        if credential.leader != lease.leader
+            || credential.emergency_epoch != lease.emergency_epoch
+            || credential.candidate_config_revision != config.revision
+            || actor != &lease.leader
+        {
+            bail!("domain.coordinator_emergency_credential_mismatch");
+        }
+        if !online.contains(&lease.leader) {
+            stored.emergency_leader = None;
+            bail!("domain.coordinator_emergency_leader_offline");
+        }
+        let unavailable = config
+            .candidates
+            .iter()
+            .map(|candidate| candidate.node_id.clone())
+            .collect::<Vec<_>>();
+        lease.renew(config.revision, online_members, &unavailable, now_unix_ms)?;
+        stored.emergency_leader = Some(lease);
+        let status = status_from_file(network, Some(stored), now_unix_ms)?;
+        Ok(CoordinatorEmergencyLeaderResponse {
+            status,
+            renewed: true,
+        })
+    }
+
     fn apply_election_proposal(
         &self,
         file: &mut CoordinatorCandidateFile,
@@ -1282,6 +1676,9 @@ impl CoordinatorCandidateStore {
         // A declaration for the previous revision cannot be promoted to the new
         // configuration. Keeping it would make offline status look fresh.
         stored.declarations.clear();
+        // Emergency proof is bound to the exact candidate revision. A new
+        // configuration invalidates it even when the candidate identities match.
+        stored.emergency_leader = None;
         stored.config = Some(config);
         let status = status_from_file(network, Some(stored), now_unix_ms)?;
         self.persist(file)?;
@@ -1465,7 +1862,11 @@ impl CoordinatorCandidateStore {
             .with_context(|| format!("无法读取协调器候选存储: {}", self.path.display()))?;
         let mut file: CoordinatorCandidateFile = serde_json::from_slice(&content)
             .with_context(|| format!("无法解析协调器候选存储: {}", self.path.display()))?;
-        if file.schema_version == COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION_V1 {
+        if matches!(
+            file.schema_version,
+            COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION_V1
+                | COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION_V2
+        ) {
             file.schema_version = COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION;
         }
         file.validate()?;
@@ -1498,6 +1899,12 @@ fn status_from_file(
     )
     .context("coordinator_candidate.error.status_projection_failed")?;
     status.latest_election = stored.and_then(|stored| stored.latest_election.clone());
+    if config.is_some_and(|config| config.is_effective_at(now_unix_ms)) {
+        status.attach_emergency_leader(
+            stored.and_then(|stored| stored.emergency_leader.clone()),
+            now_unix_ms,
+        )?;
+    }
     status.refresh_control_plane();
     Ok(status)
 }
@@ -1626,6 +2033,39 @@ fn term_audit_details(term: Option<&CoordinatorTerm>) -> BTreeMap<String, String
             "lease_expires_at_unix_ms".into(),
             term.expires_at_unix_ms.to_string(),
         ),
+    ])
+}
+
+fn emergency_audit_details(
+    emergency: Option<&CoordinatorEmergencyLeaderStatus>,
+) -> BTreeMap<String, String> {
+    let Some(emergency) = emergency else {
+        return BTreeMap::new();
+    };
+    BTreeMap::from([
+        ("leader".into(), emergency.leader.to_string()),
+        (
+            "emergency_epoch".into(),
+            emergency.emergency_epoch.to_string(),
+        ),
+        (
+            "candidate_config_revision".into(),
+            emergency.candidate_config_revision.to_string(),
+        ),
+        (
+            "issued_at_unix_ms".into(),
+            emergency.issued_at_unix_ms.to_string(),
+        ),
+        (
+            "expires_at_unix_ms".into(),
+            emergency.expires_at_unix_ms.to_string(),
+        ),
+        (
+            "hard_expires_at_unix_ms".into(),
+            emergency.hard_expires_at_unix_ms.to_string(),
+        ),
+        ("governance_writable".into(), "false".into()),
+        ("data_plane_allowed".into(), "true".into()),
     ])
 }
 
@@ -3101,6 +3541,250 @@ mod tests {
             entry.action == "coordinator.term.lease.renew.rejected"
                 && entry.outcome == AuditOutcome::Denied
         }));
+    }
+
+    #[test]
+    fn emergency_lease_is_bounded_and_restart_never_extends_it() {
+        let fixture = Fixture::new("emergency-bounded");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let ordinary_id = NodeId::from_public_key(&fixture.ordinary.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        let online = vec![owner_id.clone(), ordinary_id.clone()];
+        let issued = store
+            .issue_emergency_leader(&owner_id, &fixture.network.network_id, &online, NOW)
+            .unwrap();
+        let lease = issued.status.emergency_leader.clone().unwrap();
+        assert!(!issued.renewed);
+        assert_eq!(lease.issued_at_unix_ms, NOW);
+        assert_eq!(
+            lease.hard_expires_at_unix_ms - lease.issued_at_unix_ms,
+            fuckipv6_common::domain::COORDINATOR_EMERGENCY_MAX_DURATION_MS
+        );
+        assert!(!issued.status.control_plane.governance_writable);
+        assert_eq!(
+            issued.status.control_plane.reason_code,
+            "coordinator.control_plane.emergency_runtime_only"
+        );
+
+        let credential = CoordinatorEmergencyWriteCredential {
+            network_id: fixture.network.network_id.clone(),
+            leader: lease.leader.clone(),
+            emergency_epoch: lease.emergency_epoch,
+            candidate_config_revision: lease.candidate_config_revision,
+        };
+        let renewed = store
+            .renew_emergency_leader(
+                &lease.leader,
+                &credential,
+                &fixture.network.network_id,
+                &online,
+                NOW + 20_000,
+            )
+            .unwrap();
+        assert!(renewed.renewed);
+        let renewed_lease = renewed.status.emergency_leader.unwrap();
+        assert_eq!(renewed_lease.expires_at_unix_ms, NOW + 50_000);
+        assert_eq!(
+            renewed_lease.hard_expires_at_unix_ms,
+            lease.hard_expires_at_unix_ms
+        );
+
+        let restored = fixture
+            .store()
+            .status(&owner_id, &fixture.network.network_id, NOW + 30_000)
+            .unwrap();
+        let restored_lease = restored.emergency_leader.unwrap();
+        assert!(restored_lease.is_active());
+        assert_eq!(restored_lease.remaining_ms, 20_000);
+        assert_eq!(
+            restored_lease.hard_expires_at_unix_ms,
+            lease.hard_expires_at_unix_ms
+        );
+    }
+
+    #[test]
+    fn emergency_lease_expiry_cannot_be_renewed_or_revived_by_restart() {
+        let fixture = Fixture::new("emergency-expiry");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let ordinary_id = NodeId::from_public_key(&fixture.ordinary.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        let online = vec![owner_id.clone(), ordinary_id];
+        let issued = store
+            .issue_emergency_leader(&owner_id, &fixture.network.network_id, &online, NOW)
+            .unwrap();
+        let lease = issued.status.emergency_leader.unwrap();
+        let credential = CoordinatorEmergencyWriteCredential {
+            network_id: fixture.network.network_id.clone(),
+            leader: lease.leader.clone(),
+            emergency_epoch: lease.emergency_epoch,
+            candidate_config_revision: lease.candidate_config_revision,
+        };
+        let error = store
+            .renew_emergency_leader(
+                &lease.leader,
+                &credential,
+                &fixture.network.network_id,
+                &online,
+                lease.expires_at_unix_ms,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("domain.coordinator_emergency_lease_expired"),
+            "{error}"
+        );
+
+        let restored = fixture
+            .store()
+            .status(
+                &owner_id,
+                &fixture.network.network_id,
+                lease.expires_at_unix_ms + 1,
+            )
+            .unwrap();
+        let restored_lease = restored.emergency_leader.unwrap();
+        assert_eq!(
+            restored_lease.state,
+            fuckipv6_common::domain::CoordinatorEmergencyLeaderState::Expired
+        );
+        assert!(!restored_lease.is_active());
+        assert!(!restored.control_plane.governance_writable);
+    }
+
+    #[test]
+    fn emergency_lease_revocation_retains_epoch_high_water_mark() {
+        let fixture = Fixture::new("emergency-epoch");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let ordinary_id = NodeId::from_public_key(&fixture.ordinary.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        let online = vec![owner_id.clone(), ordinary_id];
+        let first = store
+            .issue_emergency_leader(&owner_id, &fixture.network.network_id, &online, NOW)
+            .unwrap();
+        let first_epoch = first
+            .status
+            .emergency_leader
+            .as_ref()
+            .unwrap()
+            .emergency_epoch;
+        store
+            .revoke_emergency_leader(
+                &owner_id,
+                &fixture.network.network_id,
+                "coordinator.emergency.reason.operator_revoked",
+                NOW + 1,
+            )
+            .unwrap();
+
+        let second = fixture
+            .store()
+            .issue_emergency_leader(&owner_id, &fixture.network.network_id, &online, NOW + 2)
+            .unwrap();
+        let second_epoch = second
+            .status
+            .emergency_leader
+            .as_ref()
+            .unwrap()
+            .emergency_epoch;
+        assert!(second_epoch > first_epoch);
+        let raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&store.path).unwrap()).unwrap();
+        assert_eq!(raw["schema_version"], 3);
+        assert_eq!(
+            raw["networks"][fixture.network.network_id.to_string()]["emergency_epoch"],
+            second_epoch
+        );
+    }
+
+    #[test]
+    fn candidate_recovery_revokes_emergency_lease_and_is_audited() {
+        let fixture = Fixture::new("emergency-candidate-recovery");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let ordinary_id = NodeId::from_public_key(&fixture.ordinary.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        let issued = store
+            .issue_emergency_leader(
+                &owner_id,
+                &fixture.network.network_id,
+                &[owner_id.clone(), ordinary_id.clone()],
+                NOW,
+            )
+            .unwrap();
+        let lease = issued.status.emergency_leader.unwrap();
+        let credential = CoordinatorEmergencyWriteCredential {
+            network_id: fixture.network.network_id.clone(),
+            leader: lease.leader.clone(),
+            emergency_epoch: lease.emergency_epoch,
+            candidate_config_revision: lease.candidate_config_revision,
+        };
+        let error = store
+            .renew_emergency_leader(
+                &lease.leader,
+                &credential,
+                &fixture.network.network_id,
+                &[owner_id.clone(), ordinary_id, candidate_one_id],
+                NOW + 1_000,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("domain.coordinator_emergency_candidate_online"),
+            "{error}"
+        );
+        let status = store
+            .status(&owner_id, &fixture.network.network_id, NOW + 1_001)
+            .unwrap();
+        assert!(status.emergency_leader.is_none());
+        assert!(store.audit_entries().unwrap().iter().any(|entry| {
+            entry.action == "coordinator.emergency.leader.revoked"
+                && entry.outcome == AuditOutcome::Succeeded
+                && entry.details.get("reason_code")
+                    == Some(&"coordinator.emergency.reason.candidate_recovered".into())
+        }));
+    }
+
+    #[test]
+    fn legacy_v2_candidate_store_loads_and_upgrades_on_next_write() {
+        let fixture = Fixture::new("emergency-v2-migration");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&store.path).unwrap()).unwrap();
+        raw["schema_version"] = 2.into();
+        let stored = raw["networks"][fixture.network.network_id.to_string()]
+            .as_object_mut()
+            .unwrap();
+        stored.remove("emergency_leader");
+        stored.remove("emergency_epoch");
+        std::fs::write(&store.path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+
+        fixture
+            .store()
+            .status(&owner_id, &fixture.network.network_id, NOW)
+            .unwrap();
+        fixture
+            .store()
+            .update_config(&owner_id, 1, fixture.config_two(2), NOW + 1)
+            .unwrap();
+        let upgraded: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&store.path).unwrap()).unwrap();
+        assert_eq!(upgraded["schema_version"], 3);
     }
 
     #[test]

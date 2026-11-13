@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use fuckipv6_common::domain::{
     CoordinatorCandidateConfigState, CoordinatorCandidateStatus, CoordinatorElectionProposal,
-    CoordinatorElectionStage, CoordinatorElectionVote, DomainError, DomainResult, NodeId,
+    CoordinatorElectionStage, CoordinatorElectionVote, CoordinatorEmergencyLeaderStatus,
+    CoordinatorEmergencyState, CoordinatorEmergencyWriteCredential, DomainError, DomainResult,
+    NodeId,
 };
 use fuckipv6_common::Identity;
 
@@ -26,6 +28,13 @@ pub(super) enum CoordinatorTakeoverDecision {
         network_id: fuckipv6_common::domain::NetworkId,
         proposal_id: fuckipv6_common::domain::ContentHash,
     },
+    IssueEmergency {
+        network_id: fuckipv6_common::domain::NetworkId,
+    },
+    RenewEmergency {
+        network_id: fuckipv6_common::domain::NetworkId,
+        credential: CoordinatorEmergencyWriteCredential,
+    },
 }
 
 /// Decide one safe control-plane action from an authoritative candidate status.
@@ -43,17 +52,26 @@ pub(super) fn decide_coordinator_takeover(
         return Ok(CoordinatorTakeoverDecision::Wait);
     }
     let local_node = NodeId::from_public_key(&identity.public_key());
-    let Some(local_candidate) = status
+    if let Some(local_candidate) = status
         .candidates
         .iter()
         .find(|candidate| candidate.node_id == local_node)
-    else {
-        return Ok(CoordinatorTakeoverDecision::Wait);
-    };
-    if !local_candidate.eligible_for_election {
-        return Ok(CoordinatorTakeoverDecision::Wait);
+    {
+        if !local_candidate.eligible_for_election {
+            return Ok(CoordinatorTakeoverDecision::Wait);
+        }
+        return decide_candidate_takeover(status, identity, &local_node, now_unix_ms);
     }
 
+    decide_emergency_takeover(status, &local_node, now_unix_ms)
+}
+
+fn decide_candidate_takeover(
+    status: &CoordinatorCandidateStatus,
+    identity: &Identity,
+    local_node: &NodeId,
+    now_unix_ms: u64,
+) -> DomainResult<CoordinatorTakeoverDecision> {
     if let Some(election) = status.latest_election.as_ref() {
         if matches!(
             election.stage,
@@ -72,7 +90,7 @@ pub(super) fn decide_coordinator_takeover(
             election
                 .proposal
                 .validate_for_candidate_status(status, now_unix_ms)?;
-            if election.votes.iter().any(|vote| vote.voter == local_node) {
+            if election.votes.iter().any(|vote| vote.voter == *local_node) {
                 return Ok(CoordinatorTakeoverDecision::Wait);
             }
             let vote = CoordinatorElectionVote::signed(
@@ -102,7 +120,7 @@ pub(super) fn decide_coordinator_takeover(
             "coordinator election has no healthy willing candidate",
         )
     })?;
-    if preferred.node_id != local_node {
+    if preferred.node_id != *local_node {
         return Ok(CoordinatorTakeoverDecision::Wait);
     }
     let config = status
@@ -140,16 +158,86 @@ pub(super) fn decide_coordinator_takeover(
     Ok(CoordinatorTakeoverDecision::Propose(proposal))
 }
 
+pub(super) fn validated_emergency_lease(
+    status: &CoordinatorCandidateStatus,
+    now_unix_ms: u64,
+) -> DomainResult<Option<CoordinatorEmergencyLeaderStatus>> {
+    let Some(lease) = status.emergency_leader.clone() else {
+        return Ok(None);
+    };
+    let mut validated = status.clone();
+    validated.attach_emergency_leader(Some(lease), now_unix_ms)?;
+    Ok(validated.emergency_leader)
+}
+
+pub(super) fn active_local_emergency(
+    status: &CoordinatorCandidateStatus,
+    local_node: &NodeId,
+    now_unix_ms: u64,
+) -> DomainResult<Option<CoordinatorEmergencyLeaderStatus>> {
+    Ok(validated_emergency_lease(status, now_unix_ms)?
+        .filter(|lease| lease.is_active() && lease.leader == *local_node))
+}
+
+fn decide_emergency_takeover(
+    status: &CoordinatorCandidateStatus,
+    local_node: &NodeId,
+    now_unix_ms: u64,
+) -> DomainResult<CoordinatorTakeoverDecision> {
+    if status.lease.is_writable() {
+        return Ok(CoordinatorTakeoverDecision::Wait);
+    }
+    if status.latest_election.as_ref().is_some_and(|election| {
+        matches!(
+            election.stage,
+            CoordinatorElectionStage::Started | CoordinatorElectionStage::Voting
+        ) && now_unix_ms < election.deadline_unix_ms
+    }) {
+        return Ok(CoordinatorTakeoverDecision::Wait);
+    }
+
+    if let Some(lease) = validated_emergency_lease(status, now_unix_ms)? {
+        if lease.is_active() {
+            if lease.leader != *local_node {
+                return Ok(CoordinatorTakeoverDecision::Wait);
+            }
+            return Ok(CoordinatorTakeoverDecision::RenewEmergency {
+                network_id: lease.network_id.clone(),
+                credential: CoordinatorEmergencyWriteCredential {
+                    network_id: lease.network_id.clone(),
+                    leader: lease.leader.clone(),
+                    emergency_epoch: lease.emergency_epoch,
+                    candidate_config_revision: lease.candidate_config_revision,
+                },
+            });
+        }
+    }
+
+    let all_candidates_unavailable = status.emergency
+        == CoordinatorEmergencyState::AllCandidatesUnavailable
+        && !status.candidates.is_empty()
+        && status
+            .candidates
+            .iter()
+            .all(|candidate| !candidate.eligible_for_election);
+    if all_candidates_unavailable {
+        return Ok(CoordinatorTakeoverDecision::IssueEmergency {
+            network_id: status.network_id.clone(),
+        });
+    }
+    Ok(CoordinatorTakeoverDecision::Wait)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use fuckipv6_common::domain::{
         CapabilityKind, CoordinatorCandidate, CoordinatorCandidateConfig,
         CoordinatorCandidateDeclaration, CoordinatorCandidateResources,
-        CoordinatorCandidateWillingness, CoordinatorElectionSession, CoordinatorPublicReachability,
-        ExitContributionMode, ExitContributionObligation, ExitContributionScope,
-        ExitSelectionPolicy, NetworkCreateProfile, NetworkJoinMode, NetworkRecord,
-        NetworkVisibility, PublicKey,
+        CoordinatorCandidateWillingness, CoordinatorElectionSession,
+        CoordinatorEmergencyLeaderStatus, CoordinatorPublicReachability, ExitContributionMode,
+        ExitContributionObligation, ExitContributionScope, ExitSelectionPolicy,
+        NetworkCreateProfile, NetworkJoinMode, NetworkRecord, NetworkVisibility, PublicKey,
     };
 
     const NOW: u64 = 2_000_000;
@@ -157,6 +245,8 @@ mod tests {
 
     struct Fixture {
         network: NetworkRecord,
+        owner: Identity,
+        ordinary: Identity,
         candidate_one: Identity,
         candidate_two: Identity,
         config: CoordinatorCandidateConfig,
@@ -166,9 +256,11 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let owner = Identity::generate().unwrap();
+            let ordinary = Identity::generate().unwrap();
             let candidate_one = Identity::generate().unwrap();
             let candidate_two = Identity::generate().unwrap();
             let owner_id = NodeId::from_public_key(&owner.public_key());
+            let ordinary_id = NodeId::from_public_key(&ordinary.public_key());
             let candidate_one_id = NodeId::from_public_key(&candidate_one.public_key());
             let candidate_two_id = NodeId::from_public_key(&candidate_two.public_key());
             let mut network = NetworkRecord::create_owned(
@@ -192,7 +284,9 @@ mod tests {
                 NOW - 10_000,
             )
             .unwrap();
-            network.members.extend([candidate_one_id, candidate_two_id]);
+            network
+                .members
+                .extend([candidate_one_id, candidate_two_id, ordinary_id]);
             network.validate().unwrap();
             let config = CoordinatorCandidateConfig::signed(
                 network.network_id.clone(),
@@ -237,6 +331,8 @@ mod tests {
                 .collect();
             Self {
                 network,
+                owner,
+                ordinary,
                 candidate_one,
                 candidate_two,
                 config,
@@ -253,6 +349,26 @@ mod tests {
                 NOW,
             )
             .unwrap()
+        }
+
+        fn unavailable_status(&self) -> CoordinatorCandidateStatus {
+            CoordinatorCandidateStatus::assess(&self.network, Some(&self.config), &[], None, NOW)
+                .unwrap()
+        }
+
+        fn emergency_status(&self, leader: &Identity) -> CoordinatorCandidateStatus {
+            let leader = NodeId::from_public_key(&leader.public_key());
+            let lease = CoordinatorEmergencyLeaderStatus::issue(
+                &self.network,
+                &self.config,
+                std::slice::from_ref(&leader),
+                1,
+                NOW,
+            )
+            .unwrap();
+            let mut status = self.unavailable_status();
+            status.attach_emergency_leader(Some(lease), NOW).unwrap();
+            status
         }
 
         fn proposal(&self, proposer: &Identity) -> CoordinatorElectionProposal {
@@ -281,6 +397,123 @@ mod tests {
             status.latest_election = Some(session);
             status
         }
+    }
+
+    #[test]
+    fn active_local_emergency_leader_renews_the_exact_lease() {
+        let fixture = Fixture::new();
+        let status = fixture.emergency_status(&fixture.owner);
+        let lease = status
+            .emergency_leader
+            .as_ref()
+            .expect("fixture issues an emergency lease");
+        assert!(lease.is_active());
+
+        let decision = decide_coordinator_takeover(&status, &fixture.owner, NOW).unwrap();
+        assert_eq!(
+            decision,
+            CoordinatorTakeoverDecision::RenewEmergency {
+                network_id: fixture.network.network_id.clone(),
+                credential: CoordinatorEmergencyWriteCredential {
+                    network_id: lease.network_id.clone(),
+                    leader: lease.leader.clone(),
+                    emergency_epoch: lease.emergency_epoch,
+                    candidate_config_revision: lease.candidate_config_revision,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn active_remote_emergency_leader_prevents_local_issue_or_renewal() {
+        let fixture = Fixture::new();
+        let status = fixture.emergency_status(&fixture.ordinary);
+        assert_eq!(
+            decide_coordinator_takeover(&status, &fixture.owner, NOW).unwrap(),
+            CoordinatorTakeoverDecision::Wait
+        );
+    }
+
+    #[test]
+    fn non_candidate_requests_issue_only_after_every_candidate_is_unavailable() {
+        let fixture = Fixture::new();
+        let status = fixture.unavailable_status();
+        assert_eq!(
+            decide_coordinator_takeover(&status, &fixture.owner, NOW).unwrap(),
+            CoordinatorTakeoverDecision::IssueEmergency {
+                network_id: fixture.network.network_id.clone(),
+            }
+        );
+    }
+
+    #[test]
+    fn configured_candidate_never_requests_emergency_authority() {
+        let fixture = Fixture::new();
+        let status = fixture.unavailable_status();
+        assert_eq!(
+            decide_coordinator_takeover(&status, &fixture.candidate_one, NOW).unwrap(),
+            CoordinatorTakeoverDecision::Wait
+        );
+    }
+
+    #[test]
+    fn expired_emergency_lease_requests_a_new_epoch_while_candidates_remain_unavailable() {
+        let fixture = Fixture::new();
+        let mut status = fixture.emergency_status(&fixture.owner);
+        let expires_at = status
+            .emergency_leader
+            .as_ref()
+            .expect("fixture issues an emergency lease")
+            .expires_at_unix_ms;
+        status
+            .attach_emergency_leader(status.emergency_leader.clone(), expires_at)
+            .unwrap();
+        assert_eq!(
+            decide_coordinator_takeover(&status, &fixture.owner, expires_at).unwrap(),
+            CoordinatorTakeoverDecision::IssueEmergency {
+                network_id: fixture.network.network_id.clone(),
+            }
+        );
+    }
+
+    #[test]
+    fn expired_emergency_lease_does_not_issue_after_candidates_recover() {
+        let fixture = Fixture::new();
+        let unavailable = fixture.emergency_status(&fixture.owner);
+        let lease = unavailable
+            .emergency_leader
+            .expect("fixture issues an emergency lease");
+        let mut status = fixture.status();
+        status
+            .attach_emergency_leader(Some(lease), NOW + 30_000)
+            .unwrap();
+        assert!(status
+            .emergency_leader
+            .as_ref()
+            .is_some_and(|lease| !lease.is_active()));
+        assert_eq!(
+            decide_coordinator_takeover(&status, &fixture.owner, NOW + 30_000).unwrap(),
+            CoordinatorTakeoverDecision::Wait
+        );
+    }
+
+    #[test]
+    fn non_candidate_waits_for_an_active_election_until_its_deadline() {
+        let fixture = Fixture::new();
+        let mut status = fixture.unavailable_status();
+        let proposal = fixture.proposal(&fixture.candidate_one);
+        let deadline = proposal.expires_at_unix_ms;
+        status.latest_election = Some(CoordinatorElectionSession::started(proposal, NOW).unwrap());
+        assert_eq!(
+            decide_coordinator_takeover(&status, &fixture.owner, NOW + 1).unwrap(),
+            CoordinatorTakeoverDecision::Wait
+        );
+        assert_eq!(
+            decide_coordinator_takeover(&status, &fixture.owner, deadline).unwrap(),
+            CoordinatorTakeoverDecision::IssueEmergency {
+                network_id: fixture.network.network_id.clone(),
+            }
+        );
     }
 
     #[test]

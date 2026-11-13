@@ -8,17 +8,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
     CoordinatorCandidateConfig, CoordinatorCandidateDeclaration, CoordinatorCandidateStatus,
-    CoordinatorRecoveryReport, CoordinatorRecoveryStatus, CoordinatorTerm,
-    CoordinatorWriteCredential, ExitHealthEvidence, ExitHealthEvidenceState, ExitHealthLayer,
-    ExitHealthProtocol, ExitHealthRetest, ExitHealthRetestPhase, ExitHealthSnapshot,
-    ExitHealthSource, ExitHealthTarget, InvitationCode, InvitationCreateRequest, InvitationId,
-    InvitationPreview, InvitationRedeemRequest, InvitationRedemption, InvitationStatusView,
-    IssuedInvitation, JoinRequest, JoinRequestId, LeakDetectionEvidence,
-    LeakDetectionEvidenceState, LeakDetectionIsolationAction, LeakDetectionProtocol,
-    LeakDetectionSnapshot, LeakDetectionSource, LeakDetectionTarget, MemberLifecycleChange,
-    MemberLifecycleChangeRequest, MemberRemovalPreview, MemberRemovalPreviewRequest,
-    MembershipRole, NetworkId, NetworkMemberDirectory, RelayAuthorizationAuditSnapshot,
-    RelayGovernanceAuditSnapshot, RelayHealthSnapshot, TrafficProtectionState,
+    CoordinatorEmergencyLeaderStatus, CoordinatorRecoveryReport, CoordinatorRecoveryStatus,
+    CoordinatorTerm, CoordinatorWriteCredential, ExitHealthEvidence, ExitHealthEvidenceState,
+    ExitHealthLayer, ExitHealthProtocol, ExitHealthRetest, ExitHealthRetestPhase,
+    ExitHealthSnapshot, ExitHealthSource, ExitHealthTarget, InvitationCode,
+    InvitationCreateRequest, InvitationId, InvitationPreview, InvitationRedeemRequest,
+    InvitationRedemption, InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestId,
+    LeakDetectionEvidence, LeakDetectionEvidenceState, LeakDetectionIsolationAction,
+    LeakDetectionProtocol, LeakDetectionSnapshot, LeakDetectionSource, LeakDetectionTarget,
+    MemberLifecycleChange, MemberLifecycleChangeRequest, MemberRemovalPreview,
+    MemberRemovalPreviewRequest, MembershipRole, NetworkId, NetworkMemberDirectory, NodeId,
+    RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot, RelayHealthSnapshot,
+    TrafficProtectionState,
 };
 use fuckipv6_common::{
     ClientConfig, ExitNodeCapabilities, ExitNodeUnsupportedReason, JoinRequestBatchReviewItem,
@@ -33,7 +34,8 @@ use super::command::{
     NodePublishCoordinatorCandidateDeclarationCommand, NodeUpdateCoordinatorCandidatesCommand,
 };
 use super::coordinator_takeover::{
-    decide_coordinator_takeover, CoordinatorTakeoverDecision, COORDINATOR_TAKEOVER_POLL_INTERVAL,
+    active_local_emergency, decide_coordinator_takeover, CoordinatorTakeoverDecision,
+    COORDINATOR_TAKEOVER_POLL_INTERVAL,
 };
 use super::state::effective_membership_state;
 use super::{
@@ -1049,6 +1051,7 @@ struct NetworkRuntimeSession {
     network_id: Option<String>,
     signaling: Option<Arc<SignalingClient>>,
     coordinator_recovery: Option<CoordinatorRecoveryStatus>,
+    coordinator_emergency: Option<CoordinatorEmergencyLeaderStatus>,
     tun_name: String,
     routing_control: mpsc::UnboundedSender<ipc::RuntimeCommand>,
     shutdown: watch::Sender<bool>,
@@ -3953,6 +3956,7 @@ impl NetworkRuntimeActor {
                 return;
             }
         };
+        let local_node = NodeId::from_public_key(&identity.public_key());
 
         for (network_name, signaling, network_id, recovery_cursor) in sessions {
             let Some(network_id) = network_id.as_deref() else {
@@ -3976,6 +3980,9 @@ impl NetworkRuntimeActor {
             {
                 Ok(status) => status,
                 Err(error) => {
+                    if let Some(session) = self.sessions.get_mut(&network_name) {
+                        session.coordinator_emergency = None;
+                    }
                     tracing::debug!(
                         network = %network_name,
                         %error,
@@ -3993,6 +4000,9 @@ impl NetworkRuntimeActor {
             {
                 Ok(recovery) => recovery,
                 Err(error) => {
+                    if let Some(session) = self.sessions.get_mut(&network_name) {
+                        session.coordinator_emergency = None;
+                    }
                     tracing::debug!(
                         network = %network_name,
                         %error,
@@ -4005,6 +4015,9 @@ impl NetworkRuntimeActor {
                 || !recovery.recovery.health_checks_allowed
                 || !recovery.recovery.data_plane_allowed
             {
+                if let Some(session) = self.sessions.get_mut(&network_name) {
+                    session.coordinator_emergency = None;
+                }
                 tracing::warn!(
                     network = %network_name,
                     stage = ?recovery.recovery.stage,
@@ -4012,13 +4025,32 @@ impl NetworkRuntimeActor {
                 );
                 continue;
             }
+            let status = recovery.status;
+            let now_unix_ms = unix_time_ms();
+            let emergency = match active_local_emergency(&status, &local_node, now_unix_ms) {
+                Ok(emergency) => emergency,
+                Err(error) => {
+                    if let Some(session) = self.sessions.get_mut(&network_name) {
+                        session.coordinator_emergency = None;
+                    }
+                    tracing::debug!(
+                        network = %network_name,
+                        %error,
+                        "Coordinator 接管轮次拒绝不可信的紧急租约"
+                    );
+                    continue;
+                }
+            };
             if let Some(session) = self.sessions.get_mut(&network_name) {
                 session.coordinator_recovery = Some(recovery.recovery.clone());
+                session.coordinator_emergency = emergency;
             }
-            let status = recovery.status;
-            let decision = match decide_coordinator_takeover(&status, &identity, unix_time_ms()) {
+            let decision = match decide_coordinator_takeover(&status, &identity, now_unix_ms) {
                 Ok(decision) => decision,
                 Err(error) => {
+                    if let Some(session) = self.sessions.get_mut(&network_name) {
+                        session.coordinator_emergency = None;
+                    }
                     tracing::debug!(
                         network = %network_name,
                         %error,
@@ -4046,9 +4078,45 @@ impl NetworkRuntimeActor {
                         .timeout_coordinator_election(network_id, proposal_id)
                         .await,
                 ),
+                CoordinatorTakeoverDecision::IssueEmergency { network_id } => (
+                    "issue_emergency",
+                    signaling
+                        .issue_emergency_leader(network_id)
+                        .await
+                        .map(|response| response.status),
+                ),
+                CoordinatorTakeoverDecision::RenewEmergency {
+                    network_id,
+                    credential,
+                } => (
+                    "renew_emergency",
+                    signaling
+                        .renew_emergency_leader(network_id, credential)
+                        .await
+                        .map(|response| response.status),
+                ),
             };
             match result {
                 Ok(status) => {
+                    let emergency =
+                        match active_local_emergency(&status, &local_node, unix_time_ms()) {
+                            Ok(emergency) => emergency,
+                            Err(error) => {
+                                if let Some(session) = self.sessions.get_mut(&network_name) {
+                                    session.coordinator_emergency = None;
+                                }
+                                tracing::debug!(
+                                    network = %network_name,
+                                    action,
+                                    %error,
+                                    "Coordinator 接管响应包含不可信的紧急租约"
+                                );
+                                continue;
+                            }
+                        };
+                    if let Some(session) = self.sessions.get_mut(&network_name) {
+                        session.coordinator_emergency = emergency;
+                    }
                     tracing::debug!(
                         network = %network_name,
                         action,
@@ -4059,6 +4127,11 @@ impl NetworkRuntimeActor {
                     );
                 }
                 Err(error) => {
+                    if matches!(action, "issue_emergency" | "renew_emergency") {
+                        if let Some(session) = self.sessions.get_mut(&network_name) {
+                            session.coordinator_emergency = None;
+                        }
+                    }
                     tracing::debug!(
                         network = %network_name,
                         action,
@@ -4859,6 +4932,7 @@ impl NetworkRuntimeActor {
                 network_id: started.network_id,
                 signaling: started.signaling,
                 coordinator_recovery: None,
+                coordinator_emergency: None,
                 tun_name: started.tun_name,
                 routing_control: started.routing_control,
                 shutdown: started.shutdown,
@@ -7301,6 +7375,7 @@ async fn wait_for_session_shutdown(
         network_id,
         signaling,
         coordinator_recovery,
+        coordinator_emergency,
         tun_name,
         routing_control,
         shutdown,
@@ -7318,6 +7393,7 @@ async fn wait_for_session_shutdown(
                     network_id: network_id.clone(),
                     signaling: signaling.clone(),
                     coordinator_recovery: coordinator_recovery.clone(),
+                    coordinator_emergency: coordinator_emergency.clone(),
                     tun_name: tun_name.clone(),
                     routing_control,
                     shutdown,
@@ -7347,6 +7423,7 @@ async fn wait_for_session_shutdown(
                     network_id: network_id.clone(),
                     signaling: signaling.clone(),
                     coordinator_recovery: coordinator_recovery.clone(),
+                    coordinator_emergency: coordinator_emergency.clone(),
                     tun_name: tun_name.clone(),
                     routing_control,
                     shutdown,
@@ -7367,6 +7444,7 @@ async fn wait_for_session_shutdown(
                 network_id: network_id.clone(),
                 signaling: signaling.clone(),
                 coordinator_recovery: coordinator_recovery.clone(),
+                coordinator_emergency: coordinator_emergency.clone(),
                 tun_name: tun_name.clone(),
                 routing_control,
                 shutdown,
@@ -7397,6 +7475,7 @@ async fn wait_for_session_shutdown(
                 network_id: network_id.clone(),
                 signaling: signaling.clone(),
                 coordinator_recovery: coordinator_recovery.clone(),
+                coordinator_emergency: coordinator_emergency.clone(),
                 tun_name: tun_name.clone(),
                 routing_control,
                 shutdown,
@@ -9040,6 +9119,7 @@ mod tests {
                     network_id: Some(network_id.to_string()),
                     signaling: Some(signaling.clone()),
                     coordinator_recovery: None,
+                    coordinator_emergency: None,
                     tun_name: "fuckipv6-takeover-continuity".into(),
                     routing_control: routing_tx,
                     shutdown: shutdown_tx.clone(),
@@ -9166,6 +9246,239 @@ mod tests {
             terminated_rx.await.expect("termination signal must arrive"),
             ()
         );
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn emergency_issue_ack_for_remote_leader_does_not_enable_local_authority() {
+        use fuckipv6_common::domain::{
+            CapabilityKind, CoordinatorCandidate, CoordinatorCandidateConfig,
+            CoordinatorEmergencyLeaderStatus, CoordinatorEmergencyState, CoordinatorRecoveryRole,
+            CoordinatorRecoveryStage, CoordinatorRecoveryStatus, ExitContributionMode,
+            ExitContributionObligation, ExitContributionScope, ExitSelectionPolicy,
+            NetworkCreateProfile, NetworkJoinMode, NetworkRecord, NetworkVisibility, PublicKey,
+        };
+        use fuckipv6_common::{Identity, SignalingMessage};
+
+        let harness = TestHarness::new("coordinator-emergency-remote-leader").await;
+        let local_identity = harness
+            .configs
+            .load_node_identity()
+            .expect("load local identity");
+        let local_node = NodeId::from_public_key(&local_identity.public_key());
+        let candidate_identity = Identity::generate().expect("candidate identity");
+        let remote_identity = Identity::generate().expect("remote leader identity");
+        let candidate_node = NodeId::from_public_key(&candidate_identity.public_key());
+        let remote_node = NodeId::from_public_key(&remote_identity.public_key());
+        let now_unix_ms = unix_time_ms();
+
+        let mut network = NetworkRecord::create_owned(
+            NetworkCreateProfile {
+                name: "emergency-remote-leader".into(),
+                purpose: "Verify runtime emergency authority binding".into(),
+                icon: "network".into(),
+                language: "zh-CN".into(),
+                region: "ZZ".into(),
+                tags: vec![],
+                capability_declarations: vec![CapabilityKind::Coordinator],
+                visibility: NetworkVisibility::Private,
+                join_mode: NetworkJoinMode::InviteOnly,
+                exit_contribution: ExitContributionObligation::NotRequired,
+                exit_contribution_scope: ExitContributionScope::NotApplicable,
+                exit_contribution_mode: ExitContributionMode::Disabled,
+                exit_selection_policy: ExitSelectionPolicy::default(),
+            },
+            PublicKey::from_bytes([71; 32]),
+            local_node.clone(),
+            now_unix_ms.saturating_sub(10_000),
+        )
+        .expect("create network record");
+        network
+            .members
+            .extend([candidate_node.clone(), remote_node.clone()]);
+        network.validate().expect("validate network record");
+        let network_id = network.network_id.clone();
+        harness
+            .configs
+            .create_network("emergency-remote-leader", "ws://127.0.0.1:6666", true)
+            .expect("create network configuration");
+        harness
+            .configs
+            .set_network_id_metadata("emergency-remote-leader", network_id.as_str())
+            .expect("bind network id");
+
+        let config = CoordinatorCandidateConfig::signed(
+            network_id.clone(),
+            1,
+            vec![CoordinatorCandidate {
+                node_id: candidate_node.clone(),
+                priority: 10,
+            }],
+            now_unix_ms,
+            now_unix_ms + 60_000,
+            &local_identity,
+        )
+        .expect("sign candidate config");
+        let status =
+            CoordinatorCandidateStatus::assess(&network, Some(&config), &[], None, now_unix_ms)
+                .expect("assess unavailable candidates");
+        assert_eq!(
+            status.emergency,
+            CoordinatorEmergencyState::AllCandidatesUnavailable
+        );
+        let lease = CoordinatorEmergencyLeaderStatus::issue(
+            &network,
+            &config,
+            std::slice::from_ref(&remote_node),
+            1,
+            now_unix_ms,
+        )
+        .expect("issue remote emergency lease");
+        let mut response_status = status.clone();
+        response_status
+            .attach_emergency_leader(Some(lease), now_unix_ms)
+            .expect("attach emergency lease");
+
+        let (signaling, mut outbound) = SignalingClient::test_channel();
+        let signaling = Arc::new(signaling);
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let (routing_tx, _routing_rx) = mpsc::unbounded_channel();
+        let (terminated_tx, _terminated_rx) = oneshot::channel();
+        let data_plane = tokio::spawn(async move {
+            let _ = shutdown_rx.changed().await;
+            let _ = terminated_tx.send(());
+            NetworkRuntimeExit {
+                cleanup: RuntimeCleanupOutcome::default(),
+                retained_owner: None,
+            }
+        });
+        let mut actor = NetworkRuntimeActor {
+            configs: harness.configs.clone(),
+            options: RuntimeOptions::default(),
+            state: harness.state.clone(),
+            events: harness.events.clone(),
+            lifecycle: harness.lifecycle.clone(),
+            registry: harness.registry.clone(),
+            services: harness.services.clone(),
+            launcher: Arc::new(harness.fake.clone()),
+            sessions: HashMap::from([(
+                "emergency-remote-leader".to_string(),
+                NetworkRuntimeSession {
+                    network_id: Some(network_id.to_string()),
+                    signaling: Some(signaling.clone()),
+                    coordinator_recovery: None,
+                    coordinator_emergency: None,
+                    tun_name: "fuckipv6-emergency-remote-leader".into(),
+                    routing_control: routing_tx,
+                    shutdown: shutdown_tx.clone(),
+                    handle: data_plane,
+                },
+            )]),
+            retained_owners: HashMap::new(),
+            cleanup_failures: BTreeMap::new(),
+            completed_cleanup: BTreeMap::new(),
+            timeouts: RuntimeTimeouts::default(),
+        };
+
+        let response_client = signaling.clone();
+        let expected_network_id = network_id.clone();
+        let expected_status = status.clone();
+        let expected_response_status = response_status.clone();
+        let expected_remote_node = remote_node.clone();
+        let responder = tokio::spawn(async move {
+            let request = timeout(Duration::from_secs(1), outbound.recv())
+                .await
+                .expect("status request timed out")
+                .expect("outbound signaling channel closed");
+            assert!(matches!(
+                request,
+                SignalingMessage::CoordinatorCandidateStatusRequest { .. }
+            ));
+            assert!(response_client.route_coordinator_candidate_test_response(
+                SignalingMessage::CoordinatorCandidateStatusAck {
+                    status: expected_status.clone(),
+                },
+            ));
+
+            let request = timeout(Duration::from_secs(1), outbound.recv())
+                .await
+                .expect("recovery request timed out")
+                .expect("outbound signaling channel closed");
+            let SignalingMessage::CoordinatorRecoveryRequest { report } = request else {
+                panic!("expected coordinator recovery request, got {request:?}");
+            };
+            assert_eq!(report.network_id, expected_network_id);
+            let recovery = CoordinatorRecoveryStatus {
+                network_id: expected_network_id.clone(),
+                stage: CoordinatorRecoveryStage::ReadOnly,
+                role: CoordinatorRecoveryRole::Member,
+                governance_writable: false,
+                health_checks_allowed: true,
+                data_plane_allowed: true,
+                authoritative_term: 0,
+                authoritative_fencing_token: fuckipv6_common::domain::FencingToken(0),
+                authoritative_leader: expected_remote_node.clone(),
+                authoritative_candidate_config_revision: 1,
+                authoritative_audit_sequence: 0,
+                reason_code: "coordinator.recovery.emergency_runtime".into(),
+            };
+            assert!(response_client.route_coordinator_candidate_test_response(
+                SignalingMessage::CoordinatorRecoveryResponse {
+                    response: fuckipv6_common::domain::CoordinatorRecoveryResponse {
+                        status: expected_status.clone(),
+                        recovery,
+                        audit_entries: Vec::new(),
+                    },
+                },
+            ));
+
+            let request = timeout(Duration::from_secs(1), outbound.recv())
+                .await
+                .expect("emergency issue request timed out")
+                .expect("outbound signaling channel closed");
+            let SignalingMessage::CoordinatorEmergencyLeaderIssue { network_id } = request else {
+                panic!("expected emergency issue request, got {request:?}");
+            };
+            assert_eq!(network_id, expected_network_id);
+            assert!(response_client.route_coordinator_candidate_test_response(
+                SignalingMessage::CoordinatorEmergencyLeaderIssueAck {
+                    response: fuckipv6_common::domain::CoordinatorEmergencyLeaderResponse {
+                        status: expected_response_status.clone(),
+                        renewed: false,
+                    },
+                },
+            ));
+        });
+
+        timeout(Duration::from_secs(1), actor.refresh_coordinator_takeover())
+            .await
+            .expect("coordinator takeover poll timed out");
+        responder.await.expect("responder task failed");
+
+        let session = actor
+            .sessions
+            .get("emergency-remote-leader")
+            .expect("data-plane session must remain registered");
+        assert!(session.coordinator_emergency.is_none());
+        assert_eq!(
+            session
+                .coordinator_emergency
+                .as_ref()
+                .map(|lease| &lease.leader),
+            None
+        );
+        assert!(!session.handle.is_finished());
+        assert!(!*shutdown_tx.borrow());
+
+        let session = actor
+            .sessions
+            .remove("emergency-remote-leader")
+            .expect("test session");
+        session.shutdown.send(true).expect("stop test session");
+        timeout(Duration::from_secs(1), session.handle)
+            .await
+            .expect("test data-plane session did not stop")
+            .expect("test data-plane task failed");
         harness.shutdown().await;
     }
 

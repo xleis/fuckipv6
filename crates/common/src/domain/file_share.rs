@@ -850,6 +850,17 @@ pub struct ResumeRequest {
     pub direction: TransferDirection,
     pub content_hash: ContentHash,
     pub share_revision: u64,
+    /// The first manifest chunk the requester still needs. It may equal the
+    /// manifest chunk count when the requester has every chunk but has not yet
+    /// completed publication.
+    pub resume_chunk_index: u32,
+    /// Absolute byte offset inside `resume_chunk_index` at which the sender
+    /// must resume. A completed transfer uses the manifest's total byte count.
+    pub resume_offset: u64,
+    /// Monotonic data-plane generation selected by the requester. Fragments
+    /// from an older generation may still be in flight after a pause and must
+    /// never be mixed with the resumed byte stream.
+    pub resume_generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1064,6 +1075,28 @@ impl TransferSession {
         self.received_chunks.insert(index, digest);
         self.revision = self.revision.saturating_add(1);
         self.updated_at_unix_ms = now_unix_ms;
+        Ok(())
+    }
+
+    /// Rewind the sender-side bookkeeping to the first chunk the peer still
+    /// needs after a pause. No file data is discarded; callers must reopen and
+    /// rebuild their streaming digest from the committed chunk prefix.
+    pub fn rewind_received_chunks_from(
+        &mut self,
+        index: u32,
+        now_unix_ms: u64,
+    ) -> Result<(), FileTransferError> {
+        if self.state != TransferState::Active {
+            return Err(FileTransferError::InvalidState);
+        }
+        if index as usize > self.manifest.chunks.len() {
+            return Err(FileTransferError::ChunkOutOfRange);
+        }
+        let removed = self.received_chunks.split_off(&index);
+        if !removed.is_empty() {
+            self.revision = self.revision.saturating_add(1);
+            self.updated_at_unix_ms = now_unix_ms;
+        }
         Ok(())
     }
 
@@ -1770,6 +1803,9 @@ mod tests {
             direction: session.binding.direction,
             content_hash: session.manifest.content_hash.clone(),
             share_revision: session.binding.share_revision,
+            resume_chunk_index: 0,
+            resume_offset: 0,
+            resume_generation: 0,
         }
     }
 }

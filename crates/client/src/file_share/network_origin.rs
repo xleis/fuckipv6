@@ -212,10 +212,12 @@ struct OriginTransfer {
     direction: TransferDirection,
     deadline_unix_ms: u64,
     pending: Option<PendingOriginReply>,
+    retry_at_unix_ms: Option<u64>,
     binding: Option<TransferBinding>,
     paused: bool,
     pause_after_reply: bool,
     next_request_sequence: u64,
+    resume_generation: u64,
     state: OriginTransferState,
 }
 
@@ -376,6 +378,25 @@ struct DownloadAssembly {
 struct PendingOriginReply {
     request_id: [u8; 16],
     kind: OriginRequestKind,
+    retry_frame: Option<FileNetworkFrame>,
+}
+
+impl PendingOriginReply {
+    fn new(request_id: [u8; 16], kind: OriginRequestKind) -> Self {
+        Self {
+            request_id,
+            kind,
+            retry_frame: None,
+        }
+    }
+
+    fn retryable(request_id: [u8; 16], kind: OriginRequestKind, frame: FileNetworkFrame) -> Self {
+        Self {
+            request_id,
+            kind,
+            retry_frame: Some(frame),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -585,10 +606,12 @@ impl FileNetworkOrigin {
             direction: TransferDirection::Upload,
             deadline_unix_ms,
             pending: None,
+            retry_at_unix_ms: None,
             binding: None,
             paused: false,
             pause_after_reply: false,
             next_request_sequence: 0,
+            resume_generation: 0,
             state: OriginTransferState::Upload(UploadOriginState {
                 source,
                 source_path: source_path.to_path_buf(),
@@ -644,14 +667,16 @@ impl FileNetworkOrigin {
             path,
             direction: TransferDirection::Download,
             deadline_unix_ms,
-            pending: Some(PendingOriginReply {
+            pending: Some(PendingOriginReply::new(
                 request_id,
-                kind: OriginRequestKind::OpenDownload,
-            }),
+                OriginRequestKind::OpenDownload,
+            )),
+            retry_at_unix_ms: None,
             binding: None,
             paused: false,
             pause_after_reply: false,
             next_request_sequence: 1,
+            resume_generation: 0,
             state: OriginTransferState::Download(Box::new(DownloadOriginState {
                 destination,
                 session: None,
@@ -677,6 +702,69 @@ impl FileNetworkOrigin {
 
     pub(crate) fn pop_outbound(&mut self) -> Option<OriginOutbound> {
         self.outbound.pop_front()
+    }
+
+    /// Return the next point at which a delayed upload fragment or the owning
+    /// transfer deadline needs runtime attention. Rate-limit responses keep the
+    /// exact pending frame so requester-side retries never advance to another
+    /// chunk or rebuild different bytes.
+    pub(crate) fn next_retry_at_unix_ms(&self) -> Option<u64> {
+        self.transfers
+            .values()
+            .filter_map(|transfer| {
+                transfer
+                    .retry_at_unix_ms
+                    .map(|retry_at| retry_at.min(transfer.deadline_unix_ms))
+            })
+            .min()
+    }
+
+    /// Requeue every rate-limited upload fragment whose retry interval has
+    /// elapsed. Expiry always wins over a retry so a delayed fragment cannot
+    /// keep a transfer alive beyond its authenticated deadline.
+    pub(crate) fn queue_due_retries(&mut self, now_unix_ms: u64) {
+        let due = self
+            .transfers
+            .iter()
+            .filter(|(_, transfer)| {
+                now_unix_ms >= transfer.deadline_unix_ms
+                    || transfer
+                        .retry_at_unix_ms
+                        .is_some_and(|retry_at| retry_at <= now_unix_ms)
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        let mut queued = false;
+        for key in due {
+            let Some(transfer) = self.transfers.get_mut(&key) else {
+                continue;
+            };
+            if now_unix_ms >= transfer.deadline_unix_ms {
+                self.fail_transfer_at(&key, now_unix_ms, "file_transfer_expired", false);
+                continue;
+            }
+            let Some(pending) = transfer.pending.as_ref() else {
+                transfer.retry_at_unix_ms = None;
+                continue;
+            };
+            let Some(frame) = pending.retry_frame.clone() else {
+                transfer.retry_at_unix_ms = None;
+                self.fail_transfer_at(&key, now_unix_ms, "file_transfer_retry_unavailable", false);
+                continue;
+            };
+            transfer.retry_at_unix_ms = None;
+            self.outbound.push_back(OriginOutbound {
+                peer: transfer.peer.clone(),
+                transfer_id: transfer.transfer_id.clone(),
+                operation_id: transfer.operation_id.clone(),
+                actor_access_epoch: outbound_access_epoch(transfer),
+                frame,
+            });
+            queued = true;
+        }
+        if queued {
+            self.outbound_notify.notify_one();
+        }
     }
 
     pub(crate) fn outbound_notify(&self) -> Arc<Notify> {
@@ -747,10 +835,28 @@ impl FileNetworkOrigin {
         }
         if let FileNetworkResponse::Error {
             code,
-            retry_after_ms: _,
+            retry_after_ms,
         } = &response
         {
             debug_assert!(!code.is_empty());
+            if code == "file_transfer_rate_limited" {
+                if let Some(retry_after_ms) = *retry_after_ms {
+                    let transfer = self
+                        .transfers
+                        .get_mut(&key)
+                        .ok_or(FileNetworkOriginError::UnknownResponse)?;
+                    let retryable_chunk = transfer.pending.as_ref().is_some_and(|pending| {
+                        matches!(pending.kind, OriginRequestKind::UploadChunk { .. })
+                            && pending.retry_frame.is_some()
+                    });
+                    if retryable_chunk {
+                        transfer.retry_at_unix_ms =
+                            Some(now_unix_ms.saturating_add(retry_after_ms));
+                        self.outbound_notify.notify_one();
+                        return Ok(());
+                    }
+                }
+            }
             self.fail_transfer_at(&key, now_unix_ms, code, false);
             return Ok(());
         }
@@ -764,13 +870,12 @@ impl FileNetworkOrigin {
             self.fail_transfer_at(&key, now_unix_ms, code, true);
             return Err(error);
         }
-        let pending = self
+        let transfer = self
             .transfers
             .get_mut(&key)
-            .ok_or(FileNetworkOriginError::UnknownResponse)?
-            .pending
-            .take()
-            .expect("pending response exists");
+            .ok_or(FileNetworkOriginError::UnknownResponse)?;
+        transfer.retry_at_unix_ms = None;
+        let pending = transfer.pending.take().expect("pending response exists");
         debug_assert_eq!(pending.request_id, request_id);
         let result = match (pending.kind, response) {
             (OriginRequestKind::OpenUpload, FileNetworkResponse::Opened { session }) => {
@@ -845,6 +950,7 @@ impl FileNetworkOrigin {
         request_id: [u8; 16],
         transfer_id: &TransferId,
         operation_id: &OperationId,
+        resume_generation: u64,
         chunk_index: u32,
         offset: u64,
         data: &[u8],
@@ -868,6 +974,22 @@ impl FileNetworkOrigin {
             }
             if transfer.direction != TransferDirection::Download {
                 return Err(FileNetworkOriginError::PeerMismatch);
+            }
+            if resume_generation < transfer.resume_generation {
+                // Pause is a stream barrier. Fragments emitted before the
+                // resumed generation may still be queued by the network and
+                // must be discarded without weakening current-generation
+                // offset and chunk ordering checks.
+                return Ok(());
+            }
+            if resume_generation != transfer.resume_generation {
+                self.fail_transfer_at(
+                    &key,
+                    now_unix_ms,
+                    "file_transfer_resume_generation_mismatch",
+                    true,
+                );
+                return Err(FileNetworkOriginError::ChunkOutOfOrder);
             }
             if transfer.paused {
                 return Ok(());
@@ -1013,6 +1135,23 @@ impl FileNetworkOrigin {
                 .is_some_and(|pending| pending.kind == OriginRequestKind::Pause)
         {
             return Err(FileNetworkOriginError::InvalidState);
+        }
+        if transfer.retry_at_unix_ms.is_some()
+            && transfer
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.retry_frame.is_some())
+        {
+            // A rate-limit error already released the request correlation even
+            // though the exact upload chunk is retained for retry. Pause now by
+            // replacing that retry with a control request; the owner discards
+            // its complete chunk assembly and the requester rewinds the chunk
+            // when the pause response arrives.
+            transfer.retry_at_unix_ms = None;
+            transfer.pending = None;
+            queue_pause(transfer, &mut self.outbound)?;
+            self.outbound_notify.notify_one();
+            return Ok(());
         }
         if transfer.binding.is_none() {
             if !transfer.pending.as_ref().is_some_and(|pending| {
@@ -1560,10 +1699,10 @@ impl FileNetworkOrigin {
                 };
                 let frame = FileNetworkFrame::request(request_id, request)
                     .map_err(|_| FileNetworkOriginError::InvalidRequest)?;
-                transfer.pending = Some(PendingOriginReply {
+                transfer.pending = Some(PendingOriginReply::new(
                     request_id,
-                    kind: OriginRequestKind::FinishDownload,
-                });
+                    OriginRequestKind::FinishDownload,
+                ));
                 self.outbound.push_back(OriginOutbound {
                     peer: transfer.peer.clone(),
                     transfer_id: transfer.transfer_id.clone(),
@@ -1666,6 +1805,7 @@ fn persisted_transfer(
         binding,
         manifest,
         next_request_sequence: transfer.next_request_sequence,
+        resume_generation: transfer.resume_generation,
         upload,
         download,
     })
@@ -1814,10 +1954,12 @@ fn restore_upload(
         direction: TransferDirection::Upload,
         deadline_unix_ms: entry.deadline_unix_ms,
         pending: None,
+        retry_at_unix_ms: None,
         binding: Some(entry.binding.clone()),
         paused: true,
         pause_after_reply: false,
         next_request_sequence: entry.next_request_sequence,
+        resume_generation: entry.resume_generation,
         state: OriginTransferState::Upload(UploadOriginState {
             source,
             source_path: upload.source_path.clone(),
@@ -1952,10 +2094,12 @@ fn restore_download(
         direction: TransferDirection::Download,
         deadline_unix_ms: entry.deadline_unix_ms,
         pending: None,
+        retry_at_unix_ms: None,
         binding: Some(entry.binding.clone()),
         paused: true,
         pause_after_reply: false,
         next_request_sequence: entry.next_request_sequence,
+        resume_generation: entry.resume_generation,
         state: OriginTransferState::Download(Box::new(DownloadOriginState {
             destination: download.destination.clone(),
             session: Some(Box::new(session)),
@@ -2163,10 +2307,10 @@ fn queue_open_upload(
     };
     let frame = FileNetworkFrame::request(request_id, request)
         .map_err(|_| FileNetworkOriginError::InvalidRequest)?;
-    transfer.pending = Some(PendingOriginReply {
+    transfer.pending = Some(PendingOriginReply::new(
         request_id,
-        kind: OriginRequestKind::OpenUpload,
-    });
+        OriginRequestKind::OpenUpload,
+    ));
     outbound.push_back(OriginOutbound {
         peer: transfer.peer.clone(),
         transfer_id: transfer.transfer_id.clone(),
@@ -2211,19 +2355,22 @@ fn queue_next_upload_action(
         request_id,
         transfer.transfer_id.clone(),
         transfer.operation_id.clone(),
+        transfer.resume_generation,
         chunk_index,
         offset,
         data,
     )
     .map_err(|_| FileNetworkOriginError::InvalidRequest)?;
-    transfer.pending = Some(PendingOriginReply {
+    let retry_frame = frame.clone();
+    transfer.pending = Some(PendingOriginReply::retryable(
         request_id,
-        kind: OriginRequestKind::UploadChunk {
+        OriginRequestKind::UploadChunk {
             chunk_index,
             offset,
             length,
         },
-    });
+        retry_frame,
+    ));
     outbound.push_back(OriginOutbound {
         peer: transfer.peer.clone(),
         transfer_id: transfer.transfer_id.clone(),
@@ -2245,10 +2392,10 @@ fn queue_finish_upload(
     };
     let frame = FileNetworkFrame::request(request_id, request)
         .map_err(|_| FileNetworkOriginError::InvalidRequest)?;
-    transfer.pending = Some(PendingOriginReply {
+    transfer.pending = Some(PendingOriginReply::new(
         request_id,
-        kind: OriginRequestKind::FinishUpload,
-    });
+        OriginRequestKind::FinishUpload,
+    ));
     outbound.push_back(OriginOutbound {
         peer: transfer.peer.clone(),
         transfer_id: transfer.transfer_id.clone(),
@@ -2273,10 +2420,10 @@ fn queue_pause(
     };
     let frame = FileNetworkFrame::request(request_id, request)
         .map_err(|_| FileNetworkOriginError::InvalidRequest)?;
-    transfer.pending = Some(PendingOriginReply {
+    transfer.pending = Some(PendingOriginReply::new(
         request_id,
-        kind: OriginRequestKind::Pause,
-    });
+        OriginRequestKind::Pause,
+    ));
     outbound.push_back(OriginOutbound {
         peer: transfer.peer.clone(),
         transfer_id: transfer.transfer_id.clone(),
@@ -2319,6 +2466,11 @@ fn queue_resume(
     {
         return Err(FileNetworkOriginError::BindingMismatch);
     }
+    let (resume_chunk_index, resume_offset) = resume_cursor(transfer)?;
+    let resume_generation = transfer
+        .resume_generation
+        .checked_add(1)
+        .ok_or(FileNetworkOriginError::InvalidRequest)?;
     let request = ResumeRequest {
         transfer_id: transfer.transfer_id.clone(),
         operation_id: transfer.operation_id.clone(),
@@ -2329,6 +2481,9 @@ fn queue_resume(
         direction,
         content_hash,
         share_revision: binding.share_revision,
+        resume_chunk_index,
+        resume_offset,
+        resume_generation,
     };
     let label = match direction {
         TransferDirection::Upload => b"resume-upload".as_slice(),
@@ -2337,13 +2492,14 @@ fn queue_resume(
     let request_id = next_origin_request_id(transfer, label, 0, 0, 0)?;
     let frame = FileNetworkFrame::request(request_id, FileNetworkRequest::Resume { request })
         .map_err(|_| FileNetworkOriginError::InvalidRequest)?;
-    transfer.pending = Some(PendingOriginReply {
+    transfer.resume_generation = resume_generation;
+    transfer.pending = Some(PendingOriginReply::new(
         request_id,
-        kind: match direction {
+        match direction {
             TransferDirection::Upload => OriginRequestKind::ResumeUpload,
             TransferDirection::Download => OriginRequestKind::ResumeDownload,
         },
-    });
+    ));
     outbound.push_back(OriginOutbound {
         peer: transfer.peer.clone(),
         transfer_id: transfer.transfer_id.clone(),
@@ -2352,6 +2508,64 @@ fn queue_resume(
         frame,
     });
     Ok(())
+}
+
+fn resume_cursor(transfer: &OriginTransfer) -> Result<(u32, u64), FileNetworkOriginError> {
+    match &transfer.state {
+        OriginTransferState::Upload(upload) => {
+            if let Some(chunk) = upload.manifest.chunks.get(upload.next_chunk as usize) {
+                let offset = chunk
+                    .offset
+                    .checked_add(upload.next_offset)
+                    .ok_or(FileNetworkOriginError::ChunkCorrupt)?;
+                if upload.next_offset > chunk.length || offset >= chunk.offset + chunk.length {
+                    return Err(FileNetworkOriginError::ChunkOutOfOrder);
+                }
+                Ok((upload.next_chunk, offset))
+            } else if upload.next_chunk as usize == upload.manifest.chunks.len() {
+                Ok((upload.next_chunk, upload.manifest.total_bytes))
+            } else {
+                Err(FileNetworkOriginError::ChunkOutOfOrder)
+            }
+        }
+        OriginTransferState::Download(download) => {
+            let session = download
+                .session
+                .as_ref()
+                .ok_or(FileNetworkOriginError::InvalidState)?;
+            if let Some(assembly) = download.assembly.as_ref() {
+                if assembly.chunk_index != download.received_chunks
+                    || assembly.expected_offset
+                        != session
+                            .manifest
+                            .chunks
+                            .get(download.received_chunks as usize)
+                            .map_or(assembly.expected_offset, |chunk| chunk.offset)
+                {
+                    return Err(FileNetworkOriginError::ChunkOutOfOrder);
+                }
+                let offset = assembly
+                    .expected_offset
+                    .checked_add(
+                        u64::try_from(assembly.bytes.len())
+                            .map_err(|_| FileNetworkOriginError::ChunkCorrupt)?,
+                    )
+                    .ok_or(FileNetworkOriginError::ChunkCorrupt)?;
+                return Ok((download.received_chunks, offset));
+            }
+            if let Some(chunk) = session
+                .manifest
+                .chunks
+                .get(download.received_chunks as usize)
+            {
+                Ok((download.received_chunks, chunk.offset))
+            } else if download.received_chunks as usize == session.manifest.chunks.len() {
+                Ok((download.received_chunks, session.manifest.total_bytes))
+            } else {
+                Err(FileNetworkOriginError::ChunkOutOfOrder)
+            }
+        }
+    }
 }
 
 fn queue_cancel(transfer: &mut OriginTransfer, outbound: &mut VecDeque<OriginOutbound>) {
@@ -2478,13 +2692,17 @@ fn validate_upload_ack(
     let end = offset
         .checked_add(length)
         .ok_or(FileNetworkOriginError::UnexpectedResponse)?;
+    let expected_end = chunk
+        .offset
+        .checked_add(upload.next_offset)
+        .ok_or(FileNetworkOriginError::UnexpectedResponse)?;
     let chunk_end = chunk
         .offset
         .checked_add(chunk.length)
         .ok_or(FileNetworkOriginError::UnexpectedResponse)?;
     if length == 0
         || offset < chunk.offset
-        || upload.next_offset != end
+        || end != expected_end
         || end > chunk_end
         || chunk_complete != (end == chunk_end)
         || progress.total_bytes != upload.manifest.total_bytes
@@ -2890,6 +3108,9 @@ mod tests {
             direction,
             content_hash: manifest.content_hash,
             share_revision: 1,
+            resume_chunk_index: 0,
+            resume_offset: 0,
+            resume_generation: 0,
         };
         session
             .resume(&resume, file_version.as_ref(), 1, true, 7, NOW + 1)
@@ -2927,12 +3148,28 @@ mod tests {
     fn take_chunk(
         origin: &mut FileNetworkOrigin,
     ) -> ([u8; 16], TransferId, OperationId, u32, u64, Vec<u8>) {
+        let (request_id, transfer_id, operation_id, _, chunk_index, offset, data) =
+            take_chunk_with_generation(origin);
+        (
+            request_id,
+            transfer_id,
+            operation_id,
+            chunk_index,
+            offset,
+            data,
+        )
+    }
+
+    fn take_chunk_with_generation(
+        origin: &mut FileNetworkOrigin,
+    ) -> ([u8; 16], TransferId, OperationId, u64, u32, u64, Vec<u8>) {
         let outbound = origin.pop_outbound().expect("outbound chunk");
         match outbound.frame {
             FileNetworkFrame::Chunk {
                 request_id,
                 transfer_id,
                 operation_id,
+                resume_generation,
                 chunk_index,
                 offset,
                 data,
@@ -2940,6 +3177,7 @@ mod tests {
                 request_id,
                 transfer_id,
                 operation_id,
+                resume_generation,
                 chunk_index,
                 offset,
                 data,
@@ -3048,6 +3286,7 @@ mod tests {
                 download_fragment_request_id(&operation(2), 0, 0),
                 &transfer(2),
                 &operation(2),
+                0,
                 0,
                 0,
                 &data[..partial_length],
@@ -3353,6 +3592,7 @@ mod tests {
                     &transfer(2),
                     &operation(2),
                     0,
+                    0,
                     offset,
                     fragment,
                     NOW + 2,
@@ -3528,6 +3768,271 @@ mod tests {
     }
 
     #[test]
+    fn requester_rate_limit_replays_the_exact_chunk_without_advancing() {
+        let temporary = TempDir::new().expect("tempdir");
+        let source = temporary.path().join("source.bin");
+        let data = b"abcdefgh";
+        std::fs::write(&source, data).expect("source");
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) =
+            start_upload(&mut origin, &local_node_id, &source, 2, data, 4);
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+        let first = take_chunk_with_generation(&mut origin);
+        assert_eq!(first.3, 0);
+        assert_eq!((first.4, first.5, first.6.as_slice()), (0, 0, &data[..4]));
+
+        origin
+            .handle_response(
+                &peer(),
+                first.0,
+                FileNetworkResponse::Error {
+                    code: "file_transfer_rate_limited".to_owned(),
+                    retry_after_ms: Some(100),
+                },
+                NOW + 2,
+            )
+            .expect("rate limit is retryable");
+        assert_eq!(origin.active_count(), 1);
+        assert_eq!(origin.next_retry_at_unix_ms(), Some(NOW + 102));
+        assert!(origin.pop_outbound().is_none());
+        origin.queue_due_retries(NOW + 101);
+        assert!(origin.pop_outbound().is_none());
+
+        origin.queue_due_retries(NOW + 102);
+        let replay = take_chunk_with_generation(&mut origin);
+        assert_eq!(replay, first);
+
+        origin
+            .handle_response(
+                &peer(),
+                replay.0,
+                FileNetworkResponse::Error {
+                    code: "file_transfer_rate_limited".to_owned(),
+                    retry_after_ms: Some(200),
+                },
+                NOW + 103,
+            )
+            .expect("a repeated rate limit keeps the same pending chunk");
+        assert_eq!(origin.active_count(), 1);
+        assert_eq!(origin.next_retry_at_unix_ms(), Some(NOW + 303));
+        origin.queue_due_retries(NOW + 302);
+        assert!(origin.pop_outbound().is_none());
+        origin.queue_due_retries(NOW + 303);
+        let second_replay = take_chunk_with_generation(&mut origin);
+        assert_eq!(second_replay, first);
+
+        origin
+            .handle_response(
+                &peer(),
+                second_replay.0,
+                FileNetworkResponse::ChunkAccepted {
+                    chunk_index: 0,
+                    chunk_complete: true,
+                    progress: progress(TransferState::Active, 4, data.len() as u64, 1, 2),
+                },
+                NOW + 304,
+            )
+            .expect("accepted chunk");
+        let next = take_chunk_with_generation(&mut origin);
+        assert_eq!(next.3, 0);
+        assert_eq!((next.4, next.5, next.6.as_slice()), (1, 4, &data[4..]));
+        origin
+            .handle_response(
+                &peer(),
+                next.0,
+                FileNetworkResponse::ChunkAccepted {
+                    chunk_index: 1,
+                    chunk_complete: true,
+                    progress: progress(TransferState::Active, 8, data.len() as u64, 2, 2),
+                },
+                NOW + 305,
+            )
+            .expect("accepted second chunk");
+        let (_, finish) = take_request(&mut origin);
+        assert!(matches!(finish, FileNetworkRequest::Finish { .. }));
+    }
+
+    #[test]
+    fn requester_rate_limit_without_retry_interval_fails_closed() {
+        let temporary = TempDir::new().expect("tempdir");
+        let source = temporary.path().join("source.bin");
+        std::fs::write(&source, b"abcdefgh").expect("source");
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) =
+            start_upload(&mut origin, &local_node_id, &source, 2, b"abcdefgh", 4);
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+        let (chunk_request_id, _, _, _, _, _) = take_chunk(&mut origin);
+        origin
+            .handle_response(
+                &peer(),
+                chunk_request_id,
+                FileNetworkResponse::Error {
+                    code: "file_transfer_rate_limited".to_owned(),
+                    retry_after_ms: None,
+                },
+                NOW + 2,
+            )
+            .expect("fatal response is recorded");
+        assert_eq!(origin.active_count(), 0);
+        assert!(origin.next_retry_at_unix_ms().is_none());
+        let event = origin.drain_events().pop().expect("failure event");
+        assert_eq!(event.state, TransferState::Failed);
+        assert_eq!(
+            event.error_code.as_deref(),
+            Some("file_transfer_rate_limited")
+        );
+        assert_eq!(event.failure_kind(), Some(FileTransferFailureKind::Quota));
+        origin.queue_due_retries(NOW + 1_000);
+        assert!(origin.pop_outbound().is_none());
+    }
+
+    #[test]
+    fn requester_pause_cancels_a_delayed_rate_limit_replay() {
+        let temporary = TempDir::new().expect("tempdir");
+        let source = temporary.path().join("source.bin");
+        std::fs::write(&source, b"abcdefgh").expect("source");
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) =
+            start_upload(&mut origin, &local_node_id, &source, 2, b"abcdefgh", 4);
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+        let (chunk_request_id, _, _, _, _, _) = take_chunk(&mut origin);
+        origin
+            .handle_response(
+                &peer(),
+                chunk_request_id,
+                FileNetworkResponse::Error {
+                    code: "file_transfer_rate_limited".to_owned(),
+                    retry_after_ms: Some(100),
+                },
+                NOW + 2,
+            )
+            .expect("rate limit is retryable");
+        origin
+            .pause(&transfer(2), &operation(2), NOW + 3)
+            .expect("pause replaces the delayed chunk");
+        assert!(origin.next_retry_at_unix_ms().is_none());
+        origin.queue_due_retries(NOW + 102);
+        let (_, request) = take_request(&mut origin);
+        assert!(matches!(request, FileNetworkRequest::Pause { .. }));
+        assert!(origin.pop_outbound().is_none());
+        assert_eq!(origin.active_count(), 1);
+    }
+
+    #[test]
+    fn requester_cancel_removes_a_delayed_rate_limit_replay() {
+        let temporary = TempDir::new().expect("tempdir");
+        let source = temporary.path().join("source.bin");
+        std::fs::write(&source, b"abcdefgh").expect("source");
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) =
+            start_upload(&mut origin, &local_node_id, &source, 2, b"abcdefgh", 4);
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+        let (chunk_request_id, _, _, _, _, _) = take_chunk(&mut origin);
+        origin
+            .handle_response(
+                &peer(),
+                chunk_request_id,
+                FileNetworkResponse::Error {
+                    code: "file_transfer_rate_limited".to_owned(),
+                    retry_after_ms: Some(100),
+                },
+                NOW + 2,
+            )
+            .expect("rate limit is retryable");
+        assert!(origin.cancel(&transfer(2), &operation(2), NOW + 3));
+        origin.queue_due_retries(NOW + 102);
+        let (_, request) = take_request(&mut origin);
+        assert!(matches!(request, FileNetworkRequest::Cancel { .. }));
+        assert!(origin.pop_outbound().is_none());
+        assert_eq!(origin.active_count(), 0);
+    }
+
+    #[test]
+    fn requester_transfer_deadline_wins_over_a_delayed_retry() {
+        let temporary = TempDir::new().expect("tempdir");
+        let source = temporary.path().join("source.bin");
+        std::fs::write(&source, b"abcdefgh").expect("source");
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) =
+            start_upload(&mut origin, &local_node_id, &source, 2, b"abcdefgh", 4);
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+        let (chunk_request_id, _, _, _, _, _) = take_chunk(&mut origin);
+        origin
+            .handle_response(
+                &peer(),
+                chunk_request_id,
+                FileNetworkResponse::Error {
+                    code: "file_transfer_rate_limited".to_owned(),
+                    retry_after_ms: Some(FILE_NETWORK_TRANSFER_TTL_MS),
+                },
+                NOW + 1,
+            )
+            .expect("rate limit is retryable");
+        assert_eq!(
+            origin.next_retry_at_unix_ms(),
+            Some(NOW + FILE_NETWORK_TRANSFER_TTL_MS)
+        );
+        origin.queue_due_retries(NOW + FILE_NETWORK_TRANSFER_TTL_MS);
+        assert_eq!(origin.active_count(), 0);
+        while let Some(outbound) = origin.pop_outbound() {
+            assert!(!matches!(outbound.frame, FileNetworkFrame::Chunk { .. }));
+        }
+        let event = origin.drain_events().pop().expect("expiry event");
+        assert_eq!(event.state, TransferState::Expired);
+        assert_eq!(event.error_code.as_deref(), Some("file_transfer_expired"));
+    }
+
+    #[test]
     fn requester_failures_preserve_network_authorization_quota_and_storage_kinds() {
         let temporary = TempDir::new().expect("tempdir");
         let source = temporary.path().join("source.bin");
@@ -3613,6 +4118,7 @@ mod tests {
                 &operation(2),
                 0,
                 0,
+                0,
                 &data[..4],
                 NOW + 2,
             )
@@ -3632,6 +4138,7 @@ mod tests {
                 request_id,
                 &transfer(2),
                 &operation(2),
+                0,
                 0,
                 0,
                 &data[..4],
@@ -3656,6 +4163,66 @@ mod tests {
         assert_eq!(
             event.error_code.as_deref(),
             Some("file_transfer_chunk_out_of_order")
+        );
+    }
+
+    #[test]
+    fn future_download_generation_fails_closed_and_removes_staging() {
+        let temporary = TempDir::new().expect("tempdir");
+        let destination = temporary.path().join("download.bin");
+        let data = b"generation barrier";
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) =
+            start_download(&mut origin, &local_node_id, &destination, 2, data, 8);
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+        assert_eq!(
+            std::fs::read_dir(temporary.path())
+                .expect("read dir")
+                .count(),
+            1
+        );
+
+        assert!(matches!(
+            origin.handle_chunk(
+                &peer(),
+                download_fragment_request_id(&operation(2), 0, 0),
+                &transfer(2),
+                &operation(2),
+                2,
+                0,
+                0,
+                data,
+                NOW + 2,
+            ),
+            Err(FileNetworkOriginError::ChunkOutOfOrder)
+        ));
+        assert_eq!(origin.active_count(), 0);
+        assert!(!destination.exists());
+        assert_eq!(
+            std::fs::read_dir(temporary.path())
+                .expect("read dir")
+                .count(),
+            0
+        );
+        assert!(matches!(
+            take_request(&mut origin).1,
+            FileNetworkRequest::Cancel { .. }
+        ));
+        let event = origin.drain_events().pop().expect("failure event");
+        assert_eq!(event.state, TransferState::Failed);
+        assert_eq!(
+            event.error_code.as_deref(),
+            Some("file_transfer_resume_generation_mismatch")
         );
     }
 
@@ -3756,6 +4323,7 @@ mod tests {
                 &transfer(2),
                 &operation(2),
                 0,
+                0,
                 wrong_offset,
                 &data[MAX_FILE_NETWORK_FRAGMENT_BYTES..],
                 NOW + 2,
@@ -3799,6 +4367,7 @@ mod tests {
                 &operation(2),
                 0,
                 0,
+                0,
                 &data[..MAX_FILE_NETWORK_FRAGMENT_BYTES],
                 NOW + 2,
             )
@@ -3812,6 +4381,7 @@ mod tests {
                 request_id,
                 &transfer(2),
                 &operation(2),
+                0,
                 0,
                 MAX_FILE_NETWORK_FRAGMENT_BYTES as u64,
                 &corrupt,
@@ -3895,6 +4465,7 @@ mod tests {
                 &operation(2),
                 0,
                 0,
+                0,
                 b"firs",
                 NOW + 2,
             ),
@@ -3918,6 +4489,7 @@ mod tests {
                 download_fragment_request_id(&operation(3), 0, 0),
                 &transfer(3),
                 &operation(3),
+                0,
                 0,
                 0,
                 b"seco",
@@ -3983,6 +4555,7 @@ mod tests {
                 &operation(2),
                 0,
                 0,
+                0,
                 b"firs",
                 NOW + 2,
             ),
@@ -4006,6 +4579,7 @@ mod tests {
                 download_fragment_request_id(&operation(3), 0, 0),
                 &transfer(3),
                 &operation(3),
+                0,
                 0,
                 0,
                 b"seco",
@@ -4238,6 +4812,7 @@ mod tests {
                 download_fragment_request_id(&operation(2), 0, 0),
                 &transfer(2),
                 &operation(2),
+                0,
                 0,
                 0,
                 &data[..4],
@@ -4502,7 +5077,14 @@ mod tests {
         origin
             .resume(&transfer(2), &operation(2), NOW + 5)
             .expect("queue resume");
-        let (resume_request_id, _) = take_request(&mut origin);
+        let (resume_request_id, resume_request) = take_request(&mut origin);
+        match resume_request {
+            FileNetworkRequest::Resume { request } => {
+                assert_eq!(request.resume_chunk_index, 0);
+                assert_eq!(request.resume_offset, 0);
+            }
+            other => panic!("expected resume request, got {other:?}"),
+        }
         origin
             .handle_response(
                 &peer(),
@@ -4559,6 +5141,7 @@ mod tests {
                 &operation(2),
                 0,
                 0,
+                0,
                 &data[..MAX_FILE_NETWORK_FRAGMENT_BYTES],
                 NOW + 2,
             )
@@ -4583,7 +5166,18 @@ mod tests {
         origin
             .resume(&transfer(2), &operation(2), NOW + 5)
             .expect("queue resume");
-        let (resume_request_id, _) = take_request(&mut origin);
+        let (resume_request_id, resume_request) = take_request(&mut origin);
+        match resume_request {
+            FileNetworkRequest::Resume { request } => {
+                assert_eq!(request.resume_chunk_index, 0);
+                assert_eq!(
+                    request.resume_offset,
+                    MAX_FILE_NETWORK_FRAGMENT_BYTES as u64
+                );
+                assert_eq!(request.resume_generation, 1);
+            }
+            other => panic!("expected resume request, got {other:?}"),
+        }
         origin
             .handle_response(
                 &peer(),
@@ -4611,9 +5205,28 @@ mod tests {
                 &transfer(2),
                 &operation(2),
                 0,
+                0,
                 MAX_FILE_NETWORK_FRAGMENT_BYTES as u64,
                 &data[MAX_FILE_NETWORK_FRAGMENT_BYTES..],
                 NOW + 7,
+            )
+            .expect("stale generation is ignored");
+        assert!(!destination.exists());
+        origin
+            .handle_chunk(
+                &peer(),
+                download_fragment_request_id(
+                    &operation(2),
+                    0,
+                    MAX_FILE_NETWORK_FRAGMENT_BYTES as u64,
+                ),
+                &transfer(2),
+                &operation(2),
+                1,
+                0,
+                MAX_FILE_NETWORK_FRAGMENT_BYTES as u64,
+                &data[MAX_FILE_NETWORK_FRAGMENT_BYTES..],
+                NOW + 8,
             )
             .expect("second fragment");
         let (finish_request_id, finish_request) = take_request(&mut origin);
@@ -4631,9 +5244,153 @@ mod tests {
                         1,
                     ),
                 },
+                NOW + 9,
+            )
+            .expect("finish response");
+        assert_eq!(std::fs::read(&destination).expect("download"), data);
+        assert_eq!(origin.active_count(), 0);
+    }
+
+    #[test]
+    fn multi_chunk_download_resume_verifies_and_publishes_content() {
+        let temporary = TempDir::new().expect("tempdir");
+        let destination = temporary.path().join("download.bin");
+        let data: Vec<u8> =
+            (0..(MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES + MAX_FILE_NETWORK_FRAGMENT_BYTES + 19))
+                .map(|index| (index % 251) as u8)
+                .collect();
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) = start_download(
+            &mut origin,
+            &local_node_id,
+            &destination,
+            2,
+            &data,
+            MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64,
+        );
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+
+        for (fragment_index, fragment) in data[..MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES]
+            .chunks(MAX_FILE_NETWORK_FRAGMENT_BYTES)
+            .enumerate()
+        {
+            let offset = fragment_index * MAX_FILE_NETWORK_FRAGMENT_BYTES;
+            origin
+                .handle_chunk(
+                    &peer(),
+                    download_fragment_request_id(&operation(2), 0, offset as u64),
+                    &transfer(2),
+                    &operation(2),
+                    0,
+                    0,
+                    offset as u64,
+                    fragment,
+                    NOW + 2,
+                )
+                .expect("first chunk fragment");
+        }
+        assert!(!destination.exists());
+
+        origin
+            .pause(&transfer(2), &operation(2), NOW + 3)
+            .expect("queue pause after first chunk");
+        let (pause_request_id, pause_request) = take_request(&mut origin);
+        assert!(matches!(pause_request, FileNetworkRequest::Pause { .. }));
+        origin
+            .handle_response(
+                &peer(),
+                pause_request_id,
+                FileNetworkResponse::Progress {
+                    progress: progress(
+                        TransferState::Paused,
+                        MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64,
+                        data.len() as u64,
+                        1,
+                        2,
+                    ),
+                },
+                NOW + 4,
+            )
+            .expect("pause response");
+
+        origin
+            .resume(&transfer(2), &operation(2), NOW + 5)
+            .expect("queue resume");
+        let (resume_request_id, _) = take_request(&mut origin);
+        let mut resumed_session = active_session(
+            &local_node_id,
+            TransferDirection::Download,
+            transfer(2),
+            operation(2),
+            manifest(&data, MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64),
+        );
+        resumed_session
+            .record_chunk(0, &data[..MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES], NOW + 6)
+            .expect("record completed first chunk");
+        origin
+            .handle_response(
+                &peer(),
+                resume_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(resumed_session),
+                },
+                NOW + 6,
+            )
+            .expect("resume response");
+
+        let second_offset = MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64;
+        for (fragment_index, fragment) in data[MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES..]
+            .chunks(MAX_FILE_NETWORK_FRAGMENT_BYTES)
+            .enumerate()
+        {
+            let offset = second_offset + (fragment_index * MAX_FILE_NETWORK_FRAGMENT_BYTES) as u64;
+            origin
+                .handle_chunk(
+                    &peer(),
+                    download_fragment_request_id(&operation(2), 1, offset),
+                    &transfer(2),
+                    &operation(2),
+                    1,
+                    1,
+                    offset,
+                    fragment,
+                    NOW + 7,
+                )
+                .expect("second chunk fragment");
+        }
+        let (finish_request_id, finish_request) = take_request(&mut origin);
+        assert!(matches!(finish_request, FileNetworkRequest::Finish { .. }));
+        origin
+            .handle_response(
+                &peer(),
+                finish_request_id,
+                FileNetworkResponse::Completed {
+                    progress: progress(
+                        TransferState::Completed,
+                        data.len() as u64,
+                        data.len() as u64,
+                        2,
+                        2,
+                    ),
+                },
                 NOW + 8,
             )
             .expect("finish response");
+
+        assert!(
+            ContentHash::from_bytes(&data)
+                == manifest(&data, MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64).content_hash
+        );
         assert_eq!(std::fs::read(&destination).expect("download"), data);
         assert_eq!(origin.active_count(), 0);
     }
@@ -4675,7 +5432,14 @@ mod tests {
         origin
             .resume(&transfer(2), &operation(2), NOW + 4)
             .expect("first resume");
-        let (first_resume_id, _) = take_request(&mut origin);
+        let (first_resume_id, first_resume) = take_request(&mut origin);
+        let FileNetworkRequest::Resume {
+            request: first_resume,
+        } = first_resume
+        else {
+            panic!("expected first resume request");
+        };
+        assert_eq!(first_resume.resume_generation, 1);
         origin
             .handle_response(
                 &peer(),
@@ -4710,12 +5474,68 @@ mod tests {
         origin
             .resume(&transfer(2), &operation(2), NOW + 8)
             .expect("second resume");
-        let (second_resume_id, _) = take_request(&mut origin);
+        let (second_resume_id, second_resume) = take_request(&mut origin);
+        let FileNetworkRequest::Resume {
+            request: second_resume,
+        } = second_resume
+        else {
+            panic!("expected second resume request");
+        };
+        assert_eq!(second_resume.resume_generation, 2);
 
         assert_ne!(first_pause_id, second_pause_id);
         assert_ne!(first_resume_id, second_resume_id);
         assert_ne!(first_pause_id, first_resume_id);
         assert_ne!(second_pause_id, second_resume_id);
+    }
+
+    #[test]
+    fn failed_resume_request_build_does_not_consume_generation() {
+        let temporary = TempDir::new().expect("tempdir");
+        let destination = temporary.path().join("download.bin");
+        let data = b"generation must not advance";
+        let local_node_id = node(4);
+        let mut origin = FileNetworkOrigin::new(local_node_id.clone());
+        let (open_request_id, session) =
+            start_download(&mut origin, &local_node_id, &destination, 2, data, 32);
+        origin
+            .handle_response(
+                &peer(),
+                open_request_id,
+                FileNetworkResponse::Opened {
+                    session: Box::new(session),
+                },
+                NOW + 1,
+            )
+            .expect("open response");
+        origin
+            .pause(&transfer(2), &operation(2), NOW + 2)
+            .expect("queue pause");
+        let (pause_request_id, _) = take_request(&mut origin);
+        origin
+            .handle_response(
+                &peer(),
+                pause_request_id,
+                FileNetworkResponse::Progress {
+                    progress: progress(TransferState::Paused, 0, data.len() as u64, 0, 1),
+                },
+                NOW + 3,
+            )
+            .expect("pause response");
+
+        let key = OriginTransferKey::new(&transfer(2), &operation(2));
+        let paused = origin.transfers.get_mut(&key).expect("paused transfer");
+        assert_eq!(paused.resume_generation, 0);
+        paused.next_request_sequence = u64::MAX;
+
+        assert!(matches!(
+            origin.resume(&transfer(2), &operation(2), NOW + 4),
+            Err(FileNetworkOriginError::InvalidRequest)
+        ));
+        let paused = origin.transfers.get(&key).expect("paused transfer");
+        assert_eq!(paused.resume_generation, 0);
+        assert!(paused.pending.is_none());
+        assert!(origin.pop_outbound().is_none());
     }
 
     #[test]
@@ -5180,6 +6000,7 @@ mod tests {
                 &operation(2),
                 0,
                 0,
+                0,
                 &data[..5],
                 NOW + 2,
             )
@@ -5230,6 +6051,7 @@ mod tests {
                 download_fragment_request_id(&operation(2), 0, 5),
                 &transfer(2),
                 &operation(2),
+                1,
                 0,
                 5,
                 &data[5..],

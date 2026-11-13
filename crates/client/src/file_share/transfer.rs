@@ -337,7 +337,7 @@ impl FileTransferAdapter {
             },
         )?;
 
-        let request = resume_request(&session);
+        let request = resume_request(&session, 0, 0);
         let member_access_epoch = session.binding.access_epoch;
         session.resume(
             &request,
@@ -440,7 +440,7 @@ impl FileTransferAdapter {
             &mut session,
         )?;
 
-        let request = resume_request(&session);
+        let request = resume_request(&session, 0, 0);
         let member_access_epoch = session.binding.access_epoch;
         session.resume(
             &request,
@@ -658,7 +658,9 @@ impl UploadTransfer {
         network_enabled: bool,
         now_unix_ms: u64,
     ) -> Result<(), FileTransferAdapterError> {
-        let request = resume_request(&self.session);
+        let (chunk_index, resume_offset) =
+            resume_cursor(&self.session.manifest, self.next_chunk, 0)?;
+        let request = resume_request(&self.session, chunk_index, resume_offset);
         let member_access_epoch = self.session.binding.access_epoch;
         self.resume_with_request(
             &request,
@@ -685,6 +687,24 @@ impl UploadTransfer {
             return Err(FileTransferError::InvalidState.into());
         }
         let result = (|| {
+            validate_resume_cursor(
+                &self.session.manifest,
+                request.resume_chunk_index,
+                request.resume_offset,
+            )?;
+            let expected_chunk = u32::try_from(self.session.received_chunk_count())
+                .map_err(|_| FileTransferError::ChunkOutOfRange)?;
+            let expected_offset = self
+                .session
+                .manifest
+                .chunks
+                .get(expected_chunk as usize)
+                .map_or(self.session.manifest.total_bytes, |chunk| chunk.offset);
+            if request.resume_chunk_index != expected_chunk
+                || request.resume_offset != expected_offset
+            {
+                return Err(FileTransferError::ChunkOutOfRange.into());
+            }
             // Re-check the permit issued when the transfer began before
             // mapping the current share binding. A disable/reconfigure must be
             // reported as a revoked transfer permission instead of a generic
@@ -921,7 +941,9 @@ impl DownloadTransfer {
         network_enabled: bool,
         now_unix_ms: u64,
     ) -> Result<(), FileTransferAdapterError> {
-        let request = resume_request(&self.session);
+        let (chunk_index, resume_offset) =
+            resume_cursor(&self.session.manifest, self.next_chunk, 0)?;
+        let request = resume_request(&self.session, chunk_index, resume_offset);
         let member_access_epoch = self.session.binding.access_epoch;
         self.resume_with_request(
             &request,
@@ -946,6 +968,11 @@ impl DownloadTransfer {
             return Err(FileTransferError::InvalidState.into());
         }
         let result = (|| {
+            validate_resume_cursor(
+                &self.session.manifest,
+                request.resume_chunk_index,
+                request.resume_offset,
+            )?;
             // Preserve revocation classification for a resume that races with
             // a local capability epoch change.
             if self.permit.ensure_current().is_err() {
@@ -984,6 +1011,11 @@ impl DownloadTransfer {
             lease.permit().ensure_current()?;
             self.permit = lease.permit().clone();
             self.file = Some(file);
+            self.rewind_to_resume_cursor(
+                request.resume_chunk_index,
+                request.resume_offset,
+                now_unix_ms,
+            )?;
             Ok(())
         })();
         if let Err(error) = &result {
@@ -1086,6 +1118,50 @@ impl DownloadTransfer {
         }
         self.file.take();
     }
+
+    fn rewind_to_resume_cursor(
+        &mut self,
+        chunk_index: u32,
+        resume_offset: u64,
+        now_unix_ms: u64,
+    ) -> Result<(), FileTransferAdapterError> {
+        validate_resume_cursor(&self.session.manifest, chunk_index, resume_offset)?;
+        self.session
+            .rewind_received_chunks_from(chunk_index, now_unix_ms)?;
+
+        let file = self.file.as_mut().ok_or(FileTransferError::InvalidState)?;
+        let mut hasher = blake3::Hasher::new();
+        let mut transferred_bytes = 0_u64;
+        for chunk in self
+            .session
+            .manifest
+            .chunks
+            .iter()
+            .take(chunk_index as usize)
+        {
+            let length =
+                usize::try_from(chunk.length).map_err(|_| FileTransferError::InvalidManifest)?;
+            let mut bytes = vec![0_u8; length];
+            file.seek(SeekFrom::Start(chunk.offset))
+                .and_then(|_| file.read_exact(&mut bytes))
+                .map_err(|error| {
+                    FileShareError::io(
+                        super::error::FileShareErrorCode::Io,
+                        "download source could not be replayed for resume",
+                        error,
+                    )
+                })?;
+            if ContentHash::from_bytes(&bytes) != chunk.checksum {
+                return Err(FileTransferError::ChunkCorrupt.into());
+            }
+            hasher.update(&bytes);
+            transferred_bytes = transferred_bytes.saturating_add(chunk.length);
+        }
+        self.hasher = hasher;
+        self.next_chunk = chunk_index;
+        self.transferred_bytes = transferred_bytes;
+        Ok(())
+    }
 }
 
 fn authorization_was_revoked(error: &FileTransferAdapterError) -> bool {
@@ -1175,7 +1251,11 @@ fn ensure_file_size(
     Ok(())
 }
 
-fn resume_request(session: &TransferSession) -> ResumeRequest {
+fn resume_request(
+    session: &TransferSession,
+    resume_chunk_index: u32,
+    resume_offset: u64,
+) -> ResumeRequest {
     ResumeRequest {
         transfer_id: session.binding.transfer_id.clone(),
         operation_id: session.binding.operation_id.clone(),
@@ -1186,7 +1266,48 @@ fn resume_request(session: &TransferSession) -> ResumeRequest {
         direction: session.binding.direction,
         content_hash: session.manifest.content_hash.clone(),
         share_revision: session.binding.share_revision,
+        resume_chunk_index,
+        resume_offset,
+        resume_generation: 0,
     }
+}
+
+fn resume_cursor(
+    manifest: &TransferManifest,
+    chunk_index: u32,
+    offset_in_chunk: u64,
+) -> Result<(u32, u64), FileTransferError> {
+    if let Some(chunk) = manifest.chunks.get(chunk_index as usize) {
+        if offset_in_chunk > chunk.length {
+            return Err(FileTransferError::ChunkOutOfRange);
+        }
+        return Ok((chunk_index, chunk.offset.saturating_add(offset_in_chunk)));
+    }
+    if chunk_index as usize == manifest.chunks.len() && offset_in_chunk == 0 {
+        return Ok((chunk_index, manifest.total_bytes));
+    }
+    Err(FileTransferError::ChunkOutOfRange)
+}
+
+fn validate_resume_cursor(
+    manifest: &TransferManifest,
+    chunk_index: u32,
+    resume_offset: u64,
+) -> Result<(), FileTransferError> {
+    if let Some(chunk) = manifest.chunks.get(chunk_index as usize) {
+        let chunk_end = chunk
+            .offset
+            .checked_add(chunk.length)
+            .ok_or(FileTransferError::InvalidManifest)?;
+        if resume_offset < chunk.offset || resume_offset >= chunk_end {
+            return Err(FileTransferError::ChunkOutOfRange);
+        }
+        return Ok(());
+    }
+    if chunk_index as usize == manifest.chunks.len() && resume_offset == manifest.total_bytes {
+        return Ok(());
+    }
+    Err(FileTransferError::ChunkOutOfRange)
 }
 
 fn progress(session: &TransferSession, transferred_bytes: u64) -> TransferProgress {

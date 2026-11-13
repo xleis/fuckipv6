@@ -37,6 +37,8 @@ pub(crate) struct PersistedOriginTransfer {
     pub(crate) binding: TransferBinding,
     pub(crate) manifest: TransferManifest,
     pub(crate) next_request_sequence: u64,
+    #[serde(default)]
+    pub(crate) resume_generation: u64,
     pub(crate) upload: Option<PersistedUploadState>,
     pub(crate) download: Option<PersistedDownloadState>,
 }
@@ -51,6 +53,7 @@ impl fmt::Debug for PersistedOriginTransfer {
             .field("direction", &self.direction)
             .field("deadline_unix_ms", &self.deadline_unix_ms)
             .field("next_request_sequence", &self.next_request_sequence)
+            .field("resume_generation", &self.resume_generation)
             .field(
                 "upload",
                 &self.upload.as_ref().map(|_| "[LOCAL PATH REDACTED]"),
@@ -394,6 +397,7 @@ mod tests {
             },
             manifest,
             next_request_sequence: 2,
+            resume_generation: 0,
             upload: Some(PersistedUploadState {
                 source_path: PathBuf::from("/private/source.bin"),
                 next_chunk: 0,
@@ -428,6 +432,33 @@ mod tests {
             assert_eq!(file_mode, 0o600);
             assert_eq!(directory_mode, 0o700);
         }
+    }
+
+    #[test]
+    fn legacy_journal_without_resume_generation_loads_as_zero() {
+        let temporary = TempDir::new().expect("tempdir");
+        let store = FileOriginStore::at(temporary.path(), "network/legacy");
+        let mut transfer = persisted_transfer(1);
+        transfer.resume_generation = 9;
+        let journal = PersistedOriginJournal {
+            schema_version: FILE_ORIGIN_JOURNAL_SCHEMA_VERSION,
+            transfers: vec![transfer],
+        };
+        let mut value = serde_json::to_value(journal).expect("serialize legacy journal");
+        value["transfers"][0]
+            .as_object_mut()
+            .expect("transfer object")
+            .remove("resume_generation")
+            .expect("resume generation field");
+        let bytes = serde_json::to_vec(&value).expect("legacy journal bytes");
+        store
+            .write_private_file_atomic(&bytes)
+            .expect("write legacy journal");
+
+        let loaded = store.load().expect("load legacy journal");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].resume_generation, 0);
+        assert_eq!(loaded[0].transfer_id, persisted_transfer(1).transfer_id);
     }
 
     #[test]

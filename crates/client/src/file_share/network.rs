@@ -191,6 +191,7 @@ pub(crate) enum FileNetworkFrame {
         request_id: [u8; 16],
         transfer_id: TransferId,
         operation_id: OperationId,
+        resume_generation: u64,
         chunk_index: u32,
         offset: u64,
         data: Vec<u8>,
@@ -226,6 +227,7 @@ impl FileNetworkFrame {
         request_id: [u8; 16],
         transfer_id: TransferId,
         operation_id: OperationId,
+        resume_generation: u64,
         chunk_index: u32,
         offset: u64,
         data: Vec<u8>,
@@ -235,6 +237,7 @@ impl FileNetworkFrame {
             request_id,
             transfer_id,
             operation_id,
+            resume_generation,
             chunk_index,
             offset,
             data,
@@ -274,6 +277,7 @@ struct ActiveUploadSession {
     cancel: watch::Sender<bool>,
     transfer: RuntimeUploadTransfer,
     assembly: Option<ChunkAssembly>,
+    resume_generation: u64,
 }
 
 struct ChunkAssembly {
@@ -292,7 +296,10 @@ struct ActiveDownloadSession {
     cancel: watch::Sender<bool>,
     transfer: RuntimeDownloadTransfer,
     pending_chunk: Option<PendingDownloadChunk>,
+    resume_offset_in_chunk: Option<usize>,
+    resume_generation: u64,
     exhausted: bool,
+    retry_at_unix_ms: Option<u64>,
 }
 
 struct PendingDownloadChunk {
@@ -358,6 +365,8 @@ pub(crate) struct PendingFileDownload {
     pub(crate) peer_ip: Ipv6Addr,
     pub(crate) transfer_id: TransferId,
     pub(crate) operation_id: OperationId,
+    pub(crate) retry_at_unix_ms: Option<u64>,
+    pub(crate) expires_at_unix_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,11 +413,18 @@ pub(crate) fn trusted_file_member(
     if member.access_epoch == 0 {
         return Err(network_error("file_member_epoch_invalid", None));
     }
-    if !member
+    // The Coordinator deliberately leaves the owner's row capability-free:
+    // the owner identity is explicit in the authoritative roster, while the
+    // network-level File declaration is the owner's grant. Do not extend this
+    // implicit grant to administrators or ordinary members, and never let an
+    // explicit capability projection without File bypass the check.
+    let member_has_file = member
         .capabilities
         .as_ref()
-        .is_some_and(|capabilities| capabilities.contains(&CapabilityKind::File))
-    {
+        .map_or(member.role == MembershipRole::Owner, |capabilities| {
+            capabilities.contains(&CapabilityKind::File)
+        });
+    if !member_has_file {
         return Err(network_error("file_capability_unavailable", None));
     }
     let role = match member.role {
@@ -477,8 +493,36 @@ impl FileNetworkDataPlane {
                 peer_ip: session.peer_ip,
                 transfer_id: session.transfer_id.clone(),
                 operation_id: session.operation_id.clone(),
+                retry_at_unix_ms: session.retry_at_unix_ms,
+                expires_at_unix_ms: session.transfer.session().binding.expires_at_unix_ms,
             })
             .collect()
+    }
+
+    pub(crate) fn next_download_retry_at_unix_ms(&self) -> Option<u64> {
+        self.downloads
+            .values()
+            .filter(|session| {
+                !session.exhausted && session.transfer.session().state == TransferState::Active
+            })
+            .filter_map(|session| {
+                session.retry_at_unix_ms.map(|retry_at| {
+                    retry_at.min(session.transfer.session().binding.expires_at_unix_ms)
+                })
+            })
+            .min()
+    }
+
+    pub(crate) fn defer_download_retry(
+        &mut self,
+        transfer_id: &TransferId,
+        operation_id: &OperationId,
+        retry_at_unix_ms: u64,
+    ) {
+        let key = NetworkSessionKey::new(transfer_id, operation_id);
+        if let Some(session) = self.downloads.get_mut(&key) {
+            session.retry_at_unix_ms = Some(retry_at_unix_ms);
+        }
     }
 
     fn record_interruption(
@@ -676,6 +720,7 @@ impl FileNetworkDataPlane {
         member_access_epoch: u64,
         transfer_id: &TransferId,
         operation_id: &OperationId,
+        resume_generation: u64,
         chunk_index: u32,
         offset: u64,
         data: &[u8],
@@ -693,6 +738,14 @@ impl FileNetworkDataPlane {
                 .uploads
                 .get_mut(&key)
                 .ok_or(ChunkFailure::Protocol("file_transfer_session_unavailable"))?;
+            if resume_generation < session.resume_generation {
+                return Ok((false, session.transfer.progress().into()));
+            }
+            if resume_generation != session.resume_generation {
+                return Err(ChunkFailure::Protocol(
+                    "file_transfer_resume_generation_mismatch",
+                ));
+            }
             session
                 .transfer
                 .ensure_authorized(now_unix_ms)
@@ -711,14 +764,11 @@ impl FileNetworkDataPlane {
                 return Err(ChunkFailure::Protocol("file_transfer_chunk_corrupt"));
             }
 
+            if data.is_empty() {
+                return Err(ChunkFailure::Protocol("file_transfer_chunk_corrupt"));
+            }
             let assembly = match session.assembly.as_mut() {
-                Some(assembly) if assembly.chunk_index == chunk_index => {
-                    let next_offset = expected.offset.saturating_add(assembly.bytes.len() as u64);
-                    if offset != next_offset {
-                        return Err(ChunkFailure::Protocol("file_transfer_chunk_out_of_order"));
-                    }
-                    assembly
-                }
+                Some(assembly) if assembly.chunk_index == chunk_index => assembly,
                 Some(_) => {
                     return Err(ChunkFailure::Protocol("file_transfer_chunk_out_of_order"));
                 }
@@ -740,9 +790,29 @@ impl FileNetworkDataPlane {
                     })
                 }
             };
-            assembly.bytes.extend_from_slice(data);
-            if assembly.bytes.len() as u64 != assembly.expected_length {
-                return Ok((false, session.transfer.progress().into()));
+            let assembled_length = assembly.bytes.len() as u64;
+            if assembled_length == assembly.expected_length {
+                // A bandwidth refusal happens after the complete chunk has
+                // been assembled but before the adapter consumes its quota.
+                // Replaying the exact final fragment is the retry protocol;
+                // validate that suffix and reuse the assembly without appending
+                // the same bytes a second time.
+                let fragment_start = assembly
+                    .expected_length
+                    .saturating_sub(u64::try_from(data.len()).unwrap_or(u64::MAX));
+                let fragment_offset = assembly.expected_offset.saturating_add(fragment_start);
+                if offset != fragment_offset || !assembly.bytes.ends_with(data) {
+                    return Err(ChunkFailure::Protocol("file_transfer_chunk_corrupt"));
+                }
+            } else {
+                let next_offset = expected.offset.saturating_add(assembled_length);
+                if offset != next_offset {
+                    return Err(ChunkFailure::Protocol("file_transfer_chunk_out_of_order"));
+                }
+                assembly.bytes.extend_from_slice(data);
+                if assembly.bytes.len() as u64 != assembly.expected_length {
+                    return Ok((false, session.transfer.progress().into()));
+                }
             }
 
             let assembly = session.assembly.take().expect("completed chunk assembly");
@@ -751,11 +821,24 @@ impl FileNetworkDataPlane {
             if received_offset != expected.offset || checksum != assembly.expected_checksum {
                 return Err(ChunkFailure::Protocol("file_transfer_chunk_corrupt"));
             }
-            session
+            let written = session
                 .transfer
                 .write_chunk(chunk_index, &assembly.bytes, now_unix_ms)
                 .map(|advanced| (advanced, session.transfer.progress().into()))
-                .map_err(ChunkFailure::Adapter)
+                .map_err(ChunkFailure::Adapter);
+            if matches!(
+                &written,
+                Err(ChunkFailure::Adapter(
+                    FileTransferAdapterError::RateLimited { .. }
+                ))
+            ) {
+                // Bandwidth admission happens only after every fragment of a
+                // chunk has arrived. Keep that exact assembly in place so the
+                // requester can retry the final fragment without resending the
+                // entire chunk or losing ordering state.
+                session.assembly = Some(assembly);
+            }
+            written
         })();
 
         match result {
@@ -770,6 +853,9 @@ impl FileNetworkDataPlane {
                 Err(network_error(code, None))
             }
             Err(ChunkFailure::Adapter(error)) => {
+                if let FileTransferAdapterError::RateLimited { .. } = error {
+                    return Err(adapter_error(&error));
+                }
                 let kind = interruption_kind_for_adapter_error(&error);
                 let code = error.code();
                 let response = adapter_error(&error);
@@ -1047,6 +1133,7 @@ impl FileNetworkDataPlane {
                 cancel,
                 transfer,
                 assembly: None,
+                resume_generation: 0,
             },
         );
         opened
@@ -1121,7 +1208,10 @@ impl FileNetworkDataPlane {
                 cancel,
                 transfer,
                 pending_chunk: None,
+                resume_offset_in_chunk: None,
+                resume_generation: 0,
                 exhausted: false,
+                retry_at_unix_ms: None,
             },
         );
         self.download_notify.notify_one();
@@ -1141,14 +1231,17 @@ impl FileNetworkDataPlane {
     ) -> Result<Option<FileNetworkFrame>, FileNetworkResponse> {
         let key = NetworkSessionKey::new(transfer_id, operation_id);
         self.ensure_session_authorized(&key, actor, member_access_epoch, now_unix_ms)?;
-        if self
+        let session = self
             .downloads
-            .get(&key)
-            .ok_or_else(|| network_error("file_transfer_direction_mismatch", None))?
-            .exhausted
-        {
+            .get_mut(&key)
+            .ok_or_else(|| network_error("file_transfer_direction_mismatch", None))?;
+        if session.exhausted {
             return Ok(None);
         }
+        // The runtime only calls this method when the retry is due. Clearing
+        // before attempting file I/O makes a repeated rate-limit response
+        // schedule a fresh deadline rather than causing a busy retry loop.
+        session.retry_at_unix_ms = None;
 
         let authorization_error = self
             .downloads
@@ -1246,13 +1339,20 @@ impl FileNetworkDataPlane {
                 );
                 return Err(network_error("file_transfer_chunk_corrupt", None));
             }
+            let sent_bytes = self
+                .downloads
+                .get_mut(&key)
+                .expect("download session checked above")
+                .resume_offset_in_chunk
+                .take()
+                .unwrap_or(0);
             self.downloads
                 .get_mut(&key)
                 .expect("download session checked above")
                 .pending_chunk = Some(PendingDownloadChunk {
                 chunk_index,
                 data,
-                sent_bytes: 0,
+                sent_bytes,
             });
         }
 
@@ -1294,6 +1394,7 @@ impl FileNetworkDataPlane {
             request_id,
             transfer_id.clone(),
             operation_id.clone(),
+            session.resume_generation,
             chunk_index,
             offset,
             data,
@@ -1364,6 +1465,9 @@ impl FileNetworkDataPlane {
             self.uploads.remove(&key);
             return network_error("file_transfer_peer_mismatch", None);
         }
+        if session.resume_generation.checked_add(1) != Some(request.resume_generation) {
+            return network_error("file_transfer_resume_generation_mismatch", None);
+        }
         session.cancel.send_replace(false);
         session.assembly = None;
         match session.transfer.resume_with_request(
@@ -1373,9 +1477,12 @@ impl FileNetworkDataPlane {
             network_enabled,
             now_unix_ms,
         ) {
-            Ok(()) => FileNetworkResponse::Opened {
-                session: Box::new(session.transfer.session().clone()),
-            },
+            Ok(()) => {
+                session.resume_generation = request.resume_generation;
+                FileNetworkResponse::Opened {
+                    session: Box::new(session.transfer.session().clone()),
+                }
+            }
             Err(error) => {
                 let response = adapter_error(&error);
                 if session.transfer.session().state.is_terminal() {
@@ -1409,8 +1516,14 @@ impl FileNetworkDataPlane {
             self.downloads.remove(&key);
             return network_error("file_transfer_peer_mismatch", None);
         }
+        if session.resume_generation.checked_add(1) != Some(request.resume_generation) {
+            return network_error("file_transfer_resume_generation_mismatch", None);
+        }
         session.cancel.send_replace(false);
+        session.pending_chunk = None;
+        session.resume_offset_in_chunk = None;
         session.exhausted = false;
+        session.retry_at_unix_ms = None;
         match session.transfer.resume_with_request(
             &request,
             member_access_epoch,
@@ -1419,6 +1532,15 @@ impl FileNetworkDataPlane {
             now_unix_ms,
         ) {
             Ok(()) => {
+                session.resume_generation = request.resume_generation;
+                session.resume_offset_in_chunk = session
+                    .transfer
+                    .session()
+                    .manifest
+                    .chunks
+                    .get(request.resume_chunk_index as usize)
+                    .and_then(|chunk| request.resume_offset.checked_sub(chunk.offset))
+                    .and_then(|offset| usize::try_from(offset).ok());
                 self.download_notify.notify_one();
                 FileNetworkResponse::Opened {
                     session: Box::new(session.transfer.session().clone()),
@@ -1461,6 +1583,7 @@ impl FileNetworkDataPlane {
         // `read_next` advances the adapter to the next transfer chunk before
         // the network pump emits fragments. Keep any partially sent chunk so a
         // paused/resumed download continues at the exact next fragment.
+        session.retry_at_unix_ms = None;
         match session.transfer.pause(now_unix_ms) {
             Ok(()) => progress_response(session.transfer.progress()),
             Err(error) => adapter_error(&error),
@@ -1714,7 +1837,7 @@ pub(crate) fn validate_fragment(offset: u64, data: &[u8]) -> Result<(), FileNetw
         .ok_or(FileNetworkError::InvalidFragment)?;
     if data.is_empty()
         || data.len() > MAX_FILE_NETWORK_FRAGMENT_BYTES
-        || end > MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64
+        || end > MAX_FILE_NETWORK_TRANSFER_BYTES
     {
         return Err(FileNetworkError::InvalidFragment);
     }
@@ -1984,7 +2107,12 @@ mod tests {
         }
     }
 
-    fn download_resume_request(session: &TransferSession) -> ResumeRequest {
+    fn resume_request(
+        session: &TransferSession,
+        resume_chunk_index: u32,
+        resume_offset: u64,
+        resume_generation: u64,
+    ) -> ResumeRequest {
         ResumeRequest {
             transfer_id: session.binding.transfer_id.clone(),
             operation_id: session.binding.operation_id.clone(),
@@ -1992,9 +2120,12 @@ mod tests {
             actor: session.binding.actor.clone(),
             access_epoch: session.binding.access_epoch,
             path: session.binding.path.clone(),
-            direction: TransferDirection::Download,
+            direction: session.binding.direction,
             content_hash: session.manifest.content_hash.clone(),
             share_revision: session.binding.share_revision,
+            resume_chunk_index,
+            resume_offset,
+            resume_generation,
         }
     }
 
@@ -2005,10 +2136,12 @@ mod tests {
         }
     }
 
-    fn round_trip(frame: FileNetworkFrame) {
+    fn round_trip(frame: FileNetworkFrame) -> FileNetworkFrame {
         let encoded = encode_file_network_frame(&frame).expect("encode");
         assert!(is_file_network_frame(&encoded));
-        assert_eq!(decode_file_network_frame(&encoded).expect("decode"), frame);
+        let decoded = decode_file_network_frame(&encoded).expect("decode");
+        assert_eq!(decoded, frame);
+        decoded
     }
 
     #[test]
@@ -2048,6 +2181,9 @@ mod tests {
                     direction: TransferDirection::Upload,
                     content_hash: ContentHash::from_bytes(b"hash"),
                     share_revision: 2,
+                    resume_chunk_index: 0,
+                    resume_offset: 0,
+                    resume_generation: 1,
                 },
             },
             FileNetworkRequest::Pause {
@@ -2108,18 +2244,26 @@ mod tests {
             [1; 16],
             transfer(2),
             operation(3),
-            4,
-            48 * 1024,
+            7,
+            1,
+            MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64,
             vec![9; MAX_FILE_NETWORK_FRAGMENT_BYTES],
         )
-        .expect("fragment");
-        round_trip(frame);
+        .expect("second chunk fragment");
+        assert!(matches!(
+            round_trip(frame),
+            FileNetworkFrame::Chunk {
+                resume_generation: 7,
+                chunk_index: 1,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn fragment_validation_rejects_empty_oversized_and_out_of_range_data() {
         assert_eq!(
-            FileNetworkFrame::chunk([1; 16], transfer(1), operation(2), 0, 0, Vec::new()),
+            FileNetworkFrame::chunk([1; 16], transfer(1), operation(2), 0, 0, 0, Vec::new()),
             Err(FileNetworkError::InvalidFragment)
         );
         assert_eq!(
@@ -2127,6 +2271,7 @@ mod tests {
                 [1; 16],
                 transfer(1),
                 operation(2),
+                0,
                 0,
                 0,
                 vec![0; MAX_FILE_NETWORK_FRAGMENT_BYTES + 1]
@@ -2139,7 +2284,8 @@ mod tests {
                 transfer(1),
                 operation(2),
                 0,
-                MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64,
+                0,
+                MAX_FILE_NETWORK_TRANSFER_BYTES,
                 vec![0]
             ),
             Err(FileNetworkError::InvalidFragment)
@@ -2323,6 +2469,7 @@ mod tests {
             [1; 16],
             transfer(2),
             operation(3),
+            0,
             7,
             0,
             vec![1; MAX_FILE_NETWORK_FRAGMENT_BYTES],
@@ -2353,6 +2500,89 @@ mod tests {
         assert_eq!(trusted.context.role, NetworkRole::Administrator);
         assert!(trusted.context.membership_active);
         assert!(trusted.context.groups.is_empty());
+
+        let mut owner = member(&actor, 42);
+        owner.role = MembershipRole::Owner;
+        owner.capabilities = None;
+        let owner_directory = directory(network_id.clone(), owner);
+        let trusted_owner = trusted_file_member(
+            &network_id,
+            Some(&owner_directory),
+            Some(1_000),
+            &actor,
+            2_000,
+        )
+        .expect("owner uses the authoritative network File declaration");
+        assert_eq!(trusted_owner.context.role, NetworkRole::Owner);
+
+        let mut ordinary_member = member(&actor, 43);
+        ordinary_member.role = MembershipRole::Member;
+        ordinary_member.capabilities = None;
+        let ordinary_directory = directory(network_id.clone(), ordinary_member);
+        assert_eq!(
+            response_code(
+                trusted_file_member(
+                    &network_id,
+                    Some(&ordinary_directory),
+                    Some(1_000),
+                    &actor,
+                    2_000
+                )
+                .expect_err("ordinary member needs an explicit File capability")
+            ),
+            "file_capability_unavailable"
+        );
+
+        let mut administrator = member(&actor, 44);
+        administrator.capabilities = None;
+        let administrator_directory = directory(network_id.clone(), administrator);
+        assert_eq!(
+            response_code(
+                trusted_file_member(
+                    &network_id,
+                    Some(&administrator_directory),
+                    Some(1_000),
+                    &actor,
+                    2_000
+                )
+                .expect_err("administrator needs an explicit File capability")
+            ),
+            "file_capability_unavailable"
+        );
+
+        let mut owner_without_file = member(&actor, 45);
+        owner_without_file.role = MembershipRole::Owner;
+        owner_without_file.capabilities = Some(vec![CapabilityKind::Relay]);
+        let owner_without_file_directory = directory(network_id.clone(), owner_without_file);
+        assert_eq!(
+            response_code(
+                trusted_file_member(
+                    &network_id,
+                    Some(&owner_without_file_directory),
+                    Some(1_000),
+                    &actor,
+                    2_000
+                )
+                .expect_err("explicit owner projection without File must fail closed")
+            ),
+            "file_capability_unavailable"
+        );
+
+        let mut owner_without_network_file = owner_directory.clone();
+        owner_without_network_file.capability_declarations = vec![CapabilityKind::Relay];
+        assert_eq!(
+            response_code(
+                trusted_file_member(
+                    &network_id,
+                    Some(&owner_without_network_file),
+                    Some(1_000),
+                    &actor,
+                    2_000
+                )
+                .expect_err("owner still requires the network File declaration")
+            ),
+            "file_capability_unavailable"
+        );
 
         assert_eq!(
             response_code(
@@ -2536,7 +2766,7 @@ mod tests {
             FileNetworkResponse::Opened { .. }
         ));
         let (chunk_complete, _) = data_plane
-            .handle_chunk(&actor, 7, &transfer(2), &operation(3), 0, 0, content, 11)
+            .handle_chunk(&actor, 7, &transfer(2), &operation(3), 0, 0, 0, content, 11)
             .expect("accepted fragment");
         assert!(chunk_complete);
         assert!(matches!(
@@ -2576,7 +2806,7 @@ mod tests {
         assert_eq!(
             response_code(
                 data_plane
-                    .handle_chunk(&actor, 7, &transfer(4), &operation(5), 0, 0, content, 15)
+                    .handle_chunk(&actor, 7, &transfer(4), &operation(5), 0, 0, 0, content, 15)
                     .expect_err("disabled local capability")
             ),
             "file_capability_revoked"
@@ -2610,7 +2840,7 @@ mod tests {
         assert_eq!(
             response_code(
                 data_plane
-                    .handle_chunk(&actor, 8, &transfer(6), &operation(7), 0, 0, content, 18)
+                    .handle_chunk(&actor, 8, &transfer(6), &operation(7), 0, 0, 0, content, 18)
                     .expect_err("changed member epoch")
             ),
             "file_transfer_access_revoked"
@@ -2687,6 +2917,7 @@ mod tests {
                     7,
                     &transfer(20),
                     &operation(21),
+                    0,
                     0,
                     0,
                     b"private",
@@ -2944,9 +3175,10 @@ mod tests {
     #[test]
     fn paused_download_resumes_at_the_next_unsent_fragment() {
         let temporary = TempDir::new().expect("tempdir");
-        let content: Vec<u8> = (0..(MAX_FILE_NETWORK_FRAGMENT_BYTES * 2 + 11))
-            .map(|index| (index % 239) as u8)
-            .collect();
+        let content: Vec<u8> =
+            (0..(MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES + MAX_FILE_NETWORK_FRAGMENT_BYTES * 2 + 11))
+                .map(|index| (index % 239) as u8)
+                .collect();
         std::fs::write(temporary.path().join("source.bin"), &content).expect("source");
         let share = share();
         let actor = node(4);
@@ -2997,7 +3229,7 @@ mod tests {
                 7,
                 Ipv6Addr::LOCALHOST,
                 FileNetworkRequest::Resume {
-                    request: download_resume_request(&opened),
+                    request: resume_request(&opened, 0, MAX_FILE_NETWORK_FRAGMENT_BYTES as u64, 1,),
                 },
                 13,
             ),
@@ -3006,7 +3238,9 @@ mod tests {
         assert_eq!(data_plane.pending_downloads().len(), 1);
 
         let mut received = first.clone();
-        for _ in 0..16 {
+        let mut saw_second_chunk = false;
+        let maximum_fragments = content.len().div_ceil(MAX_FILE_NETWORK_FRAGMENT_BYTES) + 1;
+        for _ in 0..maximum_fragments {
             let frame = data_plane
                 .next_download_frame(
                     &actor,
@@ -3020,13 +3254,27 @@ mod tests {
                 break;
             };
             match frame {
-                FileNetworkFrame::Chunk { offset, data, .. } => {
+                FileNetworkFrame::Chunk {
+                    chunk_index,
+                    offset,
+                    data,
+                    ..
+                } => {
                     assert_eq!(offset, received.len() as u64);
+                    if chunk_index == 1 {
+                        if !saw_second_chunk {
+                            assert_eq!(offset, MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES as u64);
+                        }
+                        saw_second_chunk = true;
+                    } else {
+                        assert_eq!(chunk_index, 0);
+                    }
                     received.extend_from_slice(&data);
                 }
                 other => panic!("expected resumed chunk, got {other:?}"),
             }
         }
+        assert!(saw_second_chunk);
         assert_eq!(received, content);
         assert!(matches!(
             data_plane.handle_request(
@@ -3063,6 +3311,611 @@ mod tests {
                 if progress.state == TransferState::Cancelled
         ));
         assert_eq!(data_plane.session_count(), 0);
+    }
+
+    #[test]
+    fn paused_download_rewinds_when_sent_fragments_were_not_received() {
+        let temporary = TempDir::new().expect("tempdir");
+        let content: Vec<u8> =
+            (0..(MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES + MAX_FILE_NETWORK_FRAGMENT_BYTES + 11))
+                .map(|index| (index % 239) as u8)
+                .collect();
+        std::fs::write(temporary.path().join("source.bin"), &content).expect("source");
+        let share = share();
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = enable_download_runtime(&temporary, &share);
+        let mut data_plane = FileNetworkDataPlane::new(runtime);
+        let opened = open_download(&mut data_plane, &actor, &context, &share, 26, 27, 10);
+
+        // The sender emits two fragments, but the receiver processes neither.
+        // Its resume cursor therefore remains the start of chunk zero.
+        for (index, expected_offset) in [0, MAX_FILE_NETWORK_FRAGMENT_BYTES as u64]
+            .into_iter()
+            .enumerate()
+        {
+            let frame = data_plane
+                .next_download_frame(
+                    &actor,
+                    7,
+                    &opened.binding.transfer_id,
+                    &opened.binding.operation_id,
+                    11 + index as u64,
+                )
+                .expect("sender fragment")
+                .expect("chunk frame");
+            match frame {
+                FileNetworkFrame::Chunk {
+                    chunk_index,
+                    offset,
+                    ..
+                } => assert_eq!((chunk_index, offset), (0, expected_offset)),
+                other => panic!("expected dropped download fragment, got {other:?}"),
+            }
+        }
+
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::Pause {
+                    transfer_id: opened.binding.transfer_id.clone(),
+                    operation_id: opened.binding.operation_id.clone(),
+                },
+                13,
+            ),
+            FileNetworkResponse::Progress { progress } if progress.state == TransferState::Paused
+        ));
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::Resume {
+                    request: resume_request(&opened, 0, 0, 1),
+                },
+                14,
+            ),
+            FileNetworkResponse::Opened { .. }
+        ));
+
+        let mut received = Vec::new();
+        let maximum_fragments = content.len().div_ceil(MAX_FILE_NETWORK_FRAGMENT_BYTES) + 1;
+        for _ in 0..maximum_fragments {
+            let frame = data_plane
+                .next_download_frame(
+                    &actor,
+                    7,
+                    &opened.binding.transfer_id,
+                    &opened.binding.operation_id,
+                    15,
+                )
+                .expect("resumed sender fragment");
+            let Some(frame) = frame else {
+                break;
+            };
+            match frame {
+                FileNetworkFrame::Chunk { offset, data, .. } => {
+                    assert_eq!(offset, received.len() as u64);
+                    received.extend_from_slice(&data);
+                }
+                other => panic!("expected resumed download chunk, got {other:?}"),
+            }
+        }
+        assert_eq!(received, content);
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::Finish {
+                    transfer_id: opened.binding.transfer_id.clone(),
+                    operation_id: opened.binding.operation_id.clone(),
+                },
+                16,
+            ),
+            FileNetworkResponse::Completed { .. }
+        ));
+        assert_eq!(data_plane.session_count(), 0);
+    }
+
+    #[test]
+    fn resume_generation_barrier_protects_owner_upload_state_and_fails_future_chunks_closed() {
+        let temporary = TempDir::new().expect("tempdir");
+        let share = upload_share();
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = FileRuntime::new(FileShareCapability::new());
+        runtime
+            .enable(
+                &share,
+                &share.owner,
+                temporary.path().to_str().expect("utf8 path"),
+                1,
+            )
+            .expect("enable File runtime");
+        let mut data_plane = FileNetworkDataPlane::new(runtime.clone());
+        let content: Vec<u8> = (0..100).map(|index| (index % 251) as u8).collect();
+        let opened = match data_plane.handle_request(
+            &actor,
+            &context,
+            true,
+            7,
+            Ipv6Addr::LOCALHOST,
+            FileNetworkRequest::OpenUpload {
+                share_id: share.id.clone(),
+                transfer_id: transfer(30),
+                operation_id: operation(31),
+                path: SharedPath::parse("generation-barrier.bin").expect("path"),
+                manifest: manifest(&content, 50),
+            },
+            10,
+        ) {
+            FileNetworkResponse::Opened { session } => *session,
+            other => panic!("expected opened upload, got {other:?}"),
+        };
+        assert!(
+            data_plane
+                .handle_chunk(
+                    &actor,
+                    7,
+                    &transfer(30),
+                    &operation(31),
+                    0,
+                    0,
+                    0,
+                    &content[..50],
+                    11,
+                )
+                .expect("first chunk")
+                .0
+        );
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::Pause {
+                    transfer_id: transfer(30),
+                    operation_id: operation(31),
+                },
+                12,
+            ),
+            FileNetworkResponse::Progress { progress }
+                if progress.state == TransferState::Paused
+                    && progress.received_chunks == 1
+        ));
+
+        let request = resume_request(&opened, 1, 50, 1);
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::Resume {
+                    request: request.clone(),
+                },
+                13,
+            ),
+            FileNetworkResponse::Opened { .. }
+        ));
+
+        let (advanced, stale_progress) = data_plane
+            .handle_chunk(
+                &actor,
+                7,
+                &transfer(30),
+                &operation(31),
+                0,
+                1,
+                50,
+                &content[50..],
+                14,
+            )
+            .expect("stale generation is ignored");
+        assert!(!advanced);
+        assert_eq!(stale_progress.transferred_bytes, 50);
+        assert_eq!(stale_progress.received_chunks, 1);
+
+        assert!(
+            !data_plane
+                .handle_chunk(
+                    &actor,
+                    7,
+                    &transfer(30),
+                    &operation(31),
+                    1,
+                    1,
+                    50,
+                    &content[50..75],
+                    15,
+                )
+                .expect("partial resumed chunk")
+                .0
+        );
+        assert_eq!(
+            response_code(data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::Resume { request },
+                16,
+            )),
+            "file_transfer_resume_generation_mismatch"
+        );
+        assert!(
+            data_plane
+                .handle_chunk(
+                    &actor,
+                    7,
+                    &transfer(30),
+                    &operation(31),
+                    1,
+                    1,
+                    75,
+                    &content[75..],
+                    17,
+                )
+                .expect("duplicate resume did not discard assembly")
+                .0
+        );
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::Finish {
+                    transfer_id: transfer(30),
+                    operation_id: operation(31),
+                },
+                18,
+            ),
+            FileNetworkResponse::Completed { .. }
+        ));
+
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::OpenUpload {
+                    share_id: share.id,
+                    transfer_id: transfer(32),
+                    operation_id: operation(33),
+                    path: SharedPath::parse("future-generation.bin").expect("path"),
+                    manifest: manifest(&content, 100),
+                },
+                19,
+            ),
+            FileNetworkResponse::Opened { .. }
+        ));
+        assert_eq!(
+            response_code(
+                data_plane
+                    .handle_chunk(
+                        &actor,
+                        7,
+                        &transfer(32),
+                        &operation(33),
+                        1,
+                        0,
+                        0,
+                        &content,
+                        20,
+                    )
+                    .expect_err("future generation must fail closed")
+            ),
+            "file_transfer_resume_generation_mismatch"
+        );
+        assert_eq!(data_plane.session_count(), 0);
+        assert_eq!(runtime.active_transfer_count(), 0);
+        assert_eq!(staging_file_count(temporary.path()), 0);
+        assert!(!temporary.path().join("future-generation.bin").exists());
+    }
+
+    #[test]
+    fn replayed_resume_does_not_rewind_owner_download_generation() {
+        let temporary = TempDir::new().expect("tempdir");
+        let content = vec![0x5a; 128 * 1024];
+        std::fs::write(temporary.path().join("source.bin"), &content).expect("source");
+        let share = share();
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = enable_download_runtime(&temporary, &share);
+        let mut data_plane = FileNetworkDataPlane::new(runtime);
+        let opened = open_download(&mut data_plane, &actor, &context, &share, 34, 35, 10);
+
+        assert!(matches!(
+            data_plane
+                .next_download_frame(
+                    &actor,
+                    7,
+                    &opened.binding.transfer_id,
+                    &opened.binding.operation_id,
+                    11,
+                )
+                .expect("first fragment")
+                .expect("fragment"),
+            FileNetworkFrame::Chunk { offset: 0, .. }
+        ));
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::Pause {
+                    transfer_id: opened.binding.transfer_id.clone(),
+                    operation_id: opened.binding.operation_id.clone(),
+                },
+                12,
+            ),
+            FileNetworkResponse::Progress { progress }
+                if progress.state == TransferState::Paused
+        ));
+
+        let request = resume_request(&opened, 0, MAX_FILE_NETWORK_FRAGMENT_BYTES as u64, 1);
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::Resume {
+                    request: request.clone(),
+                },
+                13,
+            ),
+            FileNetworkResponse::Opened { .. }
+        ));
+        assert_eq!(
+            response_code(data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::Resume { request },
+                14,
+            )),
+            "file_transfer_resume_generation_mismatch"
+        );
+        assert!(matches!(
+            data_plane
+                .next_download_frame(
+                    &actor,
+                    7,
+                    &opened.binding.transfer_id,
+                    &opened.binding.operation_id,
+                    15,
+                )
+                .expect("resumed fragment")
+                .expect("fragment"),
+            FileNetworkFrame::Chunk {
+                resume_generation: 1,
+                offset,
+                ..
+            } if offset == MAX_FILE_NETWORK_FRAGMENT_BYTES as u64
+        ));
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::Cancel {
+                    transfer_id: opened.binding.transfer_id.clone(),
+                    operation_id: opened.binding.operation_id.clone(),
+                },
+                16,
+            ),
+            FileNetworkResponse::Progress { progress }
+                if progress.state == TransferState::Cancelled
+        ));
+        assert_eq!(data_plane.session_count(), 0);
+    }
+
+    #[test]
+    fn owner_upload_rate_limit_keeps_assembly_and_replays_the_same_final_fragment() {
+        let temporary = TempDir::new().expect("tempdir");
+        let mut share = upload_share();
+        share.quota.max_bandwidth_kbps = 8;
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = FileRuntime::new(FileShareCapability::new());
+        runtime
+            .enable(
+                &share,
+                &share.owner,
+                temporary.path().to_str().expect("utf8 path"),
+                1,
+            )
+            .expect("enable File runtime");
+        let mut data_plane = FileNetworkDataPlane::new(runtime.clone());
+        let content = b"rate-limited-upload";
+        let opened = match data_plane.handle_request(
+            &actor,
+            &context,
+            true,
+            7,
+            Ipv6Addr::LOCALHOST,
+            FileNetworkRequest::OpenUpload {
+                share_id: share.id.clone(),
+                transfer_id: transfer(2),
+                operation_id: operation(3),
+                path: SharedPath::parse("paced.bin").expect("path"),
+                manifest: manifest(content, content.len() as u64),
+            },
+            10,
+        ) {
+            FileNetworkResponse::Opened { session } => *session,
+            other => panic!("expected opened upload, got {other:?}"),
+        };
+        let transfer_id = opened.binding.transfer_id.clone();
+        let operation_id = opened.binding.operation_id.clone();
+
+        let first = data_plane
+            .handle_chunk(&actor, 7, &transfer_id, &operation_id, 0, 0, 0, content, 11)
+            .expect_err("the first full chunk must wait for quota");
+        let FileNetworkResponse::Error {
+            code,
+            retry_after_ms: Some(retry_after_ms),
+        } = first
+        else {
+            panic!("expected rate limit response, got {first:?}");
+        };
+        assert_eq!(code, "file_transfer_rate_limited");
+        assert!(retry_after_ms > 0);
+        assert_eq!(data_plane.session_count(), 1);
+        assert_eq!(runtime.active_transfer_count(), 1);
+        assert_eq!(staging_file_count(temporary.path()), 1);
+        assert_eq!(
+            opened.manifest.content_hash,
+            ContentHash::from_bytes(content)
+        );
+
+        let repeated = data_plane
+            .handle_chunk(&actor, 7, &transfer_id, &operation_id, 0, 0, 0, content, 11)
+            .expect_err("replaying the final fragment must retry the same chunk");
+        assert!(matches!(
+            repeated,
+            FileNetworkResponse::Error {
+                ref code,
+                retry_after_ms: Some(_),
+            } if code == "file_transfer_rate_limited"
+        ));
+        assert_eq!(data_plane.session_count(), 1);
+        assert_eq!(runtime.active_transfer_count(), 1);
+        assert_eq!(staging_file_count(temporary.path()), 1);
+
+        let (chunk_complete, _) = data_plane
+            .handle_chunk(
+                &actor,
+                7,
+                &transfer_id,
+                &operation_id,
+                0,
+                0,
+                0,
+                content,
+                11 + retry_after_ms,
+            )
+            .expect("the exact final fragment retry completes the chunk");
+        assert!(chunk_complete);
+        assert!(matches!(
+            data_plane.handle_request(
+                &actor,
+                &context,
+                true,
+                7,
+                Ipv6Addr::LOCALHOST,
+                FileNetworkRequest::Finish {
+                    transfer_id: transfer_id.clone(),
+                    operation_id: operation_id.clone(),
+                },
+                12 + retry_after_ms,
+            ),
+            FileNetworkResponse::Completed { .. }
+        ));
+        assert_eq!(
+            std::fs::read(temporary.path().join("paced.bin")).expect("uploaded file"),
+            content
+        );
+        assert_eq!(data_plane.session_count(), 0);
+    }
+
+    #[test]
+    fn owner_download_rate_limit_keeps_the_session_and_continues_the_same_chunk() {
+        let temporary = TempDir::new().expect("tempdir");
+        let content = b"rate-limited-download";
+        std::fs::write(temporary.path().join("source.bin"), content).expect("source");
+        let mut share = share();
+        share.quota.max_bandwidth_kbps = 8;
+        let actor = node(4);
+        let context = upload_context(&share, &actor);
+        let runtime = FileRuntime::new(FileShareCapability::new());
+        runtime
+            .enable(
+                &share,
+                &share.owner,
+                temporary.path().to_str().expect("utf8 path"),
+                1,
+            )
+            .expect("enable File runtime");
+        let mut data_plane = FileNetworkDataPlane::new(runtime.clone());
+        let opened = open_download(&mut data_plane, &actor, &context, &share, 22, 23, 10);
+        let transfer_id = opened.binding.transfer_id.clone();
+        let operation_id = opened.binding.operation_id.clone();
+
+        let limited = data_plane
+            .next_download_frame(&actor, 7, &transfer_id, &operation_id, 11)
+            .expect_err("the first download chunk must wait for quota");
+        let FileNetworkResponse::Error {
+            code,
+            retry_after_ms: Some(retry_after_ms),
+        } = limited
+        else {
+            panic!("expected rate limit response, got {limited:?}");
+        };
+        assert_eq!(code, "file_transfer_rate_limited");
+        assert!(retry_after_ms > 0);
+        assert_eq!(data_plane.session_count(), 1);
+        assert_eq!(runtime.active_transfer_count(), 1);
+        let pending = data_plane.pending_downloads();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].retry_at_unix_ms.is_none());
+
+        let retry_at = 11 + retry_after_ms;
+        data_plane.defer_download_retry(&transfer_id, &operation_id, retry_at);
+        assert_eq!(data_plane.next_download_retry_at_unix_ms(), Some(retry_at));
+        assert_eq!(
+            data_plane.pending_downloads()[0].retry_at_unix_ms,
+            Some(retry_at)
+        );
+
+        let frame = data_plane
+            .next_download_frame(&actor, 7, &transfer_id, &operation_id, retry_at)
+            .expect("the due retry continues the same chunk")
+            .expect("download fragment");
+        match frame {
+            FileNetworkFrame::Chunk {
+                chunk_index,
+                offset,
+                data,
+                ..
+            } => {
+                assert_eq!(chunk_index, 0);
+                assert_eq!(offset, 0);
+                assert_eq!(data, content);
+            }
+            other => panic!("expected download chunk, got {other:?}"),
+        }
+        assert_eq!(data_plane.session_count(), 1);
+        assert_eq!(runtime.active_transfer_count(), 1);
+        assert!(data_plane.next_download_retry_at_unix_ms().is_none());
+        let pending = data_plane.pending_downloads();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].retry_at_unix_ms.is_none());
     }
 
     #[test]
@@ -3178,6 +4031,7 @@ mod tests {
                 &upload.binding.operation_id,
                 0,
                 0,
+                0,
                 &upload_content[..8],
                 11,
             )
@@ -3269,6 +4123,7 @@ mod tests {
                     7,
                     &upload.binding.transfer_id,
                     &upload.binding.operation_id,
+                    0,
                     0,
                     0,
                     &upload_content[..8],
@@ -3384,6 +4239,7 @@ mod tests {
                     7,
                     &transfer(70),
                     &operation(71),
+                    0,
                     0,
                     0,
                     &content[..8],

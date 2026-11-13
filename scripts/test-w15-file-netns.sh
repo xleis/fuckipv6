@@ -7,9 +7,11 @@
 # This test also exercises pause/resume across a veth outage and a complete
 # node-service SIGKILL/restart, cancellation cleanup, live ACL revocation, live
 # network File-capability revocation, path-free observability and resource
-# cleanup. All network changes remain inside three private namespaces and two
-# 10.79.x/24 veth pairs. The host default route, policy rules, DNS, OpenClash
-# and firewall are never modified.
+# cleanup. It also saturates all four File transfer slots with real P2P uploads
+# while probing the coordinator, owner and member control planes. All network
+# changes remain inside three private namespaces and two 10.79.x/24 veth pairs.
+# The host default route, policy rules, DNS, OpenClash and firewall are never
+# modified.
 #
 # Run as root:
 #   sudo -n scripts/test-w15-file-netns.sh
@@ -446,6 +448,41 @@ wait_for_file_state() {
     done
     jq '.data.file_capability' "$output" >&2 || true
     return 1
+}
+
+wait_for_file_active_transfers() {
+    local socket_path=$1 output=$2 expected=$3 attempts=${4:-60}
+    local i state active
+    for ((i = 0; i < attempts; i++)); do
+        if snapshot_to "$socket_path" "$output" 2>/dev/null; then
+            state=$(jq -r '.data.file_capability.state' "$output" 2>/dev/null)
+            active=$(jq -r '.data.file_capability.active_transfers' "$output" 2>/dev/null)
+            if [ "$state" = enabled ] && [ "$active" = "$expected" ]; then
+                return 0
+            fi
+        fi
+        sleep 0.2
+    done
+    jq '.data.file_capability' "$output" >&2 || true
+    return 1
+}
+
+control_snapshot_probe() {
+    local socket_path=$1 output=$2 label=$3 round=$4 expected_active=$5
+    local started ended latency active
+    started=$(date +%s%3N)
+    snapshot_to "$socket_path" "$output" || fail "$label control snapshot failed under File load"
+    ended=$(date +%s%3N)
+    latency=$((ended - started))
+    jq -e '.data.identity.node_id != null and (.data.networks | type == "array")' "$output" >/dev/null \
+        || fail "$label control snapshot omitted basic node/network state under File load"
+    active=$(jq -r '.data.file_capability.active_transfers // empty' "$output")
+    if [ -n "$expected_active" ]; then
+        [ "$active" = "$expected_active" ] \
+            || fail "$label active transfer count changed during control probe ($expected_active -> ${active:-missing})"
+    fi
+    [ "$latency" -le 2000 ] || fail "$label control snapshot exceeded 2s under File load: ${latency}ms"
+    printf '%s\t%s\t%s\t%s\n' "$round" "$label" "$latency" "$active" >>"$WORK/control-probes.tsv"
 }
 
 wait_for_journal_entry() {
@@ -912,6 +949,39 @@ assert_runtime_stable() {
     [ "$after_threads" -le $((before_threads + 8)) ] || fail "$label retained too many threads ($before_threads -> $after_threads)"
 }
 
+record_stress_baseline() {
+    local label=$1 pid=$2 rss
+    kill -0 "$pid" 2>/dev/null || fail "$label process is unavailable for File stress baseline"
+    rss=$(awk '/^VmRSS:/ {print $2}' "/proc/$pid/status")
+    {
+        printf 'fd=%s\n' "$(find "/proc/$pid/fd" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)"
+        printf 'threads=%s\n' "$(find "/proc/$pid/task" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)"
+        printf 'rss_kib=%s\n' "${rss:-0}"
+    } >"$WORK/resource-stress-$label-before.txt"
+}
+
+assert_stress_runtime_stable() {
+    local label=$1 pid=$2 before_fd before_threads before_rss after_fd after_threads after_rss
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || fail "$label process is unavailable after File stress"
+    before_fd=$(sed -n 's/^fd=//p' "$WORK/resource-stress-$label-before.txt")
+    before_threads=$(sed -n 's/^threads=//p' "$WORK/resource-stress-$label-before.txt")
+    before_rss=$(sed -n 's/^rss_kib=//p' "$WORK/resource-stress-$label-before.txt")
+    after_fd=$(find "/proc/$pid/fd" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
+    after_threads=$(find "/proc/$pid/task" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
+    after_rss=$(awk '/^VmRSS:/ {print $2}' "/proc/$pid/status")
+    {
+        printf 'fd=%s\n' "$after_fd"
+        printf 'threads=%s\n' "$after_threads"
+        printf 'rss_kib=%s\n' "${after_rss:-0}"
+    } >"$WORK/resource-stress-$label-after.txt"
+    [ "$after_fd" -le $((before_fd + 8)) ] \
+        || fail "$label retained too many file descriptors after File stress ($before_fd -> $after_fd)"
+    [ "$after_threads" -le $((before_threads + 8)) ] \
+        || fail "$label retained too many threads after File stress ($before_threads -> $after_threads)"
+    [ "${after_rss:-0}" -le $((before_rss + 16384)) ] \
+        || fail "$label retained too much RSS after File stress ($before_rss -> $after_rss KiB)"
+}
+
 assert_pid_gone() {
     local pid=$1 label=$2
     [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null || fail "$label process $pid is still running"
@@ -1345,6 +1415,106 @@ SH
     configure_share "$config_low" enable-low-bandwidth
     wait_for_file_state "$HOST_SOCK" "$WORK/host-file-low.json" enabled 60 \
         || fail "low-bandwidth File reconfigure did not settle"
+
+    info "saturating all four File slots while probing coordinator/owner/member control planes"
+    local -a stress_sockets=("$NODE1_SOCK" "$NODE1_SOCK" "$NODE2_SOCK" "$NODE2_SOCK")
+    local -a stress_labels=(stress-node1-a stress-node1-b stress-node2-a stress-node2-b)
+    local -a stress_paths=(isolation/node1-a/file.bin isolation/node1-b/file.bin isolation/node2-a/file.bin isolation/node2-b/file.bin)
+    local -a stress_transfer_ids=() stress_operation_ids=()
+    local stress_index stress_source stress_target
+    for stress_index in 0 1 2 3; do
+        stress_source="$WORK/${stress_labels[$stress_index]}-source.bin"
+        stress_target="$SHARE_ROOT/${stress_paths[$stress_index]}"
+        mkdir -p "$(dirname "$stress_target")"
+        write_pattern_file "$stress_source" 4194304 "${stress_labels[$stress_index]}"
+    done
+    record_stress_baseline host "$HOST_NODE_PID"
+    record_stress_baseline node1 "$NODE1_NODE_PID"
+    record_stress_baseline node2 "$NODE2_NODE_PID"
+    for stress_index in 0 1 2 3; do
+        stress_source="$WORK/${stress_labels[$stress_index]}-source.bin"
+        start_transfer "${stress_sockets[$stress_index]}" "${stress_labels[$stress_index]}" "$HOST_NODE_ID" upload \
+            "$SHARE_ID" "${stress_paths[$stress_index]}" "$stress_source" 262144
+        stress_transfer_ids+=("$STARTED_TRANSFER_ID")
+        stress_operation_ids+=("$STARTED_OPERATION_ID")
+    done
+    wait_for_file_active_transfers "$HOST_SOCK" "$WORK/host-file-saturated.json" 4 120 \
+        || { tail -200 "$WORK/host/host.log" >&2 || true; fail "File did not reach the four-transfer global saturation point"; }
+    : >"$WORK/control-probes.tsv"
+    local -a probe_sockets=("$HOST_SOCK" "$NODE1_SOCK" "$NODE2_SOCK")
+    local -a probe_labels=(coordinator-owner node1 node2)
+    local -a probe_expected=(4 '' '')
+    local probe_round probe_index
+    for ((probe_round = 1; probe_round <= 8; probe_round++)); do
+        for probe_index in 0 1 2; do
+            control_snapshot_probe "${probe_sockets[$probe_index]}" "$WORK/control-${probe_round}-${probe_labels[$probe_index]}.json" \
+                "${probe_labels[$probe_index]}" "$probe_round" "${probe_expected[$probe_index]}"
+        done
+        sleep 0.1
+    done
+    [ "$(jq -r '.data.file_capability.active_transfers' "$WORK/control-8-coordinator-owner.json")" = 4 ] \
+        || fail "File slots did not remain saturated through the control-plane probes"
+    info "control probes passed at full File saturation; cancelling all four uploads"
+    for stress_index in 0 1 2 3; do
+        file_control "${stress_sockets[$stress_index]}" cancel "${stress_transfer_ids[$stress_index]}" \
+            "${stress_operation_ids[$stress_index]}" "${stress_labels[$stress_index]}"
+    done
+    wait_for_file_state "$HOST_SOCK" "$WORK/host-file-stress-drained.json" enabled 120 \
+        || fail "File did not return to zero active transfers after the saturation test"
+    wait_for_upload_staging_absent 120 || fail "saturation test left owner upload staging behind"
+    for stress_index in 0 1 2 3; do
+        wait_for_path_absent "$SHARE_ROOT/${stress_paths[$stress_index]}" 30 \
+            || fail "cancelled saturation upload was published: ${stress_paths[$stress_index]}"
+    done
+    wait_for_journal_absent "$WORK/node1/config/file_origin/$NETWORK_ID-file_origin_transfers.json" 120 \
+        || fail "node1 retained cancelled saturation transfer journal entries"
+    wait_for_journal_absent "$WORK/node2/config/file_origin/$NETWORK_ID-file_origin_transfers.json" 120 \
+        || fail "node2 retained cancelled saturation transfer journal entries"
+    assert_share_staging_empty
+    assert_stress_runtime_stable host "$HOST_NODE_PID"
+    assert_stress_runtime_stable node1 "$NODE1_NODE_PID"
+    assert_stress_runtime_stable node2 "$NODE2_NODE_PID"
+    local probe_count max_control_latency_ms
+    probe_count=$(wc -l <"$WORK/control-probes.tsv" | tr -d '[:space:]')
+    max_control_latency_ms=$(awk -F '\t' 'BEGIN { max = 0 } { if ($3 > max) max = $3 } END { print max + 0 }' "$WORK/control-probes.tsv")
+    jq -n \
+        --arg commit "$(git -C "$ROOT" rev-parse HEAD)" \
+        --argjson probe_count "$probe_count" \
+        --argjson rounds 8 \
+        --argjson max_control_latency_ms "$max_control_latency_ms" \
+        --argjson host_before_fd "$(sed -n 's/^fd=//p' "$WORK/resource-stress-host-before.txt")" \
+        --argjson host_before_threads "$(sed -n 's/^threads=//p' "$WORK/resource-stress-host-before.txt")" \
+        --argjson host_before_rss_kib "$(sed -n 's/^rss_kib=//p' "$WORK/resource-stress-host-before.txt")" \
+        --argjson host_after_fd "$(sed -n 's/^fd=//p' "$WORK/resource-stress-host-after.txt")" \
+        --argjson host_after_threads "$(sed -n 's/^threads=//p' "$WORK/resource-stress-host-after.txt")" \
+        --argjson host_after_rss_kib "$(sed -n 's/^rss_kib=//p' "$WORK/resource-stress-host-after.txt")" \
+        --argjson node1_before_fd "$(sed -n 's/^fd=//p' "$WORK/resource-stress-node1-before.txt")" \
+        --argjson node1_before_threads "$(sed -n 's/^threads=//p' "$WORK/resource-stress-node1-before.txt")" \
+        --argjson node1_before_rss_kib "$(sed -n 's/^rss_kib=//p' "$WORK/resource-stress-node1-before.txt")" \
+        --argjson node1_after_fd "$(sed -n 's/^fd=//p' "$WORK/resource-stress-node1-after.txt")" \
+        --argjson node1_after_threads "$(sed -n 's/^threads=//p' "$WORK/resource-stress-node1-after.txt")" \
+        --argjson node1_after_rss_kib "$(sed -n 's/^rss_kib=//p' "$WORK/resource-stress-node1-after.txt")" \
+        --argjson node2_before_fd "$(sed -n 's/^fd=//p' "$WORK/resource-stress-node2-before.txt")" \
+        --argjson node2_before_threads "$(sed -n 's/^threads=//p' "$WORK/resource-stress-node2-before.txt")" \
+        --argjson node2_before_rss_kib "$(sed -n 's/^rss_kib=//p' "$WORK/resource-stress-node2-before.txt")" \
+        --argjson node2_after_fd "$(sed -n 's/^fd=//p' "$WORK/resource-stress-node2-after.txt")" \
+        --argjson node2_after_threads "$(sed -n 's/^threads=//p' "$WORK/resource-stress-node2-after.txt")" \
+        --argjson node2_after_rss_kib "$(sed -n 's/^rss_kib=//p' "$WORK/resource-stress-node2-after.txt")" \
+        '{
+          schema:"fuckipv6.w15.node-control-isolation.v1",
+          commit:$commit,
+          status:"pass",
+          active_transfers:4,
+          global_transfer_limit:4,
+          control_probe:{operation:"get_snapshot",rounds:$rounds,count:$probe_count,max_latency_ms:$max_control_latency_ms,latency_limit_ms:2000},
+          cleanup:{active_transfers:0,staging_empty:true,cancelled_targets_absent:true,journals_empty:true},
+          runtime:{
+            coordinator_owner:{before:{fd:$host_before_fd,threads:$host_before_threads,rss_kib:$host_before_rss_kib},after:{fd:$host_after_fd,threads:$host_after_threads,rss_kib:$host_after_rss_kib}},
+            node1:{before:{fd:$node1_before_fd,threads:$node1_before_threads,rss_kib:$node1_before_rss_kib},after:{fd:$node1_after_fd,threads:$node1_after_threads,rss_kib:$node1_after_rss_kib}},
+            node2:{before:{fd:$node2_before_fd,threads:$node2_before_threads,rss_kib:$node2_before_rss_kib},after:{fd:$node2_after_fd,threads:$node2_after_threads,rss_kib:$node2_after_rss_kib}}
+          }
+        }' >"$WORK/node-control-isolation.json"
+    info "File saturation isolation passed: probes=$probe_count max_control_latency_ms=$max_control_latency_ms"
 
     start_transfer "$NODE1_SOCK" outage-resume "$HOST_NODE_ID" upload "$SHARE_ID" outage-resume.bin "$NODE1_ACL_UPLOAD_SOURCE" 262144
     transfer_id=$STARTED_TRANSFER_ID

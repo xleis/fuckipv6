@@ -3,7 +3,9 @@ use fs2::FileExt;
 use fuckipv6_common::domain::{
     AuditEntry, AuditId, AuditLog, AuditOutcome, ContentHash, CoordinatorCandidateConfig,
     CoordinatorCandidateDeclaration, CoordinatorCandidateStatus, CoordinatorElectionProposal,
-    CoordinatorElectionSession, CoordinatorElectionStage, CoordinatorElectionVote, CoordinatorTerm,
+    CoordinatorElectionSession, CoordinatorElectionStage, CoordinatorElectionVote,
+    CoordinatorRecoveryReport, CoordinatorRecoveryResponse, CoordinatorRecoveryRole,
+    CoordinatorRecoveryStage, CoordinatorRecoveryStatus, CoordinatorTerm,
     CoordinatorWriteCredential, CoordinatorWriteKind, NetworkId, NetworkRecord, NodeId,
     COORDINATOR_MAX_LEASE_DURATION_MS,
 };
@@ -17,6 +19,7 @@ use std::sync::Mutex;
 
 const COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION: u16 = 2;
 const COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION_V1: u16 = 1;
+const COORDINATOR_RECOVERY_AUDIT_REPLAY_LIMIT: usize = 128;
 static AUDIT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct ConfigUpdate<'a> {
@@ -44,6 +47,10 @@ struct StoredCoordinatorCandidates {
     /// in-memory quorum calculation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     latest_election: Option<CoordinatorElectionSession>,
+    /// Last validated recovery cursor for each node. This is progress state,
+    /// not authority: it can never make a node writable or install a term.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    recoveries: BTreeMap<NodeId, CoordinatorRecoveryStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +125,30 @@ impl CoordinatorCandidateFile {
                     .any(|candidate| candidate.node_id == *node_id)
                 {
                     bail!("coordinator_candidate.error.declaration_not_candidate");
+                }
+            }
+            let network_audit_sequence = self
+                .audit_log
+                .entries()
+                .iter()
+                .filter(|entry| entry.network_id.as_ref() == Some(network_id))
+                .count() as u64;
+            for (node_id, recovery) in &stored.recoveries {
+                let term = stored
+                    .latest_term
+                    .as_ref()
+                    .context("coordinator_candidate.error.recovery_term_missing")?;
+                let config = stored
+                    .config
+                    .as_ref()
+                    .context("coordinator_candidate.error.recovery_config_missing")?;
+                let is_candidate = config
+                    .candidates
+                    .iter()
+                    .any(|candidate| candidate.node_id == *node_id);
+                recovery.validate_against_authority(network_id, term, config, is_candidate)?;
+                if recovery.authoritative_audit_sequence > network_audit_sequence {
+                    bail!("coordinator_candidate.error.recovery_audit_cursor_ahead");
                 }
             }
         }
@@ -545,6 +576,199 @@ impl CoordinatorCandidateStore {
             self.persist(&file)?;
         }
         result
+    }
+
+    /// Validate a rejoining node against the current authoritative snapshot and
+    /// return a bounded audit replay. A stale term or snapshot is admitted only
+    /// into `ReadOnly`; matching cursors produce `Rejoined`, which is still not
+    /// a governance credential.
+    pub fn recover(
+        &self,
+        actor: &NodeId,
+        report: CoordinatorRecoveryReport,
+        now_unix_ms: u64,
+    ) -> Result<CoordinatorRecoveryResponse> {
+        let network_id = report.network_id.clone();
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
+        self.ensure_parent()?;
+        let _file_lock = lock_candidate_file(&self.path)?;
+        let mut file = self.load_unlocked()?;
+        let network = read_network_record(&self.network_record_path, &network_id)?;
+        let audit_sequence_before = network_audit_sequence(&file, &network_id);
+
+        let current = (|| -> Result<(CoordinatorTerm, CoordinatorCandidateConfig)> {
+            report.validate_definition()?;
+            if !network.members.contains(actor) {
+                bail!("coordinator_candidate.error.permission_denied");
+            }
+            let stored = file
+                .networks
+                .get(&network_id)
+                .context("coordinator_term.error.missing")?;
+            let term = stored
+                .latest_term
+                .as_ref()
+                .context("coordinator_term.error.missing")?
+                .clone();
+            let config = stored
+                .config
+                .as_ref()
+                .context("coordinator_term.error.config_missing")?
+                .clone();
+            config.validate_against_network(&network)?;
+            term.validate_against_candidate_config(&config)?;
+            if report.observed_audit_sequence > audit_sequence_before {
+                bail!("coordinator_recovery.error.audit_cursor_ahead");
+            }
+            match report.observed_term {
+                Some(observed_term) if observed_term > term.term => {
+                    bail!("coordinator_term.error.not_installed");
+                }
+                Some(observed_term)
+                    if observed_term == term.term
+                        && (report.observed_fencing_token != Some(term.fencing_token)
+                            || report.observed_leader.as_ref() != Some(&term.leader)) =>
+                {
+                    bail!("coordinator_term.error.conflict");
+                }
+                _ => {}
+            }
+            if report
+                .observed_candidate_config_revision
+                .is_some_and(|revision| revision > config.revision)
+            {
+                bail!("coordinator_candidate.error.revision_rollback");
+            }
+            Ok((term, config))
+        })();
+        let (term, config) = match current {
+            Ok(current) => current,
+            Err(error) => {
+                append_audit(
+                    &mut file.audit_log,
+                    actor,
+                    &network_id,
+                    "coordinator.recovery.rejected",
+                    format!("network/{network_id}/recovery/{actor}"),
+                    audit_outcome_for_error(&error),
+                    now_unix_ms,
+                    "coordinator recovery validation rejected",
+                    recovery_audit_details(actor, &report, None, None),
+                )?;
+                self.persist(&file)?;
+                return Err(error);
+            }
+        };
+
+        let snapshot_current = report.observed_term == Some(term.term)
+            && report.observed_fencing_token == Some(term.fencing_token)
+            && report.observed_leader.as_ref() == Some(&term.leader)
+            && report.observed_candidate_config_revision == Some(config.revision);
+        let audit_current = report.observed_audit_sequence == audit_sequence_before;
+        let role = if config
+            .candidates
+            .iter()
+            .any(|candidate| candidate.node_id == *actor)
+        {
+            CoordinatorRecoveryRole::Candidate
+        } else {
+            CoordinatorRecoveryRole::Member
+        };
+        let old_leader = report
+            .observed_term
+            .is_some_and(|observed| observed < term.term)
+            && report.observed_leader.as_ref() == Some(actor);
+        let (stage, reason_code) = if !snapshot_current {
+            (
+                CoordinatorRecoveryStage::ReadOnly,
+                if old_leader {
+                    "coordinator.recovery.stale_old_leader"
+                } else {
+                    "coordinator.recovery.snapshot_behind"
+                },
+            )
+        } else if !audit_current {
+            (
+                CoordinatorRecoveryStage::CatchingUp,
+                "coordinator.recovery.audit_behind",
+            )
+        } else {
+            (
+                CoordinatorRecoveryStage::Rejoined,
+                if role == CoordinatorRecoveryRole::Candidate {
+                    "coordinator.recovery.rejoined_candidate"
+                } else {
+                    "coordinator.recovery.rejoined_member"
+                },
+            )
+        };
+
+        let recovery_before_audit = CoordinatorRecoveryStatus {
+            network_id: network_id.clone(),
+            stage,
+            role,
+            governance_writable: false,
+            health_checks_allowed: true,
+            data_plane_allowed: true,
+            authoritative_term: term.term,
+            authoritative_fencing_token: term.fencing_token,
+            authoritative_leader: term.leader.clone(),
+            authoritative_candidate_config_revision: config.revision,
+            authoritative_audit_sequence: audit_sequence_before,
+            reason_code: reason_code.into(),
+        };
+        let previous = file
+            .networks
+            .get(&network_id)
+            .and_then(|stored| stored.recoveries.get(actor));
+        if previous != Some(&recovery_before_audit) {
+            append_audit(
+                &mut file.audit_log,
+                actor,
+                &network_id,
+                if old_leader {
+                    "coordinator.recovery.old_leader"
+                } else {
+                    "coordinator.recovery.validated"
+                },
+                format!("network/{network_id}/recovery/{actor}"),
+                AuditOutcome::Succeeded,
+                now_unix_ms,
+                "coordinator recovery validated without restoring governance write authority",
+                recovery_audit_details(actor, &report, Some(stage), Some(&term)),
+            )?;
+        }
+
+        let audit_sequence_after = network_audit_sequence(&file, &network_id);
+        let replay_start = usize::try_from(report.observed_audit_sequence)
+            .context("coordinator_recovery.error.audit_cursor_overflow")?
+            .min(audit_sequence_after as usize);
+        let audit_entries = network_audit_entries(&file, &network_id)
+            .skip(replay_start)
+            .take(COORDINATOR_RECOVERY_AUDIT_REPLAY_LIMIT)
+            .cloned()
+            .collect::<Vec<_>>();
+        let recovered_through = report
+            .observed_audit_sequence
+            .saturating_add(audit_entries.len() as u64);
+        let mut recovery = recovery_before_audit;
+        recovery.authoritative_audit_sequence = recovered_through;
+        file.networks
+            .entry(network_id.clone())
+            .or_default()
+            .recoveries
+            .insert(actor.clone(), recovery.clone());
+        let status = status_from_file(&network, file.networks.get(&network_id), now_unix_ms)?;
+        self.persist(&file)?;
+        Ok(CoordinatorRecoveryResponse {
+            status,
+            recovery,
+            audit_entries,
+        })
     }
 
     pub fn update_config(
@@ -1278,6 +1502,81 @@ fn status_from_file(
     Ok(status)
 }
 
+fn network_audit_entries<'a>(
+    file: &'a CoordinatorCandidateFile,
+    network_id: &'a NetworkId,
+) -> impl Iterator<Item = &'a AuditEntry> + 'a {
+    file.audit_log
+        .entries()
+        .iter()
+        .filter(move |entry| entry.network_id.as_ref() == Some(network_id))
+}
+
+fn network_audit_sequence(file: &CoordinatorCandidateFile, network_id: &NetworkId) -> u64 {
+    network_audit_entries(file, network_id).count() as u64
+}
+
+fn recovery_audit_details(
+    actor: &NodeId,
+    report: &CoordinatorRecoveryReport,
+    stage: Option<CoordinatorRecoveryStage>,
+    term: Option<&CoordinatorTerm>,
+) -> BTreeMap<String, String> {
+    let mut details = BTreeMap::from([
+        ("actor".into(), actor.to_string()),
+        (
+            "observed_term".into(),
+            report
+                .observed_term
+                .map(|term| term.to_string())
+                .unwrap_or_else(|| "none".into()),
+        ),
+        (
+            "observed_fencing_token".into(),
+            report
+                .observed_fencing_token
+                .map(|token| token.0.to_string())
+                .unwrap_or_else(|| "none".into()),
+        ),
+        (
+            "observed_leader".into(),
+            report
+                .observed_leader
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "none".into()),
+        ),
+        (
+            "observed_candidate_config_revision".into(),
+            report
+                .observed_candidate_config_revision
+                .map(|revision| revision.to_string())
+                .unwrap_or_else(|| "none".into()),
+        ),
+        (
+            "observed_audit_sequence".into(),
+            report.observed_audit_sequence.to_string(),
+        ),
+        ("governance_writable".into(), "false".into()),
+    ]);
+    if let Some(stage) = stage {
+        details.insert("recovery_stage".into(), format!("{stage:?}"));
+    }
+    if let Some(term) = term {
+        details.insert("authoritative_term".into(), term.term.to_string());
+        details.insert(
+            "authoritative_fencing_token".into(),
+            term.fencing_token.0.to_string(),
+        );
+        details.insert("authoritative_leader".into(), term.leader.to_string());
+        details.insert(
+            "authoritative_candidate_config_revision".into(),
+            term.candidate_config_revision.to_string(),
+        );
+    }
+    details
+}
+
 fn election_audit_details(
     election: Option<&CoordinatorElectionSession>,
 ) -> BTreeMap<String, String> {
@@ -1341,6 +1640,7 @@ fn audit_outcome_for_error(error: &anyhow::Error) -> AuditOutcome {
         || code.contains("term_conflict")
         || code.contains("fencing_token_rollback")
         || code.contains("not_installed")
+        || code.contains("audit_cursor_ahead")
         || code.contains("write_forbidden")
         || code.contains("transition_read_only")
         || code.contains("clock_skew")
@@ -1480,7 +1780,7 @@ mod tests {
         NetworkJoinMode, NetworkVisibility, PublicKey, COORDINATOR_ELECTION_VOTE_MAX_VALIDITY_MS,
     };
     use fuckipv6_common::Identity;
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
     use std::thread;
 
     const NOW: u64 = 2_000_000;
@@ -1644,16 +1944,41 @@ mod tests {
                 NodeId::from_public_key(&self.candidate_one.public_key()),
                 NodeId::from_public_key(&self.candidate_two.public_key()),
             ];
+            self.term_with_revision_and_group(
+                term,
+                fencing_token,
+                leader,
+                1,
+                candidate_group,
+                &[&self.candidate_one, &self.candidate_two],
+                issued_at_unix_ms,
+                expires_at_unix_ms,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn term_with_revision_and_group(
+            &self,
+            term: u64,
+            fencing_token: u64,
+            leader: &Identity,
+            candidate_config_revision: u64,
+            candidate_group: Vec<NodeId>,
+            voters: &[&Identity],
+            issued_at_unix_ms: u64,
+            expires_at_unix_ms: u64,
+        ) -> CoordinatorTerm {
             let leader = NodeId::from_public_key(&leader.public_key());
             let election_expiry = issued_at_unix_ms
                 .saturating_add(COORDINATOR_ELECTION_VOTE_MAX_VALIDITY_MS)
                 .max(expires_at_unix_ms);
-            let majority_votes = [&self.candidate_one, &self.candidate_two]
-                .into_iter()
+            let majority_votes = voters
+                .iter()
+                .copied()
                 .map(|voter| {
                     fuckipv6_common::domain::CoordinatorElectionVote::signed(
                         self.network.network_id.clone(),
-                        1,
+                        candidate_config_revision,
                         term,
                         leader.clone(),
                         candidate_group.clone(),
@@ -1669,7 +1994,7 @@ mod tests {
                 term,
                 leader,
                 candidate_group,
-                candidate_config_revision: 1,
+                candidate_config_revision,
                 majority_proof: majority_votes
                     .iter()
                     .map(|vote| vote.voter.clone())
@@ -2913,5 +3238,430 @@ mod tests {
             }),
             "{audit:#?}"
         );
+    }
+
+    fn network_audit_count(store: &CoordinatorCandidateStore, network_id: &NetworkId) -> u64 {
+        store
+            .audit_entries()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.network_id.as_ref() == Some(network_id))
+            .count() as u64
+    }
+
+    #[test]
+    fn old_leader_recovery_enters_read_only_before_rejoining() {
+        let fixture = Fixture::new("old-leader-read-only");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_two_id = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        store
+            .install_term(
+                &candidate_one_id,
+                fixture.term(1, 10, &fixture.candidate_one, NOW, NOW + 60_000),
+                NOW,
+            )
+            .unwrap();
+        store
+            .install_term(
+                &candidate_two_id,
+                fixture.term(2, 20, &fixture.candidate_two, NOW, NOW + 60_000),
+                NOW,
+            )
+            .unwrap();
+
+        let response = store
+            .recover(
+                &candidate_one_id,
+                CoordinatorRecoveryReport {
+                    network_id: fixture.network.network_id.clone(),
+                    observed_term: Some(1),
+                    observed_fencing_token: Some(FencingToken(10)),
+                    observed_leader: Some(candidate_one_id.clone()),
+                    observed_candidate_config_revision: Some(1),
+                    observed_audit_sequence: network_audit_count(
+                        &store,
+                        &fixture.network.network_id,
+                    ),
+                },
+                NOW + 1,
+            )
+            .unwrap();
+
+        assert_eq!(response.recovery.stage, CoordinatorRecoveryStage::ReadOnly);
+        assert_eq!(response.recovery.role, CoordinatorRecoveryRole::Candidate);
+        assert_eq!(
+            response.recovery.reason_code,
+            "coordinator.recovery.stale_old_leader"
+        );
+        assert!(!response.recovery.governance_writable);
+        assert!(response.recovery.health_checks_allowed);
+        assert!(response.recovery.data_plane_allowed);
+        assert_eq!(response.recovery.authoritative_term, 2);
+        assert_eq!(response.recovery.authoritative_leader, candidate_two_id);
+        assert!(response.recovery.rejects_governance_write());
+
+        let audit = store.audit_entries().unwrap();
+        let recovered = audit
+            .iter()
+            .find(|entry| entry.action == "coordinator.recovery.old_leader")
+            .expect("old leader recovery must be audited");
+        assert_eq!(recovered.outcome, AuditOutcome::Succeeded);
+        assert_eq!(
+            recovered.details.get("governance_writable"),
+            Some(&"false".into())
+        );
+    }
+
+    #[test]
+    fn recovery_catches_up_audit_then_rejoins_without_write_authority() {
+        let fixture = Fixture::new("recovery-audit-catchup");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        store
+            .install_term(
+                &candidate_one_id,
+                fixture.term(2, 20, &fixture.candidate_one, NOW, NOW + 60_000),
+                NOW,
+            )
+            .unwrap();
+        let report = CoordinatorRecoveryReport {
+            network_id: fixture.network.network_id.clone(),
+            observed_term: Some(2),
+            observed_fencing_token: Some(FencingToken(20)),
+            observed_leader: Some(candidate_one_id.clone()),
+            observed_candidate_config_revision: Some(1),
+            observed_audit_sequence: 0,
+        };
+
+        let catching_up = store
+            .recover(&candidate_one_id, report.clone(), NOW + 1)
+            .unwrap();
+        assert_eq!(
+            catching_up.recovery.stage,
+            CoordinatorRecoveryStage::CatchingUp
+        );
+        assert_eq!(
+            catching_up.recovery.reason_code,
+            "coordinator.recovery.audit_behind"
+        );
+        assert!(!catching_up.recovery.governance_writable);
+        assert!(!catching_up.audit_entries.is_empty());
+        assert!(catching_up.audit_entries.len() <= COORDINATOR_RECOVERY_AUDIT_REPLAY_LIMIT);
+        assert!(catching_up.recovery.authoritative_audit_sequence > 0);
+
+        let mut current = report;
+        current.observed_audit_sequence = catching_up.recovery.authoritative_audit_sequence;
+        let rejoined = store.recover(&candidate_one_id, current, NOW + 2).unwrap();
+        assert_eq!(rejoined.recovery.stage, CoordinatorRecoveryStage::Rejoined);
+        assert_eq!(
+            rejoined.recovery.reason_code,
+            "coordinator.recovery.rejoined_candidate"
+        );
+        assert!(!rejoined.recovery.governance_writable);
+        assert!(rejoined.recovery.health_checks_allowed);
+        assert!(rejoined.recovery.data_plane_allowed);
+    }
+
+    #[test]
+    fn rejoin_as_member_when_config_changes_candidate_group() {
+        let fixture = Fixture::new("recovery-member-role");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_two_id = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        let ordinary_id = NodeId::from_public_key(&fixture.ordinary.public_key());
+        store
+            .update_config(
+                &owner_id,
+                0,
+                fixture.config(
+                    1,
+                    vec![
+                        CoordinatorCandidate {
+                            node_id: owner_id.clone(),
+                            priority: 10,
+                        },
+                        CoordinatorCandidate {
+                            node_id: candidate_one_id.clone(),
+                            priority: 20,
+                        },
+                    ],
+                ),
+                NOW,
+            )
+            .unwrap();
+        let old_term = fixture.term_with_revision_and_group(
+            1,
+            10,
+            &fixture.owner,
+            1,
+            vec![owner_id.clone(), candidate_one_id.clone()],
+            &[&fixture.owner, &fixture.candidate_one],
+            NOW,
+            NOW + 60_000,
+        );
+        let old_credential = fixture.credential(&old_term);
+        store.install_term(&owner_id, old_term, NOW).unwrap();
+
+        let config_two = CoordinatorCandidateConfig::signed(
+            fixture.network.network_id.clone(),
+            2,
+            vec![
+                CoordinatorCandidate {
+                    node_id: candidate_two_id.clone(),
+                    priority: 10,
+                },
+                CoordinatorCandidate {
+                    node_id: ordinary_id.clone(),
+                    priority: 20,
+                },
+            ],
+            NOW,
+            NOW + 3_600_000,
+            &fixture.owner,
+        )
+        .unwrap();
+        store
+            .update_config_authorized(&owner_id, 1, config_two, &old_credential, NOW + 1)
+            .unwrap();
+        let current_term = fixture.term_with_revision_and_group(
+            2,
+            20,
+            &fixture.candidate_two,
+            2,
+            vec![candidate_two_id.clone(), ordinary_id.clone()],
+            &[&fixture.candidate_two, &fixture.ordinary],
+            NOW,
+            NOW + 60_000,
+        );
+        store
+            .install_term(&candidate_two_id, current_term, NOW + 2)
+            .unwrap();
+
+        let response = store
+            .recover(
+                &candidate_one_id,
+                CoordinatorRecoveryReport {
+                    network_id: fixture.network.network_id.clone(),
+                    observed_term: Some(2),
+                    observed_fencing_token: Some(FencingToken(20)),
+                    observed_leader: Some(candidate_two_id),
+                    observed_candidate_config_revision: Some(2),
+                    observed_audit_sequence: network_audit_count(
+                        &store,
+                        &fixture.network.network_id,
+                    ),
+                },
+                NOW + 3,
+            )
+            .unwrap();
+
+        assert_eq!(response.recovery.stage, CoordinatorRecoveryStage::Rejoined);
+        assert_eq!(response.recovery.role, CoordinatorRecoveryRole::Member);
+        assert_eq!(
+            response.recovery.reason_code,
+            "coordinator.recovery.rejoined_member"
+        );
+        assert!(!response.recovery.governance_writable);
+        assert!(response.recovery.health_checks_allowed);
+        assert!(response.recovery.data_plane_allowed);
+    }
+
+    #[test]
+    fn recovery_rejects_future_term_and_audit_cursor() {
+        let fixture = Fixture::new("recovery-future-cursor");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        store
+            .install_term(
+                &candidate_one_id,
+                fixture.term(1, 10, &fixture.candidate_one, NOW, NOW + 60_000),
+                NOW,
+            )
+            .unwrap();
+        let current_report = CoordinatorRecoveryReport {
+            network_id: fixture.network.network_id.clone(),
+            observed_term: Some(1),
+            observed_fencing_token: Some(FencingToken(10)),
+            observed_leader: Some(candidate_one_id.clone()),
+            observed_candidate_config_revision: Some(1),
+            observed_audit_sequence: 0,
+        };
+        let mut future = current_report.clone();
+        future.observed_term = Some(2);
+        future.observed_fencing_token = Some(FencingToken(20));
+        assert_eq!(
+            store
+                .recover(&candidate_one_id, future, NOW + 1)
+                .unwrap_err()
+                .to_string(),
+            "coordinator_term.error.not_installed"
+        );
+
+        let mut cursor_ahead = current_report;
+        cursor_ahead.observed_audit_sequence =
+            network_audit_count(&store, &fixture.network.network_id) + 1;
+        assert_eq!(
+            store
+                .recover(&candidate_one_id, cursor_ahead, NOW + 2)
+                .unwrap_err()
+                .to_string(),
+            "coordinator_recovery.error.audit_cursor_ahead"
+        );
+
+        let rejected = store
+            .audit_entries()
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.action == "coordinator.recovery.rejected")
+            .collect::<Vec<_>>();
+        assert_eq!(rejected.len(), 2);
+        assert!(rejected
+            .iter()
+            .all(|entry| entry.outcome == AuditOutcome::Denied));
+    }
+
+    #[test]
+    fn concurrent_recovery_is_durable_and_audited_once() {
+        let fixture = Fixture::new("recovery-concurrent");
+        let store = Arc::new(fixture.store());
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_two_id = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        store
+            .install_term(
+                &candidate_one_id,
+                fixture.term(1, 10, &fixture.candidate_one, NOW, NOW + 60_000),
+                NOW,
+            )
+            .unwrap();
+        store
+            .install_term(
+                &candidate_two_id,
+                fixture.term(2, 20, &fixture.candidate_two, NOW, NOW + 60_000),
+                NOW,
+            )
+            .unwrap();
+        let report = CoordinatorRecoveryReport {
+            network_id: fixture.network.network_id.clone(),
+            observed_term: Some(1),
+            observed_fencing_token: Some(FencingToken(10)),
+            observed_leader: Some(candidate_one_id.clone()),
+            observed_candidate_config_revision: Some(1),
+            observed_audit_sequence: network_audit_count(&store, &fixture.network.network_id),
+        };
+        let barrier = Arc::new(Barrier::new(12));
+        let mut handles = Vec::new();
+        for index in 0..12 {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            let report = report.clone();
+            let actor = candidate_one_id.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                store
+                    .recover(&actor, report, NOW + 1 + index)
+                    .map(|response| response.recovery)
+            }));
+        }
+        for handle in handles {
+            let recovery = handle.join().unwrap().unwrap();
+            assert_eq!(recovery.stage, CoordinatorRecoveryStage::ReadOnly);
+            assert!(!recovery.governance_writable);
+            assert!(recovery.health_checks_allowed);
+            assert!(recovery.data_plane_allowed);
+        }
+
+        let restarted = fixture.store();
+        let audit = restarted.audit_entries().unwrap();
+        assert_eq!(
+            audit
+                .iter()
+                .filter(|entry| entry.action == "coordinator.recovery.old_leader")
+                .count(),
+            1,
+            "{audit:#?}"
+        );
+        let status = restarted
+            .status(&candidate_one_id, &fixture.network.network_id, NOW + 20)
+            .unwrap();
+        assert_eq!(status.latest_term.as_ref().map(|term| term.term), Some(2));
+    }
+
+    #[test]
+    fn recovered_old_credential_remains_rejected() {
+        let fixture = Fixture::new("recovered-old-credential");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_two_id = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        let old_term = fixture.term(1, 10, &fixture.candidate_one, NOW, NOW + 60_000);
+        let old_credential = fixture.credential(&old_term);
+        store
+            .install_term(&candidate_one_id, old_term, NOW)
+            .unwrap();
+        store
+            .install_term(
+                &candidate_two_id,
+                fixture.term(2, 20, &fixture.candidate_two, NOW, NOW + 60_000),
+                NOW,
+            )
+            .unwrap();
+        store
+            .recover(
+                &candidate_one_id,
+                CoordinatorRecoveryReport {
+                    network_id: fixture.network.network_id.clone(),
+                    observed_term: Some(1),
+                    observed_fencing_token: Some(FencingToken(10)),
+                    observed_leader: Some(candidate_one_id.clone()),
+                    observed_candidate_config_revision: Some(1),
+                    observed_audit_sequence: network_audit_count(
+                        &store,
+                        &fixture.network.network_id,
+                    ),
+                },
+                NOW + 1,
+            )
+            .unwrap();
+
+        let error = store
+            .authorize_governance_write(
+                &candidate_one_id,
+                &old_credential,
+                CoordinatorWriteKind::Membership,
+                NOW + 2,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("domain.coordinator_term_rollback"),
+            "{error}"
+        );
+        let audit = store.audit_entries().unwrap();
+        assert!(audit.iter().any(|entry| {
+            entry.action == "coordinator.term.write.rejected"
+                && entry.outcome == AuditOutcome::Denied
+                && entry.details.get("error") == Some(&error)
+        }));
     }
 }

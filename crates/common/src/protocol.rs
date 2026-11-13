@@ -5,14 +5,15 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use crate::domain::{
     ContentHash, CoordinatorCandidateConfig, CoordinatorCandidateDeclaration,
     CoordinatorCandidateStatus, CoordinatorElectionProposal, CoordinatorElectionStage,
-    CoordinatorElectionVote, CoordinatorTerm, CoordinatorWriteCredential,
-    ExitContributionAuthorizationSnapshot, ExitContributionRequest, ExitContributionRequestId,
-    ExitContributionRequestState, ExitContributionReviewAction, InvitationCreateRequest,
-    InvitationId, InvitationPreviewRequest, InvitationRedeemRequest, InvitationRedemption,
-    InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestId,
-    JoinRequestReviewAction, JoinRequestState, MemberLifecycleChange, MemberLifecycleChangeRequest,
-    MemberRemovalPreview, MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview,
-    NetworkJoinPreviewRequest, NetworkMemberDirectory, NodeId,
+    CoordinatorElectionVote, CoordinatorRecoveryReport,
+    CoordinatorRecoveryResponse as CoordinatorRecoveryResult, CoordinatorTerm,
+    CoordinatorWriteCredential, ExitContributionAuthorizationSnapshot, ExitContributionRequest,
+    ExitContributionRequestId, ExitContributionRequestState, ExitContributionReviewAction,
+    InvitationCreateRequest, InvitationId, InvitationPreviewRequest, InvitationRedeemRequest,
+    InvitationRedemption, InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest,
+    JoinRequestId, JoinRequestReviewAction, JoinRequestState, MemberLifecycleChange,
+    MemberLifecycleChangeRequest, MemberRemovalPreview, MemberRemovalPreviewRequest, NetworkId,
+    NetworkJoinPreview, NetworkJoinPreviewRequest, NetworkMemberDirectory, NodeId,
 };
 use crate::types::{ClientId, NatType, PeerInfo, RouteEntry, VirtualIps};
 
@@ -450,6 +451,16 @@ pub enum SignalingMessage {
         network_id: NetworkId,
         proposal_id: ContentHash,
         stage: CoordinatorElectionStage,
+    },
+
+    // Stale/restarted Leader recovery. Appended after every earlier variant so
+    // postcard tags remain stable. The response carries a bounded audit replay
+    // but never grants governance write authority.
+    CoordinatorRecoveryRequest {
+        report: CoordinatorRecoveryReport,
+    },
+    CoordinatorRecoveryResponse {
+        response: CoordinatorRecoveryResult,
     },
 }
 
@@ -1349,8 +1360,11 @@ mod tests {
     #[test]
     fn coordinator_candidate_messages_are_postcard_safe() -> anyhow::Result<()> {
         use crate::domain::{
-            CoordinatorAuthority, CoordinatorCandidate, CoordinatorElectionProposal,
-            CoordinatorElectionStage, CoordinatorElectionVote, CoordinatorPhase, CoordinatorTerm,
+            CoordinatorAuthority, CoordinatorCandidate, CoordinatorCandidateConfigState,
+            CoordinatorCandidateStatus, CoordinatorElectionProposal, CoordinatorElectionStage,
+            CoordinatorElectionVote, CoordinatorEmergencyState, CoordinatorPhase,
+            CoordinatorRecoveryReport, CoordinatorRecoveryResponse, CoordinatorRecoveryRole,
+            CoordinatorRecoveryStage, CoordinatorRecoveryStatus, CoordinatorTerm,
             CoordinatorWriteCredential, FencingToken,
         };
 
@@ -1515,7 +1529,7 @@ mod tests {
         let credential = CoordinatorWriteCredential {
             network_id: network_id.clone(),
             term: term.term,
-            leader: candidate_id,
+            leader: candidate_id.clone(),
             fencing_token: term.fencing_token,
         };
 
@@ -1559,6 +1573,77 @@ mod tests {
         };
         assert_eq!(decoded_credential, credential);
         assert_eq!(new_expires_at_unix_ms, 180);
+
+        let report = CoordinatorRecoveryReport {
+            network_id: network_id.clone(),
+            observed_term: Some(1),
+            observed_fencing_token: Some(FencingToken(1)),
+            observed_leader: Some(candidate_id.clone()),
+            observed_candidate_config_revision: Some(1),
+            observed_audit_sequence: 3,
+        };
+        let decoded = assert_signaling_round_trip(SignalingMessage::CoordinatorRecoveryRequest {
+            report: report.clone(),
+        })
+        .map_err(|error| anyhow::anyhow!("recovery request round trip failed: {error:#}"))?;
+        let SignalingMessage::CoordinatorRecoveryRequest { report: decoded } = decoded else {
+            panic!("expected coordinator recovery request");
+        };
+        assert_eq!(decoded, report);
+
+        let status = CoordinatorCandidateStatus {
+            network_id: network_id.clone(),
+            generated_at_unix_ms: 150,
+            config_state: CoordinatorCandidateConfigState::Current,
+            config: Some(config),
+            candidates: vec![],
+            current_leader: Some(candidate_id.clone()),
+            latest_term: Some(term.clone()),
+            lease: Default::default(),
+            control_plane: Default::default(),
+            emergency: CoordinatorEmergencyState::None,
+            latest_election: None,
+        };
+        let recovery = CoordinatorRecoveryStatus {
+            network_id: network_id.clone(),
+            stage: CoordinatorRecoveryStage::ReadOnly,
+            role: CoordinatorRecoveryRole::Candidate,
+            governance_writable: false,
+            health_checks_allowed: true,
+            data_plane_allowed: true,
+            authoritative_term: term.term,
+            authoritative_fencing_token: term.fencing_token,
+            authoritative_leader: term.leader.clone(),
+            authoritative_candidate_config_revision: term.candidate_config_revision,
+            authoritative_audit_sequence: 3,
+            reason_code: "coordinator.recovery.stale_old_leader".into(),
+        };
+        let response = CoordinatorRecoveryResponse {
+            status: status.clone(),
+            recovery,
+            audit_entries: vec![],
+        };
+        let encoded = crate::codec::encode(&status.lease)?;
+        let _: crate::domain::CoordinatorLeaseStatus = crate::codec::decode(&encoded)
+            .map_err(|error| anyhow::anyhow!("lease status round trip failed: {error:#}"))?;
+        let encoded = crate::codec::encode(&status.control_plane)?;
+        let _: crate::domain::CoordinatorControlPlaneStatus = crate::codec::decode(&encoded)
+            .map_err(|error| anyhow::anyhow!("control plane round trip failed: {error:#}"))?;
+        let encoded = crate::codec::encode(&status)?;
+        let _: CoordinatorCandidateStatus = crate::codec::decode(&encoded)
+            .map_err(|error| anyhow::anyhow!("candidate status round trip failed: {error:#}"))?;
+        assert_signaling_round_trip(SignalingMessage::CoordinatorCandidateStatusAck { status })
+            .map_err(|error| {
+                anyhow::anyhow!("candidate status ack round trip failed: {error:#}")
+            })?;
+        let decoded = assert_signaling_round_trip(SignalingMessage::CoordinatorRecoveryResponse {
+            response: response.clone(),
+        })
+        .map_err(|error| anyhow::anyhow!("recovery response round trip failed: {error:#}"))?;
+        let SignalingMessage::CoordinatorRecoveryResponse { response: decoded } = decoded else {
+            panic!("expected coordinator recovery response");
+        };
+        assert_eq!(decoded, response);
         Ok(())
     }
 

@@ -3,10 +3,11 @@ use bytes::Bytes;
 use fuckipv6_common::domain::{
     ContentHash, CoordinatorCandidateConfig, CoordinatorCandidateDeclaration,
     CoordinatorCandidateStatus, CoordinatorElectionProposal, CoordinatorElectionVote,
-    CoordinatorTerm, CoordinatorWriteCredential, InvitationCode, InvitationCreateRequest,
-    InvitationId, InvitationPreview, InvitationRedeemRequest, InvitationRedemption,
-    InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestId,
-    JoinRequestState, MemberLifecycleChange, MemberLifecycleChangeRequest, MemberRemovalPreview,
+    CoordinatorRecoveryReport, CoordinatorRecoveryResponse, CoordinatorTerm,
+    CoordinatorWriteCredential, InvitationCode, InvitationCreateRequest, InvitationId,
+    InvitationPreview, InvitationRedeemRequest, InvitationRedemption, InvitationState,
+    InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestId, JoinRequestState,
+    MemberLifecycleChange, MemberLifecycleChangeRequest, MemberRemovalPreview,
     MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview, NetworkJoinPreviewRequest,
     NetworkMemberDirectory, NodeId,
 };
@@ -370,12 +371,44 @@ enum PendingCoordinatorCandidate {
         network_id: NetworkId,
         proposal_id: ContentHash,
     },
+    Recovery {
+        network_id: NetworkId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CoordinatorCandidateOperationResponse {
+    Status(CoordinatorCandidateStatus),
+    Recovery(CoordinatorRecoveryResponse),
+}
+
+impl CoordinatorCandidateOperationResponse {
+    fn into_status(
+        self,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        match self {
+            Self::Status(status) => Ok(status),
+            Self::Recovery(_) => Err(CoordinatorCandidateControlError::Unavailable),
+        }
+    }
+
+    fn into_recovery(
+        self,
+    ) -> std::result::Result<CoordinatorRecoveryResponse, CoordinatorCandidateControlError> {
+        match self {
+            Self::Recovery(response) => Ok(response),
+            Self::Status(_) => Err(CoordinatorCandidateControlError::Unavailable),
+        }
+    }
 }
 
 struct PendingCoordinatorCandidateResponse {
     expected: PendingCoordinatorCandidate,
     sender: oneshot::Sender<
-        std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError>,
+        std::result::Result<
+            CoordinatorCandidateOperationResponse,
+            CoordinatorCandidateControlError,
+        >,
     >,
 }
 
@@ -390,7 +423,10 @@ impl CoordinatorCandidateResponseHub {
         expected: PendingCoordinatorCandidate,
     ) -> std::result::Result<
         oneshot::Receiver<
-            std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError>,
+            std::result::Result<
+                CoordinatorCandidateOperationResponse,
+                CoordinatorCandidateControlError,
+            >,
         >,
         CoordinatorCandidateControlError,
     > {
@@ -520,6 +556,15 @@ impl CoordinatorCandidateResponseHub {
                     _ => false,
                 })
             }
+            SignalingMessage::CoordinatorRecoveryResponse { response } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::Recovery { network_id } => {
+                        response.status.network_id == *network_id
+                            && response.recovery.network_id == *network_id
+                    }
+                    _ => false,
+                })
+            }
             _ => return false,
         };
 
@@ -533,6 +578,7 @@ impl CoordinatorCandidateResponseHub {
                 | SignalingMessage::CoordinatorElectionProposeAck { .. }
                 | SignalingMessage::CoordinatorElectionVoteAck { .. }
                 | SignalingMessage::CoordinatorElectionTimeoutAck { .. }
+                | SignalingMessage::CoordinatorRecoveryResponse { .. }
         );
         if !matches {
             return is_candidate_response;
@@ -546,7 +592,12 @@ impl CoordinatorCandidateResponseHub {
             | SignalingMessage::CoordinatorTermLeaseRenewAck { status }
             | SignalingMessage::CoordinatorElectionProposeAck { status }
             | SignalingMessage::CoordinatorElectionVoteAck { status }
-            | SignalingMessage::CoordinatorElectionTimeoutAck { status } => status.clone(),
+            | SignalingMessage::CoordinatorElectionTimeoutAck { status } => {
+                CoordinatorCandidateOperationResponse::Status(status.clone())
+            }
+            SignalingMessage::CoordinatorRecoveryResponse { response } => {
+                CoordinatorCandidateOperationResponse::Recovery(response.clone())
+            }
             SignalingMessage::Error { code, .. } => {
                 return self.finish(Err(CoordinatorCandidateControlError::Rejected(*code)));
             }
@@ -572,7 +623,10 @@ impl CoordinatorCandidateResponseHub {
 
     fn finish(
         &self,
-        result: std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError>,
+        result: std::result::Result<
+            CoordinatorCandidateOperationResponse,
+            CoordinatorCandidateControlError,
+        >,
     ) -> bool {
         let pending = self
             .pending
@@ -1388,6 +1442,21 @@ impl SignalingClient {
         .await
     }
 
+    pub(crate) async fn recover_coordinator(
+        &self,
+        report: CoordinatorRecoveryReport,
+    ) -> std::result::Result<CoordinatorRecoveryResponse, CoordinatorCandidateControlError> {
+        let expected = PendingCoordinatorCandidate::Recovery {
+            network_id: report.network_id.clone(),
+        };
+        self.send_coordinator_candidate_operation_response(
+            SignalingMessage::CoordinatorRecoveryRequest { report },
+            expected,
+        )
+        .await?
+        .into_recovery()
+    }
+
     pub(crate) async fn update_coordinator_candidates(
         &self,
         config: CoordinatorCandidateConfig,
@@ -1539,6 +1608,17 @@ impl SignalingClient {
         message: SignalingMessage,
         expected: PendingCoordinatorCandidate,
     ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        self.send_coordinator_candidate_operation_response(message, expected)
+            .await?
+            .into_status()
+    }
+
+    async fn send_coordinator_candidate_operation_response(
+        &self,
+        message: SignalingMessage,
+        expected: PendingCoordinatorCandidate,
+    ) -> std::result::Result<CoordinatorCandidateOperationResponse, CoordinatorCandidateControlError>
+    {
         let _gate = self.coordinator_candidate_gate.lock().await;
         let receiver = self.coordinator_candidates.register(expected)?;
         if self.send(message).is_err() {
@@ -2394,7 +2474,9 @@ fn signaling_message_to_event(msg: SignalingMessage) -> Option<SignalingEvent> {
         | SignalingMessage::CoordinatorElectionVote { .. }
         | SignalingMessage::CoordinatorElectionVoteAck { .. }
         | SignalingMessage::CoordinatorElectionTimeout { .. }
-        | SignalingMessage::CoordinatorElectionTimeoutAck { .. } => None,
+        | SignalingMessage::CoordinatorElectionTimeoutAck { .. }
+        | SignalingMessage::CoordinatorRecoveryRequest { .. }
+        | SignalingMessage::CoordinatorRecoveryResponse { .. } => None,
 
         _ => None,
     }
@@ -2878,7 +2960,7 @@ mod tests {
         }));
         assert_eq!(
             receiver.await.expect("matching install response"),
-            Ok(status)
+            Ok(CoordinatorCandidateOperationResponse::Status(status))
         );
     }
 
@@ -2917,7 +2999,7 @@ mod tests {
         }));
         assert_eq!(
             receiver.await.expect("matching renewal response"),
-            Ok(status)
+            Ok(CoordinatorCandidateOperationResponse::Status(status))
         );
     }
 
@@ -2949,7 +3031,7 @@ mod tests {
         }));
         assert_eq!(
             receiver.await.expect("matching proposal response"),
-            Ok(status)
+            Ok(CoordinatorCandidateOperationResponse::Status(status))
         );
     }
 
@@ -2979,7 +3061,10 @@ mod tests {
         assert!(hub.route(&SignalingMessage::CoordinatorElectionVoteAck {
             status: status.clone(),
         }));
-        assert_eq!(receiver.await.expect("matching vote response"), Ok(status));
+        assert_eq!(
+            receiver.await.expect("matching vote response"),
+            Ok(CoordinatorCandidateOperationResponse::Status(status))
+        );
     }
 
     #[tokio::test]
@@ -3010,7 +3095,60 @@ mod tests {
         }));
         assert_eq!(
             receiver.await.expect("matching timeout response"),
-            Ok(status)
+            Ok(CoordinatorCandidateOperationResponse::Status(status))
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_response_requires_matching_status_and_recovery_network() {
+        let term = coordinator_term(2, 20, 1_700_000_060_000);
+        let status = coordinator_status(&term, 1_700_000_001_000);
+        let network_id = term.network_id.clone();
+        let recovery = fuckipv6_common::domain::CoordinatorRecoveryStatus {
+            network_id: network_id.clone(),
+            stage: fuckipv6_common::domain::CoordinatorRecoveryStage::ReadOnly,
+            role: fuckipv6_common::domain::CoordinatorRecoveryRole::Candidate,
+            governance_writable: false,
+            health_checks_allowed: true,
+            data_plane_allowed: true,
+            authoritative_term: term.term,
+            authoritative_fencing_token: term.fencing_token,
+            authoritative_leader: term.leader.clone(),
+            authoritative_candidate_config_revision: term.candidate_config_revision,
+            authoritative_audit_sequence: 7,
+            reason_code: "coordinator.recovery.stale_old_leader".into(),
+        };
+        let response = CoordinatorRecoveryResponse {
+            status,
+            recovery,
+            audit_entries: Vec::new(),
+        };
+        let hub = CoordinatorCandidateResponseHub::default();
+        let mut receiver = hub
+            .register(PendingCoordinatorCandidate::Recovery {
+                network_id: network_id.clone(),
+            })
+            .expect("register recovery");
+
+        let mut mismatched = response.clone();
+        mismatched.recovery.network_id =
+            NetworkId::from_public_key(b"recovery-response-other-network");
+        assert!(hub.route(&SignalingMessage::CoordinatorRecoveryResponse {
+            response: mismatched,
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "a recovery response with a mismatched network must not complete the request"
+        );
+
+        assert!(hub.route(&SignalingMessage::CoordinatorRecoveryResponse {
+            response: response.clone(),
+        }));
+        assert_eq!(
+            receiver.await.expect("matching recovery response"),
+            Ok(CoordinatorCandidateOperationResponse::Recovery(response))
         );
     }
 

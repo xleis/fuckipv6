@@ -624,7 +624,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "default": null
         },
         "config_state": {
           "$ref": "#/$defs/CoordinatorCandidateConfigState"
@@ -650,7 +651,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "default": null
         },
         "emergency": {
           "$ref": "#/$defs/CoordinatorEmergencyState"
@@ -669,6 +671,7 @@
               "type": "null"
             }
           ],
+          "default": null,
           "description": "Most recent persisted election, including terminal outcomes. Keeping the\nfull signed proposal and vote set makes takeover decisions auditable from\nthe same projection used by clients and operators."
         },
         "latest_term": {
@@ -679,11 +682,13 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "default": null
         },
         "lease": {
           "$ref": "#/$defs/CoordinatorLeaseStatus",
           "default": {
+            "lease_expires_at_unix_ms": null,
             "max_clock_skew_ms": 30000,
             "observed_clock_skew_ms": 0,
             "reason_code": "coordinator.lease.no_term",
@@ -714,7 +719,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "default": null
         },
         "eligible_for_election": {
           "description": "Eligibility for the election protocol, never an appointment as Leader.",
@@ -897,6 +903,7 @@
           "$ref": "#/$defs/CoordinatorElectionProposal"
         },
         "rejection_reason": {
+          "default": null,
           "type": [
             "string",
             "null"
@@ -910,7 +917,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "default": null
         },
         "schema_version": {
           "format": "uint16",
@@ -1065,6 +1073,7 @@
       "description": "Observable lease projection used by the control plane and UI. `reason_code`\nis stable so a clock-skew alert cannot be mistaken for an ordinary expiry.",
       "properties": {
         "lease_expires_at_unix_ms": {
+          "default": null,
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -1120,6 +1129,7 @@
       "description": "Public reachability evidence supplied by the candidate itself. Consumers\nmust treat this as a claim until the election protocol verifies a quorum.",
       "properties": {
         "public_endpoint": {
+          "default": null,
           "type": [
             "string",
             "null"
@@ -1135,17 +1145,17 @@
     "CoordinatorQuorumStatus": {
       "properties": {
         "participant_count": {
-          "format": "uint",
+          "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         "received_votes": {
-          "format": "uint",
+          "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         "required_votes": {
-          "format": "uint",
+          "format": "uint64",
           "minimum": 0,
           "type": "integer"
         }

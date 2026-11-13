@@ -3341,16 +3341,30 @@ netns/iptables 测试覆盖。三端 Relay UI 的权限、网络选择、健康�
 
 **验收**：系统宁可暂停治理也不制造双写；分区恢复不会回滚已确认状态。
 
-### W14-05 旧 Leader 恢复 `[ ]`
+### W14-05 旧 Leader 恢复 `[x]`
 
-- [ ] 旧 Leader 恢复后先验证当前任期，不直接恢复写入；
-- [ ] 低任期写入、事件和状态同步被拒绝；
-- [ ] 旧 Leader 以普通候选或成员身份重新加入；
-- [ ] 完成状态快照/日志追赶和只读阶段；
-- [ ] 客户端拒绝旧 Leader 的治理事件；
-- [ ] 旧 Leader 健康检查和数据面能力可继续；
-- [ ] 记录恢复过程和被拒绝写入；
-- [ ] 完成旧 Leader 并发恢复测试。
+- [x] 旧 Leader 恢复后先验证当前任期，不直接恢复写入；
+- [x] 低任期写入、事件和状态同步被拒绝；
+- [x] 旧 Leader 以普通候选或成员身份重新加入；
+- [x] 完成状态快照/日志追赶和只读阶段；
+- [x] 客户端拒绝旧 Leader 的治理事件；
+- [x] 旧 Leader 健康检查和数据面能力可继续；
+- [x] 记录恢复过程和被拒绝写入；
+- [x] 完成旧 Leader 并发恢复测试。
+
+**证据**：Coordinator 新增已认证、幂等的恢复请求/响应链路。恢复节点提交自己观察到的 term、fencing token、
+Leader、候选配置 revision 和审计游标；服务端以持久化权威快照校验，拒绝未来 term、冲突 token 和越界的审计游标。
+旧 Leader 先进入只读阶段，只读追赶有界审计日志后才以候选或成员身份重入，恢复状态明确禁止治理写权限，但保留健康
+检查和既有数据面能力。旧凭据继续失败关闭，恢复、拒绝及并发重试均持久化审计。
+`old_leader_recovery_enters_read_only_before_rejoining`、`recovery_catches_up_audit_then_rejoins_without_write_authority`、
+`recovery_rejects_future_term_and_audit_cursor`、`recovered_old_credential_remains_rejected`、
+`rejoin_as_member_when_config_changes_candidate_group` 和 `concurrent_recovery_is_durable_and_audited_once` 覆盖上述路径；
+`stale_leader_governance_events_are_rejected_against_authoritative_status` 与客户端恢复网络绑定测试覆盖旧治理事件拒绝；
+`coordinator_takeover_poll_preserves_the_live_data_plane_session` 验证恢复轮询不替换 Signaling 会话、不结束数据面任务且
+保留审计游标。全量门禁为 common 417 passed、Coordinator 172 passed、client 1237 passed/3 ignored；
+目标测试 common coordinator 32 passed、Coordinator candidate 19 passed、client takeover 6 passed；
+`cargo fmt --all -- --check`、全 workspace Clippy `-D warnings`、契约 DTO/TypeScript/Java 检查及 `git diff --check` 均通过。
+本项不声称完成真实断电、断网和候选全失演练，这些仍由 W14-06/W14-10 覆盖。
 
 **验收**：旧 Leader 恢复不会形成脑裂或覆盖新状态，数据面与控制面可安全重连。
 

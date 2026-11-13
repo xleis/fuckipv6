@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::ids::{ContentHash, NetworkId, NodeId, PublicKey, Signature};
 use super::network::NetworkRecord;
-use super::{DomainError, DomainResult};
+use super::{AuditEntry, DomainError, DomainResult};
 use crate::Identity;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -146,7 +146,7 @@ pub enum CoordinatorLeaseState {
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct CoordinatorLeaseStatus {
     pub state: CoordinatorLeaseState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub lease_expires_at_unix_ms: Option<u64>,
     pub remaining_ms: u64,
     pub observed_clock_skew_ms: u64,
@@ -824,9 +824,9 @@ pub struct CoordinatorElectionSession {
     pub started_at_unix_ms: u64,
     pub deadline_unix_ms: u64,
     pub updated_at_unix_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub result_term: Option<CoordinatorTerm>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub rejection_reason: Option<String>,
 }
 
@@ -1628,7 +1628,7 @@ pub enum CoordinatorCandidateWillingness {
 /// must treat this as a claim until the election protocol verifies a quorum.
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct CoordinatorPublicReachability {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub public_endpoint: Option<SocketAddr>,
     #[serde(default)]
     pub reachable_via_relay: bool,
@@ -1859,7 +1859,7 @@ pub struct CoordinatorCandidateStatusEntry {
     /// Eligibility for the election protocol, never an appointment as Leader.
     pub eligible_for_election: bool,
     pub reason_code: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub declaration: Option<CoordinatorCandidateDeclaration>,
 }
 
@@ -1883,9 +1883,33 @@ pub enum CoordinatorControlPlaneState {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct CoordinatorQuorumStatus {
+    #[serde(with = "usize_as_u64")]
+    #[schemars(with = "u64")]
     pub received_votes: usize,
+    #[serde(with = "usize_as_u64")]
+    #[schemars(with = "u64")]
     pub required_votes: usize,
+    #[serde(with = "usize_as_u64")]
+    #[schemars(with = "u64")]
     pub participant_count: usize,
+}
+
+mod usize_as_u64 {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &usize, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(*value as u64)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<usize, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        usize::try_from(u64::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Fail-closed projection intended for clients and operators. A missing leader
@@ -1925,12 +1949,12 @@ pub struct CoordinatorCandidateStatus {
     pub network_id: NetworkId,
     pub generated_at_unix_ms: u64,
     pub config_state: CoordinatorCandidateConfigState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub config: Option<CoordinatorCandidateConfig>,
     pub candidates: Vec<CoordinatorCandidateStatusEntry>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub current_leader: Option<NodeId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub latest_term: Option<CoordinatorTerm>,
     #[serde(default)]
     pub lease: CoordinatorLeaseStatus,
@@ -1940,8 +1964,244 @@ pub struct CoordinatorCandidateStatus {
     /// Most recent persisted election, including terminal outcomes. Keeping the
     /// full signed proposal and vote set makes takeover decisions auditable from
     /// the same projection used by clients and operators.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub latest_election: Option<CoordinatorElectionSession>,
+}
+
+/// A stale or restarted Coordinator candidate must prove which authority it
+/// observed before it may receive the current snapshot. Audit sequence is a
+/// separate cursor because a valid term and snapshot can still have a stale
+/// control-plane history.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct CoordinatorRecoveryReport {
+    pub network_id: NetworkId,
+    pub observed_term: Option<u64>,
+    pub observed_fencing_token: Option<FencingToken>,
+    pub observed_leader: Option<NodeId>,
+    pub observed_candidate_config_revision: Option<u64>,
+    pub observed_audit_sequence: u64,
+}
+
+impl CoordinatorRecoveryReport {
+    pub fn from_status(status: &CoordinatorCandidateStatus, observed_audit_sequence: u64) -> Self {
+        Self {
+            network_id: status.network_id.clone(),
+            observed_term: status.latest_term.as_ref().map(|term| term.term),
+            observed_fencing_token: status.latest_term.as_ref().map(|term| term.fencing_token),
+            observed_leader: status.latest_term.as_ref().map(|term| term.leader.clone()),
+            observed_candidate_config_revision: status
+                .config
+                .as_ref()
+                .map(|config| config.revision),
+            observed_audit_sequence,
+        }
+    }
+
+    pub fn validate_definition(&self) -> DomainResult<()> {
+        match (
+            self.observed_term,
+            self.observed_fencing_token,
+            self.observed_leader.as_ref(),
+        ) {
+            (None, None, None) => {}
+            (Some(term), Some(_), Some(_)) if term > 0 => {}
+            _ => {
+                return Err(DomainError::invariant(
+                    "coordinator recovery report has an incomplete observed term",
+                ));
+            }
+        }
+        if self
+            .observed_fencing_token
+            .is_some_and(|token| token.0 == 0)
+        {
+            return Err(DomainError::invalid_value(
+                "coordinator recovery fencing token must be positive",
+            ));
+        }
+        if self
+            .observed_candidate_config_revision
+            .is_some_and(|revision| revision == 0)
+        {
+            return Err(DomainError::invalid_value(
+                "coordinator recovery candidate revision must be positive",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinatorRecoveryStage {
+    /// The reported term or snapshot is stale. Governance stays disabled until
+    /// the authoritative snapshot is applied.
+    ReadOnly,
+    /// The snapshot and term match, but the audit cursor still needs replay.
+    CatchingUp,
+    /// Snapshot and audit cursors match. The node has rejoined only with the
+    /// role it derives from the current candidate/member configuration.
+    Rejoined,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinatorRecoveryRole {
+    Candidate,
+    Member,
+}
+
+/// Fail-closed recovery projection. Health checks and the existing data plane
+/// are independent from governance authority and remain available while the
+/// control-plane cursors catch up.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct CoordinatorRecoveryStatus {
+    pub network_id: NetworkId,
+    pub stage: CoordinatorRecoveryStage,
+    pub role: CoordinatorRecoveryRole,
+    pub governance_writable: bool,
+    pub health_checks_allowed: bool,
+    pub data_plane_allowed: bool,
+    pub authoritative_term: u64,
+    pub authoritative_fencing_token: FencingToken,
+    pub authoritative_leader: NodeId,
+    pub authoritative_candidate_config_revision: u64,
+    pub authoritative_audit_sequence: u64,
+    pub reason_code: String,
+}
+
+impl CoordinatorRecoveryStatus {
+    /// Recovery is never a back door to governance. A rejoined old Leader can
+    /// perform health/runtime work and may later win a fresh election, but this
+    /// status alone never restores writable authority.
+    pub fn rejects_governance_write(&self) -> bool {
+        !self.governance_writable
+    }
+
+    /// Validate the recovery record against the persisted authority snapshot.
+    /// Recovery progress is allowed to lag, but its authority projection and
+    /// safety flags must never diverge from the current term/configuration.
+    pub fn validate_against_authority(
+        &self,
+        network_id: &NetworkId,
+        term: &CoordinatorTerm,
+        config: &CoordinatorCandidateConfig,
+        is_candidate: bool,
+    ) -> DomainResult<()> {
+        if self.network_id != *network_id
+            || self.authoritative_term != term.term
+            || self.authoritative_fencing_token != term.fencing_token
+            || self.authoritative_leader != term.leader
+            || self.authoritative_candidate_config_revision != config.revision
+        {
+            return Err(DomainError::invariant(
+                "coordinator recovery status does not match persisted authority",
+            ));
+        }
+        if self.governance_writable || !self.health_checks_allowed || !self.data_plane_allowed {
+            return Err(DomainError::invariant(
+                "coordinator recovery status has unsafe capability flags",
+            ));
+        }
+        let expected_role = if is_candidate {
+            CoordinatorRecoveryRole::Candidate
+        } else {
+            CoordinatorRecoveryRole::Member
+        };
+        if self.role != expected_role || self.reason_code.is_empty() {
+            return Err(DomainError::invalid_value(
+                "coordinator recovery status has an invalid role or reason",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A governance notification projected by a Leader. Consumers validate the
+/// complete authority tuple against their authoritative candidate status before
+/// applying it; an event from the previous Leader is never merged.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct CoordinatorGovernanceEvent {
+    pub network_id: NetworkId,
+    pub leader: NodeId,
+    pub term: u64,
+    pub fencing_token: FencingToken,
+    pub candidate_config_revision: u64,
+}
+
+impl CoordinatorGovernanceEvent {
+    pub fn validate_for_status(
+        &self,
+        status: &CoordinatorCandidateStatus,
+        now_unix_ms: u64,
+    ) -> DomainResult<()> {
+        if self.network_id != status.network_id {
+            return Err(DomainError::new(
+                "domain.coordinator_governance_event_network_mismatch",
+                "governance event belongs to another network",
+            ));
+        }
+        let term = status.latest_term.as_ref().ok_or_else(|| {
+            DomainError::new(
+                "domain.coordinator_governance_event_without_term",
+                "governance event arrived without an authoritative term",
+            )
+        })?;
+        if self.term < term.term
+            || self.fencing_token < term.fencing_token
+            || self.leader != term.leader
+            || status
+                .config
+                .as_ref()
+                .is_some_and(|config| self.candidate_config_revision < config.revision)
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_stale_leader_event",
+                "governance event was projected by an obsolete Leader authority",
+            ));
+        }
+        if self.term > term.term
+            || self.fencing_token > term.fencing_token
+            || self.leader != term.leader
+            || status
+                .config
+                .as_ref()
+                .is_some_and(|config| self.candidate_config_revision > config.revision)
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_governance_event_not_installed",
+                "governance event carries authority not present in the snapshot",
+            ));
+        }
+        if status
+            .config
+            .as_ref()
+            .is_none_or(|config| self.candidate_config_revision != config.revision)
+            || self.candidate_config_revision != term.candidate_config_revision
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_governance_event_config_mismatch",
+                "governance event does not bind the authoritative candidate configuration",
+            ));
+        }
+        if !status.control_plane.is_available() || !term.lease_status_at(now_unix_ms).is_writable()
+        {
+            return Err(DomainError::new(
+                "domain.coordinator_governance_event_read_only",
+                "governance event arrived while control-plane authority is read-only",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct CoordinatorRecoveryResponse {
+    pub status: CoordinatorCandidateStatus,
+    pub recovery: CoordinatorRecoveryStatus,
+    /// Sanitized audit records after the caller's cursor. This is the bounded
+    /// control-plane journal replay that accompanies the authoritative snapshot.
+    pub audit_entries: Vec<AuditEntry>,
 }
 
 impl CoordinatorCandidateStatus {
@@ -2703,6 +2963,138 @@ mod tests {
         );
         next.fencing_token = FencingToken(31);
         current.validate_successor(&next, 100).unwrap();
+    }
+
+    #[test]
+    fn stale_leader_governance_events_are_rejected_against_authoritative_status() {
+        let fixture = TermFixture::new();
+        let current_term = fixture.term_with_window(2, 20, &fixture.candidate_one, 1_000, 200_000);
+        let config = CoordinatorCandidateConfig::signed(
+            fixture.network_id.clone(),
+            1,
+            fixture
+                .candidate_group()
+                .into_iter()
+                .enumerate()
+                .map(|(index, node_id)| CoordinatorCandidate {
+                    node_id,
+                    priority: index as u32,
+                })
+                .collect(),
+            1_000,
+            200_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        let status = CoordinatorCandidateStatus {
+            network_id: fixture.network_id.clone(),
+            generated_at_unix_ms: 2_000,
+            config_state: CoordinatorCandidateConfigState::Current,
+            config: Some(config),
+            candidates: Vec::new(),
+            current_leader: Some(current_term.leader.clone()),
+            lease: current_term.lease_status_at(2_000),
+            latest_term: Some(current_term.clone()),
+            control_plane: CoordinatorControlPlaneStatus {
+                state: CoordinatorControlPlaneState::Available,
+                governance_writable: true,
+                reason_code: "coordinator.control_plane.available".into(),
+                quorum: CoordinatorQuorumStatus::default(),
+            },
+            emergency: CoordinatorEmergencyState::NoCandidatesConfigured,
+            latest_election: None,
+        };
+        let current = CoordinatorGovernanceEvent {
+            network_id: fixture.network_id.clone(),
+            leader: current_term.leader.clone(),
+            term: current_term.term,
+            fencing_token: current_term.fencing_token,
+            candidate_config_revision: 1,
+        };
+        current.validate_for_status(&status, 2_000).unwrap();
+
+        let mut stale = current.clone();
+        stale.leader = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        stale.term = 1;
+        stale.fencing_token = FencingToken(10);
+        assert_eq!(
+            stale
+                .validate_for_status(&status, 2_000)
+                .unwrap_err()
+                .code(),
+            "domain.coordinator_stale_leader_event"
+        );
+
+        let mut future = current;
+        future.term = 3;
+        assert_eq!(
+            future
+                .validate_for_status(&status, 2_000)
+                .unwrap_err()
+                .code(),
+            "domain.coordinator_governance_event_not_installed"
+        );
+    }
+
+    #[test]
+    fn recovery_status_keeps_runtime_available_but_never_writable() {
+        let fixture = TermFixture::new();
+        let term = fixture.term_with_window(2, 20, &fixture.candidate_one, 1_000, 200_000);
+        let config = CoordinatorCandidateConfig::signed(
+            fixture.network_id.clone(),
+            1,
+            fixture
+                .candidate_group()
+                .into_iter()
+                .enumerate()
+                .map(|(index, node_id)| CoordinatorCandidate {
+                    node_id,
+                    priority: index as u32,
+                })
+                .collect(),
+            1_000,
+            200_000,
+            &fixture.candidate_one,
+        )
+        .unwrap();
+        let recovery = CoordinatorRecoveryStatus {
+            network_id: fixture.network_id.clone(),
+            stage: CoordinatorRecoveryStage::Rejoined,
+            role: CoordinatorRecoveryRole::Candidate,
+            governance_writable: false,
+            health_checks_allowed: true,
+            data_plane_allowed: true,
+            authoritative_term: term.term,
+            authoritative_fencing_token: term.fencing_token,
+            authoritative_leader: term.leader.clone(),
+            authoritative_candidate_config_revision: config.revision,
+            authoritative_audit_sequence: 4,
+            reason_code: "coordinator.recovery.rejoined_candidate".into(),
+        };
+        recovery
+            .validate_against_authority(&fixture.network_id, &term, &config, true)
+            .unwrap();
+        assert!(recovery.rejects_governance_write());
+
+        let mut escalated = recovery.clone();
+        escalated.governance_writable = true;
+        assert_eq!(
+            escalated
+                .validate_against_authority(&fixture.network_id, &term, &config, true)
+                .unwrap_err()
+                .code(),
+            "domain.invariant_violation"
+        );
+
+        let mut wrong_role = recovery;
+        wrong_role.role = CoordinatorRecoveryRole::Member;
+        assert_eq!(
+            wrong_role
+                .validate_against_authority(&fixture.network_id, &term, &config, true)
+                .unwrap_err()
+                .code(),
+            "domain.invalid_value"
+        );
     }
 
     #[test]

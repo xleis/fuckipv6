@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
-    ContentHash, CoordinatorElectionProposal, CoordinatorElectionVote, CoordinatorTerm,
-    CoordinatorWriteCredential, ExitContributionRequest, ExitContributionRequestId,
-    ExitContributionReviewAction, InvitationId, InvitationState, JoinRequest, JoinRequestId,
-    JoinRequestState, MemberLifecycleChange, MemberLifecycleChangeRequest,
-    MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview, NetworkMemberPresence,
-    NetworkRecord, NodeId,
+    ContentHash, CoordinatorElectionProposal, CoordinatorElectionVote, CoordinatorRecoveryReport,
+    CoordinatorTerm, CoordinatorWriteCredential, ExitContributionRequest,
+    ExitContributionRequestId, ExitContributionReviewAction, InvitationId, InvitationState,
+    JoinRequest, JoinRequestId, JoinRequestState, MemberLifecycleChange,
+    MemberLifecycleChangeRequest, MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview,
+    NetworkMemberPresence, NetworkRecord, NodeId,
 };
 use fuckipv6_common::{
     codec, validate_signaling_message_len, validate_signaling_relay_payload_len, CoordinatorConfig,
@@ -1019,6 +1019,16 @@ async fn handle_signaling_message(
             )
             .await?;
         }
+        SignalingMessage::CoordinatorRecoveryRequest { report } => {
+            handle_coordinator_recovery(
+                report,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
         SignalingMessage::CoordinatorCandidateConfigUpdateAuthorized {
             expected_revision,
             config,
@@ -1094,42 +1104,9 @@ async fn handle_signaling_message(
             )
             .await?;
         }
-        // These variants are server-to-client events. Accepting one from a
-        // client would let it manufacture approval state in another view.
-        SignalingMessage::JoinRequestStatus { .. }
-        | SignalingMessage::JoinRequestListResponse { .. }
-        | SignalingMessage::JoinRequestReviewAck { .. }
-        | SignalingMessage::JoinRequestChanged { .. }
-        | SignalingMessage::InvitationCreateAck { .. }
-        | SignalingMessage::InvitationListAck { .. }
-        | SignalingMessage::InvitationStatusAck { .. }
-        | SignalingMessage::InvitationRevokeAck { .. }
-        | SignalingMessage::InvitationPreviewAck { .. }
-        | SignalingMessage::InvitationRedeemAck { .. }
-        | SignalingMessage::InvitationChanged { .. }
-        | SignalingMessage::MemberDirectoryListAck { .. }
-        | SignalingMessage::MemberRemovalPreviewAck { .. }
-        | SignalingMessage::MemberLifecycleChangeAck { .. }
-        | SignalingMessage::MemberLifecycleChanged { .. }
-        | SignalingMessage::ExitContributionSubmitAck { .. }
-        | SignalingMessage::ExitContributionListAck { .. }
-        | SignalingMessage::ExitContributionStatusAck { .. }
-        | SignalingMessage::ExitContributionReviewAck { .. }
-        | SignalingMessage::ExitContributionWithdrawAck { .. }
-        | SignalingMessage::ExitContributionAuthorizationListAck { .. }
-        | SignalingMessage::ExitContributionChanged { .. }
-        | SignalingMessage::ExitAvailabilityReportAck { .. }
-        | SignalingMessage::NetworkJoinPreviewAck { .. }
-        | SignalingMessage::CoordinatorCandidateConfigAck { .. }
-        | SignalingMessage::CoordinatorCandidateDeclarationAck { .. }
-        | SignalingMessage::CoordinatorCandidateStatusAck { .. }
-        | SignalingMessage::CoordinatorCandidateStatusChanged { .. }
-        | SignalingMessage::CoordinatorTermInstallAck { .. }
-        | SignalingMessage::CoordinatorTermLeaseRenewAck { .. }
-        | SignalingMessage::CoordinatorElectionProposeAck { .. }
-        | SignalingMessage::CoordinatorElectionVoteAck { .. }
-        | SignalingMessage::CoordinatorElectionTimeoutAck { .. }
-        | SignalingMessage::CoordinatorElectionChanged { .. } => {
+        // Accepting a server-originated response from a client would let it
+        // manufacture approval or recovery state in another view.
+        message if is_server_originated_response(&message) => {
             send_binary(
                 tx,
                 session_manager,
@@ -1145,6 +1122,47 @@ async fn handle_signaling_message(
     }
 
     Ok(())
+}
+
+fn is_server_originated_response(message: &SignalingMessage) -> bool {
+    matches!(
+        message,
+        SignalingMessage::JoinRequestStatus { .. }
+            | SignalingMessage::JoinRequestListResponse { .. }
+            | SignalingMessage::JoinRequestReviewAck { .. }
+            | SignalingMessage::JoinRequestChanged { .. }
+            | SignalingMessage::InvitationCreateAck { .. }
+            | SignalingMessage::InvitationListAck { .. }
+            | SignalingMessage::InvitationStatusAck { .. }
+            | SignalingMessage::InvitationRevokeAck { .. }
+            | SignalingMessage::InvitationPreviewAck { .. }
+            | SignalingMessage::InvitationRedeemAck { .. }
+            | SignalingMessage::InvitationChanged { .. }
+            | SignalingMessage::MemberDirectoryListAck { .. }
+            | SignalingMessage::MemberRemovalPreviewAck { .. }
+            | SignalingMessage::MemberLifecycleChangeAck { .. }
+            | SignalingMessage::MemberLifecycleChanged { .. }
+            | SignalingMessage::ExitContributionSubmitAck { .. }
+            | SignalingMessage::ExitContributionListAck { .. }
+            | SignalingMessage::ExitContributionStatusAck { .. }
+            | SignalingMessage::ExitContributionReviewAck { .. }
+            | SignalingMessage::ExitContributionWithdrawAck { .. }
+            | SignalingMessage::ExitContributionAuthorizationListAck { .. }
+            | SignalingMessage::ExitContributionChanged { .. }
+            | SignalingMessage::ExitAvailabilityReportAck { .. }
+            | SignalingMessage::NetworkJoinPreviewAck { .. }
+            | SignalingMessage::CoordinatorCandidateConfigAck { .. }
+            | SignalingMessage::CoordinatorCandidateDeclarationAck { .. }
+            | SignalingMessage::CoordinatorCandidateStatusAck { .. }
+            | SignalingMessage::CoordinatorCandidateStatusChanged { .. }
+            | SignalingMessage::CoordinatorTermInstallAck { .. }
+            | SignalingMessage::CoordinatorTermLeaseRenewAck { .. }
+            | SignalingMessage::CoordinatorElectionProposeAck { .. }
+            | SignalingMessage::CoordinatorElectionVoteAck { .. }
+            | SignalingMessage::CoordinatorElectionTimeoutAck { .. }
+            | SignalingMessage::CoordinatorElectionChanged { .. }
+            | SignalingMessage::CoordinatorRecoveryResponse { .. }
+    )
 }
 
 fn require_coordinator_candidate_store<'a>(
@@ -1603,6 +1621,44 @@ async fn handle_coordinator_candidate_status(
         }
         Err(error) => {
             tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 候选状态查询");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_recovery(
+    report: CoordinatorRecoveryReport,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let network_id = report.network_id.clone();
+    match store.recover(&actor, report, unix_time_ms()) {
+        Ok(response) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorRecoveryResponse { response },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 旧 Leader 恢复请求");
             send_binary(
                 tx,
                 session_manager,
@@ -3268,6 +3324,47 @@ async fn handle_relay_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coordinator_recovery_response_is_rejected_as_a_client_message() {
+        let network_id = NetworkId::from_public_key(b"recovery-response-spoof");
+        let leader = NodeId::from_public_key(b"recovery-response-leader");
+        let message = SignalingMessage::CoordinatorRecoveryResponse {
+            response: fuckipv6_common::domain::CoordinatorRecoveryResponse {
+                status: fuckipv6_common::domain::CoordinatorCandidateStatus {
+                    network_id: network_id.clone(),
+                    generated_at_unix_ms: 1,
+                    config_state: fuckipv6_common::domain::CoordinatorCandidateConfigState::Missing,
+                    config: None,
+                    candidates: Vec::new(),
+                    current_leader: None,
+                    latest_term: None,
+                    lease: fuckipv6_common::domain::CoordinatorLeaseStatus::no_term(),
+                    control_plane: Default::default(),
+                    emergency:
+                        fuckipv6_common::domain::CoordinatorEmergencyState::NoCandidatesConfigured,
+                    latest_election: None,
+                },
+                recovery: fuckipv6_common::domain::CoordinatorRecoveryStatus {
+                    network_id,
+                    stage: fuckipv6_common::domain::CoordinatorRecoveryStage::ReadOnly,
+                    role: fuckipv6_common::domain::CoordinatorRecoveryRole::Member,
+                    governance_writable: false,
+                    health_checks_allowed: true,
+                    data_plane_allowed: true,
+                    authoritative_term: 0,
+                    authoritative_fencing_token: fuckipv6_common::domain::FencingToken(0),
+                    authoritative_leader: leader,
+                    authoritative_candidate_config_revision: 0,
+                    authoritative_audit_sequence: 0,
+                    reason_code: "coordinator.recovery.snapshot_behind".into(),
+                },
+                audit_entries: Vec::new(),
+            },
+        };
+
+        assert!(is_server_originated_response(&message));
+    }
 
     #[test]
     fn join_request_changed_notification_contains_only_identity_and_state() {

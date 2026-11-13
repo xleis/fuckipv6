@@ -154,6 +154,7 @@
       "description": "Public reachability evidence supplied by the candidate itself. Consumers\nmust treat this as a claim until the election protocol verifies a quorum.",
       "properties": {
         "public_endpoint": {
+          "default": null,
           "type": [
             "string",
             "null"

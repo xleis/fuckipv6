@@ -8,17 +8,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
     CoordinatorCandidateConfig, CoordinatorCandidateDeclaration, CoordinatorCandidateStatus,
-    CoordinatorTerm, CoordinatorWriteCredential, ExitHealthEvidence, ExitHealthEvidenceState,
-    ExitHealthLayer, ExitHealthProtocol, ExitHealthRetest, ExitHealthRetestPhase,
-    ExitHealthSnapshot, ExitHealthSource, ExitHealthTarget, InvitationCode,
-    InvitationCreateRequest, InvitationId, InvitationPreview, InvitationRedeemRequest,
-    InvitationRedemption, InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestId,
-    LeakDetectionEvidence, LeakDetectionEvidenceState, LeakDetectionIsolationAction,
-    LeakDetectionProtocol, LeakDetectionSnapshot, LeakDetectionSource, LeakDetectionTarget,
-    MemberLifecycleChange, MemberLifecycleChangeRequest, MemberRemovalPreview,
-    MemberRemovalPreviewRequest, MembershipRole, NetworkId, NetworkMemberDirectory,
-    RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot, RelayHealthSnapshot,
-    TrafficProtectionState,
+    CoordinatorRecoveryReport, CoordinatorRecoveryStatus, CoordinatorTerm,
+    CoordinatorWriteCredential, ExitHealthEvidence, ExitHealthEvidenceState, ExitHealthLayer,
+    ExitHealthProtocol, ExitHealthRetest, ExitHealthRetestPhase, ExitHealthSnapshot,
+    ExitHealthSource, ExitHealthTarget, InvitationCode, InvitationCreateRequest, InvitationId,
+    InvitationPreview, InvitationRedeemRequest, InvitationRedemption, InvitationStatusView,
+    IssuedInvitation, JoinRequest, JoinRequestId, LeakDetectionEvidence,
+    LeakDetectionEvidenceState, LeakDetectionIsolationAction, LeakDetectionProtocol,
+    LeakDetectionSnapshot, LeakDetectionSource, LeakDetectionTarget, MemberLifecycleChange,
+    MemberLifecycleChangeRequest, MemberRemovalPreview, MemberRemovalPreviewRequest,
+    MembershipRole, NetworkId, NetworkMemberDirectory, RelayAuthorizationAuditSnapshot,
+    RelayGovernanceAuditSnapshot, RelayHealthSnapshot, TrafficProtectionState,
 };
 use fuckipv6_common::{
     ClientConfig, ExitNodeCapabilities, ExitNodeUnsupportedReason, JoinRequestBatchReviewItem,
@@ -1048,6 +1048,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
 struct NetworkRuntimeSession {
     network_id: Option<String>,
     signaling: Option<Arc<SignalingClient>>,
+    coordinator_recovery: Option<CoordinatorRecoveryStatus>,
     tun_name: String,
     routing_control: mpsc::UnboundedSender<ipc::RuntimeCommand>,
     shutdown: watch::Sender<bool>,
@@ -3924,15 +3925,24 @@ impl NetworkRuntimeActor {
         {
             self.reconcile_finished_sessions().await;
         }
-        let sessions =
-            self.sessions
-                .iter()
-                .filter_map(|(network_name, session)| {
-                    session.signaling.clone().map(|signaling| {
-                        (network_name.clone(), signaling, session.network_id.clone())
-                    })
+        let sessions = self
+            .sessions
+            .iter()
+            .filter_map(|(network_name, session)| {
+                session.signaling.clone().map(|signaling| {
+                    (
+                        network_name.clone(),
+                        signaling,
+                        session.network_id.clone(),
+                        session
+                            .coordinator_recovery
+                            .as_ref()
+                            .map(|recovery| recovery.authoritative_audit_sequence)
+                            .unwrap_or(0),
+                    )
                 })
-                .collect::<Vec<_>>();
+            })
+            .collect::<Vec<_>>();
         if sessions.is_empty() {
             return;
         }
@@ -3944,7 +3954,7 @@ impl NetworkRuntimeActor {
             }
         };
 
-        for (network_name, signaling, network_id) in sessions {
+        for (network_name, signaling, network_id, recovery_cursor) in sessions {
             let Some(network_id) = network_id.as_deref() else {
                 tracing::warn!(network = %network_name, "Coordinator 接管轮次缺少网络 ID");
                 continue;
@@ -3974,6 +3984,38 @@ impl NetworkRuntimeActor {
                     continue;
                 }
             };
+            let recovery = match signaling
+                .recover_coordinator(CoordinatorRecoveryReport::from_status(
+                    &status,
+                    recovery_cursor,
+                ))
+                .await
+            {
+                Ok(recovery) => recovery,
+                Err(error) => {
+                    tracing::debug!(
+                        network = %network_name,
+                        %error,
+                        "Coordinator 接管轮次无法验证恢复快照，治理保持只读"
+                    );
+                    continue;
+                }
+            };
+            if recovery.recovery.governance_writable
+                || !recovery.recovery.health_checks_allowed
+                || !recovery.recovery.data_plane_allowed
+            {
+                tracing::warn!(
+                    network = %network_name,
+                    stage = ?recovery.recovery.stage,
+                    "Coordinator 恢复响应包含不安全的能力声明，拒绝继续接管"
+                );
+                continue;
+            }
+            if let Some(session) = self.sessions.get_mut(&network_name) {
+                session.coordinator_recovery = Some(recovery.recovery.clone());
+            }
+            let status = recovery.status;
             let decision = match decide_coordinator_takeover(&status, &identity, unix_time_ms()) {
                 Ok(decision) => decision,
                 Err(error) => {
@@ -4816,6 +4858,7 @@ impl NetworkRuntimeActor {
             NetworkRuntimeSession {
                 network_id: started.network_id,
                 signaling: started.signaling,
+                coordinator_recovery: None,
                 tun_name: started.tun_name,
                 routing_control: started.routing_control,
                 shutdown: started.shutdown,
@@ -7257,6 +7300,7 @@ async fn wait_for_session_shutdown(
     let NetworkRuntimeSession {
         network_id,
         signaling,
+        coordinator_recovery,
         tun_name,
         routing_control,
         shutdown,
@@ -7273,6 +7317,7 @@ async fn wait_for_session_shutdown(
                 retry_session: Some(NetworkRuntimeSession {
                     network_id: network_id.clone(),
                     signaling: signaling.clone(),
+                    coordinator_recovery: coordinator_recovery.clone(),
                     tun_name: tun_name.clone(),
                     routing_control,
                     shutdown,
@@ -7301,6 +7346,7 @@ async fn wait_for_session_shutdown(
                 retry_session: Some(NetworkRuntimeSession {
                     network_id: network_id.clone(),
                     signaling: signaling.clone(),
+                    coordinator_recovery: coordinator_recovery.clone(),
                     tun_name: tun_name.clone(),
                     routing_control,
                     shutdown,
@@ -7320,6 +7366,7 @@ async fn wait_for_session_shutdown(
             retry_session: Some(NetworkRuntimeSession {
                 network_id: network_id.clone(),
                 signaling: signaling.clone(),
+                coordinator_recovery: coordinator_recovery.clone(),
                 tun_name: tun_name.clone(),
                 routing_control,
                 shutdown,
@@ -7349,6 +7396,7 @@ async fn wait_for_session_shutdown(
             retry_session: Some(NetworkRuntimeSession {
                 network_id: network_id.clone(),
                 signaling: signaling.clone(),
+                coordinator_recovery: coordinator_recovery.clone(),
                 tun_name: tun_name.clone(),
                 routing_control,
                 shutdown,
@@ -7917,9 +7965,9 @@ mod tests {
         TunCapabilities, TunCapabilityReason, TunPlatform, TUN_CAPABILITY_SCHEMA_VERSION,
     };
     use fuckipv6_common::domain::{
-        RelayAuthorizationAuditSnapshot, RelayExistingSessionPolicy, RelayGovernanceAuditSnapshot,
-        RelayHealthSnapshot, RelayLifecycleState, RelayLimitPolicy, RelayReachabilityState,
-        RelayUsageSnapshot,
+        NodeId, RelayAuthorizationAuditSnapshot, RelayExistingSessionPolicy,
+        RelayGovernanceAuditSnapshot, RelayHealthSnapshot, RelayLifecycleState, RelayLimitPolicy,
+        RelayReachabilityState, RelayUsageSnapshot,
     };
     use futures::FutureExt;
     use std::collections::HashSet;
@@ -8991,6 +9039,7 @@ mod tests {
                 NetworkRuntimeSession {
                     network_id: Some(network_id.to_string()),
                     signaling: Some(signaling.clone()),
+                    coordinator_recovery: None,
                     tun_name: "fuckipv6-takeover-continuity".into(),
                     routing_control: routing_tx,
                     shutdown: shutdown_tx.clone(),
@@ -9006,19 +9055,8 @@ mod tests {
         let response_client = signaling.clone();
         let expected_network_id = network_id.clone();
         let responder = tokio::spawn(async move {
-            let request = timeout(Duration::from_secs(1), outbound.recv())
-                .await
-                .expect("takeover poll must request authoritative status")
-                .expect("outbound signaling channel must stay open");
-            let SignalingMessage::CoordinatorCandidateStatusRequest {
-                network_id: requested,
-            } = request
-            else {
-                panic!("expected coordinator status request, got {request:?}");
-            };
-            assert_eq!(requested, expected_network_id);
             let status = CoordinatorCandidateStatus {
-                network_id: requested,
+                network_id: expected_network_id.clone(),
                 generated_at_unix_ms: 1_000,
                 config_state: CoordinatorCandidateConfigState::Missing,
                 config: None,
@@ -9030,14 +9068,65 @@ mod tests {
                 emergency: CoordinatorEmergencyState::NoCandidatesConfigured,
                 latest_election: None,
             };
-            assert!(response_client.route_coordinator_candidate_test_response(
-                SignalingMessage::CoordinatorCandidateStatusAck { status },
-            ));
+            for (round, expected_cursor) in [0, 7].into_iter().enumerate() {
+                let request = timeout(Duration::from_secs(1), outbound.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("takeover round {round} must request status"))
+                    .expect("outbound signaling channel must stay open");
+                let SignalingMessage::CoordinatorCandidateStatusRequest {
+                    network_id: requested,
+                } = request
+                else {
+                    panic!("expected coordinator status request, got {request:?}");
+                };
+                assert_eq!(requested, expected_network_id);
+                assert!(response_client.route_coordinator_candidate_test_response(
+                    SignalingMessage::CoordinatorCandidateStatusAck {
+                        status: status.clone(),
+                    },
+                ));
+
+                let request = timeout(Duration::from_secs(1), outbound.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("takeover round {round} must request recovery"))
+                    .expect("outbound signaling channel must stay open");
+                let SignalingMessage::CoordinatorRecoveryRequest { report } = request else {
+                    panic!("expected coordinator recovery request, got {request:?}");
+                };
+                assert_eq!(report.network_id, expected_network_id);
+                assert_eq!(report.observed_audit_sequence, expected_cursor);
+                let recovery = CoordinatorRecoveryStatus {
+                    network_id: expected_network_id.clone(),
+                    stage: fuckipv6_common::domain::CoordinatorRecoveryStage::ReadOnly,
+                    role: fuckipv6_common::domain::CoordinatorRecoveryRole::Candidate,
+                    governance_writable: false,
+                    health_checks_allowed: true,
+                    data_plane_allowed: true,
+                    authoritative_term: 0,
+                    authoritative_fencing_token: fuckipv6_common::domain::FencingToken(0),
+                    authoritative_leader: NodeId::from_public_key(b"recovery-test-leader"),
+                    authoritative_candidate_config_revision: 0,
+                    authoritative_audit_sequence: 7,
+                    reason_code: "coordinator.recovery.stale_old_leader".into(),
+                };
+                assert!(response_client.route_coordinator_candidate_test_response(
+                    SignalingMessage::CoordinatorRecoveryResponse {
+                        response: fuckipv6_common::domain::CoordinatorRecoveryResponse {
+                            status: status.clone(),
+                            recovery,
+                            audit_entries: Vec::new(),
+                        },
+                    },
+                ));
+            }
         });
 
         timeout(Duration::from_secs(1), actor.refresh_coordinator_takeover())
             .await
             .expect("coordinator takeover poll timed out");
+        timeout(Duration::from_secs(1), actor.refresh_coordinator_takeover())
+            .await
+            .expect("second coordinator takeover poll timed out");
         responder.await.expect("responder task failed");
 
         let session = actor
@@ -9050,6 +9139,14 @@ mod tests {
             .is_some_and(|current| Arc::ptr_eq(current, &signaling)));
         assert!(!session.handle.is_finished());
         assert!(!*shutdown_tx.borrow());
+        let recovery = session
+            .coordinator_recovery
+            .as_ref()
+            .expect("recovery cursor must be retained");
+        assert!(!recovery.governance_writable);
+        assert!(recovery.health_checks_allowed);
+        assert!(recovery.data_plane_allowed);
+        assert_eq!(recovery.authoritative_audit_sequence, 7);
         assert!(matches!(
             terminated_rx.try_recv(),
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)

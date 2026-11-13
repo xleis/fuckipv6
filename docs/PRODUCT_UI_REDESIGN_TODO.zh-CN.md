@@ -3331,7 +3331,7 @@ Coordinator owner 节点和两个真实成员节点，通过 veth 建立真实 P
 `/tmp/w15-file.<UTC时间>.<PID>`。该结果覆盖 Linux 真实网络链路、撤权中断和完整 node supervisor 重启，不替代 Windows/macOS
 实机、WebUI/Android File 内容表面或跨平台性能验收。
 
-**补充（2026-11-13，恢复分片乱序 handoff 与最终 netns 复验）**：真实低带宽重启续传暴露出 Resume 响应应用后恢复块分片仍可能乱序到达。requester 现在从排队 Resume 请求开始到恢复块完整落地，只缓存同一 resume generation、同一 transfer chunk 的分片，并按从 resume offset 起的连续前缀 drain；缓存上限为一个 4 MiB transfer chunk 和 4,096 个分片。旧 generation 继续丢弃，重复、重叠、跳号和非恢复块仍失败关闭，避免放宽正常严格顺序校验。`resume_handoff_buffers_post_response_fragments_until_prefix_is_contiguous` 确定性覆盖“响应后第 3 片先到、第 1/2 片后到”。`cargo test -p fuckipv6-client --lib file_share::`（177 passed）、`cargo clippy -p fuckipv6-client --lib --tests -- -D warnings` 与 `cargo build --release` 均通过；基于 `d5cc4ca` 重新执行 `sudo -n scripts/test-w15-file-netns.sh`，完整验收 PASS，证据目录为 `/tmp/w15-file.20261113T115402Z.190353`。为消除 ACL 用例误报，验收脚本还固定撤销前带宽并把实际终止码 `file_capability_revoked` 纳入匹配（`9507a64`）。
+**补充（2026-11-13，恢复分片乱序 handoff 与最终 netns 复验）**：真实低带宽重启续传暴露出 Resume 响应应用后恢复块分片仍可能乱序到达。requester 现在从排队 Resume 请求开始到恢复块完整落地，只缓存同一 resume generation、同一 transfer chunk 的分片，并按从 resume offset 起的连续前缀 drain；缓存上限为一个 4 MiB transfer chunk 和 4,096 个分片。旧 generation 继续丢弃，重复、重叠、跳号和非恢复块仍失败关闭，避免放宽正常严格顺序校验。`resume_handoff_buffers_post_response_fragments_until_prefix_is_contiguous` 确定性覆盖“响应后第 3 片先到、第 1/2 片后到”。`cargo test -p fuckipv6-client --lib file_share::`（177 passed）、`cargo clippy -p fuckipv6-client --lib --tests -- -D warnings` 与 `cargo build --release` 均通过；为消除 ACL 用例误报，验收脚本固定撤销前带宽并把实际终止码纳入匹配（`9507a64`），随后在 `ebe94ab` 上以最终脚本复跑 `sudo -n scripts/test-w15-file-netns.sh`，完整验收 PASS，证据目录为 `/tmp/w15-file.20261113T115914Z.214435`。复跑同时通过 62 个 observability 文件的无本地路径扫描、三个节点的资源基线与命名空间/进程清理检查。
 
 ### W15-04 canonicalize 与路径边界 `[~]`
 

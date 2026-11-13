@@ -2370,6 +2370,7 @@ mod tests {
             latest_term: Some(term.clone()),
             lease: term.lease_status_at(generated_at_unix_ms),
             emergency: CoordinatorEmergencyState::NoCandidatesConfigured,
+            latest_election: None,
         }
     }
 

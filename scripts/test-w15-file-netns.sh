@@ -36,6 +36,9 @@ WORK="/tmp/w15-file.$(date -u +%Y%m%dT%H%M%SZ).$$"
 HPID=""
 N1PID=""
 N2PID=""
+HOST_NODE_PID=""
+NODE1_NODE_PID=""
+NODE2_NODE_PID=""
 STARTED_TRANSFER_ID=""
 STARTED_OPERATION_ID=""
 CLEANED=0
@@ -300,6 +303,50 @@ EOF
     return 1
 }
 
+ready_node_pid() {
+    local log=$1
+    python3 - "$log" <<'PY'
+import json
+import sys
+
+last = None
+with open(sys.argv[1], "r", encoding="utf-8", errors="replace") as handle:
+    for line in handle:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("role") == "node" and record.get("state") == "ready":
+            pid = record.get("pid")
+            if isinstance(pid, int) and pid > 0:
+                last = pid
+if last is not None:
+    print(last)
+PY
+}
+
+wait_for_ready_node_pid() {
+    local log=$1 attempts=${2:-120} previous_pid=${3:-} i pid
+    for ((i = 0; i < attempts; i++)); do
+        pid=$(ready_node_pid "$log" 2>/dev/null || true)
+        if [ -n "$pid" ] && [ "$pid" != "$previous_pid" ] && kill -0 "$pid" 2>/dev/null; then
+            printf '%s\n' "$pid"
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+wait_for_pid_gone() {
+    local pid=$1 attempts=${2:-300} i
+    for ((i = 0; i < attempts; i++)); do
+        ! kill -0 "$pid" 2>/dev/null && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
 wait_for_network_online() {
     local socket_path=$1 output=$2 attempts=${3:-90}
     local i status ip
@@ -492,13 +539,16 @@ wait_for_upload_staging() {
 wait_for_download_staging() {
     local directory=$1 attempts=${2:-60}
     local i
-    for ((i = 0; i < attempts; i++)); do
+    # Small downloads can become visible and complete between one-second
+    # polling ticks. Keep the overall timeout in seconds while sampling more
+    # frequently so the pause/cancel/restart checks reliably observe staging.
+    for ((i = 0; i < attempts * 10; i++)); do
         STAGING_PATH=$(find "$directory" -maxdepth 1 -type f -name '.fkfile-download-*' -print -quit 2>/dev/null || true)
         if [ -n "$STAGING_PATH" ] && [ -f "$STAGING_PATH" ] && [ "$(stat -c %s "$STAGING_PATH")" -gt 0 ]; then
             printf '%s\n' "$STAGING_PATH" >>"$WORK/private-staging-paths.txt"
             return 0
         fi
-        sleep 1
+        sleep 0.1
     done
     return 1
 }
@@ -967,6 +1017,8 @@ SH
         tail -240 "$WORK/host/host.log" >&2 || true
         fail "Coordinator owner network did not become online"
     }
+    HOST_NODE_PID=$(wait_for_ready_node_pid "$WORK/host/host.log" 60) \
+        || fail "Coordinator node readiness PID was not reported"
     info "network_id=$NETWORK_ID owner=$HOST_NODE_ID join_mode=invite_only"
 
     # Invitation capability policy is checked against the current signed network
@@ -985,6 +1037,10 @@ SH
     NODE2_SOCK="$WORK/node2/run/node.sock"
     wait_for_socket "$NODE1_SOCK" 60 || { tail -160 "$WORK/node1/node.log" >&2 || true; fail "node1 socket did not appear"; }
     wait_for_socket "$NODE2_SOCK" 60 || { tail -160 "$WORK/node2/node.log" >&2 || true; fail "node2 socket did not appear"; }
+    NODE1_NODE_PID=$(wait_for_ready_node_pid "$WORK/node1/node.log" 60) \
+        || fail "node1 readiness PID was not reported"
+    NODE2_NODE_PID=$(wait_for_ready_node_pid "$WORK/node2/node.log" 60) \
+        || fail "node2 readiness PID was not reported"
     snapshot_to "$NODE1_SOCK" "$WORK/node1-identity.json"
     snapshot_to "$NODE2_SOCK" "$WORK/node2-identity.json"
     NODE1_ID=$(jq -r '.data.identity.node_id // empty' "$WORK/node1-identity.json")
@@ -1057,6 +1113,25 @@ SH
         jq '.data.peers' "$WORK/node2-online.json" >&2 || true
         fail "node2 did not report node1 as active/healthy P2P peer"
     }
+    record_runtime_baseline host "$HOST_NODE_PID"
+    record_runtime_baseline node1 "$NODE1_NODE_PID"
+    record_runtime_baseline node2 "$NODE2_NODE_PID"
+
+    info "validating member-authorized File scope from the joined-node directory"
+    member_directory_command=$(jq -cn --arg network "$NETWORK_ID" \
+        '{command:"list_network_members",payload:{network_id:$network}}')
+    ipc_command "$NODE1_SOCK" "$member_directory_command" >"$WORK/node1-member-directory.json"
+    jq -e --arg owner "$HOST_NODE_ID" --arg node1 "$NODE1_ID" '
+        .status == "network_members"
+        and (.data.capability_declarations | index("file")) != null
+        and ([.data.members[] | select(.node_id == $owner)] | length == 1)
+        and ([.data.members[] | select(.node_id == $owner and .role == "owner")] | length == 1)
+        and ([.data.members[] | select(.node_id == $node1 and .role == "member")] | length == 1)
+        and ([.data.members[] | select(.node_id == $node1 and ((.capabilities // []) | index("file")) != null)] | length == 1)
+    ' "$WORK/node1-member-directory.json" >/dev/null || {
+        jq '{status, data:{network_revision:.data.network_revision,capability_declarations:.data.capability_declarations,viewer_role:.data.viewer_role,members:[.data.members[] | {node_id,role,capabilities,lifecycle_state,access_epoch}]}}' "$WORK/node1-member-directory.json" >&2 || true
+        fail "joined-node member directory does not authorize the signed File scope"
+    }
 
     info "owner-authoritative network File profile is current and signed; File members were admitted under it"
 
@@ -1075,7 +1150,7 @@ SH
     ACL_REVOKE_TARGET="$SHARE_ROOT/acl-revoke.bin"
     NETWORK_REVOKE_TARGET="$SHARE_ROOT/network-revoke.bin"
 
-    write_pattern_file "$OWNER_SOURCE" 1048576 owner-source
+    write_pattern_file "$OWNER_SOURCE" 8388608 owner-source
     write_pattern_file "$NODE1_UPLOAD_SOURCE" 2097152 node1-upload
     write_pattern_file "$NODE1_CANCEL_UPLOAD_SOURCE" 2097152 cancel-upload
     write_pattern_file "$NODE1_ACL_UPLOAD_SOURCE" 2097152 acl-revoke
@@ -1185,25 +1260,22 @@ SH
     wait_for_journal_entry "$NODE2_JOURNAL" "$transfer_id" 90 || fail "restart download did not persist paused journal state"
     [ -f "$DOWNLOAD_RESTART_STAGING" ] || fail "download staging vanished before SIGKILL"
 
-    info "SIGKILLing node2 and restarting the complete node service"
-    OLD_N2PID=$N2PID
-    kill -KILL "$N2PID"
-    wait "$OLD_N2PID" 2>/dev/null || true
-    assert_pid_gone "$OLD_N2PID" node2-before-restart
-    N2PID=""
-    rm -f "$NODE2_SOCK"
-    "$headless_exec" "$headless_state" ip netns exec "$NS2" "${node2_env[@]}" RUST_LOG=debug "$BIN" --headless --webui-port "$WEBUI2" \
-        >>"$WORK/node2/node.log" 2>&1 &
-    N2PID=$!
+    info "SIGKILLing node2 and waiting for its supervisor to restart the complete node data plane"
+    OLD_NODE2_NODE_PID=$NODE2_NODE_PID
+    kill -KILL "$OLD_NODE2_NODE_PID"
+    wait_for_pid_gone "$OLD_NODE2_NODE_PID" 300 || fail "node2 process did not exit after SIGKILL"
+    assert_pid_gone "$OLD_NODE2_NODE_PID" node2-before-restart
+    NODE2_NODE_PID=$(wait_for_ready_node_pid "$WORK/node2/node.log" 120 "$OLD_NODE2_NODE_PID") \
+        || fail "node2 supervisor did not report a restarted process"
     wait_for_live_socket "$NODE2_SOCK" "$WORK/node2-restarted.json" 120 || {
         tail -240 "$WORK/node2/node.log" >&2 || true
-        fail "node2 did not restart after SIGKILL"
+        fail "restarted node2 socket did not become live"
     }
     wait_for_network_online "$NODE2_SOCK" "$WORK/node2-restarted-online.json" 120 || fail "restarted node2 network did not become online"
     wait_for_peer "$NODE2_SOCK" "$WORK/node2-restarted-p2p.json" "$IP1" 120 || fail "restarted node2 did not recover healthy P2P"
     wait_for_journal_entry "$NODE2_JOURNAL" "$transfer_id" 90 || fail "restarted node2 did not restore paused transfer journal"
     [ -f "$DOWNLOAD_RESTART_STAGING" ] || fail "restarted node2 lost durable download staging"
-    record_runtime_baseline node2 "$N2PID"
+    record_runtime_baseline node2 "$NODE2_NODE_PID"
     file_control "$NODE2_SOCK" resume "$transfer_id" "$operation_id" restart-download
     wait_for_target_hash "$NODE2_RESTART_TARGET" "$OWNER_HASH" 240 || fail "post-SIGKILL download hash mismatch"
     wait_for_completion_log "$WORK/node2/node.log" "$transfer_id" 180 || fail "post-SIGKILL download did not complete"
@@ -1293,9 +1365,9 @@ SH
     snapshot_to "$HOST_SOCK" "$WORK/final-host-snapshot.json"
     snapshot_to "$NODE1_SOCK" "$WORK/final-node1-snapshot.json"
     snapshot_to "$NODE2_SOCK" "$WORK/final-node2-snapshot.json"
-    assert_runtime_stable host "$HPID"
-    assert_runtime_stable node1 "$N1PID"
-    assert_runtime_stable node2 "$N2PID"
+    assert_runtime_stable host "$HOST_NODE_PID"
+    assert_runtime_stable node1 "$NODE1_NODE_PID"
+    assert_runtime_stable node2 "$NODE2_NODE_PID"
     assert_no_private_path_leaks
 
     ip rule show >"$WORK/host-ip-rule.after"
@@ -1319,6 +1391,9 @@ SH
     assert_pid_gone "$HPID" host
     assert_pid_gone "$N1PID" node1
     assert_pid_gone "$N2PID" node2
+    assert_pid_gone "$HOST_NODE_PID" host-node
+    assert_pid_gone "$NODE1_NODE_PID" node1-node
+    assert_pid_gone "$NODE2_NODE_PID" node2-node
     for port in "$HOST_PORT" "$RELAY_PORT" "$WEBUI_HOST" "$WEBUI1" "$WEBUI2"; do
         assert_port_free "$port"
     done

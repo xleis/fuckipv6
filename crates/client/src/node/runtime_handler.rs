@@ -799,6 +799,102 @@ impl NodeRuntimeHandler {
                         Err(error) => embedded_service_rejection(request_id, &network_name, error),
                     }
                 }
+                super::NodeCommand::GetCoordinatorCandidates(command) => {
+                    let network_name = command.network_name;
+                    match runtime {
+                        Some(runtime) => match runtime
+                            .get_coordinator_candidates(network_name.clone())
+                            .await
+                        {
+                            Ok(status) => NodeCommandResult::completed(
+                                request_id,
+                                NodeCommandOutcome::CoordinatorCandidates(Box::new(status)),
+                            ),
+                            Err(error) => runtime_rejection(request_id, error),
+                        },
+                        None => match services
+                            .get_coordinator_candidates(network_name.clone())
+                            .await
+                        {
+                            Ok(status) => NodeCommandResult::completed(
+                                request_id,
+                                NodeCommandOutcome::CoordinatorCandidates(Box::new(status)),
+                            ),
+                            Err(error) => {
+                                embedded_service_rejection(request_id, &network_name, error)
+                            }
+                        },
+                    }
+                }
+                super::NodeCommand::UpdateCoordinatorCandidates(command) => {
+                    let network_name = command.network_name.clone();
+                    match runtime {
+                        Some(runtime) => match runtime.update_coordinator_candidates(command).await
+                        {
+                            Ok(status) => NodeCommandResult::completed(
+                                request_id,
+                                NodeCommandOutcome::CoordinatorCandidates(Box::new(status)),
+                            ),
+                            Err(error) => runtime_rejection(request_id, error),
+                        },
+                        None => {
+                            let effective_from_unix_ms = command
+                                .effective_from_unix_ms
+                                .unwrap_or_else(coordinator_now_unix_ms);
+                            match services
+                                .update_coordinator_candidates(
+                                    network_name.clone(),
+                                    command.expected_revision,
+                                    command.candidates,
+                                    effective_from_unix_ms,
+                                    command.expires_at_unix_ms,
+                                )
+                                .await
+                            {
+                                Ok(status) => NodeCommandResult::completed(
+                                    request_id,
+                                    NodeCommandOutcome::CoordinatorCandidates(Box::new(status)),
+                                ),
+                                Err(error) => {
+                                    embedded_service_rejection(request_id, &network_name, error)
+                                }
+                            }
+                        }
+                    }
+                }
+                super::NodeCommand::PublishCoordinatorCandidateDeclaration(command) => {
+                    let network_name = command.network_name.clone();
+                    match runtime {
+                        Some(runtime) => match runtime
+                            .publish_coordinator_candidate_declaration(command)
+                            .await
+                        {
+                            Ok(status) => NodeCommandResult::completed(
+                                request_id,
+                                NodeCommandOutcome::CoordinatorCandidates(Box::new(status)),
+                            ),
+                            Err(error) => runtime_rejection(request_id, error),
+                        },
+                        None => match services
+                            .publish_coordinator_candidate_declaration(
+                                network_name.clone(),
+                                command.willingness,
+                                command.public_reachability,
+                                command.resources,
+                                command.validity_ms,
+                            )
+                            .await
+                        {
+                            Ok(status) => NodeCommandResult::completed(
+                                request_id,
+                                NodeCommandOutcome::CoordinatorCandidates(Box::new(status)),
+                            ),
+                            Err(error) => {
+                                embedded_service_rejection(request_id, &network_name, error)
+                            }
+                        },
+                    }
+                }
                 super::NodeCommand::TestPolicy(input) => NodeCommandResult::completed(
                     request_id,
                     NodeCommandOutcome::PolicyTest(Box::new(input.evaluate())),
@@ -1853,6 +1949,13 @@ async fn policy_history(
             PolicyTransactionError::Persistence(format!("读取策略历史任务异常终止: {error}")),
         ),
     }
+}
+
+fn coordinator_now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or_default()
 }
 
 fn embedded_service_rejection(

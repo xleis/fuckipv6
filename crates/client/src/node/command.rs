@@ -7,15 +7,17 @@ use base64::Engine;
 use fuckipv6_common::domain::{
     default_network_icon, default_network_language, default_network_purpose,
     default_network_region, ActivityEntry, AuditEntry, AuditOutcome, CapabilityKind, ContentHash,
-    ExitContributionMode, ExitContributionObligation, ExitContributionScope, ExitHealthAssessment,
-    ExitHealthSnapshot, ExitSelectionPolicy, InvitationCode, InvitationCreateRequest, InvitationId,
-    InvitationPreview, InvitationRedeemRequest, InvitationRedemption, InvitationStatusView,
-    IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
-    LeakDetectionAssessment, LeakDetectionSnapshot, MemberLifecycleAction, MemberLifecycleChange,
-    MemberRemovalPreview, MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord,
-    NetworkEndpoint, NetworkId, NetworkJoinMode, NetworkJoinPreview, NetworkMemberDirectory,
-    NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility,
-    PermissionDenialCode, PolicyTestInput, PolicyTestResult, RelayGovernanceAction, TrafficPolicy,
+    CoordinatorCandidate, CoordinatorCandidateResources, CoordinatorCandidateStatus,
+    CoordinatorCandidateWillingness, CoordinatorPublicReachability, ExitContributionMode,
+    ExitContributionObligation, ExitContributionScope, ExitHealthAssessment, ExitHealthSnapshot,
+    ExitSelectionPolicy, InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
+    InvitationRedeemRequest, InvitationRedemption, InvitationStatusView, IssuedInvitation,
+    JoinRequest, JoinRequestReviewAction, JoinRequestState, LeakDetectionAssessment,
+    LeakDetectionSnapshot, MemberLifecycleAction, MemberLifecycleChange, MemberRemovalPreview,
+    MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord, NetworkEndpoint, NetworkId,
+    NetworkJoinMode, NetworkJoinPreview, NetworkMemberDirectory, NetworkProfileApplyResult,
+    NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility, PermissionDenialCode,
+    PolicyTestInput, PolicyTestResult, RelayGovernanceAction, TrafficPolicy,
     TrafficPolicyTestComparison, TrafficPolicyTestInput, TrafficPolicyTestVisibility,
     JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS, JOIN_REQUEST_MAX_REASON_CHARS,
     NETWORK_PROFILE_MAX_TAG_CHARS,
@@ -149,11 +151,14 @@ pub enum NodeCommandKind {
     RollbackTrafficPolicy,
     GetTrafficPolicyHistory,
     TestTrafficPolicy,
+    GetCoordinatorCandidates,
+    UpdateCoordinatorCandidates,
+    PublishCoordinatorCandidateDeclaration,
     Shutdown,
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 69] = [
+    pub const ALL: [Self; 72] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -222,12 +227,15 @@ impl NodeCommandKind {
         Self::RollbackTrafficPolicy,
         Self::GetTrafficPolicyHistory,
         Self::TestTrafficPolicy,
+        Self::GetCoordinatorCandidates,
+        Self::UpdateCoordinatorCandidates,
+        Self::PublishCoordinatorCandidateDeclaration,
         Self::Shutdown,
     ];
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 68] = [
+    pub const ACTIONS: [Self; 71] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -295,6 +303,9 @@ impl NodeCommandKind {
         Self::RollbackTrafficPolicy,
         Self::GetTrafficPolicyHistory,
         Self::TestTrafficPolicy,
+        Self::GetCoordinatorCandidates,
+        Self::UpdateCoordinatorCandidates,
+        Self::PublishCoordinatorCandidateDeclaration,
         Self::Shutdown,
     ];
 
@@ -322,6 +333,8 @@ impl NodeCommandKind {
                 | Self::RevokeInvitation
                 | Self::PreviewInvitation
                 | Self::RedeemInvitation
+                | Self::UpdateCoordinatorCandidates
+                | Self::PublishCoordinatorCandidateDeclaration
         )
     }
 
@@ -396,6 +409,11 @@ impl NodeCommandKind {
             Self::RollbackTrafficPolicy => "rollback_traffic_policy",
             Self::GetTrafficPolicyHistory => "get_traffic_policy_history",
             Self::TestTrafficPolicy => "test_traffic_policy",
+            Self::GetCoordinatorCandidates => "get_coordinator_candidates",
+            Self::UpdateCoordinatorCandidates => "update_coordinator_candidates",
+            Self::PublishCoordinatorCandidateDeclaration => {
+                "publish_coordinator_candidate_declaration"
+            }
         }
     }
 
@@ -448,6 +466,8 @@ impl NodeCommandKind {
                 | Self::RollbackPolicy
                 | Self::ApplyTrafficPolicy
                 | Self::RollbackTrafficPolicy
+                | Self::UpdateCoordinatorCandidates
+                | Self::PublishCoordinatorCandidateDeclaration
         )
     }
 
@@ -619,6 +639,13 @@ pub enum NodeCommand {
     /// Compare a current and candidate traffic policy for one hypothetical flow
     /// without touching host networking, persistence, audit or activity.
     TestTrafficPolicy(NodeTestTrafficPolicyCommand),
+    /// Read the authoritative Coordinator candidate health projection.
+    GetCoordinatorCandidates(NodeCoordinatorCandidateStatusCommand),
+    /// Replace the administrator-signed candidate group using optimistic revision.
+    UpdateCoordinatorCandidates(NodeUpdateCoordinatorCandidatesCommand),
+    /// Publish this node's signed health/willingness declaration; `Unwilling`
+    /// is the owner's explicit refusal of the local candidate role.
+    PublishCoordinatorCandidateDeclaration(NodePublishCoordinatorCandidateDeclarationCommand),
 }
 
 impl NodeCommand {
@@ -693,6 +720,11 @@ impl NodeCommand {
             Self::RollbackTrafficPolicy(_) => NodeCommandKind::RollbackTrafficPolicy,
             Self::GetTrafficPolicyHistory => NodeCommandKind::GetTrafficPolicyHistory,
             Self::TestTrafficPolicy(_) => NodeCommandKind::TestTrafficPolicy,
+            Self::GetCoordinatorCandidates(_) => NodeCommandKind::GetCoordinatorCandidates,
+            Self::UpdateCoordinatorCandidates(_) => NodeCommandKind::UpdateCoordinatorCandidates,
+            Self::PublishCoordinatorCandidateDeclaration(_) => {
+                NodeCommandKind::PublishCoordinatorCandidateDeclaration
+            }
         }
     }
 
@@ -817,6 +849,9 @@ impl NodeCommand {
             Self::ApplyTrafficPolicy(command) => command.validate(),
             Self::RollbackTrafficPolicy(command) => command.validate(),
             Self::TestTrafficPolicy(command) => command.validate(),
+            Self::GetCoordinatorCandidates(command) => command.validate(),
+            Self::UpdateCoordinatorCandidates(command) => command.validate(),
+            Self::PublishCoordinatorCandidateDeclaration(command) => command.validate(),
         }
     }
 }
@@ -2317,6 +2352,15 @@ fn invalid(message: impl Into<String>) -> NodeProblem {
     NodeProblem::new(NodeProblemCode::InvalidRequest, message)
 }
 
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 #[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeCommandResult {
     pub request_id: u64,
@@ -2677,6 +2721,85 @@ pub struct NodeJoinRequestReviewAck {
     pub reviews: Vec<NodeJoinRequestReviewOutcome>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeCoordinatorCandidateStatusCommand {
+    pub network_name: String,
+}
+
+impl NodeCoordinatorCandidateStatusCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_name(&self.network_name)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeUpdateCoordinatorCandidatesCommand {
+    pub network_name: String,
+    pub expected_revision: u64,
+    pub candidates: Vec<CoordinatorCandidate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_from_unix_ms: Option<u64>,
+    pub expires_at_unix_ms: u64,
+}
+
+impl NodeUpdateCoordinatorCandidatesCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_name(&self.network_name)?;
+        if self.candidates.len() > fuckipv6_common::domain::COORDINATOR_CANDIDATE_MAX_GROUP_SIZE {
+            return Err(invalid(format!(
+                "Coordinator 候选组最多 {} 个节点",
+                fuckipv6_common::domain::COORDINATOR_CANDIDATE_MAX_GROUP_SIZE
+            ))
+            .for_network(self.network_name.clone()));
+        }
+        let mut priorities = HashSet::new();
+        for candidate in &self.candidates {
+            if !priorities.insert(candidate.priority) {
+                return Err(invalid("Coordinator 候选优先级必须唯一")
+                    .for_network(self.network_name.clone()));
+            }
+        }
+        let now = now_unix_ms();
+        let effective = self.effective_from_unix_ms.unwrap_or(now);
+        if self.expires_at_unix_ms <= effective {
+            return Err(invalid("Coordinator 候选配置的失效时间必须晚于生效时间")
+                .for_network(self.network_name.clone()));
+        }
+        if self.expires_at_unix_ms <= now {
+            return Err(invalid("Coordinator 候选配置不能使用已过期的时间窗口")
+                .for_network(self.network_name.clone()));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodePublishCoordinatorCandidateDeclarationCommand {
+    pub network_name: String,
+    pub willingness: CoordinatorCandidateWillingness,
+    pub public_reachability: CoordinatorPublicReachability,
+    pub resources: CoordinatorCandidateResources,
+    /// Short declaration lease. Runtime signs the exact timestamps.
+    pub validity_ms: u64,
+}
+
+impl NodePublishCoordinatorCandidateDeclarationCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_name(&self.network_name)?;
+        if self.validity_ms == 0
+            || self.validity_ms
+                > fuckipv6_common::domain::COORDINATOR_CANDIDATE_MAX_DECLARATION_VALIDITY_MS
+        {
+            return Err(invalid(format!(
+                "Coordinator 候选声明有效期必须在 1..={} ms 之间",
+                fuckipv6_common::domain::COORDINATOR_CANDIDATE_MAX_DECLARATION_VALIDITY_MS
+            ))
+            .for_network(self.network_name.clone()));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "status", content = "data", rename_all = "snake_case")]
 pub enum NodeCommandOutcome {
@@ -2725,6 +2848,7 @@ pub enum NodeCommandOutcome {
     TrafficPolicyHistory(Box<TrafficPolicyHistorySnapshot>),
     TrafficPolicyRolledBack(Box<TrafficPolicyRollbackResult>),
     TrafficPolicyTest(Box<TrafficPolicyTestComparison>),
+    CoordinatorCandidates(Box<CoordinatorCandidateStatus>),
     Accepted { operation_id: String },
     Completed { message: String },
     Rejected(NodeProblem),
@@ -4325,6 +4449,39 @@ mod tests {
                 candidate: valid_traffic_policy(2),
                 input: valid_traffic_test_input(),
             }),
+            NodeCommand::GetCoordinatorCandidates(NodeCoordinatorCandidateStatusCommand {
+                network_name: "home".into(),
+            }),
+            NodeCommand::UpdateCoordinatorCandidates(NodeUpdateCoordinatorCandidatesCommand {
+                network_name: "home".into(),
+                expected_revision: 1,
+                candidates: vec![CoordinatorCandidate {
+                    node_id: fuckipv6_common::domain::NodeId::from_public_key(
+                        b"coordinator-candidate-one",
+                    ),
+                    priority: 10,
+                }],
+                effective_from_unix_ms: Some(now_unix_ms()),
+                expires_at_unix_ms: now_unix_ms().saturating_add(60_000),
+            }),
+            NodeCommand::PublishCoordinatorCandidateDeclaration(
+                NodePublishCoordinatorCandidateDeclarationCommand {
+                    network_name: "home".into(),
+                    willingness: CoordinatorCandidateWillingness::Willing,
+                    public_reachability: CoordinatorPublicReachability {
+                        public_endpoint: Some(
+                            "203.0.113.10:6666".parse().expect("public endpoint"),
+                        ),
+                        reachable_via_relay: true,
+                    },
+                    resources: CoordinatorCandidateResources {
+                        cpu_cores: 2,
+                        memory_bytes: 256 * 1024 * 1024,
+                        max_connections: 128,
+                    },
+                    validity_ms: 30_000,
+                },
+            ),
             NodeCommand::Shutdown,
         ]
     }
@@ -4385,8 +4542,8 @@ mod tests {
 
     #[test]
     fn command_kind_inventory_and_sensitive_reauth_contract_are_complete() {
-        assert_eq!(NodeCommandKind::ALL.len(), 69);
-        assert_eq!(NodeCommandKind::ACTIONS.len(), 68);
+        assert_eq!(NodeCommandKind::ALL.len(), 72);
+        assert_eq!(NodeCommandKind::ACTIONS.len(), 71);
         for kind in [
             NodeCommandKind::CreateInvitation,
             NodeCommandKind::RevokeInvitation,
@@ -5194,6 +5351,7 @@ mod tests {
             NodeCommandKind::GetSnapshot,
             NodeCommandKind::GetUiManifest,
             NodeCommandKind::GetDiagnostics,
+            NodeCommandKind::GetCoordinatorCandidates,
             NodeCommandKind::GetBlacklist,
             NodeCommandKind::GetNetworkAllocation,
             NodeCommandKind::ProbePeer,
@@ -5227,6 +5385,7 @@ mod tests {
                 kind,
                 NodeCommandKind::GetSnapshot
                     | NodeCommandKind::GetDiagnostics
+                    | NodeCommandKind::GetCoordinatorCandidates
                     | NodeCommandKind::GetBlacklist
                     | NodeCommandKind::GetNetworkAllocation
                     | NodeCommandKind::ProbePeer

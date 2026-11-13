@@ -94,6 +94,9 @@
             "rollback_traffic_policy",
             "get_traffic_policy_history",
             "test_traffic_policy",
+            "get_coordinator_candidates",
+            "update_coordinator_candidates",
+            "publish_coordinator_candidate_declaration",
             "shutdown"
           ],
           "type": "string"
@@ -292,6 +295,8 @@
         "member_lifecycle_reason",
         "invitation_code",
         "coordinator_url",
+        "coordinator_candidates_json",
+        "coordinator_willingness",
         "port",
         "revision",
         "role",
@@ -389,7 +394,9 @@
         "member_lifecycle_action",
         "member_lifecycle_reason",
         "invitation_code",
-        "coordinator_url"
+        "coordinator_url",
+        "coordinator_candidates_json",
+        "coordinator_willingness"
       ],
       "type": "string"
     }

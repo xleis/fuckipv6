@@ -2421,6 +2421,20 @@ impl GpuiShell {
                     snapshot.owner_exit_enabled, snapshot.stage, snapshot.healthy
                 ));
             }
+            NodeCommandOutcome::CoordinatorCandidates(status) => {
+                let leader = status
+                    .current_leader
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "none".into());
+                self.notice = Some(format!(
+                    "Coordinator 候选 · config={:?} · candidates={} · leader={} · emergency={:?}",
+                    status.config_state,
+                    status.candidates.len(),
+                    leader,
+                    status.emergency
+                ));
+            }
             NodeCommandOutcome::Accepted { operation_id } => {
                 self.notice = Some(tr(
                     self.locale,
@@ -14700,6 +14714,11 @@ fn action_label(locale: Locale, id: &str) -> String {
         "rollback_traffic_policy" => "action.rollback_traffic_policy",
         "get_traffic_policy_history" => "action.get_traffic_policy_history",
         "test_traffic_policy" => "action.test_traffic_policy",
+        "get_coordinator_candidates" => "action.get_coordinator_candidates",
+        "update_coordinator_candidates" => "action.update_coordinator_candidates",
+        "publish_coordinator_candidate_declaration" => {
+            "action.publish_coordinator_candidate_declaration"
+        }
         "shutdown_node" => "action.shutdown_node",
         _ => "common.unknown_action",
     };

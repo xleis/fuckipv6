@@ -6,20 +6,22 @@ use fuckipv6_common::domain::JoinRequestReviewAction;
 use fuckipv6_common::domain::{
     parse_policy_test_input, ActivityCategory, ActivityEntry, ActivitySeverity,
     ApplicationIdentity, AuditOutcome, CapabilityKind, CapabilityState, ContentHash,
-    EffectiveAccessReason, EffectivePolicyLayer, ExitAvailabilitySource, ExitAvailabilityState,
-    ExitContributionAvailability, ExitContributionMode, ExitContributionObligation,
-    ExitContributionScope, ExitSelectionCandidate, ExitSelectionMode, ExitSelectionPolicy,
-    ExitSelectionSource, InvitationCode, InvitationId, InvitationRedeemRequest,
-    MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode, NetworkMember,
-    NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberStatus,
-    NetworkProfileUpdate, NetworkVisibility, NodeId, RelayAuthorizationAuditSnapshot,
-    RelayAuthorizationDiagnostic, RelayAuthorizationSourceDiagnostic, RelayExistingSessionPolicy,
-    RelayGovernanceAction, RelayGovernanceEvent, RelayHealthIssue, RelayHealthSnapshot,
-    RelayHealthStatus, RelayLifecycleState, RelayLimitPolicy, RelayLimitSource,
-    RelayMeasurementState, RelayReachabilityState, TopologyNode, TopologyNodeHealth,
-    TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy, TrafficFailureKind, TrafficFlow,
-    TrafficMatch, TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput, TrafficProtectionState,
-    TrafficProtocol, TrafficRoutingHitSample, TrafficRoutingObservation, TrafficRoutingPageModel,
+    CoordinatorCandidate, CoordinatorCandidateResources, CoordinatorCandidateWillingness,
+    CoordinatorPublicReachability, EffectiveAccessReason, EffectivePolicyLayer,
+    ExitAvailabilitySource, ExitAvailabilityState, ExitContributionAvailability,
+    ExitContributionMode, ExitContributionObligation, ExitContributionScope,
+    ExitSelectionCandidate, ExitSelectionMode, ExitSelectionPolicy, ExitSelectionSource,
+    InvitationCode, InvitationId, InvitationRedeemRequest, MemberLifecycleAction, MembershipRole,
+    NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
+    NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId,
+    RelayAuthorizationAuditSnapshot, RelayAuthorizationDiagnostic,
+    RelayAuthorizationSourceDiagnostic, RelayExistingSessionPolicy, RelayGovernanceAction,
+    RelayGovernanceEvent, RelayHealthIssue, RelayHealthSnapshot, RelayHealthStatus,
+    RelayLifecycleState, RelayLimitPolicy, RelayLimitSource, RelayMeasurementState,
+    RelayReachabilityState, TopologyNode, TopologyNodeHealth, TopologySnapshot, TrafficAction,
+    TrafficDefaultConfirmedBy, TrafficFailureKind, TrafficFlow, TrafficMatch, TrafficMatchRisk,
+    TrafficPolicy, TrafficPolicyTestInput, TrafficProtectionState, TrafficProtocol,
+    TrafficRoutingHitSample, TrafficRoutingObservation, TrafficRoutingPageModel,
     TrafficRoutingRuleActivityEffect, TrafficRoutingRuleImpactView, TrafficRoutingTarget,
     TrafficRoutingTargetKind, TrafficRoutingTargetRef, TrafficRoutingWorkflowState,
     TrafficSessionEventKind,
@@ -33,25 +35,26 @@ use crate::node::{
     NodeApplyConfigurationCommand, NodeApplyPolicyCommand, NodeApplyTrafficPolicyCommand,
     NodeBatchReviewJoinRequestsCommand, NodeChangeMemberLifecycleCommand,
     NodeClientBlacklistCommand, NodeCommand, NodeCommandKind, NodeControlHealth,
-    NodeCreateInvitationCommand, NodeCreateNetworkCommand, NodeEmbeddedServiceStatus,
-    NodeGetInvitationStatusCommand, NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceStatus,
-    NodeJoinNetworkCommand, NodeJoinRequestReviewItem, NodeLeaveNetworkCommand,
-    NodeListInvitationsCommand, NodeListJoinRequestsCommand, NodeMemberRemovalPreviewCommand,
-    NodeNetworkAllocation, NodeNetworkDiscoveryCommand, NodeNetworkMembersCommand,
-    NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus,
-    NodePermission, NodePhase, NodePreviewConfigurationCommand, NodePreviewInvitationCommand,
-    NodePreviewJoinNetworkCommand, NodePreviewPolicyCommand, NodePreviewPolicyRollbackCommand,
-    NodePreviewTrafficPolicyCommand, NodePreviewTrafficPolicyRollbackCommand, NodePrimaryStatus,
-    NodeProbePeerCommand, NodeProblemCode, NodeRedeemInvitationCommand,
-    NodeResubmitJoinRequestCommand, NodeReviewJoinRequestCommand, NodeRevokeInvitationCommand,
-    NodeRollbackConfigurationCommand, NodeRollbackPolicyCommand, NodeRollbackTrafficPolicyCommand,
-    NodeRotateNodeIdentityCommand, NodeRoutingDefaultAction, NodeRoutingMode,
-    NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot, NodeSetLocalExitCapabilityCommand,
-    NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand, NodeSnapshot,
-    NodeSubmitJoinRequestCommand, NodeTestTrafficPolicyCommand, NodeUiAction,
+    NodeCoordinatorCandidateStatusCommand, NodeCreateInvitationCommand, NodeCreateNetworkCommand,
+    NodeEmbeddedServiceStatus, NodeGetInvitationStatusCommand, NodeInterfaceKind,
+    NodeInterfaceOwnership, NodeInterfaceStatus, NodeJoinNetworkCommand, NodeJoinRequestReviewItem,
+    NodeLeaveNetworkCommand, NodeListInvitationsCommand, NodeListJoinRequestsCommand,
+    NodeMemberRemovalPreviewCommand, NodeNetworkAllocation, NodeNetworkDiscoveryCommand,
+    NodeNetworkMembersCommand, NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection,
+    NodeNetworkStatus, NodePermission, NodePhase, NodePreviewConfigurationCommand,
+    NodePreviewInvitationCommand, NodePreviewJoinNetworkCommand, NodePreviewPolicyCommand,
+    NodePreviewPolicyRollbackCommand, NodePreviewTrafficPolicyCommand,
+    NodePreviewTrafficPolicyRollbackCommand, NodePrimaryStatus, NodeProbePeerCommand,
+    NodeProblemCode, NodePublishCoordinatorCandidateDeclarationCommand,
+    NodeRedeemInvitationCommand, NodeResubmitJoinRequestCommand, NodeReviewJoinRequestCommand,
+    NodeRevokeInvitationCommand, NodeRollbackConfigurationCommand, NodeRollbackPolicyCommand,
+    NodeRollbackTrafficPolicyCommand, NodeRotateNodeIdentityCommand, NodeRoutingDefaultAction,
+    NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
+    NodeSetLocalExitCapabilityCommand, NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand,
+    NodeSnapshot, NodeSubmitJoinRequestCommand, NodeTestTrafficPolicyCommand, NodeUiAction,
     NodeUiActionBlockReason, NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage,
-    NodeUiPermission, NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
-    NodeWithdrawJoinRequestCommand,
+    NodeUiPermission, NodeUpdateCoordinatorCandidatesCommand, NodeUpdateNetworkAllocationCommand,
+    NodeUpdateRoutingCommand, NodeWithdrawJoinRequestCommand,
 };
 use crate::policy_transaction::PolicySnapshot;
 use crate::traffic_policy_transaction::TrafficPolicyDraft;
@@ -449,11 +452,14 @@ pub enum ActionBinding {
     RollbackTrafficPolicy,
     GetTrafficPolicyHistory,
     TestTrafficPolicy,
+    GetCoordinatorCandidates,
+    UpdateCoordinatorCandidates,
+    PublishCoordinatorCandidateDeclaration,
     ShutdownNode,
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 69] = [
+    pub const ALL: [Self; 72] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
@@ -522,6 +528,9 @@ impl ActionBinding {
         Self::RollbackTrafficPolicy,
         Self::GetTrafficPolicyHistory,
         Self::TestTrafficPolicy,
+        Self::GetCoordinatorCandidates,
+        Self::UpdateCoordinatorCandidates,
+        Self::PublishCoordinatorCandidateDeclaration,
         Self::ShutdownNode,
     ];
 
@@ -595,6 +604,11 @@ impl ActionBinding {
             Self::RollbackTrafficPolicy => "rollback_traffic_policy",
             Self::GetTrafficPolicyHistory => "get_traffic_policy_history",
             Self::TestTrafficPolicy => "test_traffic_policy",
+            Self::GetCoordinatorCandidates => "get_coordinator_candidates",
+            Self::UpdateCoordinatorCandidates => "update_coordinator_candidates",
+            Self::PublishCoordinatorCandidateDeclaration => {
+                "publish_coordinator_candidate_declaration"
+            }
             Self::ShutdownNode => "shutdown_node",
         }
     }
@@ -1959,6 +1973,18 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             ActionBinding::TestTrafficPolicy,
             NodeCommandKind::TestTrafficPolicy,
         ),
+        "get_coordinator_candidates" => (
+            ActionBinding::GetCoordinatorCandidates,
+            NodeCommandKind::GetCoordinatorCandidates,
+        ),
+        "update_coordinator_candidates" => (
+            ActionBinding::UpdateCoordinatorCandidates,
+            NodeCommandKind::UpdateCoordinatorCandidates,
+        ),
+        "publish_coordinator_candidate_declaration" => (
+            ActionBinding::PublishCoordinatorCandidateDeclaration,
+            NodeCommandKind::PublishCoordinatorCandidateDeclaration,
+        ),
         "shutdown_node" => (ActionBinding::ShutdownNode, NodeCommandKind::Shutdown),
         _ => {
             return Err(ModelError::UnknownAction {
@@ -2162,6 +2188,23 @@ pub fn default_form_values(
                 ("update_network_allocation", "mode") => "dual_stack".into(),
                 ("update_network_allocation", "ipv4_pool") => "10.8.0.0/24".into(),
                 ("update_network_allocation", "ipv6_pool") => "fd00::/120".into(),
+                ("update_coordinator_candidates", "expected_revision") => "1".into(),
+                ("update_coordinator_candidates", "candidates_json") => format!(
+                    r#"[{{"node_id":"{}","priority":1}}]"#,
+                    NodeId::from_public_key(b"default-coordinator-candidate")
+                ),
+                ("update_coordinator_candidates", "expires_at_unix_ms") => {
+                    "2000000000000".into()
+                }
+                ("publish_coordinator_candidate_declaration", "willingness") => {
+                    "willing".into()
+                }
+                ("publish_coordinator_candidate_declaration", "cpu_cores") => "2".into(),
+                ("publish_coordinator_candidate_declaration", "memory_bytes") => {
+                    "1073741824".into()
+                }
+                ("publish_coordinator_candidate_declaration", "max_connections") => "128".into(),
+                ("publish_coordinator_candidate_declaration", "validity_ms") => "60000".into(),
                 ("preview_configuration" | "apply_configuration", "expected_revision") => {
                     "0".into()
                 }
@@ -2946,6 +2989,76 @@ pub fn build_command(
                 )?,
             },
         )),
+        Ok(ActionBinding::GetCoordinatorCandidates) => Ok(NodeCommand::GetCoordinatorCandidates(
+            NodeCoordinatorCandidateStatusCommand {
+                network_name: required("network_name")?,
+            },
+        )),
+        Ok(ActionBinding::UpdateCoordinatorCandidates) => {
+            let effective_from_unix_ms = optional_non_empty(field("effective_from_unix_ms"))
+                .map(|value| parse_number::<u64>(action, "effective_from_unix_ms", &value))
+                .transpose()?;
+            Ok(NodeCommand::UpdateCoordinatorCandidates(
+                NodeUpdateCoordinatorCandidatesCommand {
+                    network_name: required("network_name")?,
+                    expected_revision: parse_number(
+                        action,
+                        "expected_revision",
+                        &required("expected_revision")?,
+                    )?,
+                    candidates: parse_coordinator_candidates(
+                        action,
+                        "candidates_json",
+                        &required("candidates_json")?,
+                    )?,
+                    effective_from_unix_ms,
+                    expires_at_unix_ms: parse_number(
+                        action,
+                        "expires_at_unix_ms",
+                        &required("expires_at_unix_ms")?,
+                    )?,
+                },
+            ))
+        }
+        Ok(ActionBinding::PublishCoordinatorCandidateDeclaration) => {
+            let public_endpoint = optional_non_empty(field("public_endpoint"))
+                .map(|value| {
+                    value.parse().map_err(|_| CommandBuildError::InvalidField {
+                        action_id: action.id.clone(),
+                        field_id: "public_endpoint".into(),
+                        value,
+                    })
+                })
+                .transpose()?;
+            Ok(NodeCommand::PublishCoordinatorCandidateDeclaration(
+                NodePublishCoordinatorCandidateDeclarationCommand {
+                    network_name: required("network_name")?,
+                    willingness: parse_coordinator_willingness(action, &required("willingness")?)?,
+                    public_reachability: CoordinatorPublicReachability {
+                        public_endpoint,
+                        reachable_via_relay: parse_bool(
+                            action,
+                            "reachable_via_relay",
+                            &field("reachable_via_relay"),
+                        )?,
+                    },
+                    resources: CoordinatorCandidateResources {
+                        cpu_cores: parse_number(action, "cpu_cores", &required("cpu_cores")?)?,
+                        memory_bytes: parse_number(
+                            action,
+                            "memory_bytes",
+                            &required("memory_bytes")?,
+                        )?,
+                        max_connections: parse_number(
+                            action,
+                            "max_connections",
+                            &required("max_connections")?,
+                        )?,
+                    },
+                    validity_ms: parse_number(action, "validity_ms", &required("validity_ms")?)?,
+                },
+            ))
+        }
         Ok(ActionBinding::ShutdownNode) => Ok(NodeCommand::Shutdown),
         Err(ModelError::UnknownAction { action_id, .. }) => {
             Err(CommandBuildError::UnknownAction { action_id })
@@ -3112,6 +3225,24 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
             HashSet::from(["expected_revision", "target_revision", "confirm_risk"])
         }
         "test_traffic_policy" => HashSet::from(["current_json", "candidate_json", "input_json"]),
+        "get_coordinator_candidates" => HashSet::from(["network_name"]),
+        "update_coordinator_candidates" => HashSet::from([
+            "network_name",
+            "expected_revision",
+            "candidates_json",
+            "effective_from_unix_ms",
+            "expires_at_unix_ms",
+        ]),
+        "publish_coordinator_candidate_declaration" => HashSet::from([
+            "network_name",
+            "willingness",
+            "public_endpoint",
+            "reachable_via_relay",
+            "cpu_cores",
+            "memory_bytes",
+            "max_connections",
+            "validity_ms",
+        ]),
         "start_node" | "stop_node" | "restart_node" | "shutdown_node" => HashSet::from([]),
         _ => return Err(format!("unknown action {}", action.id)),
     };
@@ -3326,6 +3457,33 @@ where
             field_id: field_id.into(),
             value: value.into(),
         })
+}
+
+fn parse_coordinator_candidates(
+    action: &NodeUiAction,
+    field_id: &str,
+    value: &str,
+) -> Result<Vec<CoordinatorCandidate>, CommandBuildError> {
+    serde_json::from_str(value).map_err(|_| CommandBuildError::InvalidField {
+        action_id: action.id.clone(),
+        field_id: field_id.into(),
+        value: value.into(),
+    })
+}
+
+fn parse_coordinator_willingness(
+    action: &NodeUiAction,
+    value: &str,
+) -> Result<CoordinatorCandidateWillingness, CommandBuildError> {
+    match value.trim() {
+        "willing" => Ok(CoordinatorCandidateWillingness::Willing),
+        "unwilling" => Ok(CoordinatorCandidateWillingness::Unwilling),
+        _ => Err(CommandBuildError::InvalidField {
+            action_id: action.id.clone(),
+            field_id: "willingness".into(),
+            value: value.into(),
+        }),
+    }
 }
 
 fn parse_bool(
@@ -9621,6 +9779,7 @@ mod tests {
             relay_health: health,
             relay_authorization: None,
             relay_governance: None,
+            coordinator_candidates: None,
         }
     }
 
@@ -9933,6 +10092,7 @@ mod tests {
                 relay_health: None,
                 relay_authorization: None,
                 relay_governance: None,
+                coordinator_candidates: None,
             });
 
         let overview = project_overview(&snapshot, Locale::En);
@@ -10380,7 +10540,7 @@ mod tests {
 
     #[test]
     fn every_manifest_action_has_an_explicit_binding() {
-        assert_eq!(ActionBinding::ALL.len(), 69);
+        assert_eq!(ActionBinding::ALL.len(), 72);
         let manifest = node_ui_manifest();
         let actual = manifest
             .pages

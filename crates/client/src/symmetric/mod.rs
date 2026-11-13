@@ -1,7 +1,10 @@
 use anyhow::{Context, Result};
 use fuckipv6_common::domain::{
-    NetworkRecord, NodeId, RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot,
-    RelayHealthSnapshot, RelayLifecycleState,
+    CoordinatorCandidate, CoordinatorCandidateConfig, CoordinatorCandidateDeclaration,
+    CoordinatorCandidateResources, CoordinatorCandidateStatus, CoordinatorCandidateWillingness,
+    CoordinatorPublicReachability, NetworkId, NetworkRecord, NodeId,
+    RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot, RelayHealthSnapshot,
+    RelayLifecycleState,
 };
 use fuckipv6_common::{
     CoordinatorConfig, Identity, NetworkAllocation, NetworkTicket, RelayEndpoint,
@@ -9,6 +12,7 @@ use fuckipv6_common::{
 use fuckipv6_coordinator::{
     relay::server::{RelayPolicyAuthority, RelayServer},
     signaling::blacklist::CoordinatorConfigBlacklistStore,
+    signaling::coordinator_candidates::CoordinatorCandidateStore,
     signaling::exit_contribution::ExitContributionRequestStore,
     signaling::invitations::InvitationStore,
     signaling::join_requests::JoinRequestStore,
@@ -119,6 +123,8 @@ pub struct EmbeddedCoordinator {
     pub relay_addr: Option<SocketAddr>,
     pub session_manager: Arc<SessionManager>,
     blacklist_store: Arc<CoordinatorConfigBlacklistStore>,
+    coordinator_candidate_store: Option<Arc<CoordinatorCandidateStore>>,
+    network_id: Option<NetworkId>,
     signaling_task: Option<JoinHandle<Result<()>>>,
     relay_directory: RelayEndpointDirectory,
     relay_server: Option<RelayServer>,
@@ -194,7 +200,10 @@ impl EmbeddedCoordinator {
         // Validate the owner-authored roster before any coordinator defaults are
         // created. A later review re-reads this file for every authorization,
         // but startup should still surface malformed authority immediately.
-        if network_record_path.exists() {
+        // Missing records keep legacy signaling/Relay services available while
+        // disabling candidate management fail-closed; production network
+        // creation persists the authoritative record before starting services.
+        let network_id = if network_record_path.exists() {
             let record: NetworkRecord = serde_json::from_slice(
                 &std::fs::read(&network_record_path).with_context(|| {
                     format!(
@@ -212,7 +221,15 @@ impl EmbeddedCoordinator {
             record
                 .validate()
                 .context("审批授权网络资料校验失败，拒绝启动内嵌协调器")?;
-        }
+            Some(record.network_id)
+        } else {
+            tracing::warn!(
+                network = network_name,
+                path = %network_record_path.display(),
+                "审批授权网络资料不存在，内嵌 Coordinator 候选组能力保持禁用"
+            );
+            None
+        };
         let node_identity = config_manager
             .load_node_identity()
             .context("无法加载内嵌协调器 owner 身份")?;
@@ -282,6 +299,17 @@ impl EmbeddedCoordinator {
             blacklist_path.with_file_name("exit_contribution_requests.json"),
             network_record_path.clone(),
         ));
+        let coordinator_candidate_store = network_id
+            .as_ref()
+            .map(|_| {
+                CoordinatorCandidateStore::new(
+                    blacklist_path.with_file_name("coordinator_candidates.json"),
+                    network_record_path.clone(),
+                )
+                .map(Arc::new)
+                .context("无法初始化 Coordinator 候选存储")
+            })
+            .transpose()?;
         let session_manager = Arc::new(
             SessionManager::new_with_allocation(&persisted_allocation)
                 .context("无法初始化内嵌协调器地址池")?,
@@ -296,17 +324,21 @@ impl EmbeddedCoordinator {
             .context("无法加载节点持久黑名单")?;
 
         let signaling_bind = format!("0.0.0.0:{}", request.signaling_port);
-        let signaling_server =
+        let mut signaling_server =
             SignalingServer::new_with_manager(signaling_bind, session_manager.clone())
                 .with_join_request_store(join_request_store)
                 .with_invitation_store(invitation_store)
                 .with_member_lifecycle_store(member_lifecycle_store)
-                .with_exit_contribution_store(exit_contribution_store)
-                .with_network_record_path(network_record_path)
-                .with_node_identity(node_identity)
-                .bind()
-                .await
-                .context("无法绑定内嵌信令服务")?;
+                .with_exit_contribution_store(exit_contribution_store);
+        if let Some(store) = coordinator_candidate_store.clone() {
+            signaling_server = signaling_server.with_coordinator_candidate_store(store);
+        }
+        let signaling_server = signaling_server
+            .with_network_record_path(network_record_path)
+            .with_node_identity(node_identity)
+            .bind()
+            .await
+            .context("无法绑定内嵌信令服务")?;
         let actual_signaling_addr = signaling_server.local_addr()?;
         let relay_directory = signaling_server.relay_endpoint_directory();
         signaling_server.spawn_timeout_cleanup(120);
@@ -354,6 +386,8 @@ impl EmbeddedCoordinator {
             relay_addr: None,
             session_manager,
             blacklist_store,
+            coordinator_candidate_store,
+            network_id,
             signaling_task: Some(signaling_task),
             relay_directory,
             relay_server: None,
@@ -559,6 +593,99 @@ impl EmbeddedCoordinator {
 
     /// Stop Relay independently, then stop signaling. Both listener ports are
     /// released before the caller treats the embedded service as stopped.
+    pub(crate) async fn coordinator_candidate_status(
+        &self,
+        actor: NodeId,
+    ) -> Result<CoordinatorCandidateStatus> {
+        let store = self
+            .coordinator_candidate_store
+            .clone()
+            .context("Coordinator 候选组不可用：缺少审批授权网络资料")?;
+        let network_id = self
+            .network_id
+            .clone()
+            .context("Coordinator 候选组不可用：缺少审批授权网络资料")?;
+        tokio::task::spawn_blocking(move || store.status(&actor, &network_id, now_unix_ms()))
+            .await
+            .context("Coordinator 候选状态查询任务失败")?
+    }
+
+    pub(crate) async fn update_coordinator_candidate_config(
+        &self,
+        identity: &Identity,
+        expected_revision: u64,
+        candidates: Vec<CoordinatorCandidate>,
+        effective_from_unix_ms: u64,
+        expires_at_unix_ms: u64,
+    ) -> Result<CoordinatorCandidateStatus> {
+        let actor = NodeId::from_public_key(&identity.public_key());
+        let network_id = self
+            .network_id
+            .clone()
+            .context("Coordinator 候选组不可用：缺少审批授权网络资料")?;
+        let config = CoordinatorCandidateConfig::signed(
+            network_id,
+            expected_revision
+                .checked_add(1)
+                .context("Coordinator 候选配置 revision 溢出")?,
+            candidates,
+            effective_from_unix_ms,
+            expires_at_unix_ms,
+            identity,
+        )?;
+        let store = self
+            .coordinator_candidate_store
+            .clone()
+            .context("Coordinator 候选组不可用：缺少审批授权网络资料")?;
+        tokio::task::spawn_blocking(move || {
+            store.update_config(&actor, expected_revision, config, now_unix_ms())
+        })
+        .await
+        .context("Coordinator 候选配置更新任务失败")?
+    }
+
+    pub(crate) async fn publish_coordinator_candidate_declaration(
+        &self,
+        identity: &Identity,
+        willingness: CoordinatorCandidateWillingness,
+        public_reachability: CoordinatorPublicReachability,
+        resources: CoordinatorCandidateResources,
+        validity_ms: u64,
+    ) -> Result<CoordinatorCandidateStatus> {
+        let actor = NodeId::from_public_key(&identity.public_key());
+        let network_id = self
+            .network_id
+            .clone()
+            .context("Coordinator 候选组不可用：缺少审批授权网络资料")?;
+        let store = self
+            .coordinator_candidate_store
+            .clone()
+            .context("Coordinator 候选组不可用：缺少审批授权网络资料")?;
+        let observed_at_unix_ms = now_unix_ms();
+        let config = store
+            .status(&actor, &network_id, observed_at_unix_ms)?
+            .config
+            .context("Coordinator 候选配置尚未生效")?;
+        let expires_at_unix_ms = observed_at_unix_ms
+            .checked_add(validity_ms)
+            .context("Coordinator 候选声明有效期溢出")?;
+        let declaration = CoordinatorCandidateDeclaration::signed(
+            network_id,
+            config.revision,
+            public_reachability,
+            resources,
+            willingness,
+            observed_at_unix_ms,
+            expires_at_unix_ms,
+            identity,
+        )?;
+        tokio::task::spawn_blocking(move || {
+            store.publish_declaration(&actor, declaration, now_unix_ms())
+        })
+        .await
+        .context("Coordinator 候选声明发布任务失败")?
+    }
+
     pub async fn shutdown(&mut self) -> Result<()> {
         let mut failures = Vec::new();
         if let Err(error) = self.disable_relay().await {

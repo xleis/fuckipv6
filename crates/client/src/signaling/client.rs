@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
+    CoordinatorCandidateConfig, CoordinatorCandidateDeclaration, CoordinatorCandidateStatus,
     InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
     InvitationRedeemRequest, InvitationRedemption, InvitationState, InvitationStatusView,
     IssuedInvitation, JoinRequest, JoinRequestId, JoinRequestState, MemberLifecycleChange,
@@ -29,6 +30,7 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const JOIN_REQUEST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const INVITATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const NETWORK_JOIN_PREVIEW_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
+const COORDINATOR_CANDIDATE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SignalingCloseError {
@@ -67,6 +69,8 @@ pub struct SignalingClient {
     invitation_gate: Arc<Mutex<()>>,
     network_join_previews: Arc<NetworkJoinPreviewResponseHub>,
     network_join_preview_gate: Arc<Mutex<()>>,
+    coordinator_candidates: Arc<CoordinatorCandidateResponseHub>,
+    coordinator_candidate_gate: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,6 +302,175 @@ impl JoinRequestResponseHub {
     }
 
     fn fail_pending(&self, error: JoinRequestControlError) {
+        let _ = self.finish(Err(error));
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum CoordinatorCandidateControlError {
+    #[error("Coordinator 候选控制连接已断开")]
+    Disconnected,
+    #[error("Coordinator 候选控制请求超时")]
+    TimedOut,
+    #[error("Coordinator 候选控制请求被拒绝")]
+    Rejected(u16),
+    #[error("Coordinator 候选控制连接尚未就绪")]
+    Unavailable,
+}
+
+impl CoordinatorCandidateControlError {
+    pub(crate) fn message_key(self) -> &'static str {
+        match self {
+            Self::Disconnected | Self::Unavailable => "coordinator_candidate.error.unavailable",
+            Self::TimedOut => "coordinator_candidate.error.timeout",
+            Self::Rejected(401) => "coordinator_candidate.error.unauthorized",
+            Self::Rejected(403) => "coordinator_candidate.error.forbidden",
+            Self::Rejected(429) => "coordinator_candidate.error.rate_limited",
+            Self::Rejected(503) => "coordinator_candidate.error.overloaded",
+            Self::Rejected(_) => "coordinator_candidate.error.unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PendingCoordinatorCandidate {
+    Config {
+        network_id: NetworkId,
+        revision: u64,
+    },
+    Declaration {
+        network_id: NetworkId,
+        config_revision: u64,
+    },
+    Status(NetworkId),
+}
+
+struct PendingCoordinatorCandidateResponse {
+    expected: PendingCoordinatorCandidate,
+    sender: oneshot::Sender<
+        std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError>,
+    >,
+}
+
+#[derive(Default)]
+struct CoordinatorCandidateResponseHub {
+    pending: StdMutex<Option<PendingCoordinatorCandidateResponse>>,
+}
+
+impl CoordinatorCandidateResponseHub {
+    fn register(
+        &self,
+        expected: PendingCoordinatorCandidate,
+    ) -> std::result::Result<
+        oneshot::Receiver<
+            std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError>,
+        >,
+        CoordinatorCandidateControlError,
+    > {
+        let (sender, receiver) = oneshot::channel();
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.is_some() {
+            return Err(CoordinatorCandidateControlError::Unavailable);
+        }
+        *pending = Some(PendingCoordinatorCandidateResponse { expected, sender });
+        Ok(receiver)
+    }
+
+    fn route(&self, message: &SignalingMessage) -> bool {
+        let matches = match message {
+            SignalingMessage::Error { .. } => self.has_pending(),
+            SignalingMessage::CoordinatorCandidateConfigAck { status } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::Config {
+                        network_id,
+                        revision,
+                    } => {
+                        status.network_id == *network_id
+                            && status
+                                .config
+                                .as_ref()
+                                .is_some_and(|config| config.revision == *revision)
+                    }
+                    _ => false,
+                })
+            }
+            SignalingMessage::CoordinatorCandidateDeclarationAck { status } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::Declaration {
+                        network_id,
+                        config_revision,
+                    } => {
+                        status.network_id == *network_id
+                            && status
+                                .config
+                                .as_ref()
+                                .is_some_and(|config| config.revision == *config_revision)
+                    }
+                    _ => false,
+                })
+            }
+            SignalingMessage::CoordinatorCandidateStatusAck { status } => self.matches(
+                |expected| matches!(expected, PendingCoordinatorCandidate::Status(network_id) if status.network_id == *network_id),
+            ),
+            _ => return false,
+        };
+
+        let is_candidate_response = matches!(
+            message,
+            SignalingMessage::CoordinatorCandidateConfigAck { .. }
+                | SignalingMessage::CoordinatorCandidateDeclarationAck { .. }
+                | SignalingMessage::CoordinatorCandidateStatusAck { .. }
+        );
+        if !matches {
+            return is_candidate_response;
+        }
+
+        let response = match message {
+            SignalingMessage::CoordinatorCandidateConfigAck { status }
+            | SignalingMessage::CoordinatorCandidateDeclarationAck { status }
+            | SignalingMessage::CoordinatorCandidateStatusAck { status } => status.clone(),
+            SignalingMessage::Error { code, .. } => {
+                return self.finish(Err(CoordinatorCandidateControlError::Rejected(*code)));
+            }
+            _ => unreachable!("coordinator candidate response match was checked above"),
+        };
+        self.finish(Ok(response))
+    }
+
+    fn has_pending(&self) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+
+    fn matches(&self, predicate: impl FnOnce(&PendingCoordinatorCandidate) -> bool) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .is_some_and(|pending| predicate(&pending.expected))
+    }
+
+    fn finish(
+        &self,
+        result: std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError>,
+    ) -> bool {
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(pending) = pending {
+            let _ = pending.sender.send(result);
+        }
+        true
+    }
+
+    fn fail_pending(&self, error: CoordinatorCandidateControlError) {
         let _ = self.finish(Err(error));
     }
 }
@@ -697,6 +870,7 @@ struct ConnectionChannels<'a> {
     join_requests: &'a JoinRequestResponseHub,
     invitations: &'a InvitationResponseHub,
     network_join_previews: &'a NetworkJoinPreviewResponseHub,
+    coordinator_candidates: &'a CoordinatorCandidateResponseHub,
 }
 
 struct ConnectionState {
@@ -746,6 +920,7 @@ impl SignalingClient {
         let join_requests = Arc::new(JoinRequestResponseHub::default());
         let invitations = Arc::new(InvitationResponseHub::default());
         let network_join_previews = Arc::new(NetworkJoinPreviewResponseHub::default());
+        let coordinator_candidates = Arc::new(CoordinatorCandidateResponseHub::default());
 
         let registration = RegistrationIdentity {
             client_id: identity.client_id().to_string(),
@@ -775,6 +950,7 @@ impl SignalingClient {
             join_requests.clone(),
             invitations.clone(),
             network_join_previews.clone(),
+            coordinator_candidates.clone(),
             shutdown_rx,
         ));
 
@@ -794,6 +970,8 @@ impl SignalingClient {
             invitation_gate: Arc::new(Mutex::new(())),
             network_join_previews,
             network_join_preview_gate: Arc::new(Mutex::new(())),
+            coordinator_candidates,
+            coordinator_candidate_gate: Arc::new(Mutex::new(())),
         };
 
         client.wait_for_initial_registration().await?;
@@ -1030,6 +1208,76 @@ impl SignalingClient {
                 self.join_requests
                     .fail_pending(JoinRequestControlError::TimedOut);
                 Err(JoinRequestControlError::TimedOut)
+            }
+        }
+    }
+
+    pub(crate) async fn coordinator_candidate_status(
+        &self,
+        network_id: NetworkId,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        self.send_coordinator_candidate_operation(
+            SignalingMessage::CoordinatorCandidateStatusRequest {
+                network_id: network_id.clone(),
+            },
+            PendingCoordinatorCandidate::Status(network_id),
+        )
+        .await
+    }
+
+    pub(crate) async fn update_coordinator_candidates(
+        &self,
+        config: CoordinatorCandidateConfig,
+        expected_revision: u64,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        let expected = PendingCoordinatorCandidate::Config {
+            network_id: config.network_id.clone(),
+            revision: config.revision,
+        };
+        self.send_coordinator_candidate_operation(
+            SignalingMessage::CoordinatorCandidateConfigUpdate {
+                expected_revision,
+                config,
+            },
+            expected,
+        )
+        .await
+    }
+
+    pub(crate) async fn publish_coordinator_candidate_declaration(
+        &self,
+        declaration: CoordinatorCandidateDeclaration,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        let expected = PendingCoordinatorCandidate::Declaration {
+            network_id: declaration.network_id.clone(),
+            config_revision: declaration.candidate_config_revision,
+        };
+        self.send_coordinator_candidate_operation(
+            SignalingMessage::CoordinatorCandidateDeclarationPublish { declaration },
+            expected,
+        )
+        .await
+    }
+
+    async fn send_coordinator_candidate_operation(
+        &self,
+        message: SignalingMessage,
+        expected: PendingCoordinatorCandidate,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        let _gate = self.coordinator_candidate_gate.lock().await;
+        let receiver = self.coordinator_candidates.register(expected)?;
+        if self.send(message).is_err() {
+            self.coordinator_candidates
+                .fail_pending(CoordinatorCandidateControlError::Disconnected);
+            return Err(CoordinatorCandidateControlError::Unavailable);
+        }
+        match tokio::time::timeout(COORDINATOR_CANDIDATE_RESPONSE_TIMEOUT, receiver).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => Err(CoordinatorCandidateControlError::Disconnected),
+            Err(_) => {
+                self.coordinator_candidates
+                    .fail_pending(CoordinatorCandidateControlError::TimedOut);
+                Err(CoordinatorCandidateControlError::TimedOut)
             }
         }
     }
@@ -1295,6 +1543,7 @@ async fn connection_manager(
     join_requests: Arc<JoinRequestResponseHub>,
     invitations: Arc<InvitationResponseHub>,
     network_join_previews: Arc<NetworkJoinPreviewResponseHub>,
+    coordinator_candidates: Arc<CoordinatorCandidateResponseHub>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let channels = ConnectionChannels {
@@ -1307,6 +1556,7 @@ async fn connection_manager(
         join_requests: &join_requests,
         invitations: &invitations,
         network_join_previews: &network_join_previews,
+        coordinator_candidates: &coordinator_candidates,
     };
     let mut pending_outbound = Vec::new();
     let mut state = ConnectionState {
@@ -1410,6 +1660,9 @@ fn notify_disconnected(channels: ConnectionChannels<'_>, reason: String) {
     channels
         .network_join_previews
         .fail_pending(NetworkJoinPreviewControlError::Disconnected);
+    channels
+        .coordinator_candidates
+        .fail_pending(CoordinatorCandidateControlError::Disconnected);
     let _ = channels.assigned_ip_tx.send(None);
     let _ = channels.relay_endpoint_tx.send(None);
     let _ = channels
@@ -1597,6 +1850,10 @@ fn handle_incoming_message(
     }
 
     if channels.network_join_previews.route(&msg) {
+        return Ok(());
+    }
+
+    if channels.coordinator_candidates.route(&msg) {
         return Ok(());
     }
 
@@ -1810,6 +2067,10 @@ fn signaling_message_to_event(msg: SignalingMessage) -> Option<SignalingEvent> {
             revision,
         }),
 
+        SignalingMessage::CoordinatorCandidateStatusChanged { network_id } => {
+            Some(SignalingEvent::CoordinatorCandidateStatusChanged { network_id })
+        }
+
         SignalingMessage::MemberDirectoryList { .. }
         | SignalingMessage::MemberDirectoryListAck { .. }
         | SignalingMessage::JoinRequestSubmit { .. }
@@ -1831,7 +2092,13 @@ fn signaling_message_to_event(msg: SignalingMessage) -> Option<SignalingEvent> {
         | SignalingMessage::InvitationRedeem { .. }
         | SignalingMessage::InvitationRedeemAck { .. }
         | SignalingMessage::NetworkJoinPreview { .. }
-        | SignalingMessage::NetworkJoinPreviewAck { .. } => None,
+        | SignalingMessage::NetworkJoinPreviewAck { .. }
+        | SignalingMessage::CoordinatorCandidateConfigUpdate { .. }
+        | SignalingMessage::CoordinatorCandidateConfigAck { .. }
+        | SignalingMessage::CoordinatorCandidateDeclarationPublish { .. }
+        | SignalingMessage::CoordinatorCandidateDeclarationAck { .. }
+        | SignalingMessage::CoordinatorCandidateStatusRequest { .. }
+        | SignalingMessage::CoordinatorCandidateStatusAck { .. } => None,
 
         _ => None,
     }
@@ -1919,6 +2186,11 @@ pub enum SignalingEvent {
         revision: u64,
     },
 
+    /// Candidate configuration, declarations or derived health changed. The
+    /// event carries only the network scope; consumers must fetch authoritative
+    /// status instead of inferring a Leader.
+    CoordinatorCandidateStatusChanged { network_id: NetworkId },
+
     /// 错误
     Error { code: u16, message: String },
 }
@@ -1969,6 +2241,8 @@ mod tests {
             invitation_gate: Arc::new(Mutex::new(())),
             network_join_previews: Arc::new(NetworkJoinPreviewResponseHub::default()),
             network_join_preview_gate: Arc::new(Mutex::new(())),
+            coordinator_candidates: Arc::new(CoordinatorCandidateResponseHub::default()),
+            coordinator_candidate_gate: Arc::new(Mutex::new(())),
         };
 
         let error = client
@@ -2317,6 +2591,7 @@ mod tests {
             Arc::new(JoinRequestResponseHub::default()),
             Arc::new(InvitationResponseHub::default()),
             Arc::new(NetworkJoinPreviewResponseHub::default()),
+            Arc::new(CoordinatorCandidateResponseHub::default()),
             shutdown_rx,
         ));
 

@@ -1458,6 +1458,70 @@ describe("node UI contract invariants", () => {
     ).toThrow("member lifecycle revision invalid");
   });
 
+  it("keeps Relay role actions on the shared command and selection gates", () => {
+    const action = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((candidate) => candidate.id === "set_relay_role")!;
+    expect(action).toMatchObject({
+      command: "set_network_role",
+      backend_status: "implemented",
+      permission: "manage_roles",
+      availability: "network_selected",
+    });
+
+    const snapshot = emptySnapshot();
+    expect(executionBlockReason(action, snapshot, "home")).toBe(
+      "permission_denied",
+    );
+    snapshot.permissions!.permissions.push("manage_roles");
+    expect(executionBlockReason(action, snapshot, "home")).toBe(
+      "no_network_selected",
+    );
+
+    snapshot.networks = [
+      {
+        name: "home",
+        tun_name: "fk-home",
+        status: "online",
+        assigned_ipv6: "fd00::2",
+        assigned_ipv4: null,
+        p2p_listen_addr: null,
+        uptime_secs: 1,
+        roles: ["member"],
+        peer_count: 0,
+        traffic: {
+          tun_rx_bytes: 0,
+          tun_tx_bytes: 0,
+          tun_rx_packets: 0,
+          tun_tx_packets: 0,
+          p2p_rx_bytes: 0,
+          p2p_tx_bytes: 0,
+          p2p_rx_packets: 0,
+          p2p_tx_packets: 0,
+          error_count: 0,
+        },
+      },
+    ];
+    expect(executionBlockReason(action, snapshot, "home")).toBeNull();
+
+    const values = initialActionValues(action, snapshot, "home");
+    expect(values).toMatchObject({
+      network_name: "home",
+      role: "relay",
+      enabled: false,
+    });
+    expect(
+      buildCommand(action, { ...values, enabled: "true" }, "en"),
+    ).toEqual({
+      command: "set_network_role",
+      payload: {
+        network_name: "home",
+        role: "relay",
+        enabled: true,
+      },
+    });
+  });
+
   it("uses the shared canonical reason for unsupported exit-node actions", () => {
     const action = manifest.pages
       .flatMap((page) => page.actions)

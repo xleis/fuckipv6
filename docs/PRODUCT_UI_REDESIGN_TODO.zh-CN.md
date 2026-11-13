@@ -61,7 +61,7 @@
 | W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05、W12-08 和 W12-10 已完成：本机启停、贡献治理、管理员选择、分层健康、故障切换/撤权及 Exit 页面权威分层均有自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收，并通过真实增量证明 IPv4 目标流量归入规范 IPv6 Peer 身份且两侧 Peer/网络级 P2P 计数一致；W12-07 的非浏览器完整文件下载与自动 DNS 清理、两侧 Exit 可达和 W12-09 的 24 小时稳定性仍待完成 |
 | W13 Relay | `[x]` | P1 | W10 | W13-01 至 W13-07 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；真实 Relay 子进程运营者导出只含最小 usage/health/governance 字段，不包含载荷、虚拟地址、密钥或显示名；生产数据面故障转移写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复、真实子进程连接风暴/慢连接/资源上限/吞吐/延迟/CPU/RSS、满载期间 Snapshot/Manifest 可用性及 Relay/Coordinator/Exit 同时故障恢复均有进程或 netns 证据。GPUI、WebUI 与 Android Compose Relay 页面现统一消费共享 Manifest、`NodeSnapshot`、健康/治理投影和 `SetNetworkRole` 命令；Android 在快照或真实命令回调缺失时失败关闭，不注入示例状态。Android 的 VpnService、节点 IPC 和真机 E2E 仍归 W16，不在本项冒充平台数据面完成 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
-| W15 File | `[~]` | P2 | W10 | 本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、WebUI 权威只读状态面、并发/速率/磁盘/扫描/审计上界已落地；Linux 独立三节点真实网络传输与恢复验收已完成，Android File 表面、WebUI 内容浏览/传输、Windows/macOS 实机竞态与性能/OS 资源基线仍未完成 |
+| W15 File | `[~]` | P2 | W10 | 本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、WebUI 权威只读状态面、并发/速率/磁盘/扫描/审计上界已落地；Linux 独立三节点真实网络传输、恢复与四槽满载控制面隔离验收已完成，Android File 表面、WebUI 内容浏览/传输、Windows/macOS 实机竞态与性能/OS 资源基线仍未完成 |
 | W16 Android | `[ ]` | P2 | W2,W4,W5,W7-W15 | Compose、VpnService、全能力 |
 | W17 跨平台硬化 | `[ ]` | P2 | W6-W16 | Linux/macOS/Windows 实机证据 |
 | W18 发布门禁 | `[ ]` | P0 | 全部 | 自动化、实测、安全和发布证据 |
@@ -3597,8 +3597,8 @@ macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态以�
 - [x] 进行磁盘空间预留与低空间保护；
 - [x] 限制目录扫描深度和条目数；
 - [x] 限制事件队列和日志增长；
-- [ ] 满载时不影响 node/control 基本功能；
-- [ ] 压力测试后文件句柄、线程和内存回到基线（Linux 进程内及 SIGKILL 恢复已自动化通过；macOS/Windows 待验收）；
+- [x] 满载时不影响 node/control 基本功能（Linux 独立三节点四传输槽位满载验收通过）；
+- [ ] 压力测试后文件句柄、线程和内存回到基线（Linux 进程内、独立三节点满载及 SIGKILL 恢复已自动化通过；macOS/Windows 待验收）；
 - [x] 报告录明阈值与恢复结果。
 
 **验收**：恶意或误用传输无法耗尽节点资源，File 故障不拖垮数据面。
@@ -3663,8 +3663,21 @@ macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态以�
 staging 被清理、活动传输为 0 且 capability 恢复为 Ready。该测试确定性地模拟“崩溃发生在部分上传写入后，进程停机时间已超过
 staging 陈旧阈值”。
 
+**补充（2026-11-14，独立三节点 File 满载控制面隔离）**：`scripts/test-w15-file-netns.sh` 在真实邀请、签名 File capability、
+直接 P2P 和独立 supervisor/node 进程拓扑中启用 512 kbps 共享带宽，由 node1、node2 各发起两个维护在不同父目录的 4 MiB 上传，
+占满全局 4 个、每成员 2 个和每个唯一目录 1 个传输槽位。满载期间连续 8 轮分别通过 coordinator/owner、node1、node2 的本地 IPC
+执行 24 次 `get_snapshot`，coordinator/owner 的 `active_transfers` 始终为 4，全部快照均包含 identity 和 network 数组，最大响应
+延迟 45 ms（门禁 2,000 ms）。随后取消四个传输，验证活动数回到 0、owner staging 为空、四个未发布目标均不存在、两个成员
+journal 为空。资源核对结果为 coordinator/owner FD 26→26、线程 20→20、RSS 52,348→52,360 KiB；node1 FD 19→18、线程
+19→19、RSS 42,556→42,800 KiB；node2 FD 18→19、线程 19→19、RSS 42,336→42,748 KiB，全部处于任务阈值内。证据目录为
+`/tmp/w15-file.20261113T160011Z.1311277`，结构化报告 `node-control-isolation.json` 的 SHA256 为
+`b019ac564d2ca90f5d30de39c1360d974f854374df42b36a3f38b81c5ba2b55f`，对应 release 二进制 SHA256 为
+`9e4c708a46c6df6ca731d7c68ed2e4889cf5702d31cc31e797d6e6ca8b02db45`，绑定提交 `3ad41dc`。该证据补齐 Linux 独立
+node/control 基本功能在 File 满载下的隔离结论；仍不扩张为 macOS/Windows 实机、长时高压、跨平台内存或真实网络吞吐结论。
+
 **未测边界**：Linux 进程内已覆盖满载上传/下载的正常完成、丢弃、staging 清理、OS 资源恢复和测试进程 SIGKILL 后的重启
-清理。尚未启动独立 node/control 进程做真实 File 满载隔离测试；macOS/Windows 的线程、RSS 与句柄基线仍需实机采样。
+清理；独立三节点已覆盖四槽满载下的控制面响应和取消后的 FD、线程、RSS 回退。尚未执行跨平台或长时高压满载，macOS/Windows
+的线程、RSS 与句柄基线仍需实机采样。
 真实 veth 断网、续传和完整 node supervisor 重启已经由 W15-03 的三节点 netns 验收覆盖，但该测试不是满载隔离或跨平台性能结论。
 
 **补充（2026-11-13，完整 node supervisor 重启）**：三节点 netns 测试按 JSON readiness 日志提取真实 node 子进程 PID，而不是把
@@ -3812,7 +3825,8 @@ debug 测试构建；命令为
 - 当前已有 GPUI owner File 设置流程、本地 owner IPC、持久化、domain ACL、路径边界、临时文件、可恢复传输适配器、资源限制和
   Linux 独立三节点真实网络验收。
 - Linux netns 已覆盖真实 P2P 上传/下载、低带宽暂停、veth 断网、撤权中断、取消清理、真实 node 子进程 `SIGKILL` 后的 supervisor
-  重启以及 journal/staging 续传；这仍不是 Windows/macOS 实机、跨平台竞态或满载隔离证据。
+  重启、journal/staging 续传，以及四槽满载时三个独立控制面的响应和取消后资源回退；这仍不是 Windows/macOS 实机、跨平台竞态
+  或跨平台满载隔离证据。
 - 当前 WebUI 只有权威只读 File 能力状态面，尚无 File 内容浏览、上传、下载或续传操作；Android 尚无 File 表面。
   不得宣称 GPUI/WebUI/Android 三端 File 语义已经一致。
 - 自动化测试仍缺 Windows GNU/macOS 实机重解析点、硬链接、目录交换、并发重命名和权限变化验收；已有的大文件/多文件性能基线

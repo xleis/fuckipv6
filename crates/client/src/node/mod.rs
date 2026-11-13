@@ -1,6 +1,7 @@
 mod authorization;
 mod command;
 pub mod contract;
+mod coordinator_takeover;
 mod event;
 mod http_adapter;
 mod lifecycle;

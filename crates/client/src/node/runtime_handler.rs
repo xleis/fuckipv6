@@ -4420,7 +4420,7 @@ async fn refresh_embedded_services(state: &NodeStateStore, services: &EmbeddedSe
         }
     };
     state
-        .update(|snapshot| {
+        .update_if_changed(|snapshot| {
             for service in &runtime_services {
                 let projected = super::NodeEmbeddedServiceSnapshot::running_from_embedded(service);
                 if let Some(existing) = snapshot
@@ -4928,6 +4928,22 @@ mod tests {
             }
             outcome => panic!("unexpected outcome: {outcome:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn unchanged_embedded_service_refresh_does_not_create_state_events() {
+        let events = NodeEventBus::new(8);
+        let mut event_receiver = events.subscribe();
+        let state = NodeStateStore::with_events(events);
+        let services = EmbeddedServiceManager::spawn(1);
+        let before = state.snapshot().await;
+
+        refresh_embedded_services(&state, &services).await;
+
+        let after = state.snapshot().await;
+        assert_eq!(after, before);
+        assert!(event_receiver.try_recv().is_err());
+        services.shutdown().await.expect("shutdown services");
     }
 
     #[tokio::test]

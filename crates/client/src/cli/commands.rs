@@ -4658,38 +4658,53 @@ async fn handle_file_network_frame(
             data,
         } => {
             let now_unix_ms = unix_time_ms();
-            let (member, _) =
-                match trusted_file_request_member(runtime, &peer.node_id, now_unix_ms).await {
-                    Ok(authorized) => authorized,
-                    Err(response) => {
-                        let reason_code = file_network_error_code(&response);
-                        cancel_file_network_session(
-                            runtime,
-                            &transfer_id,
-                            &operation_id,
-                            reason_code,
-                            now_unix_ms,
-                        );
-                        tracing::debug!(
-                            peer = %peer.node_id,
-                            %src_ip,
-                            %transfer_id,
-                            %operation_id,
-                            error_code = file_network_error_code(&response),
-                            "File 分片授权复核失败，已取消对应传输"
-                        );
-                        return;
+            let owns_download =
+                runtime
+                    .file_origin
+                    .owns_download(&peer.node_id, &transfer_id, &operation_id);
+            let (member, _) = match trusted_file_request_member(runtime, &peer.node_id, now_unix_ms)
+                .await
+            {
+                Ok(authorized) => authorized,
+                Err(response) => {
+                    let reason_code = file_network_error_code(&response);
+                    cancel_file_network_session(
+                        runtime,
+                        &transfer_id,
+                        &operation_id,
+                        reason_code,
+                        now_unix_ms,
+                    );
+                    tracing::debug!(
+                        peer = %peer.node_id,
+                        %src_ip,
+                        %transfer_id,
+                        %operation_id,
+                        error_code = reason_code,
+                        owns_download,
+                        "File 分片授权复核失败，已取消对应传输"
+                    );
+                    // Upload fragments are acknowledged by the owner. A
+                    // terminal error must retain the fragment's correlation
+                    // id so the requester does not wait for the TTL after
+                    // authorization is revoked. Download fragments have no
+                    // per-fragment acknowledgement; their origin state is
+                    // failed locally above.
+                    if let Some(response) =
+                        chunk_authorization_failure_reply(owns_download, response)
+                    {
+                        send_file_network_response(runtime, peer.virtual_ip, request_id, response)
+                            .await;
                     }
-                };
+                    return;
+                }
+            };
 
             let origin_peer = OriginPeer {
                 node_id: peer.node_id.clone(),
                 virtual_ip: peer.virtual_ip,
             };
-            if runtime
-                .file_origin
-                .owns_download(&peer.node_id, &transfer_id, &operation_id)
-            {
+            if owns_download {
                 let _ = runtime.file_origin.handle_chunk(
                     &origin_peer,
                     request_id,
@@ -4960,6 +4975,16 @@ fn file_network_error(code: &str) -> FileNetworkResponse {
         code: code.to_owned(),
         retry_after_ms: None,
     }
+}
+
+/// Upload chunks are request/response messages, so an authorization failure
+/// must be returned to the requester with the original correlation id.
+/// Download chunks are unsolicited stream data and must only be failed locally.
+fn chunk_authorization_failure_reply(
+    owns_download: bool,
+    response: FileNetworkResponse,
+) -> Option<FileNetworkResponse> {
+    (!owns_download).then_some(response)
 }
 
 async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacket, source: &str) {
@@ -10575,6 +10600,22 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
         assert_eq!(
             validate_file_origin_actor_epoch(Some(8), &requester_member),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn chunk_authorization_failure_replies_only_to_upload_requester() {
+        let response = file_network_error("file_capability_unavailable");
+        assert_eq!(
+            chunk_authorization_failure_reply(false, response.clone()),
+            Some(response)
+        );
+        assert_eq!(
+            chunk_authorization_failure_reply(
+                true,
+                file_network_error("file_capability_unavailable")
+            ),
+            None
         );
     }
 

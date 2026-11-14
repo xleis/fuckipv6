@@ -28,14 +28,14 @@ use fuckipv6_common::{
 use futures::future::join_all;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{interval, sleep, timeout, Instant, MissedTickBehavior};
+use tokio::time::{sleep, sleep_until, timeout, Instant};
 
 use super::command::{
     NodePublishCoordinatorCandidateDeclarationCommand, NodeUpdateCoordinatorCandidatesCommand,
 };
 use super::coordinator_takeover::{
     active_local_emergency, decide_coordinator_takeover, CoordinatorTakeoverDecision,
-    COORDINATOR_TAKEOVER_POLL_INTERVAL,
+    CoordinatorTakeoverPollBackoff,
 };
 use super::state::effective_membership_state;
 use super::{
@@ -846,6 +846,7 @@ struct LiveNetworkRuntimeLauncher {
     events: NodeEventBus,
     registry: MultiNetworkRegistry,
     failover_audit: Option<Arc<OwnerSecurityAudit>>,
+    coordinator_takeover_wakeup: mpsc::UnboundedSender<()>,
 }
 
 impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
@@ -854,6 +855,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
         let events = self.events.clone();
         let registry = self.registry.clone();
         let failover_audit = self.failover_audit.clone();
+        let coordinator_takeover_wakeup = self.coordinator_takeover_wakeup.clone();
 
         Box::pin(async move {
             let mut runtime = commands::prepare_client_runtime_ext(
@@ -888,6 +890,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
                     ))
                 }
             })?;
+            runtime.set_coordinator_takeover_wakeup(coordinator_takeover_wakeup);
 
             let tun_name = runtime.tun_name().to_string();
             let assigned_ipv6 = runtime.assigned_ip;
@@ -1059,6 +1062,13 @@ struct CoordinatorContinuityMetrics {
     recoveries: u64,
     last_recovery_duration: Option<Duration>,
     last_failure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoordinatorTakeoverRefreshOutcome {
+    Idle,
+    Healthy,
+    Failed,
 }
 
 impl CoordinatorContinuityMetrics {
@@ -2308,29 +2318,15 @@ impl NetworkRuntimeManager {
         services: EmbeddedServiceManager,
         failover_audit: Option<Arc<OwnerSecurityAudit>>,
     ) -> Self {
+        let (coordinator_takeover_wakeup, coordinator_takeover_wakeups) = mpsc::unbounded_channel();
         let launcher = Arc::new(LiveNetworkRuntimeLauncher {
             state: state.clone(),
             events: events.clone(),
             registry: registry.clone(),
             failover_audit,
+            coordinator_takeover_wakeup,
         });
-        Self::spawn_with_launcher(
-            configs, options, state, events, lifecycle, registry, services, launcher,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn spawn_with_launcher(
-        configs: ConfigManager,
-        options: RuntimeOptions,
-        state: NodeStateStore,
-        events: NodeEventBus,
-        lifecycle: NodeLifecycle,
-        registry: MultiNetworkRegistry,
-        services: EmbeddedServiceManager,
-        launcher: Arc<dyn NetworkRuntimeLauncher>,
-    ) -> Self {
-        Self::spawn_with_launcher_and_timeout(
+        Self::spawn_with_launcher_and_timeouts_inner(
             configs,
             options,
             state,
@@ -2339,39 +2335,13 @@ impl NetworkRuntimeManager {
             registry,
             services,
             launcher,
-            ROUTING_UPDATE_TIMEOUT,
+            RuntimeTimeouts::default(),
+            Some(coordinator_takeover_wakeups),
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn spawn_with_launcher_and_timeout(
-        configs: ConfigManager,
-        options: RuntimeOptions,
-        state: NodeStateStore,
-        events: NodeEventBus,
-        lifecycle: NodeLifecycle,
-        registry: MultiNetworkRegistry,
-        services: EmbeddedServiceManager,
-        launcher: Arc<dyn NetworkRuntimeLauncher>,
-        routing_update_timeout: Duration,
-    ) -> Self {
-        Self::spawn_with_launcher_and_timeouts(
-            configs,
-            options,
-            state,
-            events,
-            lifecycle,
-            registry,
-            services,
-            launcher,
-            RuntimeTimeouts {
-                routing_update: routing_update_timeout,
-                ..RuntimeTimeouts::default()
-            },
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     fn spawn_with_launcher_and_timeouts(
         configs: ConfigManager,
         options: RuntimeOptions,
@@ -2382,6 +2352,25 @@ impl NetworkRuntimeManager {
         services: EmbeddedServiceManager,
         launcher: Arc<dyn NetworkRuntimeLauncher>,
         timeouts: RuntimeTimeouts,
+    ) -> Self {
+        Self::spawn_with_launcher_and_timeouts_inner(
+            configs, options, state, events, lifecycle, registry, services, launcher, timeouts,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_with_launcher_and_timeouts_inner(
+        configs: ConfigManager,
+        options: RuntimeOptions,
+        state: NodeStateStore,
+        events: NodeEventBus,
+        lifecycle: NodeLifecycle,
+        registry: MultiNetworkRegistry,
+        services: EmbeddedServiceManager,
+        launcher: Arc<dyn NetworkRuntimeLauncher>,
+        timeouts: RuntimeTimeouts,
+        coordinator_takeover_wakeups: Option<mpsc::UnboundedReceiver<()>>,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(16);
         tokio::spawn(run_actor(
@@ -2400,6 +2389,7 @@ impl NetworkRuntimeManager {
                 cleanup_failures: BTreeMap::new(),
                 completed_cleanup: BTreeMap::new(),
                 timeouts,
+                coordinator_takeover_wakeups,
             },
         ));
         Self {
@@ -3079,8 +3069,21 @@ async fn run_actor(
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     refresh.tick().await;
 
-    let mut takeover_tick = interval(COORDINATOR_TAKEOVER_POLL_INTERVAL);
-    takeover_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let coordinator_takeover_seed = actor
+        .configs
+        .load_node_identity()
+        .map(|identity| {
+            let digest = blake3::hash(&identity.public_key());
+            u64::from_le_bytes(
+                digest.as_bytes()[..8]
+                    .try_into()
+                    .expect("blake3 digest contains at least eight bytes"),
+            )
+        })
+        .unwrap_or(0x5741_3443_4F4F_5244);
+    let mut takeover_backoff = CoordinatorTakeoverPollBackoff::new(coordinator_takeover_seed);
+    let mut takeover_deadline = Instant::now() + takeover_backoff.delay();
+    let mut coordinator_takeover_wakeups = actor.coordinator_takeover_wakeups.take();
     loop {
         tokio::select! {
             command = receiver.recv() => {
@@ -3221,8 +3224,35 @@ async fn run_actor(
             _ = refresh.tick() => {
                 actor.refresh_local_exit_client_counts().await;
             }
-            _ = takeover_tick.tick() => {
-                actor.refresh_coordinator_takeover().await;
+            _ = sleep_until(takeover_deadline) => {
+                if matches!(
+                    actor.refresh_coordinator_takeover().await,
+                    CoordinatorTakeoverRefreshOutcome::Failed
+                ) {
+                    takeover_backoff.record_failure();
+                } else {
+                    takeover_backoff.record_success();
+                }
+                takeover_deadline = Instant::now() + takeover_backoff.delay();
+            }
+            received = async {
+                match coordinator_takeover_wakeups.as_mut() {
+                    Some(wakeups) => wakeups.recv().await.is_some(),
+                    None => std::future::pending::<bool>().await,
+                }
+            }, if coordinator_takeover_wakeups.is_some() => {
+                if received {
+                    takeover_backoff.record_success();
+                    if matches!(
+                        actor.refresh_coordinator_takeover().await,
+                        CoordinatorTakeoverRefreshOutcome::Failed
+                    ) {
+                        takeover_backoff.record_failure();
+                    }
+                    takeover_deadline = Instant::now() + takeover_backoff.delay();
+                } else {
+                    coordinator_takeover_wakeups = None;
+                }
             }
         }
     }
@@ -3242,6 +3272,7 @@ struct NetworkRuntimeActor {
     cleanup_failures: BTreeMap<String, RuntimeCleanupOutcome>,
     completed_cleanup: BTreeMap<String, RuntimeCleanupOutcome>,
     timeouts: RuntimeTimeouts,
+    coordinator_takeover_wakeups: Option<mpsc::UnboundedReceiver<()>>,
 }
 
 impl NetworkRuntimeActor {
@@ -4063,7 +4094,7 @@ impl NetworkRuntimeActor {
     /// every round fetches authoritative status before signing a proposal or
     /// vote. A missed acknowledgement is therefore repaired by the next poll
     /// instead of being inferred from a replayed event.
-    async fn refresh_coordinator_takeover(&mut self) {
+    async fn refresh_coordinator_takeover(&mut self) -> CoordinatorTakeoverRefreshOutcome {
         if self
             .sessions
             .values()
@@ -4090,20 +4121,23 @@ impl NetworkRuntimeActor {
             })
             .collect::<Vec<_>>();
         if sessions.is_empty() {
-            return;
+            return CoordinatorTakeoverRefreshOutcome::Idle;
         }
         let identity = match self.configs.load_node_identity() {
             Ok(identity) => identity,
             Err(error) => {
                 tracing::debug!(%error, "Coordinator 接管轮次无法加载本机身份");
-                return;
+                return CoordinatorTakeoverRefreshOutcome::Failed;
             }
         };
         let local_node = NodeId::from_public_key(&identity.public_key());
+        let mut saw_authority = false;
+        let mut saw_failure = false;
 
         for (network_name, signaling, network_id, recovery_cursor) in sessions {
             let Some(network_id) = network_id.as_deref() else {
                 tracing::warn!(network = %network_name, "Coordinator 接管轮次缺少网络 ID");
+                saw_failure = true;
                 continue;
             };
             let network_id = match NetworkId::parse(network_id.to_owned()) {
@@ -4114,6 +4148,7 @@ impl NetworkRuntimeActor {
                         %error,
                         "Coordinator 接管轮次跳过无效网络 ID"
                     );
+                    saw_failure = true;
                     continue;
                 }
             };
@@ -4127,6 +4162,7 @@ impl NetworkRuntimeActor {
                         &network_name,
                         format!("无法刷新权威候选状态: {error}"),
                     );
+                    saw_failure = true;
                     continue;
                 }
             };
@@ -4143,6 +4179,7 @@ impl NetworkRuntimeActor {
                         &network_name,
                         format!("无法验证恢复快照，治理保持只读: {error}"),
                     );
+                    saw_failure = true;
                     continue;
                 }
             };
@@ -4160,9 +4197,11 @@ impl NetworkRuntimeActor {
                         recovery.recovery.data_plane_allowed,
                     ),
                 );
+                saw_failure = true;
                 continue;
             }
             let status = recovery.status;
+            saw_authority = true;
             let now_unix_ms = unix_time_ms();
             let emergency = match active_local_emergency(&status, &local_node, now_unix_ms) {
                 Ok(emergency) => emergency,
@@ -4171,6 +4210,7 @@ impl NetworkRuntimeActor {
                         &network_name,
                         format!("拒绝不可信的紧急租约: {error}"),
                     );
+                    saw_failure = true;
                     continue;
                 }
             };
@@ -4185,6 +4225,7 @@ impl NetworkRuntimeActor {
                         &network_name,
                         format!("拒绝不可信的候选状态: {error}"),
                     );
+                    saw_failure = true;
                     continue;
                 }
             };
@@ -4241,6 +4282,7 @@ impl NetworkRuntimeActor {
                                     %error,
                                     "Coordinator 接管响应包含不可信的紧急租约"
                                 );
+                                saw_failure = true;
                                 continue;
                             }
                         };
@@ -4268,8 +4310,16 @@ impl NetworkRuntimeActor {
                         %error,
                         "Coordinator 接管动作失败，将在下一轮重新读取权威状态"
                     );
+                    saw_failure = true;
                 }
             }
+        }
+        if saw_failure {
+            CoordinatorTakeoverRefreshOutcome::Failed
+        } else if saw_authority {
+            CoordinatorTakeoverRefreshOutcome::Healthy
+        } else {
+            CoordinatorTakeoverRefreshOutcome::Failed
         }
     }
 
@@ -9277,6 +9327,7 @@ mod tests {
             cleanup_failures: BTreeMap::new(),
             completed_cleanup: BTreeMap::new(),
             timeouts: RuntimeTimeouts::default(),
+            coordinator_takeover_wakeups: None,
         };
 
         let response_client = signaling.clone();
@@ -9456,6 +9507,170 @@ mod tests {
         harness.shutdown().await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn coordinator_takeover_reconnect_wakeup_refreshes_without_waiting_for_poll() {
+        use fuckipv6_common::domain::{
+            CoordinatorCandidateConfigState, CoordinatorEmergencyState, CoordinatorLeaseStatus,
+        };
+        use fuckipv6_common::SignalingMessage;
+
+        let harness = TestHarness::new("coordinator-takeover-wakeup").await;
+        harness
+            .configs
+            .create_network("takeover-wakeup", "ws://127.0.0.1:6666", true)
+            .expect("create network configuration");
+        let network_id = NetworkId::from_public_key(b"coordinator-takeover-wakeup");
+        harness
+            .configs
+            .set_network_id_metadata("takeover-wakeup", network_id.as_str())
+            .expect("bind network id");
+
+        let (signaling, mut outbound) = SignalingClient::test_channel();
+        let signaling = Arc::new(signaling);
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let (routing_tx, _routing_rx) = mpsc::unbounded_channel();
+        let data_plane = tokio::spawn(async move {
+            let _ = shutdown_rx.changed().await;
+            NetworkRuntimeExit {
+                cleanup: RuntimeCleanupOutcome::default(),
+                retained_owner: None,
+            }
+        });
+
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (wakeup_tx, wakeup_rx) = mpsc::unbounded_channel();
+        let actor = NetworkRuntimeActor {
+            configs: harness.configs.clone(),
+            options: RuntimeOptions::default(),
+            state: harness.state.clone(),
+            events: harness.events.clone(),
+            lifecycle: harness.lifecycle.clone(),
+            registry: harness.registry.clone(),
+            services: harness.services.clone(),
+            launcher: Arc::new(harness.fake.clone()),
+            sessions: HashMap::from([(
+                "takeover-wakeup".to_string(),
+                NetworkRuntimeSession {
+                    network_id: Some(network_id.to_string()),
+                    signaling: Some(signaling.clone()),
+                    coordinator_recovery: None,
+                    coordinator_emergency: None,
+                    coordinator_continuity: CoordinatorContinuityMetrics::default(),
+                    tun_name: "fuckipv6-takeover-wakeup".into(),
+                    routing_control: routing_tx,
+                    shutdown: shutdown_tx.clone(),
+                    handle: data_plane,
+                },
+            )]),
+            retained_owners: HashMap::new(),
+            cleanup_failures: BTreeMap::new(),
+            completed_cleanup: BTreeMap::new(),
+            timeouts: RuntimeTimeouts {
+                local_exit_update: Duration::ZERO,
+                ..RuntimeTimeouts::default()
+            },
+            coordinator_takeover_wakeups: Some(wakeup_rx),
+        };
+        let actor_task = tokio::spawn(run_actor(command_rx, actor));
+
+        let response_client = signaling.clone();
+        let expected_network_id = network_id.clone();
+        let responder = tokio::spawn(async move {
+            let status = CoordinatorCandidateStatus {
+                network_id: expected_network_id.clone(),
+                generated_at_unix_ms: 1_000,
+                config_state: CoordinatorCandidateConfigState::Missing,
+                config: None,
+                candidates: Vec::new(),
+                current_leader: None,
+                latest_term: None,
+                lease: CoordinatorLeaseStatus::no_term(),
+                control_plane: Default::default(),
+                emergency: CoordinatorEmergencyState::NoCandidatesConfigured,
+                emergency_leader: None,
+                latest_election: None,
+            };
+
+            // The regular first poll cannot arrive for at least 4.5 seconds.
+            // A queued reconnect wakeup must refresh authority well before that.
+            let request = timeout(Duration::from_secs(2), outbound.recv())
+                .await
+                .expect("reconnect wakeup did not refresh coordinator authority")
+                .expect("outbound signaling channel closed");
+            let SignalingMessage::CoordinatorCandidateStatusRequest {
+                network_id: requested,
+            } = request
+            else {
+                panic!("expected coordinator status request, got {request:?}");
+            };
+            assert_eq!(requested, expected_network_id);
+            assert!(response_client.route_coordinator_candidate_test_response(
+                SignalingMessage::CoordinatorCandidateStatusAck {
+                    status: status.clone(),
+                },
+            ));
+
+            let request = timeout(Duration::from_secs(2), outbound.recv())
+                .await
+                .expect("reconnect refresh did not request recovery authority")
+                .expect("outbound signaling channel closed");
+            let SignalingMessage::CoordinatorRecoveryRequest { report } = request else {
+                panic!("expected coordinator recovery request, got {request:?}");
+            };
+            assert_eq!(report.network_id, expected_network_id);
+            let recovery = CoordinatorRecoveryStatus {
+                network_id: expected_network_id.clone(),
+                stage: fuckipv6_common::domain::CoordinatorRecoveryStage::ReadOnly,
+                role: fuckipv6_common::domain::CoordinatorRecoveryRole::Candidate,
+                governance_writable: false,
+                health_checks_allowed: true,
+                data_plane_allowed: true,
+                authoritative_term: 0,
+                authoritative_fencing_token: fuckipv6_common::domain::FencingToken(0),
+                authoritative_leader: NodeId::from_public_key(b"reconnect-test-leader"),
+                authoritative_candidate_config_revision: 0,
+                authoritative_audit_sequence: 11,
+                reason_code: "coordinator.recovery.stale_old_leader".into(),
+            };
+            assert!(response_client.route_coordinator_candidate_test_response(
+                SignalingMessage::CoordinatorRecoveryResponse {
+                    response: fuckipv6_common::domain::CoordinatorRecoveryResponse {
+                        status,
+                        recovery,
+                        audit_entries: Vec::new(),
+                    },
+                },
+            ));
+        });
+
+        wakeup_tx
+            .send(())
+            .expect("coordinator takeover wakeup receiver closed");
+        responder.await.expect("responder task failed");
+
+        let operation = OperationGate::new()
+            .try_acquire()
+            .expect("acquire shutdown operation");
+        let (reply, response) = oneshot::channel();
+        command_tx
+            .send(RuntimeControlCommand::Shutdown {
+                _operation: operation,
+                reply,
+            })
+            .await
+            .expect("runtime actor command channel closed");
+        timeout(Duration::from_secs(2), response)
+            .await
+            .expect("runtime actor shutdown timed out")
+            .expect("runtime actor shutdown response closed")
+            .expect("runtime actor shutdown failed");
+        timeout(Duration::from_secs(2), actor_task)
+            .await
+            .expect("runtime actor did not exit")
+            .expect("runtime actor task failed");
+        harness.shutdown().await;
+    }
+
     #[tokio::test]
     async fn emergency_issue_ack_for_remote_leader_does_not_enable_local_authority() {
         use fuckipv6_common::domain::{
@@ -9586,6 +9801,7 @@ mod tests {
             cleanup_failures: BTreeMap::new(),
             completed_cleanup: BTreeMap::new(),
             timeouts: RuntimeTimeouts::default(),
+            coordinator_takeover_wakeups: None,
         };
 
         let response_client = signaling.clone();

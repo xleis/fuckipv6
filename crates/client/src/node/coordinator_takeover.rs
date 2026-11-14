@@ -12,6 +12,71 @@ use fuckipv6_common::Identity;
 /// takeover still converges if a notification is delayed, dropped or replayed.
 pub(super) const COORDINATOR_TAKEOVER_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Failed authority reads back off exponentially up to this bound. The cap
+/// keeps a recovered Coordinator observable even when the previous outage was
+/// long-lived, while still avoiding a fixed-rate retry storm.
+pub(super) const COORDINATOR_TAKEOVER_MAX_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+const COORDINATOR_TAKEOVER_MAX_BACKOFF_EXPONENT: u32 = 4;
+const COORDINATOR_TAKEOVER_JITTER_DIVISOR: u128 = 10;
+
+/// Deterministic, bounded exponential backoff for authoritative Coordinator
+/// status polls. Jitter is derived from the local node identity, network and
+/// failure count so clients spread out without making retries non-reproducible
+/// in tests or incident analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CoordinatorTakeoverPollBackoff {
+    failures: u32,
+    seed: u64,
+}
+
+impl CoordinatorTakeoverPollBackoff {
+    pub(super) const fn new(seed: u64) -> Self {
+        Self { failures: 0, seed }
+    }
+
+    #[cfg(test)]
+    pub(super) const fn failures(&self) -> u32 {
+        self.failures
+    }
+
+    pub(super) fn delay(&self) -> Duration {
+        let exponent = self.failures.min(COORDINATOR_TAKEOVER_MAX_BACKOFF_EXPONENT);
+        let nominal = COORDINATOR_TAKEOVER_POLL_INTERVAL
+            .saturating_mul(1_u32 << exponent)
+            .min(COORDINATOR_TAKEOVER_MAX_POLL_INTERVAL);
+        let jitter_span = nominal.as_millis() / COORDINATOR_TAKEOVER_JITTER_DIVISOR;
+        if jitter_span == 0 {
+            return nominal;
+        }
+        let span = jitter_span.min(u64::MAX as u128) as u64;
+        let mixed = splitmix64(
+            self.seed
+                .wrapping_add(u64::from(self.failures).wrapping_mul(0x9E37_79B9_7F4A_7C15)),
+        );
+        let offset = (mixed % (span.saturating_mul(2).saturating_add(1))) as i128 - span as i128;
+        let nominal_ms = i128::try_from(nominal.as_millis()).unwrap_or(i128::MAX);
+        let jittered_ms = nominal_ms.saturating_add(offset).max(0);
+        let jittered_ms = u64::try_from(jittered_ms).unwrap_or(u64::MAX);
+        Duration::from_millis(jittered_ms).min(COORDINATOR_TAKEOVER_MAX_POLL_INTERVAL)
+    }
+
+    pub(super) fn record_success(&mut self) {
+        self.failures = 0;
+    }
+
+    pub(super) fn record_failure(&mut self) {
+        self.failures = self.failures.saturating_add(1);
+    }
+}
+
+fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    value ^ (value >> 31)
+}
+
 /// A proposal is intentionally shorter than the protocol maximum. This bounds
 /// how long a stalled election can delay the next deterministic candidate.
 pub(super) const COORDINATOR_TAKEOVER_PROPOSAL_VALIDITY_MS: u64 = 2 * 60 * 1000;
@@ -242,6 +307,67 @@ mod tests {
 
     const NOW: u64 = 2_000_000;
     const VALIDITY: u64 = 120_000;
+
+    #[test]
+    fn takeover_poll_backoff_is_deterministic_bounded_and_resettable() {
+        let mut first = CoordinatorTakeoverPollBackoff::new(0xA11CE);
+        let mut replay = CoordinatorTakeoverPollBackoff::new(0xA11CE);
+        let initial = first.delay();
+        assert_eq!(first.delay(), replay.delay());
+        assert!(initial >= Duration::from_millis(4_500));
+        assert!(initial <= COORDINATOR_TAKEOVER_POLL_INTERVAL);
+
+        let bounds = [
+            (Duration::from_millis(9_000), Duration::from_secs(11)),
+            (Duration::from_millis(18_000), Duration::from_secs(22)),
+            (Duration::from_millis(36_000), Duration::from_secs(44)),
+            (
+                Duration::from_secs(54),
+                COORDINATOR_TAKEOVER_MAX_POLL_INTERVAL,
+            ),
+            (
+                Duration::from_secs(54),
+                COORDINATOR_TAKEOVER_MAX_POLL_INTERVAL,
+            ),
+            (
+                Duration::from_secs(54),
+                COORDINATOR_TAKEOVER_MAX_POLL_INTERVAL,
+            ),
+            (
+                Duration::from_secs(54),
+                COORDINATOR_TAKEOVER_MAX_POLL_INTERVAL,
+            ),
+            (
+                Duration::from_secs(54),
+                COORDINATOR_TAKEOVER_MAX_POLL_INTERVAL,
+            ),
+        ];
+        for (expected_failures, (minimum, maximum)) in (1..=8).zip(bounds.into_iter()) {
+            first.record_failure();
+            replay.record_failure();
+            let delay = first.delay();
+            assert_eq!(first.failures(), expected_failures);
+            assert_eq!(delay, replay.delay());
+            assert!((minimum..=maximum).contains(&delay), "{delay:?}");
+        }
+
+        first.record_success();
+        replay.record_success();
+        assert_eq!(first.failures(), 0);
+        assert_eq!(first.delay(), initial);
+        assert_eq!(first.delay(), replay.delay());
+    }
+
+    #[test]
+    fn takeover_poll_jitter_differs_by_stable_seed() {
+        let first = CoordinatorTakeoverPollBackoff::new(1).delay();
+        let second = CoordinatorTakeoverPollBackoff::new(2).delay();
+        assert_ne!(first, second);
+        for delay in [first, second] {
+            assert!(delay >= Duration::from_millis(4_500));
+            assert!(delay <= COORDINATOR_TAKEOVER_POLL_INTERVAL);
+        }
+    }
 
     struct Fixture {
         network: NetworkRecord,

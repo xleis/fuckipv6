@@ -618,6 +618,7 @@ pub(crate) struct ClientRuntime {
     pub(crate) config_reload_task: Option<JoinHandle<()>>,
     pub(crate) relay_reconnect_task: Option<JoinHandle<()>>,
     pub(crate) relay_grant_renewal_task: Option<JoinHandle<()>>,
+    coordinator_takeover_wakeup: Option<mpsc::UnboundedSender<()>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -701,6 +702,16 @@ impl ClientRuntime {
 
     pub(crate) async fn shutdown(&mut self) -> RuntimeCleanupOutcome {
         shutdown_runtime(self).await
+    }
+
+    pub(crate) fn set_coordinator_takeover_wakeup(&mut self, sender: mpsc::UnboundedSender<()>) {
+        self.coordinator_takeover_wakeup = Some(sender);
+    }
+
+    fn notify_coordinator_takeover_refresh(&self) {
+        if let Some(sender) = &self.coordinator_takeover_wakeup {
+            let _ = sender.send(());
+        }
     }
 
     /// Bind Exit contribution enforcement to the same authoritative state that
@@ -1805,6 +1816,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         config_reload_task: Some(tasks.config_reload_task),
         relay_reconnect_task: None,
         relay_grant_renewal_task: None,
+        coordinator_takeover_wakeup: None,
     })
 }
 
@@ -5000,6 +5012,7 @@ async fn handle_runtime_signaling_event(
         }
         SignalingAction::Reconnected => {
             runtime.stats.record_signaling_reconnect().await;
+            runtime.notify_coordinator_takeover_refresh();
         }
         SignalingAction::PeersUpsert(peers) => {
             tracing::debug!("已更新 {} 个节点的运行时状态", peers.len());

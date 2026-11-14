@@ -1051,11 +1051,51 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct CoordinatorContinuityMetrics {
+    unavailable_since: Option<Instant>,
+    control_plane_interruptions: u64,
+    consecutive_failures: u64,
+    recoveries: u64,
+    last_recovery_duration: Option<Duration>,
+    last_failure_reason: Option<String>,
+}
+
+impl CoordinatorContinuityMetrics {
+    fn record_failure(&mut self, now: Instant, reason: String) -> (Duration, u64, u64) {
+        if self.unavailable_since.is_none() {
+            self.unavailable_since = Some(now);
+            self.control_plane_interruptions += 1;
+        }
+        self.consecutive_failures += 1;
+        self.last_failure_reason = Some(reason);
+        (
+            now.saturating_duration_since(
+                self.unavailable_since
+                    .expect("an interruption start is recorded before measuring it"),
+            ),
+            self.consecutive_failures,
+            self.control_plane_interruptions,
+        )
+    }
+
+    fn record_success(&mut self, now: Instant) -> Option<(Duration, u64, u64)> {
+        let started_at = self.unavailable_since.take()?;
+        let duration = now.saturating_duration_since(started_at);
+        self.consecutive_failures = 0;
+        self.recoveries += 1;
+        self.last_recovery_duration = Some(duration);
+        self.last_failure_reason = None;
+        Some((duration, self.recoveries, self.control_plane_interruptions))
+    }
+}
+
 struct NetworkRuntimeSession {
     network_id: Option<String>,
     signaling: Option<Arc<SignalingClient>>,
     coordinator_recovery: Option<CoordinatorRecoveryStatus>,
     coordinator_emergency: Option<CoordinatorEmergencyLeaderStatus>,
+    coordinator_continuity: CoordinatorContinuityMetrics,
     tun_name: String,
     routing_control: mpsc::UnboundedSender<ipc::RuntimeCommand>,
     shutdown: watch::Sender<bool>,
@@ -3983,6 +4023,42 @@ impl NetworkRuntimeActor {
         }
     }
 
+    fn record_coordinator_control_failure(&mut self, network_name: &str, reason: String) {
+        let Some(session) = self.sessions.get_mut(network_name) else {
+            return;
+        };
+        session.coordinator_emergency = None;
+        let (unavailable_for, consecutive_failures, interruptions) = session
+            .coordinator_continuity
+            .record_failure(Instant::now(), reason.clone());
+        tracing::warn!(
+            network = %network_name,
+            reason = %reason,
+            unavailable_ms = unavailable_for.as_millis() as u64,
+            consecutive_failures,
+            interruptions,
+            "Coordinator 控制面暂不可用，数据面保持现有会话"
+        );
+    }
+
+    fn record_coordinator_control_recovered(&mut self, network_name: &str) {
+        let Some(session) = self.sessions.get_mut(network_name) else {
+            return;
+        };
+        if let Some((recovery_time, recoveries, interruptions)) = session
+            .coordinator_continuity
+            .record_success(Instant::now())
+        {
+            tracing::info!(
+                network = %network_name,
+                recovery_ms = recovery_time.as_millis() as u64,
+                recoveries,
+                interruptions,
+                "Coordinator 控制面已恢复，数据面会话未重建"
+            );
+        }
+    }
+
     /// Poll only live data-plane registrations. Candidate events are hints;
     /// every round fetches authoritative status before signing a proposal or
     /// vote. A missed acknowledgement is therefore repaired by the next poll
@@ -4047,13 +4123,9 @@ impl NetworkRuntimeActor {
             {
                 Ok(status) => status,
                 Err(error) => {
-                    if let Some(session) = self.sessions.get_mut(&network_name) {
-                        session.coordinator_emergency = None;
-                    }
-                    tracing::debug!(
-                        network = %network_name,
-                        %error,
-                        "Coordinator 接管轮次无法刷新权威候选状态"
+                    self.record_coordinator_control_failure(
+                        &network_name,
+                        format!("无法刷新权威候选状态: {error}"),
                     );
                     continue;
                 }
@@ -4067,13 +4139,9 @@ impl NetworkRuntimeActor {
             {
                 Ok(recovery) => recovery,
                 Err(error) => {
-                    if let Some(session) = self.sessions.get_mut(&network_name) {
-                        session.coordinator_emergency = None;
-                    }
-                    tracing::debug!(
-                        network = %network_name,
-                        %error,
-                        "Coordinator 接管轮次无法验证恢复快照，治理保持只读"
+                    self.record_coordinator_control_failure(
+                        &network_name,
+                        format!("无法验证恢复快照，治理保持只读: {error}"),
                     );
                     continue;
                 }
@@ -4082,13 +4150,15 @@ impl NetworkRuntimeActor {
                 || !recovery.recovery.health_checks_allowed
                 || !recovery.recovery.data_plane_allowed
             {
-                if let Some(session) = self.sessions.get_mut(&network_name) {
-                    session.coordinator_emergency = None;
-                }
-                tracing::warn!(
-                    network = %network_name,
-                    stage = ?recovery.recovery.stage,
-                    "Coordinator 恢复响应包含不安全的能力声明，拒绝继续接管"
+                self.record_coordinator_control_failure(
+                    &network_name,
+                    format!(
+                        "恢复响应包含不安全的能力声明: stage={:?}, governance_writable={}, health_checks_allowed={}, data_plane_allowed={}",
+                        recovery.recovery.stage,
+                        recovery.recovery.governance_writable,
+                        recovery.recovery.health_checks_allowed,
+                        recovery.recovery.data_plane_allowed,
+                    ),
                 );
                 continue;
             }
@@ -4097,13 +4167,9 @@ impl NetworkRuntimeActor {
             let emergency = match active_local_emergency(&status, &local_node, now_unix_ms) {
                 Ok(emergency) => emergency,
                 Err(error) => {
-                    if let Some(session) = self.sessions.get_mut(&network_name) {
-                        session.coordinator_emergency = None;
-                    }
-                    tracing::debug!(
-                        network = %network_name,
-                        %error,
-                        "Coordinator 接管轮次拒绝不可信的紧急租约"
+                    self.record_coordinator_control_failure(
+                        &network_name,
+                        format!("拒绝不可信的紧急租约: {error}"),
                     );
                     continue;
                 }
@@ -4115,17 +4181,14 @@ impl NetworkRuntimeActor {
             let decision = match decide_coordinator_takeover(&status, &identity, now_unix_ms) {
                 Ok(decision) => decision,
                 Err(error) => {
-                    if let Some(session) = self.sessions.get_mut(&network_name) {
-                        session.coordinator_emergency = None;
-                    }
-                    tracing::debug!(
-                        network = %network_name,
-                        %error,
-                        "Coordinator 接管轮次拒绝不可信的候选状态"
+                    self.record_coordinator_control_failure(
+                        &network_name,
+                        format!("拒绝不可信的候选状态: {error}"),
                     );
                     continue;
                 }
             };
+            self.record_coordinator_control_recovered(&network_name);
             let (action, result) = match decision {
                 CoordinatorTakeoverDecision::Wait => continue,
                 CoordinatorTakeoverDecision::Propose(proposal) => (
@@ -5010,6 +5073,7 @@ impl NetworkRuntimeActor {
                 signaling: started.signaling,
                 coordinator_recovery: None,
                 coordinator_emergency: None,
+                coordinator_continuity: CoordinatorContinuityMetrics::default(),
                 tun_name: started.tun_name,
                 routing_control: started.routing_control,
                 shutdown: started.shutdown,
@@ -7453,6 +7517,7 @@ async fn wait_for_session_shutdown(
         signaling,
         coordinator_recovery,
         coordinator_emergency,
+        coordinator_continuity,
         tun_name,
         routing_control,
         shutdown,
@@ -7471,6 +7536,7 @@ async fn wait_for_session_shutdown(
                     signaling: signaling.clone(),
                     coordinator_recovery: coordinator_recovery.clone(),
                     coordinator_emergency: coordinator_emergency.clone(),
+                    coordinator_continuity: coordinator_continuity.clone(),
                     tun_name: tun_name.clone(),
                     routing_control,
                     shutdown,
@@ -7501,6 +7567,7 @@ async fn wait_for_session_shutdown(
                     signaling: signaling.clone(),
                     coordinator_recovery: coordinator_recovery.clone(),
                     coordinator_emergency: coordinator_emergency.clone(),
+                    coordinator_continuity: coordinator_continuity.clone(),
                     tun_name: tun_name.clone(),
                     routing_control,
                     shutdown,
@@ -7522,6 +7589,7 @@ async fn wait_for_session_shutdown(
                 signaling: signaling.clone(),
                 coordinator_recovery: coordinator_recovery.clone(),
                 coordinator_emergency: coordinator_emergency.clone(),
+                coordinator_continuity: coordinator_continuity.clone(),
                 tun_name: tun_name.clone(),
                 routing_control,
                 shutdown,
@@ -7553,6 +7621,7 @@ async fn wait_for_session_shutdown(
                 signaling: signaling.clone(),
                 coordinator_recovery: coordinator_recovery.clone(),
                 coordinator_emergency: coordinator_emergency.clone(),
+                coordinator_continuity: coordinator_continuity.clone(),
                 tun_name: tun_name.clone(),
                 routing_control,
                 shutdown,
@@ -9197,6 +9266,7 @@ mod tests {
                     signaling: Some(signaling.clone()),
                     coordinator_recovery: None,
                     coordinator_emergency: None,
+                    coordinator_continuity: CoordinatorContinuityMetrics::default(),
                     tun_name: "fuckipv6-takeover-continuity".into(),
                     routing_control: routing_tx,
                     shutdown: shutdown_tx.clone(),
@@ -9226,7 +9296,7 @@ mod tests {
                 emergency_leader: None,
                 latest_election: None,
             };
-            for (round, expected_cursor) in [0, 7].into_iter().enumerate() {
+            for round in 0..2 {
                 let request = timeout(Duration::from_secs(1), outbound.recv())
                     .await
                     .unwrap_or_else(|_| panic!("takeover round {round} must request status"))
@@ -9239,52 +9309,100 @@ mod tests {
                 };
                 assert_eq!(requested, expected_network_id);
                 assert!(response_client.route_coordinator_candidate_test_response(
-                    SignalingMessage::CoordinatorCandidateStatusAck {
-                        status: status.clone(),
-                    },
-                ));
-
-                let request = timeout(Duration::from_secs(1), outbound.recv())
-                    .await
-                    .unwrap_or_else(|_| panic!("takeover round {round} must request recovery"))
-                    .expect("outbound signaling channel must stay open");
-                let SignalingMessage::CoordinatorRecoveryRequest { report } = request else {
-                    panic!("expected coordinator recovery request, got {request:?}");
-                };
-                assert_eq!(report.network_id, expected_network_id);
-                assert_eq!(report.observed_audit_sequence, expected_cursor);
-                let recovery = CoordinatorRecoveryStatus {
-                    network_id: expected_network_id.clone(),
-                    stage: fuckipv6_common::domain::CoordinatorRecoveryStage::ReadOnly,
-                    role: fuckipv6_common::domain::CoordinatorRecoveryRole::Candidate,
-                    governance_writable: false,
-                    health_checks_allowed: true,
-                    data_plane_allowed: true,
-                    authoritative_term: 0,
-                    authoritative_fencing_token: fuckipv6_common::domain::FencingToken(0),
-                    authoritative_leader: NodeId::from_public_key(b"recovery-test-leader"),
-                    authoritative_candidate_config_revision: 0,
-                    authoritative_audit_sequence: 7,
-                    reason_code: "coordinator.recovery.stale_old_leader".into(),
-                };
-                assert!(response_client.route_coordinator_candidate_test_response(
-                    SignalingMessage::CoordinatorRecoveryResponse {
-                        response: fuckipv6_common::domain::CoordinatorRecoveryResponse {
-                            status: status.clone(),
-                            recovery,
-                            audit_entries: Vec::new(),
-                        },
+                    SignalingMessage::Error {
+                        code: 503,
+                        message: "coordinator temporarily unavailable".into(),
                     },
                 ));
             }
+
+            let request = timeout(Duration::from_secs(1), outbound.recv())
+                .await
+                .expect("recovery round must request status")
+                .expect("outbound signaling channel must stay open");
+            let SignalingMessage::CoordinatorCandidateStatusRequest {
+                network_id: requested,
+            } = request
+            else {
+                panic!("expected coordinator status request, got {request:?}");
+            };
+            assert_eq!(requested, expected_network_id);
+            assert!(response_client.route_coordinator_candidate_test_response(
+                SignalingMessage::CoordinatorCandidateStatusAck {
+                    status: status.clone(),
+                },
+            ));
+
+            let request = timeout(Duration::from_secs(1), outbound.recv())
+                .await
+                .expect("recovery round must request recovery")
+                .expect("outbound signaling channel must stay open");
+            let SignalingMessage::CoordinatorRecoveryRequest { report } = request else {
+                panic!("expected coordinator recovery request, got {request:?}");
+            };
+            assert_eq!(report.network_id, expected_network_id);
+            assert_eq!(report.observed_audit_sequence, 0);
+            let recovery = CoordinatorRecoveryStatus {
+                network_id: expected_network_id.clone(),
+                stage: fuckipv6_common::domain::CoordinatorRecoveryStage::ReadOnly,
+                role: fuckipv6_common::domain::CoordinatorRecoveryRole::Candidate,
+                governance_writable: false,
+                health_checks_allowed: true,
+                data_plane_allowed: true,
+                authoritative_term: 0,
+                authoritative_fencing_token: fuckipv6_common::domain::FencingToken(0),
+                authoritative_leader: NodeId::from_public_key(b"recovery-test-leader"),
+                authoritative_candidate_config_revision: 0,
+                authoritative_audit_sequence: 7,
+                reason_code: "coordinator.recovery.stale_old_leader".into(),
+            };
+            assert!(response_client.route_coordinator_candidate_test_response(
+                SignalingMessage::CoordinatorRecoveryResponse {
+                    response: fuckipv6_common::domain::CoordinatorRecoveryResponse {
+                        status: status.clone(),
+                        recovery,
+                        audit_entries: Vec::new(),
+                    },
+                },
+            ));
         });
 
         timeout(Duration::from_secs(1), actor.refresh_coordinator_takeover())
             .await
             .expect("coordinator takeover poll timed out");
+        let session = actor
+            .sessions
+            .get("takeover-continuity")
+            .expect("data-plane session must survive the first control-plane failure");
+        assert!(!session.handle.is_finished());
+        assert!(!*shutdown_tx.borrow());
+        assert_eq!(
+            session.coordinator_continuity.control_plane_interruptions,
+            1
+        );
+        assert_eq!(session.coordinator_continuity.consecutive_failures, 1);
+        assert!(session.coordinator_continuity.unavailable_since.is_some());
+        assert!(session.coordinator_continuity.last_failure_reason.is_some());
+
         timeout(Duration::from_secs(1), actor.refresh_coordinator_takeover())
             .await
             .expect("second coordinator takeover poll timed out");
+        let session = actor
+            .sessions
+            .get("takeover-continuity")
+            .expect("data-plane session must survive repeated control-plane failures");
+        assert!(!session.handle.is_finished());
+        assert!(!*shutdown_tx.borrow());
+        assert_eq!(
+            session.coordinator_continuity.control_plane_interruptions,
+            1
+        );
+        assert_eq!(session.coordinator_continuity.consecutive_failures, 2);
+        assert_eq!(session.coordinator_continuity.recoveries, 0);
+
+        timeout(Duration::from_secs(1), actor.refresh_coordinator_takeover())
+            .await
+            .expect("recovery coordinator takeover poll timed out");
         responder.await.expect("responder task failed");
 
         let session = actor
@@ -9305,6 +9423,18 @@ mod tests {
         assert!(recovery.health_checks_allowed);
         assert!(recovery.data_plane_allowed);
         assert_eq!(recovery.authoritative_audit_sequence, 7);
+        assert_eq!(
+            session.coordinator_continuity.control_plane_interruptions,
+            1
+        );
+        assert_eq!(session.coordinator_continuity.consecutive_failures, 0);
+        assert_eq!(session.coordinator_continuity.recoveries, 1);
+        assert!(session.coordinator_continuity.unavailable_since.is_none());
+        assert!(session
+            .coordinator_continuity
+            .last_recovery_duration
+            .is_some());
+        assert!(session.coordinator_continuity.last_failure_reason.is_none());
         assert!(matches!(
             terminated_rx.try_recv(),
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
@@ -9445,6 +9575,7 @@ mod tests {
                     signaling: Some(signaling.clone()),
                     coordinator_recovery: None,
                     coordinator_emergency: None,
+                    coordinator_continuity: CoordinatorContinuityMetrics::default(),
                     tun_name: "fuckipv6-emergency-remote-leader".into(),
                     routing_control: routing_tx,
                     shutdown: shutdown_tx.clone(),

@@ -8260,6 +8260,10 @@ async fn handle_signaling_event(
             );
         }
 
+        SignalingEvent::CoordinatorCandidateStatusChanged { network_id } => {
+            tracing::debug!("Coordinator 候选状态变更通知: network={network_id}");
+        }
+
         SignalingEvent::Error { code, message } => {
             tracing::error!("信令错误 {}: {}", code, message);
         }

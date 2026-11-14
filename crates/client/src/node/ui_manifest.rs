@@ -429,7 +429,8 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         | NodeCommandKind::PreviewTrafficPolicy
         | NodeCommandKind::PreviewTrafficPolicyRollback
         | NodeCommandKind::GetTrafficPolicyHistory
-        | NodeCommandKind::TestTrafficPolicy => NodeUiAudit::none(),
+        | NodeCommandKind::TestTrafficPolicy
+        | NodeCommandKind::GetCoordinatorCandidates => NodeUiAudit::none(),
         NodeCommandKind::CreateNetwork => NodeUiAudit::record("network.create"),
         NodeCommandKind::UpdateNetworkProfile => NodeUiAudit::record("network.profile.update"),
         NodeCommandKind::PublishNetworkDiscovery => {
@@ -489,6 +490,12 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         NodeCommandKind::RollbackPolicy => NodeUiAudit::record("policy.rollback"),
         NodeCommandKind::ApplyTrafficPolicy => NodeUiAudit::record("traffic_policy.apply"),
         NodeCommandKind::RollbackTrafficPolicy => NodeUiAudit::record("traffic_policy.rollback"),
+        NodeCommandKind::UpdateCoordinatorCandidates => {
+            NodeUiAudit::record("coordinator.candidate.config.update")
+        }
+        NodeCommandKind::PublishCoordinatorCandidateDeclaration => {
+            NodeUiAudit::record("coordinator.candidate.declaration.publish")
+        }
         NodeCommandKind::Shutdown => NodeUiAudit::record("node.shutdown"),
     }
 }
@@ -551,6 +558,8 @@ pub enum NodeUiInputKind {
     MemberLifecycleReason,
     InvitationCode,
     CoordinatorUrl,
+    CoordinatorCandidatesJson,
+    CoordinatorWillingness,
     Port,
     Revision,
     Role,
@@ -604,6 +613,8 @@ pub enum NodeUiValidation {
     MemberLifecycleReason,
     InvitationCode,
     CoordinatorUrl,
+    CoordinatorCandidatesJson,
+    CoordinatorWillingness,
 }
 
 pub fn node_ui_manifest() -> NodeUiManifest {
@@ -1732,6 +1743,145 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             NodeCommandKind::AcknowledgeMembershipPolicy,
                             "confirm.acknowledge_membership_policy.title",
                             "confirm.acknowledge_membership_policy.consequence",
+                            false,
+                        )),
+                    ),
+                    action(
+                        "get_coordinator_candidates",
+                        "action.get_coordinator_candidates",
+                        NodeCommandKind::GetCoordinatorCandidates,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::NetworkSelected,
+                        vec![field(
+                            "network_name",
+                            "field.network_name",
+                            NodeUiInputKind::NetworkName,
+                            true,
+                            NodeUiValidation::NetworkName,
+                        )],
+                        None,
+                    ),
+                    action(
+                        "update_coordinator_candidates",
+                        "action.update_coordinator_candidates",
+                        NodeCommandKind::UpdateCoordinatorCandidates,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::NetworkSelected,
+                        vec![
+                            field(
+                                "network_name",
+                                "field.network_name",
+                                NodeUiInputKind::NetworkName,
+                                true,
+                                NodeUiValidation::NetworkName,
+                            ),
+                            field(
+                                "expected_revision",
+                                "field.expected_revision",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "candidates_json",
+                                "field.coordinator_candidates_json",
+                                NodeUiInputKind::CoordinatorCandidatesJson,
+                                true,
+                                NodeUiValidation::CoordinatorCandidatesJson,
+                            ),
+                            field(
+                                "effective_from_unix_ms",
+                                "field.coordinator_effective_from",
+                                NodeUiInputKind::Revision,
+                                false,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "expires_at_unix_ms",
+                                "field.coordinator_expires_at",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                        ],
+                        Some(confirmation(
+                            NodeCommandKind::UpdateCoordinatorCandidates,
+                            "confirm.update_coordinator_candidates.title",
+                            "confirm.update_coordinator_candidates.consequence",
+                            false,
+                        )),
+                    ),
+                    action(
+                        "publish_coordinator_candidate_declaration",
+                        "action.publish_coordinator_candidate_declaration",
+                        NodeCommandKind::PublishCoordinatorCandidateDeclaration,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::NetworkSelected,
+                        vec![
+                            field(
+                                "network_name",
+                                "field.network_name",
+                                NodeUiInputKind::NetworkName,
+                                true,
+                                NodeUiValidation::NetworkName,
+                            ),
+                            field(
+                                "willingness",
+                                "field.coordinator_willingness",
+                                NodeUiInputKind::CoordinatorWillingness,
+                                true,
+                                NodeUiValidation::CoordinatorWillingness,
+                            ),
+                            field(
+                                "public_endpoint",
+                                "field.coordinator_public_endpoint",
+                                NodeUiInputKind::ExternalHost,
+                                false,
+                                NodeUiValidation::NonEmpty,
+                            ),
+                            field(
+                                "reachable_via_relay",
+                                "field.coordinator_reachable_via_relay",
+                                NodeUiInputKind::Boolean,
+                                false,
+                                NodeUiValidation::None,
+                            ),
+                            field(
+                                "cpu_cores",
+                                "field.coordinator_cpu_cores",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "memory_bytes",
+                                "field.coordinator_memory_bytes",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "max_connections",
+                                "field.coordinator_max_connections",
+                                NodeUiInputKind::Revision,
+                                true,
+                                NodeUiValidation::Revision,
+                            ),
+                            field(
+                                "validity_ms",
+                                "field.coordinator_validity_ms",
+                                NodeUiInputKind::TimeoutMs,
+                                true,
+                                NodeUiValidation::PositiveTimeout,
+                            ),
+                        ],
+                        Some(confirmation(
+                            NodeCommandKind::PublishCoordinatorCandidateDeclaration,
+                            "confirm.publish_coordinator_candidate_declaration.title",
+                            "confirm.publish_coordinator_candidate_declaration.consequence",
                             false,
                         )),
                     ),

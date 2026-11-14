@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
+    CoordinatorCandidateConfig, CoordinatorCandidateDeclaration, CoordinatorCandidateStatus,
     ExitHealthEvidence, ExitHealthEvidenceState, ExitHealthLayer, ExitHealthProtocol,
     ExitHealthRetest, ExitHealthRetestPhase, ExitHealthSnapshot, ExitHealthSource,
     ExitHealthTarget, InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
@@ -27,6 +28,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout, Instant};
 
+use super::command::{
+    NodePublishCoordinatorCandidateDeclarationCommand, NodeUpdateCoordinatorCandidatesCommand,
+};
 use super::state::effective_membership_state;
 use super::{
     LocalExitCapabilitySnapshot, LocalExitCapabilityStage, NodeCleanupFailureReason,
@@ -54,7 +58,8 @@ use crate::node::runtime_metadata;
 use crate::owner_security::audit::OwnerSecurityAudit;
 use crate::routing::leak_detection::{collect_leak_detection, LeakDetectionContext};
 use crate::signaling::client::{
-    InvitationControlError, JoinRequestControlError, JoinRequestStatusSnapshot, SignalingClient,
+    CoordinatorCandidateControlError, InvitationControlError, JoinRequestControlError,
+    JoinRequestStatusSnapshot, SignalingClient,
 };
 use crate::symmetric::{
     EmbeddedServiceError, EmbeddedServiceManager, EmbeddedServiceSnapshot,
@@ -159,6 +164,12 @@ pub(crate) enum RuntimeControlError {
         message_key: &'static str,
         message: String,
     },
+    #[error("{message}")]
+    CoordinatorCandidate {
+        code: NodeProblemCode,
+        message_key: &'static str,
+        message: String,
+    },
 }
 
 impl RuntimeControlError {
@@ -185,6 +196,7 @@ impl RuntimeControlError {
             Self::Timeout(_) => NodeProblemCode::TimedOut,
             Self::JoinRequest { code, .. } => *code,
             Self::Invitation { code, .. } => *code,
+            Self::CoordinatorCandidate { code, .. } => *code,
         }
     }
 
@@ -195,6 +207,7 @@ impl RuntimeControlError {
             Self::PermissionDenied(_) => "error.permission_denied",
             Self::JoinRequest { message_key, .. } => message_key,
             Self::Invitation { message_key, .. } => message_key,
+            Self::CoordinatorCandidate { message_key, .. } => message_key,
             _ => self.problem_code().message_key(),
         }
     }
@@ -232,6 +245,17 @@ impl RuntimeControlError {
                     ..
                 }
                 | Self::Invitation {
+                    code: NodeProblemCode::AuthenticationRequired
+                        | NodeProblemCode::InvalidRequest
+                        | NodeProblemCode::NotFound
+                        | NodeProblemCode::Conflict
+                        | NodeProblemCode::PermissionDenied
+                        | NodeProblemCode::Cancelled
+                        | NodeProblemCode::Unsupported
+                        | NodeProblemCode::Internal,
+                    ..
+                }
+                | Self::CoordinatorCandidate {
                     code: NodeProblemCode::AuthenticationRequired
                         | NodeProblemCode::InvalidRequest
                         | NodeProblemCode::NotFound
@@ -328,6 +352,42 @@ fn invitation_unavailable(message: impl Into<String>) -> RuntimeControlError {
     RuntimeControlError::Invitation {
         code: NodeProblemCode::Unavailable,
         message_key: "invitation.error.unavailable",
+        message: message.into(),
+    }
+}
+
+fn map_coordinator_candidate_error(error: CoordinatorCandidateControlError) -> RuntimeControlError {
+    let message = error.to_string();
+    let code = match error {
+        CoordinatorCandidateControlError::Disconnected
+        | CoordinatorCandidateControlError::Unavailable
+        | CoordinatorCandidateControlError::Rejected(429 | 503) => NodeProblemCode::Unavailable,
+        CoordinatorCandidateControlError::TimedOut => NodeProblemCode::TimedOut,
+        CoordinatorCandidateControlError::Rejected(401) => NodeProblemCode::AuthenticationRequired,
+        CoordinatorCandidateControlError::Rejected(403) => NodeProblemCode::PermissionDenied,
+        CoordinatorCandidateControlError::Rejected(404) => NodeProblemCode::NotFound,
+        CoordinatorCandidateControlError::Rejected(409 | 412) => NodeProblemCode::Conflict,
+        CoordinatorCandidateControlError::Rejected(_) => NodeProblemCode::InvalidRequest,
+    };
+    RuntimeControlError::CoordinatorCandidate {
+        code,
+        message_key: error.message_key(),
+        message,
+    }
+}
+
+fn coordinator_candidate_unavailable(message: impl Into<String>) -> RuntimeControlError {
+    RuntimeControlError::CoordinatorCandidate {
+        code: NodeProblemCode::Unavailable,
+        message_key: "coordinator_candidate.error.unavailable",
+        message: message.into(),
+    }
+}
+
+fn coordinator_candidate_invalid(message: impl Into<String>) -> RuntimeControlError {
+    RuntimeControlError::CoordinatorCandidate {
+        code: NodeProblemCode::InvalidRequest,
+        message_key: "coordinator_candidate.error.invalid",
         message: message.into(),
     }
 }
@@ -1866,6 +1926,10 @@ enum RuntimeControlCommand {
         command: InvitationRuntimeCommand,
         reply: oneshot::Sender<Result<InvitationExecutionResult, RuntimeControlError>>,
     },
+    CoordinatorCandidates {
+        command: CoordinatorCandidateRuntimeCommand,
+        reply: oneshot::Sender<Result<CoordinatorCandidateStatus, RuntimeControlError>>,
+    },
     Stop {
         networks: Vec<String>,
         all: bool,
@@ -1987,6 +2051,12 @@ enum InvitationExecutionResult {
     Revoked(InvitationStatusView),
     Preview(InvitationPreview),
     Redeemed(InvitationRedemption),
+}
+
+enum CoordinatorCandidateRuntimeCommand {
+    Status { network_name: String },
+    UpdateConfig(NodeUpdateCoordinatorCandidatesCommand),
+    PublishDeclaration(NodePublishCoordinatorCandidateDeclarationCommand),
 }
 
 fn routing_summary_timestamp() -> u64 {
@@ -2702,6 +2772,48 @@ impl NetworkRuntimeManager {
             .map_err(|_| RuntimeControlError::ActorClosed)?
     }
 
+    pub async fn get_coordinator_candidates(
+        &self,
+        network_name: String,
+    ) -> Result<CoordinatorCandidateStatus, RuntimeControlError> {
+        self.execute_coordinator_candidates(CoordinatorCandidateRuntimeCommand::Status {
+            network_name,
+        })
+        .await
+    }
+
+    pub async fn update_coordinator_candidates(
+        &self,
+        command: NodeUpdateCoordinatorCandidatesCommand,
+    ) -> Result<CoordinatorCandidateStatus, RuntimeControlError> {
+        self.execute_coordinator_candidates(CoordinatorCandidateRuntimeCommand::UpdateConfig(
+            command,
+        ))
+        .await
+    }
+
+    pub async fn publish_coordinator_candidate_declaration(
+        &self,
+        command: NodePublishCoordinatorCandidateDeclarationCommand,
+    ) -> Result<CoordinatorCandidateStatus, RuntimeControlError> {
+        self.execute_coordinator_candidates(CoordinatorCandidateRuntimeCommand::PublishDeclaration(
+            command,
+        ))
+        .await
+    }
+
+    async fn execute_coordinator_candidates(
+        &self,
+        command: CoordinatorCandidateRuntimeCommand,
+    ) -> Result<CoordinatorCandidateStatus, RuntimeControlError> {
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::CoordinatorCandidates { command, reply })
+            .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
     pub async fn stop(
         &self,
         networks: Vec<String>,
@@ -2946,6 +3058,10 @@ async fn run_actor(
             }
             RuntimeControlCommand::Invitation { command, reply } => {
                 let result = actor.execute_invitation_command(command).await;
+                let _ = reply.send(result);
+            }
+            RuntimeControlCommand::CoordinatorCandidates { command, reply } => {
+                let result = actor.execute_coordinator_candidate_command(command).await;
                 let _ = reply.send(result);
             }
             RuntimeControlCommand::Stop {
@@ -3545,6 +3661,212 @@ impl NetworkRuntimeActor {
                 result
                     .map(InvitationExecutionResult::Redeemed)
                     .map_err(map_invitation_error)
+            }
+        }
+    }
+
+    async fn execute_coordinator_candidate_command(
+        &mut self,
+        command: CoordinatorCandidateRuntimeCommand,
+    ) -> Result<CoordinatorCandidateStatus, RuntimeControlError> {
+        match command {
+            CoordinatorCandidateRuntimeCommand::Status { network_name } => {
+                let (network_id, signaling, ephemeral) =
+                    self.coordinator_candidate_signaling(&network_name).await?;
+                let result = signaling
+                    .coordinator_candidate_status(network_id)
+                    .await
+                    .map_err(map_coordinator_candidate_error);
+                self.close_ephemeral_coordinator_candidate_signaling(&signaling, ephemeral)
+                    .await;
+                result
+            }
+            CoordinatorCandidateRuntimeCommand::UpdateConfig(command) => {
+                let network_name = command.network_name.clone();
+                let (network_id, signaling, ephemeral) =
+                    self.coordinator_candidate_signaling(&network_name).await?;
+                let identity = self.configs.load_node_identity().map_err(|error| {
+                    coordinator_candidate_unavailable(format!(
+                        "加载 Coordinator 候选配置签名身份失败: {error:#}"
+                    ))
+                });
+                let result = match identity {
+                    Ok(identity) => {
+                        let revision = command.expected_revision.checked_add(1).ok_or_else(|| {
+                            coordinator_candidate_invalid(
+                                "Coordinator 候选配置 revision 溢出".to_owned(),
+                            )
+                        });
+                        match revision {
+                            Ok(revision) => {
+                                let effective_from_unix_ms =
+                                    command.effective_from_unix_ms.unwrap_or_else(unix_time_ms);
+                                match CoordinatorCandidateConfig::signed(
+                                    network_id,
+                                    revision,
+                                    command.candidates,
+                                    effective_from_unix_ms,
+                                    command.expires_at_unix_ms,
+                                    &identity,
+                                ) {
+                                    Ok(config) => signaling
+                                        .update_coordinator_candidates(
+                                            config,
+                                            command.expected_revision,
+                                        )
+                                        .await
+                                        .map_err(map_coordinator_candidate_error),
+                                    Err(error) => Err(coordinator_candidate_invalid(format!(
+                                        "构造 Coordinator 候选配置失败: {error}"
+                                    ))),
+                                }
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                self.close_ephemeral_coordinator_candidate_signaling(&signaling, ephemeral)
+                    .await;
+                result
+            }
+            CoordinatorCandidateRuntimeCommand::PublishDeclaration(command) => {
+                let network_name = command.network_name.clone();
+                let (network_id, signaling, ephemeral) =
+                    self.coordinator_candidate_signaling(&network_name).await?;
+                let identity = self.configs.load_node_identity().map_err(|error| {
+                    coordinator_candidate_unavailable(format!(
+                        "加载 Coordinator 候选声明签名身份失败: {error:#}"
+                    ))
+                });
+                let result =
+                    match identity {
+                        Ok(identity) => {
+                            match signaling
+                                .coordinator_candidate_status(network_id.clone())
+                                .await
+                                .map_err(map_coordinator_candidate_error)
+                            {
+                                Ok(status) => match status.config {
+                                    None => Err(coordinator_candidate_unavailable(
+                                        "Coordinator 候选配置尚未生效，无法发布声明",
+                                    )),
+                                    Some(config) => {
+                                        let observed_at_unix_ms = unix_time_ms();
+                                        let expires_at_unix_ms = observed_at_unix_ms
+                                            .checked_add(command.validity_ms)
+                                            .ok_or_else(|| {
+                                                coordinator_candidate_invalid(
+                                                    "Coordinator 候选声明有效期溢出".to_owned(),
+                                                )
+                                            });
+                                        match expires_at_unix_ms {
+                                    Ok(expires_at_unix_ms) => {
+                                        match CoordinatorCandidateDeclaration::signed(
+                                            network_id,
+                                            config.revision,
+                                            command.public_reachability,
+                                            command.resources,
+                                            command.willingness,
+                                            observed_at_unix_ms,
+                                            expires_at_unix_ms,
+                                            &identity,
+                                        ) {
+                                            Ok(declaration) => signaling
+                                                .publish_coordinator_candidate_declaration(
+                                                    declaration,
+                                                )
+                                                .await
+                                                .map_err(map_coordinator_candidate_error),
+                                            Err(error) => Err(coordinator_candidate_invalid(
+                                                format!("构造 Coordinator 候选声明失败: {error}"),
+                                            )),
+                                        }
+                                    }
+                                    Err(error) => Err(error),
+                                }
+                                    }
+                                },
+                                Err(error) => Err(error),
+                            }
+                        }
+                        Err(error) => Err(error),
+                    };
+                self.close_ephemeral_coordinator_candidate_signaling(&signaling, ephemeral)
+                    .await;
+                result
+            }
+        }
+    }
+
+    /// Candidate administration always targets the authoritative Coordinator.
+    /// Prefer the live data-plane registration, otherwise use the configured
+    /// endpoint for one short-lived command and close it immediately.
+    async fn coordinator_candidate_signaling(
+        &mut self,
+        network_name: &str,
+    ) -> Result<(NetworkId, Arc<SignalingClient>, bool), RuntimeControlError> {
+        self.reconcile_finished_sessions().await;
+        let network = self
+            .configs
+            .list_networks()
+            .map_err(|error| {
+                RuntimeControlError::Persistence(format!(
+                    "加载 Coordinator 候选网络配置失败: {error:#}"
+                ))
+            })?
+            .into_iter()
+            .find(|network| network.name == network_name)
+            .ok_or_else(|| {
+                RuntimeControlError::NotFound(format!("网络 [{network_name}] 不存在"))
+            })?;
+        let network_id_text = network.network_id.as_deref().ok_or_else(|| {
+            coordinator_candidate_unavailable(format!(
+                "网络 [{network_name}] 缺少稳定网络 ID，拒绝访问 Coordinator"
+            ))
+        })?;
+        let network_id = NetworkId::parse(network_id_text.to_owned()).map_err(|error| {
+            coordinator_candidate_invalid(format!(
+                "网络 [{network_name}] 的稳定网络 ID 无效: {error:#}"
+            ))
+        })?;
+        if let Some(signaling) = self
+            .sessions
+            .values()
+            .find(|session| session.network_id.as_deref() == Some(network_id.as_str()))
+            .and_then(|session| session.signaling.clone())
+        {
+            return Ok((network_id, signaling, false));
+        }
+        let coordinator_url = network.coordinator_url.trim();
+        if coordinator_url.is_empty() {
+            return Err(coordinator_candidate_unavailable(format!(
+                "网络 [{network_name}] 没有可用的 Coordinator 信令端点"
+            )));
+        }
+        let identity = self.configs.load_node_identity().map_err(|error| {
+            coordinator_candidate_unavailable(format!(
+                "加载 Coordinator 候选控制连接所需节点身份失败: {error:#}"
+            ))
+        })?;
+        let signaling = SignalingClient::connect(coordinator_url, identity, 0, NatType::Unknown)
+            .await
+            .map_err(|error| {
+                coordinator_candidate_unavailable(format!(
+                    "建立 Coordinator 候选控制连接失败: {error:#}"
+                ))
+            })?;
+        Ok((network_id, Arc::new(signaling), true))
+    }
+
+    async fn close_ephemeral_coordinator_candidate_signaling(
+        &self,
+        signaling: &Arc<SignalingClient>,
+        ephemeral: bool,
+    ) {
+        if ephemeral {
+            if let Err(error) = signaling.close().await {
+                tracing::warn!(%error, "关闭一次性 Coordinator 候选控制连接失败");
             }
         }
     }
@@ -4295,16 +4617,30 @@ impl NetworkRuntimeActor {
             });
         }
 
-        let host_public_key = self
-            .configs
-            .load_node_identity()
-            .map_err(|error| {
-                RuntimeControlError::Persistence(format!(
+        // Candidate admission derives its authoritative network ID from the
+        // signed NetworkRecord. Persist the record and owner configuration
+        // before binding embedded services so startup can never use a
+        // fabricated or implicit network identity.
+        let coordinator_url = format!("ws://127.0.0.1:{}", command.signaling_port);
+        let created = match self.configs.create_owned_network(
+            command.create_profile(),
+            &coordinator_url,
+            true,
+        ) {
+            Ok(created) => created,
+            Err(error) => return Err(map_network_creation_error(&command.name, error)),
+        };
+
+        let host_public_key = match self.configs.load_node_identity() {
+            Ok(identity) => identity.public_key_bytes(),
+            Err(error) => {
+                self.remove_created_network_persistence(&command.name).await;
+                return Err(RuntimeControlError::Persistence(format!(
                     "网络 [{}] 加载节点身份失败: {error:#}",
                     command.name
-                ))
-            })?
-            .public_key_bytes();
+                )));
+            }
+        };
         let service_request = EmbeddedServiceStartRequest::new(
             command.name.clone(),
             command.signaling_port,
@@ -4321,37 +4657,15 @@ impl NetworkRuntimeActor {
             Ok(service) => service,
             Err(error) => {
                 if matches!(&error, EmbeddedServiceError::RelayStartFailed { .. }) {
-                    // Creating a network is atomic from the caller's point of
-                    // view. A Relay startup failure must not leave a
-                    // signaling-only service behind when no network metadata
-                    // has been persisted yet.
-                    self.stop_embedded_service(&command.name).await;
-                    self.forget_network(&command.name).await;
+                    self.rollback_created_network(&command.name).await;
                 } else {
-                    self.mark_embedded_service_status(
-                        &command.name,
-                        NodeEmbeddedServiceStatus::Failed,
-                    )
-                    .await;
+                    self.rollback_created_network_after_service_failure(&command.name)
+                        .await;
                 }
                 return Err(map_service_error(error));
             }
         };
         self.record_running_embedded_service(&service).await;
-        let coordinator_url = format!("ws://127.0.0.1:{}", service.signaling_addr.port());
-
-        let created = match self.configs.create_owned_network(
-            command.create_profile(),
-            &coordinator_url,
-            true,
-        ) {
-            Ok(created) => created,
-            Err(error) => {
-                self.stop_embedded_service(&command.name).await;
-                self.forget_network(&command.name).await;
-                return Err(map_network_creation_error(&command.name, error));
-            }
-        };
         let joined_membership = match self
             .configs
             .persist_owned_network_membership(&created.record)
@@ -6097,7 +6411,7 @@ impl NetworkRuntimeActor {
         }
     }
 
-    async fn rollback_created_network(&mut self, network_name: &str) {
+    async fn remove_created_network_persistence(&self, network_name: &str) {
         if let Ok(Some(joined)) = self
             .configs
             .joined_membership_for_network_name(network_name)
@@ -6107,8 +6421,24 @@ impl NetworkRuntimeActor {
                 .remove_joined_membership(joined.membership.network_id.as_str());
         }
         let _ = self.configs.delete_network(network_name);
+    }
+
+    async fn rollback_created_network(&mut self, network_name: &str) {
+        self.remove_created_network_persistence(network_name).await;
         self.stop_embedded_service(network_name).await;
         self.forget_network(network_name).await;
+    }
+
+    async fn rollback_created_network_after_service_failure(&mut self, network_name: &str) {
+        self.remove_created_network_persistence(network_name).await;
+        if let Err(error) = self.services.stop(network_name).await {
+            if !matches!(error, EmbeddedServiceError::NotFound(_)) {
+                tracing::warn!("网络 [{network_name}] 内嵌服务启动失败后的清理失败: {error}");
+            }
+        }
+        self.forget_network(network_name).await;
+        self.mark_embedded_service_status(network_name, NodeEmbeddedServiceStatus::Failed)
+            .await;
     }
 
     async fn stop_embedded_service(&self, network_name: &str) {
@@ -6251,6 +6581,7 @@ impl NetworkRuntimeActor {
             relay_health: None,
             relay_authorization: None,
             relay_governance: None,
+            coordinator_candidates: None,
         };
         self.state
             .update(|state| {
@@ -7157,6 +7488,15 @@ fn local_exit_error_with_network(
             message_key,
             message,
         } => RuntimeControlError::Invitation {
+            code,
+            message_key,
+            message: format!("{context}：{message}"),
+        },
+        RuntimeControlError::CoordinatorCandidate {
+            code,
+            message_key,
+            message,
+        } => RuntimeControlError::CoordinatorCandidate {
             code,
             message_key,
             message: format!("{context}：{message}"),
@@ -8505,6 +8845,7 @@ mod tests {
             relay_health: Some(healthy_relay_health()),
             relay_authorization: None,
             relay_governance: None,
+            coordinator_candidates: None,
         };
         harness
             .state

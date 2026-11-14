@@ -497,6 +497,7 @@ impl AppController {
                         relay_health: None,
                         relay_authorization: None,
                         relay_governance: None,
+                        coordinator_candidates: None,
                     });
             })
             .await;
@@ -1709,6 +1710,7 @@ mod tests {
                 relay_health: None,
                 relay_authorization: None,
                 relay_governance: None,
+                coordinator_candidates: None,
             }],
             peers: vec![
                 node_peer("office", "peer-office", true),

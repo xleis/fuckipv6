@@ -1370,6 +1370,7 @@ fn status_for_command_result(result: &NodeCommandResult) -> StatusCode {
         | NodeCommandOutcome::TrafficPolicyHistory(_)
         | NodeCommandOutcome::TrafficPolicyRolledBack(_)
         | NodeCommandOutcome::TrafficPolicyTest(_)
+        | NodeCommandOutcome::CoordinatorCandidates(_)
         | NodeCommandOutcome::MemberRemovalPreview(_)
         | NodeCommandOutcome::MemberLifecycleChanged(_)
         | NodeCommandOutcome::Completed { .. } => StatusCode::OK,
@@ -1455,7 +1456,10 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::AcknowledgeMembershipPolicy(_) => OperationKind::NetworkApply,
         NodeCommand::LeaveNetwork(_) => OperationKind::NetworkLeave,
         NodeCommand::UpdateRouting(_) => OperationKind::TrafficRulesApply,
-        NodeCommand::SetNetworkRole(_) => OperationKind::NetworkRoleUpdate,
+        NodeCommand::SetNetworkRole(_) | NodeCommand::UpdateCoordinatorCandidates(_) => {
+            OperationKind::NetworkRoleUpdate
+        }
+        NodeCommand::PublishCoordinatorCandidateDeclaration(_) => OperationKind::NetworkApply,
         NodeCommand::SetLocalExitCapability(command) if command.enabled => {
             OperationKind::CapabilityEnable
         }
@@ -1492,6 +1496,7 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::ListInvitations(_)
         | NodeCommand::GetInvitationStatus(_)
         | NodeCommand::PreviewInvitation(_)
+        | NodeCommand::GetCoordinatorCandidates(_)
         | NodeCommand::GetConfigurationHistory => OperationKind::ConfigurationHistory,
         NodeCommand::GetPolicy
         | NodeCommand::PreviewPolicy(_)
@@ -1552,6 +1557,11 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
         NodeCommand::AcknowledgeMembershipPolicy(command) => network_target(&command.network_id),
         NodeCommand::UpdateRouting(command) => network_target(&command.network_name),
         NodeCommand::SetNetworkRole(command) => network_target(&command.network_name),
+        NodeCommand::GetCoordinatorCandidates(command) => network_target(&command.network_name),
+        NodeCommand::UpdateCoordinatorCandidates(command) => network_target(&command.network_name),
+        NodeCommand::PublishCoordinatorCandidateDeclaration(command) => {
+            network_target(&command.network_name)
+        }
         NodeCommand::SetLocalExitCapability(_) => node_target(),
         NodeCommand::RebuildTun { network_name } => network_target(network_name),
         NodeCommand::BanClient(command) | NodeCommand::UnbanClient(command) => {

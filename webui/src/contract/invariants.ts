@@ -10,6 +10,7 @@ import type {
   ConfigurationDocument,
   ConfigurationHistoryEntry,
   ConfigurationPreview,
+  CoordinatorCandidate,
   NodeNetworkSelection,
   ExitSelectionPolicy,
   NetworkProfileApplyResult,
@@ -167,6 +168,10 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   rotate_node_identity: "rotate_node_identity",
   get_network_allocation: "get_network_allocation",
   update_network_allocation: "update_network_allocation",
+  get_coordinator_candidates: "get_coordinator_candidates",
+  update_coordinator_candidates: "update_coordinator_candidates",
+  publish_coordinator_candidate_declaration:
+    "publish_coordinator_candidate_declaration",
   get_configuration: "get_configuration",
   preview_configuration: "preview_configuration",
   apply_configuration: "apply_configuration",
@@ -253,6 +258,8 @@ const INPUT_KINDS = new Set([
   "routing_mode",
   "url_or_ticket",
   "coordinator_url",
+  "coordinator_candidates_json",
+  "coordinator_willingness",
   "invitation_code",
   "timeout_ms",
   "revision",
@@ -307,6 +314,8 @@ const VALIDATIONS = new Set([
   "member_lifecycle_action",
   "member_lifecycle_reason",
   "coordinator_url",
+  "coordinator_candidates_json",
+  "coordinator_willingness",
   "invitation_code",
 ]);
 const OUTCOME_STATUSES = new Set([
@@ -425,14 +434,9 @@ const NETWORK_JOIN_MODES = new Set([
   "invite_only",
 ]);
 type ExitContributionMode =
-  | "autonomous"
-  | "required_on_join"
-  | "disabled"
-  | "approval_required";
+  "autonomous" | "required_on_join" | "disabled" | "approval_required";
 type ExitContributionScope =
-  | "not_applicable"
-  | "joining_members"
-  | "all_members";
+  "not_applicable" | "joining_members" | "all_members";
 
 function canonicalExitContribution(
   mode: ExitContributionMode,
@@ -1067,10 +1071,40 @@ export function defaultFieldValue(
   if (field.id === "signaling_port") return "6666";
   if (field.id === "relay_port") return "6667";
   if (field.id === "timeout_ms") return "1500";
+  if (field.id === "candidates_json") {
+    const status = snapshot.embedded_services?.find(
+      (service) => service.network_name === network,
+    )?.coordinator_candidates;
+    return JSON.stringify(status?.config?.candidates ?? []);
+  }
+  if (field.id === "expected_revision") {
+    const status = snapshot.embedded_services?.find(
+      (service) => service.network_name === network,
+    )?.coordinator_candidates;
+    if (status?.config) return String(status.config.revision);
+  }
+  if (field.id === "effective_from_unix_ms") {
+    const status = snapshot.embedded_services?.find(
+      (service) => service.network_name === network,
+    )?.coordinator_candidates;
+    return status?.config ? String(status.config.effective_from_unix_ms) : "";
+  }
+  if (field.id === "expires_at_unix_ms") {
+    const status = snapshot.embedded_services?.find(
+      (service) => service.network_name === network,
+    )?.coordinator_candidates;
+    return status?.config ? String(status.config.expires_at_unix_ms) : "";
+  }
+  if (field.id === "willingness") return "willing";
+  if (field.id === "cpu_cores") return "1";
+  if (field.id === "memory_bytes") return "67108864";
+  if (field.id === "max_connections") return "100";
+  if (field.id === "validity_ms") return "60000";
   if (
     field.id === "auto_connect" ||
     field.id === "start" ||
-    field.id === "is_exit_node"
+    field.id === "is_exit_node" ||
+    field.id === "reachable_via_relay"
   )
     return true;
   if (field.id === "all") return action.id === "cleanup_node_residuals";
@@ -1290,6 +1324,55 @@ function revisionValue(
     );
   }
   return revision;
+}
+
+function coordinatorCandidatesJson(
+  value: string | boolean,
+  locale: Locale,
+): CoordinatorCandidate[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(String(value));
+  } catch {
+    throw new Error(
+      label(locale, "validation.coordinator_candidates_json_invalid"),
+    );
+  }
+  if (!Array.isArray(parsed) || parsed.length > 32) {
+    throw new Error(
+      label(locale, "validation.coordinator_candidates_json_invalid"),
+    );
+  }
+  const nodes = new Set<string>();
+  const priorities = new Set<number>();
+  return parsed.map((entry, index) => {
+    if (!record(entry)) {
+      throw new Error(
+        i18n().tr(locale, "validation.coordinator_candidate_invalid", {
+          index: index + 1,
+        }),
+      );
+    }
+    const nodeId = String(entry.node_id ?? "").trim();
+    const priority = Number(entry.priority);
+    if (
+      !nodeId ||
+      !Number.isSafeInteger(priority) ||
+      priority < 0 ||
+      priority > 0xffff_ffff ||
+      nodes.has(nodeId) ||
+      priorities.has(priority)
+    ) {
+      throw new Error(
+        i18n().tr(locale, "validation.coordinator_candidate_invalid", {
+          index: index + 1,
+        }),
+      );
+    }
+    nodes.add(nodeId);
+    priorities.add(priority);
+    return { node_id: nodeId, priority };
+  });
 }
 
 function configurationObject(
@@ -1650,10 +1733,7 @@ function validateTrafficSessionSnapshot(value: unknown): void {
       "dns_validated",
       "reachability_validated",
     ]) {
-      booleanValueRaw(
-        validation[field],
-        `traffic session ${field} invalid`,
-      );
+      booleanValueRaw(validation[field], `traffic session ${field} invalid`);
     }
     nonNegativeInteger(
       validation.observed_at_unix_ms,
@@ -1745,9 +1825,7 @@ function trafficPolicyAffectedObjects(
   )) {
     if (
       !record(entry) ||
-      !TRAFFIC_POLICY_OBJECT_KINDS.has(
-        entry.kind as TrafficPolicyObjectKind,
-      )
+      !TRAFFIC_POLICY_OBJECT_KINDS.has(entry.kind as TrafficPolicyObjectKind)
     ) {
       fail("traffic policy affected object invalid");
     }
@@ -1764,7 +1842,9 @@ function trafficPolicyDiffs(value: unknown): TrafficPolicyDiffEntry[] {
   )) {
     if (!record(entry)) fail("traffic policy diff entry invalid");
     stringValue(entry.path, "traffic policy diff path invalid", true);
-    if (!TRAFFIC_POLICY_CHANGE_KINDS.has(entry.change as TrafficPolicyChangeKind))
+    if (
+      !TRAFFIC_POLICY_CHANGE_KINDS.has(entry.change as TrafficPolicyChangeKind)
+    )
       fail("traffic policy diff change invalid");
   }
   return value as TrafficPolicyDiffEntry[];
@@ -1787,10 +1867,7 @@ function trafficPolicyRuleRisks(value: unknown): void {
       entry.risks,
       "traffic policy match risks invalid",
     )) {
-      if (
-        !record(risk) ||
-        !TRAFFIC_MATCH_RISK_KINDS.has(String(risk.kind))
-      ) {
+      if (!record(risk) || !TRAFFIC_MATCH_RISK_KINDS.has(String(risk.kind))) {
         fail("traffic policy match risk invalid");
       }
       if (risk.kind === "broad_cidr") {
@@ -1814,9 +1891,7 @@ function trafficPolicyRuleRisks(value: unknown): void {
   }
 }
 
-function trafficPolicyHistoryEntry(
-  value: unknown,
-): TrafficPolicyHistoryEntry {
+function trafficPolicyHistoryEntry(value: unknown): TrafficPolicyHistoryEntry {
   if (!record(value)) fail("traffic policy history entry invalid");
   if (!TRAFFIC_POLICY_CHANGE_ACTIONS.has(String(value.action)))
     fail("traffic policy history action invalid");
@@ -1829,7 +1904,11 @@ function trafficPolicyHistoryEntry(
     "traffic policy transaction id invalid",
     true,
   );
-  stringValue(value.occurred_at, "traffic policy history timestamp invalid", true);
+  stringValue(
+    value.occurred_at,
+    "traffic policy history timestamp invalid",
+    true,
+  );
   stringValue(
     value.content_hash,
     "traffic policy history content hash invalid",
@@ -1884,16 +1963,13 @@ function trafficPolicyPreview(value: unknown): TrafficPolicyPreview {
     "traffic policy candidate revision invalid",
   );
   trafficPolicyValue(value.current, "traffic policy preview current invalid");
-  trafficPolicyValue(value.candidate, "traffic policy preview candidate invalid");
-  if (
-    record(value.current) &&
-    value.current.revision !== currentRevision
-  )
+  trafficPolicyValue(
+    value.candidate,
+    "traffic policy preview candidate invalid",
+  );
+  if (record(value.current) && value.current.revision !== currentRevision)
     fail("traffic policy current revision mismatch");
-  if (
-    record(value.candidate) &&
-    value.candidate.revision !== candidateRevision
-  )
+  if (record(value.candidate) && value.candidate.revision !== candidateRevision)
     fail("traffic policy candidate revision mismatch");
   trafficPolicyDiffs(value.diffs);
   trafficPolicyAffectedObjects(value.affected_objects);
@@ -1931,7 +2007,10 @@ function trafficPolicyApplied(value: unknown): TrafficPolicyApplyResult {
     fail("traffic policy applied revision mismatch");
   trafficPolicyDiffs(value.diffs);
   trafficPolicyAffectedObjects(value.affected_objects);
-  const noOp = booleanValueRaw(value.no_op, "traffic policy no-op flag invalid");
+  const noOp = booleanValueRaw(
+    value.no_op,
+    "traffic policy no-op flag invalid",
+  );
   if (noOp && revision !== previousRevision)
     fail("traffic policy no-op moved revision");
   if (noOp && value.history !== undefined && value.history !== null)
@@ -1946,9 +2025,7 @@ function trafficPolicyApplied(value: unknown): TrafficPolicyApplyResult {
   return value as TrafficPolicyApplyResult;
 }
 
-function trafficPolicyHistory(
-  value: unknown,
-): TrafficPolicyHistorySnapshot {
+function trafficPolicyHistory(value: unknown): TrafficPolicyHistorySnapshot {
   if (!record(value)) fail("traffic policy history invalid");
   nonNegativeInteger(
     value.current_revision,
@@ -1962,9 +2039,7 @@ function trafficPolicyHistory(
   return value as TrafficPolicyHistorySnapshot;
 }
 
-function trafficPolicyRolledBack(
-  value: unknown,
-): TrafficPolicyRollbackResult {
+function trafficPolicyRolledBack(value: unknown): TrafficPolicyRollbackResult {
   if (!record(value)) fail("traffic policy rollback result invalid");
   nonNegativeInteger(
     value.previous_revision,
@@ -1984,7 +2059,8 @@ function trafficPolicyRolledBack(
     fail("traffic policy rollback revision mismatch");
   trafficPolicyDiffs(value.diffs);
   trafficPolicyAffectedObjects(value.affected_objects);
-  if (!record(value.history)) fail("traffic policy rollback is missing history");
+  if (!record(value.history))
+    fail("traffic policy rollback is missing history");
   const history = trafficPolicyHistoryEntry(value.history);
   if (history.action !== "rollback")
     fail("traffic policy rollback history action mismatch");
@@ -2015,10 +2091,7 @@ function trafficAction(value: unknown): void {
   fail("traffic policy test action invalid");
 }
 
-function trafficPolicyTestDecision(
-  value: unknown,
-  message: string,
-): void {
+function trafficPolicyTestDecision(value: unknown, message: string): void {
   if (!record(value)) fail(message);
   trafficAction(value.action);
   if (value.visibility === "route_summary") return;
@@ -2034,7 +2107,10 @@ function trafficPolicyTestDecision(
     if (!TRAFFIC_FAILURE_OUTCOMES.has(String(decision.outcome))) fail(message);
     if (!TRAFFIC_FAILURE_REASONS.has(String(decision.reason))) fail(message);
     if (decision.recovery_action !== "retry_requested_route") fail(message);
-    if (decision.direct_fallback !== undefined && decision.direct_fallback !== null) {
+    if (
+      decision.direct_fallback !== undefined &&
+      decision.direct_fallback !== null
+    ) {
       if (!record(decision.direct_fallback)) fail(message);
       for (const failure of arrayValue(
         decision.direct_fallback.allowed_failures,
@@ -2084,8 +2160,14 @@ function trafficPolicyTestComparison(
   } else {
     fail("traffic policy test source invalid");
   }
-  trafficPolicyTestDecision(value.before, "traffic policy before decision invalid");
-  trafficPolicyTestDecision(value.after, "traffic policy after decision invalid");
+  trafficPolicyTestDecision(
+    value.before,
+    "traffic policy before decision invalid",
+  );
+  trafficPolicyTestDecision(
+    value.after,
+    "traffic policy after decision invalid",
+  );
   if (!record(value.delta)) fail("traffic policy test delta invalid");
   for (const field of ["changed", "route_changed"] as const)
     booleanValueRaw(
@@ -2719,6 +2801,17 @@ export function validateActionValues(
       ) {
         errors.push(label(locale, "validation.invitation_code_invalid"));
       }
+    } else if (field.validation === "coordinator_candidates_json") {
+      try {
+        coordinatorCandidatesJson(value, locale);
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : String(error));
+      }
+    } else if (
+      field.validation === "coordinator_willingness" &&
+      !["willing", "unwilling"].includes(String(value))
+    ) {
+      errors.push(label(locale, "validation.coordinator_willingness_invalid"));
     }
   }
   if (previewJoin) {
@@ -2793,8 +2886,34 @@ export function validateActionValues(
     const mode = String(values.exit_contribution_mode ?? "");
     const scope = String(values.exit_contribution_scope ?? "");
     if (mode === "required_on_join" && scope === "not_applicable") {
+      errors.push(label(locale, "validation.exit_contribution_scope_required"));
+    }
+  }
+  if (action.id === "update_coordinator_candidates") {
+    const effective = blank(values.effective_from_unix_ms)
+      ? Date.now()
+      : Number(values.effective_from_unix_ms);
+    const expires = Number(values.expires_at_unix_ms);
+    if (
+      !Number.isSafeInteger(effective) ||
+      !Number.isSafeInteger(expires) ||
+      expires <= effective ||
+      expires <= Date.now()
+    ) {
       errors.push(
-        label(locale, "validation.exit_contribution_scope_required"),
+        label(locale, "validation.coordinator_config_window_invalid"),
+      );
+    }
+  }
+  if (action.id === "publish_coordinator_candidate_declaration") {
+    const validity = Number(values.validity_ms);
+    if (
+      !Number.isSafeInteger(validity) ||
+      validity <= 0 ||
+      validity > 15 * 60 * 1000
+    ) {
+      errors.push(
+        label(locale, "validation.coordinator_declaration_validity_invalid"),
       );
     }
   }
@@ -2846,6 +2965,50 @@ export function buildCommand(
         command: "get_network_allocation",
         payload: { network_name: requiredString("network_name") },
       };
+    case "get_coordinator_candidates":
+      return {
+        command: "get_coordinator_candidates",
+        payload: { network_name: requiredString("network_name") },
+      };
+    case "update_coordinator_candidates": {
+      const effective = optional(values, "effective_from_unix_ms");
+      return {
+        command: "update_coordinator_candidates",
+        payload: {
+          network_name: requiredString("network_name"),
+          expected_revision: Number(requireValue("expected_revision")),
+          candidates: coordinatorCandidatesJson(
+            requireValue("candidates_json"),
+            locale,
+          ),
+          ...(effective ? { effective_from_unix_ms: Number(effective) } : {}),
+          expires_at_unix_ms: Number(requireValue("expires_at_unix_ms")),
+        },
+      };
+    }
+    case "publish_coordinator_candidate_declaration": {
+      const publicEndpoint = optional(values, "public_endpoint");
+      return {
+        command: "publish_coordinator_candidate_declaration",
+        payload: {
+          network_name: requiredString("network_name"),
+          willingness: requiredString("willingness") as "willing" | "unwilling",
+          public_reachability: {
+            ...(publicEndpoint ? { public_endpoint: publicEndpoint } : {}),
+            reachable_via_relay: booleanValue(
+              values.reachable_via_relay,
+              locale,
+            ),
+          },
+          resources: {
+            cpu_cores: Number(requireValue("cpu_cores")),
+            memory_bytes: Number(requireValue("memory_bytes")),
+            max_connections: Number(requireValue("max_connections")),
+          },
+          validity_ms: Number(requireValue("validity_ms")),
+        },
+      };
+    }
     case "ban_client":
       return {
         command: "ban_client",
@@ -2898,8 +3061,9 @@ export function buildCommand(
             "public" | "unlisted" | "private",
           join_mode: requiredString("join_mode") as
             "open" | "approval_required" | "invite_only",
-          exit_contribution_mode: requiredString("exit_contribution_mode") as
-            ExitContributionMode,
+          exit_contribution_mode: requiredString(
+            "exit_contribution_mode",
+          ) as ExitContributionMode,
           ...canonicalExitContribution(
             requiredString("exit_contribution_mode") as ExitContributionMode,
             requiredString("exit_contribution_scope") as ExitContributionScope,
@@ -2941,8 +3105,9 @@ export function buildCommand(
             "public" | "unlisted" | "private",
           join_mode: requiredString("join_mode") as
             "open" | "approval_required" | "invite_only",
-          exit_contribution_mode: requiredString("exit_contribution_mode") as
-            ExitContributionMode,
+          exit_contribution_mode: requiredString(
+            "exit_contribution_mode",
+          ) as ExitContributionMode,
           ...canonicalExitContribution(
             requiredString("exit_contribution_mode") as ExitContributionMode,
             requiredString("exit_contribution_scope") as ExitContributionScope,
@@ -3523,7 +3688,9 @@ export function buildCommand(
           payload: {
             current: parseTrafficPolicyJson(requiredString("current_json")),
             candidate: parseTrafficPolicyJson(requiredString("candidate_json")),
-            input: parseTrafficPolicyTestInputJson(requiredString("input_json")),
+            input: parseTrafficPolicyTestInputJson(
+              requiredString("input_json"),
+            ),
           },
         };
       } catch (error) {
@@ -4190,9 +4357,7 @@ export function outcomeSummary(
       after: actionText(outcome.data.after),
       change: label(
         locale,
-        outcome.data.delta.changed
-          ? "outcome.changed"
-          : "outcome.unchanged",
+        outcome.data.delta.changed ? "outcome.changed" : "outcome.unchanged",
       ),
     });
   }

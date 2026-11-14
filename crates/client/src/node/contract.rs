@@ -673,6 +673,41 @@ mod tests {
                 candidate: sample_traffic_policy(2),
                 input: sample_traffic_test_input(),
             }),
+            NodeCommand::GetCoordinatorCandidates(
+                crate::node::command::NodeCoordinatorCandidateStatusCommand {
+                    network_name: "home".into(),
+                },
+            ),
+            NodeCommand::UpdateCoordinatorCandidates(
+                crate::node::command::NodeUpdateCoordinatorCandidatesCommand {
+                    network_name: "home".into(),
+                    expected_revision: 0,
+                    candidates: vec![fuckipv6_common::domain::CoordinatorCandidate {
+                        node_id: fuckipv6_common::domain::NodeId::from_public_key(
+                            b"coordinator-candidate",
+                        ),
+                        priority: 0,
+                    }],
+                    effective_from_unix_ms: None,
+                    expires_at_unix_ms: u64::MAX,
+                },
+            ),
+            NodeCommand::PublishCoordinatorCandidateDeclaration(
+                crate::node::command::NodePublishCoordinatorCandidateDeclarationCommand {
+                    network_name: "home".into(),
+                    willingness: fuckipv6_common::domain::CoordinatorCandidateWillingness::Willing,
+                    public_reachability: fuckipv6_common::domain::CoordinatorPublicReachability {
+                        public_endpoint: Some("203.0.113.10:443".parse().unwrap()),
+                        reachable_via_relay: false,
+                    },
+                    resources: fuckipv6_common::domain::CoordinatorCandidateResources {
+                        cpu_cores: 8,
+                        memory_bytes: 16 * 1024 * 1024 * 1024,
+                        max_connections: 10_000,
+                    },
+                    validity_ms: 60_000,
+                },
+            ),
             NodeCommand::Shutdown,
         ]
     }

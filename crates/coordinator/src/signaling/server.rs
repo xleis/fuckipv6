@@ -23,6 +23,7 @@ use tokio_tungstenite::{
     tungstenite::{protocol::WebSocketConfig, Message},
 };
 
+use super::coordinator_candidates::CoordinatorCandidateStore;
 use super::exit_availability::ExitAvailabilityObservationRegistry;
 use super::exit_contribution::ExitContributionRequestStore;
 use super::invitations::{load_trusted_network_record, InvitationStore};
@@ -99,6 +100,7 @@ pub struct SignalingServer {
     invitation_store: Option<Arc<InvitationStore>>,
     member_lifecycle_store: Option<Arc<MemberLifecycleStore>>,
     exit_contribution_store: Option<Arc<ExitContributionRequestStore>>,
+    coordinator_candidate_store: Option<Arc<CoordinatorCandidateStore>>,
     exit_availability: Arc<ExitAvailabilityObservationRegistry>,
     network_record_path: Option<PathBuf>,
     node_identity: Option<Arc<Identity>>,
@@ -118,6 +120,7 @@ impl SignalingServer {
             invitation_store: None,
             member_lifecycle_store: None,
             exit_contribution_store: None,
+            coordinator_candidate_store: None,
             exit_availability: Arc::new(ExitAvailabilityObservationRegistry::default()),
             network_record_path: None,
             node_identity: None,
@@ -134,6 +137,7 @@ impl SignalingServer {
             invitation_store: None,
             member_lifecycle_store: None,
             exit_contribution_store: None,
+            coordinator_candidate_store: None,
             exit_availability: Arc::new(ExitAvailabilityObservationRegistry::default()),
             network_record_path: None,
             node_identity: None,
@@ -309,6 +313,33 @@ impl SignalingServer {
         Ok(self)
     }
 
+    /// Attach the durable Coordinator candidate configuration/declaration
+    /// ledger. Candidate operations fail closed when it is absent.
+    pub fn with_coordinator_candidate_store(
+        mut self,
+        store: Arc<CoordinatorCandidateStore>,
+    ) -> Self {
+        self.coordinator_candidate_store = Some(store);
+        self
+    }
+
+    pub fn with_coordinator_candidate_store_from_config(
+        mut self,
+        state_dir: impl AsRef<std::path::Path>,
+        config: &CoordinatorConfig,
+    ) -> Result<Self> {
+        let network_record_path = config
+            .network_record_path
+            .clone()
+            .context("Coordinator 候选组需要可信 network_record_path")?;
+        self.network_record_path = Some(network_record_path.clone());
+        self.coordinator_candidate_store = Some(Arc::new(CoordinatorCandidateStore::new(
+            state_dir.as_ref().join("coordinator_candidates.json"),
+            network_record_path,
+        )?));
+        Ok(self)
+    }
+
     pub fn session_manager(&self) -> Arc<SessionManager> {
         self.session_manager.clone()
     }
@@ -334,6 +365,7 @@ impl SignalingServer {
                     let invitation_store = self.invitation_store.clone();
                     let member_lifecycle_store = self.member_lifecycle_store.clone();
                     let exit_contribution_store = self.exit_contribution_store.clone();
+                    let coordinator_candidate_store = self.coordinator_candidate_store.clone();
                     let exit_availability = self.exit_availability.clone();
                     let network_record_path = self.network_record_path.clone();
                     let node_identity = self.node_identity.clone();
@@ -348,6 +380,7 @@ impl SignalingServer {
                             invitation_store,
                             member_lifecycle_store,
                             exit_contribution_store,
+                            coordinator_candidate_store,
                             exit_availability,
                             network_record_path,
                             node_identity,
@@ -400,6 +433,7 @@ async fn handle_connection(
     invitation_store: Option<Arc<InvitationStore>>,
     member_lifecycle_store: Option<Arc<MemberLifecycleStore>>,
     exit_contribution_store: Option<Arc<ExitContributionRequestStore>>,
+    coordinator_candidate_store: Option<Arc<CoordinatorCandidateStore>>,
     exit_availability: Arc<ExitAvailabilityObservationRegistry>,
     network_record_path: Option<PathBuf>,
     node_identity: Option<Arc<Identity>>,
@@ -428,6 +462,7 @@ async fn handle_connection(
             invitation_store.as_deref(),
             member_lifecycle_store.as_deref(),
             exit_contribution_store.as_deref(),
+            coordinator_candidate_store.as_deref(),
             exit_availability.as_ref(),
             network_record_path.as_deref(),
             node_identity.as_deref(),
@@ -473,6 +508,7 @@ async fn handle_connection_message(
     invitation_store: Option<&InvitationStore>,
     member_lifecycle_store: Option<&MemberLifecycleStore>,
     exit_contribution_store: Option<&ExitContributionRequestStore>,
+    coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
     exit_availability: &ExitAvailabilityObservationRegistry,
     network_record_path: Option<&std::path::Path>,
     node_identity: Option<&Identity>,
@@ -491,6 +527,7 @@ async fn handle_connection_message(
                 invitation_store,
                 member_lifecycle_store,
                 exit_contribution_store,
+                coordinator_candidate_store,
                 exit_availability,
                 network_record_path,
                 node_identity,
@@ -524,6 +561,7 @@ async fn handle_binary_message(
     invitation_store: Option<&InvitationStore>,
     member_lifecycle_store: Option<&MemberLifecycleStore>,
     exit_contribution_store: Option<&ExitContributionRequestStore>,
+    coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
     exit_availability: &ExitAvailabilityObservationRegistry,
     network_record_path: Option<&std::path::Path>,
     node_identity: Option<&Identity>,
@@ -549,6 +587,7 @@ async fn handle_binary_message(
                 invitation_store,
                 member_lifecycle_store,
                 exit_contribution_store,
+                coordinator_candidate_store,
                 exit_availability,
                 network_record_path,
                 node_identity,
@@ -615,6 +654,7 @@ async fn handle_signaling_message(
     invitation_store: Option<&InvitationStore>,
     member_lifecycle_store: Option<&MemberLifecycleStore>,
     exit_contribution_store: Option<&ExitContributionRequestStore>,
+    coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
     exit_availability: &ExitAvailabilityObservationRegistry,
     network_record_path: Option<&std::path::Path>,
     node_identity: Option<&Identity>,
@@ -942,6 +982,40 @@ async fn handle_signaling_message(
             )
             .await?;
         }
+        SignalingMessage::CoordinatorCandidateConfigUpdate {
+            expected_revision,
+            config,
+        } => {
+            handle_coordinator_candidate_config_update(
+                expected_revision,
+                config,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
+        SignalingMessage::CoordinatorCandidateDeclarationPublish { declaration } => {
+            handle_coordinator_candidate_declaration_publish(
+                declaration,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
+        SignalingMessage::CoordinatorCandidateStatusRequest { network_id } => {
+            handle_coordinator_candidate_status(
+                network_id,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
         // These variants are server-to-client events. Accepting one from a
         // client would let it manufacture approval state in another view.
         SignalingMessage::JoinRequestStatus { .. }
@@ -967,7 +1041,11 @@ async fn handle_signaling_message(
         | SignalingMessage::ExitContributionAuthorizationListAck { .. }
         | SignalingMessage::ExitContributionChanged { .. }
         | SignalingMessage::ExitAvailabilityReportAck { .. }
-        | SignalingMessage::NetworkJoinPreviewAck { .. } => {
+        | SignalingMessage::NetworkJoinPreviewAck { .. }
+        | SignalingMessage::CoordinatorCandidateConfigAck { .. }
+        | SignalingMessage::CoordinatorCandidateDeclarationAck { .. }
+        | SignalingMessage::CoordinatorCandidateStatusAck { .. }
+        | SignalingMessage::CoordinatorCandidateStatusChanged { .. } => {
             send_binary(
                 tx,
                 session_manager,
@@ -982,6 +1060,208 @@ async fn handle_signaling_message(
         }
     }
 
+    Ok(())
+}
+
+fn require_coordinator_candidate_store<'a>(
+    store: Option<&'a CoordinatorCandidateStore>,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> Result<Option<&'a CoordinatorCandidateStore>> {
+    if let Some(store) = store {
+        return Ok(Some(store));
+    }
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::protocol_error(
+            ErrorCode::BadRequest,
+            "Coordinator candidate management is not configured on this Coordinator",
+        ),
+    )?;
+    Ok(None)
+}
+
+fn coordinator_candidate_protocol_error(error: &anyhow::Error) -> SignalingMessage {
+    let text = error.to_string();
+    let code = if text.contains("permission_denied")
+        || text.contains("authenticated_actor_mismatch")
+        || text.contains("config_expired")
+        || text.contains("declaration_expired")
+        || text.contains("declaration_from_future")
+    {
+        ErrorCode::Forbidden
+    } else if text.contains("error.")
+        || text.contains("domain.")
+        || text.contains("store_lock_poisoned")
+    {
+        ErrorCode::BadRequest
+    } else {
+        ErrorCode::Internal
+    };
+    let message = if code == ErrorCode::Internal {
+        "Coordinator candidate operation could not be processed".to_string()
+    } else {
+        format!("Coordinator candidate operation rejected: {text}")
+    };
+    SignalingMessage::protocol_error(code, message)
+}
+
+async fn broadcast_coordinator_candidate_status_changed(
+    store: &CoordinatorCandidateStore,
+    session_manager: &SessionManager,
+    network_id: &NetworkId,
+) -> Result<()> {
+    let recipients = store.notification_recipients(network_id)?;
+    let message = SignalingMessage::CoordinatorCandidateStatusChanged {
+        network_id: network_id.clone(),
+    };
+    for peer in session_manager.get_all_peers().await {
+        let node_id = NodeId::from_public_key(&peer.public_key);
+        if recipients.contains(&node_id) {
+            session_manager
+                .send_to_client(&peer.client_id, message.clone())
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_candidate_config_update(
+    expected_revision: u64,
+    config: fuckipv6_common::domain::CoordinatorCandidateConfig,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let network_id = config.network_id.clone();
+    if config.signer != actor {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Forbidden,
+                "Coordinator candidate configuration must be signed by the authenticated actor",
+            ),
+        )?;
+        return Ok(());
+    }
+    match store.update_config(&actor, expected_revision, config, unix_time_ms()) {
+        Ok(status) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorCandidateConfigAck {
+                    status: status.clone(),
+                },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 候选配置更新");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_candidate_declaration_publish(
+    declaration: fuckipv6_common::domain::CoordinatorCandidateDeclaration,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let network_id = declaration.network_id.clone();
+    if declaration.node_id != actor {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Forbidden,
+                "Coordinator candidate declarations must be signed by the authenticated actor",
+            ),
+        )?;
+        return Ok(());
+    }
+    match store.publish_declaration(&actor, declaration, unix_time_ms()) {
+        Ok(status) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorCandidateDeclarationAck {
+                    status: status.clone(),
+                },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 候选健康声明");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_candidate_status(
+    network_id: NetworkId,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    match store.status(&actor, &network_id, unix_time_ms()) {
+        Ok(status) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorCandidateStatusAck { status },
+            )?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 候选状态查询");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+        }
+    }
     Ok(())
 }
 

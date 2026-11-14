@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "ConfirmedTrafficDirectFallback", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitContributionAvailability", "ExitContributionRestrictions", "ExitContributionTimeWindow", "ExitContributionTrafficQuota", "ExitHealthAssessment", "ExitHealthEvidence", "ExitHealthRetest", "ExitHealthSnapshot", "ExitNodeCapabilities", "ExitSelectionCandidate", "ExitSelectionGroupRule", "ExitSelectionMemberRule", "ExitSelectionPolicy", "ExitSelectionResolution", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "LeakDetectionAssessment", "LeakDetectionEnvironment", "LeakDetectionEvidence", "LeakDetectionSnapshot", "LocalExitCapabilitySnapshot", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkJoinPreview", "NetworkJoinTerms", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeApplyPolicyCommand", "NodeApplyTrafficPolicyCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeExitSelectionSnapshot", "NodeFileCapabilitySnapshot", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodePreviewPolicyCommand", "NodePreviewPolicyRollbackCommand", "NodePreviewTrafficPolicyCommand", "NodePreviewTrafficPolicyRollbackCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRollbackPolicyCommand", "NodeRollbackTrafficPolicyCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetLocalExitCapabilityCommand", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTestTrafficPolicyCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyAffectedObject", "PolicyApplyResult", "PolicyCurrent", "PolicyDiffEntry", "PolicyHistoryEntry", "PolicyHistorySnapshot", "PolicyPrecedenceExplanation", "PolicyPreview", "PolicyRiskSummary", "PolicyRollbackResult", "PolicyRuleExplanation", "PolicySnapshot", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "PortRange", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "RelayAuthorizationAuditSnapshot", "RelayAuthorizationDiagnostic", "RelayAuthorizationSourceDiagnostic", "RelayGovernanceAuditSnapshot", "RelayGovernanceEvent", "RelayHealthSnapshot", "RelayLimitPolicy", "RelayUsageSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TrafficDefaultPolicy", "TrafficFailureDecision", "TrafficFailurePolicy", "TrafficFlow", "TrafficMatch", "TrafficPolicy", "TrafficPolicyAffectedObject", "TrafficPolicyApplyResult", "TrafficPolicyCurrent", "TrafficPolicyDiffEntry", "TrafficPolicyDraft", "TrafficPolicyHistoryEntry", "TrafficPolicyHistorySnapshot", "TrafficPolicyPreview", "TrafficPolicyRollbackResult", "TrafficPolicyTestComparison", "TrafficPolicyTestDelta", "TrafficPolicyTestInput", "TrafficRoutingDefaultPolicyView", "TrafficRoutingHardConstraints", "TrafficRoutingHitSample", "TrafficRoutingMoveAction", "TrafficRoutingNavigation", "TrafficRoutingObservedHit", "TrafficRoutingPageModel", "TrafficRoutingRuleImpact", "TrafficRoutingRuleView", "TrafficRoutingTarget", "TrafficRoutingTargetRef", "TrafficRule", "TrafficRuleRisk", "TrafficSessionEvent", "TrafficSessionSnapshot", "TrafficSessionValidation", "TunCapabilities", "UiModeResolution", "ApplicationIdentity", "ExitContributionMemberScope", "ExitHealthTarget", "ExitSelectionMode", "ExitSelectionSource", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector", "TrafficAction", "TrafficMatchRisk", "TrafficPolicyTestContextSource", "TrafficPolicyTestDecision", "TrafficRoutingObservation", "TrafficRoutingRuleActivityEffect", "TrafficRoutingRuleImpactView", "TrafficRoutingWorkflowState"
+        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "ConfirmedTrafficDirectFallback", "CoordinatorCandidate", "CoordinatorCandidateConfig", "CoordinatorCandidateDeclaration", "CoordinatorCandidateResources", "CoordinatorCandidateStatus", "CoordinatorCandidateStatusEntry", "CoordinatorPublicReachability", "CoordinatorTerm", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitContributionAvailability", "ExitContributionRestrictions", "ExitContributionTimeWindow", "ExitContributionTrafficQuota", "ExitHealthAssessment", "ExitHealthEvidence", "ExitHealthRetest", "ExitHealthSnapshot", "ExitNodeCapabilities", "ExitSelectionCandidate", "ExitSelectionGroupRule", "ExitSelectionMemberRule", "ExitSelectionPolicy", "ExitSelectionResolution", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "LeakDetectionAssessment", "LeakDetectionEnvironment", "LeakDetectionEvidence", "LeakDetectionSnapshot", "LocalExitCapabilitySnapshot", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkJoinPreview", "NetworkJoinTerms", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeApplyPolicyCommand", "NodeApplyTrafficPolicyCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCoordinatorCandidateStatusCommand", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeExitSelectionSnapshot", "NodeFileCapabilitySnapshot", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodePreviewPolicyCommand", "NodePreviewPolicyRollbackCommand", "NodePreviewTrafficPolicyCommand", "NodePreviewTrafficPolicyRollbackCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodePublishCoordinatorCandidateDeclarationCommand", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRollbackPolicyCommand", "NodeRollbackTrafficPolicyCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetLocalExitCapabilityCommand", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTestTrafficPolicyCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateCoordinatorCandidatesCommand", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyAffectedObject", "PolicyApplyResult", "PolicyCurrent", "PolicyDiffEntry", "PolicyHistoryEntry", "PolicyHistorySnapshot", "PolicyPrecedenceExplanation", "PolicyPreview", "PolicyRiskSummary", "PolicyRollbackResult", "PolicyRuleExplanation", "PolicySnapshot", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "PortRange", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "RelayAuthorizationAuditSnapshot", "RelayAuthorizationDiagnostic", "RelayAuthorizationSourceDiagnostic", "RelayGovernanceAuditSnapshot", "RelayGovernanceEvent", "RelayHealthSnapshot", "RelayLimitPolicy", "RelayUsageSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TrafficDefaultPolicy", "TrafficFailureDecision", "TrafficFailurePolicy", "TrafficFlow", "TrafficMatch", "TrafficPolicy", "TrafficPolicyAffectedObject", "TrafficPolicyApplyResult", "TrafficPolicyCurrent", "TrafficPolicyDiffEntry", "TrafficPolicyDraft", "TrafficPolicyHistoryEntry", "TrafficPolicyHistorySnapshot", "TrafficPolicyPreview", "TrafficPolicyRollbackResult", "TrafficPolicyTestComparison", "TrafficPolicyTestDelta", "TrafficPolicyTestInput", "TrafficRoutingDefaultPolicyView", "TrafficRoutingHardConstraints", "TrafficRoutingHitSample", "TrafficRoutingMoveAction", "TrafficRoutingNavigation", "TrafficRoutingObservedHit", "TrafficRoutingPageModel", "TrafficRoutingRuleImpact", "TrafficRoutingRuleView", "TrafficRoutingTarget", "TrafficRoutingTargetRef", "TrafficRule", "TrafficRuleRisk", "TrafficSessionEvent", "TrafficSessionSnapshot", "TrafficSessionValidation", "TunCapabilities", "UiModeResolution", "ApplicationIdentity", "ExitContributionMemberScope", "ExitHealthTarget", "ExitSelectionMode", "ExitSelectionSource", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector", "TrafficAction", "TrafficMatchRisk", "TrafficPolicyTestContextSource", "TrafficPolicyTestDecision", "TrafficRoutingObservation", "TrafficRoutingRuleActivityEffect", "TrafficRoutingRuleImpactView", "TrafficRoutingWorkflowState"
     };
 
     public enum AclAction {
@@ -266,6 +266,165 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown ContributionKind wire value: " + value);
+        }
+    }
+
+    public enum CoordinatorAuthority {
+        FULL("full"),
+        EMERGENCY("emergency");
+
+        private final String wireName;
+
+        CoordinatorAuthority(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static CoordinatorAuthority fromWireName(String value) {
+            for (CoordinatorAuthority candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown CoordinatorAuthority wire value: " + value);
+        }
+    }
+
+    public enum CoordinatorCandidateConfigState {
+        MISSING("missing"),
+        PENDING("pending"),
+        CURRENT("current"),
+        EXPIRED("expired");
+
+        private final String wireName;
+
+        CoordinatorCandidateConfigState(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static CoordinatorCandidateConfigState fromWireName(String value) {
+            for (CoordinatorCandidateConfigState candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown CoordinatorCandidateConfigState wire value: " + value);
+        }
+    }
+
+    public enum CoordinatorCandidateHealth {
+        HEALTHY("healthy"),
+        DEGRADED("degraded"),
+        UNWILLING("unwilling"),
+        STALE("stale"),
+        MISSING("missing"),
+        INELIGIBLE("ineligible");
+
+        private final String wireName;
+
+        CoordinatorCandidateHealth(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static CoordinatorCandidateHealth fromWireName(String value) {
+            for (CoordinatorCandidateHealth candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown CoordinatorCandidateHealth wire value: " + value);
+        }
+    }
+
+    public enum CoordinatorCandidateWillingness {
+        WILLING("willing"),
+        UNWILLING("unwilling");
+
+        private final String wireName;
+
+        CoordinatorCandidateWillingness(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static CoordinatorCandidateWillingness fromWireName(String value) {
+            for (CoordinatorCandidateWillingness candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown CoordinatorCandidateWillingness wire value: " + value);
+        }
+    }
+
+    public enum CoordinatorEmergencyState {
+        NONE("none"),
+        NO_CANDIDATES_CONFIGURED("no_candidates_configured"),
+        CONFIGURATION_PENDING("configuration_pending"),
+        CONFIGURATION_EXPIRED("configuration_expired"),
+        ALL_CANDIDATES_UNAVAILABLE("all_candidates_unavailable");
+
+        private final String wireName;
+
+        CoordinatorEmergencyState(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static CoordinatorEmergencyState fromWireName(String value) {
+            for (CoordinatorEmergencyState candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown CoordinatorEmergencyState wire value: " + value);
+        }
+    }
+
+    public enum CoordinatorPhase {
+        STABLE("stable"),
+        ELECTION("election"),
+        LEADER_ACK("leader_ack"),
+        PARTITION("partition"),
+        EMERGENCY_PROPOSAL("emergency_proposal"),
+        EMERGENCY_LEADER("emergency_leader"),
+        HANDOFF("handoff"),
+        RECOVERY_REQUIRED("recovery_required");
+
+        private final String wireName;
+
+        CoordinatorPhase(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static CoordinatorPhase fromWireName(String value) {
+            for (CoordinatorPhase candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown CoordinatorPhase wire value: " + value);
         }
     }
 
@@ -1599,6 +1758,7 @@ public final class NodeContractV1 {
         GET_BLACKLIST("get_blacklist"),
         GET_CONFIGURATION("get_configuration"),
         GET_CONFIGURATION_HISTORY("get_configuration_history"),
+        GET_COORDINATOR_CANDIDATES("get_coordinator_candidates"),
         GET_INVITATION_STATUS("get_invitation_status"),
         GET_NETWORK_ALLOCATION("get_network_allocation"),
         GET_NODE_DIAGNOSTICS("get_node_diagnostics"),
@@ -1623,6 +1783,7 @@ public final class NodeContractV1 {
         PREVIEW_TRAFFIC_POLICY("preview_traffic_policy"),
         PREVIEW_TRAFFIC_POLICY_ROLLBACK("preview_traffic_policy_rollback"),
         PROBE_PEER("probe_peer"),
+        PUBLISH_COORDINATOR_CANDIDATE_DECLARATION("publish_coordinator_candidate_declaration"),
         PUBLISH_NETWORK_DISCOVERY("publish_network_discovery"),
         REBUILD_TUN("rebuild_tun"),
         REDEEM_INVITATION("redeem_invitation"),
@@ -1650,6 +1811,7 @@ public final class NodeContractV1 {
         TEST_TRAFFIC_POLICY("test_traffic_policy"),
         UNBAN_CLIENT("unban_client"),
         UNPUBLISH_NETWORK_DISCOVERY("unpublish_network_discovery"),
+        UPDATE_COORDINATOR_CANDIDATES("update_coordinator_candidates"),
         UPDATE_NETWORK_ALLOCATION("update_network_allocation"),
         UPDATE_NETWORK_DISCOVERY("update_network_discovery"),
         UPDATE_NETWORK_PROFILE("update_network_profile"),
@@ -2435,6 +2597,8 @@ public final class NodeContractV1 {
         MEMBER_LIFECYCLE_REASON("member_lifecycle_reason"),
         INVITATION_CODE("invitation_code"),
         COORDINATOR_URL("coordinator_url"),
+        COORDINATOR_CANDIDATES_JSON("coordinator_candidates_json"),
+        COORDINATOR_WILLINGNESS("coordinator_willingness"),
         PORT("port"),
         REVISION("revision"),
         ROLE("role"),
@@ -2539,7 +2703,9 @@ public final class NodeContractV1 {
         MEMBER_LIFECYCLE_ACTION("member_lifecycle_action"),
         MEMBER_LIFECYCLE_REASON("member_lifecycle_reason"),
         INVITATION_CODE("invitation_code"),
-        COORDINATOR_URL("coordinator_url");
+        COORDINATOR_URL("coordinator_url"),
+        COORDINATOR_CANDIDATES_JSON("coordinator_candidates_json"),
+        COORDINATOR_WILLINGNESS("coordinator_willingness");
 
         private final String wireName;
 
@@ -4092,6 +4258,164 @@ public final class NodeContractV1 {
             this.allowed_failures = allowed_failures;
             this.confirmed_at_unix_ms = confirmed_at_unix_ms;
             this.confirmed_by = confirmed_by;
+        }
+    }
+
+    /** DTO for CoordinatorCandidate. */
+    public static final class CoordinatorCandidate {
+        public final String node_id;
+        public final Long priority;
+
+        public CoordinatorCandidate(String node_id, Long priority) {
+            this.node_id = node_id;
+            this.priority = priority;
+        }
+    }
+
+    /** DTO for CoordinatorCandidateConfig. */
+    public static final class CoordinatorCandidateConfig {
+        public final List<CoordinatorCandidate> candidates;
+        public final Long effective_from_unix_ms;
+        public final Long expires_at_unix_ms;
+        public final String network_id;
+        public final Long revision;
+        public final Integer schema_version;
+        public final String signature;
+        public final String signer;
+        public final String signer_public_key;
+
+        public CoordinatorCandidateConfig(List<CoordinatorCandidate> candidates, Long effective_from_unix_ms, Long expires_at_unix_ms, String network_id, Long revision, Integer schema_version, String signature, String signer, String signer_public_key) {
+            this.candidates = candidates;
+            this.effective_from_unix_ms = effective_from_unix_ms;
+            this.expires_at_unix_ms = expires_at_unix_ms;
+            this.network_id = network_id;
+            this.revision = revision;
+            this.schema_version = schema_version;
+            this.signature = signature;
+            this.signer = signer;
+            this.signer_public_key = signer_public_key;
+        }
+    }
+
+    /** DTO for CoordinatorCandidateDeclaration. */
+    public static final class CoordinatorCandidateDeclaration {
+        public final Long candidate_config_revision;
+        public final Long expires_at_unix_ms;
+        public final String network_id;
+        public final String node_id;
+        public final String node_public_key;
+        public final Long observed_at_unix_ms;
+        public final CoordinatorPublicReachability public_reachability;
+        public final CoordinatorCandidateResources resources;
+        public final Integer schema_version;
+        public final String signature;
+        public final CoordinatorCandidateWillingness willingness;
+
+        public CoordinatorCandidateDeclaration(Long candidate_config_revision, Long expires_at_unix_ms, String network_id, String node_id, String node_public_key, Long observed_at_unix_ms, CoordinatorPublicReachability public_reachability, CoordinatorCandidateResources resources, Integer schema_version, String signature, CoordinatorCandidateWillingness willingness) {
+            this.candidate_config_revision = candidate_config_revision;
+            this.expires_at_unix_ms = expires_at_unix_ms;
+            this.network_id = network_id;
+            this.node_id = node_id;
+            this.node_public_key = node_public_key;
+            this.observed_at_unix_ms = observed_at_unix_ms;
+            this.public_reachability = public_reachability;
+            this.resources = resources;
+            this.schema_version = schema_version;
+            this.signature = signature;
+            this.willingness = willingness;
+        }
+    }
+
+    /** DTO for CoordinatorCandidateResources. */
+    public static final class CoordinatorCandidateResources {
+        public final Integer cpu_cores;
+        public final Long max_connections;
+        public final Long memory_bytes;
+
+        public CoordinatorCandidateResources(Integer cpu_cores, Long max_connections, Long memory_bytes) {
+            this.cpu_cores = cpu_cores;
+            this.max_connections = max_connections;
+            this.memory_bytes = memory_bytes;
+        }
+    }
+
+    /** DTO for CoordinatorCandidateStatus. */
+    public static final class CoordinatorCandidateStatus {
+        public final List<CoordinatorCandidateStatusEntry> candidates;
+        public final CoordinatorCandidateConfig config;
+        public final CoordinatorCandidateConfigState config_state;
+        public final String current_leader;
+        public final CoordinatorEmergencyState emergency;
+        public final Long generated_at_unix_ms;
+        public final CoordinatorTerm latest_term;
+        public final String network_id;
+
+        public CoordinatorCandidateStatus(List<CoordinatorCandidateStatusEntry> candidates, CoordinatorCandidateConfig config, CoordinatorCandidateConfigState config_state, String current_leader, CoordinatorEmergencyState emergency, Long generated_at_unix_ms, CoordinatorTerm latest_term, String network_id) {
+            this.candidates = candidates;
+            this.config = config;
+            this.config_state = config_state;
+            this.current_leader = current_leader;
+            this.emergency = emergency;
+            this.generated_at_unix_ms = generated_at_unix_ms;
+            this.latest_term = latest_term;
+            this.network_id = network_id;
+        }
+    }
+
+    /** DTO for CoordinatorCandidateStatusEntry. */
+    public static final class CoordinatorCandidateStatusEntry {
+        public final CoordinatorCandidateDeclaration declaration;
+        public final Boolean eligible_for_election;
+        public final CoordinatorCandidateHealth health;
+        public final String node_id;
+        public final Long priority;
+        public final String reason_code;
+
+        public CoordinatorCandidateStatusEntry(CoordinatorCandidateDeclaration declaration, Boolean eligible_for_election, CoordinatorCandidateHealth health, String node_id, Long priority, String reason_code) {
+            this.declaration = declaration;
+            this.eligible_for_election = eligible_for_election;
+            this.health = health;
+            this.node_id = node_id;
+            this.priority = priority;
+            this.reason_code = reason_code;
+        }
+    }
+
+    /** DTO for CoordinatorPublicReachability. */
+    public static final class CoordinatorPublicReachability {
+        public final String public_endpoint;
+        public final Boolean reachable_via_relay;
+
+        public CoordinatorPublicReachability(String public_endpoint, Boolean reachable_via_relay) {
+            this.public_endpoint = public_endpoint;
+            this.reachable_via_relay = reachable_via_relay;
+        }
+    }
+
+    /** DTO for CoordinatorTerm. */
+    public static final class CoordinatorTerm {
+        public final String authority;
+        public final List<String> candidate_group;
+        public final Long expires_at_unix_ms;
+        public final Long fencing_token;
+        public final Long issued_at_unix_ms;
+        public final String leader;
+        public final List<String> majority_proof;
+        public final String network_id;
+        public final CoordinatorPhase phase;
+        public final Long term;
+
+        public CoordinatorTerm(String authority, List<String> candidate_group, Long expires_at_unix_ms, Long fencing_token, Long issued_at_unix_ms, String leader, List<String> majority_proof, String network_id, CoordinatorPhase phase, Long term) {
+            this.authority = authority;
+            this.candidate_group = candidate_group;
+            this.expires_at_unix_ms = expires_at_unix_ms;
+            this.fencing_token = fencing_token;
+            this.issued_at_unix_ms = issued_at_unix_ms;
+            this.leader = leader;
+            this.majority_proof = majority_proof;
+            this.network_id = network_id;
+            this.phase = phase;
+            this.term = term;
         }
     }
 
@@ -5692,6 +6016,15 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeCoordinatorCandidateStatusCommand. */
+    public static final class NodeCoordinatorCandidateStatusCommand {
+        public final String network_name;
+
+        public NodeCoordinatorCandidateStatusCommand(String network_name) {
+            this.network_name = network_name;
+        }
+    }
+
     /** DTO for NodeCreateInvitationCommand. */
     public static final class NodeCreateInvitationCommand {
         public final List<CapabilityKind> capabilities;
@@ -5928,6 +6261,7 @@ public final class NodeContractV1 {
 
     /** DTO for NodeEmbeddedServiceSnapshot. */
     public static final class NodeEmbeddedServiceSnapshot {
+        public final CoordinatorCandidateStatus coordinator_candidates;
         public final String network_name;
         public final String relay_addr;
         public final RelayAuthorizationAuditSnapshot relay_authorization;
@@ -5937,7 +6271,8 @@ public final class NodeContractV1 {
         public final String signaling_addr;
         public final NodeEmbeddedServiceStatus status;
 
-        public NodeEmbeddedServiceSnapshot(String network_name, String relay_addr, RelayAuthorizationAuditSnapshot relay_authorization, RelayGovernanceAuditSnapshot relay_governance, RelayHealthSnapshot relay_health, NodeEmbeddedServiceStatus relay_status, String signaling_addr, NodeEmbeddedServiceStatus status) {
+        public NodeEmbeddedServiceSnapshot(CoordinatorCandidateStatus coordinator_candidates, String network_name, String relay_addr, RelayAuthorizationAuditSnapshot relay_authorization, RelayGovernanceAuditSnapshot relay_governance, RelayHealthSnapshot relay_health, NodeEmbeddedServiceStatus relay_status, String signaling_addr, NodeEmbeddedServiceStatus status) {
+            this.coordinator_candidates = coordinator_candidates;
             this.network_name = network_name;
             this.relay_addr = relay_addr;
             this.relay_authorization = relay_authorization;
@@ -6915,6 +7250,23 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodePublishCoordinatorCandidateDeclarationCommand. */
+    public static final class NodePublishCoordinatorCandidateDeclarationCommand {
+        public final String network_name;
+        public final CoordinatorPublicReachability public_reachability;
+        public final CoordinatorCandidateResources resources;
+        public final Long validity_ms;
+        public final CoordinatorCandidateWillingness willingness;
+
+        public NodePublishCoordinatorCandidateDeclarationCommand(String network_name, CoordinatorPublicReachability public_reachability, CoordinatorCandidateResources resources, Long validity_ms, CoordinatorCandidateWillingness willingness) {
+            this.network_name = network_name;
+            this.public_reachability = public_reachability;
+            this.resources = resources;
+            this.validity_ms = validity_ms;
+            this.willingness = willingness;
+        }
+    }
+
     /** DTO for NodeRedeemInvitationCommand. */
     public static final class NodeRedeemInvitationCommand {
         public final String coordinator_url;
@@ -7338,6 +7690,23 @@ public final class NodeContractV1 {
             this.id = id;
             this.nav_label_key = nav_label_key;
             this.title_key = title_key;
+        }
+    }
+
+    /** DTO for NodeUpdateCoordinatorCandidatesCommand. */
+    public static final class NodeUpdateCoordinatorCandidatesCommand {
+        public final List<CoordinatorCandidate> candidates;
+        public final Long effective_from_unix_ms;
+        public final Long expected_revision;
+        public final Long expires_at_unix_ms;
+        public final String network_name;
+
+        public NodeUpdateCoordinatorCandidatesCommand(List<CoordinatorCandidate> candidates, Long effective_from_unix_ms, Long expected_revision, Long expires_at_unix_ms, String network_name) {
+            this.candidates = candidates;
+            this.effective_from_unix_ms = effective_from_unix_ms;
+            this.expected_revision = expected_revision;
+            this.expires_at_unix_ms = expires_at_unix_ms;
+            this.network_name = network_name;
         }
     }
 
@@ -7817,6 +8186,7 @@ public final class NodeContractV1 {
 
     /** DTO for ProjectedNodeEmbeddedServiceSnapshot. */
     public static final class ProjectedNodeEmbeddedServiceSnapshot {
+        public final CoordinatorCandidateStatus coordinator_candidates;
         public final String network_name;
         public final String relay_addr;
         public final RelayAuthorizationAuditSnapshot relay_authorization;
@@ -7826,7 +8196,8 @@ public final class NodeContractV1 {
         public final String signaling_addr;
         public final NodeEmbeddedServiceStatus status;
 
-        public ProjectedNodeEmbeddedServiceSnapshot(String network_name, String relay_addr, RelayAuthorizationAuditSnapshot relay_authorization, RelayGovernanceAuditSnapshot relay_governance, RelayHealthSnapshot relay_health, NodeEmbeddedServiceStatus relay_status, String signaling_addr, NodeEmbeddedServiceStatus status) {
+        public ProjectedNodeEmbeddedServiceSnapshot(CoordinatorCandidateStatus coordinator_candidates, String network_name, String relay_addr, RelayAuthorizationAuditSnapshot relay_authorization, RelayGovernanceAuditSnapshot relay_governance, RelayHealthSnapshot relay_health, NodeEmbeddedServiceStatus relay_status, String signaling_addr, NodeEmbeddedServiceStatus status) {
+            this.coordinator_candidates = coordinator_candidates;
             this.network_name = network_name;
             this.relay_addr = relay_addr;
             this.relay_authorization = relay_authorization;
@@ -9953,6 +10324,33 @@ public final class NodeContractV1 {
                 this.payload = payload;
             }
         }
+
+        public static final class GetCoordinatorCandidates extends NodeCommand {
+            public final NodeCoordinatorCandidateStatusCommand payload;
+
+            public GetCoordinatorCandidates(NodeCoordinatorCandidateStatusCommand payload) {
+                super(NodeCommandKind.GET_COORDINATOR_CANDIDATES);
+                this.payload = payload;
+            }
+        }
+
+        public static final class UpdateCoordinatorCandidates extends NodeCommand {
+            public final NodeUpdateCoordinatorCandidatesCommand payload;
+
+            public UpdateCoordinatorCandidates(NodeUpdateCoordinatorCandidatesCommand payload) {
+                super(NodeCommandKind.UPDATE_COORDINATOR_CANDIDATES);
+                this.payload = payload;
+            }
+        }
+
+        public static final class PublishCoordinatorCandidateDeclaration extends NodeCommand {
+            public final NodePublishCoordinatorCandidateDeclarationCommand payload;
+
+            public PublishCoordinatorCandidateDeclaration(NodePublishCoordinatorCandidateDeclarationCommand payload) {
+                super(NodeCommandKind.PUBLISH_COORDINATOR_CANDIDATE_DECLARATION);
+                this.payload = payload;
+            }
+        }
     }
 
     /** Tagged union DTO for NodeCommandOutcome. */
@@ -10364,6 +10762,15 @@ public final class NodeContractV1 {
 
             public TrafficPolicyTest(TrafficPolicyTestComparison data) {
                 super("traffic_policy_test");
+                this.data = data;
+            }
+        }
+
+        public static final class CoordinatorCandidates extends NodeCommandOutcome {
+            public final CoordinatorCandidateStatus data;
+
+            public CoordinatorCandidates(CoordinatorCandidateStatus data) {
+                super("coordinator_candidates");
                 this.data = data;
             }
         }
@@ -11241,6 +11648,15 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class CoordinatorCandidates extends ProjectedNodeCommandOutcome {
+            public final CoordinatorCandidateStatus data;
+
+            public CoordinatorCandidates(CoordinatorCandidateStatus data) {
+                super("coordinator_candidates");
+                this.data = data;
+            }
+        }
+
         public static final class Accepted extends ProjectedNodeCommandOutcome {
             public final AcceptedData data;
 
@@ -11883,6 +12299,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.GET_BLACKLIST ||
             command == NodeCommandKind.GET_CONFIGURATION ||
             command == NodeCommandKind.GET_CONFIGURATION_HISTORY ||
+            command == NodeCommandKind.GET_COORDINATOR_CANDIDATES ||
             command == NodeCommandKind.GET_INVITATION_STATUS ||
             command == NodeCommandKind.GET_NETWORK_ALLOCATION ||
             command == NodeCommandKind.GET_NODE_DIAGNOSTICS ||
@@ -11906,6 +12323,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.PREVIEW_TRAFFIC_POLICY ||
             command == NodeCommandKind.PREVIEW_TRAFFIC_POLICY_ROLLBACK ||
             command == NodeCommandKind.PROBE_PEER ||
+            command == NodeCommandKind.PUBLISH_COORDINATOR_CANDIDATE_DECLARATION ||
             command == NodeCommandKind.PUBLISH_NETWORK_DISCOVERY ||
             command == NodeCommandKind.REBUILD_TUN ||
             command == NodeCommandKind.REDEEM_INVITATION ||
@@ -11933,6 +12351,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.TEST_TRAFFIC_POLICY ||
             command == NodeCommandKind.UNBAN_CLIENT ||
             command == NodeCommandKind.UNPUBLISH_NETWORK_DISCOVERY ||
+            command == NodeCommandKind.UPDATE_COORDINATOR_CANDIDATES ||
             command == NodeCommandKind.UPDATE_NETWORK_ALLOCATION ||
             command == NodeCommandKind.UPDATE_NETWORK_DISCOVERY ||
             command == NodeCommandKind.UPDATE_NETWORK_PROFILE ||

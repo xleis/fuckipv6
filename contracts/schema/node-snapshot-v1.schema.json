@@ -256,6 +256,409 @@
       ],
       "type": "string"
     },
+    "CoordinatorAuthority": {
+      "oneOf": [
+        {
+          "const": "full",
+          "description": "Elected by a majority of the configured candidate group.",
+          "type": "string"
+        },
+        {
+          "const": "emergency",
+          "description": "Temporary authority during partition. It cannot perform governance writes.",
+          "type": "string"
+        }
+      ]
+    },
+    "CoordinatorCandidate": {
+      "description": "One administrator-selected Coordinator candidate. Lower priority values\nare preferred, with node identity as the deterministic tie-breaker.",
+      "properties": {
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "priority": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "node_id",
+        "priority"
+      ],
+      "type": "object"
+    },
+    "CoordinatorCandidateConfig": {
+      "description": "Administrator-signed candidate group. Possessing this document is not\nsufficient to become Leader: the signer must be a current network manager\nwhen the document is admitted, every candidate must be a network member, and\nelection still requires the majority protocol defined by `CoordinatorTerm`.",
+      "properties": {
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/CoordinatorCandidate"
+          },
+          "type": "array"
+        },
+        "effective_from_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signature": {
+          "$ref": "#/$defs/Signature"
+        },
+        "signer": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "signer_public_key": {
+          "$ref": "#/$defs/PublicKey"
+        }
+      },
+      "required": [
+        "schema_version",
+        "network_id",
+        "revision",
+        "candidates",
+        "effective_from_unix_ms",
+        "expires_at_unix_ms",
+        "signer",
+        "signer_public_key",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "CoordinatorCandidateConfigState": {
+      "enum": [
+        "missing",
+        "pending",
+        "current",
+        "expired"
+      ],
+      "type": "string"
+    },
+    "CoordinatorCandidateDeclaration": {
+      "description": "A short-lived, node-signed statement used as candidate health/eligibility\ninput. It is never a vote, majority proof or Leader promotion.",
+      "properties": {
+        "candidate_config_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "node_public_key": {
+          "$ref": "#/$defs/PublicKey"
+        },
+        "observed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "public_reachability": {
+          "$ref": "#/$defs/CoordinatorPublicReachability"
+        },
+        "resources": {
+          "$ref": "#/$defs/CoordinatorCandidateResources"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signature": {
+          "$ref": "#/$defs/Signature"
+        },
+        "willingness": {
+          "$ref": "#/$defs/CoordinatorCandidateWillingness"
+        }
+      },
+      "required": [
+        "schema_version",
+        "network_id",
+        "candidate_config_revision",
+        "node_id",
+        "node_public_key",
+        "public_reachability",
+        "resources",
+        "willingness",
+        "observed_at_unix_ms",
+        "expires_at_unix_ms",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "CoordinatorCandidateHealth": {
+      "enum": [
+        "healthy",
+        "degraded",
+        "unwilling",
+        "stale",
+        "missing",
+        "ineligible"
+      ],
+      "type": "string"
+    },
+    "CoordinatorCandidateResources": {
+      "properties": {
+        "cpu_cores": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_connections": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "memory_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpu_cores",
+        "memory_bytes",
+        "max_connections"
+      ],
+      "type": "object"
+    },
+    "CoordinatorCandidateStatus": {
+      "description": "Shared UI projection. `latest_term` is retained even after expiry so the UI\ncan show recent tenure without pretending the old leader still has authority.",
+      "properties": {
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/CoordinatorCandidateStatusEntry"
+          },
+          "type": "array"
+        },
+        "config": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoordinatorCandidateConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "config_state": {
+          "$ref": "#/$defs/CoordinatorCandidateConfigState"
+        },
+        "current_leader": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NodeId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "emergency": {
+          "$ref": "#/$defs/CoordinatorEmergencyState"
+        },
+        "generated_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "latest_term": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoordinatorTerm"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        }
+      },
+      "required": [
+        "network_id",
+        "generated_at_unix_ms",
+        "config_state",
+        "candidates",
+        "emergency"
+      ],
+      "type": "object"
+    },
+    "CoordinatorCandidateStatusEntry": {
+      "properties": {
+        "declaration": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoordinatorCandidateDeclaration"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "eligible_for_election": {
+          "description": "Eligibility for the election protocol, never an appointment as Leader.",
+          "type": "boolean"
+        },
+        "health": {
+          "$ref": "#/$defs/CoordinatorCandidateHealth"
+        },
+        "node_id": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "priority": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason_code": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "node_id",
+        "priority",
+        "health",
+        "eligible_for_election",
+        "reason_code"
+      ],
+      "type": "object"
+    },
+    "CoordinatorCandidateWillingness": {
+      "enum": [
+        "willing",
+        "unwilling"
+      ],
+      "type": "string"
+    },
+    "CoordinatorEmergencyState": {
+      "enum": [
+        "none",
+        "no_candidates_configured",
+        "configuration_pending",
+        "configuration_expired",
+        "all_candidates_unavailable"
+      ],
+      "type": "string"
+    },
+    "CoordinatorPhase": {
+      "enum": [
+        "stable",
+        "election",
+        "leader_ack",
+        "partition",
+        "emergency_proposal",
+        "emergency_leader",
+        "handoff",
+        "recovery_required"
+      ],
+      "type": "string"
+    },
+    "CoordinatorPublicReachability": {
+      "description": "Public reachability evidence supplied by the candidate itself. Consumers\nmust treat this as a claim until the election protocol verifies a quorum.",
+      "properties": {
+        "public_endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reachable_via_relay": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "CoordinatorTerm": {
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/CoordinatorAuthority"
+        },
+        "candidate_group": {
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fencing_token": {
+          "$ref": "#/$defs/FencingToken"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "leader": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "majority_proof": {
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "phase": {
+          "$ref": "#/$defs/CoordinatorPhase"
+        },
+        "term": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "network_id",
+        "term",
+        "leader",
+        "candidate_group",
+        "majority_proof",
+        "authority",
+        "phase",
+        "fencing_token",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms"
+      ],
+      "type": "object"
+    },
     "DiscoveryTransport": {
       "enum": [
         "quic",
@@ -953,6 +1356,11 @@
         "fail_closed"
       ],
       "type": "string"
+    },
+    "FencingToken": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
     },
     "FieldPrivacyPolicy": {
       "description": "Immutable network-authored field policy. Revisions are monotonic and carry\nboth issuance and effective time. A malformed, duplicate, expired or\nnot-yet-effective policy fails closed.",
@@ -1947,6 +2355,17 @@
     "NodeEmbeddedServiceSnapshot": {
       "description": "Non-secret runtime state for one network's embedded signaling and relay\nservices. Invitation tickets, identity material, and host-local paths are\ndeliberately excluded from this shared UI contract.",
       "properties": {
+        "coordinator_candidates": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoordinatorCandidateStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Administrator-signed candidate group, verified declarations and the\ncurrently authoritative leader/term projection. Missing means the\nruntime has not supplied candidate status yet; it is never inferred."
+        },
         "network_name": {
           "type": "string"
         },

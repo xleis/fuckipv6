@@ -13,13 +13,14 @@ use serde::{Deserialize, Serialize};
 
 use fuckipv6_common::domain::{
     field_is_visible, project_activity_entry, project_member_directory, project_topology_snapshot,
-    ActivityEntry, FieldPrivacyPolicy, InvitationPreview, InvitationRedemption,
-    InvitationStatusView, IssuedInvitation, JoinRequest, MemberLifecycleChange,
-    MemberRemovalPreview, MembershipState, NetworkId, NetworkMemberDirectory,
-    NetworkProfileApplyResult, NetworkProfilePreview, NodeId, PolicyTestResult, PrivacyField,
-    PrivacyObjectState, PrivacyViewer, ProjectedActivityEntry, RelayAuthorizationAuditSnapshot,
-    RelayGovernanceAuditSnapshot, RelayHealthSnapshot, TopologyConnection, TopologyNode,
-    TopologySnapshot, TrafficPolicyTestComparison, TrafficRoutingPageModel, TrafficSessionSnapshot,
+    ActivityEntry, CoordinatorCandidateStatus, FieldPrivacyPolicy, InvitationPreview,
+    InvitationRedemption, InvitationStatusView, IssuedInvitation, JoinRequest,
+    MemberLifecycleChange, MemberRemovalPreview, MembershipState, NetworkId,
+    NetworkMemberDirectory, NetworkProfileApplyResult, NetworkProfilePreview, NodeId,
+    PolicyTestResult, PrivacyField, PrivacyObjectState, PrivacyViewer, ProjectedActivityEntry,
+    RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot, RelayHealthSnapshot,
+    TopologyConnection, TopologyNode, TopologySnapshot, TrafficPolicyTestComparison,
+    TrafficRoutingPageModel, TrafficSessionSnapshot,
 };
 use fuckipv6_common::ExitNodeCapabilities;
 
@@ -220,6 +221,8 @@ pub struct ProjectedNodeEmbeddedServiceSnapshot {
     /// another member's activity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_governance: Option<RelayGovernanceAuditSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_candidates: Option<CoordinatorCandidateStatus>,
 }
 
 /// A member directory that has already passed field projection. The inner
@@ -291,6 +294,7 @@ pub enum ProjectedNodeCommandOutcome {
     TrafficPolicyHistory(Box<TrafficPolicyHistorySnapshot>),
     TrafficPolicyRolledBack(Box<TrafficPolicyRollbackResult>),
     TrafficPolicyTest(Box<TrafficPolicyTestComparison>),
+    CoordinatorCandidates(Box<CoordinatorCandidateStatus>),
     Accepted { operation_id: String },
     Completed { message: String },
     Rejected(NodeProblem),
@@ -531,6 +535,9 @@ pub fn project_node_command_result(
         }
         NodeCommandOutcome::TrafficPolicyTest(result) => {
             ProjectedNodeCommandOutcome::TrafficPolicyTest(result.clone())
+        }
+        NodeCommandOutcome::CoordinatorCandidates(status) => {
+            ProjectedNodeCommandOutcome::CoordinatorCandidates(status.clone())
         }
         NodeCommandOutcome::Accepted { operation_id } => ProjectedNodeCommandOutcome::Accepted {
             operation_id: operation_id.clone(),
@@ -946,6 +953,10 @@ impl<'a> SnapshotProjector<'a> {
             relay_governance: viewer
                 .local_owner
                 .then(|| service.relay_governance.clone())
+                .flatten(),
+            coordinator_candidates: viewer
+                .local_owner
+                .then(|| service.coordinator_candidates.clone())
                 .flatten(),
         }))
     }
@@ -1591,6 +1602,7 @@ mod tests {
                     }],
                     dropped_events: 2,
                 }),
+                coordinator_candidates: None,
             }],
             ui_mode: None,
             tun_capabilities: TunCapabilities::default(),

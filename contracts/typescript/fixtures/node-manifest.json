@@ -1279,6 +1279,159 @@
           }
         },
         {
+          "id": "get_coordinator_candidates",
+          "label_key": "action.get_coordinator_candidates",
+          "command": "get_coordinator_candidates",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "network_selected",
+          "fields": [
+            {
+              "id": "network_name",
+              "label_key": "field.network_name",
+              "input": "network_name",
+              "required": true,
+              "validation": "network_name"
+            }
+          ],
+          "confirmation": null
+        },
+        {
+          "id": "update_coordinator_candidates",
+          "label_key": "action.update_coordinator_candidates",
+          "command": "update_coordinator_candidates",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "coordinator.candidate.config.update"
+          },
+          "availability": "network_selected",
+          "fields": [
+            {
+              "id": "network_name",
+              "label_key": "field.network_name",
+              "input": "network_name",
+              "required": true,
+              "validation": "network_name"
+            },
+            {
+              "id": "expected_revision",
+              "label_key": "field.expected_revision",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "candidates_json",
+              "label_key": "field.coordinator_candidates_json",
+              "input": "coordinator_candidates_json",
+              "required": true,
+              "validation": "coordinator_candidates_json"
+            },
+            {
+              "id": "effective_from_unix_ms",
+              "label_key": "field.coordinator_effective_from",
+              "input": "revision",
+              "required": false,
+              "validation": "revision"
+            },
+            {
+              "id": "expires_at_unix_ms",
+              "label_key": "field.coordinator_expires_at",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.update_coordinator_candidates.title",
+            "consequence_key": "confirm.update_coordinator_candidates.consequence",
+            "destructive": false,
+            "recent_authentication_required": true
+          }
+        },
+        {
+          "id": "publish_coordinator_candidate_declaration",
+          "label_key": "action.publish_coordinator_candidate_declaration",
+          "command": "publish_coordinator_candidate_declaration",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "coordinator.candidate.declaration.publish"
+          },
+          "availability": "network_selected",
+          "fields": [
+            {
+              "id": "network_name",
+              "label_key": "field.network_name",
+              "input": "network_name",
+              "required": true,
+              "validation": "network_name"
+            },
+            {
+              "id": "willingness",
+              "label_key": "field.coordinator_willingness",
+              "input": "coordinator_willingness",
+              "required": true,
+              "validation": "coordinator_willingness"
+            },
+            {
+              "id": "public_endpoint",
+              "label_key": "field.coordinator_public_endpoint",
+              "input": "external_host",
+              "required": false,
+              "validation": "non_empty"
+            },
+            {
+              "id": "reachable_via_relay",
+              "label_key": "field.coordinator_reachable_via_relay",
+              "input": "boolean",
+              "required": false,
+              "validation": "none"
+            },
+            {
+              "id": "cpu_cores",
+              "label_key": "field.coordinator_cpu_cores",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "memory_bytes",
+              "label_key": "field.coordinator_memory_bytes",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "max_connections",
+              "label_key": "field.coordinator_max_connections",
+              "input": "revision",
+              "required": true,
+              "validation": "revision"
+            },
+            {
+              "id": "validity_ms",
+              "label_key": "field.coordinator_validity_ms",
+              "input": "timeout_ms",
+              "required": true,
+              "validation": "positive_timeout"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.publish_coordinator_candidate_declaration.title",
+            "consequence_key": "confirm.publish_coordinator_candidate_declaration.consequence",
+            "destructive": false,
+            "recent_authentication_required": true
+          }
+        },
+        {
           "id": "start_networks",
           "label_key": "action.start_networks",
           "command": "start_networks",

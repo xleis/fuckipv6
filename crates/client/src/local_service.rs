@@ -830,7 +830,10 @@ fn command_timeout(command: &crate::node::NodeCommand) -> Duration {
         | NodeCommandKind::ApplyTrafficPolicy
         | NodeCommandKind::RollbackTrafficPolicy
         | NodeCommandKind::GetTrafficPolicyHistory
-        | NodeCommandKind::TestTrafficPolicy => COMMAND_TIMEOUT,
+        | NodeCommandKind::TestTrafficPolicy
+        | NodeCommandKind::GetCoordinatorCandidates
+        | NodeCommandKind::UpdateCoordinatorCandidates
+        | NodeCommandKind::PublishCoordinatorCandidateDeclaration => COMMAND_TIMEOUT,
     }
 }
 

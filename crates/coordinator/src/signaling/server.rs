@@ -759,6 +759,7 @@ async fn handle_signaling_message(
                 tx,
                 client_id,
                 join_request_store,
+                coordinator_candidate_store,
             )
             .await?;
         }
@@ -773,6 +774,7 @@ async fn handle_signaling_message(
                 tx,
                 client_id,
                 join_request_store,
+                coordinator_candidate_store,
             )
             .await?;
         }
@@ -809,8 +811,15 @@ async fn handle_signaling_message(
             .await?;
         }
         SignalingMessage::InvitationCreate { request } => {
-            handle_invitation_create(request, session_manager, tx, client_id, invitation_store)
-                .await?;
+            handle_invitation_create(
+                request,
+                session_manager,
+                tx,
+                client_id,
+                invitation_store,
+                coordinator_candidate_store,
+            )
+            .await?;
         }
         SignalingMessage::InvitationList { network_id } => {
             handle_invitation_list(network_id, session_manager, tx, client_id, invitation_store)
@@ -843,6 +852,7 @@ async fn handle_signaling_message(
                 tx,
                 client_id,
                 invitation_store,
+                coordinator_candidate_store,
             )
             .await?;
         }
@@ -851,8 +861,15 @@ async fn handle_signaling_message(
                 .await?;
         }
         SignalingMessage::InvitationRedeem { request } => {
-            handle_invitation_redeem(request, session_manager, tx, client_id, invitation_store)
-                .await?;
+            handle_invitation_redeem(
+                request,
+                session_manager,
+                tx,
+                client_id,
+                invitation_store,
+                coordinator_candidate_store,
+            )
+            .await?;
         }
         SignalingMessage::NetworkJoinPreview { request } => {
             handle_network_join_preview(
@@ -895,6 +912,7 @@ async fn handle_signaling_message(
                 tx,
                 client_id,
                 member_lifecycle_store,
+                coordinator_candidate_store,
             )
             .await?;
         }
@@ -961,6 +979,7 @@ async fn handle_signaling_message(
                 tx,
                 client_id,
                 exit_contribution_store,
+                coordinator_candidate_store,
             )
             .await?;
         }
@@ -1233,6 +1252,42 @@ fn require_coordinator_candidate_store<'a>(
         ),
     )?;
     Ok(None)
+}
+
+fn guard_emergency_governance_write(
+    store: Option<&CoordinatorCandidateStore>,
+    actor: &NodeId,
+    network_id: &NetworkId,
+    action: &str,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> Result<bool> {
+    let Some(store) = store else {
+        return Ok(false);
+    };
+    match store.reject_emergency_governance_write(actor, network_id, action, unix_time_ms()) {
+        Ok(false) => Ok(false),
+        Ok(true) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::protocol_error(
+                    ErrorCode::Forbidden,
+                    "Governance is frozen during emergency Coordinator runtime authority",
+                ),
+            )?;
+            Ok(true)
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, %action, "紧急 Coordinator 治理冻结检查失败");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+            Ok(true)
+        }
+    }
 }
 
 fn coordinator_candidate_protocol_error(error: &anyhow::Error) -> SignalingMessage {
@@ -2154,6 +2209,7 @@ async fn handle_member_lifecycle_change(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
     store: Option<&MemberLifecycleStore>,
+    coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
 ) -> Result<()> {
     let Some((actor, _public_key)) =
         authenticated_join_actor(session_manager, tx, client_id).await?
@@ -2164,6 +2220,16 @@ async fn handle_member_lifecycle_change(
         return Ok(());
     };
     let network_id = request.network_id.clone();
+    if guard_emergency_governance_write(
+        coordinator_candidate_store,
+        &actor,
+        &network_id,
+        "member_lifecycle_change",
+        session_manager,
+        tx,
+    )? {
+        return Ok(());
+    }
     let target_node_id = request.target_node_id.clone();
     let change = match store.change(&actor, request, unix_time_ms()) {
         Ok(change) => change,
@@ -2548,6 +2614,7 @@ async fn handle_exit_contribution_review(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
     store: Option<&ExitContributionRequestStore>,
+    coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
 ) -> Result<()> {
     let Some((actor, _public_key)) =
         authenticated_join_actor(session_manager, tx, client_id).await?
@@ -2557,6 +2624,16 @@ async fn handle_exit_contribution_review(
     let Some(store) = require_exit_contribution_store(store, session_manager, tx)? else {
         return Ok(());
     };
+    if guard_emergency_governance_write(
+        coordinator_candidate_store,
+        &actor,
+        &network_id,
+        "exit_contribution_review",
+        session_manager,
+        tx,
+    )? {
+        return Ok(());
+    }
     let request = match store.review(
         &network_id,
         &actor,
@@ -2664,6 +2741,7 @@ async fn handle_join_request_review(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
     store: Option<&JoinRequestStore>,
+    coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
 ) -> Result<()> {
     let Some((actor, _public_key)) =
         authenticated_join_actor(session_manager, tx, client_id).await?
@@ -2673,6 +2751,16 @@ async fn handle_join_request_review(
     let Some(store) = require_join_request_store(store, session_manager, tx)? else {
         return Ok(());
     };
+    if guard_emergency_governance_write(
+        coordinator_candidate_store,
+        &actor,
+        &network_id,
+        "join_request_review",
+        session_manager,
+        tx,
+    )? {
+        return Ok(());
+    }
 
     // Resolve applicants before the atomic decision so online notifications can
     // be delivered without another authorization-dependent read afterwards.
@@ -2862,6 +2950,7 @@ async fn handle_invitation_create(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
     store: Option<&InvitationStore>,
+    coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
 ) -> Result<()> {
     let Some((actor, _public_key)) =
         authenticated_join_actor(session_manager, tx, client_id).await?
@@ -2872,6 +2961,16 @@ async fn handle_invitation_create(
         return Ok(());
     };
     let network_id = request.network_id.clone();
+    if guard_emergency_governance_write(
+        coordinator_candidate_store,
+        &actor,
+        &network_id,
+        "invitation_create",
+        session_manager,
+        tx,
+    )? {
+        return Ok(());
+    }
     let issued = store.create(&network_id, &actor, request, unix_time_ms())?;
     let invitation_id = issued.status.invitation.invitation_id.clone();
     send_binary(
@@ -2949,6 +3048,7 @@ async fn handle_invitation_revoke(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
     store: Option<&InvitationStore>,
+    coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
 ) -> Result<()> {
     let Some((actor, _public_key)) =
         authenticated_join_actor(session_manager, tx, client_id).await?
@@ -2958,6 +3058,16 @@ async fn handle_invitation_revoke(
     let Some(store) = require_invitation_store(store, session_manager, tx)? else {
         return Ok(());
     };
+    if guard_emergency_governance_write(
+        coordinator_candidate_store,
+        &actor,
+        &network_id,
+        "invitation_revoke",
+        session_manager,
+        tx,
+    )? {
+        return Ok(());
+    }
     let invitation = store.revoke(
         &network_id,
         &actor,
@@ -3110,6 +3220,7 @@ async fn handle_invitation_redeem(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
     store: Option<&InvitationStore>,
+    coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
 ) -> Result<()> {
     let Some((actor, _public_key)) =
         authenticated_join_actor(session_manager, tx, client_id).await?
@@ -3119,6 +3230,17 @@ async fn handle_invitation_redeem(
     let Some(store) = require_invitation_store(store, session_manager, tx)? else {
         return Ok(());
     };
+    let network_id = request.network_id.clone();
+    if guard_emergency_governance_write(
+        coordinator_candidate_store,
+        &actor,
+        &network_id,
+        "invitation_redeem",
+        session_manager,
+        tx,
+    )? {
+        return Ok(());
+    }
     let invitation_id = request.invitation_id.clone();
     let redemption = store.redeem(request, &actor, unix_time_ms())?;
     send_binary(
@@ -3563,6 +3685,103 @@ mod tests {
                 },
             }
         ));
+    }
+
+    #[test]
+    fn emergency_governance_guard_rejects_an_invitee_with_structured_forbidden() -> Result<()> {
+        use fuckipv6_common::domain::{
+            CapabilityKind, CoordinatorCandidate, CoordinatorCandidateConfig, ExitContributionMode,
+            ExitContributionObligation, ExitContributionScope, ExitSelectionPolicy,
+            NetworkCreateProfile, NetworkJoinMode, NetworkVisibility, PublicKey,
+        };
+
+        let dir = std::env::temp_dir().join(format!(
+            "fuckipv6-emergency-governance-guard-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let owner = Identity::generate()?;
+        let candidate = Identity::generate()?;
+        let ordinary = Identity::generate()?;
+        let invitee = Identity::generate()?;
+        let owner_id = NodeId::from_public_key(&owner.public_key());
+        let candidate_id = NodeId::from_public_key(&candidate.public_key());
+        let ordinary_id = NodeId::from_public_key(&ordinary.public_key());
+        let invitee_id = NodeId::from_public_key(&invitee.public_key());
+        let now = unix_time_ms();
+        let mut network = NetworkRecord::create_owned(
+            NetworkCreateProfile {
+                name: "emergency-governance-guard".into(),
+                purpose: "emergency governance guard test".into(),
+                icon: "network".into(),
+                language: "zh-CN".into(),
+                region: "ZZ".into(),
+                tags: vec![],
+                capability_declarations: vec![CapabilityKind::Coordinator],
+                visibility: NetworkVisibility::Private,
+                join_mode: NetworkJoinMode::InviteOnly,
+                exit_contribution: ExitContributionObligation::NotRequired,
+                exit_contribution_scope: ExitContributionScope::NotApplicable,
+                exit_contribution_mode: ExitContributionMode::Disabled,
+                exit_selection_policy: ExitSelectionPolicy::default(),
+            },
+            PublicKey::from_bytes([91; 32]),
+            owner_id.clone(),
+            now.saturating_sub(1_000),
+        )?;
+        network
+            .members
+            .extend([candidate_id.clone(), ordinary_id.clone()]);
+        network.validate()?;
+        let network_path = dir.join("network.json");
+        std::fs::write(&network_path, serde_json::to_vec_pretty(&network)?)?;
+        let store =
+            CoordinatorCandidateStore::new(dir.join("coordinator_candidates.json"), network_path)?;
+        let config = CoordinatorCandidateConfig::signed(
+            network.network_id.clone(),
+            1,
+            vec![CoordinatorCandidate {
+                node_id: candidate_id,
+                priority: 10,
+            }],
+            now.saturating_sub(1),
+            now.saturating_add(3_600_000),
+            &owner,
+        )?;
+        store.update_config(&owner_id, 0, config, now)?;
+        store.issue_emergency_leader(
+            &owner_id,
+            &network.network_id,
+            &[owner_id.clone(), ordinary_id],
+            now,
+        )?;
+
+        let manager = SessionManager::new("fd00::1000/120")?;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(guard_emergency_governance_write(
+            Some(&store),
+            &invitee_id,
+            &network.network_id,
+            "invitation_redeem",
+            &manager,
+            &tx,
+        )?);
+        let Message::Binary(encoded) = rx.try_recv()? else {
+            panic!("expected a binary protocol error");
+        };
+        let SignalingMessage::Error { code, message } =
+            codec::decode::<SignalingMessage>(&encoded)?
+        else {
+            panic!("expected a protocol error");
+        };
+        assert_eq!(code, ErrorCode::Forbidden.as_u16());
+        assert_eq!(
+            message,
+            "Governance is frozen during emergency Coordinator runtime authority"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
     }
 
     #[test]

@@ -777,9 +777,12 @@ impl CoordinatorCandidateStore {
     }
 
     /// Reject and audit a long-lived governance mutation while an emergency
-    /// runtime lease is active. The caller must invoke this before touching a
-    /// governance store; the candidate-store write path applies the same rule
-    /// atomically under its own file lock.
+    /// runtime lease is active. The actor is already authenticated by the
+    /// signaling layer; this gate deliberately does not require current
+    /// membership because invitation redemption is a governance write by an
+    /// invitee who is not yet a member. The caller must invoke this before
+    /// touching a governance store; the candidate-store write path applies the
+    /// same rule atomically under its own file lock.
     pub fn reject_emergency_governance_write(
         &self,
         actor: &NodeId,
@@ -795,11 +798,6 @@ impl CoordinatorCandidateStore {
         self.ensure_parent()?;
         let _file_lock = lock_candidate_file(&self.path)?;
         let mut file = self.load_unlocked()?;
-        let network = read_network_record(&self.network_record_path, network_id)?;
-        if !network.members.contains(actor) {
-            bail!("coordinator_candidate.error.permission_denied");
-        }
-
         let lease = file
             .networks
             .get_mut(network_id)
@@ -815,7 +813,7 @@ impl CoordinatorCandidateStore {
         append_emergency_governance_rejected(
             &mut file.audit_log,
             actor,
-            &network.network_id,
+            network_id,
             action,
             lease,
             now_unix_ms,
@@ -4210,10 +4208,11 @@ mod tests {
         let store = fixture.store();
         let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
         let ordinary_id = NodeId::from_public_key(&fixture.ordinary.public_key());
+        let invitee_id = NodeId::from_public_key(&Identity::generate().unwrap().public_key());
 
         assert!(!store
             .reject_emergency_governance_write(
-                &owner_id,
+                &invitee_id,
                 &fixture.network.network_id,
                 "invitation_create",
                 NOW,
@@ -4239,9 +4238,9 @@ mod tests {
         let lease = issued.status.emergency_leader.unwrap();
         assert!(store
             .reject_emergency_governance_write(
-                &owner_id,
+                &invitee_id,
                 &fixture.network.network_id,
-                "invitation_create",
+                "invitation_redeem",
                 NOW + 1,
             )
             .unwrap());
@@ -4252,7 +4251,7 @@ mod tests {
             .into_iter()
             .find(|entry| {
                 entry.action == "coordinator.emergency.governance.rejected"
-                    && entry.details.get("action").map(String::as_str) == Some("invitation_create")
+                    && entry.details.get("action").map(String::as_str) == Some("invitation_redeem")
             })
             .expect("governance rejection must be audited");
         assert_eq!(audit.outcome, AuditOutcome::Denied);

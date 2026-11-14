@@ -47,6 +47,7 @@ import java.util.Locale
 fun FuckIpv6App(
     contracts: SharedContracts,
     relay: RelayPageData? = null,
+    coordinator: CoordinatorPageData? = null,
 ) {
     val systemLocale = LocalLocale.current.platformLocale
     val initialModule = contracts.navigation.modules.first()
@@ -123,6 +124,7 @@ fun FuckIpv6App(
                 state = unavailable,
                 modifier = Modifier.weight(1f),
                 relay = relay,
+                coordinator = coordinator,
             )
         }
     }
@@ -148,6 +150,7 @@ fun PageContent(
     state: SurfaceState,
     modifier: Modifier = Modifier,
     relay: RelayPageData? = null,
+    coordinator: CoordinatorPageData? = null,
 ) {
     Column(
         modifier = modifier
@@ -161,10 +164,12 @@ fun PageContent(
             text = contracts.i18n.translate(locale, "page.$pageId"),
             style = MaterialTheme.typography.headlineSmall,
         )
-        if (pageId == "relay" && relay != null && relay.backendAvailable) {
-            RelayPageContent(contracts = contracts, locale = locale, data = relay)
-        } else {
-            SurfaceNotice(state = state, locale = locale, contracts = contracts)
+        when {
+            pageId == "node_runtime" && coordinator != null ->
+                CoordinatorPageContent(contracts = contracts, locale = locale, data = coordinator)
+            pageId == "relay" && relay != null && relay.backendAvailable ->
+                RelayPageContent(contracts = contracts, locale = locale, data = relay)
+            else -> SurfaceNotice(state = state, locale = locale, contracts = contracts)
         }
     }
 }

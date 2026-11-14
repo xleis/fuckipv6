@@ -228,6 +228,7 @@ private fun relaySnapshot(
         0L,
     )
     val service = NodeEmbeddedServiceSnapshot(
+        null,
         "home",
         null,
         null,

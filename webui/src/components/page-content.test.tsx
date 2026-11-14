@@ -1175,6 +1175,7 @@ describe("membership policy reconfirmation", () => {
 
 describe("Coordinator control-plane runtime state", () => {
   it("shows governance read-only and quorum details without treating the service as failed", () => {
+    const leader = "node_candidate_healthy";
     const snapshot: NodeSnapshot = {
       ...baseSnapshot,
       embedded_services: [
@@ -1185,9 +1186,37 @@ describe("Coordinator control-plane runtime state", () => {
             network_id: "net_control_plane_home",
             generated_at_unix_ms: Date.UTC(2026, 0, 1, 12, 0, 0),
             config_state: "current",
-            candidates: [],
-            current_leader: null,
-            latest_term: null,
+            candidates: [
+              {
+                node_id: leader,
+                priority: 1,
+                health: "healthy",
+                eligible_for_election: true,
+                reason_code: "coordinator.candidate.eligible",
+              },
+              {
+                node_id: "node_candidate_stale",
+                priority: 2,
+                health: "stale",
+                eligible_for_election: false,
+                reason_code: "coordinator.candidate.declaration_expired",
+              },
+            ],
+            current_leader: leader,
+            latest_term: {
+              network_id: "net_control_plane_home",
+              term: 4,
+              leader,
+              candidate_group: [leader, "node_candidate_stale"],
+              candidate_config_revision: 3,
+              majority_proof: [leader, "node_recovery"],
+              majority_votes: [],
+              authority: "full",
+              phase: "stable",
+              fencing_token: 44,
+              issued_at_unix_ms: Date.UTC(2026, 0, 1, 11, 59, 0),
+              expires_at_unix_ms: Date.UTC(2026, 0, 1, 12, 4, 0),
+            },
             emergency: "none",
             control_plane: {
               state: "quorum_unavailable",
@@ -1229,6 +1258,36 @@ describe("Coordinator control-plane runtime state", () => {
       "coordinator.control_plane.no_majority",
     );
     expect(home).toHaveTextContent("1/2");
+    expect(home).toHaveAttribute("data-current-leader", leader);
+    expect(home).toHaveAttribute("data-latest-term", "4");
+    expect(home).toHaveAttribute("data-latest-fencing-token", "44");
+    expect(
+      within(home).getByTestId("runtime-coordinator-leader-home"),
+    ).toHaveTextContent(leader);
+    expect(
+      within(home).getByTestId("runtime-coordinator-term-home"),
+    ).toHaveTextContent("4");
+    expect(
+      within(home).getByTestId("runtime-coordinator-term-home"),
+    ).toHaveTextContent("44");
+    expect(
+      within(home).getByTestId("runtime-coordinator-term-home"),
+    ).toHaveTextContent(translated("runtime.coordinator.phase.stable"));
+    expect(
+      within(home).getByTestId(
+        `runtime-coordinator-candidate-home-${leader}`,
+      ),
+    ).toHaveAttribute("data-candidate-health", "healthy");
+    expect(
+      within(home).getByTestId(
+        "runtime-coordinator-candidate-home-node_candidate_stale",
+      ),
+    ).toHaveAttribute("data-candidate-eligible", "false");
+    expect(
+      within(home).getByTestId(
+        "runtime-coordinator-candidate-home-node_candidate_stale",
+      ),
+    ).toHaveTextContent(translated("runtime.coordinator.health.stale"));
     expect(home).not.toHaveTextContent(
       translated("runtime.control_plane.available"),
     );

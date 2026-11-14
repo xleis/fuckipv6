@@ -9027,6 +9027,145 @@ mod tests {
         }
     }
 
+    async fn spawn_test_coordinator_runtime(
+        harness: &TestHarness,
+        network_name: &str,
+        network_id: NetworkId,
+        signaling: Arc<SignalingClient>,
+        coordinator_takeover_wakeups: mpsc::UnboundedReceiver<()>,
+    ) -> (
+        mpsc::Sender<RuntimeControlCommand>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (shutdown, mut shutdown_rx) = watch::channel(false);
+        let (routing_control, _routing_rx) = mpsc::unbounded_channel();
+        let data_plane = tokio::spawn(async move {
+            let _ = shutdown_rx.changed().await;
+            NetworkRuntimeExit {
+                cleanup: RuntimeCleanupOutcome::default(),
+                retained_owner: None,
+            }
+        });
+        let actor = NetworkRuntimeActor {
+            configs: harness.configs.clone(),
+            options: RuntimeOptions::default(),
+            state: harness.state.clone(),
+            events: harness.events.clone(),
+            lifecycle: harness.lifecycle.clone(),
+            registry: harness.registry.clone(),
+            services: harness.services.clone(),
+            launcher: Arc::new(harness.fake.clone()),
+            sessions: HashMap::from([(
+                network_name.to_string(),
+                NetworkRuntimeSession {
+                    network_id: Some(network_id.to_string()),
+                    signaling: Some(signaling),
+                    coordinator_recovery: None,
+                    coordinator_emergency: None,
+                    coordinator_continuity: CoordinatorContinuityMetrics::default(),
+                    tun_name: format!("fuckipv6-{network_name}"),
+                    routing_control,
+                    shutdown,
+                    handle: data_plane,
+                },
+            )]),
+            retained_owners: HashMap::new(),
+            cleanup_failures: BTreeMap::new(),
+            completed_cleanup: BTreeMap::new(),
+            timeouts: RuntimeTimeouts::default(),
+            coordinator_takeover_wakeups: Some(coordinator_takeover_wakeups),
+        };
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_actor(command_rx, actor));
+        (command_tx, task)
+    }
+
+    async fn shutdown_test_coordinator_runtime(
+        command_tx: mpsc::Sender<RuntimeControlCommand>,
+        task: tokio::task::JoinHandle<()>,
+    ) {
+        let operation = OperationGate::new()
+            .try_acquire()
+            .expect("acquire runtime shutdown operation");
+        let (reply, response) = oneshot::channel();
+        command_tx
+            .send(RuntimeControlCommand::Shutdown {
+                _operation: operation,
+                reply,
+            })
+            .await
+            .expect("runtime command channel closed");
+        timeout(Duration::from_secs(2), response)
+            .await
+            .expect("runtime shutdown timed out")
+            .expect("runtime shutdown response closed")
+            .expect("runtime shutdown failed");
+        timeout(Duration::from_secs(2), task)
+            .await
+            .expect("runtime actor did not exit")
+            .expect("runtime actor task failed");
+    }
+
+    fn route_test_coordinator_runtime_message(
+        store: &fuckipv6_coordinator::signaling::coordinator_candidates::CoordinatorCandidateStore,
+        signaling: &SignalingClient,
+        actor: &NodeId,
+        network_id: &NetworkId,
+        message: fuckipv6_common::SignalingMessage,
+    ) -> &'static str {
+        use fuckipv6_common::SignalingMessage;
+
+        let now = unix_time_ms();
+        match message {
+            SignalingMessage::CoordinatorCandidateStatusRequest {
+                network_id: requested,
+            } => {
+                assert_eq!(&requested, network_id);
+                let status = store
+                    .status(actor, network_id, now)
+                    .expect("coordinator store status failed");
+                assert!(signaling.route_coordinator_candidate_test_response(
+                    SignalingMessage::CoordinatorCandidateStatusAck { status },
+                ));
+                "status"
+            }
+            SignalingMessage::CoordinatorRecoveryRequest { report } => {
+                assert_eq!(&report.network_id, network_id);
+                let response = store
+                    .recover(actor, report, now)
+                    .expect("coordinator store recovery failed");
+                assert!(!response.recovery.governance_writable);
+                assert!(signaling.route_coordinator_candidate_test_response(
+                    SignalingMessage::CoordinatorRecoveryResponse { response },
+                ));
+                "recovery"
+            }
+            SignalingMessage::CoordinatorElectionPropose { proposal } => {
+                assert_eq!(&proposal.proposer, actor);
+                assert_eq!(&proposal.network_id, network_id);
+                let status = store
+                    .propose_election(actor, proposal, now)
+                    .expect("coordinator election proposal failed");
+                assert!(signaling.route_coordinator_candidate_test_response(
+                    SignalingMessage::CoordinatorElectionProposeAck { status },
+                ));
+                "propose"
+            }
+            SignalingMessage::CoordinatorElectionVote { proposal_id, vote } => {
+                assert_eq!(&vote.voter, actor);
+                assert_eq!(&vote.network_id, network_id);
+                let status = store
+                    .record_election_vote(actor, &proposal_id, vote, now)
+                    .expect("coordinator election vote failed");
+                assert!(signaling.route_coordinator_candidate_test_response(
+                    SignalingMessage::CoordinatorElectionVoteAck { status },
+                ));
+                "vote"
+            }
+            other => panic!("unexpected Coordinator runtime request: {other:?}"),
+        }
+    }
+
     fn create_command(name: &str, auto_connect: bool) -> NodeCreateNetworkCommand {
         NodeCreateNetworkCommand {
             name: name.into(),
@@ -9266,6 +9405,423 @@ mod tests {
                 state.embedded_services.push(snapshot);
             })
             .await;
+    }
+
+    #[tokio::test]
+    async fn coordinator_takeover_background_candidate_failure_e2e() {
+        use fuckipv6_common::domain::{
+            CapabilityKind, CoordinatorCandidate, CoordinatorCandidateConfig,
+            CoordinatorCandidateDeclaration, CoordinatorCandidateHealth,
+            CoordinatorCandidateResources, CoordinatorCandidateWillingness,
+            CoordinatorElectionProposal, CoordinatorElectionStage, CoordinatorElectionVote,
+            CoordinatorPublicReachability, ExitContributionMode, ExitContributionObligation,
+            ExitContributionScope, ExitSelectionPolicy, NetworkCreateProfile, NetworkJoinMode,
+            NetworkRecord, NetworkVisibility, PublicKey,
+        };
+        use fuckipv6_common::Identity;
+        use fuckipv6_coordinator::signaling::coordinator_candidates::CoordinatorCandidateStore;
+
+        let owner = Identity::generate().expect("owner identity");
+        let candidate_a = Identity::generate().expect("candidate A identity");
+        let candidate_b = Identity::generate().expect("candidate B identity");
+        let candidate_c = Identity::generate().expect("candidate C identity");
+        let owner_id = NodeId::from_public_key(&owner.public_key());
+        let candidate_a_id = NodeId::from_public_key(&candidate_a.public_key());
+        let candidate_b_id = NodeId::from_public_key(&candidate_b.public_key());
+        let candidate_c_id = NodeId::from_public_key(&candidate_c.public_key());
+        let now = unix_time_ms();
+
+        let mut network = NetworkRecord::create_owned(
+            NetworkCreateProfile {
+                name: "background-takeover-e2e".into(),
+                purpose: "Verify automatic coordinator takeover through live runtimes".into(),
+                icon: "network".into(),
+                language: "zh-CN".into(),
+                region: "ZZ".into(),
+                tags: Vec::new(),
+                capability_declarations: vec![CapabilityKind::Coordinator],
+                visibility: NetworkVisibility::Private,
+                join_mode: NetworkJoinMode::InviteOnly,
+                exit_contribution: ExitContributionObligation::NotRequired,
+                exit_contribution_scope: ExitContributionScope::NotApplicable,
+                exit_contribution_mode: ExitContributionMode::Disabled,
+                exit_selection_policy: ExitSelectionPolicy::default(),
+            },
+            PublicKey::from_bytes([17; 32]),
+            owner_id.clone(),
+            now.saturating_sub(30_000),
+        )
+        .expect("create network record");
+        network.members.extend([
+            candidate_a_id.clone(),
+            candidate_b_id.clone(),
+            candidate_c_id.clone(),
+        ]);
+        network.validate().expect("validate network record");
+        let network_id = network.network_id.clone();
+
+        let candidate_config = CoordinatorCandidateConfig::signed(
+            network_id.clone(),
+            1,
+            vec![
+                CoordinatorCandidate {
+                    node_id: candidate_a_id.clone(),
+                    priority: 1,
+                },
+                CoordinatorCandidate {
+                    node_id: candidate_b_id.clone(),
+                    priority: 2,
+                },
+                CoordinatorCandidate {
+                    node_id: candidate_c_id.clone(),
+                    priority: 3,
+                },
+            ],
+            now.saturating_sub(25_000),
+            now.saturating_add(30 * 60 * 1000),
+            &owner,
+        )
+        .expect("sign candidate config");
+
+        let b_harness = TestHarness::new("coordinator-background-takeover-b").await;
+        let c_harness = TestHarness::new("coordinator-background-takeover-c").await;
+        candidate_b
+            .save_to_file(b_harness.configs.node_identity_path())
+            .expect("install candidate B identity");
+        candidate_c
+            .save_to_file(c_harness.configs.node_identity_path())
+            .expect("install candidate C identity");
+        assert_eq!(
+            NodeId::from_public_key(&b_harness.configs.load_node_identity().unwrap().public_key()),
+            candidate_b_id
+        );
+        assert_eq!(
+            NodeId::from_public_key(&c_harness.configs.load_node_identity().unwrap().public_key()),
+            candidate_c_id
+        );
+
+        for (harness, network_name) in [
+            (&b_harness, "background-takeover-b"),
+            (&c_harness, "background-takeover-c"),
+        ] {
+            harness
+                .configs
+                .create_network(network_name, "ws://127.0.0.1:6666", true)
+                .expect("create runtime network config");
+            harness
+                .configs
+                .set_network_id_metadata(network_name, network_id.as_str())
+                .expect("bind runtime network id");
+        }
+
+        let network_path = b_harness
+            .config_dir
+            .join("background-takeover-network.json");
+        let store_path = b_harness.config_dir.join("background-takeover-store.json");
+        std::fs::write(
+            &network_path,
+            serde_json::to_vec_pretty(&network).expect("serialize network record"),
+        )
+        .expect("write network record");
+        let store = CoordinatorCandidateStore::new(&store_path, &network_path)
+            .expect("create coordinator candidate store");
+        store
+            .update_config(&owner_id, 0, candidate_config.clone(), now)
+            .expect("install candidate config");
+
+        let declaration_issued_at = now.saturating_sub(20_000);
+        let declarations = [
+            (&candidate_a, now.saturating_sub(10_000), "203.0.113.31:443"),
+            (&candidate_b, now + 60_000, "203.0.113.32:443"),
+            (&candidate_c, now + 60_000, "203.0.113.33:443"),
+        ];
+        for (identity, expires_at_unix_ms, endpoint) in declarations {
+            let declaration = CoordinatorCandidateDeclaration::signed(
+                network_id.clone(),
+                candidate_config.revision,
+                CoordinatorPublicReachability {
+                    public_endpoint: Some(endpoint.parse().expect("candidate endpoint")),
+                    reachable_via_relay: true,
+                },
+                CoordinatorCandidateResources {
+                    cpu_cores: 4,
+                    memory_bytes: 512 * 1024 * 1024,
+                    max_connections: 1_000,
+                },
+                CoordinatorCandidateWillingness::Willing,
+                declaration_issued_at,
+                expires_at_unix_ms,
+                identity,
+            )
+            .expect("sign candidate declaration");
+            store
+                .publish_declaration(
+                    &NodeId::from_public_key(&identity.public_key()),
+                    declaration,
+                    declaration_issued_at,
+                )
+                .expect("publish candidate declaration");
+        }
+
+        let proposal_issued_at = now.saturating_sub(15_000);
+        let proposal = CoordinatorElectionProposal::signed(
+            network_id.clone(),
+            candidate_config.revision,
+            1,
+            vec![
+                candidate_a_id.clone(),
+                candidate_b_id.clone(),
+                candidate_c_id.clone(),
+            ],
+            proposal_issued_at,
+            now.saturating_sub(5_000),
+            &candidate_a,
+        )
+        .expect("sign term 1 proposal");
+        store
+            .propose_election(&candidate_a_id, proposal.clone(), proposal_issued_at)
+            .expect("start term 1 election");
+        for (voter, identity) in [
+            (&candidate_a_id, &candidate_a),
+            (&candidate_b_id, &candidate_b),
+        ] {
+            let vote = CoordinatorElectionVote::signed(
+                network_id.clone(),
+                proposal.candidate_config_revision,
+                proposal.term,
+                proposal.leader.clone(),
+                proposal.candidate_group.clone(),
+                now.saturating_sub(14_000),
+                now + 30_000,
+                identity,
+            )
+            .expect("sign term 1 vote");
+            store
+                .record_election_vote(
+                    voter,
+                    &proposal.proposal_id,
+                    vote,
+                    now.saturating_sub(14_000),
+                )
+                .expect("record term 1 vote");
+        }
+        let failed_leader_status = store
+            .status(&owner_id, &network_id, now)
+            .expect("load term 1 status");
+        let term_one = failed_leader_status
+            .latest_term
+            .as_ref()
+            .expect("term 1 is installed");
+        assert_eq!(term_one.leader, candidate_a_id);
+        assert!(!failed_leader_status.lease.is_writable());
+        assert!(failed_leader_status
+            .candidates
+            .iter()
+            .find(|candidate| candidate.node_id == candidate_a_id)
+            .is_some_and(|candidate| {
+                candidate.health == CoordinatorCandidateHealth::Stale
+                    && !candidate.eligible_for_election
+            }));
+        assert_eq!(
+            failed_leader_status
+                .preferred_election_candidate()
+                .map(|candidate| &candidate.node_id),
+            Some(&candidate_b_id)
+        );
+
+        let (b_signaling, mut b_outbound) = SignalingClient::test_channel();
+        let (c_signaling, mut c_outbound) = SignalingClient::test_channel();
+        let b_signaling = Arc::new(b_signaling);
+        let c_signaling = Arc::new(c_signaling);
+        let (b_wakeup_tx, b_wakeup_rx) = mpsc::unbounded_channel();
+        let (c_wakeup_tx, c_wakeup_rx) = mpsc::unbounded_channel();
+        let (b_command_tx, b_runtime) = spawn_test_coordinator_runtime(
+            &b_harness,
+            "background-takeover-b",
+            network_id.clone(),
+            b_signaling.clone(),
+            b_wakeup_rx,
+        )
+        .await;
+        let (c_command_tx, c_runtime) = spawn_test_coordinator_runtime(
+            &c_harness,
+            "background-takeover-c",
+            network_id.clone(),
+            c_signaling.clone(),
+            c_wakeup_rx,
+        )
+        .await;
+        b_wakeup_tx
+            .send(())
+            .expect("queue candidate B authority refresh");
+        c_wakeup_tx
+            .send(())
+            .expect("queue candidate C authority refresh");
+
+        let responder_b_id = candidate_b_id.clone();
+        let responder_c_id = candidate_c_id.clone();
+        let responder = tokio::spawn(async move {
+            let mut proposal_seen = false;
+            timeout(Duration::from_secs(10), async {
+                while !proposal_seen {
+                    tokio::select! {
+                        message = b_outbound.recv() => {
+                            let message = message.expect("candidate B signaling channel closed");
+                            if route_test_coordinator_runtime_message(
+                                &store,
+                                b_signaling.as_ref(),
+                                &responder_b_id,
+                                &network_id,
+                                message,
+                            ) == "propose"
+                            {
+                                proposal_seen = true;
+                            }
+                        }
+                        message = c_outbound.recv() => {
+                            let message = message.expect("candidate C signaling channel closed");
+                            route_test_coordinator_runtime_message(
+                                &store,
+                                c_signaling.as_ref(),
+                                &responder_c_id,
+                                &network_id,
+                                message,
+                            );
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("candidate B did not propose after candidate A failed");
+            b_wakeup_tx
+                .send(())
+                .expect("wake candidate B for election voting");
+            c_wakeup_tx
+                .send(())
+                .expect("wake candidate C for election voting");
+
+            let committed_status = timeout(Duration::from_secs(10), async {
+                loop {
+                    let status = store
+                        .status(&owner_id, &network_id, unix_time_ms())
+                        .expect("poll committed takeover status");
+                    if status
+                        .latest_term
+                        .as_ref()
+                        .is_some_and(|term| term.term == 2 && term.leader == responder_b_id)
+                    {
+                        break status;
+                    }
+                    tokio::select! {
+                        message = b_outbound.recv() => {
+                            let message = message.expect("candidate B signaling channel closed");
+                            route_test_coordinator_runtime_message(
+                                &store,
+                                b_signaling.as_ref(),
+                                &responder_b_id,
+                                &network_id,
+                                message,
+                            );
+                        }
+                        message = c_outbound.recv() => {
+                            let message = message.expect("candidate C signaling channel closed");
+                            route_test_coordinator_runtime_message(
+                                &store,
+                                c_signaling.as_ref(),
+                                &responder_c_id,
+                                &network_id,
+                                message,
+                            );
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("runtime candidates did not commit term 2");
+
+            b_wakeup_tx
+                .send(())
+                .expect("wake candidate B after takeover");
+            c_wakeup_tx
+                .send(())
+                .expect("wake candidate C after takeover");
+            let mut b_refreshes = 0_u8;
+            let mut c_refreshes = 0_u8;
+            timeout(Duration::from_secs(10), async {
+                while b_refreshes < 2 || c_refreshes < 2 {
+                    tokio::select! {
+                        message = b_outbound.recv() => {
+                            let message = message.expect("candidate B signaling channel closed");
+                            let kind = route_test_coordinator_runtime_message(
+                                &store,
+                                b_signaling.as_ref(),
+                                &responder_b_id,
+                                &network_id,
+                                message,
+                            );
+                            assert!(matches!(kind, "status" | "recovery"));
+                            b_refreshes += 1;
+                        }
+                        message = c_outbound.recv() => {
+                            let message = message.expect("candidate C signaling channel closed");
+                            let kind = route_test_coordinator_runtime_message(
+                                &store,
+                                c_signaling.as_ref(),
+                                &responder_c_id,
+                                &network_id,
+                                message,
+                            );
+                            assert!(matches!(kind, "status" | "recovery"));
+                            c_refreshes += 1;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("runtime candidates did not refresh the committed term");
+            committed_status
+        });
+        let committed_status = responder.await.expect("coordinator responder task failed");
+
+        let term_two = committed_status
+            .latest_term
+            .as_ref()
+            .expect("term 2 must be installed");
+        assert_eq!(term_two.term, 2);
+        assert_eq!(term_two.fencing_token.0, 2);
+        assert_eq!(term_two.leader, candidate_b_id);
+        assert_eq!(
+            committed_status.current_leader.as_ref(),
+            Some(&candidate_b_id)
+        );
+        assert!(committed_status.lease.is_writable());
+        assert_eq!(
+            committed_status
+                .config
+                .as_ref()
+                .map(|config| config.revision),
+            Some(candidate_config.revision)
+        );
+        let election = committed_status
+            .latest_election
+            .as_ref()
+            .expect("term 2 election evidence");
+        assert_eq!(election.stage, CoordinatorElectionStage::Committed);
+        assert!(election
+            .votes
+            .iter()
+            .any(|vote| vote.voter == candidate_b_id));
+        assert!(election
+            .votes
+            .iter()
+            .any(|vote| vote.voter == candidate_c_id));
+        assert!(!b_runtime.is_finished());
+        assert!(!c_runtime.is_finished());
+
+        shutdown_test_coordinator_runtime(b_command_tx, b_runtime).await;
+        shutdown_test_coordinator_runtime(c_command_tx, c_runtime).await;
+        b_harness.shutdown().await;
+        c_harness.shutdown().await;
     }
 
     #[tokio::test]

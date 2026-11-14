@@ -1,7 +1,8 @@
 # W14 Coordinator 选举与任期协议内部安全审计
 
 > 内部审计日期：2026-11-15
-> 代码基线：`2d41622 feat(w14): refresh coordinator takeover on reconnect`
+> 代码基线：`79cfad6 docs(w14): record coordinator takeover runtime backoff`；增量覆盖后台故障接管 E2E、
+> election commit 的旧 recovery/emergency 投影失效修复及对应回归
 > 审计范围：候选配置、选举提案、投票、严格多数、任期/fencing、治理写入门禁、恢复与紧急运行权限
 > 文档定位：**内部代码与协议安全审计**，不是第三方正式审计、形式化验证或发布安全认证
 
@@ -24,7 +25,8 @@
 
 - 本次不是独立外部审计，没有审计机构签核、威胁建模评审记录和公开审计报告；
 - 没有进行形式化模型检查、穷举状态验证或 Byzantine Coordinator 主机攻防演练；
-- 尚未由真实客户端运行时完成后台节点故障接管的完整 E2E；
+- 后台节点故障接管已有进程内真实 `run_actor` + 持久化 store E2E，但尚未覆盖跨主机断网、真实进程崩溃和
+  磁盘故障组合；
 - 三端候选健康、Leader 和最近任期展示仍不完整，影响运营可观察性；
 - 本地持久化、墙上时钟和 Coordinator 服务可用性仍存在部署级残余风险。
 
@@ -295,18 +297,24 @@ cargo test -p fuckipv6-client node::runtime_control::tests::coordinator_takeover
 cargo test -p fuckipv6-common domain::coordinator --lib
   33 passed
 cargo test -p fuckipv6-coordinator signaling::coordinator_candidates --lib
-  36 passed
+  37 passed
 ```
 
 其中 `coordinator_takeover_reconnect_wakeup_refreshes_without_waiting_for_poll` 和
 `coordinator_takeover_poll_preserves_the_live_data_plane_session` 本轮均通过。
+
+`coordinator_takeover_background_candidate_failure_e2e` 使用两个真实后台 `run_actor`、两套独立节点身份和
+同一个持久化 candidate store：候选 A 的声明过期后，B 自动提案 term 2，B/C 自动投票并提交严格多数结果；
+测试验证 fencing token 2、B 为新 Leader、lease 可写且两个 runtime 保持存活。该场景发现旧 recovery
+投影未随 election commit 原子失效的问题，`election_commit_invalidates_recovery_projections_from_the_previous_term`
+已覆盖修复后的持久化读取和重新恢复。
 
 ## 6. 审计发现与处置
 
 | ID | 级别 | 发现 | 处置 |
 |---|---|---|---|
 | IA-01 | 发布门禁 | 当前结论不是独立正式审计，缺少第三方报告和签核 | 保持 W14-03 审计项未勾选，安排外部安全审计 |
-| IA-02 | 发布门禁 | 真实客户端运行时尚未完成后台节点故障接管完整 E2E | 新增真实进程/运行时故障接管场景后再验收 |
+| IA-02 | 已关闭 | 后台节点故障接管缺少真实运行时 E2E | `coordinator_takeover_background_candidate_failure_e2e` 验证两个真实 `run_actor` 自动完成 term 2 接管；旧 recovery 投影失效缺陷由 `election_commit_invalidates_recovery_projections_from_the_previous_term` 回归覆盖 |
 | IA-03 | 中 | UI 未完整展示候选健康、Leader、最近任期和选举轨迹 | 补齐 GPUI/WebUI/Android 等价投影和运营视图 |
 | IA-04 | 环境假设 | 持久化正确性依赖本地文件锁、`fsync`、原子 rename 和目录同步 | 明确只支持已验证文件系统；禁止网络盘部署，补跨平台测试 |
 | IA-05 | 环境假设 | 租约/超时依赖墙上时钟和有限漂移边界 | 部署可信时间源，持续暴露 `clock_skew` 告警并演练回拨 |
@@ -323,12 +331,12 @@ cargo test -p fuckipv6-coordinator signaling::coordinator_candidates --lib
 - [x] 选举过程有超时、退避和幂等重试；
 - [x] 客户端重连后刷新 Leader 与任期中继信息；
 - [x] 记录选举阶段、参与者集合和结果；
+- [x] 真实后台客户端运行时完成候选故障后的自动接管 E2E；
 - [x] 严格多数、旧任期、旧 token、迟到/重复/冲突票和配置 revision 均有失败关闭路径。
 
 不能确认的发布项：
 
 - [ ] 自研设计已经过正式、独立、可公开复核的安全审计；
-- [ ] 真实客户端运行时已在后台节点故障场景中完成全链路接管 E2E；
 - [ ] 三端运营界面完整展示候选健康、Leader 和最近任期；
 - [ ] 管理员阈值恢复和三端灾难流程完成。
 

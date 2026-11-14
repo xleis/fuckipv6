@@ -342,7 +342,7 @@ mod tests {
                 COORDINATOR_TAKEOVER_MAX_POLL_INTERVAL,
             ),
         ];
-        for (expected_failures, (minimum, maximum)) in (1..=8).zip(bounds.into_iter()) {
+        for (expected_failures, (minimum, maximum)) in (1..=8).zip(bounds) {
             first.record_failure();
             replay.record_failure();
             let delay = first.delay();

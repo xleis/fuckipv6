@@ -3552,6 +3552,8 @@ DOS 设备名拒绝同时覆盖 `CONIN$`、`CONOUT$`、`CLOCK$` 与 `COM/LPT` �
 实现。跨平台 property 测试已在共享代码执行，Windows GNU client library 交叉编译通过，但 Windows/macOS 实机路径差异和重解析点
 仍未验收，因此 W15-04 继续保持 `[~]`。
 
+**补充（2026-11-14，Windows Win32/NT 路径边界自动化）**：Windows `LocalShareRoot` 现在以共享根 `HANDLE` 及 volume serial/file index 身份锚定边界，逐组件使用 `NtCreateFile`，并同时设置 `OBJ_CASE_INSENSITIVE`、`OBJ_DONT_REPARSE` 与 `FILE_OPEN_REPARSE_POINT`；每次打开后都通过 `GetFileInformationByHandle` 复核 reparse 属性及预期文件/目录类型，根探测也会重新打开并比较身份，目录替换不会静默继承旧授权。`AllowWithinRoot` 在非 Linux 平台仍失败关闭，不采用 canonicalize 后再打开的竞态路径。Windows GNU client library 交叉编译、Linux `file_share::` 195 项和 Wine 下 Windows target `file_share::` 186 项/0 失败通过；Wine 仅提供兼容性自动化证据，Windows/macOS 实机路径语义仍未验收，因此 W15-04 继续保持 `[~]`。
+
 ### W15-05 符号链接、竞态与临时文件 `[~]`
 
 - [ ] 拒绝指向共享根外的符号链接/重解析点；
@@ -3577,6 +3579,8 @@ DOS 设备名拒绝同时覆盖 `CONIN$`、`CONOUT$`、`CLOCK$` 与 `COM/LPT` �
 代码证据。Linux 进程内另由 `download_session_limit_and_cancel_restore_capacity` 读取 `/proc/self/fd`，验证 16 个受全局上限约束的
 下载会话各占用一个临时目录文件句柄，逐个取消后回到同一基线；该结果只覆盖正常取消路径，不证明异常退出、满载隔离或
 macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态以及 macOS/Windows 并发重命名语义仍未验收。
+
+**补充（2026-11-14，Windows 链接拒绝、原子发布与 staging 清理自动化）**：Windows 适配器将最终文件和中间目录均按句柄相对方式打开，`NtCreateFile` 遇到 reparse point 或非目录组件时失败关闭；`NtQueryDirectoryFile(FileIdBothDirectoryInformation)` 枚举时跳过 reparse point/device，并对不可表示 UTF-16 名称仍计入枚举上限。上传发布先锚定临时目录和目标父目录，再以 `NtSetInformationFile(FileLinkInformation)` 执行 no-replace 硬链接；成功后通过 `FileDispositionInformation` 删除 staging，现有目标导致失败时也验证 staging 被删除。`rejects_final_symbolic_link`、`rejects_intermediate_symbolic_link`、`directory_listing_skips_reparse_points`、`probe_rejects_root_replaced_by_symbolic_link`、`publication_rejects_a_target_parent_swapped_to_an_outside_symlink` 和 staging 清理断言在 Wine 下通过。该证据不证明 Windows/macOS 实机竞态、真实 ACL/ETW 或并发重命名语义，W15-05 继续保持 `[~]`。
 
 **补充（2026-11-13，Linux 并发目录交换）**：`concurrent_directory_exchange_never_publishes_outside_root` 使用
 `renameat2(RENAME_EXCHANGE)` 持续原子交换共享根内的真实父目录与指向根外的符号链接，同时连续发布 256 个唯一目标文件。
@@ -3674,6 +3678,8 @@ journal 为空。资源核对结果为 coordinator/owner FD 26→26、线程 20�
 `b019ac564d2ca90f5d30de39c1360d974f854374df42b36a3f38b81c5ba2b55f`，对应 release 二进制 SHA256 为
 `9e4c708a46c6df6ca731d7c68ed2e4889cf5702d31cc31e797d6e6ca8b02db45`，绑定提交 `3ad41dc`。该证据补齐 Linux 独立
 node/control 基本功能在 File 满载下的隔离结论；仍不扩张为 macOS/Windows 实机、长时高压、跨平台内存或真实网络吞吐结论。
+
+**补充（2026-11-14，Windows 配额扫描根绑定）**：Windows quota scan 不复用共享目录游标，而是从新打开的根句柄重新核对 volume serial/file index 后遍历；`NtQueryDirectoryFile` 每次调用受固定 64 KiB 缓冲区和枚举上限约束，reparse point 计入跳过数且不会进入根外目录。Wine 下完整的 `file_share::` 186 项通过，包括并发配额扫描、目录链接跳过和根替换测试；macOS/Windows 实机线程、RSS、句柄及长时高压基线仍未验收。
 
 **未测边界**：Linux 进程内已覆盖满载上传/下载的正常完成、丢弃、staging 清理、OS 资源恢复和测试进程 SIGKILL 后的重启
 清理；独立三节点已覆盖四槽满载下的控制面响应和取消后的 FD、线程、RSS 回退。尚未执行跨平台或长时高压满载，macOS/Windows
@@ -3811,6 +3817,8 @@ Linux 三节点 netns 验收通过，覆盖双向 P2P 上传/下载、暂停/vet
 在线 ACL/撤权与四槽满载隔离。本次还补齐 5 个英文 File 错误键，并将生成的 Android DTO 清单断言更新为 301。
 该记录只证明集成门禁与 Linux 实网路径，不替代 Android SAF、Windows/macOS 实机路径安全、跨平台竞态/验收或
 OS 性能基线，故 W15-08 与 W15 总体继续保持 `[~]`。
+
+**补充（2026-11-14，Windows 路径安全测试矩阵与 Wine 兼容性）**：Windows target 现已启用文件/目录 symlink、根替换、硬链接、目录枚举重解析点、发布父目录交换、配额扫描和 staging 清理测试；Win32/NT adapter 使用锚定根和逐组件句柄解析，`NtCreateFile`、`NtQueryDirectoryFile`、`NtSetInformationFile` 覆盖打开、枚举、原子发布与删除路径。Linux `cargo test -p fuckipv6-client --lib file_share::` 为 195 项通过，Wine 下 Windows target 同一过滤集为 186 项通过/0 失败，Windows GNU client library 交叉编译、`cargo test --workspace --all-targets`（client library 1,459 项通过/3 项忽略）、`cargo fmt --all -- --check`、workspace Clippy `-D warnings` 与 `git diff --check` 通过。Wine 不是 Windows/macOS 实机，仍不能证明真实 ACL、杀软/过滤驱动、大小写不敏感卷、重解析点行为或跨平台传输竞态；Android SAF/File 内容表面及跨平台性能验收也未完成，因此 W15-08 与 W15 总体继续保持 `[~]`。
 
 **补充（2026-11-13，portable ACL 身份与 Linux TOCTOU）**：
 `portable_paths_preserve_rendering_and_fold_authorization_identity` 与 ACL Deny 大小写变体断言补齐了 portable 路径授权身份，

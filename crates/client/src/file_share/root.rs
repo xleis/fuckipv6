@@ -1,9 +1,11 @@
 #[cfg(unix)]
 use std::ffi::{CStr, CString};
-use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
+use std::fs::OpenOptions;
+use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,6 +15,10 @@ use std::os::fd::AsFd;
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+
+#[cfg(windows)]
+#[path = "root_windows.rs"]
+mod windows;
 
 use fuckipv6_common::domain::{ContentHash, FileVersion, ShareRoot, SharedPath, SymlinkPolicy};
 
@@ -71,9 +77,11 @@ pub(crate) const STALE_TEMP_FILE_AGE_MS: u64 = 30 * 60 * 1_000;
 pub struct LocalShareRoot {
     canonical_root: PathBuf,
     symlink_policy: SymlinkPolicy,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     root_file: Arc<File>,
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    root_identity: windows::WindowsFileIdentity,
+    #[cfg(not(any(unix, windows)))]
     _private: (),
 }
 
@@ -173,12 +181,19 @@ impl LocalShareRoot {
             Arc::new(file)
         };
 
+        #[cfg(windows)]
+        let (root_file, root_identity) = windows::open_root(&canonical_root)?;
+        #[cfg(windows)]
+        let root_file = Arc::new(root_file);
+
         Ok(Self {
             canonical_root,
             symlink_policy,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             root_file,
-            #[cfg(not(unix))]
+            #[cfg(windows)]
+            root_identity,
+            #[cfg(not(any(unix, windows)))]
             _private: (),
         })
     }
@@ -242,7 +257,11 @@ impl LocalShareRoot {
                 ));
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            windows::probe_root(&self.canonical_root, &self.root_file, self.root_identity)?;
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let metadata = fs::metadata(&self.canonical_root).map_err(|error| {
                 FileShareError::io(
@@ -297,7 +316,17 @@ impl LocalShareRoot {
             scan_directory_unix(root.as_raw_fd(), 0, limits, &mut usage)?;
             Ok(usage)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            windows::scan_directory(
+                &self.canonical_root,
+                &self.root_file,
+                self.root_identity,
+                0,
+                limits,
+            )
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let mut usage = DirectoryUsage::default();
             scan_directory_portable(&self.canonical_root, 0, limits, &mut usage)?;
@@ -352,11 +381,15 @@ impl LocalShareRoot {
         }
         #[cfg(unix)]
         let directory = self.open_directory(path)?;
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        let directory = self.open_directory(path)?;
+        #[cfg(not(any(unix, windows)))]
         let _directory = self.open_directory(path)?;
         #[cfg(unix)]
         let mut entries = enumerate_directory_unix(&directory, path)?;
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        let mut entries = windows::enumerate_directory(&directory, path)?;
+        #[cfg(not(any(unix, windows)))]
         let mut entries = self.enumerate_directory_portable(path)?;
         entries.sort_by(|left, right| left.path.as_str().cmp(right.path.as_str()));
 
@@ -395,7 +428,9 @@ impl LocalShareRoot {
         match self.symlink_policy {
             #[cfg(unix)]
             SymlinkPolicy::Reject => self.open_without_symlinks(path, libc_read_flags(), 0),
-            #[cfg(not(unix))]
+            #[cfg(windows)]
+            SymlinkPolicy::Reject => self.open_windows_read(path),
+            #[cfg(not(any(unix, windows)))]
             SymlinkPolicy::Reject => self.open_without_symlinks_portable(path),
             SymlinkPolicy::AllowWithinRoot => self.open_following_within_root(path),
         }
@@ -464,7 +499,11 @@ impl LocalShareRoot {
         {
             self.open_without_symlinks(path, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o600)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            self.open_windows_write_new(path)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             self.open_write_new_portable(path)
         }
@@ -484,7 +523,11 @@ impl LocalShareRoot {
             }
             self.open_without_symlinks(path, libc::O_RDONLY | libc::O_DIRECTORY, 0)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            self.open_windows_directory(path)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             self.open_directory_portable(path)
         }
@@ -524,7 +567,11 @@ impl LocalShareRoot {
             }
             Ok(unsafe { File::from_raw_fd(descriptor) })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            self.create_temporary_file_windows(name)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             self.create_temporary_file_portable(name)
         }
@@ -581,7 +628,11 @@ impl LocalShareRoot {
             }
             Ok(())
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            self.link_temporary_file_new_windows(temporary_name, target)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             self.link_temporary_file_new_portable(temporary_name, target)
         }
@@ -605,7 +656,11 @@ impl LocalShareRoot {
             }
             Ok(())
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            self.remove_temporary_file_windows(temporary_name)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             match fs::remove_file(self.temporary_file_path(temporary_name)) {
                 Ok(()) => Ok(()),
@@ -719,7 +774,11 @@ impl LocalShareRoot {
             }
             Ok(removed)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            self.cleanup_stale_temporary_files_windows(now_unix_ms, max_age_ms)
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let directory = self.temporary_directory_path();
             let entries = match fs::read_dir(&directory) {
@@ -987,7 +1046,7 @@ impl LocalShareRoot {
         ))
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn ensure_inside_root(&self, canonical: &Path) -> FileShareResult<()> {
         canonical.strip_prefix(&self.canonical_root).map_err(|_| {
             FileShareError::new(
@@ -998,7 +1057,7 @@ impl LocalShareRoot {
         Ok(())
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn open_without_symlinks_portable(&self, path: &SharedPath) -> FileShareResult<File> {
         let mut current = self.canonical_root.clone();
         for component in path.components() {
@@ -1052,7 +1111,7 @@ impl LocalShareRoot {
         Ok(file)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn open_write_new_portable(&self, path: &SharedPath) -> FileShareResult<File> {
         self.validate_portable_target_parent(path)?;
         let target = self.canonical_root.join(path.as_str());
@@ -1067,7 +1126,7 @@ impl LocalShareRoot {
         })
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn open_directory_portable(&self, path: &SharedPath) -> FileShareResult<File> {
         let target = self.canonical_root.join(path.as_str());
         let canonical = fs::canonicalize(target).map_err(|error| {
@@ -1087,7 +1146,7 @@ impl LocalShareRoot {
         })
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn validate_portable_target_parent(&self, path: &SharedPath) -> FileShareResult<()> {
         let components: Vec<&str> = path.components().collect();
         let (_, parents) = components.split_last().ok_or_else(|| {
@@ -1108,7 +1167,7 @@ impl LocalShareRoot {
         self.ensure_inside_root(&canonical)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn create_temporary_file_portable(&self, name: &str) -> FileShareResult<File> {
         let directory = self.temporary_directory_path();
         fs::create_dir_all(&directory).map_err(|error| {
@@ -1132,7 +1191,7 @@ impl LocalShareRoot {
             })
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn link_temporary_file_new_portable(
         &self,
         temporary_name: &str,
@@ -1270,7 +1329,7 @@ fn stat_modified_at_unix_ms(metadata: &libc::stat) -> Option<u64> {
         .checked_add(u64::try_from(nanos).ok()? / 1_000_000)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 impl LocalShareRoot {
     fn enumerate_directory_portable(
         &self,
@@ -1526,7 +1585,7 @@ fn count_scanned_entry(limits: QuotaScanLimits, usage: &mut DirectoryUsage) -> F
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn scan_directory_portable(
     directory: &Path,
     depth: usize,
@@ -1694,6 +1753,26 @@ mod tests {
         (temporary, selected)
     }
 
+    #[cfg(unix)]
+    fn create_directory_link(target: &Path, link: &Path) {
+        std::os::unix::fs::symlink(target, link).expect("directory symlink");
+    }
+
+    #[cfg(windows)]
+    fn create_directory_link(target: &Path, link: &Path) {
+        std::os::windows::fs::symlink_dir(target, link).expect("directory symlink");
+    }
+
+    #[cfg(unix)]
+    fn create_file_link(target: &Path, link: &Path) {
+        std::os::unix::fs::symlink(target, link).expect("file symlink");
+    }
+
+    #[cfg(windows)]
+    fn create_file_link(target: &Path, link: &Path) {
+        std::os::windows::fs::symlink_file(target, link).expect("file symlink");
+    }
+
     #[test]
     fn rejects_regular_file_as_share_root() {
         let temporary = tempfile::tempdir().expect("tempdir");
@@ -1749,25 +1828,24 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn rejects_final_symbolic_link() {
         let (temporary, share) = root();
         let outside = tempfile::NamedTempFile::new().expect("outside");
-        std::os::unix::fs::symlink(outside.path(), temporary.path().join("link")).expect("symlink");
+        create_file_link(outside.path(), &temporary.path().join("link"));
         let path = SharedPath::parse("link").expect("path");
         let error = share.open_read(&path).expect_err("symlink must fail");
         assert_eq!(error.code(), FileShareErrorCode::SymlinkRejected);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn rejects_intermediate_symbolic_link() {
         let (temporary, share) = root();
         let outside = tempfile::tempdir().expect("outside");
         fs::write(outside.path().join("secret"), b"secret").expect("file");
-        std::os::unix::fs::symlink(outside.path(), temporary.path().join("outside"))
-            .expect("symlink");
+        create_directory_link(outside.path(), &temporary.path().join("outside"));
         let path = SharedPath::parse("outside/secret").expect("path");
         let error = share.open_read(&path).expect_err("symlink must fail");
         assert_eq!(error.code(), FileShareErrorCode::SymlinkRejected);
@@ -1953,7 +2031,7 @@ mod tests {
         run_concurrent_directory_exchange(SymlinkPolicy::AllowWithinRoot);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn hard_link_inside_root_is_authorized_as_a_directory_entry() {
         let temporary = tempfile::tempdir().expect("tempdir");
@@ -1980,7 +2058,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn probe_rejects_root_replaced_by_another_directory() {
         let temporary = tempfile::tempdir().expect("tempdir");
@@ -1999,7 +2077,7 @@ mod tests {
         assert_eq!(error.code(), FileShareErrorCode::RootUnavailable);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn probe_rejects_root_replaced_by_symbolic_link() {
         let temporary = tempfile::tempdir().expect("tempdir");
@@ -2013,8 +2091,8 @@ mod tests {
         )
         .expect("share root");
 
-        fs::remove_dir(&selected).expect("remove root");
-        std::os::unix::fs::symlink(&outside, &selected).expect("replacement symlink");
+        fs::rename(&selected, temporary.path().join("shared-original")).expect("move root");
+        create_directory_link(&outside, &selected);
 
         let error = share.probe().expect_err("replacement symlink must fail");
         assert_eq!(error.code(), FileShareErrorCode::RootUnavailable);
@@ -2132,6 +2210,36 @@ mod tests {
         assert_eq!(listing.entries[0].path.as_str(), "visible.txt");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn directory_listing_skips_reparse_points() {
+        let (temporary, share) = root();
+        let outside = tempfile::tempdir().expect("outside");
+        fs::write(outside.path().join("secret"), b"outside-secret").expect("outside file");
+        create_directory_link(outside.path(), &temporary.path().join("directory-link"));
+        create_file_link(
+            &outside.path().join("secret"),
+            &temporary.path().join("file-link"),
+        );
+        fs::write(temporary.path().join("visible.txt"), b"visible").expect("visible file");
+
+        let listing = share
+            .list_directory(&SharedPath::root(), 16, None)
+            .expect("listing");
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!(listing.entries[0].path.as_str(), "visible.txt");
+        assert_eq!(listing.entries[0].size, 7);
+
+        let error = share
+            .list_directory(
+                &SharedPath::parse("directory-link").expect("path"),
+                16,
+                None,
+            )
+            .expect_err("listing a reparse point must fail closed");
+        assert_eq!(error.code(), FileShareErrorCode::SymlinkRejected);
+    }
+
     #[test]
     fn quota_scan_counts_nested_files_and_excludes_staging() {
         let (temporary, share) = root();
@@ -2150,14 +2258,13 @@ mod tests {
         assert_eq!(usage.symlinks_skipped, 0);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn quota_scan_never_follows_symbolic_links() {
         let (temporary, share) = root();
         let outside = tempfile::tempdir().expect("outside");
         fs::write(outside.path().join("secret"), vec![0_u8; 4096]).expect("outside file");
-        std::os::unix::fs::symlink(outside.path(), temporary.path().join("outside"))
-            .expect("symlink");
+        create_directory_link(outside.path(), &temporary.path().join("outside"));
 
         let usage = share
             .directory_usage(QuotaScanLimits::default())
@@ -2191,7 +2298,7 @@ mod tests {
         assert_eq!(depth_error.code(), FileShareErrorCode::ScanLimitExceeded);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn concurrent_quota_scans_keep_independent_directory_cursors() {
         use std::sync::{Arc, Barrier};
@@ -2274,14 +2381,13 @@ mod tests {
             .expect("unrelated staging-like file");
         drop(share.create_temporary_file("notes.txt").expect("user file"));
 
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let outside_link = {
             let outside = tempfile::tempdir().expect("outside");
             let target = outside.path().join("secret");
             fs::write(&target, b"outside").expect("outside file");
             let link_name = format!("up-{:032x}", 3);
-            std::os::unix::fs::symlink(&target, share.temporary_file_path(&link_name))
-                .expect("staging symlink");
+            create_file_link(&target, &share.temporary_file_path(&link_name));
             (outside, link_name)
         };
 
@@ -2299,7 +2405,7 @@ mod tests {
         assert!(share.temporary_file_path(&fresh_name).exists());
         assert!(share.temporary_file_path(&invalid_name).exists());
         assert!(share.temporary_file_path("notes.txt").exists());
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             assert!(share.temporary_file_path(&outside_link.1).exists());
             assert!(outside_link.0.path().join("secret").exists());

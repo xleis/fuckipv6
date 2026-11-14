@@ -124,7 +124,9 @@ use fuckipv6_common::domain::SharedPath;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(any(unix, windows))]
     use std::fs;
+    #[cfg(unix)]
     use std::io::Read;
 
     use fuckipv6_common::domain::{SharedPath, SymlinkPolicy};
@@ -141,15 +143,27 @@ mod tests {
         (temporary, selected)
     }
 
+    #[cfg(unix)]
+    fn create_directory_link(target: &std::path::Path, link: &std::path::Path) {
+        std::os::unix::fs::symlink(target, link).expect("directory symlink");
+    }
+
+    #[cfg(windows)]
+    fn create_directory_link(target: &std::path::Path, link: &std::path::Path) {
+        std::os::windows::fs::symlink_dir(target, link).expect("directory symlink");
+    }
+
     #[test]
     fn temporary_upload_is_published_only_after_completion() {
         let (temporary, share) = root();
         let target = SharedPath::parse("result.txt").expect("path");
         let mut upload = TemporaryUpload::create(&share).expect("upload");
         upload.write_all(b"complete").expect("write");
+        let staged = upload.temporary_path();
         assert!(!temporary.path().join("result.txt").exists());
 
         upload.persist_new(&target).expect("persist");
+        assert!(!staged.exists());
         assert_eq!(
             std::fs::read_to_string(temporary.path().join("result.txt")).expect("read"),
             "complete"
@@ -174,18 +188,20 @@ mod tests {
         let target = SharedPath::parse("result.txt").expect("path");
         let mut upload = TemporaryUpload::create(&share).expect("upload");
         upload.write_all(b"replacement").expect("write");
+        let staged = upload.temporary_path();
 
         let error = upload
             .persist_new(&target)
             .expect_err("existing target must fail");
         assert_eq!(error.code(), FileShareErrorCode::TargetExists);
+        assert!(!staged.exists());
         assert_eq!(
             std::fs::read_to_string(temporary.path().join("result.txt")).expect("read"),
             "original"
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn publication_rejects_a_target_parent_swapped_to_an_outside_symlink() {
         let (temporary, share) = root();
@@ -200,7 +216,7 @@ mod tests {
         upload.write_all(b"replacement").expect("write");
 
         fs::rename(&target_parent, &parked_parent).expect("move inside parent");
-        std::os::unix::fs::symlink(outside.path(), &target_parent).expect("outside symlink");
+        create_directory_link(outside.path(), &target_parent);
         let error = upload
             .persist_new(&target)
             .expect_err("swapped target parent must fail closed");

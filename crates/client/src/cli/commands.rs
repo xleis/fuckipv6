@@ -11640,6 +11640,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn local_exit_veto_overrides_network_exit_role() {
         assert!(local_exit_effective(true, true));

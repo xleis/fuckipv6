@@ -3316,18 +3316,18 @@ netns/iptables 测试覆盖。三端 Relay UI 的权限、网络选择、健康�
 
 ### W14-03 正常多数接管 `[ ]`
 
-> 当前进展（2026-11-15）：运行时每 5 秒读取一次权威候选状态和恢复快照，再决定 proposal、vote、timeout、紧急签发或续租；动作失败不会在本地推断成功，下一轮会重新读取权威状态。候选偏好、健康、当前任期/租约和严格多数共同约束新 Leader 安装，迟到票、重复票和冲突票均失败关闭。已具备 `quorum` 和 `latest_election` 的候选、票集合、阶段与结果投影，长时间数据面会话也能跨真实 term 1 → term 2 切换保持。仍缺显式选举退避/抖动、自研共识协议的正式审计结论，以及由真实客户端运行时自动完成后台节点故障接管的完整 E2E，因此本项保持未完成。
+> 当前进展（2026-11-15）：运行时以 5 秒为基础间隔读取权威候选状态和恢复快照，再决定 proposal、vote、timeout、紧急签发或续租；动作失败不会在本地推断成功，失败后按 5/10/20/40/60 秒有界退避并在成功时重置。轮询抖动由稳定 identity 确定性生成 ±10%，避免客户端同步重试且保持事故可复现。信令 `Reconnected` 会经 wakeup channel 立即刷新候选权威状态和恢复快照，不等待下一轮常规轮询。候选偏好、健康、当前任期/租约和严格多数共同约束新 Leader 安装，迟到票、重复票和冲突票均失败关闭。已具备 `quorum` 和 `latest_election` 的候选、票集合、阶段与结果投影，长时间数据面会话也能跨真实 term 1 → term 2 切换保持。[内部安全审计](W14_COORDINATOR_PROTOCOL_AUDIT.zh-CN.md)确认了严格多数、旧任期/旧 token、迟到/重复/冲突票、配置 revision、TOCTOU、租约/fencing 和失败关闭路径，但它不是独立正式审计。仍缺自研共识协议的正式外部审计结论，以及由真实客户端运行时自动完成后台节点故障接管的完整 E2E，因此本项保持未完成。
 
 - [x] Leader 失联后按候选组和健康状态发起选举；
 - [x] 仅在达到配置多数/法定人数时产生新 Leader；
 - [ ] 选择协议采用经过评估的成熟实现或经过审计的自研设计；
-- [ ] 选举过程有超时、退避和幂等重试；
-- [ ] 客户端重连后刷新 Leader 与任期中继信息；
+- [x] 选举过程有超时、退避和幂等重试；
+- [x] 客户端重连后刷新 Leader 与任期中继信息；
 - [x] 数据面连接不因控制面选举无条件中断；
 - [ ] 完成后台节点故障接管 E2E；
 - [x] 记录选举阶段、参与者集合和结果。
 
-**证据**：client takeover 决策测试 12 passed，覆盖首选/非首选候选、候选人等待、过期 proposal 超时和 malformed proposal 失败关闭；Coordinator `three_candidate_election_commits_only_after_strict_majority`、`persisted_election_commits_only_after_strict_majority`、`election_timeout_is_durable_and_rejects_late_votes` 和 `election_session_requires_strict_majority_and_is_idempotent` 验证严格多数、持久化、超时与幂等；`w14_fault_injection_matrix_records_state_machine_trajectory` 记录阶段、参与者集合和结果。`coordinator_takeover_poll_preserves_the_live_data_plane_session` 验证控制面故障/恢复轮询不终止数据面；`quic_p2p_mesh_long_lived_stream_spans_real_coordinator_term_takeover` 验证 term 1 → term 2 期间 96 个媒体尺寸 frame 按序到达且 QUIC 连接未重建。当前实现只有固定 5 秒轮询，没有显式 backoff/jitter，不能把“超时、退避和幂等重试”整项勾选。
+**证据**：client takeover 决策测试 14 passed，覆盖首选/非首选候选、候选人等待、过期 proposal 超时、malformed proposal、有界指数退避、确定性 jitter 和重连立即刷新；`takeover_poll_backoff_is_deterministic_bounded_and_resettable` 验证 5/10/20/40/60 秒上限及成功重置，`takeover_poll_jitter_differs_by_stable_seed` 验证稳定 identity 的抖动差异，`coordinator_takeover_reconnect_wakeup_refreshes_without_waiting_for_poll` 在 2 秒内观察到状态与恢复请求。Coordinator `three_candidate_election_commits_only_after_strict_majority`、`persisted_election_commits_only_after_strict_majority`、`election_timeout_is_durable_and_rejects_late_votes` 和 `election_session_requires_strict_majority_and_is_idempotent` 验证严格多数、持久化、超时与幂等；`w14_fault_injection_matrix_records_state_machine_trajectory` 记录阶段、参与者集合和结果。`coordinator_takeover_poll_preserves_the_live_data_plane_session` 验证控制面故障/恢复轮询不终止数据面；`quic_p2p_mesh_long_lived_stream_spans_real_coordinator_term_takeover` 验证 term 1 → term 2 期间 96 个媒体尺寸 frame 按序到达且 QUIC 连接未重建。内部审计与残余风险见 `docs/W14_COORDINATOR_PROTOCOL_AUDIT.zh-CN.md`；正式独立审计和真实客户端运行时完整故障接管 E2E 仍未完成。
 
 **验收**：正常多数接管可重复、可观察，且不会产生双 Leader 写入。
 

@@ -2583,7 +2583,8 @@ mod tests {
         CoordinatorCandidateWillingness, CoordinatorControlPlaneState, CoordinatorPhase,
         CoordinatorPublicReachability, ExitContributionMode, ExitContributionObligation,
         ExitContributionScope, ExitSelectionPolicy, FencingToken, NetworkCreateProfile,
-        NetworkJoinMode, NetworkVisibility, PublicKey, COORDINATOR_ELECTION_VOTE_MAX_VALIDITY_MS,
+        NetworkJoinMode, NetworkVisibility, PublicKey, COORDINATOR_CLOCK_SKEW_LIMIT_MS,
+        COORDINATOR_ELECTION_VOTE_MAX_VALIDITY_MS,
     };
     use fuckipv6_common::Identity;
     use std::sync::mpsc;
@@ -3853,6 +3854,486 @@ mod tests {
                 && entry.outcome == AuditOutcome::Denied
                 && entry.details.get("term") == Some(&"1".into())
         }));
+    }
+
+    #[test]
+    fn w14_fault_injection_matrix_records_state_machine_trajectory() {
+        fn event(
+            scenario: &str,
+            status: &CoordinatorCandidateStatus,
+            audit_sequence: u64,
+            result: &str,
+        ) -> serde_json::Value {
+            let election = status.latest_election.as_ref().map(|election| {
+                serde_json::json!({
+                    "stage": format!("{:?}", election.stage),
+                    "term": election.proposal.term,
+                    "votes": election.votes.len(),
+                    "required_votes": election.proposal.majority_threshold(),
+                })
+            });
+            let emergency = status.emergency_leader.as_ref().map(|lease| {
+                serde_json::json!({
+                    "leader": lease.leader.to_string(),
+                    "epoch": lease.emergency_epoch,
+                    "governance_writable": lease.governance_writable,
+                    "data_plane_allowed": lease.data_plane_allowed,
+                    "remaining_ms": lease.remaining_ms,
+                })
+            });
+            serde_json::json!({
+                "scenario": scenario,
+                "result": result,
+                "audit_sequence": audit_sequence,
+                "term": status.latest_term.as_ref().map(|term| term.term),
+                "fencing_token": status
+                    .latest_term
+                    .as_ref()
+                    .map(|term| term.fencing_token.0),
+                "leader": status.current_leader.as_ref().map(ToString::to_string),
+                "control_plane": format!("{:?}", status.control_plane.state),
+                "reason_code": status.control_plane.reason_code,
+                "governance_writable": status.control_plane.governance_writable,
+                "votes": status.control_plane.quorum.received_votes,
+                "required_votes": status.control_plane.quorum.required_votes,
+                "participants": status.control_plane.quorum.participant_count,
+                "emergency": emergency,
+                "election": election,
+            })
+        }
+
+        let fixture = Fixture::new("w14-fault-matrix");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_two_id = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        let ordinary_id = NodeId::from_public_key(&fixture.ordinary.public_key());
+        let audit_sequence = || store.audit_entries().unwrap().len() as u64;
+        let mut trajectory = Vec::new();
+
+        store
+            .update_config(&owner_id, 0, fixture.config_three(1), NOW)
+            .unwrap();
+        for candidate in [
+            &fixture.candidate_one,
+            &fixture.candidate_two,
+            &fixture.ordinary,
+        ] {
+            store
+                .publish_declaration(
+                    &NodeId::from_public_key(&candidate.public_key()),
+                    fixture.declaration(candidate, 1),
+                    NOW,
+                )
+                .unwrap();
+        }
+
+        let first_lease_expires_at_unix_ms = NOW + 20_000;
+        let initial_term = fixture.term_three(
+            1,
+            1,
+            &fixture.candidate_one,
+            NOW,
+            first_lease_expires_at_unix_ms,
+        );
+        let stale_credential = fixture.credential(&initial_term);
+        let initial = store
+            .install_term(&candidate_one_id, initial_term, NOW)
+            .unwrap();
+        assert_eq!(
+            initial.control_plane.state,
+            CoordinatorControlPlaneState::Available
+        );
+        assert!(initial.control_plane.governance_writable);
+        trajectory.push(event(
+            "normal_majority",
+            &initial,
+            audit_sequence(),
+            "term 1 installed with 2/3 candidate votes",
+        ));
+
+        // Candidate two can observe only its own vote after the candidate group
+        // is partitioned. Candidate one's vote is suspended and arrives after
+        // the election deadline, so no new authority may be installed.
+        let partition_started_at_unix_ms = first_lease_expires_at_unix_ms;
+        let partition_proposal = fixture.election_proposal_three(
+            2,
+            &fixture.candidate_two,
+            partition_started_at_unix_ms,
+            NOW + 45_000,
+        );
+        let partition_proposal_id = partition_proposal.proposal_id.clone();
+        store
+            .propose_election(
+                &candidate_two_id,
+                partition_proposal.clone(),
+                partition_started_at_unix_ms,
+            )
+            .unwrap();
+        let self_vote = fixture.election_vote_three(
+            2,
+            &fixture.candidate_two,
+            &fixture.candidate_two,
+            partition_started_at_unix_ms,
+            partition_proposal.expires_at_unix_ms,
+        );
+        let partitioned = store
+            .record_election_vote(
+                &candidate_two_id,
+                &partition_proposal_id,
+                self_vote,
+                partition_started_at_unix_ms + 1,
+            )
+            .unwrap();
+        assert_eq!(
+            partitioned.control_plane.state,
+            CoordinatorControlPlaneState::ElectionInProgress
+        );
+        trajectory.push(event(
+            "network_partition",
+            &partitioned,
+            audit_sequence(),
+            "only 1/2 required votes observed",
+        ));
+
+        let timed_out = store
+            .timeout_election(
+                &candidate_two_id,
+                &fixture.network.network_id,
+                &partition_proposal_id,
+                partition_proposal.expires_at_unix_ms,
+            )
+            .unwrap();
+        assert_eq!(
+            timed_out.control_plane.state,
+            CoordinatorControlPlaneState::QuorumUnavailable
+        );
+        assert!(!timed_out.control_plane.governance_writable);
+        trajectory.push(event(
+            "no_majority",
+            &timed_out,
+            audit_sequence(),
+            "election timed out without installing term 2",
+        ));
+
+        let paused_vote = fixture.election_vote_three(
+            2,
+            &fixture.candidate_two,
+            &fixture.candidate_one,
+            partition_started_at_unix_ms,
+            partition_proposal.expires_at_unix_ms,
+        );
+        let paused_vote_error = store
+            .record_election_vote(
+                &candidate_one_id,
+                &partition_proposal_id,
+                paused_vote,
+                partition_proposal.expires_at_unix_ms + 1,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(paused_vote_error.contains("invalid_stage"));
+        trajectory.push(serde_json::json!({
+            "scenario": "process_pause_late_vote",
+            "result": "rejected after election timeout",
+            "error": paused_vote_error,
+            "audit_sequence": audit_sequence(),
+        }));
+
+        // A restarted candidate with a future local clock cannot contribute a
+        // vote until its clock is aligned. The same candidate can vote after it
+        // observes the authoritative current time.
+        let recovery_started_at_unix_ms = partition_proposal.expires_at_unix_ms + 2;
+        let recovery_proposal = fixture.election_proposal_three(
+            2,
+            &fixture.candidate_two,
+            recovery_started_at_unix_ms,
+            NOW + 125_002,
+        );
+        let recovery_proposal_id = recovery_proposal.proposal_id.clone();
+        store
+            .propose_election(
+                &candidate_two_id,
+                recovery_proposal.clone(),
+                recovery_started_at_unix_ms,
+            )
+            .unwrap();
+        let future_vote = fixture.election_vote_three(
+            2,
+            &fixture.candidate_two,
+            &fixture.candidate_one,
+            recovery_started_at_unix_ms + COORDINATOR_CLOCK_SKEW_LIMIT_MS + 1,
+            recovery_proposal.expires_at_unix_ms,
+        );
+        let clock_error = store
+            .record_election_vote(
+                &candidate_one_id,
+                &recovery_proposal_id,
+                future_vote,
+                recovery_started_at_unix_ms,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(clock_error.contains("vote_from_future"));
+        trajectory.push(serde_json::json!({
+            "scenario": "clock_drift",
+            "result": "future-dated vote rejected",
+            "error": clock_error,
+            "audit_sequence": audit_sequence(),
+        }));
+
+        let recovered_vote_one = fixture.election_vote_three(
+            2,
+            &fixture.candidate_two,
+            &fixture.candidate_one,
+            recovery_started_at_unix_ms + 1,
+            recovery_proposal.expires_at_unix_ms,
+        );
+        let recovered_vote_leader = fixture.election_vote_three(
+            2,
+            &fixture.candidate_two,
+            &fixture.candidate_two,
+            recovery_started_at_unix_ms + 2,
+            recovery_proposal.expires_at_unix_ms,
+        );
+        store
+            .record_election_vote(
+                &candidate_one_id,
+                &recovery_proposal_id,
+                recovered_vote_one.clone(),
+                recovery_started_at_unix_ms + 2,
+            )
+            .unwrap();
+        let recovered = store
+            .record_election_vote(
+                &candidate_two_id,
+                &recovery_proposal_id,
+                recovered_vote_leader,
+                recovery_started_at_unix_ms + 3,
+            )
+            .unwrap();
+        assert_eq!(
+            recovered.control_plane.state,
+            CoordinatorControlPlaneState::Available
+        );
+        assert_eq!(recovered.latest_term.as_ref().unwrap().term, 2);
+        trajectory.push(event(
+            "partition_recovery",
+            &recovered,
+            audit_sequence(),
+            "clock-aligned candidates restored strict majority and term 2",
+        ));
+
+        // Replaying an already accepted signed vote is idempotent and cannot
+        // advance the durable term or fencing token.
+        let replayed = store
+            .record_election_vote(
+                &candidate_one_id,
+                &recovery_proposal_id,
+                recovered_vote_one,
+                recovery_started_at_unix_ms + 4,
+            )
+            .unwrap();
+        assert_eq!(replayed.latest_term.as_ref().unwrap().term, 2);
+        assert_eq!(
+            replayed.latest_term.as_ref().unwrap().fencing_token,
+            FencingToken(2)
+        );
+        assert_eq!(replayed.latest_election.as_ref().unwrap().votes.len(), 2);
+        trajectory.push(event(
+            "message_replay",
+            &replayed,
+            audit_sequence(),
+            "duplicate signed vote was idempotent",
+        ));
+
+        let stale_write_error = store
+            .authorize_governance_write(
+                &candidate_one_id,
+                &stale_credential,
+                CoordinatorWriteKind::SecurityPolicy,
+                recovery_started_at_unix_ms + 5,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(!stale_write_error.is_empty());
+        trajectory.push(serde_json::json!({
+            "scenario": "stale_authority_write",
+            "result": "term 1 credential rejected after term 2",
+            "error": stale_write_error,
+            "audit_sequence": audit_sequence(),
+        }));
+
+        // Once term 2 expires and every configured candidate is observed
+        // offline, the online owner receives only the bounded emergency lease.
+        let emergency_issued_at_unix_ms = NOW + 126_000;
+        let emergency = store
+            .issue_emergency_leader(
+                &owner_id,
+                &fixture.network.network_id,
+                std::slice::from_ref(&owner_id),
+                emergency_issued_at_unix_ms,
+            )
+            .unwrap();
+        let lease = emergency
+            .status
+            .emergency_leader
+            .as_ref()
+            .expect("candidate loss must issue an emergency lease");
+        assert!(!lease.governance_writable);
+        assert!(lease.data_plane_allowed);
+        let emergency_credential = CoordinatorEmergencyWriteCredential {
+            network_id: lease.network_id.clone(),
+            leader: lease.leader.clone(),
+            emergency_epoch: lease.emergency_epoch,
+            candidate_config_revision: lease.candidate_config_revision,
+        };
+        lease
+            .authorize_runtime_write(
+                &owner_id,
+                &emergency_credential,
+                CoordinatorWriteKind::HealthCheck,
+                emergency_issued_at_unix_ms + 1,
+            )
+            .unwrap();
+        let emergency_governance_error = lease
+            .authorize_runtime_write(
+                &owner_id,
+                &emergency_credential,
+                CoordinatorWriteKind::SecurityPolicy,
+                emergency_issued_at_unix_ms + 1,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(emergency_governance_error.contains("governance_forbidden"));
+        trajectory.push(event(
+            "all_candidates_lost",
+            &emergency.status,
+            audit_sequence(),
+            "bounded emergency runtime lease issued; governance remains frozen",
+        ));
+
+        // A formally elected successor with a strict majority atomically
+        // revokes the emergency lease and restores normal governance.
+        let successor_issued_at_unix_ms = NOW + 127_000;
+        let successor = fixture.term_three(
+            3,
+            3,
+            &fixture.candidate_one,
+            successor_issued_at_unix_ms,
+            NOW + 157_000,
+        );
+        let successor_status = store
+            .install_term(
+                &candidate_one_id,
+                successor.clone(),
+                successor_issued_at_unix_ms,
+            )
+            .unwrap();
+        assert!(successor_status.emergency_leader.is_none());
+        assert_eq!(successor_status.latest_term.as_ref().unwrap().term, 3);
+        assert!(successor_status.control_plane.governance_writable);
+        let successor_credential = fixture.credential(&successor);
+        store
+            .authorize_governance_write(
+                &candidate_one_id,
+                &successor_credential,
+                CoordinatorWriteKind::SecurityPolicy,
+                successor_issued_at_unix_ms + 1,
+            )
+            .unwrap();
+        trajectory.push(event(
+            "candidate_recovery_handoff",
+            &successor_status,
+            audit_sequence(),
+            "strict-majority term 3 revoked emergency authority",
+        ));
+
+        let old_leader_recovery = store
+            .recover(
+                &candidate_one_id,
+                CoordinatorRecoveryReport {
+                    network_id: fixture.network.network_id.clone(),
+                    observed_term: Some(1),
+                    observed_fencing_token: Some(FencingToken(1)),
+                    observed_leader: Some(candidate_one_id.clone()),
+                    observed_candidate_config_revision: Some(1),
+                    observed_audit_sequence: 0,
+                },
+                successor_issued_at_unix_ms + 2,
+            )
+            .unwrap();
+        assert_eq!(
+            old_leader_recovery.recovery.stage,
+            CoordinatorRecoveryStage::ReadOnly
+        );
+        assert_eq!(
+            old_leader_recovery.recovery.reason_code,
+            "coordinator.recovery.stale_old_leader"
+        );
+        assert!(!old_leader_recovery.recovery.governance_writable);
+        assert!(old_leader_recovery.recovery.data_plane_allowed);
+        trajectory.push(event(
+            "old_leader_recovery",
+            &old_leader_recovery.status,
+            audit_sequence(),
+            "old leader re-entered read-only with data-plane access retained",
+        ));
+
+        let audit = store.audit_entries().unwrap();
+        for action in [
+            "coordinator.election.no_majority",
+            "coordinator.election.vote.rejected",
+            "coordinator.election.committed",
+            "coordinator.emergency.leader.issued",
+            "coordinator.term.write.rejected",
+            "coordinator.recovery.old_leader",
+        ] {
+            assert!(
+                audit.iter().any(|entry| entry.action == action),
+                "missing fault-matrix audit action {action}: {audit:#?}"
+            );
+        }
+
+        let report = serde_json::json!({
+            "schema": "fuckipv6.w14.fault-injection.v1",
+            "topology": {
+                "mode": "deterministic-in-process",
+                "candidates": [
+                    candidate_one_id.to_string(),
+                    candidate_two_id.to_string(),
+                    ordinary_id.to_string(),
+                ],
+                "participants": 3,
+                "strict_majority": 2,
+            },
+            "faults": [
+                "network_partition",
+                "process_pause",
+                "clock_drift",
+                "message_replay",
+                "all_candidates_lost",
+            ],
+            "trajectory": trajectory,
+            "audit_actions": audit.iter().map(|entry| entry.action.clone()).collect::<Vec<_>>(),
+            "final": {
+                "term": successor_status.latest_term.as_ref().map(|term| term.term),
+                "leader": successor_status.current_leader.as_ref().map(ToString::to_string),
+                "governance_writable": successor_status.control_plane.governance_writable,
+                "emergency_revoked": successor_status.emergency_leader.is_none(),
+                "old_leader_read_only": !old_leader_recovery.recovery.governance_writable,
+                "old_leader_data_plane_allowed": old_leader_recovery.recovery.data_plane_allowed,
+            },
+        });
+        let rendered = serde_json::to_string_pretty(&report).unwrap();
+        if let Ok(path) = std::env::var("FUCKIPV6_W14_FAULT_REPORT") {
+            let path = PathBuf::from(path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, &rendered).unwrap();
+        }
+        eprintln!("{rendered}");
     }
 
     #[test]

@@ -219,6 +219,9 @@ fn classify_activity_category(action: &str, outcome: AuditOutcome) -> ActivityCa
     if action.starts_with("traffic.failure.") {
         return ActivityCategory::SystemEvent;
     }
+    if action.starts_with("coordinator.emergency.") || action.starts_with("admin_recovery.") {
+        return ActivityCategory::SecurityEvent;
+    }
     if outcome == AuditOutcome::Denied {
         return ActivityCategory::SecurityEvent;
     }
@@ -247,6 +250,9 @@ fn classify_activity_category(action: &str, outcome: AuditOutcome) -> ActivityCa
 
 fn classify_activity_severity(action: &str, outcome: AuditOutcome) -> ActivitySeverity {
     if action.starts_with("traffic.failure.") {
+        return ActivitySeverity::Warning;
+    }
+    if action.starts_with("coordinator.emergency.") || action.starts_with("admin_recovery.") {
         return ActivitySeverity::Warning;
     }
     if outcome == AuditOutcome::Denied {
@@ -903,6 +909,32 @@ mod tests {
         );
         assert!(!activity.details.contains_key("accessToken"));
         assert!(!activity.details.contains_key("custom-hidden"));
+    }
+
+    #[test]
+    fn emergency_audit_projects_as_high_priority_security_event() {
+        for (action, outcome) in [
+            (
+                "coordinator.emergency.leader.issued",
+                AuditOutcome::Succeeded,
+            ),
+            (
+                "coordinator.emergency.governance.rejected",
+                AuditOutcome::Denied,
+            ),
+            (
+                "admin_recovery.invalidations_applied",
+                AuditOutcome::Succeeded,
+            ),
+            ("admin_recovery.execution.denied", AuditOutcome::Denied),
+        ] {
+            let mut entry = entry();
+            entry.action = action.into();
+            entry.outcome = outcome;
+            let activity = entry.project_activity();
+            assert_eq!(activity.category, ActivityCategory::SecurityEvent);
+            assert_eq!(activity.severity, ActivitySeverity::Warning);
+        }
     }
 
     #[test]

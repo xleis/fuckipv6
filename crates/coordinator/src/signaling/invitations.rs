@@ -378,6 +378,30 @@ impl InvitationStore {
         })
     }
 
+    /// Recovery-only bulk invalidation. The caller must be the newly installed
+    /// recovery owner and is expected to persist the approved recovery
+    /// execution before invoking this method. Re-running is idempotent.
+    pub(crate) fn revoke_all_for_recovery(
+        &self,
+        network_id: &NetworkId,
+        recovery_owner: &NodeId,
+        now_unix_ms: u64,
+    ) -> Result<usize> {
+        self.transaction(|file| {
+            let mut revoked = 0;
+            for stored in file
+                .invitations
+                .values_mut()
+                .filter(|stored| stored.record.network_id == *network_id)
+            {
+                if stored.record.revoke(recovery_owner.clone(), now_unix_ms)? {
+                    revoked += 1;
+                }
+            }
+            Ok(revoked)
+        })
+    }
+
     pub fn preview(
         &self,
         request_network_id: &NetworkId,
@@ -1120,6 +1144,41 @@ mod tests {
             .record(&network_id(), &invitee)
             .unwrap();
         assert!(lifecycle.is_none());
+    }
+
+    #[test]
+    fn recovery_revokes_every_invitation_idempotently() {
+        let dir = test_dir("recovery-revoke-all");
+        write_network_record(&dir, &network_record(vec![admin()]));
+        let store = open_store(&dir);
+        let first = store
+            .create(&network_id(), &owner(), create_request(1), NOW)
+            .unwrap();
+        let second = store
+            .create(&network_id(), &owner(), create_request(2), NOW + 1)
+            .unwrap();
+        let recovery_owner = invitee("recovery-owner");
+
+        assert_eq!(
+            store
+                .revoke_all_for_recovery(&network_id(), &recovery_owner, NOW + 2)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .revoke_all_for_recovery(&network_id(), &recovery_owner, NOW + 3)
+                .unwrap(),
+            0,
+            "recovery invalidation must be retry-safe"
+        );
+        for issued in [first, second] {
+            let (_, _, state, revision) = store
+                .notification_metadata(&issued.status.invitation.invitation_id, NOW + 3)
+                .unwrap();
+            assert_eq!(state, InvitationState::Revoked);
+            assert_eq!(revision, 2);
+        }
     }
 
     #[test]

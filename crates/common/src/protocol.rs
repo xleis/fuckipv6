@@ -3,18 +3,19 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 use crate::domain::{
-    ContentHash, CoordinatorCandidateConfig, CoordinatorCandidateDeclaration,
-    CoordinatorCandidateStatus, CoordinatorElectionProposal, CoordinatorElectionStage,
-    CoordinatorElectionVote, CoordinatorEmergencyLeaderResponse,
-    CoordinatorEmergencyWriteCredential, CoordinatorRecoveryReport,
-    CoordinatorRecoveryResponse as CoordinatorRecoveryResult, CoordinatorTerm,
-    CoordinatorWriteCredential, ExitContributionAuthorizationSnapshot, ExitContributionRequest,
-    ExitContributionRequestId, ExitContributionRequestState, ExitContributionReviewAction,
-    InvitationCreateRequest, InvitationId, InvitationPreviewRequest, InvitationRedeemRequest,
-    InvitationRedemption, InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest,
-    JoinRequestId, JoinRequestReviewAction, JoinRequestState, MemberLifecycleChange,
-    MemberLifecycleChangeRequest, MemberRemovalPreview, MemberRemovalPreviewRequest, NetworkId,
-    NetworkJoinPreview, NetworkJoinPreviewRequest, NetworkMemberDirectory, NodeId,
+    AdminRecoveryRequest, AdminRecoveryRequestId, AdminRecoveryStatusView, ContentHash,
+    CoordinatorCandidateConfig, CoordinatorCandidateDeclaration, CoordinatorCandidateStatus,
+    CoordinatorElectionProposal, CoordinatorElectionStage, CoordinatorElectionVote,
+    CoordinatorEmergencyLeaderResponse, CoordinatorEmergencyWriteCredential,
+    CoordinatorRecoveryReport, CoordinatorRecoveryResponse as CoordinatorRecoveryResult,
+    CoordinatorTerm, CoordinatorWriteCredential, ExitContributionAuthorizationSnapshot,
+    ExitContributionRequest, ExitContributionRequestId, ExitContributionRequestState,
+    ExitContributionReviewAction, InvitationCreateRequest, InvitationId, InvitationPreviewRequest,
+    InvitationRedeemRequest, InvitationRedemption, InvitationState, InvitationStatusView,
+    IssuedInvitation, JoinRequest, JoinRequestId, JoinRequestReviewAction, JoinRequestState,
+    MemberLifecycleChange, MemberLifecycleChangeRequest, MemberRemovalPreview,
+    MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview, NetworkJoinPreviewRequest,
+    NetworkMemberDirectory, NodeId,
 };
 use crate::types::{ClientId, NatType, PeerInfo, RouteEntry, VirtualIps};
 
@@ -480,6 +481,44 @@ pub enum SignalingMessage {
     },
     CoordinatorEmergencyLeaderRenewAck {
         response: CoordinatorEmergencyLeaderResponse,
+    },
+
+    // Administrator threshold recovery. Appended after every earlier variant so
+    // postcard tags remain stable. Requests carry independently signed approvals;
+    // acknowledgements are server-originated and expose only status projections.
+    AdminRecoverySubmit {
+        request: Box<AdminRecoveryRequest>,
+    },
+    AdminRecoverySubmitAck {
+        status: AdminRecoveryStatusView,
+    },
+    AdminRecoveryStatus {
+        network_id: NetworkId,
+        request_id: AdminRecoveryRequestId,
+    },
+    AdminRecoveryStatusAck {
+        status: AdminRecoveryStatusView,
+    },
+    AdminRecoveryList {
+        network_id: NetworkId,
+    },
+    AdminRecoveryListAck {
+        requests: Vec<AdminRecoveryStatusView>,
+    },
+    AdminRecoveryRevoke {
+        network_id: NetworkId,
+        request_id: AdminRecoveryRequestId,
+        reason: String,
+    },
+    AdminRecoveryRevokeAck {
+        status: AdminRecoveryStatusView,
+    },
+    AdminRecoveryExecute {
+        network_id: NetworkId,
+        request_id: AdminRecoveryRequestId,
+    },
+    AdminRecoveryExecuteAck {
+        status: AdminRecoveryStatusView,
     },
 }
 
@@ -1373,6 +1412,104 @@ mod tests {
             panic!("expected exit contribution status");
         };
         assert_eq!(decoded, request);
+        Ok(())
+    }
+
+    #[test]
+    fn administrator_recovery_messages_are_postcard_safe() -> anyhow::Result<()> {
+        use crate::domain::{
+            AdminRecoveryProposal, AdminRecoveryReason, AdminRecoveryRevocationPlan,
+            AdminRecoveryState, AdminRecoveryTarget, CapabilityKind, ExitContributionMode,
+            ExitContributionObligation, ExitContributionScope, ExitSelectionPolicy,
+            NetworkCreateProfile, NetworkJoinMode, NetworkVisibility, NodeId, PublicKey, Signature,
+        };
+
+        let network_identity = Identity::generate()?;
+        let owner_identity = Identity::generate()?;
+        let owner = NodeId::from_public_key(&owner_identity.public_key());
+        let network = crate::domain::NetworkRecord::create_owned(
+            NetworkCreateProfile {
+                name: "Recovery".into(),
+                purpose: "Administrator recovery protocol test".into(),
+                icon: "network".into(),
+                language: "zh-CN".into(),
+                region: "ZZ".into(),
+                tags: Vec::new(),
+                capability_declarations: vec![CapabilityKind::File],
+                visibility: NetworkVisibility::Private,
+                join_mode: NetworkJoinMode::ApprovalRequired,
+                exit_contribution: ExitContributionObligation::default(),
+                exit_contribution_scope: ExitContributionScope::default(),
+                exit_contribution_mode: ExitContributionMode::default(),
+                exit_selection_policy: ExitSelectionPolicy::default(),
+            },
+            PublicKey::from_bytes(network_identity.public_key_bytes()),
+            owner.clone(),
+            1_000,
+        )?;
+        let network_id = network.network_id.clone();
+        let replacement = NodeId::from_public_key(b"replacement-owner");
+        let proposal = AdminRecoveryProposal::new(
+            &network,
+            AdminRecoveryTarget::replace_authorities(&network, replacement.clone(), Vec::new()),
+            owner.clone(),
+            AdminRecoveryReason::DisasterRecovery,
+            "postcard-recovery",
+            1_100,
+            1_200,
+            AdminRecoveryRevocationPlan::default(),
+        )?;
+        let request = AdminRecoveryRequest::with_approvals(
+            proposal.clone(),
+            vec![crate::domain::AdminRecoveryApproval {
+                signer: owner,
+                signer_public_key: PublicKey::from_bytes(owner_identity.public_key_bytes()),
+                signed_at_unix_ms: 1_110,
+                signature: Signature::from_bytes([7; 64]),
+            }],
+        );
+        let request_id = proposal.request_id.clone();
+        let status =
+            AdminRecoveryStatusView::new(&request, &network, AdminRecoveryState::Pending, 1_120);
+        let messages = vec![
+            SignalingMessage::AdminRecoverySubmit {
+                request: Box::new(request),
+            },
+            SignalingMessage::AdminRecoverySubmitAck {
+                status: status.clone(),
+            },
+            SignalingMessage::AdminRecoveryStatus {
+                network_id: network_id.clone(),
+                request_id: request_id.clone(),
+            },
+            SignalingMessage::AdminRecoveryStatusAck {
+                status: status.clone(),
+            },
+            SignalingMessage::AdminRecoveryList {
+                network_id: network_id.clone(),
+            },
+            SignalingMessage::AdminRecoveryListAck {
+                requests: vec![status.clone()],
+            },
+            SignalingMessage::AdminRecoveryRevoke {
+                network_id: network_id.clone(),
+                request_id: request_id.clone(),
+                reason: "operator cancelled the recovery".into(),
+            },
+            SignalingMessage::AdminRecoveryRevokeAck {
+                status: status.clone(),
+            },
+            SignalingMessage::AdminRecoveryExecute {
+                network_id,
+                request_id,
+            },
+            SignalingMessage::AdminRecoveryExecuteAck { status },
+        ];
+        for message in messages {
+            let encoded = crate::codec::encode(&message)?;
+            let decoded = crate::codec::decode::<SignalingMessage>(&encoded)?;
+            assert_eq!(crate::codec::encode(&decoded)?, encoded);
+        }
         Ok(())
     }
 

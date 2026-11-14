@@ -160,6 +160,7 @@ impl MemberLifecycleStore {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn admit_with_governance(
         &self,
         actor: &NodeId,

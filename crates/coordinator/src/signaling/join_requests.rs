@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use fuckipv6_common::domain::{
-    JoinRequest, JoinRequestId, JoinRequestState, NetworkId, NetworkJoinMode, NetworkRecord, NodeId,
+    JoinRequest, JoinRequestId, JoinRequestReviewAction, JoinRequestState, NetworkId,
+    NetworkJoinMode, NetworkRecord, NodeId,
 };
 use fuckipv6_common::{Identity, JoinRequestBatchReviewItem, JoinRequestReviewResult};
 
@@ -286,6 +287,49 @@ impl JoinRequestStore {
                     .then_with(|| left.request_id.cmp(&right.request_id))
             });
             Ok(requests)
+        })
+    }
+
+    /// Recovery-only cancellation of requests that were never approved. The
+    /// transition is persisted in one transaction and is idempotent. Existing
+    /// approved requests are left to the lifecycle ledger's tombstones.
+    pub(crate) fn cancel_unconfirmed_for_recovery(
+        &self,
+        network_id: &NetworkId,
+        recovery_owner: &NodeId,
+        now_unix_ms: u64,
+    ) -> Result<usize> {
+        self.with_file_lock(|file| {
+            let mut candidate = file.clone();
+            candidate.expire_and_scrub(now_unix_ms)?;
+            let pending = candidate
+                .requests
+                .iter()
+                .filter(|(_, request)| {
+                    request.network_id == *network_id
+                        && matches!(
+                            request.state,
+                            JoinRequestState::Pending | JoinRequestState::NeedsInformation
+                        )
+                })
+                .map(|(request_id, _)| request_id.clone())
+                .collect::<Vec<_>>();
+            for request_id in &pending {
+                let request = candidate
+                    .requests
+                    .get_mut(request_id)
+                    .context("join request disappeared during recovery cancellation")?;
+                request.review(
+                    request.revision,
+                    JoinRequestReviewAction::Reject,
+                    recovery_owner.clone(),
+                    Some("authority recovery invalidation".into()),
+                    now_unix_ms,
+                )?;
+            }
+            candidate.validate()?;
+            self.persist(&candidate)?;
+            Ok(pending.len())
         })
     }
 
@@ -886,6 +930,67 @@ mod tests {
         )
         .unwrap()
         .with_member_lifecycle_store(lifecycle_store(dir))
+    }
+
+    #[test]
+    fn recovery_cancels_pending_and_information_requested_writes_idempotently() {
+        let dir = test_dir("recovery-cancel-unconfirmed");
+        let store = test_store(&dir);
+        let first_seed = "recovery-pending-applicant";
+        let second_seed = "recovery-information-applicant";
+        let first = request(first_seed, "recovery-pending", 1_000);
+        let second = request(second_seed, "recovery-information", 1_001);
+        store
+            .submit(
+                &network_id(),
+                &applicant(first_seed),
+                first_seed.as_bytes(),
+                first.clone(),
+                1_002,
+            )
+            .unwrap();
+        store
+            .submit(
+                &network_id(),
+                &applicant(second_seed),
+                second_seed.as_bytes(),
+                second.clone(),
+                1_003,
+            )
+            .unwrap();
+        store
+            .review(
+                &network_id(),
+                &owner(),
+                vec![JoinRequestBatchReviewItem {
+                    request_id: second.request_id.clone(),
+                    expected_revision: 1,
+                    action: JoinRequestReviewAction::RequestInformation,
+                    note: Some("Provide one more detail".into()),
+                }],
+                1_004,
+            )
+            .unwrap();
+        let recovery_owner = NodeId::from_public_key(b"recovery-owner");
+
+        assert_eq!(
+            store
+                .cancel_unconfirmed_for_recovery(&network_id(), &recovery_owner, 1_005)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .cancel_unconfirmed_for_recovery(&network_id(), &recovery_owner, 1_006)
+                .unwrap(),
+            0,
+            "recovery cancellation must be retry-safe"
+        );
+        let listed = store.list(&network_id(), &owner(), 1_006).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed
+            .iter()
+            .all(|request| request.state == JoinRequestState::Rejected));
     }
 
     #[test]

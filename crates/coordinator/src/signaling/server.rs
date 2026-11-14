@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
-    ContentHash, CoordinatorElectionProposal, CoordinatorElectionVote, CoordinatorRecoveryReport,
-    CoordinatorTerm, CoordinatorWriteCredential, ExitContributionRequest,
-    ExitContributionRequestId, ExitContributionReviewAction, InvitationId, InvitationState,
-    JoinRequest, JoinRequestId, JoinRequestState, MemberLifecycleChange,
-    MemberLifecycleChangeRequest, MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview,
-    NetworkMemberPresence, NetworkRecord, NodeId,
+    AdminRecoveryRequest, AdminRecoveryRequestId, ContentHash, CoordinatorElectionProposal,
+    CoordinatorElectionVote, CoordinatorRecoveryReport, CoordinatorTerm,
+    CoordinatorWriteCredential, ExitContributionRequest, ExitContributionRequestId,
+    ExitContributionReviewAction, InvitationId, InvitationState, JoinRequest, JoinRequestId,
+    JoinRequestState, MemberLifecycleChange, MemberLifecycleChangeRequest,
+    MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview, NetworkMemberPresence,
+    NetworkRecord, NodeId,
 };
 use fuckipv6_common::{
     codec, validate_signaling_message_len, validate_signaling_relay_payload_len, CoordinatorConfig,
@@ -25,6 +26,7 @@ use tokio_tungstenite::{
     tungstenite::{protocol::WebSocketConfig, Message},
 };
 
+use super::admin_recovery::{AdminRecoveryService, AdminRecoveryStore};
 use super::coordinator_candidates::{CoordinatorCandidateStore, GOVERNANCE_FROZEN_ERROR};
 use super::exit_availability::ExitAvailabilityObservationRegistry;
 use super::exit_contribution::ExitContributionRequestStore;
@@ -102,6 +104,8 @@ pub struct SignalingServer {
     relay_directory: RelayEndpointDirectory,
     join_request_store: Option<Arc<JoinRequestStore>>,
     invitation_store: Option<Arc<InvitationStore>>,
+    admin_recovery_store: Option<Arc<AdminRecoveryStore>>,
+    admin_recovery_service: Option<Arc<AdminRecoveryService>>,
     member_lifecycle_store: Option<Arc<MemberLifecycleStore>>,
     exit_contribution_store: Option<Arc<ExitContributionRequestStore>>,
     coordinator_candidate_store: Option<Arc<CoordinatorCandidateStore>>,
@@ -122,6 +126,8 @@ impl SignalingServer {
             relay_directory: RelayEndpointDirectory::default(),
             join_request_store: None,
             invitation_store: None,
+            admin_recovery_store: None,
+            admin_recovery_service: None,
             member_lifecycle_store: None,
             exit_contribution_store: None,
             coordinator_candidate_store: None,
@@ -139,6 +145,8 @@ impl SignalingServer {
             relay_directory: RelayEndpointDirectory::default(),
             join_request_store: None,
             invitation_store: None,
+            admin_recovery_store: None,
+            admin_recovery_service: None,
             member_lifecycle_store: None,
             exit_contribution_store: None,
             coordinator_candidate_store: None,
@@ -200,6 +208,7 @@ impl SignalingServer {
     /// closed while registration and data-plane signaling remain available.
     pub fn with_join_request_store(mut self, store: Arc<JoinRequestStore>) -> Self {
         self.join_request_store = Some(store);
+        self.refresh_admin_recovery_service();
         self
     }
 
@@ -228,6 +237,7 @@ impl SignalingServer {
         .with_member_lifecycle_store(lifecycle.clone());
         self.join_request_store = Some(Arc::new(store));
         self.member_lifecycle_store = Some(lifecycle);
+        self.refresh_admin_recovery_service();
         Ok(self)
     }
 
@@ -235,6 +245,7 @@ impl SignalingServer {
     /// fail closed while unrelated signaling continues to work.
     pub fn with_invitation_store(mut self, store: Arc<InvitationStore>) -> Self {
         self.invitation_store = Some(store);
+        self.refresh_admin_recovery_service();
         self
     }
 
@@ -261,7 +272,65 @@ impl SignalingServer {
         .with_member_lifecycle_store(lifecycle.clone());
         self.invitation_store = Some(Arc::new(store));
         self.member_lifecycle_store = Some(lifecycle);
+        self.refresh_admin_recovery_service();
         Ok(self)
+    }
+
+    /// Attach the durable administrator recovery ledger. When the invitation
+    /// and join-request stores are also present, this immediately builds the
+    /// single service instance that coordinates roster recovery with local
+    /// credential invalidation.
+    pub fn with_admin_recovery_store(mut self, store: Arc<AdminRecoveryStore>) -> Self {
+        self.admin_recovery_store = Some(store);
+        self.refresh_admin_recovery_service();
+        self
+    }
+
+    pub fn with_admin_recovery_store_from_config(
+        mut self,
+        state_dir: impl AsRef<std::path::Path>,
+        config: &CoordinatorConfig,
+    ) -> Result<Self> {
+        let network_record_path = config
+            .network_record_path
+            .clone()
+            .context("管理员恢复需要可信 network_record_path")?;
+        self.network_record_path = Some(network_record_path.clone());
+        let store = Arc::new(AdminRecoveryStore::new(
+            state_dir.as_ref().join("admin_recovery.json"),
+            network_record_path,
+        )?);
+        self.admin_recovery_store = Some(store);
+        self.refresh_admin_recovery_service();
+        Ok(self)
+    }
+
+    /// Read the configured recovery ledger and orchestration service. Both are
+    /// absent unless explicitly attached, so disaster recovery fails closed
+    /// instead of silently creating a hidden authority path.
+    pub fn admin_recovery_store(&self) -> Option<Arc<AdminRecoveryStore>> {
+        self.admin_recovery_store.clone()
+    }
+
+    pub fn admin_recovery_service(&self) -> Option<Arc<AdminRecoveryService>> {
+        self.admin_recovery_service.clone()
+    }
+
+    fn refresh_admin_recovery_service(&mut self) {
+        let (Some(store), Some(invitation_store), Some(join_request_store)) = (
+            self.admin_recovery_store.as_ref(),
+            self.invitation_store.as_ref(),
+            self.join_request_store.as_ref(),
+        ) else {
+            self.admin_recovery_service = None;
+            return;
+        };
+        self.admin_recovery_service = Some(Arc::new(AdminRecoveryService::new(
+            store.clone(),
+            invitation_store.clone(),
+            join_request_store.clone(),
+            self.session_manager.clone(),
+        )));
     }
 
     /// Attach the durable unified membership lifecycle ledger. Management
@@ -367,6 +436,8 @@ impl SignalingServer {
                     let relay_directory = self.relay_directory.clone();
                     let join_request_store = self.join_request_store.clone();
                     let invitation_store = self.invitation_store.clone();
+                    let admin_recovery_store = self.admin_recovery_store.clone();
+                    let admin_recovery_service = self.admin_recovery_service.clone();
                     let member_lifecycle_store = self.member_lifecycle_store.clone();
                     let exit_contribution_store = self.exit_contribution_store.clone();
                     let coordinator_candidate_store = self.coordinator_candidate_store.clone();
@@ -382,6 +453,8 @@ impl SignalingServer {
                             relay_directory,
                             join_request_store,
                             invitation_store,
+                            admin_recovery_store,
+                            admin_recovery_service,
                             member_lifecycle_store,
                             exit_contribution_store,
                             coordinator_candidate_store,
@@ -451,6 +524,8 @@ async fn handle_connection(
     relay_directory: RelayEndpointDirectory,
     join_request_store: Option<Arc<JoinRequestStore>>,
     invitation_store: Option<Arc<InvitationStore>>,
+    admin_recovery_store: Option<Arc<AdminRecoveryStore>>,
+    admin_recovery_service: Option<Arc<AdminRecoveryService>>,
     member_lifecycle_store: Option<Arc<MemberLifecycleStore>>,
     exit_contribution_store: Option<Arc<ExitContributionRequestStore>>,
     coordinator_candidate_store: Option<Arc<CoordinatorCandidateStore>>,
@@ -480,6 +555,8 @@ async fn handle_connection(
             &relay_directory,
             join_request_store.as_deref(),
             invitation_store.as_deref(),
+            admin_recovery_store.as_deref(),
+            admin_recovery_service.as_deref(),
             member_lifecycle_store.as_deref(),
             exit_contribution_store.as_deref(),
             coordinator_candidate_store.as_deref(),
@@ -526,6 +603,8 @@ async fn handle_connection_message(
     relay_directory: &RelayEndpointDirectory,
     join_request_store: Option<&JoinRequestStore>,
     invitation_store: Option<&InvitationStore>,
+    admin_recovery_store: Option<&AdminRecoveryStore>,
+    admin_recovery_service: Option<&AdminRecoveryService>,
     member_lifecycle_store: Option<&MemberLifecycleStore>,
     exit_contribution_store: Option<&ExitContributionRequestStore>,
     coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
@@ -545,6 +624,8 @@ async fn handle_connection_message(
                 relay_directory,
                 join_request_store,
                 invitation_store,
+                admin_recovery_store,
+                admin_recovery_service,
                 member_lifecycle_store,
                 exit_contribution_store,
                 coordinator_candidate_store,
@@ -579,6 +660,8 @@ async fn handle_binary_message(
     relay_directory: &RelayEndpointDirectory,
     join_request_store: Option<&JoinRequestStore>,
     invitation_store: Option<&InvitationStore>,
+    admin_recovery_store: Option<&AdminRecoveryStore>,
+    admin_recovery_service: Option<&AdminRecoveryService>,
     member_lifecycle_store: Option<&MemberLifecycleStore>,
     exit_contribution_store: Option<&ExitContributionRequestStore>,
     coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
@@ -605,6 +688,8 @@ async fn handle_binary_message(
                 relay_directory,
                 join_request_store,
                 invitation_store,
+                admin_recovery_store,
+                admin_recovery_service,
                 member_lifecycle_store,
                 exit_contribution_store,
                 coordinator_candidate_store,
@@ -672,6 +757,8 @@ async fn handle_signaling_message(
     relay_directory: &RelayEndpointDirectory,
     join_request_store: Option<&JoinRequestStore>,
     invitation_store: Option<&InvitationStore>,
+    admin_recovery_store: Option<&AdminRecoveryStore>,
+    admin_recovery_service: Option<&AdminRecoveryService>,
     member_lifecycle_store: Option<&MemberLifecycleStore>,
     exit_contribution_store: Option<&ExitContributionRequestStore>,
     coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
@@ -1172,6 +1259,71 @@ async fn handle_signaling_message(
             )
             .await?;
         }
+        SignalingMessage::AdminRecoverySubmit { request } => {
+            handle_admin_recovery_submit(
+                *request,
+                session_manager,
+                tx,
+                client_id,
+                admin_recovery_store,
+            )
+            .await?;
+        }
+        SignalingMessage::AdminRecoveryStatus {
+            network_id,
+            request_id,
+        } => {
+            handle_admin_recovery_status(
+                network_id,
+                request_id,
+                session_manager,
+                tx,
+                client_id,
+                admin_recovery_store,
+            )
+            .await?;
+        }
+        SignalingMessage::AdminRecoveryList { network_id } => {
+            handle_admin_recovery_list(
+                network_id,
+                session_manager,
+                tx,
+                client_id,
+                admin_recovery_store,
+            )
+            .await?;
+        }
+        SignalingMessage::AdminRecoveryRevoke {
+            network_id,
+            request_id,
+            reason,
+        } => {
+            handle_admin_recovery_revoke(
+                network_id,
+                request_id,
+                reason,
+                session_manager,
+                tx,
+                client_id,
+                admin_recovery_store,
+            )
+            .await?;
+        }
+        SignalingMessage::AdminRecoveryExecute {
+            network_id,
+            request_id,
+        } => {
+            handle_admin_recovery_execute(
+                network_id,
+                request_id,
+                session_manager,
+                tx,
+                client_id,
+                admin_recovery_store,
+                admin_recovery_service,
+            )
+            .await?;
+        }
         // Accepting a server-originated response from a client would let it
         // manufacture approval or recovery state in another view.
         message if is_server_originated_response(&message) => {
@@ -1232,6 +1384,11 @@ fn is_server_originated_response(message: &SignalingMessage) -> bool {
             | SignalingMessage::CoordinatorRecoveryResponse { .. }
             | SignalingMessage::CoordinatorEmergencyLeaderIssueAck { .. }
             | SignalingMessage::CoordinatorEmergencyLeaderRenewAck { .. }
+            | SignalingMessage::AdminRecoverySubmitAck { .. }
+            | SignalingMessage::AdminRecoveryStatusAck { .. }
+            | SignalingMessage::AdminRecoveryListAck { .. }
+            | SignalingMessage::AdminRecoveryRevokeAck { .. }
+            | SignalingMessage::AdminRecoveryExecuteAck { .. }
     )
 }
 
@@ -1934,6 +2091,265 @@ async fn authenticated_join_actor(
         return Ok(None);
     };
     Ok(Some((NodeId::from_public_key(&public_key), public_key)))
+}
+
+fn require_admin_recovery_store<'a>(
+    store: Option<&'a AdminRecoveryStore>,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> Result<Option<&'a AdminRecoveryStore>> {
+    if let Some(store) = store {
+        return Ok(Some(store));
+    }
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::protocol_error(
+            ErrorCode::BadRequest,
+            "Administrator recovery is not configured on this Coordinator",
+        ),
+    )?;
+    Ok(None)
+}
+
+fn require_admin_recovery_service<'a>(
+    service: Option<&'a AdminRecoveryService>,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> Result<Option<&'a AdminRecoveryService>> {
+    if let Some(service) = service {
+        return Ok(Some(service));
+    }
+    send_binary(
+        tx,
+        session_manager,
+        SignalingMessage::protocol_error(
+            ErrorCode::BadRequest,
+            "Administrator recovery execution is not configured on this Coordinator",
+        ),
+    )?;
+    Ok(None)
+}
+
+async fn handle_admin_recovery_submit(
+    request: AdminRecoveryRequest,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&AdminRecoveryStore>,
+) -> Result<()> {
+    let Some(store) = require_admin_recovery_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    match store.submit_as(&actor, request, unix_time_ms()) {
+        Ok(status) => send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::AdminRecoverySubmitAck { status },
+        )?,
+        Err(error) => {
+            tracing::warn!(%error, %actor, "管理员恢复请求提交失败");
+            send_binary(tx, session_manager, admin_recovery_protocol_error(&error))?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_admin_recovery_status(
+    network_id: NetworkId,
+    request_id: AdminRecoveryRequestId,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&AdminRecoveryStore>,
+) -> Result<()> {
+    let Some(store) = require_admin_recovery_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    match store.status_for_actor(&request_id, &actor, unix_time_ms()) {
+        Ok(status) if status.network_id == network_id => send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::AdminRecoveryStatusAck { status },
+        )?,
+        Ok(_) => send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::BadRequest,
+                "admin_recovery.error.network_mismatch",
+            ),
+        )?,
+        Err(error) => {
+            tracing::warn!(%error, %actor, %request_id, "管理员恢复状态查询失败");
+            send_binary(tx, session_manager, admin_recovery_protocol_error(&error))?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_admin_recovery_list(
+    network_id: NetworkId,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&AdminRecoveryStore>,
+) -> Result<()> {
+    let Some(store) = require_admin_recovery_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    match store.list_for_actor(&network_id, &actor, unix_time_ms()) {
+        Ok(requests) => send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::AdminRecoveryListAck { requests },
+        )?,
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "管理员恢复列表查询失败");
+            send_binary(tx, session_manager, admin_recovery_protocol_error(&error))?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_admin_recovery_revoke(
+    network_id: NetworkId,
+    request_id: AdminRecoveryRequestId,
+    reason: String,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&AdminRecoveryStore>,
+) -> Result<()> {
+    let Some(store) = require_admin_recovery_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let now_unix_ms = unix_time_ms();
+    let result = (|| {
+        let current = store.status(&request_id, now_unix_ms)?;
+        if current.network_id != network_id {
+            anyhow::bail!("admin_recovery.error.network_mismatch");
+        }
+        store.revoke(&request_id, &actor, reason, now_unix_ms)
+    })();
+    match result {
+        Ok(status) => send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::AdminRecoveryRevokeAck { status },
+        )?,
+        Err(error) => {
+            tracing::warn!(%error, %actor, %request_id, "管理员恢复撤销失败");
+            send_binary(tx, session_manager, admin_recovery_protocol_error(&error))?;
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_admin_recovery_execute(
+    network_id: NetworkId,
+    request_id: AdminRecoveryRequestId,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&AdminRecoveryStore>,
+    service: Option<&AdminRecoveryService>,
+) -> Result<()> {
+    let Some(store) = require_admin_recovery_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some(service) = require_admin_recovery_service(service, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let now_unix_ms = unix_time_ms();
+    let result = async {
+        let visible = store.status_for_actor(&request_id, &actor, now_unix_ms)?;
+        if visible.network_id != network_id {
+            anyhow::bail!("admin_recovery.error.network_mismatch");
+        }
+        service
+            .execute_authorized(&actor, &request_id, now_unix_ms)
+            .await?;
+        store.status(&request_id, now_unix_ms)
+    }
+    .await;
+    match result {
+        Ok(status) => send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::AdminRecoveryExecuteAck { status },
+        )?,
+        Err(error) => {
+            tracing::warn!(%error, %actor, %request_id, "管理员恢复执行失败");
+            send_binary(tx, session_manager, admin_recovery_protocol_error(&error))?;
+        }
+    }
+    Ok(())
+}
+
+fn admin_recovery_protocol_error(error: &anyhow::Error) -> SignalingMessage {
+    let text = format!("{error:#}");
+    let code = if text.contains("admin_recovery.error.permission_denied") {
+        ErrorCode::Forbidden
+    } else if text.contains("admin recovery request not found") {
+        ErrorCode::NotFound
+    } else if text.contains("admin_recovery.error.") {
+        ErrorCode::BadRequest
+    } else {
+        ErrorCode::Internal
+    };
+    let message = match code {
+        ErrorCode::Forbidden => "admin_recovery.error.permission_denied",
+        ErrorCode::NotFound => "admin_recovery.error.not_found",
+        ErrorCode::BadRequest => {
+            const PUBLIC_KEYS: [&str; 11] = [
+                "admin_recovery.error.already_executed",
+                "admin_recovery.error.expired",
+                "admin_recovery.error.invalid_revocation_reason",
+                "admin_recovery.error.network_mismatch",
+                "admin_recovery.error.not_executable",
+                "admin_recovery.error.replayed",
+                "admin_recovery.error.request_id_conflict",
+                "admin_recovery.error.revoked",
+                "admin_recovery.error.stale_snapshot",
+                "admin_recovery.error.threshold_not_met",
+                "admin_recovery.error.permission_denied",
+            ];
+            PUBLIC_KEYS
+                .iter()
+                .find(|key| text.contains(**key))
+                .copied()
+                .unwrap_or("admin_recovery.error.rejected")
+        }
+        _ => "admin_recovery.error.internal",
+    };
+    SignalingMessage::protocol_error(code, message)
 }
 
 fn require_join_request_store<'a>(
@@ -3718,6 +4134,75 @@ mod tests {
     use super::*;
 
     #[test]
+    fn admin_recovery_service_requires_all_three_durable_stores() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "fuckipv6-admin-recovery-wiring-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let network_record_path = dir.join("network.json");
+        let mut server = SignalingServer::new("127.0.0.1:0".into(), "fd00::/120")?;
+
+        assert!(server.admin_recovery_store().is_none());
+        assert!(server.admin_recovery_service().is_none());
+
+        server = server.with_admin_recovery_store(Arc::new(AdminRecoveryStore::new(
+            dir.join("admin_recovery.json"),
+            &network_record_path,
+        )?));
+        assert!(server.admin_recovery_store().is_some());
+        assert!(server.admin_recovery_service().is_none());
+
+        server = server.with_join_request_store(Arc::new(JoinRequestStore::new(
+            dir.join("join_requests.json"),
+            Some(network_record_path.clone()),
+            None,
+            Vec::new(),
+        )?));
+        assert!(server.admin_recovery_service().is_none());
+
+        server = server.with_invitation_store(Arc::new(InvitationStore::new(
+            dir.join("invitations.json"),
+            Some(network_record_path),
+            None,
+            Vec::new(),
+        )?));
+        assert!(server.admin_recovery_service().is_some());
+
+        drop(server);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn admin_recovery_store_from_config_uses_stable_state_path() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!(
+            "fuckipv6-admin-recovery-config-path-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let config = CoordinatorConfig {
+            network_record_path: Some(dir.join("network.json")),
+            ..CoordinatorConfig::default()
+        };
+
+        let server = SignalingServer::new("127.0.0.1:0".into(), "fd00::/120")?
+            .with_admin_recovery_store_from_config(&dir, &config)?;
+        let store = server
+            .admin_recovery_store()
+            .context("configured recovery store is missing")?;
+        assert_eq!(store.path(), dir.join("admin_recovery.json"));
+        assert!(server.admin_recovery_service().is_none());
+
+        drop(store);
+        drop(server);
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    #[test]
     fn coordinator_recovery_response_is_rejected_as_a_client_message() {
         let network_id = NetworkId::from_public_key(b"recovery-response-spoof");
         let leader = NodeId::from_public_key(b"recovery-response-leader");
@@ -3773,6 +4258,54 @@ mod tests {
                 },
             }
         ));
+    }
+
+    #[test]
+    fn administrator_recovery_acknowledgements_are_rejected_as_client_messages() {
+        let network_id = NetworkId::from_public_key(b"admin-recovery-ack-network");
+        let node = NodeId::from_public_key(b"admin-recovery-ack-node");
+        let status = fuckipv6_common::domain::AdminRecoveryStatusView {
+            request_id: fuckipv6_common::domain::AdminRecoveryRequestId::from_public_key(
+                b"admin-recovery-ack-request",
+            ),
+            network_id: network_id.clone(),
+            state: fuckipv6_common::domain::AdminRecoveryState::Pending,
+            impact: fuckipv6_common::domain::AdminRecoveryImpact {
+                owner_before: node.clone(),
+                owner_after: node.clone(),
+                administrators_added: Vec::new(),
+                administrators_removed: Vec::new(),
+                members_added: Vec::new(),
+                members_removed: Vec::new(),
+            },
+            initiator: node.clone(),
+            participants: Vec::new(),
+            signature_count: 0,
+            required_signatures: 1,
+            issued_at_unix_ms: 1,
+            expires_at_unix_ms: 2,
+            revocation: fuckipv6_common::domain::AdminRecoveryRevocationPlan::default(),
+            can_execute: false,
+            denial_key: Some("admin_recovery.error.threshold_not_met".into()),
+        };
+        let messages = [
+            SignalingMessage::AdminRecoverySubmitAck {
+                status: status.clone(),
+            },
+            SignalingMessage::AdminRecoveryStatusAck {
+                status: status.clone(),
+            },
+            SignalingMessage::AdminRecoveryListAck {
+                requests: vec![status.clone()],
+            },
+            SignalingMessage::AdminRecoveryRevokeAck {
+                status: status.clone(),
+            },
+            SignalingMessage::AdminRecoveryExecuteAck { status },
+        ];
+        for message in messages {
+            assert!(is_server_originated_response(&message));
+        }
     }
 
     #[test]

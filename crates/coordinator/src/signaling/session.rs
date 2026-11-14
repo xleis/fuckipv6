@@ -6,7 +6,7 @@ use fuckipv6_common::{
 };
 use serde::Serialize;
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1087,11 +1087,21 @@ impl SessionManager {
     /// lifecycle ledger remains the source of truth, so an UndoRemove followed
     /// by a fresh approval can safely establish a new access epoch.
     pub(crate) async fn disconnect_node_sessions(&self, target: &NodeId) -> usize {
+        self.disconnect_sessions_for_nodes(&BTreeSet::from([target.clone()]))
+            .await
+    }
+
+    /// Close every live signalling session whose authenticated identity is in
+    /// the supplied set. Recovery uses the approved roster snapshot so pending
+    /// applicants and unrelated local sessions are not disconnected.
+    pub(crate) async fn disconnect_sessions_for_nodes(&self, targets: &BTreeSet<NodeId>) -> usize {
         let sessions_to_disconnect: Vec<(ClientId, mpsc::UnboundedSender<Message>)> = {
             let sessions = self.sessions.read().await;
             sessions
                 .values()
-                .filter(|session| NodeId::from_public_key(&session.peer_info.public_key) == *target)
+                .filter(|session| {
+                    targets.contains(&NodeId::from_public_key(&session.peer_info.public_key))
+                })
                 .map(|session| (session.peer_info.client_id.clone(), session.tx.clone()))
                 .collect()
         };
@@ -3057,6 +3067,62 @@ mod tests {
 
         manager.unregister_client(&target_client_id).await;
         manager.unregister_client(&other_client_id).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recovery_disconnects_only_snapshot_member_sessions() -> Result<()> {
+        let manager = SessionManager::new("fd00::1000/120")?;
+        let first = Identity::generate()?;
+        let second = Identity::generate()?;
+        let outsider = Identity::generate()?;
+        let first_id = NodeId::from_public_key(&first.public_key());
+        let second_id = NodeId::from_public_key(&second.public_key());
+        let outsider_id = NodeId::from_public_key(&outsider.public_key());
+        let first_client = first.client_id().to_string();
+        let second_client = second.client_id().to_string();
+        let outsider_client = outsider.client_id().to_string();
+
+        for (index, identity, client_id) in [
+            (0_u16, &first, first_client.clone()),
+            (1_u16, &second, second_client.clone()),
+            (2_u16, &outsider, outsider_client.clone()),
+        ] {
+            let (tx, _rx) = mpsc::unbounded_channel();
+            manager
+                .register_client(
+                    client_id,
+                    identity.public_key(),
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42_100 + index),
+                    52_000 + index,
+                    NatType::Open,
+                    tx,
+                )
+                .await?;
+        }
+
+        let targets = BTreeSet::from([first_id.clone(), second_id]);
+        assert_eq!(manager.disconnect_sessions_for_nodes(&targets).await, 2);
+        assert!(
+            manager.get_peer_info(&first_client).await.is_none(),
+            "snapshot member session must be invalidated"
+        );
+        assert!(
+            manager.get_peer_info(&second_client).await.is_none(),
+            "snapshot member session must be invalidated"
+        );
+        assert!(
+            manager.get_peer_info(&outsider_client).await.is_some(),
+            "non-member session must not be treated as an old roster session"
+        );
+        assert_eq!(
+            manager.disconnect_sessions_for_nodes(&targets).await,
+            0,
+            "session invalidation must be retry-safe"
+        );
+        assert_ne!(outsider_id, first_id);
+
+        manager.unregister_client(&outsider_client).await;
         Ok(())
     }
 

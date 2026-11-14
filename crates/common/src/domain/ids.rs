@@ -95,6 +95,12 @@ macro_rules! prefixed_id {
 }
 
 prefixed_id!(NodeId, "node_", "^node_[A-Za-z0-9_-]{43}$", "node id");
+prefixed_id!(
+    AdminRecoveryRequestId,
+    "recovery_",
+    "^recovery_[A-Za-z0-9_-]{43}$",
+    "admin recovery request id"
+);
 prefixed_id!(NetworkId, "net_", "^net_[A-Za-z0-9_-]{43}$", "network id");
 prefixed_id!(OperationId, "op_", "^op_[A-Za-z0-9_-]{43}$", "operation id");
 prefixed_id!(

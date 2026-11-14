@@ -1,3 +1,4 @@
+pub mod admin_recovery;
 pub mod blacklist;
 pub mod coordinator_candidates;
 pub mod exit_availability;

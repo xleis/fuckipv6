@@ -107,6 +107,15 @@ pub struct NetworkRecord {
     pub owner: NodeId,
     #[serde(default)]
     pub administrators: Vec<NodeId>,
+    /// Offline recovery trustees. These are independent public keys escrowed
+    /// before a disaster, never member identities and never exposed publicly.
+    #[serde(default)]
+    pub recovery_authorities: Vec<PublicKey>,
+    /// Number of distinct offline trustee approvals required. Zero means no
+    /// offline policy is configured and owner/administrator strict majority is
+    /// required instead.
+    #[serde(default)]
+    pub recovery_threshold: u32,
     #[serde(default)]
     pub members: Vec<NodeId>,
     pub revision: u64,
@@ -172,6 +181,10 @@ impl<'de> Deserialize<'de> for NetworkRecord {
             #[serde(default)]
             administrators: Vec<NodeId>,
             #[serde(default)]
+            recovery_authorities: Vec<PublicKey>,
+            #[serde(default)]
+            recovery_threshold: u32,
+            #[serde(default)]
             members: Vec<NodeId>,
             revision: u64,
             policy_revision: u64,
@@ -210,6 +223,8 @@ impl<'de> Deserialize<'de> for NetworkRecord {
             join_mode: raw.join_mode,
             owner: raw.owner,
             administrators: raw.administrators,
+            recovery_authorities: raw.recovery_authorities,
+            recovery_threshold: raw.recovery_threshold,
             members: raw.members,
             revision: raw.revision,
             policy_revision: raw.policy_revision,
@@ -286,6 +301,23 @@ impl NetworkRecord {
         if administrators.contains(&self.owner) {
             return Err(DomainError::invariant(
                 "network owner must not also be listed as administrator",
+            ));
+        }
+        let mut recovery_authorities = BTreeSet::new();
+        for authority in &self.recovery_authorities {
+            if !recovery_authorities.insert(authority) {
+                return Err(DomainError::invariant(
+                    "duplicate network recovery authority",
+                ));
+            }
+        }
+        if (recovery_authorities.is_empty() && self.recovery_threshold != 0)
+            || (!recovery_authorities.is_empty()
+                && (self.recovery_threshold == 0
+                    || self.recovery_threshold as usize > recovery_authorities.len()))
+        {
+            return Err(DomainError::invariant(
+                "network recovery threshold must fit its configured authorities",
             ));
         }
         let mut members = BTreeSet::new();
@@ -441,6 +473,8 @@ impl NetworkRecord {
             join_mode: profile.join_mode,
             owner: owner.clone(),
             administrators: Vec::new(),
+            recovery_authorities: Vec::new(),
+            recovery_threshold: 0,
             members: vec![owner],
             revision: 1,
             policy_revision: 1,
@@ -2425,6 +2459,8 @@ mod tests {
             join_mode: NetworkJoinMode::InviteOnly,
             owner: owner.clone(),
             administrators: vec![admin.clone()],
+            recovery_authorities: Vec::new(),
+            recovery_threshold: 0,
             members: vec![owner, admin],
             revision: 1,
             policy_revision: 1,

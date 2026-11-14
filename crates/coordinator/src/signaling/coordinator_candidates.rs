@@ -255,6 +255,10 @@ impl CoordinatorCandidateStore {
         let _file_lock = lock_candidate_file(&self.path)?;
         let mut file = self.load_unlocked()?;
         let network = read_network_record(&self.network_record_path, &network_id)?;
+        let revoked_emergency = file
+            .networks
+            .get(&network_id)
+            .and_then(|stored| stored.emergency_leader.clone());
 
         let outcome = self.apply_term_install(&mut file, actor, term, &network, now_unix_ms);
         match outcome {
@@ -270,6 +274,50 @@ impl CoordinatorCandidateStore {
                     "coordinator term admitted",
                     term_audit_details(status.latest_term.as_ref()),
                 )?;
+                if let Some(lease) = revoked_emergency {
+                    append_audit(
+                        &mut file.audit_log,
+                        actor,
+                        &network.network_id,
+                        "coordinator.emergency.leader.revoked",
+                        format!("network/{}/coordinator-emergency", network.network_id),
+                        AuditOutcome::Succeeded,
+                        now_unix_ms,
+                        "emergency runtime Leader revoked after authoritative term handoff",
+                        BTreeMap::from([
+                            (
+                                "reason_code".into(),
+                                "coordinator.emergency.reason.successor_term_installed".into(),
+                            ),
+                            ("emergency_epoch".into(), lease.emergency_epoch.to_string()),
+                            ("leader".into(), lease.leader.to_string()),
+                            (
+                                "successor_term".into(),
+                                status
+                                    .latest_term
+                                    .as_ref()
+                                    .map(|term| term.term.to_string())
+                                    .unwrap_or_default(),
+                            ),
+                            (
+                                "successor_leader".into(),
+                                status
+                                    .latest_term
+                                    .as_ref()
+                                    .map(|term| term.leader.to_string())
+                                    .unwrap_or_default(),
+                            ),
+                            (
+                                "successor_fencing_token".into(),
+                                status
+                                    .latest_term
+                                    .as_ref()
+                                    .map(|term| term.fencing_token.0.to_string())
+                                    .unwrap_or_default(),
+                            ),
+                        ]),
+                    )?;
+                }
                 self.persist(&file)?;
                 Ok(status)
             }
@@ -1987,10 +2035,12 @@ impl CoordinatorCandidateStore {
 
         if let Some(current) = &stored.latest_term {
             if current == &term {
+                stored.emergency_leader = None;
                 return status_from_file(network, Some(stored), now_unix_ms);
             }
             current.validate_successor(&term, now_unix_ms)?;
         }
+        stored.emergency_leader = None;
         stored.latest_term = Some(term);
         let status = status_from_file(network, Some(stored), now_unix_ms)?;
         self.persist(file)?;
@@ -4358,6 +4408,283 @@ mod tests {
                 && entry.details.get("reason_code")
                     == Some(&"coordinator.emergency.reason.candidate_recovered".into())
         }));
+    }
+
+    #[test]
+    fn successor_term_install_atomically_revokes_emergency_authority() {
+        let fixture = Fixture::new("emergency-successor-term");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let ordinary_id = NodeId::from_public_key(&fixture.ordinary.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        let issued = store
+            .issue_emergency_leader(
+                &owner_id,
+                &fixture.network.network_id,
+                &[owner_id.clone(), ordinary_id.clone()],
+                NOW,
+            )
+            .unwrap();
+        let lease = issued.status.emergency_leader.unwrap();
+        let emergency_credential = CoordinatorEmergencyWriteCredential {
+            network_id: fixture.network.network_id.clone(),
+            leader: lease.leader.clone(),
+            emergency_epoch: lease.emergency_epoch,
+            candidate_config_revision: lease.candidate_config_revision,
+        };
+
+        let term = fixture.term(1, 1, &fixture.candidate_one, NOW, NOW + 60_000);
+        let handed_off = store
+            .install_term(&candidate_one_id, term.clone(), NOW + 1)
+            .unwrap();
+        assert_eq!(
+            handed_off.latest_term.as_ref().map(|term| term.term),
+            Some(1)
+        );
+        assert_eq!(
+            handed_off
+                .latest_term
+                .as_ref()
+                .map(|term| term.fencing_token),
+            Some(FencingToken(1))
+        );
+        assert_eq!(handed_off.current_leader, Some(candidate_one_id.clone()));
+        assert!(handed_off.control_plane.governance_writable);
+        assert!(handed_off.emergency_leader.is_none());
+
+        store
+            .authorize_governance_write(
+                &candidate_one_id,
+                &fixture.credential(&term),
+                CoordinatorWriteKind::Membership,
+                NOW + 2,
+            )
+            .unwrap();
+        let stale_emergency_error = store
+            .renew_emergency_leader(
+                &lease.leader,
+                &emergency_credential,
+                &fixture.network.network_id,
+                &[owner_id.clone(), ordinary_id],
+                NOW + 3,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            stale_emergency_error.contains("coordinator_candidate.error.emergency_missing"),
+            "{stale_emergency_error}"
+        );
+
+        let audit = store.audit_entries().unwrap();
+        assert!(
+            audit.iter().any(|entry| {
+                entry.action == "coordinator.emergency.leader.revoked"
+                    && entry.outcome == AuditOutcome::Succeeded
+                    && entry.details.get("reason_code")
+                        == Some(&"coordinator.emergency.reason.successor_term_installed".into())
+                    && entry.details.get("successor_term") == Some(&"1".into())
+                    && entry.details.contains_key("successor_fencing_token")
+            }),
+            "{audit:#?}"
+        );
+
+        let restarted = fixture.store();
+        let status = restarted
+            .status(&candidate_one_id, &fixture.network.network_id, NOW + 4)
+            .unwrap();
+        assert_eq!(status.current_leader, Some(candidate_one_id));
+        assert!(status.emergency_leader.is_none());
+        assert!(status.control_plane.governance_writable);
+    }
+
+    #[test]
+    fn failed_successor_install_preserves_emergency_lease_and_freeze() {
+        let fixture = Fixture::new("emergency-failed-handoff");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let ordinary_id = NodeId::from_public_key(&fixture.ordinary.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_two_id = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        let issued = store
+            .issue_emergency_leader(
+                &owner_id,
+                &fixture.network.network_id,
+                &[owner_id.clone(), ordinary_id.clone()],
+                NOW,
+            )
+            .unwrap();
+        let lease = issued.status.emergency_leader.unwrap();
+        let emergency_credential = CoordinatorEmergencyWriteCredential {
+            network_id: fixture.network.network_id.clone(),
+            leader: lease.leader.clone(),
+            emergency_epoch: lease.emergency_epoch,
+            candidate_config_revision: lease.candidate_config_revision,
+        };
+
+        // A single proof is not a strict majority of the two-candidate group.
+        let invalid_term = fixture.term_with_revision_and_group(
+            1,
+            1,
+            &fixture.candidate_one,
+            1,
+            vec![candidate_one_id.clone(), candidate_two_id],
+            &[&fixture.candidate_one],
+            NOW,
+            NOW + 60_000,
+        );
+        let error = store
+            .install_term(&candidate_one_id, invalid_term, NOW + 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("coordinator_term.error.invalid"), "{error}");
+
+        let rejected = store
+            .status(&owner_id, &fixture.network.network_id, NOW + 1)
+            .unwrap();
+        assert!(rejected.latest_term.is_none());
+        assert!(!rejected.control_plane.governance_writable);
+        let still_active = rejected.emergency_leader.as_ref().unwrap();
+        assert!(still_active.is_active());
+        assert_eq!(still_active.emergency_epoch, lease.emergency_epoch);
+
+        let governance_error = store
+            .update_config(&owner_id, 1, fixture.config_two(2), NOW + 2)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            governance_error,
+            "domain.coordinator_emergency_governance_forbidden"
+        );
+        let renewed = store
+            .renew_emergency_leader(
+                &lease.leader,
+                &emergency_credential,
+                &fixture.network.network_id,
+                &[owner_id, ordinary_id],
+                NOW + 3,
+            )
+            .unwrap();
+        assert!(renewed.renewed);
+        assert!(!renewed.status.control_plane.governance_writable);
+        assert!(renewed
+            .status
+            .emergency_leader
+            .as_ref()
+            .unwrap()
+            .is_active());
+        assert!(store.audit_entries().unwrap().iter().any(|entry| {
+            entry.action == "coordinator.term.install.rejected"
+                && entry.outcome != AuditOutcome::Succeeded
+        }));
+    }
+
+    #[test]
+    fn concurrent_split_brain_successors_install_exactly_one_authority() {
+        let fixture = Fixture::new("emergency-concurrent-successors");
+        let store = Arc::new(fixture.store());
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let ordinary_id = NodeId::from_public_key(&fixture.ordinary.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_two_id = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        store
+            .issue_emergency_leader(
+                &owner_id,
+                &fixture.network.network_id,
+                &[owner_id.clone(), ordinary_id],
+                NOW,
+            )
+            .unwrap();
+
+        let first_term = fixture.term(1, 1, &fixture.candidate_one, NOW, NOW + 60_000);
+        let second_term = fixture.term(1, 2, &fixture.candidate_two, NOW, NOW + 60_000);
+        let barrier = Arc::new(Barrier::new(2));
+        let first_handle = {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            let term = first_term.clone();
+            let actor = candidate_one_id.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                store.install_term(&actor, term, NOW + 1)
+            })
+        };
+        let second_handle = {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            let term = second_term.clone();
+            let actor = candidate_two_id.clone();
+            thread::spawn(move || {
+                barrier.wait();
+                store.install_term(&actor, term, NOW + 1)
+            })
+        };
+        let results = [first_handle.join().unwrap(), second_handle.join().unwrap()];
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let conflict = results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(conflict.len(), 1);
+        assert!(conflict[0].contains("domain.coordinator_term_conflict"));
+
+        let status = store
+            .status(&owner_id, &fixture.network.network_id, NOW + 2)
+            .unwrap();
+        let installed = status.latest_term.as_ref().unwrap();
+        assert_eq!(installed.term, 1);
+        assert!(status.emergency_leader.is_none());
+        assert!(status.control_plane.governance_writable);
+        let (winner, winner_term, loser_term) = if installed.leader == candidate_one_id {
+            (candidate_one_id, first_term, second_term)
+        } else {
+            (candidate_two_id, second_term, first_term)
+        };
+        assert_eq!(status.current_leader, Some(winner.clone()));
+        store
+            .authorize_governance_write(
+                &winner,
+                &fixture.credential(&winner_term),
+                CoordinatorWriteKind::Membership,
+                NOW + 3,
+            )
+            .unwrap();
+        let loser_error = store
+            .authorize_governance_write(
+                &loser_term.leader,
+                &fixture.credential(&loser_term),
+                CoordinatorWriteKind::Membership,
+                NOW + 3,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            loser_error.contains("domain.coordinator_term_conflict")
+                || loser_error.contains("domain.fencing_token"),
+            "{loser_error}"
+        );
+        assert_eq!(
+            store
+                .audit_entries()
+                .unwrap()
+                .iter()
+                .filter(|entry| {
+                    entry.action == "coordinator.emergency.leader.revoked"
+                        && entry.details.get("reason_code")
+                            == Some(&"coordinator.emergency.reason.successor_term_installed".into())
+                })
+                .count(),
+            1
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ use std::error::Error;
 use std::fmt;
 
 pub mod access_control;
+pub mod admin_recovery;
 pub mod application_identity;
 pub mod audit;
 pub mod capability;
@@ -40,6 +41,7 @@ pub mod traffic_routing_page;
 pub mod traffic_session;
 
 pub use access_control::*;
+pub use admin_recovery::*;
 pub use application_identity::*;
 pub use audit::*;
 pub use capability::*;

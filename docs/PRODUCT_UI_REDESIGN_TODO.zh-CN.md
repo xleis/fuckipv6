@@ -3803,6 +3803,15 @@ WebUI/Android 内容传输和跨平台竞态仍未验收。
 继续保持 `[~]`。当前 GPUI 工作区在同一分支通过 `x86_64-pc-windows-gnu` client library 编译检查；同时修正了目录列表在非 Unix
 目标下的条件编译未使用值，Linux 断言行为不变。该交叉编译只证明类型与平台接线可构建，不构成 Windows 实机路径安全或传输验收。
 
+**补充（2026-11-14，集成收口）**：已将 `main` 合并到 `feat/w15-file`（`d4f41c9`），保留 W15
+`ConnectionServices` 重构并重建共享契约与嵌入 WebUI bundle。集成后 `cargo check --workspace --all-targets`、
+`cargo test --workspace --all-targets`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`scripts/check-contracts.sh`、WebUI 321 项 Vitest、ESLint/TypeScript 和文档检查全部通过；
+Linux 三节点 netns 验收通过，覆盖双向 P2P 上传/下载、暂停/veth 断网续传、`SIGKILL` supervisor 恢复、取消清理、
+在线 ACL/撤权与四槽满载隔离。本次还补齐 5 个英文 File 错误键，并将生成的 Android DTO 清单断言更新为 301。
+该记录只证明集成门禁与 Linux 实网路径，不替代 Android SAF、Windows/macOS 实机路径安全、跨平台竞态/验收或
+OS 性能基线，故 W15-08 与 W15 总体继续保持 `[~]`。
+
 **补充（2026-11-13，portable ACL 身份与 Linux TOCTOU）**：
 `portable_paths_preserve_rendering_and_fold_authorization_identity` 与 ACL Deny 大小写变体断言补齐了 portable 路径授权身份，
 确认原始拼写不丢失且大小写、NFC/NFD、final sigma 等价拼写得到同一 ACL 决策。Linux `AllowWithinRoot` 改为锚定 root fd 的

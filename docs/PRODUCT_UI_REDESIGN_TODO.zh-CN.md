@@ -3450,18 +3450,22 @@ pending applicant 三条 WebSocket：提交并执行阈值恢复后，断言执�
 
 **验收**：灾难恢复不依赖单个隐藏后门；恢复权限与正常治理权限有清晰边界。
 
-### W14-09 数据面连续性 `[ ]`
+### W14-09 数据面连续性 `[x]`
 
-> 当前进展（2026-11-15）：后端已为每条网络会话增加 Coordinator 控制面连续性指标，分别统计控制面中断次数、连续失败、恢复次数、中断起点、最后一次失败原因与恢复耗时。状态读取、恢复快照、安全能力声明、紧急租约或候选状态校验失败均只清空 emergency 快照并记录结构化告警，不终止 node、不发送 shutdown，也不替换数据面 session/handle。`coordinator_takeover_poll_preserves_the_live_data_plane_session` 连续注入两轮 503 后验证中断数只增加一次、连续失败递增、数据面任务与 handle 始终存活；第三轮状态和恢复响应成功后再验证恢复耗时、恢复计数、失败原因清空，且同一数据面会话未重建。专项测试与 client Clippy 通过；全量 client 库测试为 1262 passed / 1 failed，唯一失败来自并行 UI 词汇表改动。仍缺 UI 单一主状态验收及真实视频/长连接切换测试，因此 W14-09 与 W14 均不勾选。
+> 当前进展（2026-11-15）：后端已为每条网络会话增加 Coordinator 控制面连续性指标，分别统计控制面中断次数、连续失败、恢复次数、中断起点、最后一次失败原因与恢复耗时。状态读取、恢复快照、安全能力声明、紧急租约或候选状态校验失败均只清空 emergency 快照并记录结构化告警，不终止 node、不发送 shutdown，也不替换数据面 session/handle。`coordinator_takeover_poll_preserves_the_live_data_plane_session` 连续注入两轮 503 后验证中断数只增加一次、连续失败递增、数据面任务与 handle 始终存活；第三轮状态和恢复响应成功后再验证恢复耗时、恢复计数、失败原因清空，且同一数据面会话未重建。
+>
+> `quic_p2p_mesh_long_lived_stream_spans_real_coordinator_term_takeover` 使用真实签名候选配置、候选声明、election proposal 和 vote 写入 `CoordinatorCandidateStore`，在 term 1 租约到期后通过严格多数切换到 term 2 / leader B / fencing token 2。切换发生在连续 96 个 1KB 级媒体尺寸 frame 传输期间，验证全部 frame 按序到达、同一 peer 只打开一条持久双向流、QUIC `stable_id()` 不变且连接未关闭，控制面最终为 `Available` 且 election 为 `Committed`。该测试覆盖 Leader 切换期间的长连接数据连续性，但不是真实视频播放、多进程网络分区或端到端媒体质量测试。
+>
+> GPUI `overview_projects_one_runtime_status_without_generic_metric_cards` 验证概览只展示一个主状态且不渲染通用指标卡；GPUI `runtime_control_plane_limits_governance_without_reporting_node_failure` 与 WebUI `Coordinator control-plane runtime state` 验证控制面受限时治理只读、展示 reason code 和 quorum，同时服务仍为 `Running`，不误报节点失败。本轮 client QUIC 专项 7 passed、完整 P2P 132 passed、common QUIC 14 passed，上述 GPUI/WebUI 专项通过，common/client Clippy `-D warnings` 和包级格式检查通过。
 
 - [x] 区分控制面故障与数据面故障；
 - [x] Leader 选举期间不需要重建全部 P2P/Relay/Exit 会话；
 - [x] 必需的状态同步失败时按安全策略降级；
 - [x] 控制面恢复后增量同步，不重复创建隧道；
-- [ ] UI 只显示一个主状态并指出控制服务异常或节点降级；
+- [x] UI 只显示一个主状态并指出控制服务异常或节点降级；
 - [x] 不因 Coordinator 瞬断自动 kill node；
 - [x] 记录数据面连续性指标和恢复时间；
-- [ ] 完成 Leader 切换期间视频/长连接场景测试。
+- [x] 完成 Leader 切换期间视频/长连接场景测试。
 
 **验收**：控制面接管不以无差别断网为代价；无法保持的会话明确降级而非伪报正常。
 

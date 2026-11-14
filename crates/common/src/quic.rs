@@ -615,7 +615,11 @@ pub struct QuicFrame {
     pub payload: Vec<u8>,
 }
 
-pub async fn send_quic_frame(stream: &mut quinn::SendStream, frame: &QuicFrame) -> Result<()> {
+/// 写入一个完整 QUIC frame，但保持发送流打开。
+///
+/// 长连接需要连续写入多个 frame，因此不能在每次写入后调用
+/// `SendStream::finish()`。单帧协议仍由 [`send_quic_frame`] 封装。
+pub async fn write_quic_frame(stream: &mut quinn::SendStream, frame: &QuicFrame) -> Result<()> {
     if frame.payload.len() > MAX_QUIC_FRAME_SIZE {
         anyhow::bail!(
             "QUIC frame payload too large: {} > {}",
@@ -636,6 +640,11 @@ pub async fn send_quic_frame(stream: &mut quinn::SendStream, frame: &QuicFrame) 
         .write_all(&frame.payload)
         .await
         .context("无法写入 QUIC frame payload")?;
+    Ok(())
+}
+
+pub async fn send_quic_frame(stream: &mut quinn::SendStream, frame: &QuicFrame) -> Result<()> {
+    write_quic_frame(stream, frame).await?;
     stream.finish().context("无法结束 QUIC send stream")?;
     Ok(())
 }

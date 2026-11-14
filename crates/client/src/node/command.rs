@@ -471,6 +471,39 @@ impl NodeCommandKind {
         )
     }
 
+    /// Durable network governance that must pause while Coordinator authority
+    /// is emergency-only, recovering, or otherwise not writable. This is
+    /// deliberately separate from `is_write`: local lifecycle, routing,
+    /// diagnostics and capability intents remain available during control-plane
+    /// outage unless another safety gate denies them.
+    pub const fn is_governance_write(self) -> bool {
+        matches!(
+            self,
+            Self::UpdateNetworkProfile
+                | Self::PublishNetworkDiscovery
+                | Self::UpdateNetworkDiscovery
+                | Self::UnpublishNetworkDiscovery
+                | Self::ReviewJoinRequest
+                | Self::BatchReviewJoinRequests
+                | Self::ChangeMemberLifecycle
+                | Self::CreateInvitation
+                | Self::RevokeInvitation
+                | Self::RedeemInvitation
+                | Self::SetNetworkRole
+                | Self::BanClient
+                | Self::UnbanClient
+                | Self::UpdateNetworkAllocation
+                | Self::ApplyConfiguration
+                | Self::RollbackConfiguration
+                | Self::ApplyPolicy
+                | Self::RollbackPolicy
+                | Self::ApplyTrafficPolicy
+                | Self::RollbackTrafficPolicy
+                | Self::UpdateCoordinatorCandidates
+                | Self::PublishCoordinatorCandidateDeclaration
+        )
+    }
+
     /// Commands that must be submitted through an operation registry. This
     /// deliberately extends mutation semantics only for diagnostics; it does
     /// not grant write authorization or make diagnostics auditable as changes.

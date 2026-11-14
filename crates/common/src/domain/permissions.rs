@@ -462,6 +462,8 @@ pub enum PermissionDenialCode {
     MembershipInactive,
     #[serde(rename = "permission.temporary_coordinator_read_only")]
     TemporaryCoordinatorReadOnly,
+    #[serde(rename = "permission.coordinator_governance_frozen")]
+    CoordinatorGovernanceFrozen,
     #[serde(rename = "permission.role_ceiling_exceeded")]
     RoleCeilingExceeded,
     #[serde(rename = "permission.policy_denied")]
@@ -479,7 +481,7 @@ pub enum PermissionDenialCode {
 }
 
 impl PermissionDenialCode {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::AuthenticationRequired,
         Self::CapabilityDenied,
         Self::LocalOwnerRequired,
@@ -487,6 +489,7 @@ impl PermissionDenialCode {
         Self::NetworkScopeDenied,
         Self::MembershipInactive,
         Self::TemporaryCoordinatorReadOnly,
+        Self::CoordinatorGovernanceFrozen,
         Self::RoleCeilingExceeded,
         Self::PolicyDenied,
         Self::CrossNetworkDenied,
@@ -505,6 +508,7 @@ impl PermissionDenialCode {
             Self::NetworkScopeDenied => "permission.network_scope_denied",
             Self::MembershipInactive => "permission.membership_inactive",
             Self::TemporaryCoordinatorReadOnly => "permission.temporary_coordinator_read_only",
+            Self::CoordinatorGovernanceFrozen => "permission.coordinator_governance_frozen",
             Self::RoleCeilingExceeded => "permission.role_ceiling_exceeded",
             Self::PolicyDenied => "permission.policy_denied",
             Self::CrossNetworkDenied => "permission.cross_network_denied",
@@ -1018,7 +1022,7 @@ mod tests {
     #[test]
     fn denial_codes_are_stable_and_unique() {
         let codes = PermissionDenialCode::ALL.map(PermissionDenialCode::as_str);
-        assert_eq!(codes.len(), 14);
+        assert_eq!(codes.len(), 15);
         assert!(codes.iter().all(|code| code.starts_with("permission.")));
         assert_eq!(
             codes.iter().copied().collect::<BTreeSet<_>>().len(),

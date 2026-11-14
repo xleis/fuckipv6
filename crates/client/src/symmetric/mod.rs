@@ -11,6 +11,7 @@ use fuckipv6_common::{
 };
 use fuckipv6_coordinator::{
     relay::server::{RelayPolicyAuthority, RelayServer},
+    signaling::admin_recovery::AdminRecoveryStore,
     signaling::blacklist::CoordinatorConfigBlacklistStore,
     signaling::coordinator_candidates::CoordinatorCandidateStore,
     signaling::exit_contribution::ExitContributionRequestStore,
@@ -321,6 +322,14 @@ impl EmbeddedCoordinator {
         }
         let invitation_store = Arc::new(invitation);
 
+        let admin_recovery_store = Arc::new(
+            AdminRecoveryStore::new(
+                blacklist_path.with_file_name("admin_recovery.json"),
+                network_record_path.clone(),
+            )
+            .context("无法初始化管理员恢复存储")?,
+        );
+
         let mut exit_contribution = ExitContributionRequestStore::new(
             blacklist_path.with_file_name("exit_contribution_requests.json"),
             network_record_path.clone(),
@@ -347,6 +356,7 @@ impl EmbeddedCoordinator {
             SignalingServer::new_with_manager(signaling_bind, session_manager.clone())
                 .with_join_request_store(join_request_store)
                 .with_invitation_store(invitation_store)
+                .with_admin_recovery_store(admin_recovery_store)
                 .with_member_lifecycle_store(member_lifecycle_store)
                 .with_exit_contribution_store(exit_contribution_store);
         if let Some(store) = coordinator_candidate_store.clone() {

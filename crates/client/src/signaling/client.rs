@@ -1,14 +1,14 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
-    ContentHash, CoordinatorCandidateConfig, CoordinatorCandidateDeclaration,
-    CoordinatorCandidateStatus, CoordinatorElectionProposal, CoordinatorElectionVote,
-    CoordinatorEmergencyLeaderResponse, CoordinatorEmergencyWriteCredential,
-    CoordinatorRecoveryReport, CoordinatorRecoveryResponse, CoordinatorTerm,
-    CoordinatorWriteCredential, InvitationCode, InvitationCreateRequest, InvitationId,
-    InvitationPreview, InvitationRedeemRequest, InvitationRedemption, InvitationState,
-    InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestId, JoinRequestState,
-    MemberLifecycleChange, MemberLifecycleChangeRequest, MemberRemovalPreview,
+    AdminRecoveryRequest, AdminRecoveryRequestId, AdminRecoveryStatusView, ContentHash,
+    CoordinatorCandidateConfig, CoordinatorCandidateDeclaration, CoordinatorCandidateStatus,
+    CoordinatorElectionProposal, CoordinatorElectionVote, CoordinatorEmergencyLeaderResponse,
+    CoordinatorEmergencyWriteCredential, CoordinatorRecoveryReport, CoordinatorRecoveryResponse,
+    CoordinatorTerm, CoordinatorWriteCredential, InvitationCode, InvitationCreateRequest,
+    InvitationId, InvitationPreview, InvitationRedeemRequest, InvitationRedemption,
+    InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestId,
+    JoinRequestState, MemberLifecycleChange, MemberLifecycleChangeRequest, MemberRemovalPreview,
     MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview, NetworkJoinPreviewRequest,
     NetworkMemberDirectory, NodeId,
 };
@@ -35,6 +35,8 @@ const JOIN_REQUEST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const INVITATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const NETWORK_JOIN_PREVIEW_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const COORDINATOR_CANDIDATE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
+#[allow(dead_code)] // Consumed when the W14 administrator recovery operator flow is wired.
+const ADMIN_RECOVERY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SignalingCloseError {
@@ -75,6 +77,10 @@ pub struct SignalingClient {
     network_join_preview_gate: Arc<Mutex<()>>,
     coordinator_candidates: Arc<CoordinatorCandidateResponseHub>,
     coordinator_candidate_gate: Arc<Mutex<()>>,
+    #[allow(dead_code)] // Read by the pending W14 administrator recovery operator flow.
+    admin_recoveries: Arc<AdminRecoveryResponseHub>,
+    #[allow(dead_code)] // Read by the pending W14 administrator recovery operator flow.
+    admin_recovery_gate: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -706,6 +712,230 @@ impl CoordinatorCandidateResponseHub {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[allow(dead_code)] // Projected by the pending W14 administrator recovery operator flow.
+pub(crate) enum AdminRecoveryControlError {
+    #[error("管理员恢复控制连接已断开")]
+    Disconnected,
+    #[error("管理员恢复控制请求超时")]
+    TimedOut,
+    #[error("管理员恢复控制请求被拒绝 ({code}): {key}")]
+    Rejected { code: u16, key: String },
+    #[error("管理员恢复控制响应无效")]
+    InvalidResponse,
+    #[error("管理员恢复控制连接尚未就绪")]
+    Unavailable,
+}
+
+impl AdminRecoveryControlError {
+    #[allow(dead_code)] // Projected by the pending W14 administrator recovery operator flow.
+    pub(crate) fn message_key(&self) -> &str {
+        match self {
+            Self::Disconnected | Self::Unavailable => "admin_recovery.error.unavailable",
+            Self::TimedOut => "admin_recovery.error.timeout",
+            Self::InvalidResponse => "admin_recovery.error.invalid_response",
+            Self::Rejected { key, .. } if key.starts_with("admin_recovery.error.") => key,
+            Self::Rejected { code: 401, .. } => "admin_recovery.error.unauthorized",
+            Self::Rejected { code: 403, .. } => "admin_recovery.error.permission_denied",
+            Self::Rejected { code: 404, .. } => "admin_recovery.error.not_found",
+            Self::Rejected { code: 429, .. } => "admin_recovery.error.rate_limited",
+            Self::Rejected { code: 503, .. } => "admin_recovery.error.overloaded",
+            Self::Rejected { .. } => "admin_recovery.error.rejected",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AdminRecoveryResponse {
+    Status(Box<AdminRecoveryStatusView>),
+    List(Vec<AdminRecoveryStatusView>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Constructed by the pending W14 administrator recovery operator flow.
+enum PendingAdminRecovery {
+    Submit {
+        network_id: NetworkId,
+        request_id: AdminRecoveryRequestId,
+    },
+    Status {
+        network_id: NetworkId,
+        request_id: AdminRecoveryRequestId,
+    },
+    List {
+        network_id: NetworkId,
+    },
+    Revoke {
+        network_id: NetworkId,
+        request_id: AdminRecoveryRequestId,
+    },
+    Execute {
+        network_id: NetworkId,
+        request_id: AdminRecoveryRequestId,
+    },
+}
+
+struct PendingAdminRecoveryResponse {
+    expected: PendingAdminRecovery,
+    sender: oneshot::Sender<std::result::Result<AdminRecoveryResponse, AdminRecoveryControlError>>,
+}
+
+#[derive(Default)]
+struct AdminRecoveryResponseHub {
+    pending: StdMutex<Option<PendingAdminRecoveryResponse>>,
+}
+
+impl AdminRecoveryResponseHub {
+    #[allow(dead_code)] // Called by the pending W14 administrator recovery operator flow.
+    fn register(
+        &self,
+        expected: PendingAdminRecovery,
+    ) -> std::result::Result<
+        oneshot::Receiver<std::result::Result<AdminRecoveryResponse, AdminRecoveryControlError>>,
+        AdminRecoveryControlError,
+    > {
+        let (sender, receiver) = oneshot::channel();
+        let mut pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if pending.is_some() {
+            return Err(AdminRecoveryControlError::Unavailable);
+        }
+        *pending = Some(PendingAdminRecoveryResponse { expected, sender });
+        Ok(receiver)
+    }
+
+    /// Correlate recovery control responses. Every recovery acknowledgement is
+    /// removed from the general event stream even when it is unsolicited or
+    /// mismatched, so forged status projections cannot surface as data events.
+    fn route(&self, message: &SignalingMessage) -> bool {
+        let matches = match message {
+            SignalingMessage::Error { .. } => self.has_pending(),
+            SignalingMessage::AdminRecoverySubmitAck { status } => self
+                .matches_status(status, |expected| {
+                    matches!(expected, PendingAdminRecovery::Submit { .. })
+                }),
+            SignalingMessage::AdminRecoveryStatusAck { status } => self
+                .matches_status(status, |expected| {
+                    matches!(expected, PendingAdminRecovery::Status { .. })
+                }),
+            SignalingMessage::AdminRecoveryListAck { requests } => {
+                self.matches(|expected| match expected {
+                    PendingAdminRecovery::List { network_id } => requests
+                        .iter()
+                        .all(|status| status.network_id == *network_id),
+                    _ => false,
+                })
+            }
+            SignalingMessage::AdminRecoveryRevokeAck { status } => self
+                .matches_status(status, |expected| {
+                    matches!(expected, PendingAdminRecovery::Revoke { .. })
+                }),
+            SignalingMessage::AdminRecoveryExecuteAck { status } => self
+                .matches_status(status, |expected| {
+                    matches!(expected, PendingAdminRecovery::Execute { .. })
+                }),
+            _ => return false,
+        };
+
+        let is_recovery_response = matches!(
+            message,
+            SignalingMessage::AdminRecoverySubmitAck { .. }
+                | SignalingMessage::AdminRecoveryStatusAck { .. }
+                | SignalingMessage::AdminRecoveryListAck { .. }
+                | SignalingMessage::AdminRecoveryRevokeAck { .. }
+                | SignalingMessage::AdminRecoveryExecuteAck { .. }
+        );
+        if !matches {
+            return is_recovery_response;
+        }
+
+        let response = match message {
+            SignalingMessage::AdminRecoverySubmitAck { status }
+            | SignalingMessage::AdminRecoveryStatusAck { status }
+            | SignalingMessage::AdminRecoveryRevokeAck { status }
+            | SignalingMessage::AdminRecoveryExecuteAck { status } => {
+                AdminRecoveryResponse::Status(Box::new(status.clone()))
+            }
+            SignalingMessage::AdminRecoveryListAck { requests } => {
+                AdminRecoveryResponse::List(requests.clone())
+            }
+            SignalingMessage::Error { code, message } => {
+                return self.finish(Err(AdminRecoveryControlError::Rejected {
+                    code: *code,
+                    key: message.clone(),
+                }));
+            }
+            _ => unreachable!("admin recovery response match was checked above"),
+        };
+        self.finish(Ok(response))
+    }
+
+    fn has_pending(&self) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+
+    fn matches(&self, predicate: impl FnOnce(&PendingAdminRecovery) -> bool) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .is_some_and(|pending| predicate(&pending.expected))
+    }
+
+    fn matches_status(
+        &self,
+        status: &AdminRecoveryStatusView,
+        kind: impl FnOnce(&PendingAdminRecovery) -> bool,
+    ) -> bool {
+        self.matches(|expected| {
+            kind(expected)
+                && match expected {
+                    PendingAdminRecovery::Submit {
+                        network_id,
+                        request_id,
+                    }
+                    | PendingAdminRecovery::Status {
+                        network_id,
+                        request_id,
+                    }
+                    | PendingAdminRecovery::Revoke {
+                        network_id,
+                        request_id,
+                    }
+                    | PendingAdminRecovery::Execute {
+                        network_id,
+                        request_id,
+                    } => status.network_id == *network_id && status.request_id == *request_id,
+                    PendingAdminRecovery::List { .. } => false,
+                }
+        })
+    }
+
+    fn finish(
+        &self,
+        result: std::result::Result<AdminRecoveryResponse, AdminRecoveryControlError>,
+    ) -> bool {
+        let pending = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(pending) = pending {
+            let _ = pending.sender.send(result);
+        }
+        true
+    }
+
+    fn fail_pending(&self, error: AdminRecoveryControlError) {
+        let _ = self.finish(Err(error));
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InvitationControlError {
     Disconnected,
@@ -1102,6 +1332,7 @@ struct ConnectionChannels<'a> {
     invitations: &'a InvitationResponseHub,
     network_join_previews: &'a NetworkJoinPreviewResponseHub,
     coordinator_candidates: &'a CoordinatorCandidateResponseHub,
+    admin_recoveries: &'a AdminRecoveryResponseHub,
 }
 
 struct ConnectionState {
@@ -1152,6 +1383,7 @@ impl SignalingClient {
         let invitations = Arc::new(InvitationResponseHub::default());
         let network_join_previews = Arc::new(NetworkJoinPreviewResponseHub::default());
         let coordinator_candidates = Arc::new(CoordinatorCandidateResponseHub::default());
+        let admin_recoveries = Arc::new(AdminRecoveryResponseHub::default());
 
         let registration = RegistrationIdentity {
             client_id: identity.client_id().to_string(),
@@ -1182,6 +1414,7 @@ impl SignalingClient {
             invitations.clone(),
             network_join_previews.clone(),
             coordinator_candidates.clone(),
+            admin_recoveries.clone(),
             shutdown_rx,
         ));
 
@@ -1203,6 +1436,8 @@ impl SignalingClient {
             network_join_preview_gate: Arc::new(Mutex::new(())),
             coordinator_candidates,
             coordinator_candidate_gate: Arc::new(Mutex::new(())),
+            admin_recoveries,
+            admin_recovery_gate: Arc::new(Mutex::new(())),
         };
 
         client.wait_for_initial_registration().await?;
@@ -1242,6 +1477,8 @@ impl SignalingClient {
                 network_join_preview_gate: Arc::new(Mutex::new(())),
                 coordinator_candidates: Arc::new(CoordinatorCandidateResponseHub::default()),
                 coordinator_candidate_gate: Arc::new(Mutex::new(())),
+                admin_recoveries: Arc::new(AdminRecoveryResponseHub::default()),
+                admin_recovery_gate: Arc::new(Mutex::new(())),
             },
             outbound_rx,
         )
@@ -1739,6 +1976,147 @@ impl SignalingClient {
         }
     }
 
+    #[allow(dead_code)] // Called by the pending W14 administrator recovery operator flow.
+    pub(crate) async fn submit_admin_recovery(
+        &self,
+        request: AdminRecoveryRequest,
+    ) -> std::result::Result<AdminRecoveryStatusView, AdminRecoveryControlError> {
+        let network_id = request.proposal.network_id.clone();
+        let request_id = request.proposal.request_id.clone();
+        match self
+            .send_admin_recovery_operation(
+                SignalingMessage::AdminRecoverySubmit {
+                    request: Box::new(request),
+                },
+                PendingAdminRecovery::Submit {
+                    network_id,
+                    request_id,
+                },
+            )
+            .await?
+        {
+            AdminRecoveryResponse::Status(status) => Ok(*status),
+            AdminRecoveryResponse::List(_) => Err(AdminRecoveryControlError::InvalidResponse),
+        }
+    }
+
+    #[allow(dead_code)] // Called by the pending W14 administrator recovery operator flow.
+    pub(crate) async fn get_admin_recovery_status(
+        &self,
+        network_id: NetworkId,
+        request_id: AdminRecoveryRequestId,
+    ) -> std::result::Result<AdminRecoveryStatusView, AdminRecoveryControlError> {
+        match self
+            .send_admin_recovery_operation(
+                SignalingMessage::AdminRecoveryStatus {
+                    network_id: network_id.clone(),
+                    request_id: request_id.clone(),
+                },
+                PendingAdminRecovery::Status {
+                    network_id,
+                    request_id,
+                },
+            )
+            .await?
+        {
+            AdminRecoveryResponse::Status(status) => Ok(*status),
+            AdminRecoveryResponse::List(_) => Err(AdminRecoveryControlError::InvalidResponse),
+        }
+    }
+
+    #[allow(dead_code)] // Called by the pending W14 administrator recovery operator flow.
+    pub(crate) async fn list_admin_recoveries(
+        &self,
+        network_id: NetworkId,
+    ) -> std::result::Result<Vec<AdminRecoveryStatusView>, AdminRecoveryControlError> {
+        match self
+            .send_admin_recovery_operation(
+                SignalingMessage::AdminRecoveryList {
+                    network_id: network_id.clone(),
+                },
+                PendingAdminRecovery::List { network_id },
+            )
+            .await?
+        {
+            AdminRecoveryResponse::List(requests) => Ok(requests),
+            AdminRecoveryResponse::Status(_) => Err(AdminRecoveryControlError::InvalidResponse),
+        }
+    }
+
+    #[allow(dead_code)] // Called by the pending W14 administrator recovery operator flow.
+    pub(crate) async fn revoke_admin_recovery(
+        &self,
+        network_id: NetworkId,
+        request_id: AdminRecoveryRequestId,
+        reason: String,
+    ) -> std::result::Result<AdminRecoveryStatusView, AdminRecoveryControlError> {
+        match self
+            .send_admin_recovery_operation(
+                SignalingMessage::AdminRecoveryRevoke {
+                    network_id: network_id.clone(),
+                    request_id: request_id.clone(),
+                    reason,
+                },
+                PendingAdminRecovery::Revoke {
+                    network_id,
+                    request_id,
+                },
+            )
+            .await?
+        {
+            AdminRecoveryResponse::Status(status) => Ok(*status),
+            AdminRecoveryResponse::List(_) => Err(AdminRecoveryControlError::InvalidResponse),
+        }
+    }
+
+    #[allow(dead_code)] // Called by the pending W14 administrator recovery operator flow.
+    pub(crate) async fn execute_admin_recovery(
+        &self,
+        network_id: NetworkId,
+        request_id: AdminRecoveryRequestId,
+    ) -> std::result::Result<AdminRecoveryStatusView, AdminRecoveryControlError> {
+        match self
+            .send_admin_recovery_operation(
+                SignalingMessage::AdminRecoveryExecute {
+                    network_id: network_id.clone(),
+                    request_id: request_id.clone(),
+                },
+                PendingAdminRecovery::Execute {
+                    network_id,
+                    request_id,
+                },
+            )
+            .await?
+        {
+            AdminRecoveryResponse::Status(status) => Ok(*status),
+            AdminRecoveryResponse::List(_) => Err(AdminRecoveryControlError::InvalidResponse),
+        }
+    }
+
+    #[allow(dead_code)] // Called by the pending W14 administrator recovery operator flow.
+    async fn send_admin_recovery_operation(
+        &self,
+        message: SignalingMessage,
+        expected: PendingAdminRecovery,
+    ) -> std::result::Result<AdminRecoveryResponse, AdminRecoveryControlError> {
+        let _gate = self.admin_recovery_gate.lock().await;
+        let receiver = self.admin_recoveries.register(expected)?;
+        if self.send(message).is_err() {
+            self.admin_recoveries
+                .fail_pending(AdminRecoveryControlError::Disconnected);
+            return Err(AdminRecoveryControlError::Unavailable);
+        }
+        match tokio::time::timeout(ADMIN_RECOVERY_RESPONSE_TIMEOUT, receiver).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => Err(AdminRecoveryControlError::Disconnected),
+            Err(_) => {
+                self.admin_recoveries
+                    .fail_pending(AdminRecoveryControlError::TimedOut);
+                Err(AdminRecoveryControlError::TimedOut)
+            }
+        }
+    }
+
     pub(crate) async fn create_invitation(
         &self,
         request: InvitationCreateRequest,
@@ -2001,6 +2379,7 @@ async fn connection_manager(
     invitations: Arc<InvitationResponseHub>,
     network_join_previews: Arc<NetworkJoinPreviewResponseHub>,
     coordinator_candidates: Arc<CoordinatorCandidateResponseHub>,
+    admin_recoveries: Arc<AdminRecoveryResponseHub>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
     let channels = ConnectionChannels {
@@ -2014,6 +2393,7 @@ async fn connection_manager(
         invitations: &invitations,
         network_join_previews: &network_join_previews,
         coordinator_candidates: &coordinator_candidates,
+        admin_recoveries: &admin_recoveries,
     };
     let mut pending_outbound = Vec::new();
     let mut state = ConnectionState {
@@ -2120,6 +2500,9 @@ fn notify_disconnected(channels: ConnectionChannels<'_>, reason: String) {
     channels
         .coordinator_candidates
         .fail_pending(CoordinatorCandidateControlError::Disconnected);
+    channels
+        .admin_recoveries
+        .fail_pending(AdminRecoveryControlError::Disconnected);
     let _ = channels.assigned_ip_tx.send(None);
     let _ = channels.relay_endpoint_tx.send(None);
     let _ = channels
@@ -2311,6 +2694,10 @@ fn handle_incoming_message(
     }
 
     if channels.coordinator_candidates.route(&msg) {
+        return Ok(());
+    }
+
+    if channels.admin_recoveries.route(&msg) {
         return Ok(());
     }
 
@@ -2691,12 +3078,13 @@ pub enum SignalingEvent {
 mod tests {
     use super::*;
     use fuckipv6_common::domain::{
-        CoordinatorAuthority, CoordinatorCandidateConfigState, CoordinatorCandidateStatus,
-        CoordinatorElectionSession, CoordinatorElectionVote, CoordinatorEmergencyLeaderState,
-        CoordinatorEmergencyLeaderStatus, CoordinatorEmergencyState, CoordinatorLeaseState,
-        CoordinatorPhase, CoordinatorTerm, ExitContributionMode, ExitContributionObligation,
-        ExitContributionScope, FencingToken, MembershipRole, NetworkCreateProfile, NetworkJoinMode,
-        NetworkRecord, NetworkVisibility, NodeId, PublicKey,
+        AdminRecoveryImpact, AdminRecoveryRevocationPlan, AdminRecoveryState, CoordinatorAuthority,
+        CoordinatorCandidateConfigState, CoordinatorCandidateStatus, CoordinatorElectionSession,
+        CoordinatorElectionVote, CoordinatorEmergencyLeaderState, CoordinatorEmergencyLeaderStatus,
+        CoordinatorEmergencyState, CoordinatorLeaseState, CoordinatorPhase, CoordinatorTerm,
+        ExitContributionMode, ExitContributionObligation, ExitContributionScope, FencingToken,
+        MembershipRole, NetworkCreateProfile, NetworkJoinMode, NetworkRecord, NetworkVisibility,
+        NodeId, PublicKey,
     };
     use fuckipv6_common::Identity;
     use futures::SinkExt;
@@ -2733,6 +3121,35 @@ mod tests {
             fencing_token: FencingToken(fencing_token),
             issued_at_unix_ms: expires_at_unix_ms.saturating_sub(60_000),
             expires_at_unix_ms,
+        }
+    }
+
+    fn admin_recovery_status(
+        network_id: NetworkId,
+        request_id: AdminRecoveryRequestId,
+    ) -> AdminRecoveryStatusView {
+        let initiator = NodeId::from_public_key(b"admin-recovery-initiator");
+        AdminRecoveryStatusView {
+            request_id,
+            network_id,
+            state: AdminRecoveryState::Pending,
+            impact: AdminRecoveryImpact {
+                owner_before: initiator.clone(),
+                owner_after: NodeId::from_public_key(b"admin-recovery-replacement"),
+                administrators_added: Vec::new(),
+                administrators_removed: Vec::new(),
+                members_added: Vec::new(),
+                members_removed: Vec::new(),
+            },
+            initiator: initiator.clone(),
+            participants: vec![initiator],
+            signature_count: 2,
+            required_signatures: 2,
+            issued_at_unix_ms: 1_100,
+            expires_at_unix_ms: 1_200,
+            revocation: AdminRecoveryRevocationPlan::default(),
+            can_execute: true,
+            denial_key: None,
         }
     }
 
@@ -2876,6 +3293,8 @@ mod tests {
             network_join_preview_gate: Arc::new(Mutex::new(())),
             coordinator_candidates: Arc::new(CoordinatorCandidateResponseHub::default()),
             coordinator_candidate_gate: Arc::new(Mutex::new(())),
+            admin_recoveries: Arc::new(AdminRecoveryResponseHub::default()),
+            admin_recovery_gate: Arc::new(Mutex::new(())),
         };
 
         let error = client
@@ -2900,6 +3319,172 @@ mod tests {
             .expect("signaling task slot poisoned")
             .is_none());
         Ok(())
+    }
+
+    #[test]
+    fn unsolicited_admin_recovery_acks_are_consumed() {
+        let hub = AdminRecoveryResponseHub::default();
+        let network_id = NetworkId::from_public_key(b"admin-recovery-unsolicited");
+        let request_id = AdminRecoveryRequestId::from_public_key(b"admin-recovery-request");
+        let status = admin_recovery_status(network_id.clone(), request_id.clone());
+
+        for message in [
+            SignalingMessage::AdminRecoverySubmitAck {
+                status: status.clone(),
+            },
+            SignalingMessage::AdminRecoveryStatusAck {
+                status: status.clone(),
+            },
+            SignalingMessage::AdminRecoveryListAck {
+                requests: vec![status.clone()],
+            },
+            SignalingMessage::AdminRecoveryRevokeAck {
+                status: status.clone(),
+            },
+            SignalingMessage::AdminRecoveryExecuteAck { status },
+        ] {
+            assert!(
+                hub.route(&message),
+                "unsolicited recovery acknowledgements must never reach general events"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_recovery_status_ack_requires_exact_request_and_network() {
+        let hub = AdminRecoveryResponseHub::default();
+        let network_id = NetworkId::from_public_key(b"admin-recovery-network");
+        let other_network_id = NetworkId::from_public_key(b"other-admin-recovery-network");
+        let request_id = AdminRecoveryRequestId::from_public_key(b"admin-recovery-request");
+        let other_request_id =
+            AdminRecoveryRequestId::from_public_key(b"other-admin-recovery-request");
+        let mut receiver = hub
+            .register(PendingAdminRecovery::Status {
+                network_id: network_id.clone(),
+                request_id: request_id.clone(),
+            })
+            .expect("register recovery status request");
+
+        assert!(hub.route(&SignalingMessage::AdminRecoveryStatusAck {
+            status: admin_recovery_status(network_id.clone(), other_request_id),
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "a different request id must not complete the pending request"
+        );
+
+        assert!(hub.route(&SignalingMessage::AdminRecoveryStatusAck {
+            status: admin_recovery_status(other_network_id, request_id.clone()),
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "a different network id must not complete the pending request"
+        );
+
+        let expected = admin_recovery_status(network_id, request_id);
+        assert!(hub.route(&SignalingMessage::AdminRecoveryStatusAck {
+            status: expected.clone(),
+        }));
+        assert_eq!(
+            receiver.await.expect("matching recovery status response"),
+            Ok(AdminRecoveryResponse::Status(Box::new(expected)))
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_recovery_list_ack_requires_matching_network() {
+        let hub = AdminRecoveryResponseHub::default();
+        let network_id = NetworkId::from_public_key(b"admin-recovery-list-network");
+        let other_network_id = NetworkId::from_public_key(b"other-admin-recovery-list-network");
+        let mut receiver = hub
+            .register(PendingAdminRecovery::List {
+                network_id: network_id.clone(),
+            })
+            .expect("register recovery list request");
+
+        assert!(hub.route(&SignalingMessage::AdminRecoveryListAck {
+            requests: vec![admin_recovery_status(
+                other_network_id,
+                AdminRecoveryRequestId::from_public_key(b"other-list-request"),
+            )],
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "a non-empty list from another network must not complete the request"
+        );
+
+        assert!(hub.route(&SignalingMessage::AdminRecoveryListAck {
+            requests: Vec::new(),
+        }));
+        assert_eq!(
+            receiver.await.expect("matching recovery list response"),
+            Ok(AdminRecoveryResponse::List(Vec::new()))
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_recovery_disconnect_fails_the_pending_request() {
+        let hub = AdminRecoveryResponseHub::default();
+        let receiver = hub
+            .register(PendingAdminRecovery::Execute {
+                network_id: NetworkId::from_public_key(b"admin-recovery-disconnect"),
+                request_id: AdminRecoveryRequestId::from_public_key(
+                    b"admin-recovery-disconnect-request",
+                ),
+            })
+            .expect("register recovery execute request");
+
+        hub.fail_pending(AdminRecoveryControlError::Disconnected);
+        assert_eq!(
+            receiver.await.expect("recovery disconnect response"),
+            Err(AdminRecoveryControlError::Disconnected)
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_recovery_protocol_error_preserves_the_public_error_key() {
+        let hub = AdminRecoveryResponseHub::default();
+        let receiver = hub
+            .register(PendingAdminRecovery::Submit {
+                network_id: NetworkId::from_public_key(b"admin-recovery-error"),
+                request_id: AdminRecoveryRequestId::from_public_key(
+                    b"admin-recovery-error-request",
+                ),
+            })
+            .expect("register recovery submit request");
+
+        assert!(hub.route(&SignalingMessage::Error {
+            code: 400,
+            message: "admin_recovery.error.threshold_not_met".into(),
+        }));
+        let error = receiver
+            .await
+            .expect("recovery error response")
+            .expect_err("protocol error must fail the request");
+        assert_eq!(
+            error.message_key(),
+            "admin_recovery.error.threshold_not_met"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_recovery_request_fails_cleanly_when_transport_is_closed() {
+        let (client, outbound_rx) = SignalingClient::test_channel();
+        drop(outbound_rx);
+
+        let error = client
+            .list_admin_recoveries(NetworkId::from_public_key(
+                b"admin-recovery-closed-transport",
+            ))
+            .await
+            .expect_err("closed transport must reject the recovery request");
+        assert_eq!(error, AdminRecoveryControlError::Unavailable);
     }
 
     #[test]
@@ -3548,6 +4133,7 @@ mod tests {
             Arc::new(InvitationResponseHub::default()),
             Arc::new(NetworkJoinPreviewResponseHub::default()),
             Arc::new(CoordinatorCandidateResponseHub::default()),
+            Arc::new(AdminRecoveryResponseHub::default()),
             shutdown_rx,
         ));
 

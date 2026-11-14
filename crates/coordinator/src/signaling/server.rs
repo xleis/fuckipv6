@@ -2287,6 +2287,9 @@ async fn handle_admin_recovery_execute(
     else {
         return Ok(());
     };
+    let Some(actor_client_id) = client_id.as_deref() else {
+        return Ok(());
+    };
     let now_unix_ms = unix_time_ms();
     let result = async {
         let visible = store.status_for_actor(&request_id, &actor, now_unix_ms)?;
@@ -2294,17 +2297,27 @@ async fn handle_admin_recovery_execute(
             anyhow::bail!("admin_recovery.error.network_mismatch");
         }
         service
-            .execute_authorized(&actor, &request_id, now_unix_ms)
+            .execute_authorized_before_actor_disconnect(
+                &actor,
+                &request_id,
+                now_unix_ms,
+                actor_client_id,
+                |status| {
+                    send_binary(
+                        tx,
+                        session_manager,
+                        SignalingMessage::AdminRecoveryExecuteAck {
+                            status: status.clone(),
+                        },
+                    )
+                },
+            )
             .await?;
-        store.status(&request_id, now_unix_ms)
+        Ok(())
     }
     .await;
     match result {
-        Ok(status) => send_binary(
-            tx,
-            session_manager,
-            SignalingMessage::AdminRecoveryExecuteAck { status },
-        )?,
+        Ok(()) => {}
         Err(error) => {
             tracing::warn!(%error, %actor, %request_id, "管理员恢复执行失败");
             send_binary(tx, session_manager, admin_recovery_protocol_error(&error))?;

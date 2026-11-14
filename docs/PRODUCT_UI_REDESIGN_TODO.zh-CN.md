@@ -3416,7 +3416,7 @@ Leader。紧急租约具有软租约、硬期限和单调递增的 `emergency_ep
 
 ### W14-08 管理员阈值恢复 `[ ]`
 
-> 当前进展（2026-11-14）：后端领域层已定义当前管理员严格多数阈值、离线灾备 Trustee 阈值、网络/成员快照版本与摘要，并对请求有效期、撤销计划、签名集合和过期/成员变更/网络错配执行校验；同一请求的重复签名、重放、伪造签名和阈值不足均失败关闭。Coordinator 新增恢复请求的提交、状态、列表、撤销和执行协议，持久化请求、执行结果与不可静默删除的审计；执行在服务互斥锁内重新校验当前权威，原子替换 roster/revision 并失效旧会话、邀请和未确认写入，部分失效失败可幂等续跑。恢复 Ack 被明确归类为服务端发起消息，客户端响应关联校验 request/network，未请求或错配 Ack 不会进入通用事件流。仍缺 GPUI、WebUI、Android 等价安全流程及真实恢复演练，因此 W14-08 和 W14 均不勾选。
+> 当前进展（2026-11-15）：后端领域层已定义当前管理员严格多数阈值、离线灾备 Trustee 阈值、网络/成员快照版本与摘要，并对请求有效期、撤销计划、签名集合和过期/成员变更/网络错配执行校验；同一请求的重复签名、重放、伪造签名和阈值不足均失败关闭。Coordinator 新增恢复请求的提交、状态、列表、撤销和执行协议，持久化请求、执行结果与不可静默删除的审计；执行在服务互斥锁内重新校验当前权威，原子替换 roster/revision 并失效旧会话、邀请和未确认写入，部分失效失败可幂等续跑。恢复 Ack 被明确归类为服务端发起消息，客户端响应关联校验 request/network，未请求或错配 Ack 不会进入通用事件流。真实 WebSocket 回归进一步修正了执行成功后的断连顺序：执行者旧连接必须先收到 `AdminRecoveryExecuteAck`，随后才收到 Close；其他旧权威立即断连，不在快照内的 pending applicant 保持信令连接。仍缺 GPUI、WebUI、Android 等价安全流程及真实恢复演练，因此 W14-08 和 W14 均不勾选。
 
 - [x] 定义管理员阈值、签名集合和成员快照版本；
 - [ ] 全部 Passkey 丢失等灾难场景提供本地/离线恢复设计；
@@ -3442,6 +3442,11 @@ Leader。紧急租约具有软租约、硬期限和单调递增的 `emergency_ep
 `administrator_recovery_acknowledgements_are_rejected_as_client_messages` 固定协议编解码和服务端 Ack 防伪边界；
 客户端测试覆盖未请求/错配 Ack 丢弃、断线失败和稳定公开错误键。真实灾难恢复尚未演练，且三端等价操作流程未完成，
 因此本项仍未通过验收。
+
+`websocket_admin_recovery_ack_precedes_old_session_close` 启动真实 Coordinator 信令服务并建立 owner、admin 与
+pending applicant 三条 WebSocket：提交并执行阈值恢复后，断言执行者先收到 `Executed` Ack、随后才收到 Close；另一名
+旧权威被立即断开；未进入批准成员快照的 applicant 仍可查询恢复列表。该测试同时校验新 owner/revision、清空旧管理员
+和 invalidation 审计已持久化，防止后续改动再次让成功的恢复以裸 Close 结束。
 
 **验收**：灾难恢复不依赖单个隐藏后门；恢复权限与正常治理权限有清晰边界。
 

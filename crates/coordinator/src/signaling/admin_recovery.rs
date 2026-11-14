@@ -19,6 +19,9 @@ use super::session::SessionManager;
 
 const ADMIN_RECOVERY_FILE_SCHEMA_VERSION: u16 = 1;
 
+type RecoveryDisconnectCallback<'a> = dyn FnMut(&AdminRecoveryStatusView) -> Result<()> + Send + 'a;
+type PreservedRecoverySession<'a> = (&'a str, &'a mut RecoveryDisconnectCallback<'a>);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredAdminRecoveryRequest {
@@ -768,7 +771,33 @@ impl AdminRecoveryService {
         if !self.store.is_current_authority(&view.network_id, actor)? {
             bail!("admin_recovery.error.permission_denied");
         }
-        self.execute_locked(request_id, now_unix_ms).await
+        self.execute_locked(request_id, now_unix_ms, None).await
+    }
+
+    /// Execute an authenticated recovery while preserving the exact
+    /// connection that will carry the success acknowledgement. All other old
+    /// sessions are closed immediately. The acknowledgement is queued only
+    /// after roster, invitation, join-request and audit persistence succeeds,
+    /// then the preserved old session is closed.
+    pub async fn execute_authorized_before_actor_disconnect(
+        &self,
+        actor: &NodeId,
+        request_id: &AdminRecoveryRequestId,
+        now_unix_ms: u64,
+        preserved_client_id: &str,
+        mut before_disconnect: impl FnMut(&AdminRecoveryStatusView) -> Result<()> + Send,
+    ) -> Result<AdminRecoveryCompletion> {
+        let _execution_guard = self.execution_lock.lock().await;
+        let view = self.store.status(request_id, now_unix_ms)?;
+        if !self.store.is_current_authority(&view.network_id, actor)? {
+            bail!("admin_recovery.error.permission_denied");
+        }
+        self.execute_locked(
+            request_id,
+            now_unix_ms,
+            Some((preserved_client_id, &mut before_disconnect)),
+        )
+        .await
     }
 
     /// Apply the approved authority change and invalidate every local artifact
@@ -781,13 +810,14 @@ impl AdminRecoveryService {
         now_unix_ms: u64,
     ) -> Result<AdminRecoveryCompletion> {
         let _execution_guard = self.execution_lock.lock().await;
-        self.execute_locked(request_id, now_unix_ms).await
+        self.execute_locked(request_id, now_unix_ms, None).await
     }
 
     async fn execute_locked(
         &self,
         request_id: &AdminRecoveryRequestId,
         now_unix_ms: u64,
+        preserved_session: Option<PreservedRecoverySession<'_>>,
     ) -> Result<AdminRecoveryCompletion> {
         let view = self.store.status(request_id, now_unix_ms)?;
         if view.state == AdminRecoveryState::Pending && !view.can_execute {
@@ -810,10 +840,15 @@ impl AdminRecoveryService {
             now_unix_ms,
         )?;
         let snapshot_members = execution.invalidated_sessions.iter().cloned().collect();
-        let disconnected_sessions = self
+        let preserved_client_id = preserved_session.as_ref().map(|(client_id, _)| *client_id);
+        let outcome = self
             .session_manager
-            .disconnect_sessions_for_nodes(&snapshot_members)
+            .disconnect_sessions_for_nodes_except(&snapshot_members, preserved_client_id)
             .await;
+        // A preserved current connection is already part of this invalidation
+        // epoch and is disconnected immediately after the acknowledgement is
+        // queued, so account for it in the durable completion audit now.
+        let disconnected_sessions = outcome.disconnected + outcome.preserved;
         self.store.record_invalidations_applied(
             request_id,
             now_unix_ms,
@@ -821,6 +856,14 @@ impl AdminRecoveryService {
             revoked_invitations,
             cancelled_join_requests,
         )?;
+        if let Some((preserved_client_id, before_disconnect)) = preserved_session {
+            let status = self.store.status(request_id, now_unix_ms)?;
+            let acknowledgement = before_disconnect(&status);
+            self.session_manager
+                .disconnect_client_session(preserved_client_id)
+                .await;
+            acknowledgement?;
+        }
         Ok(AdminRecoveryCompletion {
             execution,
             disconnected_sessions,

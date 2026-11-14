@@ -26,6 +26,12 @@ pub struct ClientSession {
     pub last_heartbeat: Instant,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct SessionDisconnectOutcome {
+    pub disconnected: usize,
+    pub preserved: usize,
+}
+
 /// 会话管理器
 pub struct SessionManager {
     sessions: Arc<RwLock<HashMap<ClientId, ClientSession>>>,
@@ -1095,7 +1101,21 @@ impl SessionManager {
     /// the supplied set. Recovery uses the approved roster snapshot so pending
     /// applicants and unrelated local sessions are not disconnected.
     pub(crate) async fn disconnect_sessions_for_nodes(&self, targets: &BTreeSet<NodeId>) -> usize {
-        let sessions_to_disconnect: Vec<(ClientId, mpsc::UnboundedSender<Message>)> = {
+        self.disconnect_sessions_for_nodes_except(targets, None)
+            .await
+            .disconnected
+    }
+
+    /// Disconnect every matching session except the connection currently
+    /// serving a recovery request. The caller must close that preserved
+    /// connection only after queueing its acknowledgement, otherwise the
+    /// client observes success as a bare WebSocket close.
+    pub(crate) async fn disconnect_sessions_for_nodes_except(
+        &self,
+        targets: &BTreeSet<NodeId>,
+        preserved_client_id: Option<&str>,
+    ) -> SessionDisconnectOutcome {
+        let sessions: Vec<(ClientId, mpsc::UnboundedSender<Message>)> = {
             let sessions = self.sessions.read().await;
             sessions
                 .values()
@@ -1105,12 +1125,34 @@ impl SessionManager {
                 .map(|session| (session.peer_info.client_id.clone(), session.tx.clone()))
                 .collect()
         };
-        let disconnected = sessions_to_disconnect.len();
-        for (client_id, tx) in sessions_to_disconnect {
+
+        let mut outcome = SessionDisconnectOutcome::default();
+        for (client_id, tx) in sessions {
+            if preserved_client_id == Some(&client_id) {
+                outcome.preserved += 1;
+                continue;
+            }
             let _ = tx.send(Message::Close(None));
             self.unregister_client(&client_id).await;
+            outcome.disconnected += 1;
         }
-        disconnected
+        outcome
+    }
+
+    /// Close one authenticated signalling connection. Unlike authorization
+    /// revocation, this only ends the current access epoch; the node may
+    /// register again and pass the normal authorization checks.
+    pub(crate) async fn disconnect_client_session(&self, client_id: &str) -> bool {
+        let tx = {
+            let sessions = self.sessions.read().await;
+            sessions.get(client_id).map(|session| session.tx.clone())
+        };
+        let Some(tx) = tx else {
+            return false;
+        };
+        let _ = tx.send(Message::Close(None));
+        self.unregister_client(&client_id.to_string()).await;
+        true
     }
 
     /// 获取所有在线的对等节点

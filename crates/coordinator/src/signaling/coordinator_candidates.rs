@@ -1862,6 +1862,12 @@ impl CoordinatorCandidateStore {
             }
             updated = candidate;
             stored.latest_term = Some(term);
+            // Recovery projections and emergency proof are bound to the
+            // previous authority tuple. Invalidate them in the same durable
+            // mutation that installs the election result, otherwise the next
+            // store read rejects the persisted recovery as stale.
+            stored.recoveries.clear();
+            stored.emergency_leader = None;
             committed = true;
         }
         stored.latest_election = Some(updated);
@@ -3363,6 +3369,117 @@ mod tests {
                 "missing {action}: {audit:#?}"
             );
         }
+    }
+
+    #[test]
+    fn election_commit_invalidates_recovery_projections_from_the_previous_term() {
+        let fixture = Fixture::new("election-commit-recovery-invalidation");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_two_id = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        store
+            .update_config(&owner_id, 0, fixture.config_three(1), NOW)
+            .unwrap();
+        for candidate in [
+            &fixture.candidate_one,
+            &fixture.candidate_two,
+            &fixture.ordinary,
+        ] {
+            store
+                .publish_declaration(
+                    &NodeId::from_public_key(&candidate.public_key()),
+                    fixture.declaration(candidate, 1),
+                    NOW,
+                )
+                .unwrap();
+        }
+
+        let lease_expires_at_unix_ms = NOW + 30_000;
+        store
+            .install_term(
+                &candidate_one_id,
+                fixture.term_three(1, 1, &fixture.candidate_one, NOW, lease_expires_at_unix_ms),
+                NOW,
+            )
+            .unwrap();
+        let recovery = store
+            .recover(
+                &candidate_one_id,
+                CoordinatorRecoveryReport {
+                    network_id: fixture.network.network_id.clone(),
+                    observed_term: Some(1),
+                    observed_fencing_token: Some(FencingToken(1)),
+                    observed_leader: Some(candidate_one_id.clone()),
+                    observed_candidate_config_revision: Some(1),
+                    observed_audit_sequence: 0,
+                },
+                NOW + 1,
+            )
+            .unwrap();
+        assert_eq!(recovery.recovery.authoritative_term, 1);
+
+        let proposal = fixture.election_proposal_three(
+            2,
+            &fixture.candidate_two,
+            lease_expires_at_unix_ms,
+            lease_expires_at_unix_ms + 30_000,
+        );
+        let proposal_id = proposal.proposal_id.clone();
+        store
+            .propose_election(&candidate_two_id, proposal, lease_expires_at_unix_ms)
+            .unwrap();
+        for (voter, voter_id, recorded_at_unix_ms) in [
+            (
+                &fixture.candidate_one,
+                &candidate_one_id,
+                lease_expires_at_unix_ms + 1,
+            ),
+            (
+                &fixture.candidate_two,
+                &candidate_two_id,
+                lease_expires_at_unix_ms + 2,
+            ),
+        ] {
+            let vote = fixture.election_vote_three(
+                2,
+                &fixture.candidate_two,
+                voter,
+                recorded_at_unix_ms,
+                lease_expires_at_unix_ms + 30_000,
+            );
+            store
+                .record_election_vote(voter_id, &proposal_id, vote, recorded_at_unix_ms)
+                .unwrap();
+        }
+
+        let restored = fixture
+            .store()
+            .status(
+                &owner_id,
+                &fixture.network.network_id,
+                lease_expires_at_unix_ms + 3,
+            )
+            .unwrap();
+        assert_eq!(restored.latest_term.as_ref().map(|term| term.term), Some(2));
+        assert_eq!(restored.current_leader.as_ref(), Some(&candidate_two_id));
+        let refreshed = store
+            .recover(
+                &candidate_one_id,
+                CoordinatorRecoveryReport {
+                    network_id: fixture.network.network_id.clone(),
+                    observed_term: Some(2),
+                    observed_fencing_token: Some(FencingToken(2)),
+                    observed_leader: Some(candidate_two_id.clone()),
+                    observed_candidate_config_revision: Some(1),
+                    observed_audit_sequence: 0,
+                },
+                lease_expires_at_unix_ms + 3,
+            )
+            .unwrap();
+        assert_eq!(refreshed.recovery.authoritative_term, 2);
+        assert_eq!(refreshed.recovery.authoritative_leader, candidate_two_id);
+        assert_ne!(refreshed.recovery.role, CoordinatorRecoveryRole::Member);
     }
 
     #[test]

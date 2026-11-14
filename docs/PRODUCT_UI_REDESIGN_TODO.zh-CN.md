@@ -3371,42 +3371,77 @@ Leader、候选配置 revision 和审计游标；服务端以持久化权威快�
 
 ### W14-06 紧急临时 Leader `[ ]`
 
-- [ ] 候选组全部失联时允许在线成员按明确规则进入临时模式；
-- [ ] 临时 Leader 获得运行协调权限，而非完整治理权限；
-- [ ] 禁止修改成员、角色、安全策略、密钥、邀请和长期配置；
-- [ ] 临时权限有短租约、自动过期和显著 UI 标识；
-- [ ] 临时 Leader 不能提升自己为正式 Leader；
-- [ ] 数据面仅在必要范围维持，避免不可追踪的长期状态；
-- [ ] 所有临时动作进入高优先级审计；
+- [x] 候选组全部失联时允许在线成员按明确规则进入临时模式；
+- [x] 临时 Leader 获得运行协调权限，而非完整治理权限；
+- [x] 禁止修改成员、角色、安全策略、密钥、邀请和长期配置；
+- [x] 临时权限有短租约、自动过期和显著 UI 标识；
+- [x] 临时 Leader 不能提升自己为正式 Leader；
+- [x] 数据面仅在必要范围维持，避免不可追踪的长期状态；
+- [x] 所有临时动作进入高优先级审计；
 - [ ] 完成断电、断网和候选全失演练。
+
+**证据**：只有服务端认证会话确认当前候选配置中的候选全部离线时，才会从在线非候选成员中按确定性规则签发紧急
+Leader。紧急租约具有软租约、硬期限和单调递增的 `emergency_epoch`，只开放发布自身任期、同步末次策略、连接协调、
+健康检查和拒绝过期状态；成员、角色、身份、策略、密钥、邀请、候选配置及其他长期治理写均被领域层和 store gate
+拒绝。`emergency_credentials_allow_runtime_only_and_reject_forgery`、`emergency_leader_cannot_write_governance_or_promote_itself`
+和 `active_emergency_lease_freezes_candidate_configuration_bootstrap` 覆盖临时权限边界；
+`emergency_lease_is_bounded_and_restart_never_extends_it`、`emergency_lease_expiry_cannot_be_renewed_or_revived_by_restart`
+和客户端 takeover 测试覆盖短租约、重启、过期和 UI 决策。签发、续租、撤权、过期及治理拒绝均写持久化审计；
+`emergency_audit_projects_as_high_priority_security_event` 进一步固定为 SecurityEvent / Warning。
+本项仍未完成真实多节点断电、断网和候选全失演练，因此 W14-06 不勾选，该演练由 W14-10 收口。
 
 **验收**：紧急模式保障基本运行，但不成为治理后门；权限范围和持续时间均有硬限制。
 
 ### W14-07 临时权限冻结与恢复 `[ ]`
 
-> 当前进展（2026-11-14）：候选控制面新增统一 governance gate。候选配置缺失、pending、expired 或当前配置下没有健康候选时，服务端以稳定错误码 `coordinator_candidate.error.governance_frozen` 失败关闭。该 gate 已接入成员准入/拒绝/变更、邀请创建/撤销/兑换、加入审批、Exit 贡献提交/审批/撤回；邀请兑换在操作者尚未成为成员时也会检查，并已有“冻结不消耗邀请、不改 roster/lifecycle”的副作用测试。命令授权层新增独立的治理写入意图，临时 Coordinator 对成员、角色、策略、身份、配置、邀请和候选治理写入返回 `permission.temporary_coordinator_governance_frozen`，但本地启停、路由、TUN、诊断和运行协调不被该角色规则自动冻结。GPUI 与 WebUI 已按 `NodeCommandKind::is_governance_write()` 分类统一禁用治理入口，并在候选状态缺失、紧急状态、控制面不可写或紧急 Leader 活跃时展示稳定恢复原因；仅候选声明发布、状态/列表/预览和既有数据面读取保持可用。正式候选恢复后的多数与任期验证已由选举、恢复和并发测试覆盖。安全交回、管理员阈值恢复和 old/new Leader 并发演练仍未完成，因此本项及 W14 均不勾选。
+> 当前进展（2026-11-14）：候选控制面新增统一 governance gate。候选配置缺失、pending、expired 或当前配置下没有健康候选时，服务端以稳定错误码 `coordinator_candidate.error.governance_frozen` 失败关闭。该 gate 已接入成员准入/拒绝/变更、邀请创建/撤销/兑换、加入审批、Exit 贡献提交/审批/撤回；邀请兑换在操作者尚未成为成员时也会检查，并已有“冻结不消耗邀请、不改 roster/lifecycle”的副作用测试。命令授权层新增独立的治理写入意图，临时 Coordinator 对成员、角色、策略、身份、配置、邀请和候选治理写入返回 `permission.temporary_coordinator_governance_frozen`，但本地启停、路由、TUN、诊断和运行协调不被该角色规则自动冻结。GPUI 与 WebUI 已按 `NodeCommandKind::is_governance_write()` 分类统一禁用治理入口，并在候选状态缺失、紧急状态、控制面不可写或紧急 Leader 活跃时展示稳定恢复原因；仅候选声明发布、状态/列表/预览和既有数据面读取保持可用。正式候选恢复后只有在严格多数、候选配置 revision 和 successor term 全部验证通过时，`install_term` 才在同一持久化事务内清除紧急租约并撤销旧 emergency credential；校验失败时租约和治理冻结保持不变。管理员阈值恢复的后端协议、持久化与失效编排已具备实现与测试证据，但 GPUI、WebUI、Android 等价安全流程及真实恢复演练仍未完成，因此本项及 W14 均不勾选。
 
-- [ ] 建立允许/禁止操作清单并落实服务端校验；
-- [ ] 临时 Leader 的所有治理命令返回明确受限错误；
+- [x] 建立允许/禁止操作清单并落实服务端校验；
+- [x] 临时 Leader 的所有治理命令返回明确受限错误；
 - [x] UI 禁用入口并显示恢复条件；
 - [x] 正式候选恢复后验证多数和任期；
-- [ ] 执行安全交回、状态校验和临时权限撤销；
-- [ ] 交回失败保持受限状态，不降级为永久权限；
+- [x] 执行安全交回、状态校验和临时权限撤销；
+- [x] 交回失败保持受限状态，不降级为永久权限；
 - [ ] 管理员阈值恢复流程需要多成员签名/批准；
-- [ ] 覆盖恢复期间并发展开 old/new Leader 测试。
+- [x] 覆盖恢复期间并发展开 old/new Leader 测试。
+
+**证据**：`successor_term_install_atomically_revokes_emergency_authority` 验证严格多数 successor term 安装后新任期
+立即可治理、紧急租约与旧 emergency credential 同时失效、撤权审计记录 successor term/leader，且重启后状态不回退。
+`failed_successor_install_preserves_emergency_lease_and_freeze` 验证多数证明不足时任期不落盘、紧急租约继续有效、
+治理仍冻结且只能续租临时运行权限。`concurrent_split_brain_successors_install_exactly_one_authority` 让两个同任期、
+不同 Leader 的 successor 并发安装，验证只有一个成功、另一个被任期/fencing 拒绝、最终只有一套权威凭据可写且紧急撤权
+审计恰好一条。管理员阈值恢复后端已落地，但端到端安全流程和真实多节点恢复演练仍未完成。
 
 **验收**：临时状态不可被静默延长或转正；交回失败时仍保持最小权限。
 
 ### W14-08 管理员阈值恢复 `[ ]`
 
-- [ ] 定义管理员阈值、签名集合和成员快照版本；
+> 当前进展（2026-11-14）：后端领域层已定义当前管理员严格多数阈值、离线灾备 Trustee 阈值、网络/成员快照版本与摘要，并对请求有效期、撤销计划、签名集合和过期/成员变更/网络错配执行校验；同一请求的重复签名、重放、伪造签名和阈值不足均失败关闭。Coordinator 新增恢复请求的提交、状态、列表、撤销和执行协议，持久化请求、执行结果与不可静默删除的审计；执行在服务互斥锁内重新校验当前权威，原子替换 roster/revision 并失效旧会话、邀请和未确认写入，部分失效失败可幂等续跑。恢复 Ack 被明确归类为服务端发起消息，客户端响应关联校验 request/network，未请求或错配 Ack 不会进入通用事件流。仍缺 GPUI、WebUI、Android 等价安全流程及真实恢复演练，因此 W14-08 和 W14 均不勾选。
+
+- [x] 定义管理员阈值、签名集合和成员快照版本；
 - [ ] 全部 Passkey 丢失等灾难场景提供本地/离线恢复设计；
 - [ ] 恢复请求展示影响、参与者、有效期和撤销路径；
-- [ ] 防止少数管理员伪造多数签名；
-- [ ] 恢复后使旧会话、邀请和未确认写入失效；
-- [ ] 恢复动作形成不可静默删除的审计；
+- [x] 防止少数管理员伪造多数签名；
+- [x] 恢复后使旧会话、邀请和未确认写入失效；
+- [x] 恢复动作形成不可静默删除的审计；
 - [ ] 完成后端、GPUI、WebUI 和 Android 等价安全流程；
-- [ ] 完成签名重放、成员变更和阈值不足测试。
+- [x] 完成签名重放、成员变更和阈值不足测试。
+
+**证据**：`strict_majority_signatures_are_required_and_duplicates_are_rejected`、
+`offline_recovery_policy_can_authorize_without_live_admin_identities`、
+`offline_trustees_cannot_be_mixed_with_live_governance_signatures`、
+`forged_signatures_other_networks_and_stale_members_are_rejected` 和
+`applying_recovery_rotates_the_roster_and_advances_revision` 覆盖阈值、离线 Trustee、伪造、重放与成员快照边界。
+`execution_is_atomic_single_use_and_audited`、`roster_change_after_submission_blocks_execution`、
+`concurrent_execution_has_exactly_one_durable_winner`、
+`service_invalidates_old_credentials_atomically_and_idempotently`、
+`service_resumes_after_partial_invalidation_failure` 和
+`queued_old_authority_is_rechecked_after_authority_replacement` 覆盖持久化执行、并发单胜者、旧权威重检和
+会话/邀请/未确认写入失效编排，其中 `queued_old_authority_is_rechecked_after_authority_replacement` 专门覆盖
+管理员在排队执行期间被替换的 TOCTOU 场景。`administrator_recovery_messages_are_postcard_safe` 与
+`administrator_recovery_acknowledgements_are_rejected_as_client_messages` 固定协议编解码和服务端 Ack 防伪边界；
+客户端测试覆盖未请求/错配 Ack 丢弃、断线失败和稳定公开错误键。真实灾难恢复尚未演练，且三端等价操作流程未完成，
+因此本项仍未通过验收。
 
 **验收**：灾难恢复不依赖单个隐藏后门；恢复权限与正常治理权限有清晰边界。
 

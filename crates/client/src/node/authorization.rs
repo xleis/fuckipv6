@@ -514,7 +514,9 @@ pub(crate) fn authorize_command(
                 network_id: scope.network_id.clone(),
                 object_id: None,
             },
-            intent: if kind.is_write() {
+            intent: if kind.is_governance_write() {
+                PermissionIntent::GovernanceWrite
+            } else if kind.is_write() {
                 PermissionIntent::Mutating
             } else {
                 PermissionIntent::ReadOnly
@@ -1606,20 +1608,20 @@ mod tests {
     }
 
     #[test]
-    fn temporary_coordinator_is_read_only() {
+    fn temporary_coordinator_can_coordinate_runtime_without_governance_authority() {
         let (local_policy, network_policy) = start_policies();
-        assert_denied(
+        authorize_command(
             &network_context(
                 NetworkRole::TemporaryCoordinator,
                 [NodePermission::ManageNetworks, NodePermission::ViewState],
                 &["home"],
                 MembershipState::Active,
-                local_policy.clone(),
+                local_policy,
                 network_policy,
             ),
-            start_home(),
-            "permission.temporary_coordinator_read_only",
-        );
+            &start_home(),
+        )
+        .expect("temporary coordinator may coordinate running networks when policy allows");
 
         authorize_command(
             &network_context(
@@ -1648,7 +1650,7 @@ mod tests {
     }
 
     #[test]
-    fn temporary_coordinator_cannot_start_or_stop_relay() {
+    fn temporary_coordinator_cannot_change_relay_governance() {
         let relay_policies = (
             vec![allow(
                 b"local-relay-capability",
@@ -1678,7 +1680,7 @@ mod tests {
                     role: crate::node::NodeNetworkRole::Relay,
                     enabled,
                 }),
-                "permission.temporary_coordinator_read_only",
+                PermissionDenialCode::TemporaryCoordinatorGovernanceFrozen.as_str(),
             );
         }
     }
@@ -1797,7 +1799,7 @@ mod tests {
                 vec![network_allow],
             ),
             ban_home(),
-            PermissionDenialCode::TemporaryCoordinatorReadOnly.as_str(),
+            PermissionDenialCode::TemporaryCoordinatorGovernanceFrozen.as_str(),
         );
     }
 

@@ -59,6 +59,12 @@ pub(crate) struct ExitPathProbeReport {
     pub(crate) ipv6: bool,
 }
 
+impl ExitPathProbeReport {
+    pub(crate) fn has_usable_family(self) -> bool {
+        self.ipv4 || self.ipv6
+    }
+}
+
 /// Resolve and establish a verified TLS connection to YouTube through sockets
 /// carrying `mark`. No unmarked application traffic is used by this probe.
 pub(crate) async fn probe_exit_path(
@@ -77,15 +83,20 @@ pub(crate) async fn probe_exit_path(
                 probe_family(ProbeFamily::V4, mark),
                 probe_family(ProbeFamily::V6, mark)
             );
-            if let Err(error) = v4 {
-                anyhow::bail!("IPv4 Exit 数据路径探针失败: {error:#}");
+            if let (Err(v4_error), Err(v6_error)) = (&v4, &v6) {
+                anyhow::bail!(
+                    "IPv4 Exit 数据路径探针失败: {v4_error:#}; IPv6 Exit 数据路径探针失败: {v6_error:#}"
+                );
             }
-            if let Err(error) = v6 {
-                anyhow::bail!("IPv6 Exit 数据路径探针失败: {error:#}");
+            if let Err(error) = &v4 {
+                tracing::warn!(error = %format!("{error:#}"), "IPv4 Exit 数据路径探针失败，将仅启用已验证的地址族");
+            }
+            if let Err(error) = &v6 {
+                tracing::warn!(error = %format!("{error:#}"), "IPv6 Exit 数据路径探针失败，将仅启用已验证的地址族");
             }
             ExitPathProbeReport {
-                ipv4: true,
-                ipv6: true,
+                ipv4: v4.is_ok(),
+                ipv6: v6.is_ok(),
             }
         }
         (true, false) => {
@@ -380,5 +391,24 @@ mod tests {
         assert_eq!(&query[0..2], &transaction_id);
         assert_eq!(u16::from_be_bytes([query[4], query[5]]), 1);
         assert!(query.ends_with(&[0, 0, 1, 0, 1]));
+    }
+
+    #[test]
+    fn probe_report_requires_at_least_one_verified_family() {
+        assert!(!ExitPathProbeReport {
+            ipv4: false,
+            ipv6: false,
+        }
+        .has_usable_family());
+        assert!(ExitPathProbeReport {
+            ipv4: true,
+            ipv6: false,
+        }
+        .has_usable_family());
+        assert!(ExitPathProbeReport {
+            ipv4: false,
+            ipv6: true,
+        }
+        .has_usable_family());
     }
 }

@@ -13,10 +13,13 @@ use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::time::Duration;
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use tokio::time::{timeout, Instant};
 
 use super::doh_dns::DohDnsGuard;
-use super::linux_route_probe::{probe_exit_path as probe_marked_exit_path, ProbeFamily};
+use super::linux_route_probe::{
+    probe_exit_path as probe_marked_exit_path, ExitPathProbeReport, ProbeFamily,
+};
 use super::recovery::RouteRecoverySnapshot;
 use crate::network_setup::{self, ensure_stage, NetworkSetupError, NetworkSetupStage};
 
@@ -92,8 +95,14 @@ struct RuleSpec {
     family: Family,
     destination: Option<IpNet>,
     fwmark: Option<u32>,
-    lookup: u32,
+    action: RuleAction,
     preference: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuleAction {
+    Lookup(u32),
+    Unreachable,
 }
 
 #[derive(Debug, Clone)]
@@ -241,7 +250,7 @@ impl LinuxRouteManager {
                     family,
                     destination: Some(*network),
                     fwmark: None,
-                    lookup: MAIN_TABLE_ID,
+                    action: RuleAction::Lookup(MAIN_TABLE_ID),
                     preference: STATIC_PREFERENCE_START + index as u32,
                 };
                 manager.install_rule(&rule).await?;
@@ -285,8 +294,24 @@ impl LinuxRouteManager {
     /// changing ordinary host routing. Only sockets carrying the private probe
     /// mark can match the temporary policy rule.
     pub async fn validate_exit_data_path(&mut self) -> Result<()> {
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        self.begin_exit_data_path_validation(result_tx).await?;
+        let probe_result = result_rx
+            .recv()
+            .await
+            .unwrap_or_else(|| Err(anyhow::anyhow!("Exit 数据路径探针任务未返回结果")));
+        self.complete_exit_data_path_validation(probe_result).await
+    }
+
+    /// Install the marked probe route, then run the real sockets in a background
+    /// task so the caller can keep servicing TUN packets. The probe intentionally
+    /// traverses the same in-process TUN -> P2P -> Exit path it is validating.
+    pub(crate) async fn begin_exit_data_path_validation(
+        &mut self,
+        result_tx: mpsc::UnboundedSender<Result<ExitPathProbeReport>>,
+    ) -> Result<()> {
         if !self.is_active() {
-            return Ok(());
+            anyhow::bail!("路由管理器未激活，拒绝执行 Exit 数据路径探针");
         }
         if self.global_proxy_active {
             anyhow::bail!("全局代理已启用，拒绝重复执行未激活状态的数据路径探针");
@@ -312,7 +337,7 @@ impl LinuxRouteManager {
                 family,
                 destination: None,
                 fwmark: Some(EXIT_PATH_PROBE_MARK),
-                lookup: self.table_id,
+                action: RuleAction::Lookup(self.table_id),
                 preference: EXIT_PATH_PROBE_PREFERENCE,
             };
             if let Err(error) = self.install_rule(&rule).await {
@@ -326,22 +351,47 @@ impl LinuxRouteManager {
             }
         }
 
-        let probe_result = match timeout(
-            EXIT_PATH_PROBE_TIMEOUT,
-            probe_marked_exit_path(&families, EXIT_PATH_PROBE_MARK),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => Err(anyhow::anyhow!(
-                "Exit 数据路径探针超过 {:?}",
-                EXIT_PATH_PROBE_TIMEOUT
-            )),
-        };
+        tokio::spawn(async move {
+            let probe = tokio::spawn(async move {
+                match timeout(
+                    EXIT_PATH_PROBE_TIMEOUT,
+                    probe_marked_exit_path(&families, EXIT_PATH_PROBE_MARK),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow::anyhow!(
+                        "Exit 数据路径探针超过 {:?}",
+                        EXIT_PATH_PROBE_TIMEOUT
+                    )),
+                }
+            });
+            let probe_result = match probe.await {
+                Ok(result) => result,
+                Err(error) => Err(anyhow::anyhow!("Exit 数据路径探针任务异常退出: {error}")),
+            };
+            if result_tx.send(probe_result).is_err() {
+                tracing::debug!("Exit 数据路径探针结果无人接收，丢弃结果");
+            }
+        });
+        Ok(())
+    }
+
+    pub(crate) async fn complete_exit_data_path_validation(
+        &mut self,
+        probe_result: Result<ExitPathProbeReport>,
+    ) -> Result<()> {
         let cleanup_result = self.remove_probe_rules().await;
 
         match (probe_result, cleanup_result) {
             (Ok(report), Ok(())) => {
+                self.active_families.retain(|family| match family {
+                    Family::V4 => report.ipv4,
+                    Family::V6 => report.ipv6,
+                });
+                if !report.has_usable_family() {
+                    anyhow::bail!("Exit 数据路径探针未验证任何可用地址族");
+                }
                 tracing::info!(
                     ipv4 = report.ipv4,
                     ipv6 = report.ipv6,
@@ -372,15 +422,30 @@ impl LinuxRouteManager {
             return Ok(());
         }
 
+        let assigned_ipv6 = self
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.assigned_ips.ipv6)
+            .is_some();
         for family in [Family::V4, Family::V6] {
-            if !self.active_families.contains(&family) || self.owns_catch_all_rule(family) {
+            let action = if self.active_families.contains(&family) {
+                RuleAction::Lookup(self.table_id)
+            } else if family == Family::V6 && assigned_ipv6 {
+                // The Exit cannot carry IPv6. Keep local/link/mesh IPv6 bypass
+                // rules, but fail ordinary IPv6 closed instead of leaking it
+                // over the physical default route.
+                RuleAction::Unreachable
+            } else {
+                continue;
+            };
+            if self.owns_catch_all_rule(family, action) {
                 continue;
             }
             let rule = RuleSpec {
                 family,
                 destination: None,
                 fwmark: None,
-                lookup: self.table_id,
+                action,
                 preference: CATCH_ALL_PREFERENCE,
             };
             if let Err(error) = self.install_rule(&rule).await {
@@ -646,7 +711,7 @@ impl LinuxRouteManager {
                 family,
                 destination: Some(host),
                 fwmark: None,
-                lookup: MAIN_TABLE_ID,
+                action: RuleAction::Lookup(MAIN_TABLE_ID),
                 preference,
             };
             if let Err(error) = self.install_rule(&rule).await {
@@ -840,11 +905,11 @@ impl LinuxRouteManager {
         self.active_families.contains(&family)
     }
 
-    fn owns_catch_all_rule(&self, family: Family) -> bool {
+    fn owns_catch_all_rule(&self, family: Family, action: RuleAction) -> bool {
         self.installed_rules.iter().any(|rule| {
             rule.family == family
                 && rule.destination.is_none()
-                && rule.lookup == self.table_id
+                && rule.action == action
                 && rule.preference == CATCH_ALL_PREFERENCE
         })
     }
@@ -858,18 +923,31 @@ impl LinuxRouteManager {
             let rules = run_ip_query(family, &["rule", "show"])
                 .await
                 .context("读取策略路由规则以清理异常退出残留失败")?;
-            let count = parse_policy_rule_snapshot(&rules, self.table_id).catch_all;
+            let counts = parse_policy_rule_snapshot(&rules, self.table_id);
             let rule = RuleSpec {
                 family,
                 destination: None,
                 fwmark: None,
-                lookup: self.table_id,
+                action: RuleAction::Lookup(self.table_id),
                 preference: CATCH_ALL_PREFERENCE,
             };
-            for _ in 0..count {
+            for _ in 0..counts.catch_all {
                 run_ip_rule("del", &rule)
                     .await
                     .context("删除异常退出遗留的全局代理兜底路由失败")?;
+                removed += 1;
+            }
+            let rule = RuleSpec {
+                family,
+                destination: None,
+                fwmark: None,
+                action: RuleAction::Unreachable,
+                preference: CATCH_ALL_PREFERENCE,
+            };
+            for _ in 0..counts.unreachable {
+                run_ip_rule("del", &rule)
+                    .await
+                    .context("删除异常退出遗留的 IPv6 失败闭合规则失败")?;
                 removed += 1;
             }
         }
@@ -898,7 +976,7 @@ impl LinuxRouteManager {
                 family,
                 destination: None,
                 fwmark: Some(EXIT_PATH_PROBE_MARK),
-                lookup: self.table_id,
+                action: RuleAction::Lookup(self.table_id),
                 preference: EXIT_PATH_PROBE_PREFERENCE,
             };
             for _ in 0..count {
@@ -976,7 +1054,7 @@ impl LinuxRouteManager {
             .iter()
             .filter(|rule| {
                 rule.destination.is_none()
-                    && rule.lookup == self.table_id
+                    && rule.fwmark.is_none()
                     && rule.preference == CATCH_ALL_PREFERENCE
             })
             .cloned()
@@ -1083,8 +1161,16 @@ impl LinuxRouteManager {
             residual_routes: 0,
             stale_interface_routes: 0,
         };
+        let assigned_ipv6 = self
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.assigned_ips.ipv6)
+            .is_some();
         for family in [Family::V4, Family::V6] {
-            if !self.active_families.contains(&family) {
+            let lookup_active = self.active_families.contains(&family);
+            let fail_closed_active =
+                family == Family::V6 && !lookup_active && assigned_ipv6 && self.global_proxy_active;
+            if !lookup_active && !fail_closed_active {
                 continue;
             }
             snapshot.expected_routes += 1;
@@ -1095,6 +1181,17 @@ impl LinuxRouteManager {
             let rule_counts = parse_policy_rule_snapshot(&rules, self.table_id);
             snapshot.residual_routes += rule_counts.residual + rule_counts.probe;
 
+            if fail_closed_active {
+                snapshot.residual_routes += rule_counts.catch_all;
+                snapshot.duplicate_routes += rule_counts.unreachable.saturating_sub(1);
+                if rule_counts.unreachable == 0 {
+                    snapshot.missing_routes += 1;
+                } else {
+                    snapshot.installed_routes += 1;
+                }
+                continue;
+            }
+
             let routes = run_ip_query(family, &["route", "show", "table", &table])
                 .await
                 .context("读取 Linux 策略路由表失败")?;
@@ -1104,6 +1201,7 @@ impl LinuxRouteManager {
 
             snapshot.duplicate_routes += route_counts.matching.saturating_sub(1);
             if self.global_proxy_active {
+                snapshot.residual_routes += rule_counts.unreachable;
                 snapshot.duplicate_routes += rule_counts.catch_all.saturating_sub(1);
                 if rule_counts.catch_all == 0 || route_counts.matching == 0 {
                     snapshot.missing_routes += 1;
@@ -1114,7 +1212,7 @@ impl LinuxRouteManager {
                 // Before Exit validation only the private table route and its
                 // bypass rules are expected. A catch-all in this phase is an
                 // unowned takeover and must be removed by recovery.
-                snapshot.residual_routes += rule_counts.catch_all;
+                snapshot.residual_routes += rule_counts.catch_all + rule_counts.unreachable;
                 if route_counts.matching == 0 {
                     snapshot.missing_routes += 1;
                 } else {
@@ -1327,9 +1425,15 @@ async fn run_ip_rule(action: &str, rule: &RuleSpec) -> Result<()> {
     if let Some(fwmark) = rule.fwmark {
         command.args(["fwmark", &format!("{fwmark:#x}")]);
     }
+    match rule.action {
+        RuleAction::Lookup(table) => {
+            command.arg("lookup").arg(table.to_string());
+        }
+        RuleAction::Unreachable => {
+            command.arg("unreachable");
+        }
+    }
     command.args([
-        "lookup",
-        &rule.lookup.to_string(),
         "pref",
         &rule.preference.to_string(),
         "protocol",
@@ -1350,9 +1454,15 @@ fn run_ip_rule_sync(action: &str, rule: &RuleSpec) -> Result<()> {
     if let Some(fwmark) = rule.fwmark {
         command.args(["fwmark", &format!("{fwmark:#x}")]);
     }
+    match rule.action {
+        RuleAction::Lookup(table) => {
+            command.arg("lookup").arg(table.to_string());
+        }
+        RuleAction::Unreachable => {
+            command.arg("unreachable");
+        }
+    }
     command.args([
-        "lookup",
-        &rule.lookup.to_string(),
         "pref",
         &rule.preference.to_string(),
         "protocol",
@@ -1378,6 +1488,7 @@ async fn run_ip_query(family: Family, args: &[&str]) -> Result<String> {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct PolicyRuleRecoveryCounts {
     catch_all: usize,
+    unreachable: usize,
     probe: usize,
     residual: usize,
 }
@@ -1396,11 +1507,17 @@ fn parse_policy_rule_snapshot(output: &str, table_id: u32) -> PolicyRuleRecovery
         .lines()
         .map(|line| line.split_whitespace().collect::<Vec<_>>())
     {
-        if !rule_has_recovery_protocol(&tokens) || !rule_uses_lookup_table(&tokens, &table) {
+        if !rule_has_recovery_protocol(&tokens) {
             continue;
         }
         if rule_has_preference(&tokens, CATCH_ALL_PREFERENCE) {
-            counts.catch_all += 1;
+            if rule_uses_lookup_table(&tokens, &table) {
+                counts.catch_all += 1;
+            } else if rule_is_unreachable(&tokens) {
+                counts.unreachable += 1;
+            }
+        } else if !rule_uses_lookup_table(&tokens, &table) {
+            continue;
         } else if rule_has_preference(&tokens, EXIT_PATH_PROBE_PREFERENCE)
             && rule_has_fwmark(&tokens, EXIT_PATH_PROBE_MARK)
         {
@@ -1468,6 +1585,12 @@ fn rule_uses_lookup_table(tokens: &[&str], table: &str) -> bool {
     tokens
         .windows(2)
         .any(|pair| pair[0].eq_ignore_ascii_case("lookup") && pair[1] == table)
+}
+
+fn rule_is_unreachable(tokens: &[&str]) -> bool {
+    tokens
+        .iter()
+        .any(|token| token.eq_ignore_ascii_case("unreachable"))
 }
 
 fn route_has_recovery_protocol(tokens: &[&str]) -> bool {
@@ -1694,7 +1817,7 @@ mod tests {
             family: Family::V4,
             destination: Some("203.0.113.0/24".parse().unwrap()),
             fwmark: None,
-            lookup: MAIN_TABLE_ID,
+            action: RuleAction::Lookup(MAIN_TABLE_ID),
             preference: 20_000,
         };
         LinuxRouteManager {
@@ -1960,6 +2083,7 @@ mod tests {
     fn recovery_rule_parser_owns_only_matching_protocol_and_table() {
         let output = "0: from all lookup local
 32000: from all lookup 10000 proto openr
+32000: from all unreachable proto 99
 32001: from all lookup 10000 protocol 99
 32002: from all lookup 10000 prot 99/openr
 32003: from all lookup 10000 proto 98
@@ -1971,6 +2095,7 @@ mod tests {
             parse_policy_rule_snapshot(output, 10_000),
             PolicyRuleRecoveryCounts {
                 catch_all: 1,
+                unreachable: 1,
                 probe: 1,
                 residual: 3,
             }
@@ -1984,6 +2109,7 @@ mod tests {
             parse_policy_rule_snapshot(output, 10_000),
             PolicyRuleRecoveryCounts {
                 catch_all: 1,
+                unreachable: 0,
                 probe: 0,
                 residual: 0,
             }

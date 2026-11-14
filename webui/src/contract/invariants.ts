@@ -11,6 +11,7 @@ import type {
   ConfigurationHistoryEntry,
   ConfigurationPreview,
   CoordinatorCandidate,
+  CoordinatorEmergencyState,
   NodeNetworkSelection,
   ExitSelectionPolicy,
   NetworkProfileApplyResult,
@@ -963,6 +964,39 @@ export function defaultNetworkName(
     snapshot.networks[0]?.name ??
     ""
   );
+}
+
+export type CoordinatorGovernanceFreezeReason =
+  | "status_missing"
+  | CoordinatorEmergencyState;
+
+const coordinatorGovernanceWriteActions = new Set([
+  "preview_member_removal",
+  "change_member_lifecycle",
+  "review_join_request",
+  "batch_review_join_requests",
+  "create_invitation",
+  "revoke_invitation",
+  "redeem_invitation",
+]);
+
+export function actionRequiresCoordinatorGovernance(actionId: string): boolean {
+  return coordinatorGovernanceWriteActions.has(actionId);
+}
+
+/** Fail closed when an embedded Coordinator omits or reports an unsafe status. */
+export function coordinatorGovernanceFreezeReason(
+  snapshot: NodeSnapshot,
+  selectedNetwork: string,
+): CoordinatorGovernanceFreezeReason | null {
+  const network = defaultNetworkName(snapshot, selectedNetwork);
+  const service = (snapshot.embedded_services ?? []).find(
+    (candidate) => candidate.network_name === network,
+  );
+  if (!service) return null;
+  const status = service.coordinator_candidates;
+  if (!status) return "status_missing";
+  return status.emergency === "none" ? null : status.emergency;
 }
 
 export function executionBlockReason(

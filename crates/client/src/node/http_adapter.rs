@@ -26,14 +26,15 @@ use axum::{
 use chrono::{SecondsFormat, Utc};
 use fuckipv6_common::domain::{
     ContentHash, DomainActorRef, DomainObjectRef, IdempotencyKey, IdempotencyRegistry,
-    IdempotentSubmission, NodeId, ObjectKind, Operation, OperationError, OperationId,
-    OperationKind, OperationRecovery, OperationState,
+    IdempotentSubmission, NodeId, ObjectKind, Operation, OperationId, OperationKind,
+    OperationRecovery, OperationState,
 };
 use futures::SinkExt as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, watch, OwnedSemaphorePermit, Semaphore};
 
+use super::operation_service::operation_error_for_problem;
 use super::{project_node_command_result, project_node_event, project_node_snapshot};
 use super::{
     NodeCommand, NodeCommandBus, NodeCommandBusError, NodeCommandContext, NodeCommandOutcome,
@@ -1605,52 +1606,6 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
         | NodeCommand::SetNodeDisplayName(_)
         | NodeCommand::RotateNodeIdentity(_)
         | NodeCommand::Shutdown => node_target(),
-    }
-}
-
-fn operation_error_for_problem(problem: &NodeProblem, target: &DomainObjectRef) -> OperationError {
-    let hide_object = matches!(
-        problem.category,
-        NodeErrorCategory::Authentication | NodeErrorCategory::Authorization
-    );
-    let code = match problem.code {
-        NodeProblemCode::AuthenticationRequired => "operation.authentication_required",
-        NodeProblemCode::InvalidRequest => "operation.invalid_request",
-        NodeProblemCode::NotFound => "operation.not_found",
-        NodeProblemCode::Conflict => "operation.conflict",
-        NodeProblemCode::Unavailable => "operation.unavailable",
-        NodeProblemCode::ResourceExhausted => "operation.unavailable",
-        NodeProblemCode::PermissionDenied => "operation.permission_denied",
-        NodeProblemCode::Cancelled => "operation.cancelled",
-        NodeProblemCode::TimedOut => "operation.timed_out",
-        NodeProblemCode::Unsupported => "operation.unsupported",
-        NodeProblemCode::Internal => "operation.internal",
-    };
-    let recovery = problem.recovery.as_deref().cloned().or_else(|| {
-        problem
-            .code
-            .recovery()
-            .map(|(kind, hint_key)| OperationRecovery {
-                kind: kind.into(),
-                hint_key: hint_key.into(),
-            })
-    });
-    OperationError {
-        code: code.into(),
-        message_key: problem.message_key.clone(),
-        params: if hide_object {
-            BTreeMap::new()
-        } else {
-            (*problem.params).clone()
-        },
-        object: if hide_object {
-            None
-        } else {
-            Some(target.clone())
-        },
-        retryable: problem.retryable,
-        recovery,
-        partial_changes: Vec::new(),
     }
 }
 
@@ -4492,6 +4447,15 @@ mod tests {
             .expect("failed operation carries a stable error");
         assert_eq!(error.code, "operation.unavailable");
         assert_eq!(error.message_key, "error.operation_unavailable");
+        assert_eq!(
+            error.params.get("detail").map(String::as_str),
+            Some("runtime backend unavailable")
+        );
+        let serialized = serde_json::to_value(&error).expect("serialize operation error");
+        assert_eq!(
+            serialized["params"]["detail"],
+            serde_json::json!("runtime backend unavailable")
+        );
         assert_eq!(
             error.object.as_ref().map(|object| &object.kind),
             Some(&ObjectKind::Node)

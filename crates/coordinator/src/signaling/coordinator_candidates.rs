@@ -10,9 +10,10 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 const COORDINATOR_CANDIDATE_FILE_SCHEMA_VERSION: u16 = 1;
+pub(crate) const GOVERNANCE_FROZEN_ERROR: &str = "coordinator_candidate.error.governance_frozen";
 static AUDIT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -94,6 +95,17 @@ pub struct CoordinatorCandidateStore {
     process_lock: Mutex<()>,
 }
 
+/// Proof that the cross-process governance gate is held for one write.
+///
+/// Nested stores use this permit instead of trying to acquire the same gate
+/// again. That keeps compound admission transactions atomic without creating a
+/// self-deadlock between the join-request/invitation ledgers and the lifecycle
+/// ledger.
+pub(crate) struct GovernancePermit<'a> {
+    _process_guard: MutexGuard<'a, ()>,
+    _gate: File,
+}
+
 impl CoordinatorCandidateStore {
     pub fn new(path: impl Into<PathBuf>, network_record_path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
@@ -119,8 +131,9 @@ impl CoordinatorCandidateStore {
             .process_lock
             .lock()
             .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
-        let _profile_lock = lock_profile(&self.network_record_path, false)?;
         self.ensure_parent()?;
+        let _governance_gate = lock_governance_gate(&self.path)?;
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
         let _file_lock = lock_candidate_file(&self.path)?;
         let mut file = self.load_unlocked()?;
         let network = read_network_record(&self.network_record_path, &config.network_id)?;
@@ -191,8 +204,9 @@ impl CoordinatorCandidateStore {
             .process_lock
             .lock()
             .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
-        let _profile_lock = lock_profile(&self.network_record_path, false)?;
         self.ensure_parent()?;
+        let _governance_gate = lock_governance_gate(&self.path)?;
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
         let _file_lock = lock_candidate_file(&self.path)?;
         let mut file = self.load_unlocked()?;
         let network = read_network_record(&self.network_record_path, &network_id)?;
@@ -258,6 +272,74 @@ impl CoordinatorCandidateStore {
             bail!("coordinator_candidate.error.permission_denied");
         }
         status_from_file(&network, file.networks.get(network_id), now_unix_ms)
+    }
+
+    /// Authoritative write gate for governance operations.
+    ///
+    /// This deliberately does not require the caller to be a member: invitation
+    /// redemption and other admission bridges must execute the same freeze
+    /// check before they add the caller to the roster. A missing candidate file
+    /// is treated as `NoCandidatesConfigured`, so callers fail closed whenever
+    /// candidate governance is attached.
+    pub fn ensure_governance_allowed(
+        &self,
+        network_id: &NetworkId,
+        now_unix_ms: u64,
+    ) -> Result<()> {
+        let _process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
+        self.ensure_parent()?;
+        let _governance_gate = lock_governance_gate(&self.path)?;
+        self.ensure_governance_allowed_locked(network_id, now_unix_ms)
+    }
+
+    /// Run one governance write while excluding candidate configuration and
+    /// declaration changes.
+    ///
+    /// The candidate state is re-read after taking the gate and the gate stays
+    /// held until `write` returns. Candidate updates therefore cannot turn an
+    /// allowed check into a frozen write (or vice versa).
+    pub(crate) fn with_governance_allowed<T>(
+        &self,
+        network_id: &NetworkId,
+        now_unix_ms: u64,
+        write: impl FnOnce(&GovernancePermit<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let process_guard = self
+            .process_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("coordinator_candidate.error.store_lock_poisoned"))?;
+        self.ensure_parent()?;
+        let gate = lock_governance_gate(&self.path)?;
+        self.ensure_governance_allowed_locked(network_id, now_unix_ms)?;
+        let permit = GovernancePermit {
+            _process_guard: process_guard,
+            _gate: gate,
+        };
+        write(&permit)
+    }
+
+    fn ensure_governance_allowed_locked(
+        &self,
+        network_id: &NetworkId,
+        now_unix_ms: u64,
+    ) -> Result<()> {
+        let _profile_lock = lock_profile(&self.network_record_path, false)?;
+        let _file_lock = lock_candidate_file(&self.path)?;
+        let file = self.load_unlocked()?;
+        let network = read_network_record(&self.network_record_path, network_id)?;
+        let status = status_from_file(&network, file.networks.get(network_id), now_unix_ms)?;
+        if status.emergency != fuckipv6_common::domain::CoordinatorEmergencyState::None {
+            tracing::warn!(
+                %network_id,
+                emergency = ?status.emergency,
+                "Coordinator candidate state has frozen governance writes"
+            );
+            bail!(GOVERNANCE_FROZEN_ERROR);
+        }
+        Ok(())
     }
 
     pub(crate) fn notification_recipients(&self, network_id: &NetworkId) -> Result<Vec<NodeId>> {
@@ -501,6 +583,19 @@ fn lock_candidate_file(path: &Path) -> Result<File> {
     Ok(lock)
 }
 
+fn lock_governance_gate(path: &Path) -> Result<File> {
+    let lock_path = path.with_extension("governance.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("无法打开协调器治理门禁锁: {}", lock_path.display()))?;
+    lock.lock_exclusive()?;
+    Ok(lock)
+}
+
 fn read_network_record(path: &Path, expected_network_id: &NetworkId) -> Result<NetworkRecord> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("无法读取协调器候选网络资料: {}", path.display()))?;
@@ -554,8 +649,10 @@ mod tests {
         NetworkCreateProfile, NetworkJoinMode, NetworkVisibility, PublicKey,
     };
     use fuckipv6_common::Identity;
+    use std::sync::mpsc;
     use std::sync::Arc;
     use std::thread;
+    use std::time::Duration;
 
     const NOW: u64 = 2_000_000;
 
@@ -814,6 +911,153 @@ mod tests {
         assert_eq!(
             status.candidates[0].health,
             fuckipv6_common::domain::CoordinatorCandidateHealth::Missing
+        );
+    }
+
+    #[test]
+    fn governance_gate_fails_closed_until_a_current_candidate_is_healthy() {
+        let fixture = Fixture::new("governance-gate");
+        let store = fixture.store();
+        let network_id = fixture.network.network_id.clone();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+
+        assert_eq!(
+            store
+                .ensure_governance_allowed(&network_id, NOW)
+                .unwrap_err()
+                .to_string(),
+            GOVERNANCE_FROZEN_ERROR
+        );
+
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        assert_eq!(
+            store
+                .ensure_governance_allowed(&network_id, NOW)
+                .unwrap_err()
+                .to_string(),
+            GOVERNANCE_FROZEN_ERROR
+        );
+
+        store
+            .publish_declaration(
+                &candidate_id,
+                fixture.declaration(&fixture.candidate_one, 1),
+                NOW,
+            )
+            .unwrap();
+        store
+            .ensure_governance_allowed(&network_id, NOW)
+            .expect("one healthy current candidate must release governance");
+
+        assert_eq!(
+            store
+                .ensure_governance_allowed(&network_id, NOW + 3_600_000)
+                .unwrap_err()
+                .to_string(),
+            GOVERNANCE_FROZEN_ERROR
+        );
+    }
+
+    #[test]
+    fn governance_gate_freezes_pending_configuration_without_actor_membership() {
+        let fixture = Fixture::new("governance-gate-pending");
+        let store = fixture.store();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let config = CoordinatorCandidateConfig::signed(
+            fixture.network.network_id.clone(),
+            1,
+            vec![CoordinatorCandidate {
+                node_id: NodeId::from_public_key(&fixture.candidate_one.public_key()),
+                priority: 10,
+            }],
+            NOW + 1,
+            NOW + 3_600_000,
+            &fixture.owner,
+        )
+        .unwrap();
+        store.update_config(&owner_id, 0, config, NOW).unwrap();
+
+        assert_eq!(
+            store
+                .ensure_governance_allowed(&fixture.network.network_id, NOW)
+                .unwrap_err()
+                .to_string(),
+            GOVERNANCE_FROZEN_ERROR
+        );
+    }
+
+    #[test]
+    fn governance_gate_serializes_governance_writes_with_candidate_updates() {
+        let fixture = Fixture::new("governance-gate-race");
+        let network_id = fixture.network.network_id.clone();
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let setup_store = fixture.store();
+        setup_store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        setup_store
+            .publish_declaration(
+                &candidate_id,
+                fixture.declaration(&fixture.candidate_one, 1),
+                NOW,
+            )
+            .unwrap();
+
+        let governance_store = Arc::new(fixture.store());
+        let update_store = Arc::new(fixture.store());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let governance = {
+            let store = governance_store.clone();
+            let network_id = network_id.clone();
+            thread::spawn(move || {
+                store.with_governance_allowed(&network_id, NOW, |_| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(())
+                })
+            })
+        };
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (updated_tx, updated_rx) = mpsc::channel();
+        let updater = {
+            let store = update_store.clone();
+            let owner_id = owner_id.clone();
+            let config = fixture.config(
+                2,
+                vec![CoordinatorCandidate {
+                    node_id: candidate_id,
+                    priority: 10,
+                }],
+            );
+            thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                let result = store.update_config(&owner_id, 1, config, NOW + 1);
+                updated_tx.send(result.is_ok()).unwrap();
+            })
+        };
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            updated_rx.recv_timeout(Duration::from_millis(150)).is_err(),
+            "candidate configuration update crossed the active governance gate"
+        );
+
+        release_tx.send(()).unwrap();
+        governance.join().unwrap().unwrap();
+        assert!(updated_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        updater.join().unwrap();
+        assert_eq!(
+            governance_store
+                .ensure_governance_allowed(&network_id, NOW + 1)
+                .unwrap_err()
+                .to_string(),
+            GOVERNANCE_FROZEN_ERROR
         );
     }
 

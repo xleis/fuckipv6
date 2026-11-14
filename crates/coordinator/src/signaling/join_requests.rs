@@ -5,6 +5,7 @@ use fuckipv6_common::domain::{
 };
 use fuckipv6_common::{Identity, JoinRequestBatchReviewItem, JoinRequestReviewResult};
 
+use super::coordinator_candidates::{CoordinatorCandidateStore, GovernancePermit};
 use super::member_lifecycle::MemberLifecycleStore;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -93,6 +94,7 @@ pub struct JoinRequestStore {
     fallback_owner: Option<NodeId>,
     fallback_administrators: BTreeSet<NodeId>,
     member_lifecycle_store: Option<Arc<MemberLifecycleStore>>,
+    coordinator_candidate_store: Option<Arc<CoordinatorCandidateStore>>,
     process_lock: Mutex<()>,
 }
 
@@ -124,6 +126,7 @@ impl JoinRequestStore {
             fallback_owner,
             fallback_administrators,
             member_lifecycle_store: None,
+            coordinator_candidate_store: None,
             process_lock: Mutex::new(()),
         })
     }
@@ -131,6 +134,27 @@ impl JoinRequestStore {
     pub fn with_member_lifecycle_store(mut self, store: Arc<MemberLifecycleStore>) -> Self {
         self.member_lifecycle_store = Some(store);
         self
+    }
+
+    pub fn with_coordinator_candidate_store(
+        mut self,
+        store: Arc<CoordinatorCandidateStore>,
+    ) -> Self {
+        self.coordinator_candidate_store = Some(store);
+        self
+    }
+
+    fn with_governance_allowed<T>(
+        &self,
+        network_id: &NetworkId,
+        now_unix_ms: u64,
+        write: impl FnOnce(Option<&GovernancePermit<'_>>) -> Result<T>,
+    ) -> Result<T> {
+        if let Some(store) = &self.coordinator_candidate_store {
+            store.with_governance_allowed(network_id, now_unix_ms, |permit| write(Some(permit)))
+        } else {
+            write(None)
+        }
     }
 
     pub fn submit(
@@ -278,6 +302,19 @@ impl JoinRequestStore {
         if reviews.len() > 100 {
             bail!("batch review exceeds 100 requests");
         }
+        self.with_governance_allowed(network_id, now_unix_ms, |permit| {
+            self.review_with_governance(network_id, reviewer, reviews, now_unix_ms, permit)
+        })
+    }
+
+    fn review_with_governance(
+        &self,
+        network_id: &NetworkId,
+        reviewer: &NodeId,
+        reviews: Vec<JoinRequestBatchReviewItem>,
+        now_unix_ms: u64,
+        permit: Option<&GovernancePermit<'_>>,
+    ) -> Result<Vec<JoinRequestReviewResult>> {
         let lifecycle = self
             .member_lifecycle_store
             .as_ref()
@@ -337,22 +374,24 @@ impl JoinRequestStore {
             for (source_key, applicant, action) in effects {
                 let effect = match action {
                     fuckipv6_common::domain::JoinRequestReviewAction::Approve => lifecycle
-                        .admit(
+                        .admit_with_governance(
                             reviewer,
                             network_id,
                             &applicant,
                             fuckipv6_common::domain::MembershipRole::Member,
                             &source_key,
                             now_unix_ms,
+                            permit,
                         )
                         .map(|_| ()),
                     fuckipv6_common::domain::JoinRequestReviewAction::Reject => lifecycle
-                        .reject_admission(
+                        .reject_admission_with_governance(
                             reviewer,
                             network_id,
                             &applicant,
                             &source_key,
                             now_unix_ms,
+                            permit,
                         )
                         .map(|_| ()),
                     fuckipv6_common::domain::JoinRequestReviewAction::RequestInformation => Ok(()),
@@ -720,6 +759,9 @@ fn unix_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signaling::coordinator_candidates::{
+        CoordinatorCandidateStore, GOVERNANCE_FROZEN_ERROR,
+    };
     use fuckipv6_common::domain::{
         CapabilityKind, ExitContributionObligation, IdempotencyKey, JoinApplicantProfile,
         JoinRequestGrantPreview, JoinRequestReviewAction, MemberLifecycleAction,
@@ -844,6 +886,71 @@ mod tests {
         )
         .unwrap()
         .with_member_lifecycle_store(lifecycle_store(dir))
+    }
+
+    #[test]
+    fn governance_freeze_rejects_review_without_mutating_request_or_roster() {
+        let dir = test_dir("governance-frozen-review");
+        let store = test_store(&dir);
+        let applicant_seed = "frozen-review-applicant";
+        let applicant_id = applicant(applicant_seed);
+        let request = request(applicant_seed, "frozen-review", 1_000);
+        store
+            .submit(
+                &network_id(),
+                &applicant_id,
+                applicant_seed.as_bytes(),
+                request.clone(),
+                1_001,
+            )
+            .unwrap();
+
+        let candidate_store = Arc::new(
+            CoordinatorCandidateStore::new(
+                dir.join("coordinator_candidates.json"),
+                dir.join("network.json"),
+            )
+            .unwrap(),
+        );
+        let frozen = test_store(&dir).with_coordinator_candidate_store(candidate_store);
+        let request_before = std::fs::read(dir.join("join_requests.json")).unwrap();
+        let network_before = std::fs::read(dir.join("network.json")).unwrap();
+        let lifecycle_before = std::fs::read(dir.join("member_lifecycle.json")).ok();
+
+        let error = frozen
+            .review(
+                &network_id(),
+                &owner(),
+                vec![JoinRequestBatchReviewItem {
+                    request_id: request.request_id.clone(),
+                    expected_revision: 1,
+                    action: JoinRequestReviewAction::Approve,
+                    note: None,
+                }],
+                1_002,
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), GOVERNANCE_FROZEN_ERROR);
+        assert_eq!(
+            std::fs::read(dir.join("join_requests.json")).unwrap(),
+            request_before
+        );
+        assert_eq!(
+            std::fs::read(dir.join("network.json")).unwrap(),
+            network_before
+        );
+        assert_eq!(
+            std::fs::read(dir.join("member_lifecycle.json")).ok(),
+            lifecycle_before
+        );
+        let lifecycle = lifecycle_store(&dir)
+            .record(&network_id(), &applicant_id)
+            .unwrap();
+        assert!(lifecycle.is_none());
+        let requests = frozen.list(&network_id(), &owner(), 1_002).unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].state, JoinRequestState::Pending);
+        assert_eq!(requests[0].revision, 1);
     }
 
     #[test]

@@ -438,7 +438,7 @@ async function main() {
               ["shortcuts_grid", '[data-testid="overview-shortcuts"] .overview-shortcuts'],
               ["shortcut_first", '[data-testid="overview-shortcuts"] .overview-shortcuts > :first-child'],
               ["actions", ".actions-panel"],
-              ["action_title", ".actions-panel .panel-title"],
+              ["action_title", ".actions-panel .panel-heading"],
               ["action_first", ".actions-panel .action-card-head"],
             ].map(([name, selector]) => {
               const element = document.querySelector(selector);
@@ -496,7 +496,7 @@ async function main() {
     if (
       semantics.primary_status.label !== "Running normally" ||
       semantics.page_heading !== "Node overview" ||
-      semantics.action_panel !== "Shared actions"
+      semantics.action_panel !== "Available actions"
     ) {
       throw new Error("visual fixture did not render the expected English overview state");
     }

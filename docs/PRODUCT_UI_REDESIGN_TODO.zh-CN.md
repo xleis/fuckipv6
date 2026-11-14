@@ -702,7 +702,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - [x] 所有命令重新校验角色、ACL、状态和能力；
 - [x] 不信任 UI 的权限预判；
 - [x] 本地所有权边界；
-- [x] 临时 Coordinator 禁写；
+- [x] 临时 Coordinator 治理禁写；
 - [x] 审计 actor 和原因；
 - [x] 添加越权测试。
 
@@ -711,7 +711,7 @@ Linux 报告还强制要求策略路由/代理路由表、DoH DNS、TUN 和 Exit
 - `NodeCommandBus::execute` 在任何 handler 分派前调用同一授权入口；请求 JSON 和 UI capability/availability 声明不参与可信上下文构造，未认证传输返回 `permission.authentication_required` 且不会触达 handler；
 - `NodeCommandContext` 的字段保持私有，只能由本地 owner、已验证 owner session、本地 owner snapshot 或认证适配器构造；网络会话由适配器提供逐网络 `NetworkCommandScope`，命令载荷中的网络名只能缩小到该可信作用域，越界、`All` 和空目标全部失败关闭；
 - 每条网络命令同时检查能力、成员状态、角色上限、本地策略和网络策略。成员只有 `Active`/`Degraded` 可访问网络资源；本地层与网络层都必须存在匹配 allow，任一层 deny 优先；显式 allow 不能突破角色上限；
-- 节点级快照、UI manifest、诊断、创建/加入网络、节点启停、残留清理和关停保持 local-owner-only；临时 Coordinator 可以读取其网络范围，但任何写命令返回 `permission.temporary_coordinator_read_only`；
+- 节点级快照、UI manifest、诊断、创建/加入网络、节点启停、残留清理和关停保持 local-owner-only；临时 Coordinator 可以读取其网络范围，但成员、角色、策略、密钥、邀请和长期配置等治理写入返回 `permission.temporary_coordinator_governance_frozen`，运行协调仍需显式策略允许；
 - 审计记录 actor、认证来源、命令 kind、request ID、逐网络角色、network ID、结果和授权原因，不记录邀请票据或其它命令载荷；拒绝结果对 UI 只暴露稳定的 `authorization_code`，详细原因保留在服务端审计中；
 - `node::authorization::tests` 的 10 个测试覆盖未认证、非活动成员、缺能力、owner-only、scope 越界/All、双层 deny 优先、缺少任一 allow、组选择、重认证时效、角色上限、跨网络条件和临时 Coordinator 只读；`node::command::tests` 的 12 个测试覆盖分派前拒绝、审计关联及载荷秘密不进入审计；
 - `cargo check --workspace --all-targets`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace` 全部通过；
@@ -1944,7 +1944,8 @@ in-flight 响应后立即刷新权威目录。
 
 身份层使用 `NodeOwner`、`Network(role)`、`DiscoveryGuest` 和 `UnauthenticatedPublic` 明确分离节点所有权、网络角色与公开发现身份；
 网络持久角色为 Owner/Administrator/Member，临时 Coordinator 仅作为运行时角色。权限契约冻结 13 个动作、12 类资源、只读/变更意图
-和 14 个稳定拒绝码。本地与网络策略必须同时存在匹配允许，任一层显式拒绝优先；临时 Coordinator 的所有变更意图在领域层冻结。
+和 15 个稳定拒绝码。本地与网络策略必须同时存在匹配允许，任一层显式拒绝优先；权限意图区分只读、运行时变更和治理写入，
+临时 Coordinator 仅冻结治理写入，运行时变更仍须满足显式策略允许与角色上限。
 命令总线从认证后的持久 membership 构造网络作用域，Node Owner 不再隐式获得网络治理权限，畸形网络 ID 失败关闭；拒绝结果保留
 策略层、规则 ID 和可解释原因。GPUI/WebUI 删除角色标签授权推断，只依据服务端 `can_manage_members` 与逐成员
 `available_actions`。
@@ -3153,7 +3154,7 @@ Relay 客户端入站队列现固定为 `RELAY_INCOMING_QUEUE_CAPACITY = 256` �
 确认不包含虚拟 IP、转发的 payload、private/session key、网络显示名或成员显示名。真实压力由独立子进程测试补充；
 单机测试仍不等同于多主机正式压测。
 `RecoveryReport::duration_ms()` 已接入 Linux 恢复成功/失败日志，并有状态、时长和原因测试；
-临时 Coordinator 启动或停止 Relay 均由 `permission.temporary_coordinator_read_only` 拒绝。
+临时 Coordinator 修改 Relay 角色/能力属于治理写入，由 `permission.temporary_coordinator_governance_frozen` 拒绝；运行协调不会仅因临时角色被自动冻结。
 `w13_relay_process::sigkill_restart_releases_relay_port_and_invalidates_old_session` 在 Linux 上启动真实
 Relay 子进程和 QUIC 客户端，完成注册后对 Relay 执行 SIGKILL 并 reap；父进程确认旧 UDP 端口可立即重新绑定，
 替代进程使用全新证书在同一端口重启并接受新会话。测试同时确认旧 QUIC 会话不能被替代进程接管，必须重新握手。
@@ -3358,6 +3359,8 @@ netns/iptables 测试覆盖。三端 Relay UI 的权限、网络选择、健康�
 **验收**：紧急模式保障基本运行，但不成为治理后门；权限范围和持续时间均有硬限制。
 
 ### W14-07 临时权限冻结与恢复 `[ ]`
+
+> 当前进展（2026-11-14）：候选控制面新增统一 governance gate。候选配置缺失、pending、expired 或当前配置下没有健康候选时，服务端以稳定错误码 `coordinator_candidate.error.governance_frozen` 失败关闭。该 gate 已接入成员准入/拒绝/变更、邀请创建/撤销/兑换、加入审批、Exit 贡献提交/审批/撤回；邀请兑换在操作者尚未成为成员时也会检查，并已有“冻结不消耗邀请、不改 roster/lifecycle”的副作用测试。命令授权层新增独立的治理写入意图，临时 Coordinator 对成员、角色、策略、身份、配置、邀请和候选治理写入返回 `permission.temporary_coordinator_governance_frozen`，但本地启停、路由、TUN、诊断和运行协调不被该角色规则自动冻结。状态、列表、预览、候选声明发布和既有数据面读取不在冻结范围。UI 禁用与恢复条件展示、正式候选恢复后的多数/任期验证、安全交回、管理员阈值恢复、old/new Leader 并发测试尚未完成，因此本项及 W14 均不勾选。
 
 - [ ] 建立允许/禁止操作清单并落实服务端校验；
 - [ ] 临时 Leader 的所有治理命令返回明确受限错误；

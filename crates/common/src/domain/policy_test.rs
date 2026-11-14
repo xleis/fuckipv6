@@ -346,6 +346,7 @@ pub enum PolicyPrecedence {
     LocalContributionVeto,
     ExplicitDeny,
     TemporaryCoordinatorReadOnly,
+    TemporaryCoordinatorGovernanceFrozen,
     RoleCeilingExceeded,
     AuthorizationRevoked,
     AuthorizationExpired,
@@ -355,13 +356,14 @@ pub enum PolicyPrecedence {
 }
 
 impl PolicyPrecedence {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::CrossNetworkDenied,
         Self::InvalidOrExpiredPolicy,
         Self::NetworkScopeRestricted,
         Self::LocalContributionVeto,
         Self::ExplicitDeny,
         Self::TemporaryCoordinatorReadOnly,
+        Self::TemporaryCoordinatorGovernanceFrozen,
         Self::RoleCeilingExceeded,
         Self::AuthorizationRevoked,
         Self::AuthorizationExpired,
@@ -378,6 +380,7 @@ impl PolicyPrecedence {
             Self::LocalContributionVeto => "local_contribution_veto",
             Self::ExplicitDeny => "explicit_deny",
             Self::TemporaryCoordinatorReadOnly => "temporary_coordinator_read_only",
+            Self::TemporaryCoordinatorGovernanceFrozen => "temporary_coordinator_governance_frozen",
             Self::RoleCeilingExceeded => "role_ceiling_exceeded",
             Self::AuthorizationRevoked => "authorization_revoked",
             Self::AuthorizationExpired => "authorization_expired",
@@ -603,9 +606,9 @@ impl PolicyTestInput {
             actions: Vec::new(),
             conditions: Vec::new(),
             matched: context.role == super::permissions::NetworkRole::TemporaryCoordinator
-                && request.intent.is_mutating(),
-            applied: decision.reason == EffectiveAccessReason::TemporaryCoordinatorReadOnly,
-            precedence: PolicyPrecedence::TemporaryCoordinatorReadOnly,
+                && request.intent.is_governance_write(),
+            applied: decision.reason == EffectiveAccessReason::TemporaryCoordinatorGovernanceFrozen,
+            precedence: PolicyPrecedence::TemporaryCoordinatorGovernanceFrozen,
         });
         explanations
     }
@@ -720,6 +723,9 @@ fn precedence_trace(decision: &EffectiveAccess) -> Vec<PolicyPrecedenceExplanati
         EffectiveAccessReason::TemporaryCoordinatorReadOnly => {
             PolicyPrecedence::TemporaryCoordinatorReadOnly
         }
+        EffectiveAccessReason::TemporaryCoordinatorGovernanceFrozen => {
+            PolicyPrecedence::TemporaryCoordinatorGovernanceFrozen
+        }
         EffectiveAccessReason::RoleCeilingExceeded => PolicyPrecedence::RoleCeilingExceeded,
         EffectiveAccessReason::AuthorizationRevoked => PolicyPrecedence::AuthorizationRevoked,
         EffectiveAccessReason::AuthorizationExpired => PolicyPrecedence::AuthorizationExpired,
@@ -731,7 +737,10 @@ fn precedence_trace(decision: &EffectiveAccess) -> Vec<PolicyPrecedenceExplanati
     };
     let source = match selected {
         PolicyPrecedence::CrossNetworkDenied => Some(PolicyRuleSource::Request),
-        PolicyPrecedence::TemporaryCoordinatorReadOnly => Some(PolicyRuleSource::AccessContext),
+        PolicyPrecedence::TemporaryCoordinatorReadOnly
+        | PolicyPrecedence::TemporaryCoordinatorGovernanceFrozen => {
+            Some(PolicyRuleSource::AccessContext)
+        }
         PolicyPrecedence::NetworkScopeRestricted => Some(PolicyRuleSource::LocalNetworkScope),
         PolicyPrecedence::LocalContributionVeto => Some(PolicyRuleSource::LocalContributionVeto),
         PolicyPrecedence::InvalidOrExpiredPolicy
@@ -1488,10 +1497,10 @@ mod tests {
     }
 
     #[test]
-    fn temporary_coordinator_write_is_read_only_even_with_allow() {
+    fn temporary_coordinator_governance_write_is_frozen_even_with_allow() {
         let mut input = base_input(NetworkRole::TemporaryCoordinator);
         input.request.action = PolicyAction::Update;
-        input.request.intent = PermissionIntent::Mutating;
+        input.request.intent = PermissionIntent::GovernanceWrite;
         let mut allow_update = rule(b"allow-update", PermissionEffect::Allow);
         allow_update.actions = vec![PolicyAction::Update];
         input.network_acl = Some(acl(&input, vec![allow_update]));
@@ -1499,10 +1508,10 @@ mod tests {
         assert!(!result.decision.allowed);
         assert_eq!(
             result.decision.reason,
-            EffectiveAccessReason::TemporaryCoordinatorReadOnly
+            EffectiveAccessReason::TemporaryCoordinatorGovernanceFrozen
         );
         assert!(result.precedence.iter().any(|entry| entry.precedence
-            == PolicyPrecedence::TemporaryCoordinatorReadOnly
+            == PolicyPrecedence::TemporaryCoordinatorGovernanceFrozen
             && entry.triggered));
         let allow = result
             .explanations
@@ -1516,6 +1525,25 @@ mod tests {
             .expect("allow explanation");
         assert!(allow.matched);
         assert!(!allow.applied);
+    }
+
+    #[test]
+    fn temporary_coordinator_runtime_write_is_not_governance_frozen() {
+        let mut input = base_input(NetworkRole::TemporaryCoordinator);
+        input.request.action = PolicyAction::Update;
+        input.request.resource = ResourceKind::Network;
+        input.request.intent = PermissionIntent::Mutating;
+        let mut allow_update = rule(b"allow-runtime-update", PermissionEffect::Allow);
+        allow_update.actions = vec![PolicyAction::Update];
+        allow_update.resources = vec![ResourceKind::Network];
+        input.network_acl = Some(acl(&input, vec![allow_update]));
+        let result = input.evaluate();
+        assert!(result.decision.allowed);
+        assert_eq!(result.decision.reason, EffectiveAccessReason::Allowed);
+        assert!(result.precedence.iter().all(|entry| {
+            entry.precedence != PolicyPrecedence::TemporaryCoordinatorGovernanceFrozen
+                || !entry.triggered
+        }));
     }
 
     #[test]

@@ -72,6 +72,8 @@ const ROUTING_UPDATE_TIMEOUT: Duration = Duration::from_secs(20);
 const LOCAL_EXIT_UPDATE_TIMEOUT: Duration = Duration::from_secs(20);
 const LOCAL_EXIT_DRAIN_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(12);
 const LOCAL_EXIT_DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const LOCAL_EXIT_SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+const LOCAL_EXIT_STATUS_REFRESH_TIMEOUT: Duration = Duration::from_secs(1);
 const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +83,7 @@ struct RuntimeTimeouts {
     restart: Duration,
     routing_update: Duration,
     local_exit_update: Duration,
+    local_exit_refresh: Duration,
     diagnostics: Duration,
 }
 
@@ -92,6 +95,7 @@ impl Default for RuntimeTimeouts {
             restart: RESTART_TIMEOUT,
             routing_update: ROUTING_UPDATE_TIMEOUT,
             local_exit_update: LOCAL_EXIT_UPDATE_TIMEOUT,
+            local_exit_refresh: LOCAL_EXIT_SNAPSHOT_REFRESH_INTERVAL,
             diagnostics: DIAGNOSTICS_TIMEOUT,
         }
     }
@@ -2975,135 +2979,148 @@ async fn run_actor(
     mut actor: NetworkRuntimeActor,
 ) {
     actor.refresh_local_exit_capability_state().await;
-    while let Some(command) = receiver.recv().await {
-        match command {
-            RuntimeControlCommand::Diagnostics { cancel, reply } => {
-                let result = actor.diagnostics_cancellable(cancel).await;
-                let _ = reply.send(result);
+    let mut refresh = tokio::time::interval(actor.timeouts.local_exit_refresh);
+    refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    refresh.tick().await;
+    loop {
+        tokio::select! {
+            command = receiver.recv() => {
+                let Some(command) = command else {
+                    break;
+                };
+                match command {
+                    RuntimeControlCommand::Diagnostics { cancel, reply } => {
+                        let result = actor.diagnostics_cancellable(cancel).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::LiveTunNames { reply } => {
+                        let result = actor.live_tun_names().await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::StartPlan {
+                        plan,
+                        _operation,
+                        reply,
+                    } => {
+                        let result = actor.start_plan(plan).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::StartSelection {
+                        selection,
+                        _operation,
+                        reply,
+                    } => {
+                        let result = actor.start_selection(selection).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::Create {
+                        command,
+                        _operation,
+                        reply,
+                    } => {
+                        let result = actor.create(command).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::Join {
+                        command,
+                        _operation,
+                        reply,
+                    } => {
+                        let result = actor.join(command).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::Leave {
+                        network_name,
+                        _operation,
+                        reply,
+                    } => {
+                        let result = actor.leave(network_name).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::UpdateRouting { command, reply } => {
+                        let result = actor.update_routing(command).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::SetNetworkRole { command, reply } => {
+                        let result = actor.set_network_role(command).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::SetLocalExitCapability {
+                        enabled,
+                        _operation,
+                        reply,
+                    } => {
+                        let result = actor.set_local_exit_capability(enabled).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::JoinRequest { command, reply } => {
+                        let result = actor.execute_join_request_command(command).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::Invitation { command, reply } => {
+                        let result = actor.execute_invitation_command(command).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::Stop {
+                        networks,
+                        all,
+                        _operation,
+                        reply,
+                    } => {
+                        let result = actor.stop(networks, all).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::Restart {
+                        networks,
+                        all,
+                        _operation,
+                        reply,
+                    } => {
+                        let result = actor.restart(networks, all).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::RebuildTun {
+                        network_name,
+                        _operation,
+                        reply,
+                    } => {
+                        let result = actor.rebuild_tun(network_name).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::StartNode { _operation, reply } => {
+                        let result = actor.start_node().await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::StopNode { _operation, reply } => {
+                        let result = actor.stop_node().await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::RestartNode { _operation, reply } => {
+                        let result = actor.restart_node().await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::CleanupResiduals {
+                        networks,
+                        all,
+                        _operation,
+                        reply,
+                    } => {
+                        let result = actor.cleanup_residuals(networks, all).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::CoordinatorCandidates { command, reply } => {
+                        let result = actor.execute_coordinator_candidate_command(command).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::Shutdown { _operation, reply } => {
+                        let result = actor.shutdown().await;
+                        let _ = reply.send(result);
+                        break;
+                    }
+                }
             }
-            RuntimeControlCommand::LiveTunNames { reply } => {
-                let result = actor.live_tun_names().await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::StartPlan {
-                plan,
-                _operation,
-                reply,
-            } => {
-                let result = actor.start_plan(plan).await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::StartSelection {
-                selection,
-                _operation,
-                reply,
-            } => {
-                let result = actor.start_selection(selection).await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::Create {
-                command,
-                _operation,
-                reply,
-            } => {
-                let result = actor.create(command).await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::Join {
-                command,
-                _operation,
-                reply,
-            } => {
-                let result = actor.join(command).await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::Leave {
-                network_name,
-                _operation,
-                reply,
-            } => {
-                let result = actor.leave(network_name).await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::UpdateRouting { command, reply } => {
-                let result = actor.update_routing(command).await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::SetNetworkRole { command, reply } => {
-                let result = actor.set_network_role(command).await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::SetLocalExitCapability {
-                enabled,
-                _operation,
-                reply,
-            } => {
-                let result = actor.set_local_exit_capability(enabled).await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::JoinRequest { command, reply } => {
-                let result = actor.execute_join_request_command(command).await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::Invitation { command, reply } => {
-                let result = actor.execute_invitation_command(command).await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::CoordinatorCandidates { command, reply } => {
-                let result = actor.execute_coordinator_candidate_command(command).await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::Stop {
-                networks,
-                all,
-                _operation,
-                reply,
-            } => {
-                let result = actor.stop(networks, all).await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::Restart {
-                networks,
-                all,
-                _operation,
-                reply,
-            } => {
-                let result = actor.restart(networks, all).await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::RebuildTun {
-                network_name,
-                _operation,
-                reply,
-            } => {
-                let result = actor.rebuild_tun(network_name).await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::StartNode { _operation, reply } => {
-                let result = actor.start_node().await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::StopNode { _operation, reply } => {
-                let result = actor.stop_node().await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::RestartNode { _operation, reply } => {
-                let result = actor.restart_node().await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::CleanupResiduals {
-                networks,
-                all,
-                _operation,
-                reply,
-            } => {
-                let result = actor.cleanup_residuals(networks, all).await;
-                let _ = reply.send(result);
-            }
-            RuntimeControlCommand::Shutdown { _operation, reply } => {
-                let result = actor.shutdown().await;
-                let _ = reply.send(result);
-                break;
+            _ = refresh.tick() => {
+                actor.refresh_local_exit_client_counts().await;
             }
         }
     }
@@ -3223,7 +3240,17 @@ impl NetworkRuntimeActor {
         String,
         Result<ipc::LocalExitRuntimeStatus, RuntimeRoutingRequestError>,
     )> {
-        let wait = self.timeouts.local_exit_update;
+        self.request_all_local_exit_statuses_with_wait(self.timeouts.local_exit_update)
+            .await
+    }
+
+    async fn request_all_local_exit_statuses_with_wait(
+        &self,
+        wait: Duration,
+    ) -> Vec<(
+        String,
+        Result<ipc::LocalExitRuntimeStatus, RuntimeRoutingRequestError>,
+    )> {
         let requests = self
             .sessions
             .iter()
@@ -3237,6 +3264,52 @@ impl NetworkRuntimeActor {
             })
             .collect::<Vec<_>>();
         join_all(requests).await
+    }
+
+    /// Client authorization happens inside a network runtime after its first
+    /// Exit packet. Refresh only the observed counters here; lifecycle and
+    /// owner intent remain owned by the command path and must not be inferred
+    /// from a periodic observation.
+    async fn refresh_local_exit_client_counts(&self) {
+        if self.sessions.is_empty() {
+            return;
+        }
+
+        let results = self
+            .request_all_local_exit_statuses_with_wait(LOCAL_EXIT_STATUS_REFRESH_TIMEOUT)
+            .await;
+        if let Some((network_name, error)) = results.iter().find_map(|(network_name, result)| {
+            result
+                .as_ref()
+                .err()
+                .map(|error| (network_name, describe_routing_request_failure(error)))
+        }) {
+            tracing::warn!(
+                network_name,
+                error,
+                "刷新本机 Exit 客户端计数失败，保留上一次已确认快照"
+            );
+            return;
+        }
+
+        let active_clients = results.iter().fold(0u32, |total, (_, result)| {
+            result
+                .as_ref()
+                .map_or(total, |status| total.saturating_add(status.active_clients))
+        });
+        let total_clients = results.iter().fold(0u64, |total, (_, result)| {
+            result
+                .as_ref()
+                .map_or(total, |status| total.saturating_add(status.total_clients))
+        });
+        self.state
+            .update_if_changed(|snapshot| {
+                if snapshot.local_exit.owner_exit_enabled {
+                    snapshot.local_exit.active_clients = active_clients;
+                    snapshot.local_exit.total_clients = total_clients;
+                }
+            })
+            .await;
     }
 
     async fn wait_for_local_exit_cleanup(
@@ -4001,7 +4074,17 @@ impl NetworkRuntimeActor {
         let lifecycle = self.lifecycle.begin_start(configured, Vec::new()).await;
         self.state.set_lifecycle(lifecycle).await;
 
-        let plan = match NodeRuntimePlan::load(&self.configs, NodeNetworkSelection::All) {
+        // Starting the node is not the same operation as `up --all`: restore
+        // only the default network here. Explicit `up <network...>` commands
+        // add their selected networks afterwards. Loading every persisted
+        // network at bootstrap can create unrelated TUNs with overlapping
+        // virtual addresses before the requested plan is applied.
+        let selection = if networks.is_empty() {
+            NodeNetworkSelection::None
+        } else {
+            NodeNetworkSelection::Default
+        };
+        let plan = match NodeRuntimePlan::load(&self.configs, selection) {
             Ok(plan) => plan,
             Err(error) => {
                 let lifecycle = self.lifecycle.failed().await;
@@ -9007,6 +9090,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_exit_client_counts_follow_runtime_authorization_aggregate() {
+        let harness = TestHarness::new_with_timeouts(
+            "local-exit-client-refresh",
+            RuntimeTimeouts {
+                local_exit_refresh: Duration::from_millis(20),
+                ..RuntimeTimeouts::default()
+            },
+        )
+        .await;
+        let names = ["local-exit-clients-a", "local-exit-clients-b"];
+        for network_name in names {
+            harness
+                .configs
+                .create_network(network_name, "ws://127.0.0.1:6666", false)
+                .expect("create test config");
+        }
+        let plan = NodeRuntimePlan::load(&harness.configs, NodeNetworkSelection::All)
+            .expect("load test plan");
+        harness
+            .runtime
+            .start_plan(plan)
+            .await
+            .expect("start fake networks");
+        set_supported_exit_capabilities(&harness).await;
+        for network_name in names {
+            harness
+                .runtime
+                .update_routing(routing_command(
+                    network_name,
+                    NodeRoutingMode::GlobalProxy,
+                    Some("office"),
+                    true,
+                ))
+                .await
+                .expect("enable network exit role");
+        }
+
+        let enabled = harness
+            .runtime
+            .set_local_exit_capability(true)
+            .await
+            .expect("enable local exit");
+        assert_eq!((enabled.active_clients, enabled.total_clients), (0, 0));
+
+        harness
+            .fake
+            .set_local_exit_clients("local-exit-clients-a", 1, 1);
+        harness
+            .fake
+            .set_local_exit_clients("local-exit-clients-b", 2, 3);
+
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let local_exit = harness.state.snapshot().await.local_exit;
+                if (local_exit.active_clients, local_exit.total_clients) == (3, 4) {
+                    assert!(local_exit.owner_exit_enabled);
+                    assert!(local_exit.healthy);
+                    assert_eq!(local_exit.stage, LocalExitCapabilityStage::Enabled);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("periodic refresh must aggregate active client counts");
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn local_exit_toggle_operations_surface_authoritative_lifecycle_stages() {
         let harness = TestHarness::new("local-exit-operation").await;
         start_fake_network(&harness, "local-exit-operation").await;
@@ -11248,11 +11401,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_node_with_partial_failure_stays_running_and_reports_failed_network() {
-        let harness = TestHarness::new("start-node-partial").await;
+    async fn start_node_only_restores_the_default_network() {
+        let harness = TestHarness::new("start-node-default").await;
         harness
             .configs
-            .create_network("home", "ws://home.example:6666", false)
+            .create_network("home", "ws://home.example:6666", true)
             .expect("create home");
         harness
             .configs
@@ -11261,6 +11414,33 @@ mod tests {
         harness.fake.fail("office");
 
         let summary = harness.runtime.start_node().await.expect("start node");
+        assert_eq!(summary.requested, 1);
+        assert_eq!(summary.started, vec!["home"]);
+        assert!(summary.failed.is_empty());
+        assert!(harness.fake.launches().iter().all(|name| name != "office"));
+
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn start_plan_with_partial_failure_stays_running_and_reports_failed_network() {
+        let harness = TestHarness::new("start-node-partial").await;
+        harness
+            .configs
+            .create_network("home", "ws://home.example:6666", true)
+            .expect("create home");
+        harness
+            .configs
+            .create_network("office", "ws://office.example:6666", false)
+            .expect("create office");
+        harness.fake.fail("office");
+        let plan = NodeRuntimePlan::load(
+            &harness.configs,
+            NodeNetworkSelection::Named(vec!["home".into(), "office".into()]),
+        )
+        .expect("load plan");
+
+        let summary = harness.runtime.start_plan(plan).await.expect("start plan");
         assert_eq!(summary.requested, 2);
         assert_eq!(summary.started, vec!["home"]);
         assert_eq!(summary.failed.len(), 1);
@@ -11279,7 +11459,7 @@ mod tests {
         let harness = TestHarness::new("start-node-failed").await;
         harness
             .configs
-            .create_network("broken", "ws://broken.example:6666", false)
+            .create_network("broken", "ws://broken.example:6666", true)
             .expect("create broken");
         harness.fake.fail("broken");
 

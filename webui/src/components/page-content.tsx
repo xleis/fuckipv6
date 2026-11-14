@@ -5999,7 +5999,6 @@ export function PageContent(props: PageContentProps) {
         </div>
         <div>
           <h1 id="page-title">{label(locale, page.title_key)}</h1>
-          <p>{label(locale, "common.node_contract_description")}</p>
         </div>
       </header>
       {content}

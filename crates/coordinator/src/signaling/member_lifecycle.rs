@@ -1,3 +1,4 @@
+use super::coordinator_candidates::{CoordinatorCandidateStore, GovernancePermit};
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use fuckipv6_common::domain::{
@@ -13,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 const MEMBER_LIFECYCLE_FILE_SCHEMA_VERSION: u16 = 1;
 
@@ -80,6 +81,7 @@ impl MemberLifecycleFile {
 pub struct MemberLifecycleStore {
     path: PathBuf,
     network_record_path: PathBuf,
+    coordinator_candidate_store: Option<Arc<CoordinatorCandidateStore>>,
     process_lock: Mutex<()>,
 }
 
@@ -93,8 +95,30 @@ impl MemberLifecycleStore {
         Ok(Self {
             path,
             network_record_path,
+            coordinator_candidate_store: None,
             process_lock: Mutex::new(()),
         })
+    }
+
+    pub fn with_coordinator_candidate_store(
+        mut self,
+        store: Arc<CoordinatorCandidateStore>,
+    ) -> Self {
+        self.coordinator_candidate_store = Some(store);
+        self
+    }
+
+    fn with_governance_allowed<T>(
+        &self,
+        network_id: &NetworkId,
+        now_unix_ms: u64,
+        write: impl FnOnce(Option<&GovernancePermit<'_>>) -> Result<T>,
+    ) -> Result<T> {
+        if let Some(store) = &self.coordinator_candidate_store {
+            store.with_governance_allowed(network_id, now_unix_ms, |permit| write(Some(permit)))
+        } else {
+            write(None)
+        }
     }
 
     pub fn change(
@@ -103,8 +127,11 @@ impl MemberLifecycleStore {
         request: MemberLifecycleChangeRequest,
         now_unix_ms: u64,
     ) -> Result<MemberLifecycleChange> {
-        self.change_with_history(actor, request, now_unix_ms)
-            .map(|(change, _)| change)
+        let network_id = request.network_id.clone();
+        self.with_governance_allowed(&network_id, now_unix_ms, |permit| {
+            self.change_with_history(actor, request, now_unix_ms, permit)
+                .map(|(change, _)| change)
+        })
     }
 
     /// Internal admission bridge used by the join-request and invitation
@@ -119,6 +146,29 @@ impl MemberLifecycleStore {
         role: MembershipRole,
         source_key: &str,
         now_unix_ms: u64,
+    ) -> Result<MemberLifecycleChange> {
+        self.with_governance_allowed(network_id, now_unix_ms, |permit| {
+            self.admit_with_governance(
+                actor,
+                network_id,
+                target_node_id,
+                role,
+                source_key,
+                now_unix_ms,
+                permit,
+            )
+        })
+    }
+
+    pub(crate) fn admit_with_governance(
+        &self,
+        actor: &NodeId,
+        network_id: &NetworkId,
+        target_node_id: &NodeId,
+        role: MembershipRole,
+        source_key: &str,
+        now_unix_ms: u64,
+        _permit: Option<&GovernancePermit<'_>>,
     ) -> Result<MemberLifecycleChange> {
         if source_key.is_empty() || now_unix_ms == 0 {
             bail!("member lifecycle admission input is invalid");
@@ -261,6 +311,27 @@ impl MemberLifecycleStore {
         source_key: &str,
         now_unix_ms: u64,
     ) -> Result<MemberLifecycleChange> {
+        self.with_governance_allowed(network_id, now_unix_ms, |permit| {
+            self.reject_admission_with_governance(
+                actor,
+                network_id,
+                target_node_id,
+                source_key,
+                now_unix_ms,
+                permit,
+            )
+        })
+    }
+
+    pub(crate) fn reject_admission_with_governance(
+        &self,
+        actor: &NodeId,
+        network_id: &NetworkId,
+        target_node_id: &NodeId,
+        source_key: &str,
+        now_unix_ms: u64,
+        _permit: Option<&GovernancePermit<'_>>,
+    ) -> Result<MemberLifecycleChange> {
         if source_key.is_empty() || now_unix_ms == 0 {
             bail!("member lifecycle rejection input is invalid");
         }
@@ -364,6 +435,7 @@ impl MemberLifecycleStore {
         actor: &NodeId,
         request: MemberLifecycleChangeRequest,
         now_unix_ms: u64,
+        _permit: Option<&GovernancePermit<'_>>,
     ) -> Result<(MemberLifecycleChange, MemberLifecycleRecord)> {
         request.validate()?;
         if now_unix_ms == 0 {
@@ -1134,6 +1206,9 @@ fn restore_optional_file(path: &Path, bytes: Option<&[u8]>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signaling::coordinator_candidates::{
+        CoordinatorCandidateStore, GOVERNANCE_FROZEN_ERROR,
+    };
     use fuckipv6_common::domain::{
         ExitContributionObligation, ExitContributionScope, NetworkJoinMode, NetworkVisibility,
         PublicKey,
@@ -1245,6 +1320,62 @@ mod tests {
         assert_eq!(retried.revision, first.revision);
         assert_eq!(retried.access_epoch, first.access_epoch);
         assert_eq!(store.audit_entries().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn governance_freeze_rejects_lifecycle_writes_without_side_effects() {
+        let (dir, network_path, _) = setup("governance-frozen");
+        let candidate_store = Arc::new(
+            CoordinatorCandidateStore::new(
+                dir.join("coordinator_candidates.json"),
+                network_path.clone(),
+            )
+            .unwrap(),
+        );
+        let frozen =
+            MemberLifecycleStore::new(dir.join("member_lifecycle.json"), network_path.clone())
+                .unwrap()
+                .with_coordinator_candidate_store(candidate_store);
+        let network_before = std::fs::read(&network_path).unwrap();
+        let lifecycle_before = std::fs::read(dir.join("member_lifecycle.json")).ok();
+
+        for error in [
+            frozen
+                .change(
+                    &owner(),
+                    request(MemberLifecycleAction::Suspend, member(), 1),
+                    200,
+                )
+                .unwrap_err(),
+            frozen
+                .admit(
+                    &owner(),
+                    &network_record().network_id,
+                    &NodeId::from_public_key(b"frozen-admit"),
+                    MembershipRole::Member,
+                    "frozen-admit",
+                    200,
+                )
+                .unwrap_err(),
+            frozen
+                .reject_admission(
+                    &owner(),
+                    &network_record().network_id,
+                    &NodeId::from_public_key(b"frozen-reject"),
+                    "frozen-reject",
+                    200,
+                )
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.to_string(), GOVERNANCE_FROZEN_ERROR);
+        }
+
+        assert_eq!(std::fs::read(&network_path).unwrap(), network_before);
+        assert_eq!(
+            std::fs::read(dir.join("member_lifecycle.json")).ok(),
+            lifecycle_before
+        );
+        assert!(frozen.audit_entries().unwrap().is_empty());
     }
 
     #[test]

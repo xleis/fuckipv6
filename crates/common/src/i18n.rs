@@ -181,18 +181,41 @@ pub fn tr(locale: Locale, key: &str, values: &[(&str, &str)]) -> String {
     interpolate(t(locale, key), values)
 }
 
-/// Resolve the operating-system language. Environment variables are checked
-/// first because they are the deterministic mechanism used by service managers
-/// and tests; `sys-locale` provides the desktop fallback.
-pub fn detect_system_locale() -> Locale {
-    for name in ["LC_ALL", "LC_MESSAGES", "LANG"] {
-        if let Ok(value) = std::env::var(name) {
-            if !value.trim().is_empty() {
-                return Locale::from_tag(&value);
-            }
+fn locale_from_system_value(value: &str) -> Option<Locale> {
+    value.split(':').find_map(|candidate| {
+        let language = candidate
+            .trim()
+            .split(['.', '@'])
+            .next()
+            .unwrap_or_default()
+            .replace('_', "-")
+            .to_ascii_lowercase();
+        if language.is_empty() || language == "c" || language == "posix" {
+            None
+        } else {
+            Some(Locale::from_tag(&language))
         }
-    }
-    Locale::from_tag(&sys_locale::get_locale().unwrap_or_else(|| "en".into()))
+    })
+}
+
+fn detect_locale_from(mut variable: impl FnMut(&str) -> Option<String>) -> Option<Locale> {
+    ["LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"]
+        .into_iter()
+        .find_map(|name| variable(name).and_then(|value| locale_from_system_value(&value)))
+}
+
+/// Resolve the operating-system language. GNU `LANGUAGE` is checked first,
+/// followed by the standard LC precedence order. `C` and `POSIX` are execution
+/// locales, not language choices, so they must not mask a real `LANG` value.
+/// `sys-locale` is only the desktop fallback when the process environment does
+/// not carry a usable language.
+pub fn detect_system_locale() -> Locale {
+    detect_locale_from(|name| std::env::var(name).ok()).unwrap_or_else(|| {
+        sys_locale::get_locale()
+            .as_deref()
+            .and_then(locale_from_system_value)
+            .unwrap_or(Locale::En)
+    })
 }
 
 pub fn resolve_language(preference: LanguagePreference) -> Locale {
@@ -507,6 +530,48 @@ mod tests {
         assert_eq!(Locale::from_tag("en-US"), Locale::En);
         assert_eq!(Locale::from_tag("fr-FR"), Locale::En);
         assert_eq!(Locale::from_tag("C"), Locale::En);
+    }
+
+    #[test]
+    fn system_locale_detection_ignores_c_and_honors_language_lists() {
+        assert_eq!(locale_from_system_value("zh_CN.UTF-8"), Some(Locale::ZhCn));
+        assert_eq!(locale_from_system_value("C.UTF-8"), None);
+        assert_eq!(locale_from_system_value("POSIX"), None);
+        assert_eq!(
+            locale_from_system_value("en_US.UTF-8:zh_CN.UTF-8"),
+            Some(Locale::En)
+        );
+        assert_eq!(
+            locale_from_system_value("C.UTF-8:zh_CN.UTF-8"),
+            Some(Locale::ZhCn)
+        );
+    }
+
+    #[test]
+    fn c_locale_does_not_override_a_chinese_system_language() {
+        let values = [("LC_ALL", "C.UTF-8"), ("LANG", "zh_CN.UTF-8")];
+        assert_eq!(
+            detect_locale_from(|name| {
+                values
+                    .iter()
+                    .find_map(|(key, value)| (*key == name).then(|| (*value).to_string()))
+            }),
+            Some(Locale::ZhCn)
+        );
+
+        let values = [
+            ("LANGUAGE", "zh_CN:en_US"),
+            ("LC_ALL", "C.UTF-8"),
+            ("LANG", "en_US.UTF-8"),
+        ];
+        assert_eq!(
+            detect_locale_from(|name| {
+                values
+                    .iter()
+                    .find_map(|(key, value)| (*key == name).then(|| (*value).to_string()))
+            }),
+            Some(Locale::ZhCn)
+        );
     }
 
     #[test]

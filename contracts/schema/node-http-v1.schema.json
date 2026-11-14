@@ -983,6 +983,7 @@
         "explicit_deny",
         "role_ceiling_exceeded",
         "temporary_coordinator_read_only",
+        "temporary_coordinator_governance_frozen",
         "default_denied",
         "invalid_policy"
       ],
@@ -9890,6 +9891,14 @@
           },
           "type": "array"
         },
+        "group": {
+          "$ref": "#/$defs/NodeUiActionGroup",
+          "description": "Business intent used to group actions in both clients. This is not a\nvisual preference: it is part of the shared manifest so WebUI, GPUI and\ngenerated clients do not maintain competing action taxonomies."
+        },
+        "group_label_key": {
+          "description": "Localized heading for `group`, supplied by the manifest so every adapter\npresents the same user-facing vocabulary.",
+          "type": "string"
+        },
         "id": {
           "type": "string"
         },
@@ -9903,6 +9912,8 @@
       "required": [
         "id",
         "label_key",
+        "group",
+        "group_label_key",
         "command",
         "backend_status",
         "permission",
@@ -9927,6 +9938,20 @@
         "tun_tool_unavailable",
         "tun_unavailable",
         "backend_unavailable"
+      ],
+      "type": "string"
+    },
+    "NodeUiActionGroup": {
+      "description": "Stable, user-facing intent groups shared by every UI adapter. The order is\nthe canonical presentation order: common creation flows first, inspection\nlast, with unavailable actions partitioned by the renderer.",
+      "enum": [
+        "create_and_join",
+        "members_and_invitations",
+        "discovery",
+        "runtime",
+        "routing",
+        "security",
+        "configuration",
+        "inspect"
       ],
       "type": "string"
     },
@@ -10089,6 +10114,13 @@
           },
           "type": "array"
         },
+        "action_groups": {
+          "description": "Canonical action-group presentation order. Renderers may collapse or\npartition groups, but must not invent a competing ordering.",
+          "items": {
+            "$ref": "#/$defs/NodeUiActionGroup"
+          },
+          "type": "array"
+        },
         "page_states": {
           "items": {
             "$ref": "#/$defs/NodeUiPageState"
@@ -10112,6 +10144,7 @@
         "schema_version",
         "page_states",
         "action_block_reasons",
+        "action_groups",
         "pages"
       ],
       "type": "object"
@@ -10691,10 +10724,11 @@
       "type": "string"
     },
     "PermissionIntent": {
-      "description": "Whether a request can mutate durable state. Temporary Coordinators may read\nthe last valid policy and coordinate existing connections, but every\nmutating request is frozen in the domain evaluator.",
+      "description": "The authorization impact of a request.\n\n`Mutating` covers runtime/local mutations such as starting a network,\nrebuilding TUN or changing live routes. `GovernanceWrite` is deliberately\nnarrower: it covers changes to long-lived membership, roles, policies,\nkeys, invitations and authorization configuration. A temporary Coordinator\nmay perform runtime coordination, but only governance writes are frozen.",
       "enum": [
         "read_only",
-        "mutating"
+        "mutating",
+        "governance_write"
       ],
       "type": "string"
     },
@@ -11023,6 +11057,7 @@
         "local_contribution_veto",
         "explicit_deny",
         "temporary_coordinator_read_only",
+        "temporary_coordinator_governance_frozen",
         "role_ceiling_exceeded",
         "authorization_revoked",
         "authorization_expired",

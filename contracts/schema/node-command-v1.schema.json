@@ -2524,10 +2524,11 @@
       "type": "string"
     },
     "PermissionIntent": {
-      "description": "Whether a request can mutate durable state. Temporary Coordinators may read\nthe last valid policy and coordinate existing connections, but every\nmutating request is frozen in the domain evaluator.",
+      "description": "The authorization impact of a request.\n\n`Mutating` covers runtime/local mutations such as starting a network,\nrebuilding TUN or changing live routes. `GovernanceWrite` is deliberately\nnarrower: it covers changes to long-lived membership, roles, policies,\nkeys, invitations and authorization configuration. A temporary Coordinator\nmay perform runtime coordination, but only governance writes are frozen.",
       "enum": [
         "read_only",
-        "mutating"
+        "mutating",
+        "governance_write"
       ],
       "type": "string"
     },

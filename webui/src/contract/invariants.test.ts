@@ -3,6 +3,8 @@ import manifestFixture from "../../../contracts/typescript/fixtures/node-manifes
 import productVisualFixture from "../../../contracts/typescript/fixtures/product-visual-snapshot.json";
 import discoveryParityFixture from "../../../contracts/typescript/fixtures/discovery-ui-parity.json";
 import type {
+  CoordinatorCandidateStatus,
+  CoordinatorEmergencyState,
   NetworkProfileProjections,
   NetworkPublicProfileDocument,
   NodeApiManifestResponse,
@@ -26,8 +28,10 @@ import type {
   TrafficPolicyTestInput,
 } from "../../../contracts/typescript/node-contract-v1";
 import {
+  actionRequiresCoordinatorGovernance,
   buildCommand,
   commandEnvelope,
+  coordinatorGovernanceFreezeReason,
   executionBlockReason,
   initialActionValues,
   operationStateIsTerminal,
@@ -655,12 +659,9 @@ describe("node UI contract invariants", () => {
       auto_connect: true,
     };
     expect(
-      initialActionValues(create, snapshot, "home")
-        .exit_selection_policy_json,
+      initialActionValues(create, snapshot, "home").exit_selection_policy_json,
     ).toBe("{}");
-    expect(
-      buildCommand(create, createValues, "en"),
-    ).toMatchObject({
+    expect(buildCommand(create, createValues, "en")).toMatchObject({
       payload: {
         exit_selection_policy: {
           mode: { mode: "member_choice" },
@@ -839,9 +840,7 @@ describe("node UI contract invariants", () => {
         },
         "en",
       ),
-    ).toEqual([
-      "translated:validation.exit_contribution_scope_required",
-    ]);
+    ).toEqual(["translated:validation.exit_contribution_scope_required"]);
   });
 
   it("validates signed profile preview and applied-result contracts", () => {
@@ -1458,6 +1457,89 @@ describe("node UI contract invariants", () => {
     ).toThrow("member lifecycle revision invalid");
   });
 
+  it("derives Coordinator governance freeze state from embedded service truth", () => {
+    const snapshot = emptySnapshot();
+    expect(coordinatorGovernanceFreezeReason(snapshot, "home")).toBeNull();
+
+    snapshot.networks = [
+      {
+        name: "home",
+        tun_name: "fk-home",
+        status: "online",
+        assigned_ipv6: "fd00::2",
+        assigned_ipv4: null,
+        p2p_listen_addr: null,
+        uptime_secs: 1,
+        roles: ["member"],
+        peer_count: 0,
+        traffic: {
+          tun_rx_bytes: 0,
+          tun_tx_bytes: 0,
+          tun_rx_packets: 0,
+          tun_tx_packets: 0,
+          p2p_rx_bytes: 0,
+          p2p_tx_bytes: 0,
+          p2p_rx_packets: 0,
+          p2p_tx_packets: 0,
+          error_count: 0,
+        },
+      },
+    ];
+    snapshot.embedded_services = [{ network_name: "home", status: "running" }];
+    expect(coordinatorGovernanceFreezeReason(snapshot, "home")).toBe(
+      "status_missing",
+    );
+
+    const status: CoordinatorCandidateStatus = {
+      network_id: "net_stable_home",
+      generated_at_unix_ms: 1_700_000_000_000,
+      config_state: "current",
+      candidates: [],
+      config: null,
+      current_leader: null,
+      latest_term: null,
+      emergency: "none",
+    };
+    snapshot.embedded_services[0].coordinator_candidates = status;
+    expect(coordinatorGovernanceFreezeReason(snapshot, "home")).toBeNull();
+
+    const emergencies: CoordinatorEmergencyState[] = [
+      "no_candidates_configured",
+      "configuration_pending",
+      "configuration_expired",
+      "all_candidates_unavailable",
+    ];
+    for (const emergency of emergencies) {
+      status.emergency = emergency;
+      expect(coordinatorGovernanceFreezeReason(snapshot, "home")).toBe(
+        emergency,
+      );
+    }
+  });
+
+  it("freezes only Coordinator governance writes", () => {
+    for (const actionId of [
+      "preview_member_removal",
+      "change_member_lifecycle",
+      "review_join_request",
+      "batch_review_join_requests",
+      "create_invitation",
+      "revoke_invitation",
+      "redeem_invitation",
+    ]) {
+      expect(actionRequiresCoordinatorGovernance(actionId)).toBe(true);
+    }
+    for (const actionId of [
+      "get_coordinator_candidates",
+      "update_coordinator_candidates",
+      "publish_coordinator_candidate_declaration",
+      "list_join_requests",
+      "preview_invitation",
+    ]) {
+      expect(actionRequiresCoordinatorGovernance(actionId)).toBe(false);
+    }
+  });
+
   it("keeps Relay role actions on the shared command and selection gates", () => {
     const action = manifest.pages
       .flatMap((page) => page.actions)
@@ -1510,9 +1592,7 @@ describe("node UI contract invariants", () => {
       role: "relay",
       enabled: false,
     });
-    expect(
-      buildCommand(action, { ...values, enabled: "true" }, "en"),
-    ).toEqual({
+    expect(buildCommand(action, { ...values, enabled: "true" }, "en")).toEqual({
       command: "set_network_role",
       payload: {
         network_name: "home",
@@ -1850,6 +1930,8 @@ describe("node UI contract invariants", () => {
     const policyAction: NodeUiAction = {
       id: "test_policy",
       label_key: "action.test_policy",
+      group: "configuration",
+      group_label_key: "action_group.configuration",
       command: "test_policy",
       backend_status: "implemented",
       permission: "manage_networks",
@@ -2347,7 +2429,9 @@ describe("node UI contract invariants", () => {
     );
     try {
       parseTrafficPolicyDraftJson(duplicate);
-      throw new Error("expected duplicate traffic policy fields to be rejected");
+      throw new Error(
+        "expected duplicate traffic policy fields to be rejected",
+      );
     } catch (error) {
       expect(error).toBeInstanceOf(TrafficPolicyJsonError);
       expect((error as TrafficPolicyJsonError).path).toBe("/node_id");

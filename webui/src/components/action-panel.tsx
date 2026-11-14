@@ -4,6 +4,7 @@ import {
   Check,
   ChevronRight,
   Copy,
+  Search,
   ShieldAlert,
   X,
 } from "lucide-react";
@@ -29,11 +30,14 @@ import type {
   NodeOperationSnapshot,
   NodeSnapshot,
   NodeUiAction,
+  NodeUiActionGroup,
   NodeUiField,
   NodeJoinRequestListResult,
 } from "../../../contracts/typescript/node-contract-v1";
 import {
+  actionRequiresCoordinatorGovernance,
   blockReasonText,
+  coordinatorGovernanceFreezeReason,
   executionBlockReason,
   i18n,
   initialActionValues,
@@ -49,12 +53,14 @@ import { pageStateDefinition, type PageStateKind } from "../state-matrix";
 
 type ActionPanelProps = {
   actions: NodeUiAction[];
+  actionGroups: NodeUiActionGroup[];
   snapshot: NodeSnapshot;
   selectedNetwork: string;
   locale: Locale;
   pendingAction: string | null;
   interactionBlocked: PageStateKind | null;
   requestedAction: {
+    requestId?: number;
     actionId: string;
     values?: ActionValues;
   } | null;
@@ -1396,6 +1402,10 @@ function InvitationListCard({
   const [revokeTarget, setRevokeTarget] = useState<InvitationStatusView | null>(
     null,
   );
+  const revokeActionLabel = label(
+    locale,
+    revokeAction?.label_key ?? "invitations.revoke",
+  );
 
   async function refreshInvitation(
     status: InvitationStatusView,
@@ -1591,7 +1601,9 @@ function InvitationListCard({
               >
                 {busy
                   ? label(locale, "common.operation_in_progress")
-                  : label(locale, "common.execute")}
+                  : tr(locale, "common.confirm_action", {
+                      action: revokeActionLabel,
+                    })}
               </button>
             </div>
           </Dialog.Content>
@@ -2617,6 +2629,13 @@ function localExitState(
   };
 }
 
+function coordinatorGovernanceReasonText(
+  reason: ReturnType<typeof coordinatorGovernanceFreezeReason>,
+  locale: Locale,
+): string {
+  return reason ? label(locale, `coordinator_governance.reason.${reason}`) : "";
+}
+
 function ActionCard({
   action,
   snapshot,
@@ -2624,6 +2643,7 @@ function ActionCard({
   locale,
   pending,
   interactionBlocked,
+  governanceBlockedReason,
   requested,
   requestedValues,
   joinAction,
@@ -2640,6 +2660,9 @@ function ActionCard({
   previewMemberRemovalAction,
   changeMemberLifecycleAction,
   networkMembersAction,
+  open,
+  onOpen,
+  onClose,
   onRequestedActionOpened,
   onSubmit,
 }: {
@@ -2649,6 +2672,7 @@ function ActionCard({
   locale: Locale;
   pending: boolean;
   interactionBlocked: PageStateKind | null;
+  governanceBlockedReason: string;
   requested: boolean;
   requestedValues?: ActionValues;
   joinAction?: NodeUiAction;
@@ -2665,6 +2689,9 @@ function ActionCard({
   previewMemberRemovalAction?: NodeUiAction;
   changeMemberLifecycleAction?: NodeUiAction;
   networkMembersAction?: NodeUiAction;
+  open: boolean;
+  onOpen(): void;
+  onClose(): void;
   onRequestedActionOpened(): void;
   onSubmit(
     action: NodeUiAction,
@@ -2672,7 +2699,10 @@ function ActionCard({
     onOperation: (operation: NodeOperationSnapshot) => void,
   ): Promise<ActionSubmission>;
 }) {
-  const [open, setOpen] = useState(requested);
+  const setOpen = (next: boolean): void => {
+    if (next) onOpen();
+    else onClose();
+  };
   const [confirming, setConfirming] = useState(false);
   const [values, setValues] = useState<ActionValues>(() => ({
     ...initialActionValues(action, snapshot, selectedNetwork),
@@ -2721,14 +2751,19 @@ function ActionCard({
     snapshot,
     selectedNetwork,
   );
-  const blocked = Boolean(pageBlocked || executionBlocked);
+  const governanceBlocked =
+    actionRequiresCoordinatorGovernance(action.id) &&
+    Boolean(governanceBlockedReason);
+  const blocked = Boolean(pageBlocked || executionBlocked || governanceBlocked);
   const confirmBlockedReason = pending
     ? label(locale, "common.control_pending")
     : pageBlocked
       ? label(locale, pageBlocked.titleKey)
       : executionBlocked
         ? blockReasonText(executionBlocked, locale)
-        : "";
+        : governanceBlocked
+          ? governanceBlockedReason
+          : "";
   const joinBlockedReason = !joinAction
     ? label(locale, "join.action_unavailable")
     : executionBlockReason(joinAction, snapshot, selectedNetwork)
@@ -2739,6 +2774,7 @@ function ActionCard({
       : "";
   function joinRequestReviewBlockedReason(reviewAction?: NodeUiAction): string {
     if (pageBlocked) return label(locale, pageBlocked.titleKey);
+    if (governanceBlockedReason) return governanceBlockedReason;
     if (!reviewAction)
       return label(locale, "join_requests.actions_unavailable");
     const reason = executionBlockReason(
@@ -2754,23 +2790,31 @@ function ActionCard({
   const batchReviewBlockedReason = joinRequestReviewBlockedReason(
     batchReviewJoinRequestsAction,
   );
-  function invitationActionBlockedReason(target?: NodeUiAction): string {
+  function invitationActionBlockedReason(
+    target: NodeUiAction | undefined,
+    governanceWrite: boolean,
+  ): string {
     if (pageBlocked) return label(locale, pageBlocked.titleKey);
+    if (governanceWrite && governanceBlockedReason)
+      return governanceBlockedReason;
     if (!target) return label(locale, "invitations.actions_unavailable");
     const reason = executionBlockReason(target, snapshot, selectedNetwork);
     return reason ? blockReasonText(reason, locale) : "";
   }
   const invitationStatusBlockedReason = invitationActionBlockedReason(
     statusInvitationAction,
+    false,
   );
   const invitationRevokeBlockedReason = invitationActionBlockedReason(
     revokeInvitationAction,
+    true,
   );
   const invitationRedeemBlockedReason = invitationActionBlockedReason(
     redeemInvitationAction,
+    true,
   );
-  const [previousRequested, setPreviousRequested] = useState(requested);
   const previousSelectedNetwork = useRef(selectedNetwork);
+  const actionLabel = label(locale, action.label_key);
 
   useEffect(() => {
     if (previousSelectedNetwork.current === selectedNetwork) return;
@@ -2793,34 +2837,6 @@ function ActionCard({
     setInvitationConfirmed(false);
     setInvitationExitConfirmed(false);
   }, [action, selectedNetwork, snapshot]);
-
-  if (requested !== previousRequested) {
-    setPreviousRequested(requested);
-    if (requested) {
-      setOpen(true);
-      setConfirming(false);
-      setValues({
-        ...initialActionValues(action, snapshot, selectedNetwork),
-        ...requestedValues,
-      });
-      setErrors([]);
-      setFailure("");
-      setResult("");
-      setProfileOutcome(null);
-      setJoinPreview(null);
-      setJoinRequests(null);
-      setNetworkMembers(null);
-      setJoinConfirmed(false);
-      setJoinExitConfirmed(false);
-      setIssuedInvitation(null);
-      setInvitations(null);
-      setInvitationStatus(null);
-      setInvitationPreview(null);
-      setInvitationPreviewLoadedAtUnixMs(0);
-      setInvitationConfirmed(false);
-      setInvitationExitConfirmed(false);
-    }
-  }
 
   useEffect(() => {
     if (requested) onRequestedActionOpened();
@@ -3179,17 +3195,26 @@ function ActionCard({
   }
 
   return (
-    <article className="action-card">
+    <article
+      data-testid={`action-card-${action.id}`}
+      className={
+        action.backend_status === "unavailable"
+          ? "action-card unavailable"
+          : "action-card"
+      }
+    >
       <button
         type="button"
         className="action-card-head"
         aria-expanded={open}
         onClick={() => {
-          if (!open) {
+          if (open) {
+            onClose();
+          } else {
             setJoinRequests(null);
             setNetworkMembers(null);
+            onOpen();
           }
-          setOpen((current) => !current);
         }}
       >
         <span>{label(locale, action.label_key)}</span>
@@ -3227,6 +3252,7 @@ function ActionCard({
           previewRemovalAction={previewMemberRemovalAction}
           changeLifecycleAction={changeMemberLifecycleAction}
           activePendingAction={activePendingAction}
+          governanceBlockedReason={governanceBlockedReason}
           onSubmit={onSubmit}
           onLifecycleChanged={handleLifecycleChanged}
         />
@@ -3305,29 +3331,33 @@ function ActionCard({
       ) : null}
       {open && !invitationPreview ? (
         <form className="action-form" onSubmit={handleSubmit}>
-          {pageBlocked || executionBlocked ? (
+          {pageBlocked || executionBlocked || governanceBlocked ? (
             <div className="inline-notice warning">
               <ShieldAlert size={15} />
               <span>
                 {pageBlocked
                   ? label(locale, pageBlocked.titleKey)
-                  : blockReasonText(executionBlocked, locale)}
+                  : executionBlocked
+                    ? blockReasonText(executionBlocked, locale)
+                    : governanceBlockedReason}
               </span>
             </div>
           ) : null}
-          {action.fields.map((field) => (
-            <FieldControl
-              key={field.id}
-              field={field}
-              locale={locale}
-              snapshot={snapshot}
-              value={values[field.id] ?? ""}
-              onChange={(value) => {
-                editedFields.current.add(field.id);
-                setValues((current) => ({ ...current, [field.id]: value }));
-              }}
-            />
-          ))}
+          <div className="action-form-fields">
+            {action.fields.map((field) => (
+              <FieldControl
+                key={field.id}
+                field={field}
+                locale={locale}
+                snapshot={snapshot}
+                value={values[field.id] ?? ""}
+                onChange={(value) => {
+                  editedFields.current.add(field.id);
+                  setValues((current) => ({ ...current, [field.id]: value }));
+                }}
+              />
+            ))}
+          </div>
           {errors.length > 0 ? (
             <ul className="form-errors" role="alert">
               {errors.map((error) => (
@@ -3352,7 +3382,7 @@ function ActionCard({
           >
             {pending
               ? label(locale, "common.operation_in_progress")
-              : label(locale, "common.execute")}
+              : actionLabel}
           </button>
         </form>
       ) : null}
@@ -3375,14 +3405,15 @@ function ActionCard({
                 <Dialog.Title>
                   {label(
                     locale,
-                    action.confirmation?.title_key ?? "common.confirm_again",
+                    action.confirmation?.title_key ??
+                      "common.confirm_action_again",
                   )}
                 </Dialog.Title>
                 <Dialog.Description>
                   {label(
                     locale,
                     action.confirmation?.consequence_key ??
-                      "common.ready_to_submit",
+                      "common.confirmation_required",
                   )}
                 </Dialog.Description>
                 {action.confirmation?.recent_authentication_required ? (
@@ -3416,7 +3447,9 @@ function ActionCard({
                   void submit();
                 }}
               >
-                {label(locale, "common.execute")}
+                {tr(locale, "common.confirm_action", {
+                  action: actionLabel,
+                })}
               </button>
             </div>
             <Dialog.Close asChild>
@@ -3437,6 +3470,41 @@ function ActionCard({
 
 export function ActionPanel(props: ActionPanelProps) {
   const { actions, locale, pendingAction, onSubmit } = props;
+  const governanceFreezeReason = coordinatorGovernanceFreezeReason(
+    props.snapshot,
+    props.selectedNetwork,
+  );
+  const governanceBlockedReason = coordinatorGovernanceReasonText(
+    governanceFreezeReason,
+    locale,
+  );
+  const governanceFreezeNotice = governanceFreezeReason ? (
+    <div
+      className="inline-notice danger"
+      role="status"
+      data-testid="coordinator-governance-frozen"
+    >
+      <ShieldAlert size={15} />
+      <div>
+        <strong>
+          {label(locale, "coordinator_governance.frozen.title")}
+        </strong>
+        <span>{governanceBlockedReason}</span>
+        <small>
+          {label(locale, "coordinator_governance.frozen.recovery")}
+        </small>
+      </div>
+    </div>
+  ) : null;
+  const [query, setQuery] = useState("");
+  const [openActionId, setOpenActionId] = useState<string | null>(null);
+  const [requestedCardKeys, setRequestedCardKeys] = useState<
+    Record<string, number>
+  >({});
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const groupHeadingId = useId();
   const hasIntegratedJoinReview = actions.some(
     (action) => action.id === "list_join_requests",
   );
@@ -3447,19 +3515,34 @@ export function ActionPanel(props: ActionPanelProps) {
           action.id !== "batch_review_join_requests",
       )
     : actions;
+  const hasGovernanceWriteAction = renderedActions.some((action) =>
+    actionRequiresCoordinatorGovernance(action.id),
+  );
+  const visibleGovernanceFreezeNotice = hasGovernanceWriteAction
+    ? governanceFreezeNotice
+    : null;
+
+  const effectiveOpenActionId = props.requestedAction?.actionId ?? openActionId;
+
   if (renderedActions.length === 0) {
     return (
       <aside
         className="actions-panel"
         data-ui-region="action-panel"
-        aria-label={label(locale, "common.shared_actions")}
+        aria-label={label(locale, "common.actions_panel_title")}
       >
-        <div className="panel-title">
-          {label(locale, "common.shared_actions")}
+        <div className="panel-heading">
+          <div className="panel-title">
+            {label(locale, "common.actions_panel_title")}
+          </div>
+          <span className="panel-count">
+            {tr(locale, "common.actions_panel_count", { count: 0 })}
+          </span>
         </div>
         <p className="empty-copy">
           {label(locale, "common.page_actions_empty")}
         </p>
+        {visibleGovernanceFreezeNotice}
         {props.operation ? (
           <OperationStatusCard
             operation={props.operation}
@@ -3471,14 +3554,179 @@ export function ActionPanel(props: ActionPanelProps) {
       </aside>
     );
   }
+
+  const normalizedQuery = query.trim().toLocaleLowerCase(locale);
+  const matchingActions = normalizedQuery
+    ? renderedActions.filter((action) =>
+        [
+          label(locale, action.label_key),
+          label(locale, action.group_label_key),
+        ].some((text) =>
+          text.toLocaleLowerCase(locale).includes(normalizedQuery),
+        ),
+      )
+    : renderedActions;
+  const availableActions = matchingActions.filter(
+    (action) => action.backend_status !== "unavailable",
+  );
+  const unavailableActions = matchingActions.filter(
+    (action) => action.backend_status === "unavailable",
+  );
+  const grouped = new Map<
+    string,
+    { labelKey: string; actions: NodeUiAction[] }
+  >();
+  for (const action of availableActions) {
+    const group = grouped.get(action.group);
+    if (group) group.actions.push(action);
+    else
+      grouped.set(action.group, {
+        labelKey: action.group_label_key,
+        actions: [action],
+      });
+  }
+
+  function toggleGroup(group: string): void {
+    setCollapsedGroups((current) => {
+      const next = new Set(current);
+      if (next.has(group)) next.delete(group);
+      else next.add(group);
+      return next;
+    });
+  }
+
+  function renderAction(action: NodeUiAction) {
+    const requestId =
+      props.requestedAction?.actionId === action.id
+        ? (props.requestedAction.requestId ?? requestedCardKeys[action.id])
+        : requestedCardKeys[action.id];
+    const cardKey = requestId ? `${action.id}:${requestId}` : action.id;
+    return (
+      <ActionCard
+        key={cardKey}
+        action={action}
+        snapshot={props.snapshot}
+        selectedNetwork={props.selectedNetwork}
+        locale={locale}
+        pending={pendingAction === action.id}
+        interactionBlocked={props.interactionBlocked}
+        governanceBlockedReason={governanceBlockedReason}
+        requested={props.requestedAction?.actionId === action.id}
+        requestedValues={
+          props.requestedAction?.actionId === action.id
+            ? props.requestedAction.values
+            : undefined
+        }
+        open={effectiveOpenActionId === action.id}
+        onOpen={() => setOpenActionId(action.id)}
+        onClose={() =>
+          setOpenActionId((current) => (current === action.id ? null : current))
+        }
+        joinAction={actions.find(
+          (candidate) => candidate.id === "join_network",
+        )}
+        joinPending={pendingAction === "join_network"}
+        previewJoinAction={actions.find(
+          (candidate) => candidate.id === "preview_join_network",
+        )}
+        statusInvitationAction={actions.find(
+          (candidate) => candidate.id === "get_invitation_status",
+        )}
+        revokeInvitationAction={actions.find(
+          (candidate) => candidate.id === "revoke_invitation",
+        )}
+        redeemInvitationAction={actions.find(
+          (candidate) => candidate.id === "redeem_invitation",
+        )}
+        redeemInvitationPending={pendingAction === "redeem_invitation"}
+        previewInvitationAction={actions.find(
+          (candidate) => candidate.id === "preview_invitation",
+        )}
+        activePendingAction={pendingAction}
+        reviewJoinRequestAction={actions.find(
+          (candidate) => candidate.id === "review_join_request",
+        )}
+        batchReviewJoinRequestsAction={actions.find(
+          (candidate) => candidate.id === "batch_review_join_requests",
+        )}
+        previewMemberRemovalAction={actions.find(
+          (candidate) => candidate.id === "preview_member_removal",
+        )}
+        changeMemberLifecycleAction={actions.find(
+          (candidate) => candidate.id === "change_member_lifecycle",
+        )}
+        networkMembersAction={actions.find(
+          (candidate) => candidate.id === "list_network_members",
+        )}
+        onRequestedActionOpened={() => {
+          setOpenActionId(action.id);
+          if (props.requestedAction?.requestId) {
+            const requestId = props.requestedAction.requestId;
+            setRequestedCardKeys((current) => ({
+              ...current,
+              [action.id]: requestId,
+            }));
+          }
+          props.onRequestedActionOpened();
+        }}
+        onSubmit={onSubmit}
+      />
+    );
+  }
+
+  function renderGroup(
+    key: string,
+    heading: string,
+    groupActions: NodeUiAction[],
+    unavailable = false,
+  ) {
+    const collapsed = !normalizedQuery && collapsedGroups.has(key);
+    return (
+      <section
+        className={unavailable ? "action-group unavailable" : "action-group"}
+        key={key}
+        aria-labelledby={`${groupHeadingId}-${key}`}
+      >
+        <button
+          type="button"
+          className="action-group-head"
+          aria-expanded={!collapsed}
+          aria-controls={`${groupHeadingId}-${key}-actions`}
+          onClick={() => toggleGroup(key)}
+        >
+          <span id={`${groupHeadingId}-${key}`}>{heading}</span>
+          <span className="action-group-meta">
+            <span className="action-group-count">{groupActions.length}</span>
+            <ChevronRight
+              className={collapsed ? "action-chevron" : "action-chevron open"}
+              size={14}
+            />
+          </span>
+        </button>
+        {!collapsed ? (
+          <div className="action-list" id={`${groupHeadingId}-${key}-actions`}>
+            {groupActions.map(renderAction)}
+          </div>
+        ) : null}
+      </section>
+    );
+  }
+
   return (
     <aside
       className="actions-panel"
       data-ui-region="action-panel"
-      aria-label={label(locale, "common.shared_actions")}
+      aria-label={label(locale, "common.actions_panel_title")}
     >
-      <div className="panel-title">
-        {label(locale, "common.shared_actions")}
+      <div className="panel-heading">
+        <div className="panel-title">
+          {label(locale, "common.actions_panel_title")}
+        </div>
+        <span className="panel-count">
+          {tr(locale, "common.actions_panel_count", {
+            count: renderedActions.length,
+          })}
+        </span>
       </div>
       {props.operation ? (
         <OperationStatusCard
@@ -3488,63 +3736,55 @@ export function ActionPanel(props: ActionPanelProps) {
           onRetry={props.onRetryOperation}
         />
       ) : null}
-      <div className="action-list">
-        {renderedActions.map((action) => (
-          <ActionCard
-            key={action.id}
-            action={action}
-            snapshot={props.snapshot}
-            selectedNetwork={props.selectedNetwork}
-            locale={locale}
-            pending={pendingAction === action.id}
-            interactionBlocked={props.interactionBlocked}
-            requested={props.requestedAction?.actionId === action.id}
-            requestedValues={
-              props.requestedAction?.actionId === action.id
-                ? props.requestedAction.values
-                : undefined
-            }
-            joinAction={actions.find(
-              (candidate) => candidate.id === "join_network",
-            )}
-            joinPending={pendingAction === "join_network"}
-            previewJoinAction={actions.find(
-              (candidate) => candidate.id === "preview_join_network",
-            )}
-            statusInvitationAction={actions.find(
-              (candidate) => candidate.id === "get_invitation_status",
-            )}
-            revokeInvitationAction={actions.find(
-              (candidate) => candidate.id === "revoke_invitation",
-            )}
-            redeemInvitationAction={actions.find(
-              (candidate) => candidate.id === "redeem_invitation",
-            )}
-            redeemInvitationPending={pendingAction === "redeem_invitation"}
-            previewInvitationAction={actions.find(
-              (candidate) => candidate.id === "preview_invitation",
-            )}
-            activePendingAction={pendingAction}
-            reviewJoinRequestAction={actions.find(
-              (candidate) => candidate.id === "review_join_request",
-            )}
-            batchReviewJoinRequestsAction={actions.find(
-              (candidate) => candidate.id === "batch_review_join_requests",
-            )}
-            previewMemberRemovalAction={actions.find(
-              (candidate) => candidate.id === "preview_member_removal",
-            )}
-            changeMemberLifecycleAction={actions.find(
-              (candidate) => candidate.id === "change_member_lifecycle",
-            )}
-            networkMembersAction={actions.find(
-              (candidate) => candidate.id === "list_network_members",
-            )}
-            onRequestedActionOpened={props.onRequestedActionOpened}
-            onSubmit={onSubmit}
-          />
-        ))}
-      </div>
+      {visibleGovernanceFreezeNotice}
+      <label className="action-search">
+        <Search size={15} aria-hidden="true" />
+        <input
+          type="search"
+          value={query}
+          aria-label={label(locale, "common.actions_search_placeholder")}
+          placeholder={label(locale, "common.actions_search_placeholder")}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+        {query ? (
+          <button
+            type="button"
+            className="icon-button"
+            aria-label={label(locale, "common.actions_search_clear")}
+            onClick={() => setQuery("")}
+          >
+            <X size={14} />
+          </button>
+        ) : null}
+      </label>
+      {matchingActions.length === 0 ? (
+        <p className="empty-copy" role="status">
+          {label(locale, "common.actions_no_results")}
+        </p>
+      ) : (
+        <div className="action-groups">
+          {props.actionGroups.flatMap((group) => {
+            const section = grouped.get(group);
+            return section
+              ? [
+                  renderGroup(
+                    group,
+                    label(locale, section.labelKey),
+                    section.actions,
+                  ),
+                ]
+              : [];
+          })}
+          {unavailableActions.length > 0
+            ? renderGroup(
+                "unavailable",
+                label(locale, "common.actions_unavailable_heading"),
+                unavailableActions,
+                true,
+              )
+            : null}
+        </div>
+      )}
     </aside>
   );
 }

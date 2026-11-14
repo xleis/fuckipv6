@@ -741,16 +741,22 @@ impl Render for NativeTextInput {
             } else {
                 RADII.md_px as f32
             }))
-            .bg(rgba(colors.input_background.rgba_hex()))
-            .border_1()
-            .border_color(rgba(
+            .bg(rgba(
                 if focused {
-                    colors.accent
+                    colors.accent_soft
                 } else {
-                    colors.border
+                    colors.input_background
                 }
                 .rgba_hex(),
             ))
+            .when(focused, |input| {
+                input.shadow(vec![gpui::BoxShadow::new(
+                    px(0.0),
+                    px(0.0),
+                    rgba(colors.accent_glow.with_alpha(0x2e).rgba_hex()).into(),
+                )
+                .blur_radius(px(14.0))])
+            })
             .text_size(px(TYPOGRAPHY.sm.size_px as f32))
             .line_height(px((TYPOGRAPHY.sm.size_px as f32
                 * TYPOGRAPHY.sm.line_height)

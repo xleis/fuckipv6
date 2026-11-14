@@ -64,6 +64,8 @@ use crate::routing::linux_recovery::{
 use crate::routing::linux_recovery_events::{LinuxRecoveryEvent, LinuxRecoveryEventWatcher};
 #[cfg(target_os = "linux")]
 use crate::routing::linux_route::LinuxRouteManager;
+#[cfg(target_os = "linux")]
+use crate::routing::linux_route_probe::ExitPathProbeReport;
 use crate::routing::recovery::RecoveryTrigger;
 #[cfg(target_os = "linux")]
 use crate::routing::recovery::{
@@ -583,6 +585,12 @@ pub(crate) struct ClientRuntime {
     exit_connection_watchdog: Option<ExitConnectionWatchdog>,
     #[cfg(target_os = "linux")]
     pending_exit_readiness: Option<PendingExitReadiness>,
+    #[cfg(target_os = "linux")]
+    exit_data_path_validation_in_progress: bool,
+    #[cfg(target_os = "linux")]
+    exit_data_path_probe_tx: mpsc::UnboundedSender<Result<ExitPathProbeReport>>,
+    #[cfg(target_os = "linux")]
+    exit_data_path_probe_rx: Option<mpsc::UnboundedReceiver<Result<ExitPathProbeReport>>>,
     pub(crate) tun_io: RuntimeTunIo,
     pub(crate) assigned_ip: Ipv6Addr,
     pub(crate) assigned_ips: VirtualIps,
@@ -797,6 +805,7 @@ impl ClientRuntime {
         {
             self.exit_connection_watchdog = None;
             self.pending_exit_readiness = None;
+            self.exit_data_path_validation_in_progress = false;
         }
         self.exit_selection_gate.set_current_exit(None);
         self.exit_selection_gate.discard_pending_exit();
@@ -1012,6 +1021,7 @@ impl ClientRuntime {
         #[cfg(target_os = "linux")]
         {
             self.pending_exit_readiness = None;
+            self.exit_data_path_validation_in_progress = false;
         }
         self.exit_selection_blocked = true;
         let migrating = self.exit_selection_gate.current_exit().is_some()
@@ -1189,6 +1199,23 @@ impl ClientRuntime {
         if self.route_engine.routing_mode() == fuckipv6_common::RoutingMode::MeshOnly {
             return None;
         }
+        #[cfg(target_os = "linux")]
+        if self.exit_data_path_validation_in_progress {
+            let current_exit = self.exit_selection_gate.current_exit().cloned();
+            let pending_target = self
+                .pending_exit_readiness
+                .as_ref()
+                .map(|pending| &pending.target);
+            if exit_probe_packet_admission_allowed(
+                self.traffic_session.state,
+                self.exit_data_path_validation_in_progress,
+                self.route_manager.global_proxy_active(),
+            ) && current_exit.as_ref() == pending_target
+            {
+                return current_exit;
+            }
+            return None;
+        }
         if self.exit_selection_blocked || self.exit_selection_gate.pending_exit().is_some() {
             return None;
         }
@@ -1326,6 +1353,23 @@ fn exit_packet_admission_allowed(
     state: TrafficProtectionState,
 ) -> bool {
     !blocked && !migration_pending && state.may_carry_traffic()
+}
+
+/// The marked data-path probe is the only traffic admitted while connecting.
+/// It remains isolated by a dedicated fwmark rule; ordinary host traffic is
+/// still not intercepted until `activate_global_proxy` succeeds.
+#[cfg(target_os = "linux")]
+fn exit_probe_packet_admission_allowed(
+    state: TrafficProtectionState,
+    validation_in_progress: bool,
+    global_proxy_active: bool,
+) -> bool {
+    validation_in_progress
+        && !global_proxy_active
+        && matches!(
+            state,
+            TrafficProtectionState::Connecting | TrafficProtectionState::Migrating
+        )
 }
 
 impl Drop for ClientRuntime {
@@ -1665,6 +1709,8 @@ pub(crate) async fn prepare_client_runtime_ext(
         }
     }
     let (control_tx, control_rx) = mpsc::unbounded_channel();
+    #[cfg(target_os = "linux")]
+    let (exit_data_path_probe_tx, exit_data_path_probe_rx) = mpsc::unbounded_channel();
 
     tracing::info!("性能监控已启用");
 
@@ -1722,6 +1768,12 @@ pub(crate) async fn prepare_client_runtime_ext(
         exit_connection_watchdog: None,
         #[cfg(target_os = "linux")]
         pending_exit_readiness: None,
+        #[cfg(target_os = "linux")]
+        exit_data_path_validation_in_progress: false,
+        #[cfg(target_os = "linux")]
+        exit_data_path_probe_tx,
+        #[cfg(target_os = "linux")]
+        exit_data_path_probe_rx: Some(exit_data_path_probe_rx),
         tun_io,
         assigned_ip,
         assigned_ips,
@@ -3070,6 +3122,10 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
     let mut node_state_updates = runtime.node_state_updates.clone();
     let mut exit_contribution_directory_updates =
         runtime.exit_contribution_directory_updates.take();
+    #[cfg(target_os = "linux")]
+    let mut exit_data_path_probe_rx = runtime.exit_data_path_probe_rx.take();
+    #[cfg(not(target_os = "linux"))]
+    let mut exit_data_path_probe_rx: Option<mpsc::UnboundedReceiver<Result<()>>> = None;
     let mut exit_connection_watchdog = tokio::time::interval(EXIT_CONNECTION_WATCHDOG_INTERVAL);
     exit_connection_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -3256,6 +3312,17 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
 
             _ = exit_readiness => complete_pending_exit_readiness_timeout(runtime).await,
 
+            probe_result = async {
+                match exit_data_path_probe_rx.as_mut() {
+                    Some(receiver) => receiver.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(probe_result) = probe_result {
+                    handle_exit_data_path_probe_result(runtime, probe_result).await;
+                }
+            }
+
             // 定期心跳与 QUIC 中继自愈检测
             _ = runtime.heartbeat_interval.tick() => {
                 if runtime
@@ -3340,6 +3407,9 @@ async fn wait_for_local_exit_drain(deadline: Option<Instant>) {
 fn pending_exit_readiness_deadline(runtime: &ClientRuntime) -> Option<Instant> {
     #[cfg(target_os = "linux")]
     {
+        if runtime.exit_data_path_validation_in_progress {
+            return None;
+        }
         runtime
             .pending_exit_readiness
             .as_ref()
@@ -4384,11 +4454,76 @@ async fn handle_exit_readiness_response(
         return;
     }
 
-    if let Err(error) = runtime.route_manager.validate_exit_data_path().await {
+    runtime.exit_data_path_validation_in_progress = true;
+    if let Err(error) = runtime
+        .route_manager
+        .begin_exit_data_path_validation(runtime.exit_data_path_probe_tx.clone())
+        .await
+    {
+        runtime.exit_data_path_validation_in_progress = false;
         tracing::error!(
             exit = %pending.target,
-            error = %error,
-            "Exit 自身 readiness 通过，但本机经 TUN/P2P/Exit 的 YouTube DNS/TCP/TLS 实测失败；宿主全局路由保持未启用"
+            error = %format!("{error:#}"),
+            "无法启动本机经 TUN/P2P/Exit 的 YouTube 数据路径实测；宿主全局路由保持未启用"
+        );
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_readiness.data_path_failed",
+            )
+            .await;
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn handle_exit_data_path_probe_result(
+    runtime: &mut ClientRuntime,
+    result: Result<ExitPathProbeReport>,
+) {
+    if !runtime.exit_data_path_validation_in_progress {
+        tracing::debug!("忽略已失效的 Exit 数据路径探针结果");
+        return;
+    }
+    let Some(target) = runtime
+        .pending_exit_readiness
+        .as_ref()
+        .map(|pending| pending.target.clone())
+    else {
+        runtime.exit_data_path_validation_in_progress = false;
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_readiness.target_missing",
+            )
+            .await;
+        return;
+    };
+    if runtime.intended_exit().as_ref() != Some(&target)
+        || runtime.exit_selection_gate.current_exit() != Some(&target)
+    {
+        runtime.exit_data_path_validation_in_progress = false;
+        runtime
+            .enter_fail_closed(
+                TrafficFailureKind::ExitUnavailable,
+                unix_time_ms(),
+                "recovery.exit_readiness.target_changed",
+            )
+            .await;
+        return;
+    }
+
+    if let Err(error) = runtime
+        .route_manager
+        .complete_exit_data_path_validation(result)
+        .await
+    {
+        runtime.exit_data_path_validation_in_progress = false;
+        tracing::error!(
+            exit = %target,
+            error = %format!("{error:#}"),
+            "本机经 TUN/P2P/Exit 的 YouTube DNS/TCP/TLS 实测失败；宿主全局路由保持未启用"
         );
         runtime
             .enter_fail_closed(
@@ -4399,10 +4534,11 @@ async fn handle_exit_readiness_response(
             .await;
         return;
     }
+    runtime.exit_data_path_validation_in_progress = false;
 
     if let Err(error) = runtime.route_manager.activate_global_proxy().await {
         tracing::error!(
-            exit = %pending.target,
+            exit = %target,
             error = %error,
             "Exit readiness 已通过，但启用全局代理路由/DNS 失败，恢复宿主网络"
         );
@@ -4423,7 +4559,7 @@ async fn handle_exit_readiness_response(
         run_linux_local_resource_recovery(runtime, RecoveryTrigger::Manual).await;
     let Some(local_validation) = report.local_resource_validation(expectations) else {
         tracing::error!(
-            exit = %pending.target,
+            exit = %target,
             status = ?report.status,
             error_code = ?report.error_code,
             "Exit readiness 已通过，但启用后的本地资源复验失败，恢复宿主网络"
@@ -4464,9 +4600,14 @@ async fn handle_exit_readiness_response(
     runtime.exit_connection_watchdog = None;
     runtime.publish_traffic_session().await;
     tracing::info!(
-        exit = %pending.target,
+        exit = %target,
         "Exit readiness 全部通过，流量会话已进入受保护状态"
     );
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn handle_exit_data_path_probe_result(runtime: &mut ClientRuntime, result: Result<()>) {
+    let _ = (runtime, result);
 }
 
 #[cfg(target_os = "linux")]
@@ -10412,6 +10553,27 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
             true,
             TrafficProtectionState::Protected
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_in_progress_marked_probe_admits_traffic_while_connecting() {
+        for state in [
+            TrafficProtectionState::Connecting,
+            TrafficProtectionState::Migrating,
+        ] {
+            assert!(exit_probe_packet_admission_allowed(state, true, false));
+            assert!(!exit_probe_packet_admission_allowed(state, false, false));
+            assert!(!exit_probe_packet_admission_allowed(state, true, true));
+        }
+        for state in [
+            TrafficProtectionState::Idle,
+            TrafficProtectionState::Protected,
+            TrafficProtectionState::ExplicitDirectFallback,
+            TrafficProtectionState::FailClosed,
+        ] {
+            assert!(!exit_probe_packet_admission_allowed(state, true, false));
+        }
     }
 
     #[cfg(target_os = "linux")]

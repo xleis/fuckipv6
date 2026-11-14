@@ -54,6 +54,25 @@ import {
 } from "./api/owner-audit";
 import { installTestI18nRuntime } from "./test/runtime";
 
+function actionHead(container: HTMLElement, actionId: string): HTMLElement {
+  return within(container)
+    .getAllByRole("button", {
+      name: `translated:action.${actionId}`,
+    })
+    .find((button) => button.hasAttribute("aria-expanded"))!;
+}
+
+function actionSubmitButton(
+  container: HTMLElement,
+  actionId: string,
+): HTMLElement {
+  return within(container)
+    .getAllByRole("button", {
+      name: `translated:action.${actionId}`,
+    })
+    .find((button) => !button.hasAttribute("aria-expanded"))!;
+}
+
 vi.mock("./api/client", async (importOriginal) => {
   const original = await importOriginal<typeof import("./api/client")>();
   return {
@@ -855,25 +874,19 @@ describe("React WebUI shell", () => {
       screen.getByRole("tab", { name: "translated:nav.identity" }),
     );
     const panel = await screen.findByRole("complementary", {
-      name: "translated:common.shared_actions",
+      name: "translated:common.actions_panel_title",
     });
-    await user.click(
-      within(panel).getByRole("button", {
-        name: "translated:action.rotate_node_identity",
-      }),
-    );
+    await user.click(actionHead(panel, "rotate_node_identity"));
     expect(
       within(panel).getByRole("textbox", {
         name: "translated:field.expected_fingerprint",
       }),
     ).toHaveValue(oldFingerprint);
-    await user.click(
-      within(panel).getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(panel, "rotate_node_identity"));
     const dialog = await screen.findByRole("dialog");
     await user.click(
       within(dialog).getByRole("button", {
-        name: "translated:common.execute",
+        name: "translated:common.confirm_action",
       }),
     );
 
@@ -1016,17 +1029,10 @@ describe("React WebUI shell", () => {
       screen.getByRole("tab", { name: "translated:nav.node_runtime" }),
     );
     const panel = await screen.findByRole("complementary", {
-      name: "translated:common.shared_actions",
+      name: "translated:common.actions_panel_title",
     });
-    await user.click(
-      within(panel).getByRole("button", {
-        name: "translated:action.get_node_diagnostics",
-      }),
-    );
-    await user.click(
-      within(panel).getByRole("button", { name: "translated:common.execute" }),
-    );
-
+    await user.click(actionHead(panel, "get_node_diagnostics"));
+    await user.click(actionSubmitButton(panel, "get_node_diagnostics"));
     const diagnosticsPanel = await screen.findByTestId("runtime-diagnostics");
     await waitFor(() =>
       expect(diagnosticsPanel).toHaveTextContent("diagnostic-w7-05"),
@@ -1190,17 +1196,10 @@ describe("React WebUI shell", () => {
       screen.getByRole("tab", { name: "translated:nav.node_runtime" }),
     );
     const panel = await screen.findByRole("complementary", {
-      name: "translated:common.shared_actions",
+      name: "translated:common.actions_panel_title",
     });
-    await user.click(
-      within(panel).getByRole("button", {
-        name: "translated:action.get_node_diagnostics",
-      }),
-    );
-    await user.click(
-      within(panel).getByRole("button", { name: "translated:common.execute" }),
-    );
-
+    await user.click(actionHead(panel, "get_node_diagnostics"));
+    await user.click(actionSubmitButton(panel, "get_node_diagnostics"));
     await waitFor(() =>
       expect(waitForOperation).toHaveBeenCalledWith(
         "op-cancel-diagnostics",
@@ -1929,9 +1928,9 @@ describe("React WebUI shell", () => {
     expect(search).toHaveFocus();
 
     await user.type(search, "no-such-object");
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "translated:common.search_no_results",
-    );
+    expect(
+      screen.getByText("translated:common.search_no_results"),
+    ).toBeInTheDocument();
     await user.click(
       screen.getByRole("button", { name: "translated:common.search_clear" }),
     );
@@ -2040,7 +2039,7 @@ describe("React WebUI shell", () => {
         }),
       ).toBeInTheDocument();
       const panel = await screen.findByRole("complementary", {
-        name: "translated:common.shared_actions",
+        name: "translated:common.actions_panel_title",
       });
       await waitFor(() => {
         expect(
@@ -2066,11 +2065,10 @@ describe("React WebUI shell", () => {
       }
       await user.click(primaryAction);
 
-      expect(
-        within(panel).getByRole("button", {
-          name: `translated:action.${action}`,
-        }),
-      ).toHaveAttribute("aria-expanded", "true");
+      expect(actionHead(panel, action)).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
       expect(panel.querySelector(".action-form")).toBeInTheDocument();
     },
   );
@@ -2127,14 +2125,14 @@ describe("React WebUI shell", () => {
     await user.click(secondary);
 
     const panel = screen.getByRole("complementary", {
-      name: "translated:common.shared_actions",
+      name: "translated:common.actions_panel_title",
     });
-    await user.click(
-      within(panel).getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(panel, "restart_node"));
     const dialog = await screen.findByRole("dialog");
     await user.click(
-      within(dialog).getByRole("button", { name: "translated:common.execute" }),
+      within(dialog).getByRole("button", {
+        name: "translated:common.confirm_action",
+      }),
     );
     await waitFor(() => {
       expect(panel.querySelector(".form-error")).toHaveTextContent(
@@ -2202,14 +2200,14 @@ describe("React WebUI shell", () => {
     await user.click(secondary);
 
     const panel = screen.getByRole("complementary", {
-      name: "translated:common.shared_actions",
+      name: "translated:common.actions_panel_title",
     });
-    await user.click(
-      within(panel).getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(panel, "restart_node"));
     let dialog = await screen.findByRole("dialog");
     await user.click(
-      within(dialog).getByRole("button", { name: "translated:common.execute" }),
+      within(dialog).getByRole("button", {
+        name: "translated:common.confirm_action",
+      }),
     );
 
     dialog = await screen.findByRole("dialog");
@@ -2285,9 +2283,7 @@ describe("React WebUI shell", () => {
       ownerAuditExportFixture(),
     );
     const success = await screen.findByTestId("relay-durable-audit-success");
-    expect(success).toHaveTextContent(
-      "translated:relay.durable_audit.success",
-    );
+    expect(success).toHaveTextContent("translated:relay.durable_audit.success");
     expect(
       screen.getByTestId("relay-durable-audit-filename"),
     ).toHaveTextContent("owner-security-audit-export.json");
@@ -2362,14 +2358,14 @@ describe("React WebUI shell", () => {
     await user.click(secondary);
 
     const panel = screen.getByRole("complementary", {
-      name: "translated:common.shared_actions",
+      name: "translated:common.actions_panel_title",
     });
-    await user.click(
-      within(panel).getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(panel, "restart_node"));
     let dialog = await screen.findByRole("dialog");
     await user.click(
-      within(dialog).getByRole("button", { name: "translated:common.execute" }),
+      within(dialog).getByRole("button", {
+        name: "translated:common.confirm_action",
+      }),
     );
 
     dialog = await screen.findByRole("dialog");
@@ -2508,9 +2504,7 @@ describe("React WebUI shell", () => {
     expect(traffic).toHaveTextContent(
       "translated:traffic.session.state.fail_closed",
     );
-    expect(traffic).toHaveTextContent(
-      "exit.recovery.handshake_interrupted",
-    );
+    expect(traffic).toHaveTextContent("exit.recovery.handshake_interrupted");
 
     const session = await screen.findByTestId("overview-traffic-session");
     expect(session).toHaveTextContent("translated:traffic.session.title");
@@ -2595,13 +2589,12 @@ describe("React WebUI shell", () => {
         screen.getByRole("tab", { name: "translated:nav.networks" }),
       ).toHaveAttribute("aria-selected", "true");
       const panel = screen.getByRole("complementary", {
-        name: "translated:common.shared_actions",
+        name: "translated:common.actions_panel_title",
       });
-      expect(
-        within(panel).getByRole("button", {
-          name: `translated:action.${action}`,
-        }),
-      ).toHaveAttribute("aria-expanded", "true");
+      expect(actionHead(panel, action)).toHaveAttribute(
+        "aria-expanded",
+        "true",
+      );
     },
   );
 
@@ -2635,13 +2628,12 @@ describe("React WebUI shell", () => {
       within(results).getByText("translated:discovery.search.private_note"),
     ).toBeInTheDocument();
     const panel = screen.getByRole("complementary", {
-      name: "translated:common.shared_actions",
+      name: "translated:common.actions_panel_title",
     });
-    expect(
-      within(panel).getByRole("button", {
-        name: "translated:action.refresh_discovery_index",
-      }),
-    ).toHaveAttribute("aria-expanded", "true");
+    expect(actionHead(panel, "refresh_discovery_index")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
     expect(within(results).getByText("family")).toBeInTheDocument();
     expect(within(results).getByText("studio")).toBeInTheDocument();
 
@@ -2700,13 +2692,12 @@ describe("React WebUI shell", () => {
       }),
     );
     const panel = screen.getByRole("complementary", {
-      name: "translated:common.shared_actions",
+      name: "translated:common.actions_panel_title",
     });
-    expect(
-      within(panel).getByRole("button", {
-        name: "translated:action.preview_join_network",
-      }),
-    ).toHaveAttribute("aria-expanded", "true");
+    expect(actionHead(panel, "preview_join_network")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
     expect(
       within(panel).getByLabelText("translated:field.network_id"),
     ).toHaveValue("network-family");
@@ -2768,32 +2759,22 @@ describe("React WebUI shell", () => {
     );
 
     const panel = screen.getByRole("complementary", {
-      name: "translated:common.shared_actions",
+      name: "translated:common.actions_panel_title",
     });
-    const leaveAction = within(panel)
-      .getByRole("button", {
-        name: "translated:action.leave_network",
-      })
-      .closest("article");
-    expect(leaveAction).not.toBeNull();
+    const leaveAction = within(panel).getByTestId("action-card-leave_network");
+    expect(actionHead(leaveAction, "leave_network")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
     expect(
-      within(leaveAction!).getByRole("button", {
-        name: "translated:action.leave_network",
-      }),
-    ).toHaveAttribute("aria-expanded", "true");
-    expect(
-      within(leaveAction!).getByLabelText("translated:field.network_name"),
+      within(leaveAction).getByLabelText("translated:field.network_name"),
     ).toHaveValue("home");
 
-    await user.click(
-      within(leaveAction!).getByRole("button", {
-        name: "translated:common.execute",
-      }),
-    );
+    await user.click(actionSubmitButton(leaveAction, "leave_network"));
     const dialog = await screen.findByRole("dialog");
     await user.click(
       within(dialog).getByRole("button", {
-        name: "translated:common.execute",
+        name: "translated:common.confirm_action",
       }),
     );
 

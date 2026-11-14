@@ -107,6 +107,9 @@ pub struct NodeUiManifest {
     pub schema_version: u16,
     pub page_states: Vec<NodeUiPageState>,
     pub action_block_reasons: Vec<NodeUiActionBlockReason>,
+    /// Canonical action-group presentation order. Renderers may collapse or
+    /// partition groups, but must not invent a competing ordering.
+    pub action_groups: Vec<NodeUiActionGroup>,
     pub pages: Vec<NodeUiPage>,
 }
 
@@ -153,6 +156,12 @@ impl NodeUiManifest {
                 self.action_block_reasons
             ));
         }
+        if self.action_groups != NODE_UI_ACTION_GROUPS {
+            violations.push(format!(
+                "action_group_set_or_order_mismatch:expected={NODE_UI_ACTION_GROUPS:?}:actual={:?}",
+                self.action_groups
+            ));
+        }
 
         let actual_pages = self
             .pages
@@ -179,7 +188,10 @@ impl NodeUiManifest {
 
             for action in &page.actions {
                 let context = format!("{}.{}", page.id, action.id);
-                if action.id.is_empty() || action.label_key.is_empty() {
+                if action.id.is_empty()
+                    || action.label_key.is_empty()
+                    || action.group_label_key.is_empty()
+                {
                     violations.push(format!("action_has_empty_contract_key:{context}"));
                 }
                 if !action_ids.insert(action.id.as_str()) {
@@ -187,6 +199,20 @@ impl NodeUiManifest {
                 }
                 if action.command == NodeCommandKind::GetUiManifest {
                     violations.push(format!("bootstrap_command_exposed_as_action:{}", action.id));
+                }
+                let expected_group = action_group_for_command(action.command);
+                if action.group != expected_group {
+                    violations.push(format!(
+                        "action_group_mismatch:{context}:expected={expected_group:?}:actual={:?}",
+                        action.group
+                    ));
+                }
+                if action.group_label_key != expected_group.label_key() {
+                    violations.push(format!(
+                        "action_group_label_mismatch:{context}:expected={}:actual={}",
+                        expected_group.label_key(),
+                        action.group_label_key
+                    ));
                 }
 
                 if let Some((backend_status, permission, audit)) = command_modes.insert(
@@ -325,10 +351,59 @@ pub struct NodeUiPage {
     pub actions: Vec<NodeUiAction>,
 }
 
+/// Stable, user-facing intent groups shared by every UI adapter. The order is
+/// the canonical presentation order: common creation flows first, inspection
+/// last, with unavailable actions partitioned by the renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeUiActionGroup {
+    CreateAndJoin,
+    MembersAndInvitations,
+    Discovery,
+    Runtime,
+    Routing,
+    Security,
+    Configuration,
+    Inspect,
+}
+
+pub const NODE_UI_ACTION_GROUPS: [NodeUiActionGroup; 8] = [
+    NodeUiActionGroup::CreateAndJoin,
+    NodeUiActionGroup::MembersAndInvitations,
+    NodeUiActionGroup::Discovery,
+    NodeUiActionGroup::Runtime,
+    NodeUiActionGroup::Routing,
+    NodeUiActionGroup::Security,
+    NodeUiActionGroup::Configuration,
+    NodeUiActionGroup::Inspect,
+];
+
+impl NodeUiActionGroup {
+    pub const fn label_key(self) -> &'static str {
+        match self {
+            Self::CreateAndJoin => "action_group.create_and_join",
+            Self::MembersAndInvitations => "action_group.members_and_invitations",
+            Self::Discovery => "action_group.discovery",
+            Self::Runtime => "action_group.runtime",
+            Self::Routing => "action_group.routing",
+            Self::Security => "action_group.security",
+            Self::Configuration => "action_group.configuration",
+            Self::Inspect => "action_group.inspect",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeUiAction {
     pub id: String,
     pub label_key: String,
+    /// Business intent used to group actions in both clients. This is not a
+    /// visual preference: it is part of the shared manifest so WebUI, GPUI and
+    /// generated clients do not maintain competing action taxonomies.
+    pub group: NodeUiActionGroup,
+    /// Localized heading for `group`, supplied by the manifest so every adapter
+    /// presents the same user-facing vocabulary.
+    pub group_label_key: String,
     #[schemars(schema_with = "ui_action_command_schema")]
     pub command: NodeCommandKind,
     pub backend_status: NodeUiBackendStatus,
@@ -621,6 +696,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
         schema_version: NODE_UI_MANIFEST_SCHEMA_VERSION,
         page_states: NODE_UI_PAGE_STATES.to_vec(),
         action_block_reasons: NODE_UI_ACTION_BLOCK_REASONS.to_vec(),
+        action_groups: NODE_UI_ACTION_GROUPS.to_vec(),
         pages: vec![
             page("overview", "nav.overview", "page.overview", vec![]),
             page(
@@ -2974,6 +3050,8 @@ fn action(
     NodeUiAction {
         id: id.into(),
         label_key: label_key.into(),
+        group: action_group_for_command(command),
+        group_label_key: action_group_for_command(command).label_key().into(),
         command,
         backend_status,
         permission,
@@ -2981,6 +3059,86 @@ fn action(
         availability,
         fields,
         confirmation,
+    }
+}
+
+const fn action_group_for_command(command: NodeCommandKind) -> NodeUiActionGroup {
+    match command {
+        NodeCommandKind::CreateNetwork
+        | NodeCommandKind::PreviewJoinNetwork
+        | NodeCommandKind::JoinNetwork
+        | NodeCommandKind::SubmitJoinRequest
+        | NodeCommandKind::WithdrawJoinRequest
+        | NodeCommandKind::ResubmitJoinRequest
+        | NodeCommandKind::RedeemInvitation => NodeUiActionGroup::CreateAndJoin,
+        NodeCommandKind::ListJoinRequests
+        | NodeCommandKind::ListNetworkMembers
+        | NodeCommandKind::PreviewMemberRemoval
+        | NodeCommandKind::ChangeMemberLifecycle
+        | NodeCommandKind::ReviewJoinRequest
+        | NodeCommandKind::BatchReviewJoinRequests
+        | NodeCommandKind::CreateInvitation
+        | NodeCommandKind::ListInvitations
+        | NodeCommandKind::GetInvitationStatus
+        | NodeCommandKind::RevokeInvitation
+        | NodeCommandKind::PreviewInvitation
+        | NodeCommandKind::LeaveNetwork
+        | NodeCommandKind::AcknowledgeMembershipPolicy => NodeUiActionGroup::MembersAndInvitations,
+        NodeCommandKind::PublishNetworkDiscovery
+        | NodeCommandKind::UpdateNetworkDiscovery
+        | NodeCommandKind::UnpublishNetworkDiscovery
+        | NodeCommandKind::RefreshDiscoveryIndex
+        | NodeCommandKind::RetryDiscoveryIndex => NodeUiActionGroup::Discovery,
+        NodeCommandKind::StartNetworks
+        | NodeCommandKind::StopNetworks
+        | NodeCommandKind::RestartNetworks
+        | NodeCommandKind::RebuildTun
+        | NodeCommandKind::SetNetworkRole
+        | NodeCommandKind::SetLocalExitCapability
+        | NodeCommandKind::StartNode
+        | NodeCommandKind::StopNode
+        | NodeCommandKind::RestartNode
+        | NodeCommandKind::CleanupResiduals
+        | NodeCommandKind::Shutdown => NodeUiActionGroup::Runtime,
+        NodeCommandKind::UpdateRouting
+        | NodeCommandKind::GetTrafficPolicy
+        | NodeCommandKind::PreviewTrafficPolicy
+        | NodeCommandKind::PreviewTrafficPolicyRollback
+        | NodeCommandKind::ApplyTrafficPolicy
+        | NodeCommandKind::RollbackTrafficPolicy
+        | NodeCommandKind::GetTrafficPolicyHistory
+        | NodeCommandKind::TestTrafficPolicy => NodeUiActionGroup::Routing,
+        NodeCommandKind::GetBlacklist
+        | NodeCommandKind::BanClient
+        | NodeCommandKind::UnbanClient
+        | NodeCommandKind::ProbePeer
+        | NodeCommandKind::RotateNodeIdentity => NodeUiActionGroup::Security,
+        NodeCommandKind::PreviewNetworkProfile
+        | NodeCommandKind::UpdateNetworkProfile
+        | NodeCommandKind::SetNodeDisplayName
+        | NodeCommandKind::GetNetworkAllocation
+        | NodeCommandKind::UpdateNetworkAllocation
+        | NodeCommandKind::GetConfiguration
+        | NodeCommandKind::PreviewConfiguration
+        | NodeCommandKind::ApplyConfiguration
+        | NodeCommandKind::RollbackConfiguration
+        | NodeCommandKind::GetConfigurationHistory
+        | NodeCommandKind::GetPolicy
+        | NodeCommandKind::PreviewPolicy
+        | NodeCommandKind::PreviewPolicyRollback
+        | NodeCommandKind::ApplyPolicy
+        | NodeCommandKind::RollbackPolicy
+        | NodeCommandKind::GetPolicyHistory
+        | NodeCommandKind::TestPolicy
+        | NodeCommandKind::GetCoordinatorCandidates
+        | NodeCommandKind::UpdateCoordinatorCandidates
+        | NodeCommandKind::PublishCoordinatorCandidateDeclaration => {
+            NodeUiActionGroup::Configuration
+        }
+        NodeCommandKind::GetSnapshot | NodeCommandKind::GetDiagnostics => {
+            NodeUiActionGroup::Inspect
+        }
+        NodeCommandKind::GetUiManifest => NodeUiActionGroup::Inspect,
     }
 }
 

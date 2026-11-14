@@ -1,4 +1,10 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -82,11 +88,12 @@ const roster = Array.from({ length: 36 }, (_, index) =>
   }),
 );
 
-
 function action(id: string): NodeUiAction {
   return {
     id,
     label_key: `action.${id}`,
+    group: "members_and_invitations",
+    group_label_key: "action_group.members_and_invitations",
     command: id as NodeUiAction["command"],
     backend_status: "implemented",
     permission: "manage_networks",
@@ -253,7 +260,9 @@ describe("MemberDirectoryCard", () => {
     );
     await user.click(memberOption);
     const detail = screen.getByTestId("member-detail");
-    expect(detail).toHaveTextContent("translated:member_directory.source.not_observed");
+    expect(detail).toHaveTextContent(
+      "translated:member_directory.source.not_observed",
+    );
     expect(detail).toHaveTextContent("translated:member_directory.joined_at");
     expect(detail).toHaveTextContent(
       "translated:member_directory.capabilities_unknown",
@@ -285,7 +294,9 @@ describe("MemberDirectoryCard", () => {
     expect(exitOption).toHaveAccessibleName(
       /translated:member_directory.exit.state.available/,
     );
-    expect(within(exitOption).getByTestId("member-exit-badge")).toHaveClass("good");
+    expect(within(exitOption).getByTestId("member-exit-badge")).toHaveClass(
+      "good",
+    );
     await user.click(exitOption);
     expect(screen.getByTestId("member-exit-availability")).toHaveTextContent(
       "translated:member_directory.exit.state.available",
@@ -357,7 +368,9 @@ describe("MemberDirectoryCard", () => {
         onSubmit={onSubmit}
       />,
     );
-    await user.click(await screen.findByRole("option", { name: /Alpha owner/ }));
+    await user.click(
+      await screen.findByRole("option", { name: /Alpha owner/ }),
+    );
     expect(screen.queryByTestId("member-governance")).not.toBeInTheDocument();
 
     view.rerender(
@@ -383,25 +396,71 @@ describe("MemberDirectoryCard", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it("blocks governance actions and confirmation when the Coordinator is frozen", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn<MemberGovernanceSubmit>(async () => ({
+      outcome: {
+        status: "member_removal_preview",
+        data: removalPreview(),
+      },
+    }));
+    const directoryProps = {
+      directory: {
+        ...directory([ownerWithGovernance]),
+        viewer_role: "owner" as const,
+        can_manage_members: true,
+      },
+      locale: "en" as const,
+      previewRemovalAction,
+      changeLifecycleAction,
+      onSubmit,
+    };
+    const view = render(<MemberDirectoryCard {...directoryProps} />);
+
+    await user.click(
+      await screen.findByRole("option", { name: /Alpha owner/ }),
+    );
+    await user.click(screen.getByTestId("member-governance-action-remove"));
+    await screen.findByTestId("member-removal-impact");
+
+    view.rerender(
+      <MemberDirectoryCard
+        {...directoryProps}
+        governanceBlockedReason="translated:coordinator_governance.reason.configuration_pending"
+      />,
+    );
+
+    expect(screen.getByTestId("member-governance-frozen")).toHaveTextContent(
+      "translated:coordinator_governance.reason.configuration_pending",
+    );
+    expect(
+      screen.getByTestId("member-governance-action-remove"),
+    ).toBeDisabled();
+    expect(
+      screen.getByTestId("member-governance-action-suspend"),
+    ).toBeDisabled();
+    expect(screen.getByTestId("member-governance-confirm")).toBeDisabled();
+    expect(onSubmit).toHaveBeenCalledOnce();
+  });
+
   it("previews removal impact before submitting the server-derived change", async () => {
     const user = userEvent.setup();
     const preview = removalPreview({ revision: 7 });
     const change = lifecycleChange({ action: "remove", revision: 8 });
-    const onSubmit = vi.fn<MemberGovernanceSubmit>(
-      async (submitted) =>
-        submitted.id === "preview_member_removal"
-          ? {
-              outcome: {
-                status: "member_removal_preview" as const,
-                data: preview,
-              },
-            }
-          : {
-              outcome: {
-                status: "member_lifecycle_changed" as const,
-                data: change,
-              },
+    const onSubmit = vi.fn<MemberGovernanceSubmit>(async (submitted) =>
+      submitted.id === "preview_member_removal"
+        ? {
+            outcome: {
+              status: "member_removal_preview" as const,
+              data: preview,
             },
+          }
+        : {
+            outcome: {
+              status: "member_lifecycle_changed" as const,
+              data: change,
+            },
+          },
     );
     const onLifecycleChanged = vi.fn();
     render(
@@ -418,7 +477,9 @@ describe("MemberDirectoryCard", () => {
         onLifecycleChanged={onLifecycleChanged}
       />,
     );
-    await user.click(await screen.findByRole("option", { name: /Alpha owner/ }));
+    await user.click(
+      await screen.findByRole("option", { name: /Alpha owner/ }),
+    );
     await user.click(screen.getByTestId("member-governance-action-remove"));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
@@ -479,7 +540,10 @@ describe("MemberDirectoryCard", () => {
         <MemberDirectoryCard
           directory={{
             ...directory([
-              { ...owner, available_actions: [lifecycle] as MemberLifecycleAction[] },
+              {
+                ...owner,
+                available_actions: [lifecycle] as MemberLifecycleAction[],
+              },
             ]),
             viewer_role: "owner",
             can_manage_members: true,
@@ -495,7 +559,9 @@ describe("MemberDirectoryCard", () => {
       await user.click(
         screen.getByTestId(`member-governance-action-${lifecycle}`),
       );
-      expect(screen.queryByTestId("member-removal-impact")).not.toBeInTheDocument();
+      expect(
+        screen.queryByTestId("member-removal-impact"),
+      ).not.toBeInTheDocument();
       await user.click(screen.getByTestId("member-governance-confirm"));
       await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
       expect(onSubmit.mock.calls[0][1]).toEqual({
@@ -527,8 +593,7 @@ describe("MemberDirectoryCard", () => {
       message_key: "member_lifecycle.error.permission_denied",
       retryable: false,
     };
-    const onSubmit = vi.fn<MemberGovernanceSubmit>(
-      async (submitted) =>
+    const onSubmit = vi.fn<MemberGovernanceSubmit>(async (submitted) =>
       submitted.id === "preview_member_removal"
         ? {
             outcome: {
@@ -553,7 +618,9 @@ describe("MemberDirectoryCard", () => {
         onLifecycleChanged={onLifecycleChanged}
       />,
     );
-    await user.click(await screen.findByRole("option", { name: /Alpha owner/ }));
+    await user.click(
+      await screen.findByRole("option", { name: /Alpha owner/ }),
+    );
     await user.click(screen.getByTestId("member-governance-action-remove"));
     await screen.findByTestId("member-removal-impact");
     expect(screen.getByTestId("member-governance-confirm")).toBeDisabled();
@@ -587,13 +654,15 @@ describe("MemberDirectoryCard", () => {
         onSubmit={onSubmit}
       />,
     );
-    await user.click(await screen.findByRole("option", { name: /Alpha owner/ }));
+    await user.click(
+      await screen.findByRole("option", { name: /Alpha owner/ }),
+    );
     await user.click(screen.getByTestId("member-governance-action-suspend"));
     await user.click(screen.getByTestId("member-governance-confirm"));
     await waitFor(() =>
-      expect(
-        screen.getByTestId("member-governance-dialog"),
-      ).toHaveTextContent("translated:member_lifecycle.error.stale_revision"),
+      expect(screen.getByTestId("member-governance-dialog")).toHaveTextContent(
+        "translated:member_lifecycle.error.stale_revision",
+      ),
     );
     expect(
       screen.queryByTestId("member-governance-feedback"),

@@ -6,7 +6,8 @@ use fuckipv6_common::domain::JoinRequestReviewAction;
 use fuckipv6_common::domain::{
     parse_policy_test_input, ActivityCategory, ActivityEntry, ActivitySeverity,
     ApplicationIdentity, AuditOutcome, CapabilityKind, CapabilityState, ContentHash,
-    CoordinatorCandidate, CoordinatorCandidateResources, CoordinatorCandidateWillingness,
+    CoordinatorCandidate, CoordinatorCandidateConfigState, CoordinatorCandidateResources,
+    CoordinatorCandidateStatus, CoordinatorCandidateWillingness, CoordinatorEmergencyState,
     CoordinatorPublicReachability, EffectiveAccessReason, EffectivePolicyLayer,
     ExitAvailabilitySource, ExitAvailabilityState, ExitContributionAvailability,
     ExitContributionMode, ExitContributionObligation, ExitContributionScope,
@@ -655,6 +656,108 @@ impl ActionBlockReason {
     pub const fn message_key(self) -> &'static str {
         self.contract_reason().message_key()
     }
+}
+
+/// Stable reason shown when Coordinator recovery freezes governance writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoordinatorGovernanceFreezeReason {
+    StatusMissing,
+    NoCandidatesConfigured,
+    ConfigurationPending,
+    ConfigurationExpired,
+    AllCandidatesUnavailable,
+}
+
+impl CoordinatorGovernanceFreezeReason {
+    pub const fn message_key(self) -> &'static str {
+        match self {
+            Self::StatusMissing => "coordinator_governance.reason.status_missing",
+            Self::NoCandidatesConfigured => {
+                "coordinator_governance.reason.no_candidates_configured"
+            }
+            Self::ConfigurationPending => "coordinator_governance.reason.configuration_pending",
+            Self::ConfigurationExpired => "coordinator_governance.reason.configuration_expired",
+            Self::AllCandidatesUnavailable => {
+                "coordinator_governance.reason.all_candidates_unavailable"
+            }
+        }
+    }
+}
+
+/// Governance writes are frozen while an embedded Coordinator needs recovery.
+/// Candidate configuration and declaration actions intentionally remain open so
+/// an operator can restore the control plane without another governance write.
+pub fn action_requires_coordinator_governance(action_id: &str) -> bool {
+    matches!(
+        action_id,
+        "preview_member_removal"
+            | "change_member_lifecycle"
+            | "review_join_request"
+            | "batch_review_join_requests"
+            | "create_invitation"
+            | "revoke_invitation"
+            | "redeem_invitation"
+    )
+}
+
+/// Resolve the same effective network used by the action forms, then fail closed
+/// when its embedded Coordinator status is missing or reports an emergency.
+pub fn coordinator_governance_freeze_reason(
+    snapshot: &NodeSnapshot,
+    selected_network: Option<&str>,
+) -> Option<CoordinatorGovernanceFreezeReason> {
+    let network_name = selected_network
+        .filter(|selected| {
+            snapshot
+                .networks
+                .iter()
+                .any(|network| network.name == *selected)
+        })
+        .or_else(|| {
+            snapshot
+                .networks
+                .iter()
+                .find(|network| network.status == NodeNetworkStatus::Online)
+                .map(|network| network.name.as_str())
+        })
+        .or_else(|| {
+            snapshot
+                .networks
+                .first()
+                .map(|network| network.name.as_str())
+        })?;
+    let service = snapshot
+        .embedded_services
+        .iter()
+        .find(|service| service.network_name == network_name)?;
+    let Some(status) = service.coordinator_candidates.as_ref() else {
+        return Some(CoordinatorGovernanceFreezeReason::StatusMissing);
+    };
+    match status.emergency {
+        CoordinatorEmergencyState::None => None,
+        CoordinatorEmergencyState::NoCandidatesConfigured => {
+            Some(CoordinatorGovernanceFreezeReason::NoCandidatesConfigured)
+        }
+        CoordinatorEmergencyState::ConfigurationPending => {
+            Some(CoordinatorGovernanceFreezeReason::ConfigurationPending)
+        }
+        CoordinatorEmergencyState::ConfigurationExpired => {
+            Some(CoordinatorGovernanceFreezeReason::ConfigurationExpired)
+        }
+        CoordinatorEmergencyState::AllCandidatesUnavailable => {
+            Some(CoordinatorGovernanceFreezeReason::AllCandidatesUnavailable)
+        }
+    }
+}
+
+pub fn action_coordinator_governance_freeze_reason(
+    action_id: &str,
+    snapshot: &NodeSnapshot,
+    selected_network: Option<&str>,
+) -> Option<CoordinatorGovernanceFreezeReason> {
+    action_requires_coordinator_governance(action_id)
+        .then(|| coordinator_governance_freeze_reason(snapshot, selected_network))
+        .flatten()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1344,6 +1447,8 @@ pub struct OverviewTrafficSessionEvent {
     pub state: TrafficProtectionState,
     pub state_label: String,
     pub reason_code: Option<String>,
+    pub failure: Option<TrafficFailureKind>,
+    pub failure_label: Option<String>,
     pub occurred_at_unix_ms: u64,
 }
 
@@ -1354,7 +1459,10 @@ pub struct OverviewTrafficSession {
     pub state: TrafficProtectionState,
     pub state_label: String,
     pub reason_code: Option<String>,
+    pub failure: Option<TrafficFailureKind>,
+    pub failure_label: Option<String>,
     pub changed_at_unix_ms: u64,
+    pub validation_observed_at_unix_ms: Option<u64>,
     pub validation: Vec<OverviewTrafficValidation>,
     pub events: Vec<OverviewTrafficSessionEvent>,
 }
@@ -3992,13 +4100,17 @@ fn project_traffic_session(snapshot: &NodeSnapshot, locale: Locale) -> OverviewT
         .events
         .iter()
         .rev()
-        .take(5)
+        .take(8)
         .map(|event| OverviewTrafficSessionEvent {
             kind: event.kind,
             kind_label: t(locale, traffic_session_event_key(event.kind)).to_string(),
             state: event.state,
             state_label: t(locale, traffic_protection_state_key(event.state)).to_string(),
             reason_code: event.reason_code.clone(),
+            failure: event.failure,
+            failure_label: event
+                .failure
+                .map(|failure| t(locale, traffic_failure_key(failure)).to_string()),
             occurred_at_unix_ms: event.occurred_at_unix_ms,
         })
         .collect();
@@ -4007,7 +4119,15 @@ fn project_traffic_session(snapshot: &NodeSnapshot, locale: Locale) -> OverviewT
         state: session.state,
         state_label: t(locale, traffic_protection_state_key(session.state)).to_string(),
         reason_code: session.reason_code.clone(),
+        failure: session.failure,
+        failure_label: session
+            .failure
+            .map(|failure| t(locale, traffic_failure_key(failure)).to_string()),
         changed_at_unix_ms: session.changed_at_unix_ms,
+        validation_observed_at_unix_ms: session
+            .validation
+            .as_ref()
+            .map(|validation| validation.observed_at_unix_ms),
         validation,
         events,
     }
@@ -7164,6 +7284,9 @@ fn relay_authorization_reason_key(reason: EffectiveAccessReason) -> &'static str
         EffectiveAccessReason::TemporaryCoordinatorReadOnly => {
             "relay.authorization.reason.temporary_coordinator_read_only"
         }
+        EffectiveAccessReason::TemporaryCoordinatorGovernanceFrozen => {
+            "relay.authorization.reason.temporary_coordinator_governance_frozen"
+        }
         EffectiveAccessReason::DefaultDenied => "relay.authorization.reason.default_denied",
         EffectiveAccessReason::InvalidPolicy => "relay.authorization.reason.invalid_policy",
     }
@@ -8953,6 +9076,137 @@ mod tests {
         snapshot
     }
 
+    fn coordinator_service(
+        network_name: &str,
+        emergency: CoordinatorEmergencyState,
+    ) -> NodeEmbeddedServiceSnapshot {
+        NodeEmbeddedServiceSnapshot {
+            network_name: network_name.into(),
+            status: crate::node::NodeEmbeddedServiceStatus::Running,
+            signaling_addr: None,
+            relay_status: crate::node::NodeEmbeddedServiceStatus::Stopped,
+            relay_addr: None,
+            relay_health: None,
+            relay_authorization: None,
+            relay_governance: None,
+            coordinator_candidates: Some(CoordinatorCandidateStatus {
+                network_id: NetworkId::from_public_key(b"gpui-governance-network"),
+                generated_at_unix_ms: 1_700_000_000_000,
+                config_state: CoordinatorCandidateConfigState::Current,
+                config: None,
+                candidates: Vec::new(),
+                current_leader: None,
+                latest_term: None,
+                emergency,
+            }),
+        }
+    }
+
+    #[test]
+    fn coordinator_governance_freezes_only_governance_writes_while_recovering() {
+        let mut snapshot = populated_snapshot();
+        snapshot
+            .embedded_services
+            .push(coordinator_service("home", CoordinatorEmergencyState::None));
+        assert_eq!(
+            coordinator_governance_freeze_reason(&snapshot, Some("home")),
+            None
+        );
+
+        for (emergency, expected) in [
+            (
+                CoordinatorEmergencyState::NoCandidatesConfigured,
+                CoordinatorGovernanceFreezeReason::NoCandidatesConfigured,
+            ),
+            (
+                CoordinatorEmergencyState::ConfigurationPending,
+                CoordinatorGovernanceFreezeReason::ConfigurationPending,
+            ),
+            (
+                CoordinatorEmergencyState::ConfigurationExpired,
+                CoordinatorGovernanceFreezeReason::ConfigurationExpired,
+            ),
+            (
+                CoordinatorEmergencyState::AllCandidatesUnavailable,
+                CoordinatorGovernanceFreezeReason::AllCandidatesUnavailable,
+            ),
+        ] {
+            snapshot.embedded_services[0]
+                .coordinator_candidates
+                .as_mut()
+                .expect("candidate status")
+                .emergency = emergency;
+            assert_eq!(
+                coordinator_governance_freeze_reason(&snapshot, Some("home")),
+                Some(expected)
+            );
+            for action_id in [
+                "preview_member_removal",
+                "change_member_lifecycle",
+                "review_join_request",
+                "batch_review_join_requests",
+                "create_invitation",
+                "revoke_invitation",
+                "redeem_invitation",
+            ] {
+                assert_eq!(
+                    action_coordinator_governance_freeze_reason(action_id, &snapshot, Some("home")),
+                    Some(expected),
+                    "{action_id}"
+                );
+            }
+            for action_id in [
+                "get_coordinator_candidates",
+                "update_coordinator_candidates",
+                "publish_coordinator_candidate_declaration",
+                "list_network_members",
+                "get_invitation_status",
+                "preview_invitation",
+            ] {
+                assert_eq!(
+                    action_coordinator_governance_freeze_reason(action_id, &snapshot, Some("home")),
+                    None,
+                    "{action_id}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn coordinator_governance_missing_status_fails_closed_and_recovery_reenables() {
+        let mut snapshot = populated_snapshot();
+        snapshot
+            .embedded_services
+            .push(coordinator_service("home", CoordinatorEmergencyState::None));
+        snapshot.embedded_services[0].coordinator_candidates = None;
+        assert_eq!(
+            coordinator_governance_freeze_reason(&snapshot, Some("home")),
+            Some(CoordinatorGovernanceFreezeReason::StatusMissing)
+        );
+
+        snapshot.embedded_services[0].coordinator_candidates = Some(CoordinatorCandidateStatus {
+            network_id: NetworkId::from_public_key(b"gpui-governance-network"),
+            generated_at_unix_ms: 1_700_000_000_000,
+            config_state: CoordinatorCandidateConfigState::Current,
+            config: None,
+            candidates: Vec::new(),
+            current_leader: None,
+            latest_term: None,
+            emergency: CoordinatorEmergencyState::None,
+        });
+        assert_eq!(
+            coordinator_governance_freeze_reason(&snapshot, Some("home")),
+            None
+        );
+
+        snapshot.embedded_services.clear();
+        assert_eq!(
+            coordinator_governance_freeze_reason(&snapshot, Some("home")),
+            None,
+            "a network without an embedded Coordinator service is unaffected"
+        );
+    }
+
     #[test]
     fn traffic_routing_page_missing_is_unavailable_and_never_uses_legacy_config() {
         let mut snapshot = populated_snapshot();
@@ -9372,6 +9626,17 @@ mod tests {
         assert_eq!(
             overview.traffic_session.reason_code.as_deref(),
             Some("recovery.handshake_interrupted")
+        );
+        assert_eq!(
+            overview.traffic_session.failure,
+            Some(TrafficFailureKind::HandshakeInterrupted)
+        );
+        assert_eq!(
+            overview.traffic_session.failure_label.as_deref(),
+            Some(t(
+                Locale::ZhCn,
+                "traffic.session.failure.handshake_interrupted"
+            ))
         );
         assert!(overview.traffic_session.validation.is_empty());
         assert_eq!(overview.traffic_session.events.len(), 1);

@@ -1,3 +1,4 @@
+use super::coordinator_candidates::{CoordinatorCandidateStore, GovernancePermit};
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
 use fuckipv6_common::domain::{
@@ -11,7 +12,7 @@ use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 const EXIT_CONTRIBUTION_REQUEST_FILE_SCHEMA_VERSION: u16 = 1;
 
@@ -100,6 +101,7 @@ impl ExitContributionRequestFile {
 pub struct ExitContributionRequestStore {
     path: PathBuf,
     network_record_path: PathBuf,
+    coordinator_candidate_store: Option<Arc<CoordinatorCandidateStore>>,
     process_lock: Mutex<()>,
 }
 
@@ -108,7 +110,29 @@ impl ExitContributionRequestStore {
         Self {
             path: path.into(),
             network_record_path: network_record_path.into(),
+            coordinator_candidate_store: None,
             process_lock: Mutex::new(()),
+        }
+    }
+
+    pub fn with_coordinator_candidate_store(
+        mut self,
+        store: Arc<CoordinatorCandidateStore>,
+    ) -> Self {
+        self.coordinator_candidate_store = Some(store);
+        self
+    }
+
+    fn with_governance_allowed<T>(
+        &self,
+        network_id: &NetworkId,
+        now_unix_ms: u64,
+        write: impl FnOnce(Option<&GovernancePermit<'_>>) -> Result<T>,
+    ) -> Result<T> {
+        if let Some(store) = &self.coordinator_candidate_store {
+            store.with_governance_allowed(network_id, now_unix_ms, |permit| write(Some(permit)))
+        } else {
+            write(None)
         }
     }
 
@@ -124,65 +148,67 @@ impl ExitContributionRequestStore {
         requested_traffic_quota_bytes: Option<u64>,
         now_unix_ms: u64,
     ) -> Result<ExitContributionRequest> {
-        self.transaction(
-            expected_network_id,
-            now_unix_ms,
-            |file, record, terms_hash| {
-                if !record.members.contains(requester) {
-                    bail!("exit_contribution.error.member_required");
-                }
-                if record.exit_contribution_mode != ExitContributionMode::ApprovalRequired {
-                    bail!("exit_contribution.error.mode_not_allowed");
-                }
-                if expected_policy_revision != record.policy_revision
-                    || expected_terms_hash != *terms_hash
-                {
-                    bail!("exit_contribution.error.stale_policy");
-                }
-                if let Some(existing) = file.requests.get(&request_id) {
-                    if existing.network_id == *expected_network_id
-                        && existing.node_id == *requester
-                        && existing.policy_revision == expected_policy_revision
-                        && existing.terms_hash == expected_terms_hash
-                    {
-                        return Ok(existing.clone());
+        self.with_governance_allowed(expected_network_id, now_unix_ms, |_| {
+            self.transaction(
+                expected_network_id,
+                now_unix_ms,
+                |file, record, terms_hash| {
+                    if !record.members.contains(requester) {
+                        bail!("exit_contribution.error.member_required");
                     }
-                    bail!("exit_contribution.error.request_id_collision");
-                }
-                if file.requests.values().any(|request| {
-                    request.network_id == *expected_network_id
-                        && request.node_id == *requester
-                        && matches!(
+                    if record.exit_contribution_mode != ExitContributionMode::ApprovalRequired {
+                        bail!("exit_contribution.error.mode_not_allowed");
+                    }
+                    if expected_policy_revision != record.policy_revision
+                        || expected_terms_hash != *terms_hash
+                    {
+                        bail!("exit_contribution.error.stale_policy");
+                    }
+                    if let Some(existing) = file.requests.get(&request_id) {
+                        if existing.network_id == *expected_network_id
+                            && existing.node_id == *requester
+                            && existing.policy_revision == expected_policy_revision
+                            && existing.terms_hash == expected_terms_hash
+                        {
+                            return Ok(existing.clone());
+                        }
+                        bail!("exit_contribution.error.request_id_collision");
+                    }
+                    if file.requests.values().any(|request| {
+                        request.network_id == *expected_network_id
+                            && request.node_id == *requester
+                            && matches!(
                             request.state,
                             fuckipv6_common::domain::ExitContributionRequestState::Pending
                                 | fuckipv6_common::domain::ExitContributionRequestState::Approved
                         )
-                }) {
-                    bail!("exit_contribution.error.active_request_exists");
-                }
-                let request = ExitContributionRequest::submit(
-                    request_id.clone(),
-                    expected_network_id.clone(),
-                    requester.clone(),
-                    expected_policy_revision,
-                    expected_terms_hash,
-                    requested_bandwidth_kbps,
-                    requested_traffic_quota_bytes,
-                    now_unix_ms,
-                )?;
-                append_request_audit(
-                    &mut file.audit_log,
-                    requester,
-                    "network.exit_contribution.submit",
-                    "exit contribution request submitted",
-                    ExitContributionRequestState::Pending,
-                    &request,
-                    now_unix_ms,
-                )?;
-                file.requests.insert(request_id, request.clone());
-                Ok(request)
-            },
-        )
+                    }) {
+                        bail!("exit_contribution.error.active_request_exists");
+                    }
+                    let request = ExitContributionRequest::submit(
+                        request_id.clone(),
+                        expected_network_id.clone(),
+                        requester.clone(),
+                        expected_policy_revision,
+                        expected_terms_hash,
+                        requested_bandwidth_kbps,
+                        requested_traffic_quota_bytes,
+                        now_unix_ms,
+                    )?;
+                    append_request_audit(
+                        &mut file.audit_log,
+                        requester,
+                        "network.exit_contribution.submit",
+                        "exit contribution request submitted",
+                        ExitContributionRequestState::Pending,
+                        &request,
+                        now_unix_ms,
+                    )?;
+                    file.requests.insert(request_id, request.clone());
+                    Ok(request)
+                },
+            )
+        })
     }
 
     /// Reviewers see the full network request ledger. Ordinary members only see
@@ -321,41 +347,43 @@ impl ExitContributionRequestStore {
         decision_reason_code: Option<String>,
         now_unix_ms: u64,
     ) -> Result<ExitContributionRequest> {
-        self.transaction(network_id, now_unix_ms, |file, record, _| {
-            if record.owner != *reviewer && !record.administrators.contains(reviewer) {
-                bail!("exit_contribution.error.reviewer_required");
-            }
-            if record.exit_contribution_mode != ExitContributionMode::ApprovalRequired {
-                bail!("exit_contribution.error.mode_not_allowed");
-            }
-            let request = file
-                .requests
-                .get_mut(request_id)
-                .context("exit_contribution.error.request_not_found")?;
-            if request.network_id != *network_id {
-                bail!("exit_contribution.error.request_not_found");
-            }
-            if request.node_id == *reviewer {
-                bail!("exit_contribution.error.self_review_forbidden");
-            }
-            let change = request.review(
-                reviewer.clone(),
-                expected_revision,
-                action,
-                decision_reason_code,
-                now_unix_ms,
-            )?;
-            append_request_audit(
-                &mut file.audit_log,
-                reviewer,
-                "network.exit_contribution.review",
-                "exit contribution request reviewed",
-                change.previous_state,
-                &change.request,
-                now_unix_ms,
-            )?;
-            *request = change.request.clone();
-            Ok(change.request)
+        self.with_governance_allowed(network_id, now_unix_ms, |_| {
+            self.transaction(network_id, now_unix_ms, |file, record, _| {
+                if record.owner != *reviewer && !record.administrators.contains(reviewer) {
+                    bail!("exit_contribution.error.reviewer_required");
+                }
+                if record.exit_contribution_mode != ExitContributionMode::ApprovalRequired {
+                    bail!("exit_contribution.error.mode_not_allowed");
+                }
+                let request = file
+                    .requests
+                    .get_mut(request_id)
+                    .context("exit_contribution.error.request_not_found")?;
+                if request.network_id != *network_id {
+                    bail!("exit_contribution.error.request_not_found");
+                }
+                if request.node_id == *reviewer {
+                    bail!("exit_contribution.error.self_review_forbidden");
+                }
+                let change = request.review(
+                    reviewer.clone(),
+                    expected_revision,
+                    action,
+                    decision_reason_code,
+                    now_unix_ms,
+                )?;
+                append_request_audit(
+                    &mut file.audit_log,
+                    reviewer,
+                    "network.exit_contribution.review",
+                    "exit contribution request reviewed",
+                    change.previous_state,
+                    &change.request,
+                    now_unix_ms,
+                )?;
+                *request = change.request.clone();
+                Ok(change.request)
+            })
         })
     }
 
@@ -367,26 +395,28 @@ impl ExitContributionRequestStore {
         expected_revision: u64,
         now_unix_ms: u64,
     ) -> Result<ExitContributionRequest> {
-        self.transaction(network_id, now_unix_ms, |file, _, _| {
-            let request = file
-                .requests
-                .get_mut(request_id)
-                .context("exit_contribution.error.request_not_found")?;
-            if request.network_id != *network_id {
-                bail!("exit_contribution.error.request_not_found");
-            }
-            let change = request.withdraw(actor, expected_revision, now_unix_ms)?;
-            append_request_audit(
-                &mut file.audit_log,
-                actor,
-                "network.exit_contribution.withdraw",
-                "exit contribution request withdrawn",
-                change.previous_state,
-                &change.request,
-                now_unix_ms,
-            )?;
-            *request = change.request.clone();
-            Ok(change.request)
+        self.with_governance_allowed(network_id, now_unix_ms, |_| {
+            self.transaction(network_id, now_unix_ms, |file, _, _| {
+                let request = file
+                    .requests
+                    .get_mut(request_id)
+                    .context("exit_contribution.error.request_not_found")?;
+                if request.network_id != *network_id {
+                    bail!("exit_contribution.error.request_not_found");
+                }
+                let change = request.withdraw(actor, expected_revision, now_unix_ms)?;
+                append_request_audit(
+                    &mut file.audit_log,
+                    actor,
+                    "network.exit_contribution.withdraw",
+                    "exit contribution request withdrawn",
+                    change.previous_state,
+                    &change.request,
+                    now_unix_ms,
+                )?;
+                *request = change.request.clone();
+                Ok(change.request)
+            })
         })
     }
 
@@ -590,6 +620,9 @@ fn lock_profile_shared(path: &Path) -> Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signaling::coordinator_candidates::{
+        CoordinatorCandidateStore, GOVERNANCE_FROZEN_ERROR,
+    };
     use fuckipv6_common::domain::{
         CapabilityKind, ContentHash, ExitContributionObligation, ExitContributionRequestState,
         ExitContributionScope, NetworkCreateProfile, NetworkJoinMode, NetworkVisibility, PublicKey,
@@ -733,6 +766,63 @@ mod tests {
         assert!(reopened
             .list(&network_id(), &member(b"exit-store-outsider"), 2_001)
             .is_err());
+    }
+
+    #[test]
+    fn governance_freeze_rejects_review_and_withdraw_without_side_effects() {
+        let dir = test_dir("governance-frozen-review-withdraw");
+        let record = record(ExitContributionMode::ApprovalRequired);
+        let store = store(&dir, &record);
+        let request = submit(&store, b"exit-store-member", &record, 2_000).unwrap();
+        let candidate_store = Arc::new(
+            CoordinatorCandidateStore::new(
+                dir.join("coordinator_candidates.json"),
+                dir.join("network.json"),
+            )
+            .unwrap(),
+        );
+        let frozen = ExitContributionRequestStore::new(
+            dir.join("exit_contribution_requests.json"),
+            dir.join("network.json"),
+        )
+        .with_coordinator_candidate_store(candidate_store);
+        let request_before = std::fs::read(dir.join("exit_contribution_requests.json")).unwrap();
+        let audits_before = frozen.audit_entries().unwrap();
+
+        for error in [
+            frozen
+                .review(
+                    &network_id(),
+                    &admin(),
+                    &request.request_id,
+                    1,
+                    ExitContributionReviewAction::Approve,
+                    Some("exit.approved.standard".into()),
+                    2_001,
+                )
+                .unwrap_err(),
+            frozen
+                .withdraw(
+                    &network_id(),
+                    &member(b"exit-store-member"),
+                    &request.request_id,
+                    1,
+                    2_001,
+                )
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.to_string(), GOVERNANCE_FROZEN_ERROR);
+        }
+
+        assert_eq!(
+            std::fs::read(dir.join("exit_contribution_requests.json")).unwrap(),
+            request_before
+        );
+        assert_eq!(frozen.audit_entries().unwrap(), audits_before);
+        let listed = frozen.list(&network_id(), &owner(), 2_001).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].state, ExitContributionRequestState::Pending);
+        assert_eq!(listed[0].revision, 1);
     }
 
     #[test]

@@ -8,6 +8,7 @@ use fuckipv6_common::domain::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::coordinator_candidates::{CoordinatorCandidateStore, GovernancePermit};
 use super::member_lifecycle::MemberLifecycleStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
@@ -123,6 +124,7 @@ pub struct InvitationStore {
     fallback_owner: Option<NodeId>,
     fallback_administrators: BTreeSet<NodeId>,
     member_lifecycle_store: Option<Arc<MemberLifecycleStore>>,
+    coordinator_candidate_store: Option<Arc<CoordinatorCandidateStore>>,
     process_lock: Mutex<()>,
 }
 
@@ -154,6 +156,7 @@ impl InvitationStore {
             fallback_owner,
             fallback_administrators,
             member_lifecycle_store: None,
+            coordinator_candidate_store: None,
             process_lock: Mutex::new(()),
         })
     }
@@ -163,7 +166,40 @@ impl InvitationStore {
         self
     }
 
+    pub fn with_coordinator_candidate_store(
+        mut self,
+        store: Arc<CoordinatorCandidateStore>,
+    ) -> Self {
+        self.coordinator_candidate_store = Some(store);
+        self
+    }
+
+    fn with_governance_allowed<T>(
+        &self,
+        network_id: &NetworkId,
+        now_unix_ms: u64,
+        write: impl FnOnce(Option<&GovernancePermit<'_>>) -> Result<T>,
+    ) -> Result<T> {
+        if let Some(store) = &self.coordinator_candidate_store {
+            store.with_governance_allowed(network_id, now_unix_ms, |permit| write(Some(permit)))
+        } else {
+            write(None)
+        }
+    }
+
     pub fn create(
+        &self,
+        network_id: &NetworkId,
+        creator: &NodeId,
+        request: InvitationCreateRequest,
+        now_unix_ms: u64,
+    ) -> Result<IssuedInvitation> {
+        self.with_governance_allowed(network_id, now_unix_ms, |_| {
+            self.create_with_governance(network_id, creator, request, now_unix_ms)
+        })
+    }
+
+    fn create_with_governance(
         &self,
         network_id: &NetworkId,
         creator: &NodeId,
@@ -300,6 +336,25 @@ impl InvitationStore {
         expected_revision: u64,
         now_unix_ms: u64,
     ) -> Result<InvitationStatusView> {
+        self.with_governance_allowed(network_id, now_unix_ms, |_| {
+            self.revoke_with_governance(
+                network_id,
+                actor,
+                invitation_id,
+                expected_revision,
+                now_unix_ms,
+            )
+        })
+    }
+
+    fn revoke_with_governance(
+        &self,
+        network_id: &NetworkId,
+        actor: &NodeId,
+        invitation_id: &InvitationId,
+        expected_revision: u64,
+        now_unix_ms: u64,
+    ) -> Result<InvitationStatusView> {
         let roster = self.load_roster(network_id)?;
         if !roster.is_manager(actor) {
             bail!("invitation.error.permission_denied");
@@ -358,6 +413,19 @@ impl InvitationStore {
         request: InvitationRedeemRequest,
         actor: &NodeId,
         now_unix_ms: u64,
+    ) -> Result<InvitationRedemption> {
+        let network_id = request.network_id.clone();
+        self.with_governance_allowed(&network_id, now_unix_ms, |permit| {
+            self.redeem_with_governance(request, actor, now_unix_ms, permit)
+        })
+    }
+
+    fn redeem_with_governance(
+        &self,
+        request: InvitationRedeemRequest,
+        actor: &NodeId,
+        now_unix_ms: u64,
+        permit: Option<&GovernancePermit<'_>>,
     ) -> Result<InvitationRedemption> {
         if now_unix_ms.saturating_sub(request.acknowledged_at_unix_ms)
             > INVITATION_TERMS_ACK_WINDOW_MS
@@ -464,7 +532,7 @@ impl InvitationStore {
         })?;
 
         let value = redemption.context("invitation redemption disappeared after commit")?;
-        if let Err(error) = lifecycle.admit(
+        if let Err(error) = lifecycle.admit_with_governance(
             &value.invited_by,
             &value.network_id,
             &value.node_id,
@@ -475,6 +543,7 @@ impl InvitationStore {
                 value.node_id.as_str()
             ),
             now_unix_ms,
+            permit,
         ) {
             restore_invitation_file(&self.path, old_file_bytes.as_deref())?;
             return Err(error);
@@ -821,6 +890,9 @@ fn persist_bytes_atomic(path: &Path, content: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signaling::coordinator_candidates::{
+        CoordinatorCandidateStore, GOVERNANCE_FROZEN_ERROR,
+    };
     use fuckipv6_common::domain::{
         IdempotencyKey, MemberLifecycleAction, MemberLifecycleChangeRequest, MemberLifecycleStatus,
         NetworkCreateProfile, NetworkVisibility, PublicKey,
@@ -1011,6 +1083,90 @@ mod tests {
         let listed = store.list(&network_id(), &owner(), NOW + 4).unwrap();
         assert_eq!(listed[0].invitation.used_count, 1);
         assert_eq!(listed[0].remaining_uses, 1);
+    }
+
+    #[test]
+    fn governance_freeze_blocks_non_member_redemption_without_consuming_invitation() {
+        let dir = test_dir("redeem-governance-frozen");
+        write_network_record(&dir, &network_record(vec![admin()]));
+        let store = open_store(&dir);
+        let issued = store
+            .create(&network_id(), &owner(), create_request(1), NOW)
+            .unwrap();
+        let invitee = invitee("frozen-redemption");
+        let preview = store
+            .preview(&network_id(), &invitee, &issued.code, NOW + 1)
+            .unwrap();
+        let request = redemption_request(&issued, &preview, NOW + 1);
+
+        let candidate_store = Arc::new(
+            CoordinatorCandidateStore::new(
+                dir.join("coordinator_candidates.json"),
+                dir.join("network.json"),
+            )
+            .unwrap(),
+        );
+        let frozen_store = open_store(&dir).with_coordinator_candidate_store(candidate_store);
+        let error = frozen_store.redeem(request, &invitee, NOW + 2).unwrap_err();
+        assert_eq!(error.to_string(), GOVERNANCE_FROZEN_ERROR);
+
+        let invitations = frozen_store.list(&network_id(), &admin(), NOW + 2).unwrap();
+        assert_eq!(invitations.len(), 1);
+        assert_eq!(invitations[0].invitation.used_count, 0);
+        assert_eq!(invitations[0].state, InvitationState::Active);
+        let roster = read_network_record(&dir.join("network.json"), Some(&network_id())).unwrap();
+        assert!(!roster.members.contains(&invitee));
+        let lifecycle = lifecycle_store(&dir)
+            .record(&network_id(), &invitee)
+            .unwrap();
+        assert!(lifecycle.is_none());
+    }
+
+    #[test]
+    fn governance_freeze_blocks_create_and_revoke_without_side_effects() {
+        let dir = test_dir("create-revoke-governance-frozen");
+        write_network_record(&dir, &network_record(vec![admin()]));
+        let candidate_store = Arc::new(
+            CoordinatorCandidateStore::new(
+                dir.join("coordinator_candidates.json"),
+                dir.join("network.json"),
+            )
+            .unwrap(),
+        );
+        let frozen = open_store(&dir).with_coordinator_candidate_store(candidate_store.clone());
+        let error = frozen
+            .create(&network_id(), &owner(), create_request(1), NOW)
+            .unwrap_err();
+        assert_eq!(error.to_string(), GOVERNANCE_FROZEN_ERROR);
+        assert!(!dir.join("invitations.json").exists());
+
+        let store = open_store(&dir);
+        let issued = store
+            .create(&network_id(), &owner(), create_request(1), NOW)
+            .unwrap();
+        let invitations_before = std::fs::read(dir.join("invitations.json")).unwrap();
+        let frozen = open_store(&dir).with_coordinator_candidate_store(candidate_store);
+        let error = frozen
+            .revoke(
+                &network_id(),
+                &owner(),
+                &issued.status.invitation.invitation_id,
+                issued.status.invitation.revision,
+                NOW + 1,
+            )
+            .unwrap_err();
+        assert_eq!(error.to_string(), GOVERNANCE_FROZEN_ERROR);
+        assert_eq!(
+            std::fs::read(dir.join("invitations.json")).unwrap(),
+            invitations_before
+        );
+        let listed = store.list(&network_id(), &owner(), NOW + 1).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].state, InvitationState::Active);
+        assert_eq!(
+            listed[0].invitation.revision,
+            issued.status.invitation.revision
+        );
     }
 
     #[test]

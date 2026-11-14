@@ -860,6 +860,9 @@ pub(crate) fn operation_error_for_problem(
     let hide_object = matches!(
         problem.category,
         NodeErrorCategory::Authentication | NodeErrorCategory::Authorization
+    ) || matches!(
+        problem.code,
+        NodeProblemCode::AuthenticationRequired | NodeProblemCode::PermissionDenied
     );
     let code = match problem.code {
         NodeProblemCode::AuthenticationRequired => "operation.authentication_required",
@@ -883,14 +886,20 @@ pub(crate) fn operation_error_for_problem(
                 hint_key: hint_key.into(),
             })
     });
+    let mut params = if hide_object {
+        BTreeMap::new()
+    } else {
+        (*problem.params).clone()
+    };
+    if !hide_object {
+        if let Some(detail) = operation_error_detail(&problem.message) {
+            params.entry("detail".into()).or_insert(detail);
+        }
+    }
     OperationError {
         code: code.into(),
         message_key: problem.message_key.clone(),
-        params: if hide_object {
-            BTreeMap::new()
-        } else {
-            (*problem.params).clone()
-        },
+        params,
         object: if hide_object {
             None
         } else {
@@ -900,6 +909,23 @@ pub(crate) fn operation_error_for_problem(
         recovery,
         partial_changes: Vec::new(),
     }
+}
+
+fn operation_error_detail(message: &str) -> Option<String> {
+    const MAX_DETAIL_BYTES: usize = 2_048;
+
+    let message = message.trim();
+    if message.is_empty() {
+        return None;
+    }
+    if message.len() <= MAX_DETAIL_BYTES {
+        return Some(message.to_owned());
+    }
+    let mut end = MAX_DETAIL_BYTES;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(message[..end].to_owned())
 }
 
 pub(crate) fn result_for_control_client(mut result: NodeCommandResult) -> NodeCommandResult {
@@ -1370,6 +1396,50 @@ mod tests {
                 if problem.code == NodeProblemCode::Conflict
                     && problem.message_key == "operation.cancel.already_terminal"
         ));
+    }
+
+    #[test]
+    fn operation_error_carries_bounded_detail_but_redacts_sensitive_failures() {
+        let target = DomainObjectRef {
+            kind: ObjectKind::Node,
+            id: "node_operation_error_test".into(),
+        };
+        let problem = NodeProblem::new(NodeProblemCode::Unavailable, "runtime backend unavailable")
+            .with_param("attempt", "2")
+            .retryable(true);
+        let error = operation_error_for_problem(&problem, &target);
+        assert_eq!(
+            error.params.get("detail").map(String::as_str),
+            Some("runtime backend unavailable")
+        );
+        assert_eq!(error.params.get("attempt").map(String::as_str), Some("2"));
+        error
+            .validate()
+            .expect("bounded detail is valid operation error");
+
+        let long_message = "界".repeat(1_000);
+        let long_error = operation_error_for_problem(
+            &NodeProblem::new(NodeProblemCode::Internal, long_message),
+            &target,
+        );
+        let detail = long_error
+            .params
+            .get("detail")
+            .expect("long backend detail is retained");
+        assert!(detail.len() <= 2_048);
+        assert!(detail.is_char_boundary(detail.len()));
+
+        let sensitive = "secret backend authorization state";
+        let sensitive_error = operation_error_for_problem(
+            &NodeProblem::new(NodeProblemCode::PermissionDenied, sensitive)
+                .with_param("detail", sensitive),
+            &target,
+        );
+        assert!(sensitive_error.params.is_empty());
+        assert!(sensitive_error.object.is_none());
+        let serialized =
+            serde_json::to_string(&sensitive_error).expect("serialize sensitive operation error");
+        assert!(!serialized.contains(sensitive));
     }
 
     #[tokio::test]

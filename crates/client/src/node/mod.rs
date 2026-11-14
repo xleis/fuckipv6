@@ -99,8 +99,9 @@ pub use state::{
     NodeSnapshot, NodeStateStore, NodeTrafficSnapshot, NodeValidationIssue,
 };
 pub use ui_manifest::{
-    audit_for_command, node_ui_manifest, NodeUiAction, NodeUiActionBlockReason, NodeUiAudit,
-    NodeUiAuditPolicy, NodeUiAvailability, NodeUiBackendStatus, NodeUiConfirmation, NodeUiField,
-    NodeUiInputKind, NodeUiManifest, NodeUiPage, NodeUiPageState, NodeUiValidation,
-    NODE_UI_ACTION_BLOCK_REASONS, NODE_UI_MANIFEST_SCHEMA_VERSION, NODE_UI_PAGE_STATES,
+    audit_for_command, node_ui_manifest, NodeUiAction, NodeUiActionBlockReason, NodeUiActionGroup,
+    NodeUiAudit, NodeUiAuditPolicy, NodeUiAvailability, NodeUiBackendStatus, NodeUiConfirmation,
+    NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage, NodeUiPageState, NodeUiValidation,
+    NODE_UI_ACTION_BLOCK_REASONS, NODE_UI_ACTION_GROUPS, NODE_UI_MANIFEST_SCHEMA_VERSION,
+    NODE_UI_PAGE_STATES,
 };

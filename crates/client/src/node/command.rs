@@ -471,6 +471,48 @@ impl NodeCommandKind {
         )
     }
 
+    /// Whether this write changes durable governance state rather than live
+    /// runtime state. Temporary Coordinators may coordinate running networks,
+    /// but this classification is the single source of truth for the writes
+    /// that must remain frozen until normal quorum authority returns.
+    pub const fn is_governance_write(self) -> bool {
+        matches!(
+            self,
+            Self::CreateNetwork
+                | Self::UpdateNetworkProfile
+                | Self::PublishNetworkDiscovery
+                | Self::UpdateNetworkDiscovery
+                | Self::UnpublishNetworkDiscovery
+                | Self::JoinNetwork
+                | Self::SubmitJoinRequest
+                | Self::ReviewJoinRequest
+                | Self::BatchReviewJoinRequests
+                | Self::WithdrawJoinRequest
+                | Self::ResubmitJoinRequest
+                | Self::ChangeMemberLifecycle
+                | Self::CreateInvitation
+                | Self::RevokeInvitation
+                | Self::RedeemInvitation
+                | Self::LeaveNetwork
+                | Self::AcknowledgeMembershipPolicy
+                | Self::SetNetworkRole
+                | Self::SetLocalExitCapability
+                | Self::SetNodeDisplayName
+                | Self::RotateNodeIdentity
+                | Self::BanClient
+                | Self::UnbanClient
+                | Self::UpdateNetworkAllocation
+                | Self::ApplyConfiguration
+                | Self::RollbackConfiguration
+                | Self::ApplyPolicy
+                | Self::RollbackPolicy
+                | Self::ApplyTrafficPolicy
+                | Self::RollbackTrafficPolicy
+                | Self::UpdateCoordinatorCandidates
+                | Self::PublishCoordinatorCandidateDeclaration
+        )
+    }
+
     /// Commands that must be submitted through an operation registry. This
     /// deliberately extends mutation semantics only for diagnostics; it does
     /// not grant write authorization or make diagnostics auditable as changes.
@@ -4560,6 +4602,49 @@ mod tests {
             NodeCommandKind::GetInvitationStatus,
         ] {
             assert!(!kind.requires_recent_reauthentication(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn governance_writes_are_a_strict_subset_of_mutations() {
+        for kind in NodeCommandKind::ALL {
+            assert!(
+                !kind.is_governance_write() || kind.is_write(),
+                "governance write must also be a mutation: {kind:?}"
+            );
+        }
+        for kind in [
+            NodeCommandKind::StartNetworks,
+            NodeCommandKind::StopNetworks,
+            NodeCommandKind::RestartNetworks,
+            NodeCommandKind::RebuildTun,
+            NodeCommandKind::RefreshDiscoveryIndex,
+            NodeCommandKind::RetryDiscoveryIndex,
+            NodeCommandKind::UpdateRouting,
+            NodeCommandKind::StartNode,
+            NodeCommandKind::StopNode,
+            NodeCommandKind::RestartNode,
+            NodeCommandKind::CleanupResiduals,
+            NodeCommandKind::Shutdown,
+        ] {
+            assert!(
+                kind.is_write(),
+                "runtime mutation must remain a write: {kind:?}"
+            );
+            assert!(
+                !kind.is_governance_write(),
+                "runtime mutation must not be frozen as governance: {kind:?}"
+            );
+        }
+        for kind in [
+            NodeCommandKind::SetNetworkRole,
+            NodeCommandKind::ChangeMemberLifecycle,
+            NodeCommandKind::CreateInvitation,
+            NodeCommandKind::ApplyPolicy,
+            NodeCommandKind::ApplyConfiguration,
+            NodeCommandKind::UpdateCoordinatorCandidates,
+        ] {
+            assert!(kind.is_governance_write(), "{kind:?}");
         }
     }
 

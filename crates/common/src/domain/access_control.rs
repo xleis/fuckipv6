@@ -661,6 +661,7 @@ pub enum EffectiveAccessReason {
     ExplicitDeny,
     RoleCeilingExceeded,
     TemporaryCoordinatorReadOnly,
+    TemporaryCoordinatorGovernanceFrozen,
     DefaultDenied,
     InvalidPolicy,
 }
@@ -702,6 +703,9 @@ impl EffectiveAccess {
             EffectiveAccessReason::RoleCeilingExceeded => "role_ceiling_exceeded",
             EffectiveAccessReason::TemporaryCoordinatorReadOnly => {
                 "temporary_coordinator_read_only"
+            }
+            EffectiveAccessReason::TemporaryCoordinatorGovernanceFrozen => {
+                "temporary_coordinator_governance_frozen"
             }
             EffectiveAccessReason::DefaultDenied => "default_denied",
             EffectiveAccessReason::InvalidPolicy => "invalid_policy",
@@ -1007,6 +1011,8 @@ fn reason_for_decision(code: &str) -> EffectiveAccessReason {
         EffectiveAccessReason::RoleCeilingExceeded
     } else if code == PermissionDenialCode::TemporaryCoordinatorReadOnly.as_str() {
         EffectiveAccessReason::TemporaryCoordinatorReadOnly
+    } else if code == PermissionDenialCode::TemporaryCoordinatorGovernanceFrozen.as_str() {
+        EffectiveAccessReason::TemporaryCoordinatorGovernanceFrozen
     } else if code == PermissionDenialCode::RecentAuthenticationRequired.as_str() {
         EffectiveAccessReason::RecentReauthenticationRequired
     } else if code == PermissionDenialCode::CrossNetworkDenied.as_str() {
@@ -1312,6 +1318,44 @@ mod tests {
             .contains(&direct_grant.grant_id));
         assert_eq!(decision.network_acl_revision, 1);
         assert_eq!(decision.local_policy_revision, 1);
+    }
+
+    #[test]
+    fn temporary_coordinator_governance_denial_projects_a_specific_reason() {
+        let network_id = network_id(b"temporary-governance");
+        let context = context(network_id.clone(), NetworkRole::TemporaryCoordinator);
+        let mut request = request(
+            network_id.clone(),
+            PolicyAction::Update,
+            ResourceKind::SecurityPolicy,
+        );
+        request.intent = PermissionIntent::GovernanceWrite;
+        let network_allow = allow_rule(
+            b"network-governance-allow",
+            SubjectSelector::AnyMember,
+            PolicyAction::Update,
+            ResourceKind::SecurityPolicy,
+            network_id.clone(),
+        );
+        let decision = evaluate_effective_access(
+            &[],
+            &[network_allow],
+            None,
+            Some(&local_policy(network_id)),
+            &request,
+            &context,
+            100,
+        );
+        assert!(!decision.allowed);
+        assert_eq!(
+            decision.code.as_deref(),
+            Some(PermissionDenialCode::TemporaryCoordinatorGovernanceFrozen.as_str())
+        );
+        assert_eq!(
+            decision.reason,
+            EffectiveAccessReason::TemporaryCoordinatorGovernanceFrozen
+        );
+        assert_eq!(decision.layer, Some(EffectivePolicyLayer::Local));
     }
 
     #[test]

@@ -1,9 +1,17 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import manifestFixture from "../../../contracts/typescript/fixtures/node-manifest.json";
 import productFixture from "../../../contracts/typescript/fixtures/product-visual-snapshot.json";
 import type {
+  CoordinatorCandidateStatus,
+  CoordinatorEmergencyState,
   InvitationPreview,
   MemberLifecycleChange,
   MemberRemovalPreview,
@@ -26,7 +34,71 @@ import { installTestI18nRuntime } from "../test/runtime";
 import { ActionPanel, type ActionSubmission } from "./action-panel";
 
 const manifest = manifestFixture as NodeUiManifest;
-const snapshot = productFixture.snapshot as NodeSnapshot;
+const actionGroups = manifest.action_groups;
+const fixtureSnapshot = productFixture.snapshot as NodeSnapshot;
+const snapshot: NodeSnapshot = {
+  ...fixtureSnapshot,
+  embedded_services: (fixtureSnapshot.embedded_services ?? []).map((service) => ({
+    ...service,
+    coordinator_candidates: {
+      network_id: `net_${service.network_name}`,
+      generated_at_unix_ms: 1_700_000_000_000,
+      config_state: "current",
+      candidates: [],
+      config: null,
+      current_leader: null,
+      latest_term: null,
+      emergency: "none",
+    },
+  })),
+};
+
+function manifestAction(id: string): NodeUiAction {
+  const action = manifest.pages
+    .flatMap((page) => page.actions)
+    .find((candidate) => candidate.id === id);
+  if (!action) throw new Error(`manifest action not found: ${id}`);
+  return action;
+}
+
+type CoordinatorGovernanceFixtureStatus =
+  | CoordinatorEmergencyState
+  | "status_missing";
+
+function coordinatorGovernanceSnapshot(
+  status: CoordinatorGovernanceFixtureStatus,
+): NodeSnapshot {
+  const service = {
+    network_name: "home",
+    status: "running" as const,
+  };
+  if (status === "status_missing") {
+    return { ...snapshot, embedded_services: [service] };
+  }
+  const coordinatorStatus: CoordinatorCandidateStatus = {
+    network_id: "net_stable_home",
+    generated_at_unix_ms: 1_700_000_000_000,
+    config_state:
+      status === "configuration_pending"
+        ? "pending"
+        : status === "configuration_expired"
+          ? "expired"
+          : status === "no_candidates_configured"
+            ? "missing"
+            : "current",
+    candidates: [],
+    config: null,
+    current_leader: null,
+    latest_term: null,
+    emergency: status,
+  };
+  return {
+    ...snapshot,
+    embedded_services: [
+      { ...service, coordinator_candidates: coordinatorStatus },
+    ],
+  };
+}
 const restart = manifest.pages
   .flatMap((page) => page.actions)
   .find((action) => action.id === "restart_node") as NodeUiAction;
@@ -48,8 +120,9 @@ const joinNetwork = manifest.pages
 const leaveNetwork = manifest.pages
   .flatMap((page) => page.actions)
   .find((action) => action.id === "leave_network") as NodeUiAction;
-const exitNodeActions = manifest.pages.find((page) => page.id === "exit_node")!
-  .actions;
+const exitNodeActions = manifest.pages.find(
+  (page) => page.id === "exit_node",
+)!.actions;
 const setLocalExitCapability = exitNodeActions.find(
   (action) => action.id === "set_local_exit_capability",
 ) as NodeUiAction;
@@ -89,6 +162,15 @@ const previewInvitation = manifest.pages
 const redeemInvitation = manifest.pages
   .flatMap((page) => page.actions)
   .find((action) => action.id === "redeem_invitation") as NodeUiAction;
+const getCoordinatorCandidates = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "get_coordinator_candidates") as NodeUiAction;
+const updateCoordinatorCandidates = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "update_coordinator_candidates") as NodeUiAction;
+const publishCoordinatorDeclaration = manifest.pages
+  .flatMap((page) => page.actions)
+  .find((action) => action.id === "publish_coordinator_candidate_declaration") as NodeUiAction;
 const joinRequestReviewActions = [
   listJoinRequests,
   reviewJoinRequest,
@@ -431,6 +513,18 @@ const profileUpdateOutcome = {
   },
 };
 
+function actionButtonName(action: NodeUiAction): string {
+  return `translated:${action.label_key}`;
+}
+
+function actionSubmitButton(action: NodeUiAction): HTMLElement {
+  return within(screen.getByTestId(`action-card-${action.id}`))
+    .getAllByRole("button", { name: actionButtonName(action) })
+    .find((button) => !button.hasAttribute("aria-expanded"))!;
+}
+
+const confirmationButtonName = "translated:common.confirm_action";
+
 function renderPanel(
   interactionBlocked: PageStateKind | null,
   onSubmit = vi.fn(async (): Promise<ActionSubmission> => ({
@@ -440,6 +534,7 @@ function renderPanel(
   return render(
     <ActionPanel
       actions={[restart]}
+      actionGroups={actionGroups}
       snapshot={snapshot}
       selectedNetwork=""
       locale="zh-CN"
@@ -474,6 +569,7 @@ describe("action panel Exit confirmations", () => {
     render(
       <ActionPanel
         actions={[setLocalExitCapability]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork=""
         locale="zh-CN"
@@ -497,9 +593,7 @@ describe("action panel Exit confirmations", () => {
     });
     expect(enabled).not.toBeChecked();
     await user.click(enabled);
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(setLocalExitCapability));
 
     expect(onSubmit).not.toHaveBeenCalled();
     const dialog = await screen.findByRole("dialog");
@@ -511,7 +605,7 @@ describe("action panel Exit confirmations", () => {
     );
     await user.click(
       within(dialog).getByRole("button", {
-        name: "translated:common.execute",
+        name: confirmationButtonName,
       }),
     );
 
@@ -534,6 +628,7 @@ describe("action panel Exit confirmations", () => {
     render(
       <ActionPanel
         actions={[setExitNodeRole]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="home"
         locale="zh-CN"
@@ -552,9 +647,9 @@ describe("action panel Exit confirmations", () => {
         name: "translated:action.set_exit_node_role",
       }),
     );
-    expect(
-      screen.getByLabelText("translated:field.network_name"),
-    ).toHaveValue("home");
+    expect(screen.getByLabelText("translated:field.network_name")).toHaveValue(
+      "home",
+    );
     expect(screen.getByLabelText("translated:field.role")).toHaveValue(
       "exit_node",
     );
@@ -563,9 +658,7 @@ describe("action panel Exit confirmations", () => {
     });
     expect(enabled).not.toBeChecked();
     await user.click(enabled);
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(setExitNodeRole));
 
     expect(onSubmit).not.toHaveBeenCalled();
     const dialog = await screen.findByRole("dialog");
@@ -577,7 +670,7 @@ describe("action panel Exit confirmations", () => {
     );
     await user.click(
       within(dialog).getByRole("button", {
-        name: "translated:common.execute",
+        name: confirmationButtonName,
       }),
     );
 
@@ -598,21 +691,21 @@ describe("action panel interaction gate", () => {
     await user.click(
       screen.getByRole("button", { name: "translated:action.restart_node" }),
     );
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(restart));
 
     const dialog = await screen.findByRole("dialog");
     const confirm = within(dialog).getByRole("button", {
-      name: "translated:common.execute",
+      name: confirmationButtonName,
     });
     expect(confirm).toBeEnabled();
-    expect(within(dialog).getByText("translated:confirm.reauthentication_required"))
-      .toBeInTheDocument();
+    expect(
+      within(dialog).getByText("translated:confirm.reauthentication_required"),
+    ).toBeInTheDocument();
 
     view.rerender(
       <ActionPanel
         actions={[restart]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork=""
         locale="zh-CN"
@@ -635,12 +728,292 @@ describe("action panel interaction gate", () => {
   });
 });
 
+describe("action panel Coordinator governance gate", () => {
+  const governanceWriteActions = [
+    "preview_member_removal",
+    "change_member_lifecycle",
+    "review_join_request",
+    "batch_review_join_requests",
+    "create_invitation",
+    "revoke_invitation",
+    "redeem_invitation",
+  ].map(manifestAction);
+
+  it("does not add governance noise to an empty action panel", () => {
+    render(
+      <ActionPanel
+        actions={[]}
+        actionGroups={actionGroups}
+        snapshot={coordinatorGovernanceSnapshot("status_missing")}
+        selectedNetwork="home"
+        locale="en"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
+          outcome: { status: "completed", data: {} } as NodeCommandOutcome,
+        }))}
+      />,
+    );
+
+    expect(
+      screen.getByText("translated:common.page_actions_empty"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("coordinator-governance-frozen"),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each<CoordinatorGovernanceFixtureStatus>([
+    "status_missing",
+    "no_candidates_configured",
+    "configuration_pending",
+    "configuration_expired",
+    "all_candidates_unavailable",
+  ])("fails closed for %s while keeping recovery reads available", async (status) => {
+    const user = userEvent.setup();
+    render(
+      <ActionPanel
+        actions={[
+          ...governanceWriteActions,
+          getCoordinatorCandidates,
+          updateCoordinatorCandidates,
+          publishCoordinatorDeclaration,
+        ]}
+        actionGroups={actionGroups}
+        snapshot={coordinatorGovernanceSnapshot(status)}
+        selectedNetwork="home"
+        locale="en"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
+          outcome: { status: "completed", data: {} } as NodeCommandOutcome,
+        }))}
+      />,
+    );
+
+    expect(screen.getByTestId("coordinator-governance-frozen")).toHaveTextContent(
+      `translated:coordinator_governance.reason.${status}`,
+    );
+    for (const action of governanceWriteActions) {
+      await user.click(
+        screen.getByRole("button", { name: actionButtonName(action) }),
+      );
+      expect(actionSubmitButton(action)).toBeDisabled();
+    }
+    for (const action of [
+      getCoordinatorCandidates,
+      updateCoordinatorCandidates,
+      publishCoordinatorDeclaration,
+    ]) {
+      await user.click(
+        screen.getByRole("button", { name: actionButtonName(action) }),
+      );
+      expect(actionSubmitButton(action)).toBeEnabled();
+    }
+  });
+
+  it("restores governance writes after the Coordinator reports none", async () => {
+    const user = userEvent.setup();
+    const view = render(
+      <ActionPanel
+        actions={[createInvitation]}
+        actionGroups={actionGroups}
+        snapshot={coordinatorGovernanceSnapshot("configuration_pending")}
+        selectedNetwork="home"
+        locale="en"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
+          outcome: { status: "completed", data: {} } as NodeCommandOutcome,
+        }))}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: actionButtonName(createInvitation) }),
+    );
+    expect(actionSubmitButton(createInvitation)).toBeDisabled();
+
+    view.rerender(
+      <ActionPanel
+        actions={[createInvitation]}
+        actionGroups={actionGroups}
+        snapshot={coordinatorGovernanceSnapshot("none")}
+        selectedNetwork="home"
+        locale="en"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
+          outcome: { status: "completed", data: {} } as NodeCommandOutcome,
+        }))}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(actionSubmitButton(createInvitation)).toBeEnabled(),
+    );
+    expect(
+      screen.queryByTestId("coordinator-governance-frozen"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("disables embedded join request review while frozen", async () => {
+    const user = userEvent.setup();
+    render(
+      <ActionPanel
+        actions={joinRequestReviewActions}
+        actionGroups={actionGroups}
+        snapshot={coordinatorGovernanceSnapshot("configuration_pending")}
+        selectedNetwork="home"
+        locale="en"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={{
+          actionId: "list_join_requests",
+          values: { network_id: "net_stable_home" },
+        }}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
+          outcome: joinRequestsOutcome as NodeCommandOutcome,
+        }))}
+      />,
+    );
+
+    await user.click(actionSubmitButton(listJoinRequests));
+    const list = await screen.findByTestId("join-request-list");
+    for (const labelKey of [
+      "choice.join_request_review.approve",
+      "choice.join_request_review.reject",
+      "choice.join_request_review.request_information",
+    ]) {
+      expect(
+        within(list).getByRole("button", { name: `translated:${labelKey}` }),
+      ).toBeDisabled();
+    }
+  });
+
+  it("keeps invitation status refresh usable while disabling revoke", async () => {
+    const user = userEvent.setup();
+    render(
+      <ActionPanel
+        actions={[listInvitations, getInvitationStatus, revokeInvitation]}
+        actionGroups={actionGroups}
+        snapshot={coordinatorGovernanceSnapshot("configuration_expired")}
+        selectedNetwork="home"
+        locale="en"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={{
+          actionId: "list_invitations",
+          values: { network_id: invitationNetworkId },
+        }}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
+          outcome: {
+            status: "invitations",
+            data: [invitationStatus],
+          } as NodeCommandOutcome,
+        }))}
+      />,
+    );
+
+    await user.click(actionSubmitButton(listInvitations));
+    const list = await screen.findByTestId("invitation-list");
+    expect(
+      within(list).getByRole("button", {
+        name: "translated:invitations.status_refresh",
+      }),
+    ).toBeEnabled();
+    expect(
+      within(list).getByRole("button", {
+        name: "translated:invitations.revoke",
+      }),
+    ).toBeDisabled();
+  });
+
+  it("keeps invitation preview usable while disabling redemption", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_123);
+    render(
+      <ActionPanel
+        actions={[previewInvitation, redeemInvitation]}
+        actionGroups={actionGroups}
+        snapshot={coordinatorGovernanceSnapshot("all_candidates_unavailable")}
+        selectedNetwork="home"
+        locale="en"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={{
+          actionId: "preview_invitation",
+          values: {
+            network_id: invitationNetworkId,
+            coordinator_url: "https://coordinator.example.test",
+            code: invitationCode,
+          },
+        }}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
+          outcome: {
+            status: "invitation_preview",
+            data: invitationPreview,
+          } as NodeCommandOutcome,
+        }))}
+      />,
+    );
+
+    await user.click(actionSubmitButton(previewInvitation));
+    const confirmation = await screen.findByRole("dialog");
+    await user.click(
+      within(confirmation).getByRole("button", {
+        name: confirmationButtonName,
+      }),
+    );
+    const preview = await screen.findByTestId("invitation-preview");
+    expect(preview).toHaveTextContent(
+      "translated:coordinator_governance.reason.all_candidates_unavailable",
+    );
+    expect(
+      within(preview).getByRole("button", {
+        name: "translated:invitations.preview_again",
+      }),
+    ).toBeEnabled();
+    expect(
+      within(preview).getByRole("button", {
+        name: "translated:invitations.accept",
+      }),
+    ).toBeDisabled();
+  });
+});
+
 describe("action panel field synchronization", () => {
   it("adopts a refreshed fingerprint until the owner edits the field", async () => {
     const user = userEvent.setup();
     const view = render(
       <ActionPanel
         actions={[rotate]}
+        actionGroups={actionGroups}
         snapshot={identitySnapshot}
         selectedNetwork=""
         locale="zh-CN"
@@ -669,6 +1042,7 @@ describe("action panel field synchronization", () => {
     view.rerender(
       <ActionPanel
         actions={[rotate]}
+        actionGroups={actionGroups}
         snapshot={{
           ...identitySnapshot,
           identity: {
@@ -696,6 +1070,7 @@ describe("action panel field synchronization", () => {
     view.rerender(
       <ActionPanel
         actions={[rotate]}
+        actionGroups={actionGroups}
         snapshot={identitySnapshot}
         selectedNetwork=""
         locale="zh-CN"
@@ -723,6 +1098,7 @@ describe("action panel selected network synchronization", () => {
     const view = render(
       <ActionPanel
         actions={[leaveNetwork]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="home"
         locale="zh-CN"
@@ -745,6 +1121,7 @@ describe("action panel selected network synchronization", () => {
     view.rerender(
       <ActionPanel
         actions={[leaveNetwork]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="studio"
         locale="zh-CN"
@@ -792,6 +1169,7 @@ describe("action panel operation status", () => {
     render(
       <ActionPanel
         actions={[]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork=""
         locale="zh-CN"
@@ -810,9 +1188,7 @@ describe("action panel operation status", () => {
     expect(status).toHaveTextContent("translated:operation.state.failed");
     expect(status).toHaveTextContent("cleanup");
     expect(status).toHaveTextContent("translated:operation.attempt");
-    expect(status).toHaveTextContent(
-      "translated:operation.cancellable_no",
-    );
+    expect(status).toHaveTextContent("translated:operation.cancellable_no");
     expect(status).toHaveTextContent("tun.route_conflict");
     expect(status).toHaveTextContent(
       "translated:error.tun_route_conflict · translated:recovery.retry_after_route_check",
@@ -826,9 +1202,9 @@ describe("action panel operation status", () => {
       }),
     );
     expect(writeText).toHaveBeenCalledWith("op-diagnostic-42");
-    expect(
-      within(status).getByRole("status"),
-    ).toHaveTextContent("translated:operation.diagnostic_copied");
+    expect(within(status).getByRole("status")).toHaveTextContent(
+      "translated:operation.diagnostic_copied",
+    );
 
     await user.click(
       within(status).getByRole("button", {
@@ -853,6 +1229,7 @@ describe("action panel operation status", () => {
     const view = render(
       <ActionPanel
         actions={[restart]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork=""
         locale="zh-CN"
@@ -877,6 +1254,7 @@ describe("action panel operation status", () => {
     view.rerender(
       <ActionPanel
         actions={[restart]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork=""
         locale="zh-CN"
@@ -916,6 +1294,7 @@ describe("action panel operation status", () => {
     render(
       <ActionPanel
         actions={[restart]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork=""
         locale="zh-CN"
@@ -951,6 +1330,7 @@ describe("action panel operation status", () => {
     render(
       <ActionPanel
         actions={[previewProfile]}
+        actionGroups={actionGroups}
         snapshot={profileSnapshot}
         selectedNetwork="home"
         locale="zh-CN"
@@ -971,9 +1351,7 @@ describe("action panel operation status", () => {
         name: "translated:action.preview_network_profile",
       }),
     );
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(previewProfile));
 
     const result = await screen.findByTestId("network-profile-result");
     expect(result).toHaveTextContent("translated:profile.preview_title");
@@ -1017,6 +1395,7 @@ describe("action panel operation status", () => {
     render(
       <ActionPanel
         actions={[previewJoin, joinNetwork]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork=""
         locale="zh-CN"
@@ -1033,16 +1412,18 @@ describe("action panel operation status", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(previewJoin));
     const preview = await screen.findByTestId("network-join-preview");
     expect(preview).toHaveTextContent("translated:join.preview_title");
     expect(preview).toHaveTextContent("network-family");
     expect(preview).toHaveTextContent("owner-family");
     expect(preview).toHaveTextContent("admin-one");
-    expect(preview).toHaveTextContent("Operators can observe connection metadata");
-    expect(preview).toHaveTextContent("translated:join.local_capabilities_none");
+    expect(preview).toHaveTextContent(
+      "Operators can observe connection metadata",
+    );
+    expect(preview).toHaveTextContent(
+      "translated:join.local_capabilities_none",
+    );
     expect(preview).toHaveTextContent(
       "translated:join.contribution.local_control",
     );
@@ -1135,6 +1516,7 @@ describe("action panel operation status", () => {
     render(
       <ActionPanel
         actions={[previewJoin, joinNetwork]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork=""
         locale="zh-CN"
@@ -1151,9 +1533,7 @@ describe("action panel operation status", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(previewJoin));
     const preview = await screen.findByTestId("network-join-preview");
     const checkbox = within(preview).getByRole("checkbox", {
       name: "translated:join.terms_checkbox",
@@ -1198,19 +1578,20 @@ describe("action panel operation status", () => {
       within(preview).getByRole("button", { name: "translated:join.confirm" }),
     );
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(4));
-    expect(screen.queryByTestId("network-join-preview")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("network-join-preview"),
+    ).not.toBeInTheDocument();
   });
 
   it("renders applied profile audit data and changed paths", async () => {
     const user = userEvent.setup();
-    const onSubmit = vi.fn(
-      async (): Promise<ActionSubmission> => ({
-        outcome: profileUpdateOutcome as NodeCommandOutcome,
-      }),
-    );
+    const onSubmit = vi.fn(async (): Promise<ActionSubmission> => ({
+      outcome: profileUpdateOutcome as NodeCommandOutcome,
+    }));
     render(
       <ActionPanel
         actions={[updateProfile]}
+        actionGroups={actionGroups}
         snapshot={profileSnapshot}
         selectedNetwork="home"
         locale="zh-CN"
@@ -1229,12 +1610,10 @@ describe("action panel operation status", () => {
         name: "translated:action.update_network_profile",
       }),
     );
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(updateProfile));
     const dialog = await screen.findByRole("dialog");
     await user.click(
-      within(dialog).getByRole("button", { name: "translated:common.execute" }),
+      within(dialog).getByRole("button", { name: confirmationButtonName }),
     );
 
     const result = await screen.findByTestId("network-profile-result");
@@ -1278,6 +1657,7 @@ describe("action panel private invitation workflows", () => {
     render(
       <ActionPanel
         actions={[createInvitation]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="home"
         locale="zh-CN"
@@ -1301,7 +1681,9 @@ describe("action panel private invitation workflows", () => {
     });
     expect(role).toHaveValue("member");
     expect(
-      within(role).getAllByRole("option").map((option) => option.textContent),
+      within(role)
+        .getAllByRole("option")
+        .map((option) => option.textContent),
     ).toEqual([
       "translated:join_request.role.member",
       "translated:join_request.role.administrator",
@@ -1331,16 +1713,14 @@ describe("action panel private invitation workflows", () => {
       }),
       "3600000",
     );
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(createInvitation));
     const confirmation = await screen.findByRole("dialog");
     expect(confirmation).toHaveTextContent(
       "translated:confirm.reauthentication_required",
     );
     await user.click(
       within(confirmation).getByRole("button", {
-        name: "translated:common.execute",
+        name: confirmationButtonName,
       }),
     );
 
@@ -1356,8 +1736,12 @@ describe("action panel private invitation workflows", () => {
     });
     expect(screen.getAllByText(invitationCode)).toHaveLength(1);
     expect(created).toHaveTextContent("translated:invitations.code_once");
-    expect(created).toHaveTextContent("translated:join_request.role.administrator");
-    expect(created).toHaveTextContent("translated:invitations.ordinary_membership");
+    expect(created).toHaveTextContent(
+      "translated:join_request.role.administrator",
+    );
+    expect(created).toHaveTextContent(
+      "translated:invitations.ordinary_membership",
+    );
     expect(created).toHaveTextContent("translated:invitations.not_permanent");
 
     const article = created.closest("article");
@@ -1424,6 +1808,7 @@ describe("action panel private invitation workflows", () => {
     render(
       <ActionPanel
         actions={[listInvitations, getInvitationStatus, revokeInvitation]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="home"
         locale="zh-CN"
@@ -1440,9 +1825,7 @@ describe("action panel private invitation workflows", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(listInvitations));
     const list = await screen.findByTestId("invitation-list");
     expect(list).toHaveTextContent("translated:invitations.state.active");
     expect(list).toHaveTextContent("translated:join_request.role.member");
@@ -1484,7 +1867,7 @@ describe("action panel private invitation workflows", () => {
     );
     await user.click(
       within(confirmation).getByRole("button", {
-        name: "translated:common.execute",
+        name: confirmationButtonName,
       }),
     );
 
@@ -1540,6 +1923,7 @@ describe("action panel private invitation workflows", () => {
     render(
       <ActionPanel
         actions={[previewInvitation, redeemInvitation]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="home"
         locale="zh-CN"
@@ -1560,13 +1944,11 @@ describe("action panel private invitation workflows", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(previewInvitation));
     const previewConfirmation = await screen.findByRole("dialog");
     await user.click(
       within(previewConfirmation).getByRole("button", {
-        name: "translated:common.execute",
+        name: confirmationButtonName,
       }),
     );
     const preview = await screen.findByTestId("invitation-preview");
@@ -1574,11 +1956,15 @@ describe("action panel private invitation workflows", () => {
     expect(preview).not.toHaveTextContent("translated:invitations.denied");
     expect(preview).toHaveTextContent("home");
     expect(preview).toHaveTextContent("translated:join_request.role.member");
-    expect(preview).toHaveTextContent("File access is limited to shared folders");
+    expect(preview).toHaveTextContent(
+      "File access is limited to shared folders",
+    );
     expect(preview).toHaveTextContent(
       "translated:invitations.reauthentication_required",
     );
-    expect(preview).toHaveTextContent("translated:invitations.ordinary_membership");
+    expect(preview).toHaveTextContent(
+      "translated:invitations.ordinary_membership",
+    );
     expect(preview).toHaveTextContent("translated:invitations.not_permanent");
     expect(document.body).not.toHaveTextContent(invitationCode);
 
@@ -1663,6 +2049,7 @@ describe("action panel private invitation workflows", () => {
       const view = render(
         <ActionPanel
           actions={[previewInvitation, redeemInvitation]}
+          actionGroups={actionGroups}
           snapshot={renderSnapshot}
           selectedNetwork="home"
           locale="zh-CN"
@@ -1683,23 +2070,32 @@ describe("action panel private invitation workflows", () => {
         />,
       );
       const user = userEvent.setup();
-      await user.click(
-        screen.getByRole("button", { name: "translated:common.execute" }),
-      );
+      await user.click(actionSubmitButton(previewInvitation));
       const confirmation = await screen.findByRole("dialog");
       await user.click(
         within(confirmation).getByRole("button", {
-          name: "translated:common.execute",
+          name: confirmationButtonName,
         }),
       );
-      return { user, view, onSubmit, previewCard: await screen.findByTestId("invitation-preview") };
+      return {
+        user,
+        view,
+        onSubmit,
+        previewCard: await screen.findByTestId("invitation-preview"),
+      };
     };
 
     const supported = await renderRequiredPreview(requiredPreview, snapshot);
     const supportedCard = supported.previewCard;
-    expect(supportedCard).toHaveTextContent("translated:join.exit.local_supported");
-    expect(supportedCard).toHaveTextContent("translated:join.exit.local_enabled");
-    expect(supportedCard).toHaveTextContent("translated:join.exit.cannot_join_without_local_exit");
+    expect(supportedCard).toHaveTextContent(
+      "translated:join.exit.local_supported",
+    );
+    expect(supportedCard).toHaveTextContent(
+      "translated:join.exit.local_enabled",
+    );
+    expect(supportedCard).toHaveTextContent(
+      "translated:join.exit.cannot_join_without_local_exit",
+    );
     const terms = within(supportedCard).getByRole("checkbox", {
       name: "translated:invitations.terms_checkbox",
     });
@@ -1825,6 +2221,7 @@ describe("action panel private invitation workflows", () => {
       render(
         <ActionPanel
           actions={[previewInvitation, redeemInvitation]}
+          actionGroups={actionGroups}
           snapshot={snapshot}
           selectedNetwork="home"
           locale="zh-CN"
@@ -1845,13 +2242,11 @@ describe("action panel private invitation workflows", () => {
         />,
       );
 
-      await user.click(
-        screen.getByRole("button", { name: "translated:common.execute" }),
-      );
+      await user.click(actionSubmitButton(previewInvitation));
       const confirmation = await screen.findByRole("dialog");
       await user.click(
         within(confirmation).getByRole("button", {
-          name: "translated:common.execute",
+          name: confirmationButtonName,
         }),
       );
       const preview = await screen.findByTestId("invitation-preview");
@@ -1886,7 +2281,9 @@ describe("action panel private invitation workflows", () => {
           name: "translated:invitations.back_to_edit",
         }),
       );
-      expect(screen.queryByTestId("invitation-preview")).not.toBeInTheDocument();
+      expect(
+        screen.queryByTestId("invitation-preview"),
+      ).not.toBeInTheDocument();
       expect(
         screen.getByDisplayValue("https://coordinator.example.test"),
       ).toBeInTheDocument();
@@ -1902,6 +2299,7 @@ describe("action panel join request review list", () => {
     render(
       <ActionPanel
         actions={[submitJoinRequest]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="home"
         locale="zh-CN"
@@ -1945,6 +2343,7 @@ describe("action panel join request review list", () => {
     const view = render(
       <ActionPanel
         actions={[listJoinRequests]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="home"
         locale="zh-CN"
@@ -1966,16 +2365,16 @@ describe("action panel join request review list", () => {
     const network = screen.getByLabelText("translated:field.network_id");
     await user.clear(network);
     await user.type(network, "net_stable_home");
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(listJoinRequests));
 
     const list = await screen.findByTestId("join-request-list");
     expect(list).toHaveTextContent("Branch office router");
     expect(list).toHaveTextContent(joinRequest.reason!);
     expect(list).toHaveTextContent("translated:join_requests.node_id");
     expect(list).toHaveTextContent(joinRequest.applicant.node_id);
-    expect(list).toHaveTextContent(joinRequest.applicant.public_key_fingerprint);
+    expect(list).toHaveTextContent(
+      joinRequest.applicant.public_key_fingerprint,
+    );
     expect(list).toHaveTextContent(
       "translated:join_requests.reason_visibility.owners_and_administrators",
     );
@@ -1995,6 +2394,7 @@ describe("action panel join request review list", () => {
     view.rerender(
       <ActionPanel
         actions={[listJoinRequests]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="studio"
         locale="zh-CN"
@@ -2017,6 +2417,7 @@ describe("action panel join request review list", () => {
     render(
       <ActionPanel
         actions={[listJoinRequests]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="home"
         locale="zh-CN"
@@ -2043,9 +2444,7 @@ describe("action panel join request review list", () => {
     const network = screen.getByLabelText("translated:field.network_id");
     await user.clear(network);
     await user.type(network, "net_stable_home");
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(listJoinRequests));
 
     expect(await screen.findByTestId("join-request-empty")).toHaveTextContent(
       "translated:join_requests.empty",
@@ -2083,6 +2482,7 @@ describe("action panel join request review list", () => {
     render(
       <ActionPanel
         actions={joinRequestReviewActions}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="home"
         locale="zh-CN"
@@ -2104,9 +2504,7 @@ describe("action panel join request review list", () => {
     const network = screen.getByLabelText("translated:field.network_id");
     await user.clear(network);
     await user.type(network, "net_stable_home");
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(listJoinRequests));
     const list = await screen.findByTestId("join-request-list");
     expect(
       screen.queryByRole("button", {
@@ -2129,7 +2527,9 @@ describe("action panel join request review list", () => {
       "translated:join_requests.review_dialog_title",
     );
     expect(dialog).toHaveTextContent("Branch office router");
-    expect(dialog).toHaveTextContent("translated:join_requests.revision_pinned");
+    expect(dialog).toHaveTextContent(
+      "translated:join_requests.revision_pinned",
+    );
     const grantImpactSection = within(dialog).getByRole("region", {
       name: "translated:join_requests.grant_impact",
     });
@@ -2140,10 +2540,14 @@ describe("action panel join request review list", () => {
       "join-request-review-grant",
     );
     expect(grantImpact).toHaveTextContent("translated:join_requests.role");
-    expect(grantImpact).toHaveTextContent("translated:join_request.role.member");
+    expect(grantImpact).toHaveTextContent(
+      "translated:join_request.role.member",
+    );
     expect(grantImpact).toHaveTextContent("translated:capability.relay");
     expect(grantImpact).toHaveTextContent("translated:capability.file");
-    expect(grantImpact).toHaveTextContent("translated:join_requests.exit.required");
+    expect(grantImpact).toHaveTextContent(
+      "translated:join_requests.exit.required",
+    );
     expect(grantImpact).toHaveTextContent(
       "translated:join_requests.file_access.granted",
     );
@@ -2202,6 +2606,7 @@ describe("action panel join request review list", () => {
     render(
       <ActionPanel
         actions={joinRequestReviewActions}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="home"
         locale="zh-CN"
@@ -2223,9 +2628,7 @@ describe("action panel join request review list", () => {
     const network = screen.getByLabelText("translated:field.network_id");
     await user.clear(network);
     await user.type(network, "net_stable_home");
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(listJoinRequests));
     const list = await screen.findByTestId("join-request-list");
     await user.click(
       within(list).getByRole("button", {
@@ -2315,6 +2718,7 @@ describe("action panel join request review list", () => {
     render(
       <ActionPanel
         actions={joinRequestReviewActions}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="home"
         locale="zh-CN"
@@ -2336,9 +2740,7 @@ describe("action panel join request review list", () => {
     const network = screen.getByLabelText("translated:field.network_id");
     await user.clear(network);
     await user.type(network, "net_stable_home");
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(listJoinRequests));
     const list = await screen.findByTestId("join-request-list");
     await user.click(
       screen.getByRole("checkbox", {
@@ -2392,7 +2794,6 @@ describe("action panel join request review list", () => {
   });
 });
 
-
 describe("action panel network member directory", () => {
   it("keeps the action expanded and renders the authoritative member directory", async () => {
     const user = userEvent.setup();
@@ -2405,6 +2806,7 @@ describe("action panel network member directory", () => {
     render(
       <ActionPanel
         actions={[listNetworkMembers]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="home"
         locale="zh-CN"
@@ -2426,9 +2828,7 @@ describe("action panel network member directory", () => {
       screen.getByLabelText("translated:field.network_id"),
       "net_stable_home",
     );
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(listNetworkMembers));
 
     expect(
       await screen.findByText("translated:member_directory.title"),
@@ -2444,6 +2844,7 @@ describe("action panel network member directory", () => {
     render(
       <ActionPanel
         actions={[listNetworkMembers]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="home"
         locale="zh-CN"
@@ -2477,9 +2878,7 @@ describe("action panel network member directory", () => {
       screen.getByLabelText("translated:field.network_id"),
       "net_stable_home",
     );
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(listNetworkMembers));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "translated:member_directory.error.permission_denied",
@@ -2501,6 +2900,7 @@ describe("action panel network member directory", () => {
     const view = render(
       <ActionPanel
         actions={[listNetworkMembers]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="home"
         locale="zh-CN"
@@ -2523,9 +2923,7 @@ describe("action panel network member directory", () => {
       screen.getByLabelText("translated:field.network_id"),
       "net_stable_home",
     );
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(listNetworkMembers));
     expect(
       await screen.findByText("translated:member_directory.title"),
     ).toBeInTheDocument();
@@ -2533,6 +2931,7 @@ describe("action panel network member directory", () => {
     view.rerender(
       <ActionPanel
         actions={[listNetworkMembers]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="studio"
         locale="zh-CN"
@@ -2553,7 +2952,6 @@ describe("action panel network member directory", () => {
     });
   });
 });
-
 
 describe("action panel member governance", () => {
   const originalClientWidth = Object.getOwnPropertyDescriptor(
@@ -2610,7 +3008,8 @@ describe("action panel member governance", () => {
           lifecycle_state: lifecycle,
           revision: lifecycle === "active" ? 3 : 4,
           access_epoch: lifecycle === "active" ? 2 : 3,
-          available_actions: lifecycle === "active" ? ["remove", "suspend"] : [],
+          available_actions:
+            lifecycle === "active" ? ["remove", "suspend"] : [],
           presence: {
             state: "online",
             source: "live_session",
@@ -2714,13 +3113,21 @@ describe("action panel member governance", () => {
           };
         }
         return {
-          outcome: { status: "member_lifecycle_changed", data: lifecycleChange },
+          outcome: {
+            status: "member_lifecycle_changed",
+            data: lifecycleChange,
+          },
         };
       },
     );
     render(
       <ActionPanel
-        actions={[listNetworkMembers, previewMemberRemoval, changeMemberLifecycle]}
+        actions={[
+          listNetworkMembers,
+          previewMemberRemoval,
+          changeMemberLifecycle,
+        ]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="home"
         locale="en"
@@ -2742,16 +3149,16 @@ describe("action panel member governance", () => {
       screen.getByLabelText("translated:field.network_id"),
       "net_stable_home",
     );
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(listNetworkMembers));
 
     await user.click(
       await screen.findByRole("option", { name: /Governed member/ }),
     );
     await user.click(screen.getByTestId("member-governance-action-remove"));
     const impact = await screen.findByTestId("member-removal-impact");
-    expect(impact).toHaveTextContent("translated:member_removal.impact.credentials");
+    expect(impact).toHaveTextContent(
+      "translated:member_removal.impact.credentials",
+    );
     await user.click(screen.getByTestId("member-governance-confirm"));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(4));
@@ -2772,8 +3179,73 @@ describe("action panel member governance", () => {
       "translated:member_directory.lifecycle_state.removed",
     );
     expect(screen.getByTestId("member-detail")).toHaveTextContent("4");
-    expect(screen.getByText("translated:outcome.network_members_loaded")).toBeVisible();
+    expect(
+      screen.getByText("translated:outcome.network_members_loaded"),
+    ).toBeVisible();
     expect(actionHead).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("disables embedded member governance while the Coordinator is frozen", async () => {
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: 680,
+      bottom: 360,
+      width: 680,
+      height: 360,
+      toJSON: () => ({}),
+    });
+    Object.defineProperty(Element.prototype, "clientWidth", {
+      configurable: true,
+      value: 680,
+    });
+    Object.defineProperty(Element.prototype, "clientHeight", {
+      configurable: true,
+      value: 360,
+    });
+    const user = userEvent.setup();
+    const onSubmit = vi.fn(async (): Promise<ActionSubmission> => ({
+      outcome: {
+        status: "network_members",
+        data: governedDirectory(),
+      } as NodeCommandOutcome,
+    }));
+    render(
+      <ActionPanel
+        actions={[listNetworkMembers, previewMemberRemoval, changeMemberLifecycle]}
+        actionGroups={actionGroups}
+        snapshot={coordinatorGovernanceSnapshot("configuration_pending")}
+        selectedNetwork="home"
+        locale="en"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={{
+          actionId: "list_network_members",
+          values: { network_id: "net_stable_home" },
+        }}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(actionSubmitButton(listNetworkMembers));
+    await user.click(
+      await screen.findByRole("option", { name: /Governed member/ }),
+    );
+    expect(screen.getByTestId("member-governance-frozen")).toHaveTextContent(
+      "translated:coordinator_governance.reason.configuration_pending",
+    );
+    expect(
+      screen.getByTestId("member-governance-action-remove"),
+    ).toBeDisabled();
+    expect(
+      screen.getByTestId("member-governance-action-suspend"),
+    ).toBeDisabled();
+    expect(onSubmit).toHaveBeenCalledOnce();
   });
 
   it("keeps a standalone removal preview open with the full impact summary", async () => {
@@ -2793,6 +3265,7 @@ describe("action panel member governance", () => {
     render(
       <ActionPanel
         actions={[previewMemberRemoval]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="home"
         locale="en"
@@ -2818,9 +3291,7 @@ describe("action panel member governance", () => {
       screen.getByLabelText("translated:field.target_node_id"),
       governedNodeId,
     );
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(previewMemberRemoval));
 
     expect(
       await screen.findByText("translated:outcome.member_removal_previewed"),
@@ -2844,7 +3315,11 @@ describe("action panel member governance", () => {
         return {
           outcome: {
             status: "member_lifecycle_changed",
-            data: { ...lifecycleChange, action: "suspend", status: "suspended" },
+            data: {
+              ...lifecycleChange,
+              action: "suspend",
+              status: "suspended",
+            },
           },
         };
       },
@@ -2852,6 +3327,7 @@ describe("action panel member governance", () => {
     render(
       <ActionPanel
         actions={[changeMemberLifecycle]}
+        actionGroups={actionGroups}
         snapshot={snapshot}
         selectedNetwork="home"
         locale="en"
@@ -2889,13 +3365,11 @@ describe("action panel member governance", () => {
       screen.getByLabelText("translated:field.expected_revision"),
       "3",
     );
-    await user.click(
-      screen.getByRole("button", { name: "translated:common.execute" }),
-    );
+    await user.click(actionSubmitButton(changeMemberLifecycle));
     const dialog = await screen.findByRole("dialog");
     await user.click(
       within(dialog).getByRole("button", {
-        name: "translated:common.execute",
+        name: confirmationButtonName,
       }),
     );
 

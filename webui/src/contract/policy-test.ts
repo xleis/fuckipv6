@@ -71,6 +71,7 @@ const RESOURCE_KINDS = new Set<ResourceKind>([
 const PERMISSION_INTENTS = new Set<PermissionIntent>([
   "read_only",
   "mutating",
+  "governance_write",
 ]);
 const PERMISSION_EFFECTS = new Set<PermissionEffect>(["allow", "deny"]);
 const CONTRIBUTION_KINDS = new Set(["relay", "exit", "file"]);
@@ -92,6 +93,7 @@ const ACCESS_REASONS = new Set<EffectiveAccessReason>([
   "explicit_deny",
   "role_ceiling_exceeded",
   "temporary_coordinator_read_only",
+  "temporary_coordinator_governance_frozen",
   "default_denied",
   "invalid_policy",
 ]);
@@ -122,6 +124,7 @@ const PRECEDENCE_VALUES = new Set<PolicyPrecedence>([
   "local_contribution_veto",
   "explicit_deny",
   "temporary_coordinator_read_only",
+  "temporary_coordinator_governance_frozen",
   "role_ceiling_exceeded",
   "authorization_revoked",
   "authorization_expired",

@@ -25,7 +25,14 @@ import {
   Wifi,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type JSX } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type JSX,
+} from "react";
 import type {
   NodeApiCommandResponse,
   NodeCommandHttpRequest,
@@ -72,10 +79,7 @@ import {
   navigationModuleForPage,
   type NavigationModuleContract,
 } from "./navigation";
-import {
-  ActionPanel,
-  type ActionSubmission,
-} from "./components/action-panel";
+import { ActionPanel, type ActionSubmission } from "./components/action-panel";
 import {
   CONFIGURATION_ACTION_IDS,
   ConfigurationWorkflow,
@@ -149,6 +153,7 @@ const MANIFEST_QUERY_KEY = ["node-manifest", 1] as const;
 const SNAPSHOT_QUERY_KEY = ["node-snapshot", 1] as const;
 
 type RequestedActionMemo = {
+  requestId: number;
   actionId: string;
   values?: ActionValues;
 };
@@ -236,10 +241,7 @@ function useNodeEvents(
       if (raw === null) return;
       try {
         const message = JSON.parse(raw) as Record<string, unknown>;
-        if (
-          message.schema_version !== 1 ||
-          typeof message.type !== "string"
-        ) {
+        if (message.schema_version !== 1 || typeof message.type !== "string") {
           queueResync();
           return;
         }
@@ -355,7 +357,11 @@ function LoadingScreen({ locale }: { locale: Locale }): JSX.Element {
   );
 }
 
-function AuthenticatedLoadingShell({ locale }: { locale: Locale }): JSX.Element {
+function AuthenticatedLoadingShell({
+  locale,
+}: {
+  locale: Locale;
+}): JSX.Element {
   return (
     <div className="app-shell" aria-busy="true">
       <a className="skip-link" href="#page-content">
@@ -375,7 +381,10 @@ function AuthenticatedLoadingShell({ locale }: { locale: Locale }): JSX.Element 
             <strong>{label(locale, "common.node_contract")}</strong>
           </div>
         </div>
-        <nav className="module-list" aria-label={label(locale, "common.main_navigation")}>
+        <nav
+          className="module-list"
+          aria-label={label(locale, "common.main_navigation")}
+        >
           {MODULES.map((module) => {
             const Icon = module.icon;
             return (
@@ -394,7 +403,8 @@ function AuthenticatedLoadingShell({ locale }: { locale: Locale }): JSX.Element 
         <div className="nav-footer">
           <span>{label(locale, "state.initial_loading.title")}</span>
           <span className="stale-indicator active">
-            <span aria-hidden="true" /> {label(locale, "state.refreshing.title")}
+            <span aria-hidden="true" />{" "}
+            {label(locale, "state.refreshing.title")}
           </span>
         </div>
       </aside>
@@ -413,7 +423,9 @@ function AuthenticatedLoadingShell({ locale }: { locale: Locale }): JSX.Element 
           <label className="network-picker">
             <span>{label(locale, "common.current_network")}</span>
             <select disabled value="">
-              <option value="">{label(locale, "state.initial_loading.title")}</option>
+              <option value="">
+                {label(locale, "state.initial_loading.title")}
+              </option>
             </select>
           </label>
           <div className="global-actions">
@@ -446,7 +458,11 @@ function AuthenticatedLoadingShell({ locale }: { locale: Locale }): JSX.Element 
 
         <div className="secondary-shell">
           <div className="local-toolbar">
-            <div className="page-tabs" role="tablist" aria-label={label(locale, "common.page_sections")}>
+            <div
+              className="page-tabs"
+              role="tablist"
+              aria-label={label(locale, "common.page_sections")}
+            >
               {MODULES.map((module) => (
                 <button
                   key={module.id}
@@ -487,7 +503,9 @@ function AuthenticatedLoadingShell({ locale }: { locale: Locale }): JSX.Element 
               <div className="loading-panel" role="status">
                 <LoaderCircle className="spin" size={19} />
                 <div>
-                  <strong>{label(locale, "state.initial_loading.title")}</strong>
+                  <strong>
+                    {label(locale, "state.initial_loading.title")}
+                  </strong>
                   <p>{label(locale, "state.initial_loading.detail")}</p>
                 </div>
               </div>
@@ -505,9 +523,13 @@ function AuthenticatedLoadingShell({ locale }: { locale: Locale }): JSX.Element 
           <aside
             className="actions-panel"
             data-ui-region="action-panel"
-            aria-label={label(locale, "common.shared_actions")}
+            aria-label={label(locale, "common.actions_panel_title")}
           >
-            <div className="panel-title">{label(locale, "common.shared_actions")}</div>
+            <div className="panel-heading">
+              <div className="panel-title">
+                {label(locale, "common.actions_panel_title")}
+              </div>
+            </div>
             <div className="loading-skeleton" aria-hidden="true">
               <div className="loading-skeleton-block compact" />
               <div className="loading-skeleton-block compact" />
@@ -755,9 +777,9 @@ function AppShell({
   } | null>(null);
   const reauthenticationAttempt = useRef<ReauthenticationAttempt | null>(null);
   const [reauthenticationOpen, setReauthenticationOpen] = useState(false);
-  const [reauthenticationPending, setReauthenticationPending] =
-    useState(false);
+  const [reauthenticationPending, setReauthenticationPending] = useState(false);
   const [reauthenticationFailure, setReauthenticationFailure] = useState("");
+  const requestedActionSequence = useRef(0);
   const setPageId = (value: string) => onUiSessionChange({ pageId: value });
   const setSelectedNetworkState = (value: string) =>
     onUiSessionChange({ selectedNetwork: value });
@@ -789,14 +811,13 @@ function AppShell({
   const activeModule = moduleForPage(activePage?.id ?? "overview");
   const selectedNetwork = defaultNetworkName(snapshot, selectedNetworkState);
   const manifestActions = useMemo(
-    () =>
-      [
-        ...new Map(
-          manifest.pages
-            .flatMap((page) => page.actions)
-            .map((action) => [action.id, action]),
-        ).values(),
-      ],
+    () => [
+      ...new Map(
+        manifest.pages
+          .flatMap((page) => page.actions)
+          .map((action) => [action.id, action]),
+      ).values(),
+    ],
     [manifest],
   );
   const searchResults = useMemo(
@@ -817,8 +838,7 @@ function AppShell({
     lastAuthoritativeAt: lastAuthoritativeAt ?? eventState.lastAuthoritativeAt,
     error: maintenance ? null : pageErrorMessage,
     maintenance,
-    permissionDenied:
-      !snapshot.permissions?.permissions.includes("view_state"),
+    permissionDenied: !snapshot.permissions?.permissions.includes("view_state"),
     unsupported: pageUnsupported(snapshot, activePage?.id ?? ""),
   });
   const pageState = primaryPageState(pageSignals);
@@ -831,7 +851,10 @@ function AppShell({
 
   useEffect(() => {
     const focusSearch = (event: KeyboardEvent): void => {
-      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "k") {
+      if (
+        !(event.ctrlKey || event.metaKey) ||
+        event.key.toLowerCase() !== "k"
+      ) {
         return;
       }
       event.preventDefault();
@@ -884,7 +907,10 @@ function AppShell({
         });
     onOperation(operation);
     if (operation.result) {
-      return { outcome: validateCommandOutcome(operation.result.outcome), operation };
+      return {
+        outcome: validateCommandOutcome(operation.result.outcome),
+        operation,
+      };
     }
     if (operation.state === "succeeded") {
       throw new Error(label(locale, "common.operation_failed"));
@@ -1033,7 +1059,8 @@ function AppShell({
       } else if (submission.outcome?.status === "identity_rotated") {
         const rotation = submission.outcome.data;
         const current =
-          queryClient.getQueryData<NodeSnapshot>(SNAPSHOT_QUERY_KEY) ?? snapshot;
+          queryClient.getQueryData<NodeSnapshot>(SNAPSHOT_QUERY_KEY) ??
+          snapshot;
         if (current.identity) {
           queryClient.setQueryData<NodeSnapshot>(SNAPSHOT_QUERY_KEY, {
             ...current,
@@ -1131,11 +1158,13 @@ function AppShell({
     if (focusInput) searchInputRef.current?.focus();
   }
 
-  function requestAction(
-    actionId: string,
-    initialValues?: ActionValues,
-  ): void {
-    setRequestedAction({ actionId, values: initialValues });
+  function requestAction(actionId: string, initialValues?: ActionValues): void {
+    requestedActionSequence.current += 1;
+    setRequestedAction({
+      requestId: requestedActionSequence.current,
+      actionId,
+      values: initialValues,
+    });
   }
 
   function selectModule(module: ModuleDefinition): void {
@@ -1206,9 +1235,7 @@ function AppShell({
           </span>
           <span
             className={
-              syncMode === "live"
-                ? "stale-indicator"
-                : "stale-indicator active"
+              syncMode === "live" ? "stale-indicator" : "stale-indicator active"
             }
           >
             <span aria-hidden="true" />{" "}
@@ -1300,7 +1327,9 @@ function AppShell({
                   role="tab"
                   aria-selected={page.id === activePage?.id}
                   className={
-                    page.id === activePage?.id ? "page-tab selected" : "page-tab"
+                    page.id === activePage?.id
+                      ? "page-tab selected"
+                      : "page-tab"
                   }
                   onClick={() => navigate(page.id)}
                 >
@@ -1321,7 +1350,9 @@ function AppShell({
                   type="text"
                   value={searchQuery}
                   aria-label={label(locale, "common.search")}
-                  aria-controls={searchOpen ? "global-search-results" : undefined}
+                  aria-controls={
+                    searchOpen ? "global-search-results" : undefined
+                  }
                   aria-expanded={searchOpen}
                   autoComplete="off"
                   spellCheck={false}
@@ -1502,6 +1533,7 @@ function AppShell({
                     !POLICY_ACTION_IDS.has(action.id) &&
                     !TRAFFIC_POLICY_ACTION_IDS.has(action.id),
                 )}
+                actionGroups={manifest.action_groups}
                 snapshot={snapshot}
                 selectedNetwork={selectedNetwork}
                 locale={locale}
@@ -1521,66 +1553,66 @@ function AppShell({
             </div>
           )}
         </main>
-      <Dialog.Root
-        open={reauthenticationOpen}
-        onOpenChange={(open) => {
-          if (!open) cancelReauthentication();
-        }}
-      >
-        <Dialog.Portal>
-          <Dialog.Overlay className="dialog-overlay" />
-          <Dialog.Content className="dialog-content confirm-dialog">
-            <div className="dialog-heading">
-              <div className="dialog-icon">
-                <KeyRound size={20} />
+        <Dialog.Root
+          open={reauthenticationOpen}
+          onOpenChange={(open) => {
+            if (!open) cancelReauthentication();
+          }}
+        >
+          <Dialog.Portal>
+            <Dialog.Overlay className="dialog-overlay" />
+            <Dialog.Content className="dialog-content confirm-dialog">
+              <div className="dialog-heading">
+                <div className="dialog-icon">
+                  <KeyRound size={20} />
+                </div>
+                <div>
+                  <Dialog.Title>
+                    {label(locale, "owner_auth.reauth.title")}
+                  </Dialog.Title>
+                  <Dialog.Description>
+                    {label(locale, "owner_auth.reauth.description")}
+                  </Dialog.Description>
+                </div>
               </div>
-              <div>
-                <Dialog.Title>
-                  {label(locale, "owner_auth.reauth.title")}
-                </Dialog.Title>
-                <Dialog.Description>
-                  {label(locale, "owner_auth.reauth.description")}
-                </Dialog.Description>
+              {reauthenticationFailure ? (
+                <p className="form-error" role="alert">
+                  {reauthenticationFailure}
+                </p>
+              ) : null}
+              <div className="dialog-actions">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={reauthenticationPending}
+                  onClick={cancelReauthentication}
+                >
+                  {label(locale, "common.cancel")}
+                </button>
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={reauthenticationPending}
+                  onClick={() => void reauthenticateAndRetry()}
+                >
+                  {reauthenticationPending
+                    ? label(locale, "owner_auth.passkey.waiting")
+                    : label(locale, "owner_auth.passkey.reauth_button")}
+                </button>
               </div>
-            </div>
-            {reauthenticationFailure ? (
-              <p className="form-error" role="alert">
-                {reauthenticationFailure}
-              </p>
-            ) : null}
-            <div className="dialog-actions">
-              <button
-                className="secondary-button"
-                type="button"
-                disabled={reauthenticationPending}
-                onClick={cancelReauthentication}
-              >
-                {label(locale, "common.cancel")}
-              </button>
-              <button
-                className="primary-button"
-                type="button"
-                disabled={reauthenticationPending}
-                onClick={() => void reauthenticateAndRetry()}
-              >
-                {reauthenticationPending
-                  ? label(locale, "owner_auth.passkey.waiting")
-                  : label(locale, "owner_auth.passkey.reauth_button")}
-              </button>
-            </div>
-            <Dialog.Close asChild>
-              <button
-                className="icon-button dialog-close"
-                type="button"
-                disabled={reauthenticationPending}
-                aria-label={label(locale, "common.close")}
-              >
-                <X size={17} />
-              </button>
-            </Dialog.Close>
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
+              <Dialog.Close asChild>
+                <button
+                  className="icon-button dialog-close"
+                  type="button"
+                  disabled={reauthenticationPending}
+                  aria-label={label(locale, "common.close")}
+                >
+                  <X size={17} />
+                </button>
+              </Dialog.Close>
+            </Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root>
       </div>
     </div>
   );
@@ -1610,9 +1642,7 @@ export function App(): JSX.Element {
   const snapshotQuery = useQuery({
     queryKey: SNAPSHOT_QUERY_KEY,
     queryFn: () =>
-      loadSnapshot(
-        queryClient.getQueryData<NodeSnapshot>(SNAPSHOT_QUERY_KEY),
-      ),
+      loadSnapshot(queryClient.getQueryData<NodeSnapshot>(SNAPSHOT_QUERY_KEY)),
     enabled: authenticated,
     retry: false,
     placeholderData: (previous) => previous,

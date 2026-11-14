@@ -699,6 +699,7 @@
         "explicit_deny",
         "role_ceiling_exceeded",
         "temporary_coordinator_read_only",
+        "temporary_coordinator_governance_frozen",
         "default_denied",
         "invalid_policy"
       ],

@@ -65,7 +65,6 @@ pub struct CapabilityItem {
 pub struct SemanticPalette {
     pub foreground: Color,
     pub background: Color,
-    pub border: Color,
 }
 
 /// Semantic palette used by every native status surface. Text labels remain
@@ -76,27 +75,22 @@ pub const fn semantic_palette(state: SemanticState) -> SemanticPalette {
         SemanticState::Neutral => SemanticPalette {
             foreground: colors.text,
             background: colors.panel_raised,
-            border: colors.border,
         },
         SemanticState::Info => SemanticPalette {
             foreground: colors.info,
             background: colors.info_soft,
-            border: colors.info,
         },
         SemanticState::Success => SemanticPalette {
             foreground: colors.success,
             background: colors.success_soft,
-            border: colors.success,
         },
         SemanticState::Warning | SemanticState::Unsupported => SemanticPalette {
             foreground: colors.warning,
             background: colors.warning_soft,
-            border: colors.warning,
         },
         SemanticState::Danger | SemanticState::PermissionDenied => SemanticPalette {
             foreground: colors.danger_text,
             background: colors.danger_soft,
-            border: colors.danger,
         },
     }
 }
@@ -147,23 +141,21 @@ pub fn button(
     disabled: bool,
 ) -> Stateful<Div> {
     let colors = DARK_THEME.colors;
-    let (background, border, foreground) = if disabled {
-        (colors.surface, colors.border_soft, colors.text_faint)
+    let (background, foreground) = if disabled {
+        (colors.surface, colors.text_faint)
     } else {
         match variant {
-            ButtonVariant::Primary => (colors.accent, colors.accent, colors.background_deep),
-            ButtonVariant::Secondary => (colors.panel_raised, colors.border, colors.text),
-            ButtonVariant::Ghost => (
-                colors.panel_raised.with_alpha(0),
-                colors.border_soft,
-                colors.text_muted,
-            ),
-            ButtonVariant::Danger => (colors.danger_soft, colors.danger, colors.danger_text),
+            ButtonVariant::Primary => (colors.accent, colors.background_deep),
+            ButtonVariant::Secondary => (colors.panel_raised, colors.text),
+            ButtonVariant::Ghost => (colors.panel_raised.with_alpha(0), colors.text_muted),
+            ButtonVariant::Danger => (colors.danger_soft, colors.danger_text),
         }
     };
+    let glow = (variant == ButtonVariant::Primary && !disabled)
+        .then(|| colors.accent_glow.with_alpha(0x38));
 
     let label = label.into();
-    div()
+    let button = div()
         .id(id)
         .role(Role::Button)
         .aria_label(label.clone())
@@ -176,8 +168,6 @@ pub fn button(
         .px(px(SPACING_PX[3] as f32))
         .rounded(px(RADII.md_px as f32))
         .bg(rgba(background.rgba_hex()))
-        .border_1()
-        .border_color(rgba(border.rgba_hex()))
         .text_color(rgba(foreground.rgba_hex()))
         .text_size(px(TYPOGRAPHY.sm.size_px as f32))
         .line_height(px((TYPOGRAPHY.sm.size_px as f32
@@ -185,7 +175,18 @@ pub fn button(
             .round()))
         .font_weight(FontWeight(TYPOGRAPHY.medium_weight as f32))
         .opacity(if disabled { 0.62 } else { 1.0 })
-        .child(label)
+        .child(label);
+    if let Some(glow) = glow {
+        button.shadow(vec![gpui::BoxShadow::new(
+            px(0.0),
+            px(10.0),
+            rgba(glow.rgba_hex()).into(),
+        )
+        .blur_radius(px(24.0))
+        .spread_radius(px(-12.0))])
+    } else {
+        button
+    }
 }
 
 pub fn text_input(
@@ -199,7 +200,7 @@ pub fn text_input(
     let value = value.into();
     let placeholder = placeholder.into();
     let empty = value.is_empty();
-    div()
+    let control = div()
         .id(id)
         .role(Role::TextInput)
         .aria_label(aria_label)
@@ -214,13 +215,11 @@ pub fn text_input(
         .py(px(SPACING_PX[2] as f32))
         .overflow_hidden()
         .rounded(px(RADII.md_px as f32))
-        .bg(rgba(colors.input_background.rgba_hex()))
-        .border_1()
-        .border_color(rgba(
+        .bg(rgba(
             if focused {
-                colors.accent
+                colors.accent_soft
             } else {
-                colors.border
+                colors.input_background
             }
             .rgba_hex(),
         ))
@@ -236,7 +235,17 @@ pub fn text_input(
             }
             .rgba_hex(),
         ))
-        .child(if empty { placeholder } else { value })
+        .child(if empty { placeholder } else { value });
+    if focused {
+        control.shadow(vec![gpui::BoxShadow::new(
+            px(0.0),
+            px(0.0),
+            rgba(colors.accent_glow.with_alpha(0x2e).rgba_hex()).into(),
+        )
+        .blur_radius(px(14.0))])
+    } else {
+        control
+    }
 }
 
 pub fn choice_control(
@@ -299,15 +308,6 @@ fn choice_surface(
             }
             .rgba_hex(),
         ))
-        .border_1()
-        .border_color(rgba(
-            if selected {
-                colors.accent
-            } else {
-                colors.border
-            }
-            .rgba_hex(),
-        ))
         .text_color(rgba(
             if selected {
                 colors.text
@@ -348,12 +348,6 @@ pub fn nav_tab(
         .h(px(42.0))
         .px(px(SPACING_PX[3] as f32))
         .rounded(px(RADII.sm_px as f32))
-        .border_1()
-        .border_color(rgba(if selected {
-            colors.accent.with_alpha(0x40).rgba_hex()
-        } else {
-            0x00000000
-        }))
         .text_size(px(TYPOGRAPHY.sm.size_px as f32))
         .font_weight(FontWeight(if selected {
             TYPOGRAPHY.semibold_weight
@@ -419,8 +413,6 @@ pub fn badge(
         .py(px(SPACING_PX[1] as f32))
         .rounded(px(RADII.full_px as f32))
         .bg(rgba(palette.background.rgba_hex()))
-        .border_1()
-        .border_color(rgba(palette.border.rgba_hex()))
         .text_color(rgba(palette.foreground.rgba_hex()))
         .text_size(px(TYPOGRAPHY.xs.size_px as f32))
         .font_weight(FontWeight(TYPOGRAPHY.medium_weight as f32))
@@ -503,9 +495,12 @@ fn state_surface(
         .gap(px(SPACING_PX[2] as f32))
         .p(px(SPACING_PX[6] as f32))
         .rounded(px(RADII.lg_px as f32))
-        .bg(rgba(DARK_THEME.colors.panel_solid.rgba_hex()))
-        .border_1()
-        .border_color(rgba(palette.border.rgba_hex()))
+        .bg(rgba(
+            palette
+                .background
+                .composite_over(DARK_THEME.colors.panel_solid)
+                .rgba_hex(),
+        ))
         .child(
             div()
                 .text_size(px(TYPOGRAPHY.xl.size_px as f32))
@@ -573,8 +568,6 @@ pub fn toast(
         .py(px(SPACING_PX[2] as f32))
         .rounded(px(RADII.md_px as f32))
         .bg(rgba(palette.background.rgba_hex()))
-        .border_1()
-        .border_color(rgba(palette.border.rgba_hex()))
         .text_color(rgba(palette.foreground.rgba_hex()))
         .text_size(px(TYPOGRAPHY.sm.size_px as f32))
         .child(message)
@@ -624,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn every_semantic_state_has_a_distinct_text_foreground_and_border() {
+    fn every_semantic_state_has_text_and_surface_colors() {
         let states = [
             SemanticState::Neutral,
             SemanticState::Info,
@@ -637,7 +630,7 @@ mod tests {
         for state in states {
             let palette = semantic_palette(state);
             assert_ne!(palette.foreground.rgba_hex(), 0);
-            assert_ne!(palette.border.rgba_hex(), 0);
+            assert_ne!(palette.background.rgba_hex(), 0);
         }
         assert_eq!(
             semantic_palette(SemanticState::Danger),

@@ -170,7 +170,10 @@ impl OperationError {
             return Err(DomainError::invalid_value("operation error is invalid"));
         }
         for (key, value) in &self.params {
-            if !is_stable_symbol(key, 128) || value.len() > 2_048 {
+            // Parameter keys are message placeholders (for example `reason`),
+            // not dotted catalog symbols. Keep them constrained to stable
+            // tokens so they remain safe for interpolation in every adapter.
+            if !is_stable_token(key, 128) || value.len() > 2_048 {
                 return Err(DomainError::invalid_value(
                     "operation error parameters are invalid",
                 ));
@@ -657,6 +660,29 @@ mod tests {
         assert!(!operation.cancellable);
         assert!(operation.cancel_blocked_reason.is_none());
         operation.validate().unwrap();
+    }
+
+    #[test]
+    fn operation_error_accepts_message_parameter_tokens() {
+        let error = OperationError {
+            code: "operation.conflict".into(),
+            message_key: "error.operation_conflict".into(),
+            params: BTreeMap::from([
+                ("reason".into(), "revision changed".into()),
+                ("detail".into(), "backend detail".into()),
+            ]),
+            object: None,
+            retryable: false,
+            recovery: None,
+            partial_changes: Vec::new(),
+        };
+        error.validate().unwrap();
+
+        let invalid = OperationError {
+            params: BTreeMap::from([("not a token".into(), "value".into())]),
+            ..error
+        };
+        assert!(invalid.validate().is_err());
     }
 
     #[test]

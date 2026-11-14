@@ -492,6 +492,7 @@ public final class NodeContractV1 {
         EXPLICIT_DENY("explicit_deny"),
         ROLE_CEILING_EXCEEDED("role_ceiling_exceeded"),
         TEMPORARY_COORDINATOR_READ_ONLY("temporary_coordinator_read_only"),
+        TEMPORARY_COORDINATOR_GOVERNANCE_FROZEN("temporary_coordinator_governance_frozen"),
         DEFAULT_DENIED("default_denied"),
         INVALID_POLICY("invalid_policy");
 
@@ -2485,6 +2486,36 @@ public final class NodeContractV1 {
         }
     }
 
+    public enum NodeUiActionGroup {
+        CREATE_AND_JOIN("create_and_join"),
+        MEMBERS_AND_INVITATIONS("members_and_invitations"),
+        DISCOVERY("discovery"),
+        RUNTIME("runtime"),
+        ROUTING("routing"),
+        SECURITY("security"),
+        CONFIGURATION("configuration"),
+        INSPECT("inspect");
+
+        private final String wireName;
+
+        NodeUiActionGroup(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static NodeUiActionGroup fromWireName(String value) {
+            for (NodeUiActionGroup candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown NodeUiActionGroup wire value: " + value);
+        }
+    }
+
     public enum NodeUiAuditPolicy {
         NONE("none"),
         RECORD_OUTCOME("record_outcome");
@@ -2902,7 +2933,8 @@ public final class NodeContractV1 {
 
     public enum PermissionIntent {
         READ_ONLY("read_only"),
-        MUTATING("mutating");
+        MUTATING("mutating"),
+        GOVERNANCE_WRITE("governance_write");
 
         private final String wireName;
 
@@ -3057,6 +3089,7 @@ public final class NodeContractV1 {
         LOCAL_CONTRIBUTION_VETO("local_contribution_veto"),
         EXPLICIT_DENY("explicit_deny"),
         TEMPORARY_COORDINATOR_READ_ONLY("temporary_coordinator_read_only"),
+        TEMPORARY_COORDINATOR_GOVERNANCE_FROZEN("temporary_coordinator_governance_frozen"),
         ROLE_CEILING_EXCEEDED("role_ceiling_exceeded"),
         AUTHORIZATION_REVOKED("authorization_revoked"),
         AUTHORIZATION_EXPIRED("authorization_expired"),
@@ -7576,17 +7609,21 @@ public final class NodeContractV1 {
         public final String command;
         public final NodeUiConfirmation confirmation;
         public final List<NodeUiField> fields;
+        public final NodeUiActionGroup group;
+        public final String group_label_key;
         public final String id;
         public final String label_key;
         public final NodePermission permission;
 
-        public NodeUiAction(NodeUiAudit audit, NodeUiAvailability availability, String backend_status, String command, NodeUiConfirmation confirmation, List<NodeUiField> fields, String id, String label_key, NodePermission permission) {
+        public NodeUiAction(NodeUiAudit audit, NodeUiAvailability availability, String backend_status, String command, NodeUiConfirmation confirmation, List<NodeUiField> fields, NodeUiActionGroup group, String group_label_key, String id, String label_key, NodePermission permission) {
             this.audit = audit;
             this.availability = availability;
             this.backend_status = backend_status;
             this.command = command;
             this.confirmation = confirmation;
             this.fields = fields;
+            this.group = group;
+            this.group_label_key = group_label_key;
             this.id = id;
             this.label_key = label_key;
             this.permission = permission;
@@ -7639,12 +7676,14 @@ public final class NodeContractV1 {
     /** DTO for NodeUiManifest. */
     public static final class NodeUiManifest {
         public final List<NodeUiActionBlockReason> action_block_reasons;
+        public final List<NodeUiActionGroup> action_groups;
         public final List<NodeUiPageState> page_states;
         public final List<NodeUiPage> pages;
         public final Integer schema_version;
 
-        public NodeUiManifest(List<NodeUiActionBlockReason> action_block_reasons, List<NodeUiPageState> page_states, List<NodeUiPage> pages, Integer schema_version) {
+        public NodeUiManifest(List<NodeUiActionBlockReason> action_block_reasons, List<NodeUiActionGroup> action_groups, List<NodeUiPageState> page_states, List<NodeUiPage> pages, Integer schema_version) {
             this.action_block_reasons = action_block_reasons;
+            this.action_groups = action_groups;
             this.page_states = page_states;
             this.pages = pages;
             this.schema_version = schema_version;

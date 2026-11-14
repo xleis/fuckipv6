@@ -245,6 +245,11 @@ impl EmbeddedCoordinator {
         };
         default_coordinator_config.network_record_path = Some(network_record_path.clone());
         default_coordinator_config.owner_node_id = Some(owner_node_id.clone());
+        // The embedded runtime request is authoritative for listener addresses.
+        // Keep the per-network coordinator config aligned with it instead of
+        // retaining CoordinatorConfig::default()'s standalone bind addresses.
+        default_coordinator_config.signaling_bind = format!("0.0.0.0:{}", request.signaling_port);
+        default_coordinator_config.relay_bind = format!("0.0.0.0:{}", request.relay_port);
         let blacklist_store = CoordinatorConfigBlacklistStore::with_default_config(
             blacklist_path.clone(),
             default_coordinator_config.clone(),
@@ -269,36 +274,6 @@ impl EmbeddedCoordinator {
         let persisted_allocation = blacklist_store
             .load_network_allocation()
             .context("无法加载持久化协调端地址分配")?;
-        let join_request_store = Arc::new(
-            JoinRequestStore::new(
-                blacklist_path.with_file_name("join_requests.json"),
-                Some(network_record_path.clone()),
-                Some(owner_node_id.clone()),
-                Vec::new(),
-            )
-            .context("无法初始化审批请求存储")?,
-        );
-        let member_lifecycle_store = Arc::new(
-            MemberLifecycleStore::new(
-                blacklist_path.with_file_name("member_lifecycle.json"),
-                network_record_path.clone(),
-            )
-            .context("无法初始化成员生命周期存储")?,
-        );
-        let invitation_store = Arc::new(
-            InvitationStore::new(
-                blacklist_path.with_file_name("invitations.json"),
-                Some(network_record_path.clone()),
-                Some(owner_node_id.clone()),
-                Vec::new(),
-            )
-            .context("无法初始化私有邀请存储")?
-            .with_member_lifecycle_store(member_lifecycle_store.clone()),
-        );
-        let exit_contribution_store = Arc::new(ExitContributionRequestStore::new(
-            blacklist_path.with_file_name("exit_contribution_requests.json"),
-            network_record_path.clone(),
-        ));
         let coordinator_candidate_store = network_id
             .as_ref()
             .map(|_| {
@@ -310,6 +285,50 @@ impl EmbeddedCoordinator {
                 .context("无法初始化 Coordinator 候选存储")
             })
             .transpose()?;
+        let mut member_lifecycle = MemberLifecycleStore::new(
+            blacklist_path.with_file_name("member_lifecycle.json"),
+            network_record_path.clone(),
+        )
+        .context("无法初始化成员生命周期存储")?;
+        if let Some(store) = coordinator_candidate_store.clone() {
+            member_lifecycle = member_lifecycle.with_coordinator_candidate_store(store);
+        }
+        let member_lifecycle_store = Arc::new(member_lifecycle);
+
+        let mut join_request = JoinRequestStore::new(
+            blacklist_path.with_file_name("join_requests.json"),
+            Some(network_record_path.clone()),
+            Some(owner_node_id.clone()),
+            Vec::new(),
+        )
+        .context("无法初始化审批请求存储")?
+        .with_member_lifecycle_store(member_lifecycle_store.clone());
+        if let Some(store) = coordinator_candidate_store.clone() {
+            join_request = join_request.with_coordinator_candidate_store(store);
+        }
+        let join_request_store = Arc::new(join_request);
+
+        let mut invitation = InvitationStore::new(
+            blacklist_path.with_file_name("invitations.json"),
+            Some(network_record_path.clone()),
+            Some(owner_node_id.clone()),
+            Vec::new(),
+        )
+        .context("无法初始化私有邀请存储")?
+        .with_member_lifecycle_store(member_lifecycle_store.clone());
+        if let Some(store) = coordinator_candidate_store.clone() {
+            invitation = invitation.with_coordinator_candidate_store(store);
+        }
+        let invitation_store = Arc::new(invitation);
+
+        let mut exit_contribution = ExitContributionRequestStore::new(
+            blacklist_path.with_file_name("exit_contribution_requests.json"),
+            network_record_path.clone(),
+        );
+        if let Some(store) = coordinator_candidate_store.clone() {
+            exit_contribution = exit_contribution.with_coordinator_candidate_store(store);
+        }
+        let exit_contribution_store = Arc::new(exit_contribution);
         let session_manager = Arc::new(
             SessionManager::new_with_allocation(&persisted_allocation)
                 .context("无法初始化内嵌协调器地址池")?,
@@ -983,6 +1002,11 @@ mod tests {
                 .port(),
             0
         );
+        let persisted =
+            CoordinatorConfig::from_file(config_dir.join("test-mesh").join("coordinator.toml"))
+                .expect("read persisted coordinator config");
+        assert_eq!(persisted.signaling_bind, "0.0.0.0:0");
+        assert_eq!(persisted.relay_bind, "0.0.0.0:0");
         coordinator.shutdown().await.expect("shutdown coordinator");
         let _ = std::fs::remove_dir_all(config_dir);
     }

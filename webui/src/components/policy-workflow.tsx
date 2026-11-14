@@ -123,7 +123,11 @@ const NETWORK_ROLES: NetworkRole[] = [
   "member",
   "temporary_coordinator",
 ];
-const PERMISSION_INTENTS: PermissionIntent[] = ["read_only", "mutating"];
+const PERMISSION_INTENTS: PermissionIntent[] = [
+  "read_only",
+  "mutating",
+  "governance_write",
+];
 const CONTRIBUTION_KINDS = ["relay", "exit", "file"] as const;
 
 export type PolicyRuleDraft = {

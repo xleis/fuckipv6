@@ -421,19 +421,28 @@ pub struct AccessContext {
     pub emergency_coordinator: bool,
 }
 
-/// Whether a request can mutate durable state. Temporary Coordinators may read
-/// the last valid policy and coordinate existing connections, but every
-/// mutating request is frozen in the domain evaluator.
+/// The authorization impact of a request.
+///
+/// `Mutating` covers runtime/local mutations such as starting a network,
+/// rebuilding TUN or changing live routes. `GovernanceWrite` is deliberately
+/// narrower: it covers changes to long-lived membership, roles, policies,
+/// keys, invitations and authorization configuration. A temporary Coordinator
+/// may perform runtime coordination, but only governance writes are frozen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, JsonSchema, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionIntent {
     ReadOnly,
     Mutating,
+    GovernanceWrite,
 }
 
 impl PermissionIntent {
     pub const fn is_mutating(self) -> bool {
-        matches!(self, Self::Mutating)
+        !matches!(self, Self::ReadOnly)
+    }
+
+    pub const fn is_governance_write(self) -> bool {
+        matches!(self, Self::GovernanceWrite)
     }
 }
 
@@ -460,8 +469,13 @@ pub enum PermissionDenialCode {
     NetworkScopeDenied,
     #[serde(rename = "permission.membership_inactive")]
     MembershipInactive,
+    /// Legacy broad code retained for wire compatibility. New evaluations use
+    /// `TemporaryCoordinatorGovernanceFrozen`, which does not imply that all
+    /// runtime writes are forbidden.
     #[serde(rename = "permission.temporary_coordinator_read_only")]
     TemporaryCoordinatorReadOnly,
+    #[serde(rename = "permission.temporary_coordinator_governance_frozen")]
+    TemporaryCoordinatorGovernanceFrozen,
     #[serde(rename = "permission.role_ceiling_exceeded")]
     RoleCeilingExceeded,
     #[serde(rename = "permission.policy_denied")]
@@ -479,7 +493,7 @@ pub enum PermissionDenialCode {
 }
 
 impl PermissionDenialCode {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::AuthenticationRequired,
         Self::CapabilityDenied,
         Self::LocalOwnerRequired,
@@ -487,6 +501,7 @@ impl PermissionDenialCode {
         Self::NetworkScopeDenied,
         Self::MembershipInactive,
         Self::TemporaryCoordinatorReadOnly,
+        Self::TemporaryCoordinatorGovernanceFrozen,
         Self::RoleCeilingExceeded,
         Self::PolicyDenied,
         Self::CrossNetworkDenied,
@@ -505,6 +520,9 @@ impl PermissionDenialCode {
             Self::NetworkScopeDenied => "permission.network_scope_denied",
             Self::MembershipInactive => "permission.membership_inactive",
             Self::TemporaryCoordinatorReadOnly => "permission.temporary_coordinator_read_only",
+            Self::TemporaryCoordinatorGovernanceFrozen => {
+                "permission.temporary_coordinator_governance_frozen"
+            }
             Self::RoleCeilingExceeded => "permission.role_ceiling_exceeded",
             Self::PolicyDenied => "permission.policy_denied",
             Self::CrossNetworkDenied => "permission.cross_network_denied",
@@ -574,7 +592,7 @@ pub fn evaluate_network_permissions(
 enum LayerDecision {
     Allow,
     ExplicitDeny(SecurityRuleId),
-    TemporaryCoordinatorReadOnly,
+    TemporaryCoordinatorGovernanceFrozen,
     RoleCeilingExceeded(SecurityRuleId),
     DefaultDenied,
 }
@@ -586,8 +604,8 @@ impl LayerDecision {
             Self::ExplicitDeny(rule_id) => {
                 PermissionDecision::deny(PermissionDenialCode::Denied, "network", Some(rule_id))
             }
-            Self::TemporaryCoordinatorReadOnly => PermissionDecision::deny(
-                PermissionDenialCode::TemporaryCoordinatorReadOnly,
+            Self::TemporaryCoordinatorGovernanceFrozen => PermissionDecision::deny(
+                PermissionDenialCode::TemporaryCoordinatorGovernanceFrozen,
                 "network",
                 None,
             ),
@@ -629,9 +647,12 @@ fn compose_permission_layers(
         }
     }
     for (layer, decision) in [("local", &local), ("network", &network)] {
-        if matches!(decision, LayerDecision::TemporaryCoordinatorReadOnly) {
+        if matches!(
+            decision,
+            LayerDecision::TemporaryCoordinatorGovernanceFrozen
+        ) {
             return PermissionDecision::deny(
-                PermissionDenialCode::TemporaryCoordinatorReadOnly,
+                PermissionDenialCode::TemporaryCoordinatorGovernanceFrozen,
                 layer,
                 None,
             );
@@ -667,8 +688,8 @@ fn evaluate_permission_layer(
             return LayerDecision::ExplicitDeny(rule.rule_id.clone());
         }
     }
-    if context.role == NetworkRole::TemporaryCoordinator && request.intent.is_mutating() {
-        return LayerDecision::TemporaryCoordinatorReadOnly;
+    if context.role == NetworkRole::TemporaryCoordinator && request.intent.is_governance_write() {
+        return LayerDecision::TemporaryCoordinatorGovernanceFrozen;
     }
     for rule in rules.iter().filter(|rule| rule.matches(request, context)) {
         if rule.effect == PermissionEffect::Allow
@@ -731,6 +752,9 @@ pub fn role_ceiling_allows(
                     | ResourceKind::Capability
                     | ResourceKind::TrafficPolicy
                     | ResourceKind::CoordinatorTerm
+            ) | (
+                PolicyAction::Enable | PolicyAction::Disable | PolicyAction::Update,
+                ResourceKind::Network
             )
         ),
     }
@@ -950,6 +974,9 @@ mod tests {
                         | ResourceKind::Capability
                         | ResourceKind::TrafficPolicy
                         | ResourceKind::CoordinatorTerm
+                ) | (
+                    PolicyAction::Enable | PolicyAction::Disable | PolicyAction::Update,
+                    ResourceKind::Network
                 )
             ),
         }
@@ -1018,7 +1045,7 @@ mod tests {
     #[test]
     fn denial_codes_are_stable_and_unique() {
         let codes = PermissionDenialCode::ALL.map(PermissionDenialCode::as_str);
-        assert_eq!(codes.len(), 14);
+        assert_eq!(codes.len(), 15);
         assert!(codes.iter().all(|code| code.starts_with("permission.")));
         assert_eq!(
             codes.iter().copied().collect::<BTreeSet<_>>().len(),
@@ -1062,23 +1089,23 @@ mod tests {
     }
 
     #[test]
-    fn temporary_coordinator_mutation_is_frozen_after_explicit_denial() {
+    fn temporary_coordinator_governance_write_is_frozen_after_explicit_denial() {
         let (network_id, actor, _) = ids();
         let context = context(
             network_id.clone(),
             actor.clone(),
             NetworkRole::TemporaryCoordinator,
         );
-        let request = |intent| PermissionRequest {
+        let read_request = PermissionRequest {
             action: PolicyAction::Read,
             resource: ResourceRef {
                 kind: ResourceKind::SecurityPolicy,
                 network_id: network_id.clone(),
                 object_id: None,
             },
-            intent,
+            intent: PermissionIntent::ReadOnly,
         };
-        let allow = rule(
+        let read_allow = rule(
             b"temporary-read-policy",
             PermissionEffect::Allow,
             SubjectSelector::AnyMember,
@@ -1087,23 +1114,66 @@ mod tests {
         );
         assert_eq!(
             evaluate_permissions(
-                std::slice::from_ref(&allow),
-                std::slice::from_ref(&allow),
-                &request(PermissionIntent::ReadOnly),
+                std::slice::from_ref(&read_allow),
+                std::slice::from_ref(&read_allow),
+                &read_request,
                 &context,
             ),
             PermissionDecision::Allow
         );
+
+        let governance_request = PermissionRequest {
+            action: PolicyAction::Update,
+            resource: ResourceRef {
+                kind: ResourceKind::SecurityPolicy,
+                network_id: network_id.clone(),
+                object_id: None,
+            },
+            intent: PermissionIntent::GovernanceWrite,
+        };
+        let governance_allow = rule(
+            b"temporary-governance-policy",
+            PermissionEffect::Allow,
+            SubjectSelector::AnyMember,
+            PolicyAction::Update,
+            ResourceKind::SecurityPolicy,
+        );
         assert!(matches!(
             evaluate_permissions(
-                std::slice::from_ref(&allow),
-                std::slice::from_ref(&allow),
-                &request(PermissionIntent::Mutating),
+                std::slice::from_ref(&governance_allow),
+                std::slice::from_ref(&governance_allow),
+                &governance_request,
                 &context,
             ),
             PermissionDecision::Deny { code, .. }
-                if code == PermissionDenialCode::TemporaryCoordinatorReadOnly.as_str()
+                if code == PermissionDenialCode::TemporaryCoordinatorGovernanceFrozen.as_str()
         ));
+
+        let runtime_request = PermissionRequest {
+            action: PolicyAction::Update,
+            resource: ResourceRef {
+                kind: ResourceKind::Network,
+                network_id,
+                object_id: None,
+            },
+            intent: PermissionIntent::Mutating,
+        };
+        let runtime_allow = rule(
+            b"temporary-runtime-network",
+            PermissionEffect::Allow,
+            SubjectSelector::AnyMember,
+            PolicyAction::Update,
+            ResourceKind::Network,
+        );
+        assert_eq!(
+            evaluate_permissions(
+                std::slice::from_ref(&runtime_allow),
+                std::slice::from_ref(&runtime_allow),
+                &runtime_request,
+                &context,
+            ),
+            PermissionDecision::Allow
+        );
     }
 
     #[test]

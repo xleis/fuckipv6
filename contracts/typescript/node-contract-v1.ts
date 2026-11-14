@@ -242,7 +242,7 @@ export type EffectiveAccess = {
   "rule_id"?: SecurityRuleId | null;
 };
 
-export type EffectiveAccessReason = "allowed" | "cross_network_denied" | "network_scope_restricted" | "local_contribution_veto" | "authorization_expired" | "authorization_revoked" | "recent_reauthentication_required" | "explicit_deny" | "role_ceiling_exceeded" | "temporary_coordinator_read_only" | "default_denied" | "invalid_policy";
+export type EffectiveAccessReason = "allowed" | "cross_network_denied" | "network_scope_restricted" | "local_contribution_veto" | "authorization_expired" | "authorization_revoked" | "recent_reauthentication_required" | "explicit_deny" | "role_ceiling_exceeded" | "temporary_coordinator_read_only" | "temporary_coordinator_governance_frozen" | "default_denied" | "invalid_policy";
 
 export type EffectivePolicyLayer = "local" | "network" | "request";
 
@@ -2427,12 +2427,16 @@ export type NodeUiAction = {
   "command": "get_snapshot" | "get_node_diagnostics" | "start_networks" | "stop_networks" | "restart_networks" | "rebuild_tun" | "create_network" | "preview_network_profile" | "update_network_profile" | "publish_network_discovery" | "update_network_discovery" | "unpublish_network_discovery" | "refresh_discovery_index" | "retry_discovery_index" | "preview_join_network" | "join_network" | "submit_join_request" | "list_join_requests" | "list_network_members" | "preview_member_removal" | "change_member_lifecycle" | "review_join_request" | "batch_review_join_requests" | "withdraw_join_request" | "resubmit_join_request" | "create_invitation" | "list_invitations" | "get_invitation_status" | "revoke_invitation" | "preview_invitation" | "redeem_invitation" | "leave_network" | "acknowledge_membership_policy" | "update_routing" | "set_network_role" | "set_local_exit_capability" | "set_node_display_name" | "rotate_node_identity" | "get_blacklist" | "ban_client" | "unban_client" | "get_network_allocation" | "update_network_allocation" | "probe_peer" | "start_node" | "stop_node" | "restart_node" | "cleanup_node_residuals" | "get_configuration" | "preview_configuration" | "apply_configuration" | "rollback_configuration" | "get_configuration_history" | "get_policy" | "preview_policy" | "preview_policy_rollback" | "apply_policy" | "rollback_policy" | "get_policy_history" | "test_policy" | "get_traffic_policy" | "preview_traffic_policy" | "preview_traffic_policy_rollback" | "apply_traffic_policy" | "rollback_traffic_policy" | "get_traffic_policy_history" | "test_traffic_policy" | "get_coordinator_candidates" | "update_coordinator_candidates" | "publish_coordinator_candidate_declaration" | "shutdown";
   "confirmation"?: NodeUiConfirmation | null;
   "fields": Array<NodeUiField>;
+  "group": NodeUiActionGroup;
+  "group_label_key": string;
   "id": string;
   "label_key": string;
   "permission": NodePermission;
 };
 
 export type NodeUiActionBlockReason = "node_not_running" | "no_online_network" | "no_network_selected" | "permission_denied" | "platform_unsupported" | "exit_node_unsupported" | "tun_platform_unsupported" | "tun_permission_denied" | "tun_device_unavailable" | "tun_tool_unavailable" | "tun_unavailable" | "backend_unavailable";
+
+export type NodeUiActionGroup = "create_and_join" | "members_and_invitations" | "discovery" | "runtime" | "routing" | "security" | "configuration" | "inspect";
 
 export type NodeUiAudit = {
   "action"?: string | null;
@@ -2464,6 +2468,7 @@ export type NodeUiInputKind = "boolean" | "client_id" | "configuration_json" | "
 
 export type NodeUiManifest = {
   "action_block_reasons": Array<NodeUiActionBlockReason>;
+  "action_groups": Array<NodeUiActionGroup>;
   "page_states": Array<NodeUiPageState>;
   "pages": Array<NodeUiPage>;
   "schema_version": number;
@@ -2575,7 +2580,7 @@ export type PermissionCondition = {
 
 export type PermissionEffect = "allow" | "deny";
 
-export type PermissionIntent = "read_only" | "mutating";
+export type PermissionIntent = "read_only" | "mutating" | "governance_write";
 
 export type PermissionRule = {
   "actions": Array<PolicyAction>;
@@ -2644,7 +2649,7 @@ export type PolicyHistorySnapshot = {
 
 export type PolicyObjectKind = "local_policy" | "network_acl" | "permission_rule" | "network_acl_grant" | "contribution_veto" | "network_scope";
 
-export type PolicyPrecedence = "cross_network_denied" | "invalid_or_expired_policy" | "network_scope_restricted" | "local_contribution_veto" | "explicit_deny" | "temporary_coordinator_read_only" | "role_ceiling_exceeded" | "authorization_revoked" | "authorization_expired" | "recent_reauthentication_required" | "default_denied" | "allow";
+export type PolicyPrecedence = "cross_network_denied" | "invalid_or_expired_policy" | "network_scope_restricted" | "local_contribution_veto" | "explicit_deny" | "temporary_coordinator_read_only" | "temporary_coordinator_governance_frozen" | "role_ceiling_exceeded" | "authorization_revoked" | "authorization_expired" | "recent_reauthentication_required" | "default_denied" | "allow";
 
 export type PolicyPrecedenceExplanation = {
   "precedence": PolicyPrecedence;

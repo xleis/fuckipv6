@@ -29,6 +29,16 @@
     "tun_unavailable",
     "backend_unavailable"
   ],
+  "action_groups": [
+    "create_and_join",
+    "members_and_invitations",
+    "discovery",
+    "runtime",
+    "routing",
+    "security",
+    "configuration",
+    "inspect"
+  ],
   "pages": [
     {
       "id": "overview",
@@ -44,6 +54,8 @@
         {
           "id": "create_network",
           "label_key": "action.create_network",
+          "group": "create_and_join",
+          "group_label_key": "action_group.create_and_join",
           "command": "create_network",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -178,6 +190,8 @@
         {
           "id": "preview_network_profile",
           "label_key": "action.preview_network_profile",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "preview_network_profile",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -291,6 +305,8 @@
         {
           "id": "update_network_profile",
           "label_key": "action.update_network_profile",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "update_network_profile",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -409,6 +425,8 @@
         {
           "id": "publish_network_discovery",
           "label_key": "action.publish_network_discovery",
+          "group": "discovery",
+          "group_label_key": "action_group.discovery",
           "command": "publish_network_discovery",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -443,6 +461,8 @@
         {
           "id": "update_network_discovery",
           "label_key": "action.update_network_discovery",
+          "group": "discovery",
+          "group_label_key": "action_group.discovery",
           "command": "update_network_discovery",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -477,6 +497,8 @@
         {
           "id": "unpublish_network_discovery",
           "label_key": "action.unpublish_network_discovery",
+          "group": "discovery",
+          "group_label_key": "action_group.discovery",
           "command": "unpublish_network_discovery",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -511,6 +533,8 @@
         {
           "id": "refresh_discovery_index",
           "label_key": "action.refresh_discovery_index",
+          "group": "discovery",
+          "group_label_key": "action_group.discovery",
           "command": "refresh_discovery_index",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -533,6 +557,8 @@
         {
           "id": "retry_discovery_index",
           "label_key": "action.retry_discovery_index",
+          "group": "discovery",
+          "group_label_key": "action_group.discovery",
           "command": "retry_discovery_index",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -547,6 +573,8 @@
         {
           "id": "preview_join_network",
           "label_key": "action.preview_join_network",
+          "group": "create_and_join",
+          "group_label_key": "action_group.create_and_join",
           "command": "preview_join_network",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -569,6 +597,8 @@
         {
           "id": "join_network",
           "label_key": "action.join_network",
+          "group": "create_and_join",
+          "group_label_key": "action_group.create_and_join",
           "command": "join_network",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -605,6 +635,8 @@
         {
           "id": "submit_join_request",
           "label_key": "action.submit_join_request",
+          "group": "create_and_join",
+          "group_label_key": "action_group.create_and_join",
           "command": "submit_join_request",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -634,6 +666,8 @@
         {
           "id": "list_join_requests",
           "label_key": "action.list_join_requests",
+          "group": "members_and_invitations",
+          "group_label_key": "action_group.members_and_invitations",
           "command": "list_join_requests",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -656,6 +690,8 @@
         {
           "id": "list_network_members",
           "label_key": "action.list_network_members",
+          "group": "members_and_invitations",
+          "group_label_key": "action_group.members_and_invitations",
           "command": "list_network_members",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -678,6 +714,8 @@
         {
           "id": "preview_member_removal",
           "label_key": "action.preview_member_removal",
+          "group": "members_and_invitations",
+          "group_label_key": "action_group.members_and_invitations",
           "command": "preview_member_removal",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -707,6 +745,8 @@
         {
           "id": "change_member_lifecycle",
           "label_key": "action.change_member_lifecycle",
+          "group": "members_and_invitations",
+          "group_label_key": "action_group.members_and_invitations",
           "command": "change_member_lifecycle",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -769,6 +809,8 @@
         {
           "id": "review_join_request",
           "label_key": "action.review_join_request",
+          "group": "members_and_invitations",
+          "group_label_key": "action_group.members_and_invitations",
           "command": "review_join_request",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -824,6 +866,8 @@
         {
           "id": "batch_review_join_requests",
           "label_key": "action.batch_review_join_requests",
+          "group": "members_and_invitations",
+          "group_label_key": "action_group.members_and_invitations",
           "command": "batch_review_join_requests",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -865,6 +909,8 @@
         {
           "id": "withdraw_join_request",
           "label_key": "action.withdraw_join_request",
+          "group": "create_and_join",
+          "group_label_key": "action_group.create_and_join",
           "command": "withdraw_join_request",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -899,6 +945,8 @@
         {
           "id": "resubmit_join_request",
           "label_key": "action.resubmit_join_request",
+          "group": "create_and_join",
+          "group_label_key": "action_group.create_and_join",
           "command": "resubmit_join_request",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -942,6 +990,8 @@
         {
           "id": "create_invitation",
           "label_key": "action.create_invitation",
+          "group": "members_and_invitations",
+          "group_label_key": "action_group.members_and_invitations",
           "command": "create_invitation",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -997,6 +1047,8 @@
         {
           "id": "list_invitations",
           "label_key": "action.list_invitations",
+          "group": "members_and_invitations",
+          "group_label_key": "action_group.members_and_invitations",
           "command": "list_invitations",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -1019,6 +1071,8 @@
         {
           "id": "get_invitation_status",
           "label_key": "action.get_invitation_status",
+          "group": "members_and_invitations",
+          "group_label_key": "action_group.members_and_invitations",
           "command": "get_invitation_status",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -1048,6 +1102,8 @@
         {
           "id": "revoke_invitation",
           "label_key": "action.revoke_invitation",
+          "group": "members_and_invitations",
+          "group_label_key": "action_group.members_and_invitations",
           "command": "revoke_invitation",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -1089,6 +1145,8 @@
         {
           "id": "preview_invitation",
           "label_key": "action.preview_invitation",
+          "group": "members_and_invitations",
+          "group_label_key": "action_group.members_and_invitations",
           "command": "preview_invitation",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -1130,6 +1188,8 @@
         {
           "id": "redeem_invitation",
           "label_key": "action.redeem_invitation",
+          "group": "create_and_join",
+          "group_label_key": "action_group.create_and_join",
           "command": "redeem_invitation",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -1206,6 +1266,8 @@
         {
           "id": "leave_network",
           "label_key": "action.leave_network",
+          "group": "members_and_invitations",
+          "group_label_key": "action_group.members_and_invitations",
           "command": "leave_network",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -1233,6 +1295,8 @@
         {
           "id": "acknowledge_membership_policy",
           "label_key": "action.acknowledge_membership_policy",
+          "group": "members_and_invitations",
+          "group_label_key": "action_group.members_and_invitations",
           "command": "acknowledge_membership_policy",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -1281,6 +1345,8 @@
         {
           "id": "get_coordinator_candidates",
           "label_key": "action.get_coordinator_candidates",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "get_coordinator_candidates",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -1303,6 +1369,8 @@
         {
           "id": "update_coordinator_candidates",
           "label_key": "action.update_coordinator_candidates",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "update_coordinator_candidates",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -1358,6 +1426,8 @@
         {
           "id": "publish_coordinator_candidate_declaration",
           "label_key": "action.publish_coordinator_candidate_declaration",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "publish_coordinator_candidate_declaration",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -1434,6 +1504,8 @@
         {
           "id": "start_networks",
           "label_key": "action.start_networks",
+          "group": "runtime",
+          "group_label_key": "action_group.runtime",
           "command": "start_networks",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -1456,6 +1528,8 @@
         {
           "id": "stop_networks",
           "label_key": "action.stop_networks",
+          "group": "runtime",
+          "group_label_key": "action_group.runtime",
           "command": "stop_networks",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -1490,6 +1564,8 @@
         {
           "id": "restart_networks",
           "label_key": "action.restart_networks",
+          "group": "runtime",
+          "group_label_key": "action_group.runtime",
           "command": "restart_networks",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -1524,6 +1600,8 @@
         {
           "id": "rebuild_tun",
           "label_key": "action.rebuild_tun",
+          "group": "runtime",
+          "group_label_key": "action_group.runtime",
           "command": "rebuild_tun",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -1558,6 +1636,8 @@
         {
           "id": "probe_peer",
           "label_key": "action.probe_peer",
+          "group": "security",
+          "group_label_key": "action_group.security",
           "command": "probe_peer",
           "backend_status": "implemented",
           "permission": "probe_peers",
@@ -1594,6 +1674,8 @@
         {
           "id": "get_blacklist",
           "label_key": "action.get_blacklist",
+          "group": "security",
+          "group_label_key": "action_group.security",
           "command": "get_blacklist",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -1616,6 +1698,8 @@
         {
           "id": "ban_client",
           "label_key": "action.ban_client",
+          "group": "security",
+          "group_label_key": "action_group.security",
           "command": "ban_client",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -1650,6 +1734,8 @@
         {
           "id": "unban_client",
           "label_key": "action.unban_client",
+          "group": "security",
+          "group_label_key": "action_group.security",
           "command": "unban_client",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -1686,6 +1772,8 @@
         {
           "id": "refresh_snapshot",
           "label_key": "action.refresh_snapshot",
+          "group": "inspect",
+          "group_label_key": "action_group.inspect",
           "command": "get_snapshot",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -1700,6 +1788,8 @@
         {
           "id": "get_node_diagnostics",
           "label_key": "action.get_node_diagnostics",
+          "group": "inspect",
+          "group_label_key": "action_group.inspect",
           "command": "get_node_diagnostics",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -1714,6 +1804,8 @@
         {
           "id": "start_node",
           "label_key": "action.start_node",
+          "group": "runtime",
+          "group_label_key": "action_group.runtime",
           "command": "start_node",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -1728,6 +1820,8 @@
         {
           "id": "stop_node",
           "label_key": "action.stop_node",
+          "group": "runtime",
+          "group_label_key": "action_group.runtime",
           "command": "stop_node",
           "backend_status": "implemented",
           "permission": "stop_node",
@@ -1742,6 +1836,8 @@
         {
           "id": "restart_node",
           "label_key": "action.restart_node",
+          "group": "runtime",
+          "group_label_key": "action_group.runtime",
           "command": "restart_node",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -1761,6 +1857,8 @@
         {
           "id": "cleanup_node_residuals",
           "label_key": "action.cleanup_node_residuals",
+          "group": "runtime",
+          "group_label_key": "action_group.runtime",
           "command": "cleanup_node_residuals",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -1820,6 +1918,8 @@
         {
           "id": "update_routing",
           "label_key": "action.update_routing",
+          "group": "routing",
+          "group_label_key": "action_group.routing",
           "command": "update_routing",
           "backend_status": "implemented",
           "permission": "change_routing",
@@ -1868,6 +1968,8 @@
         {
           "id": "get_traffic_policy",
           "label_key": "action.get_traffic_policy",
+          "group": "routing",
+          "group_label_key": "action_group.routing",
           "command": "get_traffic_policy",
           "backend_status": "unavailable",
           "permission": "view_state",
@@ -1882,6 +1984,8 @@
         {
           "id": "preview_traffic_policy",
           "label_key": "action.preview_traffic_policy",
+          "group": "routing",
+          "group_label_key": "action_group.routing",
           "command": "preview_traffic_policy",
           "backend_status": "unavailable",
           "permission": "change_routing",
@@ -1911,6 +2015,8 @@
         {
           "id": "preview_traffic_policy_rollback",
           "label_key": "action.preview_traffic_policy_rollback",
+          "group": "routing",
+          "group_label_key": "action_group.routing",
           "command": "preview_traffic_policy_rollback",
           "backend_status": "unavailable",
           "permission": "change_routing",
@@ -1940,6 +2046,8 @@
         {
           "id": "apply_traffic_policy",
           "label_key": "action.apply_traffic_policy",
+          "group": "routing",
+          "group_label_key": "action_group.routing",
           "command": "apply_traffic_policy",
           "backend_status": "unavailable",
           "permission": "change_routing",
@@ -1981,6 +2089,8 @@
         {
           "id": "rollback_traffic_policy",
           "label_key": "action.rollback_traffic_policy",
+          "group": "routing",
+          "group_label_key": "action_group.routing",
           "command": "rollback_traffic_policy",
           "backend_status": "unavailable",
           "permission": "change_routing",
@@ -2022,6 +2132,8 @@
         {
           "id": "get_traffic_policy_history",
           "label_key": "action.get_traffic_policy_history",
+          "group": "routing",
+          "group_label_key": "action_group.routing",
           "command": "get_traffic_policy_history",
           "backend_status": "unavailable",
           "permission": "view_state",
@@ -2036,6 +2148,8 @@
         {
           "id": "test_traffic_policy",
           "label_key": "action.test_traffic_policy",
+          "group": "routing",
+          "group_label_key": "action_group.routing",
           "command": "test_traffic_policy",
           "backend_status": "implemented",
           "permission": "change_routing",
@@ -2079,6 +2193,8 @@
         {
           "id": "set_local_exit_capability",
           "label_key": "action.set_local_exit_capability",
+          "group": "runtime",
+          "group_label_key": "action_group.runtime",
           "command": "set_local_exit_capability",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -2106,6 +2222,8 @@
         {
           "id": "set_exit_node_role",
           "label_key": "action.set_exit_node_role",
+          "group": "runtime",
+          "group_label_key": "action_group.runtime",
           "command": "set_network_role",
           "backend_status": "implemented",
           "permission": "manage_roles",
@@ -2154,6 +2272,8 @@
         {
           "id": "set_relay_role",
           "label_key": "action.set_relay_role",
+          "group": "runtime",
+          "group_label_key": "action_group.runtime",
           "command": "set_network_role",
           "backend_status": "implemented",
           "permission": "manage_roles",
@@ -2208,6 +2328,8 @@
         {
           "id": "set_node_display_name",
           "label_key": "action.set_node_display_name",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "set_node_display_name",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -2235,6 +2357,8 @@
         {
           "id": "rotate_node_identity",
           "label_key": "action.rotate_node_identity",
+          "group": "security",
+          "group_label_key": "action_group.security",
           "command": "rotate_node_identity",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -2269,6 +2393,8 @@
         {
           "id": "get_network_allocation",
           "label_key": "action.get_network_allocation",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "get_network_allocation",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -2291,6 +2417,8 @@
         {
           "id": "update_network_allocation",
           "label_key": "action.update_network_allocation",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "update_network_allocation",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -2339,6 +2467,8 @@
         {
           "id": "get_configuration",
           "label_key": "action.get_configuration",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "get_configuration",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -2353,6 +2483,8 @@
         {
           "id": "preview_configuration",
           "label_key": "action.preview_configuration",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "preview_configuration",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -2382,6 +2514,8 @@
         {
           "id": "apply_configuration",
           "label_key": "action.apply_configuration",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "apply_configuration",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -2416,6 +2550,8 @@
         {
           "id": "rollback_configuration",
           "label_key": "action.rollback_configuration",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "rollback_configuration",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -2450,6 +2586,8 @@
         {
           "id": "get_configuration_history",
           "label_key": "action.get_configuration_history",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "get_configuration_history",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -2464,6 +2602,8 @@
         {
           "id": "test_policy",
           "label_key": "action.test_policy",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "test_policy",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -2486,6 +2626,8 @@
         {
           "id": "get_policy",
           "label_key": "action.get_policy",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "get_policy",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -2500,6 +2642,8 @@
         {
           "id": "preview_policy",
           "label_key": "action.preview_policy",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "preview_policy",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -2529,6 +2673,8 @@
         {
           "id": "preview_policy_rollback",
           "label_key": "action.preview_policy_rollback",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "preview_policy_rollback",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -2558,6 +2704,8 @@
         {
           "id": "apply_policy",
           "label_key": "action.apply_policy",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "apply_policy",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -2613,6 +2761,8 @@
         {
           "id": "rollback_policy",
           "label_key": "action.rollback_policy",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "rollback_policy",
           "backend_status": "implemented",
           "permission": "manage_networks",
@@ -2668,6 +2818,8 @@
         {
           "id": "get_policy_history",
           "label_key": "action.get_policy_history",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
           "command": "get_policy_history",
           "backend_status": "implemented",
           "permission": "view_state",
@@ -2682,6 +2834,8 @@
         {
           "id": "shutdown_node",
           "label_key": "action.shutdown_node",
+          "group": "runtime",
+          "group_label_key": "action_group.runtime",
           "command": "shutdown",
           "backend_status": "implemented",
           "permission": "stop_node",

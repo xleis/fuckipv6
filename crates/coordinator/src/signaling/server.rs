@@ -23,7 +23,7 @@ use tokio_tungstenite::{
     tungstenite::{protocol::WebSocketConfig, Message},
 };
 
-use super::coordinator_candidates::CoordinatorCandidateStore;
+use super::coordinator_candidates::{CoordinatorCandidateStore, GOVERNANCE_FROZEN_ERROR};
 use super::exit_availability::ExitAvailabilityObservationRegistry;
 use super::exit_contribution::ExitContributionRequestStore;
 use super::invitations::{load_trusted_network_record, InvitationStore};
@@ -1314,6 +1314,26 @@ fn require_join_request_store<'a>(
     Ok(None)
 }
 
+fn join_request_error_message(error: &str) -> SignalingMessage {
+    let code = if error.contains(GOVERNANCE_FROZEN_ERROR)
+        || error.contains("join_request.error.permission_denied")
+        || error.contains("join_request.error.reviewer_required")
+        || error.contains("join_request.error.self_review_forbidden")
+    {
+        ErrorCode::Forbidden
+    } else if error.contains("join_request.error.") || error.contains("join request") {
+        ErrorCode::BadRequest
+    } else {
+        ErrorCode::Internal
+    };
+    let message = if code == ErrorCode::Internal {
+        "Join request operation could not be processed"
+    } else {
+        error
+    };
+    SignalingMessage::protocol_error(code, message)
+}
+
 async fn broadcast_join_request_changed(
     store: &JoinRequestStore,
     session_manager: &SessionManager,
@@ -1511,7 +1531,8 @@ fn require_member_lifecycle_store<'a>(
 
 fn member_lifecycle_error_message(error: &str) -> SignalingMessage {
     let code = match error {
-        "member_lifecycle.error.permission_denied"
+        GOVERNANCE_FROZEN_ERROR
+        | "member_lifecycle.error.permission_denied"
         | "member_lifecycle.error.owner_protected"
         | "member_lifecycle.error.last_administrator_protected" => ErrorCode::Forbidden,
         "member_lifecycle.error.stale_revision"
@@ -1776,7 +1797,8 @@ fn require_exit_contribution_store<'a>(
 }
 
 fn exit_contribution_error_message(error: &str) -> SignalingMessage {
-    let code = if error.contains("exit_contribution.error.member_required")
+    let code = if error.contains(GOVERNANCE_FROZEN_ERROR)
+        || error.contains("exit_contribution.error.member_required")
         || error.contains("exit_contribution.error.permission_denied")
         || error.contains("exit_contribution.error.reviewer_required")
         || error.contains("exit_contribution.error.self_review_forbidden")
@@ -2098,7 +2120,18 @@ async fn handle_join_request_review(
         applicants.push((review.request_id.clone(), request.applicant.node_id));
     }
 
-    let results = store.review(&network_id, &actor, reviews, unix_time_ms())?;
+    let results = match store.review(&network_id, &actor, reviews, unix_time_ms()) {
+        Ok(results) => results,
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "审批加入请求失败");
+            send_binary(
+                tx,
+                session_manager,
+                join_request_error_message(&error.to_string()),
+            )?;
+            return Ok(());
+        }
+    };
     send_binary(
         tx,
         session_manager,
@@ -2217,6 +2250,28 @@ fn require_invitation_store<'a>(
     Ok(None)
 }
 
+fn invitation_error_message(error: &str) -> SignalingMessage {
+    let code = if error.contains(GOVERNANCE_FROZEN_ERROR)
+        || error.contains("invitation.error.permission_denied")
+        || error.contains("invitation.error.creator_authority_revoked")
+        || error.contains("invitation.error.already_member")
+    {
+        ErrorCode::Forbidden
+    } else if error.contains("invitation.error.") {
+        ErrorCode::BadRequest
+    } else if error.contains("invitation not found") {
+        ErrorCode::NotFound
+    } else {
+        ErrorCode::Internal
+    };
+    let message = if code == ErrorCode::Internal {
+        "Invitation operation could not be processed"
+    } else {
+        error
+    };
+    SignalingMessage::protocol_error(code, message)
+}
+
 async fn broadcast_invitation_changed(
     store: &InvitationStore,
     session_manager: &SessionManager,
@@ -2286,7 +2341,18 @@ async fn handle_invitation_create(
         return Ok(());
     };
     let network_id = request.network_id.clone();
-    let issued = store.create(&network_id, &actor, request, unix_time_ms())?;
+    let issued = match store.create(&network_id, &actor, request, unix_time_ms()) {
+        Ok(issued) => issued,
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "创建邀请失败");
+            send_binary(
+                tx,
+                session_manager,
+                invitation_error_message(&error.to_string()),
+            )?;
+            return Ok(());
+        }
+    };
     let invitation_id = issued.status.invitation.invitation_id.clone();
     send_binary(
         tx,
@@ -2372,13 +2438,24 @@ async fn handle_invitation_revoke(
     let Some(store) = require_invitation_store(store, session_manager, tx)? else {
         return Ok(());
     };
-    let invitation = store.revoke(
+    let invitation = match store.revoke(
         &network_id,
         &actor,
         &invitation_id,
         expected_revision,
         unix_time_ms(),
-    )?;
+    ) {
+        Ok(invitation) => invitation,
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "撤销邀请失败");
+            send_binary(
+                tx,
+                session_manager,
+                invitation_error_message(&error.to_string()),
+            )?;
+            return Ok(());
+        }
+    };
     send_binary(
         tx,
         session_manager,
@@ -2534,7 +2611,18 @@ async fn handle_invitation_redeem(
         return Ok(());
     };
     let invitation_id = request.invitation_id.clone();
-    let redemption = store.redeem(request, &actor, unix_time_ms())?;
+    let redemption = match store.redeem(request, &actor, unix_time_ms()) {
+        Ok(redemption) => redemption,
+        Err(error) => {
+            tracing::warn!(%error, %actor, "兑换邀请失败");
+            send_binary(
+                tx,
+                session_manager,
+                invitation_error_message(&error.to_string()),
+            )?;
+            return Ok(());
+        }
+    };
     send_binary(
         tx,
         session_manager,
@@ -2985,6 +3073,23 @@ mod tests {
         };
         assert_eq!(code, ErrorCode::Internal.as_u16());
         assert!(!message.contains("filesystem"));
+    }
+
+    #[test]
+    fn governance_freeze_maps_to_forbidden_on_every_write_surface() {
+        let messages = [
+            member_lifecycle_error_message(GOVERNANCE_FROZEN_ERROR),
+            exit_contribution_error_message(GOVERNANCE_FROZEN_ERROR),
+            invitation_error_message(GOVERNANCE_FROZEN_ERROR),
+            join_request_error_message(GOVERNANCE_FROZEN_ERROR),
+        ];
+        for response in messages {
+            let SignalingMessage::Error { code, message } = response else {
+                panic!("expected a protocol error");
+            };
+            assert_eq!(code, ErrorCode::Forbidden.as_u16());
+            assert_eq!(message, GOVERNANCE_FROZEN_ERROR);
+        }
     }
 
     #[test]

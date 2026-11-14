@@ -2,6 +2,7 @@ import {
   AlertTriangle,
   Check,
   Download,
+  ShieldAlert,
   ShieldCheck,
   UserRound,
 } from "lucide-react";
@@ -344,6 +345,7 @@ export function MemberDirectoryCard({
   previewRemovalAction,
   changeLifecycleAction,
   activePendingAction = null,
+  governanceBlockedReason = "",
   onSubmit,
   onLifecycleChanged,
 }: {
@@ -352,6 +354,7 @@ export function MemberDirectoryCard({
   previewRemovalAction?: NodeUiAction;
   changeLifecycleAction?: NodeUiAction;
   activePendingAction?: string | null;
+  governanceBlockedReason?: string;
   onSubmit?: MemberGovernanceSubmit;
   onLifecycleChanged?(change: MemberLifecycleChange): void;
 }) {
@@ -442,7 +445,7 @@ export function MemberDirectoryCard({
     member: NetworkMember,
     lifecycleAction: MemberLifecycleAction,
   ): Promise<void> {
-    if (!onSubmit || governanceBusy) return;
+    if (!onSubmit || governanceBusy || governanceBlockedReason) return;
     resetGovernanceMessages();
     setGovernanceFeedback("");
     setReason("");
@@ -491,7 +494,14 @@ export function MemberDirectoryCard({
   }
 
   async function submitLifecycle(): Promise<void> {
-    if (!dialog || !onSubmit || !changeLifecycleAction || governing) return;
+    if (
+      !dialog ||
+      !onSubmit ||
+      !changeLifecycleAction ||
+      governing ||
+      governanceBlockedReason
+    )
+      return;
     const member = dialog.member;
     const expectedRevision = (
       dialog.preview?.revision ?? member.revision
@@ -781,13 +791,23 @@ export function MemberDirectoryCard({
               <p>{label(locale, "member_directory.governance.hint")}</p>
             </div>
           </div>
+          {governanceBlockedReason ? (
+            <div
+              className="inline-notice danger"
+              role="status"
+              data-testid="member-governance-frozen"
+            >
+              <ShieldAlert size={15} />
+              <span>{governanceBlockedReason}</span>
+            </div>
+          ) : null}
           <div className="member-governance-actions">
             {governanceActions.map((lifecycleAction) => (
               <button
                 key={lifecycleAction}
                 type="button"
                 className="secondary-button"
-                disabled={governanceBusy}
+                disabled={governanceBusy || Boolean(governanceBlockedReason)}
                 data-testid={`member-governance-action-${lifecycleAction}`}
                 onClick={() =>
                   void beginLifecycle(selectedMember!, lifecycleAction)
@@ -903,7 +923,9 @@ export function MemberDirectoryCard({
               className="primary-button"
               data-testid="member-governance-confirm"
               disabled={
-                governing || (dialog.preview ? !dialog.preview.can_remove : false)
+                governing ||
+                Boolean(governanceBlockedReason) ||
+                (dialog.preview ? !dialog.preview.can_remove : false)
               }
               onClick={() => void submitLifecycle()}
             >

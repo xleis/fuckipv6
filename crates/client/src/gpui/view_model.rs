@@ -6,28 +6,28 @@ use fuckipv6_common::domain::JoinRequestReviewAction;
 use fuckipv6_common::domain::{
     parse_policy_test_input, ActivityCategory, ActivityEntry, ActivitySeverity,
     ApplicationIdentity, AuditOutcome, CapabilityKind, CapabilityState, ContentHash,
-    CoordinatorCandidate, CoordinatorCandidateConfigState, CoordinatorCandidateResources,
-    CoordinatorCandidateStatus, CoordinatorCandidateWillingness, CoordinatorEmergencyState,
-    CoordinatorPublicReachability, EffectiveAccessReason, EffectivePolicyLayer,
-    ExitAvailabilitySource, ExitAvailabilityState, ExitContributionAvailability,
-    ExitContributionMode, ExitContributionObligation, ExitContributionScope,
-    ExitSelectionCandidate, ExitSelectionMode, ExitSelectionPolicy, ExitSelectionSource,
-    InvitationCode, InvitationId, InvitationRedeemRequest, MemberLifecycleAction, MembershipRole,
-    NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
-    NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId,
-    RelayAuthorizationAuditSnapshot, RelayAuthorizationDiagnostic,
-    RelayAuthorizationSourceDiagnostic, RelayExistingSessionPolicy, RelayGovernanceAction,
-    RelayGovernanceEvent, RelayHealthIssue, RelayHealthSnapshot, RelayHealthStatus,
-    RelayLifecycleState, RelayLimitPolicy, RelayLimitSource, RelayMeasurementState,
-    RelayReachabilityState, TopologyNode, TopologyNodeHealth, TopologySnapshot, TrafficAction,
-    TrafficDefaultConfirmedBy, TrafficFailureKind, TrafficFlow, TrafficMatch, TrafficMatchRisk,
-    TrafficPolicy, TrafficPolicyTestInput, TrafficProtectionState, TrafficProtocol,
-    TrafficRoutingHitSample, TrafficRoutingObservation, TrafficRoutingPageModel,
+    CoordinatorCandidate, CoordinatorCandidateResources, CoordinatorCandidateWillingness,
+    CoordinatorControlPlaneState, CoordinatorControlPlaneStatus, CoordinatorEmergencyLeaderState,
+    CoordinatorEmergencyLeaderStatus, CoordinatorEmergencyState, CoordinatorPublicReachability,
+    EffectiveAccessReason, EffectivePolicyLayer, ExitAvailabilitySource, ExitAvailabilityState,
+    ExitContributionAvailability, ExitContributionMode, ExitContributionObligation,
+    ExitContributionScope, ExitSelectionCandidate, ExitSelectionMode, ExitSelectionPolicy,
+    ExitSelectionSource, InvitationCode, InvitationId, InvitationRedeemRequest,
+    MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode, NetworkMember,
+    NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberStatus,
+    NetworkProfileUpdate, NetworkVisibility, NodeId, RelayAuthorizationAuditSnapshot,
+    RelayAuthorizationDiagnostic, RelayAuthorizationSourceDiagnostic, RelayExistingSessionPolicy,
+    RelayGovernanceAction, RelayGovernanceEvent, RelayHealthIssue, RelayHealthSnapshot,
+    RelayHealthStatus, RelayLifecycleState, RelayLimitPolicy, RelayLimitSource,
+    RelayMeasurementState, RelayReachabilityState, TopologyNode, TopologyNodeHealth,
+    TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy, TrafficFailureKind, TrafficFlow,
+    TrafficMatch, TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput, TrafficProtectionState,
+    TrafficProtocol, TrafficRoutingHitSample, TrafficRoutingObservation, TrafficRoutingPageModel,
     TrafficRoutingRuleActivityEffect, TrafficRoutingRuleImpactView, TrafficRoutingTarget,
     TrafficRoutingTargetKind, TrafficRoutingTargetRef, TrafficRoutingWorkflowState,
     TrafficSessionEventKind,
 };
-use fuckipv6_common::i18n::{format_integer, t, tr, Locale};
+use fuckipv6_common::i18n::{format_decimal, format_integer, t, tr, Locale};
 use fuckipv6_common::ui_layout::navigation_module_for_page;
 use fuckipv6_common::NetworkMode;
 
@@ -662,6 +662,8 @@ impl ActionBlockReason {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoordinatorGovernanceFreezeReason {
     StatusMissing,
+    EmergencyLeaderActive,
+    ControlPlaneNotWritable,
     NoCandidatesConfigured,
     ConfigurationPending,
     ConfigurationExpired,
@@ -672,6 +674,10 @@ impl CoordinatorGovernanceFreezeReason {
     pub const fn message_key(self) -> &'static str {
         match self {
             Self::StatusMissing => "coordinator_governance.reason.status_missing",
+            Self::EmergencyLeaderActive => "coordinator_governance.reason.emergency_leader_active",
+            Self::ControlPlaneNotWritable => {
+                "coordinator_governance.reason.control_plane_not_writable"
+            }
             Self::NoCandidatesConfigured => {
                 "coordinator_governance.reason.no_candidates_configured"
             }
@@ -685,19 +691,10 @@ impl CoordinatorGovernanceFreezeReason {
 }
 
 /// Governance writes are frozen while an embedded Coordinator needs recovery.
-/// Candidate configuration and declaration actions intentionally remain open so
-/// an operator can restore the control plane without another governance write.
-pub fn action_requires_coordinator_governance(action_id: &str) -> bool {
-    matches!(
-        action_id,
-        "preview_member_removal"
-            | "change_member_lifecycle"
-            | "review_join_request"
-            | "batch_review_join_requests"
-            | "create_invitation"
-            | "revoke_invitation"
-            | "redeem_invitation"
-    )
+/// Candidate declaration publication intentionally remains open so an operator
+/// can restore candidate health without another governance write.
+pub fn action_requires_coordinator_governance(action: &NodeUiAction) -> bool {
+    action.command.is_governance_write()
 }
 
 /// Resolve the same effective network used by the action forms, then fail closed
@@ -733,31 +730,49 @@ pub fn coordinator_governance_freeze_reason(
     let Some(status) = service.coordinator_candidates.as_ref() else {
         return Some(CoordinatorGovernanceFreezeReason::StatusMissing);
     };
+    if status
+        .emergency_leader
+        .as_ref()
+        .is_some_and(|leader| leader.state == CoordinatorEmergencyLeaderState::Active)
+    {
+        return Some(CoordinatorGovernanceFreezeReason::EmergencyLeaderActive);
+    }
     match status.emergency {
-        CoordinatorEmergencyState::None => None,
+        CoordinatorEmergencyState::None => {}
         CoordinatorEmergencyState::NoCandidatesConfigured => {
-            Some(CoordinatorGovernanceFreezeReason::NoCandidatesConfigured)
+            return Some(CoordinatorGovernanceFreezeReason::NoCandidatesConfigured);
         }
         CoordinatorEmergencyState::ConfigurationPending => {
-            Some(CoordinatorGovernanceFreezeReason::ConfigurationPending)
+            return Some(CoordinatorGovernanceFreezeReason::ConfigurationPending);
         }
         CoordinatorEmergencyState::ConfigurationExpired => {
-            Some(CoordinatorGovernanceFreezeReason::ConfigurationExpired)
+            return Some(CoordinatorGovernanceFreezeReason::ConfigurationExpired);
         }
         CoordinatorEmergencyState::AllCandidatesUnavailable => {
-            Some(CoordinatorGovernanceFreezeReason::AllCandidatesUnavailable)
+            return Some(CoordinatorGovernanceFreezeReason::AllCandidatesUnavailable);
         }
     }
+    (!status.control_plane.governance_writable)
+        .then_some(CoordinatorGovernanceFreezeReason::ControlPlaneNotWritable)
 }
 
-pub fn action_coordinator_governance_freeze_reason(
-    action_id: &str,
+pub fn command_coordinator_governance_freeze_reason(
+    command: NodeCommandKind,
     snapshot: &NodeSnapshot,
     selected_network: Option<&str>,
 ) -> Option<CoordinatorGovernanceFreezeReason> {
-    action_requires_coordinator_governance(action_id)
+    command
+        .is_governance_write()
         .then(|| coordinator_governance_freeze_reason(snapshot, selected_network))
         .flatten()
+}
+
+pub fn action_coordinator_governance_freeze_reason(
+    action: &NodeUiAction,
+    snapshot: &NodeSnapshot,
+    selected_network: Option<&str>,
+) -> Option<CoordinatorGovernanceFreezeReason> {
+    command_coordinator_governance_freeze_reason(action.command, snapshot, selected_network)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3125,6 +3140,7 @@ pub fn build_command(
                         "expires_at_unix_ms",
                         &required("expires_at_unix_ms")?,
                     )?,
+                    credential: None,
                 },
             ))
         }
@@ -4724,6 +4740,26 @@ fn project_node_runtime(
             )
         })
         .collect::<Vec<_>>();
+    let local_node_id = snapshot
+        .identity
+        .as_ref()
+        .map(|identity| identity.node_id.as_str());
+    let control_plane_rows = snapshot
+        .embedded_services
+        .iter()
+        .map(|service| {
+            let coordinator = service.coordinator_candidates.as_ref();
+            row(
+                service.network_name.clone(),
+                coordinator_control_plane_detail(
+                    locale,
+                    coordinator.map(|status| &status.control_plane),
+                    coordinator.and_then(|status| status.emergency_leader.as_ref()),
+                    local_node_id,
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
     let tun_capabilities = &snapshot.tun_capabilities;
     let tun_reasons = if tun_capabilities.reasons.is_empty() {
         t(locale, "runtime.value.tun_reason.unknown").to_string()
@@ -4845,8 +4881,119 @@ fn project_node_runtime(
                 t(locale, "runtime.empty.services"),
                 service_rows,
             ));
+            sections.push(section(
+                t(locale, "runtime.section.control_plane"),
+                t(locale, "runtime.empty.control_plane"),
+                control_plane_rows,
+            ));
             sections
         },
+    )
+}
+
+fn coordinator_control_plane_detail(
+    locale: Locale,
+    control_plane: Option<&CoordinatorControlPlaneStatus>,
+    emergency_leader: Option<&CoordinatorEmergencyLeaderStatus>,
+    local_node_id: Option<&str>,
+) -> String {
+    let unobserved = CoordinatorControlPlaneStatus::default();
+    let control_plane = control_plane.unwrap_or(&unobserved);
+    let state = if control_plane.state == CoordinatorControlPlaneState::Available {
+        t(locale, "runtime.control_plane.available")
+    } else if control_plane.reason_code == "coordinator.control_plane.unobserved" {
+        t(locale, "runtime.control_plane.unobserved")
+    } else {
+        t(locale, "runtime.control_plane.limited")
+    };
+    let governance = if control_plane.governance_writable {
+        t(locale, "runtime.control_plane.governance_writable")
+    } else {
+        t(locale, "runtime.control_plane.governance_read_only")
+    };
+    let received = relay_format_u64(locale, control_plane.quorum.received_votes as u64);
+    let required = relay_format_u64(locale, control_plane.quorum.required_votes as u64);
+    let participants = relay_format_u64(locale, control_plane.quorum.participant_count as u64);
+    let detail = tr(
+        locale,
+        "runtime.control_plane.detail",
+        &[
+            ("state", state),
+            ("governance", governance),
+            ("received", &received),
+            ("required", &required),
+            ("participants", &participants),
+            ("reason_code", control_plane.reason_code.as_str()),
+        ],
+    );
+    let Some(emergency_leader) = emergency_leader else {
+        return detail;
+    };
+
+    let active = emergency_leader.state == CoordinatorEmergencyLeaderState::Active
+        && emergency_leader.remaining_ms > 0;
+    let state = if !active {
+        t(locale, "runtime.emergency.expired")
+    } else {
+        match local_node_id {
+            Some(local_node_id) if local_node_id == emergency_leader.leader.as_str() => {
+                t(locale, "runtime.emergency.active_local")
+            }
+            Some(_) => t(locale, "runtime.emergency.active_remote"),
+            None => t(locale, "runtime.emergency.active"),
+        }
+    };
+    let remaining = runtime_duration_label(locale, emergency_leader.remaining_ms);
+    let hard_deadline =
+        routing_timestamp_label(Some(emergency_leader.hard_expires_at_unix_ms), locale);
+    let epoch = relay_format_u64(locale, emergency_leader.emergency_epoch);
+    let revision = relay_format_u64(locale, emergency_leader.candidate_config_revision);
+    let mut parts = vec![
+        state.to_string(),
+        format!(
+            "{} {}",
+            t(locale, "runtime.emergency.leader"),
+            emergency_leader.leader
+        ),
+        format!("{} {epoch}", t(locale, "runtime.emergency.epoch")),
+        format!(
+            "{} {revision}",
+            t(locale, "runtime.emergency.candidate_revision")
+        ),
+        format!("{} {remaining}", t(locale, "runtime.emergency.remaining")),
+        format!(
+            "{} {hard_deadline}",
+            t(locale, "runtime.emergency.hard_deadline")
+        ),
+    ];
+    if !emergency_leader.governance_writable {
+        parts.push(t(locale, "runtime.emergency.governance_frozen").to_string());
+    }
+    if active {
+        parts.push(t(locale, "runtime.emergency.handoff_on_recovery").to_string());
+    }
+    format!("{detail} · {}", parts.join(" · "))
+}
+
+fn runtime_duration_label(locale: Locale, duration_ms: u64) -> String {
+    if duration_ms < 1_000 {
+        let duration = relay_format_u64(locale, duration_ms);
+        return tr(
+            locale,
+            "diagnostic.duration_ms_value",
+            &[("duration", &duration)],
+        );
+    }
+    let precision = if duration_ms.is_multiple_of(1_000) {
+        0
+    } else {
+        1
+    };
+    let duration = format_decimal(locale, duration_ms as f64 / 1_000.0, precision);
+    tr(
+        locale,
+        "diagnostic.duration_value",
+        &[("duration", &duration)],
     )
 }
 
@@ -8578,11 +8725,15 @@ mod tests {
         NodeUiValidation,
     };
     use fuckipv6_common::domain::{
-        ActivityEntry, AuditId, AuditOutcome, DomainSuffix, MembershipState, NetworkMemberPresence,
-        NodeId, PortRange, RelayGovernanceAuditSnapshot, RelayUsageSnapshot, TopologyBoundary,
-        TopologyConnection, TopologyConnectionState, TopologyNode, TopologyNodeNetwork,
-        TrafficDefaultPolicy, TrafficFailureKind, TrafficFailurePolicy, TrafficMatch,
-        TrafficRoutingHardConstraints, TrafficRoutingObservedHit, TrafficRule, TrafficRuleId,
+        ActivityEntry, AuditId, AuditOutcome, CoordinatorCandidateConfigState,
+        CoordinatorCandidateStatus, CoordinatorControlPlaneState, CoordinatorControlPlaneStatus,
+        CoordinatorEmergencyLeaderState, CoordinatorEmergencyLeaderStatus,
+        CoordinatorEmergencyState, CoordinatorQuorumStatus, CoordinatorWriteKind, DomainSuffix,
+        MembershipState, NetworkMemberPresence, NodeId, PortRange, RelayGovernanceAuditSnapshot,
+        RelayUsageSnapshot, TopologyBoundary, TopologyConnection, TopologyConnectionState,
+        TopologyNode, TopologyNodeNetwork, TrafficDefaultPolicy, TrafficFailureKind,
+        TrafficFailurePolicy, TrafficMatch, TrafficRoutingHardConstraints,
+        TrafficRoutingObservedHit, TrafficRule, TrafficRuleId,
     };
     use serde::Deserialize;
     use std::collections::BTreeMap;
@@ -9098,6 +9249,23 @@ mod tests {
                 current_leader: None,
                 latest_term: None,
                 emergency,
+                lease: Default::default(),
+                control_plane: CoordinatorControlPlaneStatus {
+                    state: if emergency == CoordinatorEmergencyState::None {
+                        CoordinatorControlPlaneState::Available
+                    } else {
+                        CoordinatorControlPlaneState::ReadOnly
+                    },
+                    governance_writable: emergency == CoordinatorEmergencyState::None,
+                    reason_code: if emergency == CoordinatorEmergencyState::None {
+                        "coordinator.control_plane.available".into()
+                    } else {
+                        "coordinator.control_plane.emergency".into()
+                    },
+                    quorum: Default::default(),
+                },
+                emergency_leader: None,
+                latest_election: None,
             }),
         }
     }
@@ -9112,6 +9280,12 @@ mod tests {
             coordinator_governance_freeze_reason(&snapshot, Some("home")),
             None
         );
+        let manifest = node_ui_manifest();
+        let actions: Vec<_> = manifest
+            .pages
+            .iter()
+            .flat_map(|page| page.actions.iter())
+            .collect();
 
         for (emergency, expected) in [
             (
@@ -9140,35 +9314,23 @@ mod tests {
                 coordinator_governance_freeze_reason(&snapshot, Some("home")),
                 Some(expected)
             );
-            for action_id in [
-                "preview_member_removal",
-                "change_member_lifecycle",
-                "review_join_request",
-                "batch_review_join_requests",
-                "create_invitation",
-                "revoke_invitation",
-                "redeem_invitation",
-            ] {
+            for action in &actions {
                 assert_eq!(
-                    action_coordinator_governance_freeze_reason(action_id, &snapshot, Some("home")),
-                    Some(expected),
-                    "{action_id}"
+                    action_coordinator_governance_freeze_reason(action, &snapshot, Some("home")),
+                    action.command.is_governance_write().then_some(expected),
+                    "{}",
+                    action.id
                 );
             }
-            for action_id in [
-                "get_coordinator_candidates",
-                "update_coordinator_candidates",
-                "publish_coordinator_candidate_declaration",
-                "list_network_members",
-                "get_invitation_status",
-                "preview_invitation",
-            ] {
-                assert_eq!(
-                    action_coordinator_governance_freeze_reason(action_id, &snapshot, Some("home")),
-                    None,
-                    "{action_id}"
-                );
-            }
+            let declaration = actions
+                .iter()
+                .find(|action| action.id == "publish_coordinator_candidate_declaration")
+                .expect("candidate declaration action");
+            assert!(!action_requires_coordinator_governance(declaration));
+            assert_eq!(
+                action_coordinator_governance_freeze_reason(declaration, &snapshot, Some("home")),
+                None
+            );
         }
     }
 
@@ -9193,6 +9355,15 @@ mod tests {
             current_leader: None,
             latest_term: None,
             emergency: CoordinatorEmergencyState::None,
+            lease: Default::default(),
+            control_plane: CoordinatorControlPlaneStatus {
+                state: CoordinatorControlPlaneState::Available,
+                governance_writable: true,
+                reason_code: "coordinator.control_plane.available".into(),
+                quorum: Default::default(),
+            },
+            emergency_leader: None,
+            latest_election: None,
         });
         assert_eq!(
             coordinator_governance_freeze_reason(&snapshot, Some("home")),
@@ -9204,6 +9375,54 @@ mod tests {
             coordinator_governance_freeze_reason(&snapshot, Some("home")),
             None,
             "a network without an embedded Coordinator service is unaffected"
+        );
+    }
+
+    #[test]
+    fn coordinator_governance_fails_closed_for_read_only_and_emergency_authority() {
+        let mut snapshot = populated_snapshot();
+        snapshot
+            .embedded_services
+            .push(coordinator_service("home", CoordinatorEmergencyState::None));
+        let status = snapshot.embedded_services[0]
+            .coordinator_candidates
+            .as_mut()
+            .expect("candidate status");
+        status.control_plane.governance_writable = false;
+        assert_eq!(
+            coordinator_governance_freeze_reason(&snapshot, Some("home")),
+            Some(CoordinatorGovernanceFreezeReason::ControlPlaneNotWritable)
+        );
+
+        let status = snapshot.embedded_services[0]
+            .coordinator_candidates
+            .as_mut()
+            .expect("candidate status");
+        status.control_plane.governance_writable = true;
+        status.emergency_leader = Some(emergency_leader_fixture(
+            b"gpui-governance-network",
+            NodeId::from_public_key(b"emergency-leader"),
+            CoordinatorEmergencyLeaderState::Active,
+            20_000,
+        ));
+        assert_eq!(
+            coordinator_governance_freeze_reason(&snapshot, Some("home")),
+            Some(CoordinatorGovernanceFreezeReason::EmergencyLeaderActive)
+        );
+
+        let status = snapshot.embedded_services[0]
+            .coordinator_candidates
+            .as_mut()
+            .expect("candidate status");
+        status.emergency_leader = Some(emergency_leader_fixture(
+            b"gpui-governance-network",
+            NodeId::from_public_key(b"emergency-leader"),
+            CoordinatorEmergencyLeaderState::Expired,
+            0,
+        ));
+        assert_eq!(
+            coordinator_governance_freeze_reason(&snapshot, Some("home")),
+            None
         );
     }
 
@@ -10006,6 +10225,264 @@ mod tests {
             .sections
             .iter()
             .all(|section| section.title != t(Locale::ZhCn, "runtime.section.interface_problems")));
+    }
+
+    fn emergency_leader_fixture(
+        network_seed: &[u8],
+        leader: NodeId,
+        state: CoordinatorEmergencyLeaderState,
+        remaining_ms: u64,
+    ) -> CoordinatorEmergencyLeaderStatus {
+        CoordinatorEmergencyLeaderStatus {
+            network_id: NetworkId::from_public_key(network_seed),
+            leader,
+            emergency_epoch: 7,
+            candidate_config_revision: 11,
+            unavailable_candidates: vec![NodeId::from_public_key(b"offline-candidate")],
+            issued_at_unix_ms: 1_700_000_000_000,
+            expires_at_unix_ms: 1_700_000_030_000,
+            hard_expires_at_unix_ms: 1_700_000_300_000,
+            state,
+            remaining_ms,
+            runtime_coordination_allowed: true,
+            governance_writable: false,
+            data_plane_allowed: true,
+            health_checks_allowed: true,
+            allowed_writes: vec![
+                CoordinatorWriteKind::PublishOwnTerm,
+                CoordinatorWriteKind::SyncLastPolicy,
+                CoordinatorWriteKind::ConnectionCoordination,
+                CoordinatorWriteKind::HealthCheck,
+                CoordinatorWriteKind::RejectStaleState,
+            ],
+        }
+    }
+
+    fn coordinator_service_fixture(
+        network_name: &str,
+        network_seed: &[u8],
+        emergency_leader: Option<CoordinatorEmergencyLeaderStatus>,
+    ) -> NodeEmbeddedServiceSnapshot {
+        let emergency = emergency_leader.is_some();
+        NodeEmbeddedServiceSnapshot {
+            network_name: network_name.into(),
+            status: NodeEmbeddedServiceStatus::Running,
+            signaling_addr: Some("127.0.0.1:6666".parse().expect("signaling socket")),
+            relay_status: NodeEmbeddedServiceStatus::Stopped,
+            relay_addr: None,
+            relay_health: None,
+            relay_authorization: None,
+            relay_governance: None,
+            coordinator_candidates: Some(CoordinatorCandidateStatus {
+                network_id: NetworkId::from_public_key(network_seed),
+                generated_at_unix_ms: 1_700_000_100_000,
+                config_state: CoordinatorCandidateConfigState::Current,
+                config: None,
+                candidates: Vec::new(),
+                current_leader: None,
+                latest_term: None,
+                lease: Default::default(),
+                control_plane: CoordinatorControlPlaneStatus {
+                    state: if emergency {
+                        CoordinatorControlPlaneState::ReadOnly
+                    } else {
+                        CoordinatorControlPlaneState::Available
+                    },
+                    governance_writable: !emergency,
+                    reason_code: if emergency {
+                        "coordinator.control_plane.emergency_runtime_only".into()
+                    } else {
+                        "coordinator.control_plane.available".into()
+                    },
+                    quorum: CoordinatorQuorumStatus {
+                        received_votes: 2,
+                        required_votes: 2,
+                        participant_count: 3,
+                    },
+                },
+                emergency: if emergency {
+                    CoordinatorEmergencyState::AllCandidatesUnavailable
+                } else {
+                    CoordinatorEmergencyState::None
+                },
+                emergency_leader,
+                latest_election: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn runtime_control_plane_displays_bounded_emergency_authority() {
+        let mut snapshot = populated_snapshot();
+        let local_leader = NodeId::from_public_key(b"local-emergency-leader");
+        let remote_leader = NodeId::from_public_key(b"remote-emergency-leader");
+        snapshot
+            .identity
+            .as_mut()
+            .expect("identity fixture")
+            .node_id = local_leader.to_string();
+        snapshot.embedded_services = vec![
+            coordinator_service_fixture(
+                "local",
+                b"emergency-local-network",
+                Some(emergency_leader_fixture(
+                    b"emergency-local-network",
+                    local_leader.clone(),
+                    CoordinatorEmergencyLeaderState::Active,
+                    20_000,
+                )),
+            ),
+            coordinator_service_fixture(
+                "remote",
+                b"emergency-remote-network",
+                Some(emergency_leader_fixture(
+                    b"emergency-remote-network",
+                    remote_leader.clone(),
+                    CoordinatorEmergencyLeaderState::Active,
+                    15_500,
+                )),
+            ),
+            coordinator_service_fixture(
+                "expired",
+                b"emergency-expired-network",
+                Some(emergency_leader_fixture(
+                    b"emergency-expired-network",
+                    local_leader.clone(),
+                    CoordinatorEmergencyLeaderState::Expired,
+                    0,
+                )),
+            ),
+            coordinator_service_fixture("none", b"emergency-none-network", None),
+        ];
+
+        let page = node_ui_manifest()
+            .pages
+            .into_iter()
+            .find(|page| page.id == "node_runtime")
+            .expect("runtime page");
+        let model =
+            build_page_model_for_page(&page, &snapshot, Locale::ZhCn).expect("runtime model");
+        let control_plane = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "runtime.section.control_plane"))
+            .expect("control plane section");
+
+        assert_eq!(control_plane.rows.len(), 4);
+        let local = &control_plane.rows[0].detail;
+        assert!(local.contains(t(Locale::ZhCn, "runtime.emergency.active_local")));
+        assert!(local.contains(t(Locale::ZhCn, "runtime.emergency.leader")));
+        assert!(local.contains(local_leader.as_str()));
+        assert!(local.contains(t(Locale::ZhCn, "runtime.emergency.epoch")));
+        assert!(local.contains(t(Locale::ZhCn, "runtime.emergency.candidate_revision")));
+        assert!(local.contains("20 秒"));
+        assert!(local.contains(&routing_timestamp_label(
+            Some(1_700_000_300_000),
+            Locale::ZhCn
+        )));
+        assert!(local.contains(t(Locale::ZhCn, "runtime.emergency.governance_frozen")));
+        assert!(local.contains(t(Locale::ZhCn, "runtime.emergency.handoff_on_recovery")));
+
+        let remote = &control_plane.rows[1].detail;
+        assert!(remote.contains(t(Locale::ZhCn, "runtime.emergency.active_remote")));
+        assert!(remote.contains(remote_leader.as_str()));
+        assert!(remote.contains("15.5 秒"));
+
+        let expired = &control_plane.rows[2].detail;
+        assert!(expired.contains(t(Locale::ZhCn, "runtime.emergency.expired")));
+        assert!(!expired.contains(t(Locale::ZhCn, "runtime.emergency.active_local")));
+        assert!(!expired.contains(t(Locale::ZhCn, "runtime.emergency.active_remote")));
+        assert!(!expired.contains(t(Locale::ZhCn, "runtime.emergency.handoff_on_recovery")));
+        assert!(!control_plane.rows[3]
+            .detail
+            .contains(t(Locale::ZhCn, "runtime.emergency.expired")));
+    }
+
+    #[test]
+    fn runtime_control_plane_limits_governance_without_reporting_node_failure() {
+        let mut snapshot = populated_snapshot();
+        snapshot
+            .embedded_services
+            .push(NodeEmbeddedServiceSnapshot {
+                network_name: "home".into(),
+                status: NodeEmbeddedServiceStatus::Running,
+                signaling_addr: Some("127.0.0.1:6666".parse().expect("signaling socket")),
+                relay_status: NodeEmbeddedServiceStatus::Stopped,
+                relay_addr: None,
+                relay_health: None,
+                relay_authorization: None,
+                relay_governance: None,
+                coordinator_candidates: Some(CoordinatorCandidateStatus {
+                    network_id: NetworkId::from_public_key(b"coordinator-control-plane-ui"),
+                    generated_at_unix_ms: 1_700_000_100_000,
+                    config_state: CoordinatorCandidateConfigState::Current,
+                    config: None,
+                    candidates: Vec::new(),
+                    current_leader: None,
+                    latest_term: None,
+                    lease: Default::default(),
+                    control_plane: CoordinatorControlPlaneStatus {
+                        state: CoordinatorControlPlaneState::QuorumUnavailable,
+                        governance_writable: false,
+                        reason_code: "coordinator.control_plane.no_majority".into(),
+                        quorum: CoordinatorQuorumStatus {
+                            received_votes: 1,
+                            required_votes: 2,
+                            participant_count: 3,
+                        },
+                    },
+                    emergency: CoordinatorEmergencyState::None,
+                    emergency_leader: None,
+                    latest_election: None,
+                }),
+            });
+        snapshot
+            .embedded_services
+            .push(NodeEmbeddedServiceSnapshot {
+                network_name: "unobserved".into(),
+                status: NodeEmbeddedServiceStatus::Running,
+                signaling_addr: None,
+                relay_status: NodeEmbeddedServiceStatus::Stopped,
+                relay_addr: None,
+                relay_health: None,
+                relay_authorization: None,
+                relay_governance: None,
+                coordinator_candidates: None,
+            });
+
+        let page = node_ui_manifest()
+            .pages
+            .into_iter()
+            .find(|page| page.id == "node_runtime")
+            .expect("runtime page");
+        let model =
+            build_page_model_for_page(&page, &snapshot, Locale::ZhCn).expect("runtime model");
+        let control_plane = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "runtime.section.control_plane"))
+            .expect("control plane section");
+
+        assert_eq!(control_plane.rows.len(), 2);
+        assert!(control_plane.rows[0]
+            .detail
+            .contains(t(Locale::ZhCn, "runtime.control_plane.limited")));
+        assert!(control_plane.rows[0].detail.contains(t(
+            Locale::ZhCn,
+            "runtime.control_plane.governance_read_only"
+        )));
+        assert!(control_plane.rows[0]
+            .detail
+            .contains("coordinator.control_plane.no_majority"));
+        assert!(control_plane.rows[0].detail.contains("1/2"));
+        assert!(control_plane.rows[0].detail.contains('3'));
+        assert!(control_plane.rows[1]
+            .detail
+            .contains(t(Locale::ZhCn, "runtime.control_plane.unobserved")));
+        assert!(control_plane.rows[1]
+            .detail
+            .contains("coordinator.control_plane.unobserved"));
+        assert!(!control_plane.rows[1].detail.contains("no_majority"));
     }
 
     fn relay_health_fixture(

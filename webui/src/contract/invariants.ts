@@ -968,20 +968,48 @@ export function defaultNetworkName(
 
 export type CoordinatorGovernanceFreezeReason =
   | "status_missing"
+  | "emergency_leader_active"
+  | "control_plane_not_writable"
   | CoordinatorEmergencyState;
 
-const coordinatorGovernanceWriteActions = new Set([
-  "preview_member_removal",
-  "change_member_lifecycle",
+const coordinatorGovernanceWriteCommands = new Set<NodeUiAction["command"]>([
+  "create_network",
+  "update_network_profile",
+  "publish_network_discovery",
+  "update_network_discovery",
+  "unpublish_network_discovery",
+  "join_network",
+  "submit_join_request",
   "review_join_request",
   "batch_review_join_requests",
+  "withdraw_join_request",
+  "resubmit_join_request",
+  "change_member_lifecycle",
   "create_invitation",
   "revoke_invitation",
   "redeem_invitation",
+  "leave_network",
+  "acknowledge_membership_policy",
+  "set_network_role",
+  "set_local_exit_capability",
+  "set_node_display_name",
+  "rotate_node_identity",
+  "ban_client",
+  "unban_client",
+  "update_network_allocation",
+  "apply_configuration",
+  "rollback_configuration",
+  "apply_policy",
+  "rollback_policy",
+  "apply_traffic_policy",
+  "rollback_traffic_policy",
+  "update_coordinator_candidates",
 ]);
 
-export function actionRequiresCoordinatorGovernance(actionId: string): boolean {
-  return coordinatorGovernanceWriteActions.has(actionId);
+export function actionRequiresCoordinatorGovernance(
+  action: Pick<NodeUiAction, "command">,
+): boolean {
+  return coordinatorGovernanceWriteCommands.has(action.command);
 }
 
 /** Fail closed when an embedded Coordinator omits or reports an unsafe status. */
@@ -996,7 +1024,12 @@ export function coordinatorGovernanceFreezeReason(
   if (!service) return null;
   const status = service.coordinator_candidates;
   if (!status) return "status_missing";
-  return status.emergency === "none" ? null : status.emergency;
+  if (status.emergency_leader?.state === "active")
+    return "emergency_leader_active";
+  if (status.emergency !== "none") return status.emergency;
+  if (status.control_plane?.governance_writable !== true)
+    return "control_plane_not_writable";
+  return null;
 }
 
 export function executionBlockReason(

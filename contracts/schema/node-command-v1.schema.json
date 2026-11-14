@@ -154,6 +154,7 @@
       "description": "Public reachability evidence supplied by the candidate itself. Consumers\nmust treat this as a claim until the election protocol verifies a quorum.",
       "properties": {
         "public_endpoint": {
+          "default": null,
           "type": [
             "string",
             "null"
@@ -164,6 +165,32 @@
           "type": "boolean"
         }
       },
+      "type": "object"
+    },
+    "CoordinatorWriteCredential": {
+      "description": "The authority facts that every governance write must carry. The write kind\nis supplied separately so one envelope cannot be silently replayed for a\nbroader operation.",
+      "properties": {
+        "fencing_token": {
+          "$ref": "#/$defs/FencingToken"
+        },
+        "leader": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "term": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "network_id",
+        "term",
+        "leader",
+        "fencing_token"
+      ],
       "type": "object"
     },
     "DiscoveryTransport": {
@@ -536,6 +563,11 @@
         "fail_closed"
       ],
       "type": "string"
+    },
+    "FencingToken": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
     },
     "GroupId": {
       "type": "string"
@@ -2374,6 +2406,17 @@
             "$ref": "#/$defs/CoordinatorCandidate"
           },
           "type": "array"
+        },
+        "credential": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoordinatorWriteCredential"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present after the first authoritative term is installed. Bootstrap\nupdates before a term are deliberately credential-free and are rejected\nby the Coordinator once a term exists."
         },
         "effective_from_unix_ms": {
           "format": "uint64",

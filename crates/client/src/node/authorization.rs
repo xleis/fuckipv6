@@ -10,10 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
     evaluate_effective_access, resolve_field_privacy_policy, role_baseline_policy, AccessContext,
-    FieldPrivacyPolicy, FieldPrivacyPolicyError, GroupId, MembershipRole, MembershipState,
-    NetworkAcl, NetworkId, NetworkRole, NodeLocalAccessPolicy, OperationId, PermissionDenialCode,
-    PermissionIntent, PermissionRequest, PermissionRule, PolicyAction, PrivacyViewer, ResourceKind,
-    ResourceRef,
+    CoordinatorEmergencyLeaderState, FieldPrivacyPolicy, FieldPrivacyPolicyError, GroupId,
+    MembershipRole, MembershipState, NetworkAcl, NetworkId, NetworkRole, NodeLocalAccessPolicy,
+    OperationId, PermissionDenialCode, PermissionIntent, PermissionRequest, PermissionRule,
+    PolicyAction, PrivacyViewer, ResourceKind, ResourceRef, TrafficAction,
 };
 
 use super::command::{NodeCommand, NodeCommandKind};
@@ -32,6 +32,7 @@ pub struct NodeCommandContext {
     field_privacy_policies: Vec<FieldPrivacyPolicy>,
     field_privacy_invalid: bool,
     network_scopes: BTreeMap<String, NetworkCommandScope>,
+    governance_frozen_networks: BTreeSet<NetworkId>,
     recent_reauthentication: bool,
     local_owner: bool,
     authenticated: bool,
@@ -98,6 +99,7 @@ impl NodeCommandContext {
             field_privacy_policies: Vec::new(),
             field_privacy_invalid: false,
             network_scopes: BTreeMap::new(),
+            governance_frozen_networks: BTreeSet::new(),
             recent_reauthentication: true,
             local_owner: true,
             authenticated: true,
@@ -130,7 +132,9 @@ impl NodeCommandContext {
                 membership.state,
             );
         }
-        context.with_access_control_snapshot(&snapshot.access_control)
+        context
+            .with_governance_snapshot(snapshot)
+            .with_access_control_snapshot(&snapshot.access_control)
     }
 
     /// Derive a verified WebUI owner context from the current node identity
@@ -169,6 +173,7 @@ impl NodeCommandContext {
             field_privacy_policies: Vec::new(),
             field_privacy_invalid: false,
             network_scopes,
+            governance_frozen_networks: BTreeSet::new(),
             recent_reauthentication: recently_reauthenticated,
             local_owner: false,
             authenticated: true,
@@ -186,6 +191,26 @@ impl NodeCommandContext {
         for (label, scope) in scopes {
             insert_network_scope(&mut self.network_scopes, label, scope);
         }
+        self
+    }
+
+    /// Attach the Coordinator control-plane observations used by the command
+    /// layer's emergency governance gate. A missing candidate projection stays
+    /// unobserved; an observed non-writable or active-emergency network freezes
+    /// governance writes for that network only.
+    pub(crate) fn with_governance_snapshot(mut self, snapshot: &NodeSnapshot) -> Self {
+        self.governance_frozen_networks =
+            snapshot
+                .embedded_services
+                .iter()
+                .filter_map(|service| service.coordinator_candidates.as_ref())
+                .filter(|status| {
+                    status.emergency_leader.as_ref().is_some_and(|leader| {
+                        leader.state == CoordinatorEmergencyLeaderState::Active
+                    }) || !status.control_plane.governance_writable
+                })
+                .map(|status| status.network_id.clone())
+                .collect();
         self
     }
 
@@ -279,6 +304,7 @@ impl NodeCommandContext {
             field_privacy_policies: Vec::new(),
             field_privacy_invalid: false,
             network_scopes: BTreeMap::new(),
+            governance_frozen_networks: BTreeSet::new(),
             recent_reauthentication: false,
             local_owner: false,
             authenticated: false,
@@ -464,6 +490,13 @@ pub(crate) fn authorize_command(
         ));
     }
 
+    if let Some(reason) = coordinator_governance_freeze_denial(context, command) {
+        return Err(CommandDenial::new(
+            PermissionDenialCode::CoordinatorGovernanceFrozen.as_str(),
+            reason,
+        ));
+    }
+
     // Node ownership is local authority, not an implicit network role. Pure
     // host operations remain available to the owner, while network governance
     // must resolve an authenticated scope and pass both policy layers below.
@@ -586,6 +619,117 @@ fn is_network_governance(kind: NodeCommandKind) -> bool {
             | NodeCommandKind::UnbanClient
             | NodeCommandKind::UpdateNetworkAllocation
     )
+}
+
+fn coordinator_governance_freeze_denial(
+    context: &NodeCommandContext,
+    command: &NodeCommand,
+) -> Option<String> {
+    if !command.kind().is_governance_write() || context.governance_frozen_networks.is_empty() {
+        return None;
+    }
+
+    let affected = match governance_write_targets(command) {
+        GovernanceWriteTargets::Networks(targets) => {
+            for target in targets {
+                let network_id = context
+                    .network_scopes
+                    .get(&target)
+                    .map(|scope| scope.network_id.clone())
+                    .or_else(|| NetworkId::parse(target.clone()).ok());
+                let Some(network_id) = network_id else {
+                    return Some(
+                        "governance target cannot be resolved while Coordinator governance is frozen"
+                            .into(),
+                    );
+                };
+                if context.governance_frozen_networks.contains(&network_id) {
+                    return Some(format!(
+                        "Coordinator governance is frozen for network {network_id}"
+                    ));
+                }
+            }
+            false
+        }
+        GovernanceWriteTargets::Global => true,
+        GovernanceWriteTargets::None => false,
+    };
+
+    affected.then(|| {
+        "Coordinator governance is frozen; global governance cannot be changed until writable authority recovers"
+            .into()
+    })
+}
+
+#[derive(Debug)]
+enum GovernanceWriteTargets {
+    Networks(BTreeSet<String>),
+    Global,
+    None,
+}
+
+fn governance_write_targets(command: &NodeCommand) -> GovernanceWriteTargets {
+    match command {
+        NodeCommand::ApplyConfiguration(command) => {
+            if command.networks.is_empty() {
+                GovernanceWriteTargets::Global
+            } else {
+                GovernanceWriteTargets::Networks(command.networks.keys().cloned().collect())
+            }
+        }
+        NodeCommand::RollbackConfiguration(_) => GovernanceWriteTargets::Global,
+        NodeCommand::ApplyPolicy(command) => {
+            if command.includes_local_policy || command.candidate.local_policy.is_some() {
+                return GovernanceWriteTargets::Global;
+            }
+            let mut targets = command.network_ids.iter().cloned().collect::<BTreeSet<_>>();
+            targets.extend(
+                command
+                    .candidate
+                    .network_acls
+                    .iter()
+                    .map(|acl| acl.network_id.to_string()),
+            );
+            if targets.is_empty() {
+                GovernanceWriteTargets::Global
+            } else {
+                GovernanceWriteTargets::Networks(targets)
+            }
+        }
+        NodeCommand::RollbackPolicy(command) => {
+            if command.includes_local_policy || command.network_ids.is_empty() {
+                GovernanceWriteTargets::Global
+            } else {
+                GovernanceWriteTargets::Networks(command.network_ids.iter().cloned().collect())
+            }
+        }
+        NodeCommand::ApplyTrafficPolicy(command) => {
+            let mut targets = BTreeSet::new();
+            if let TrafficAction::Network(network_id) = &command.draft.default_policy.action {
+                targets.insert(network_id.to_string());
+            }
+            for rule in &command.draft.rules {
+                if let TrafficAction::Network(network_id) = &rule.action {
+                    targets.insert(network_id.to_string());
+                }
+            }
+            if targets.is_empty() {
+                // Direct, Exit and Reject fallback semantics are node-wide, so
+                // the command cannot be proven to leave frozen networks alone.
+                GovernanceWriteTargets::Global
+            } else {
+                GovernanceWriteTargets::Networks(targets)
+            }
+        }
+        NodeCommand::RollbackTrafficPolicy(_) => GovernanceWriteTargets::Global,
+        _ => match command_network_targets(command) {
+            NetworkTargets::Named(names) if !names.is_empty() => {
+                GovernanceWriteTargets::Networks(names.into_iter().collect())
+            }
+            NetworkTargets::Named(_) => GovernanceWriteTargets::None,
+            NetworkTargets::None | NetworkTargets::All => GovernanceWriteTargets::Global,
+        },
+    }
 }
 
 fn insert_network_scope(

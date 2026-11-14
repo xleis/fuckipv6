@@ -2752,7 +2752,7 @@ function ActionCard({
     selectedNetwork,
   );
   const governanceBlocked =
-    actionRequiresCoordinatorGovernance(action.id) &&
+    actionRequiresCoordinatorGovernance(action) &&
     Boolean(governanceBlockedReason);
   const blocked = Boolean(pageBlocked || executionBlocked || governanceBlocked);
   const confirmBlockedReason = pending
@@ -3516,7 +3516,7 @@ export function ActionPanel(props: ActionPanelProps) {
       )
     : actions;
   const hasGovernanceWriteAction = renderedActions.some((action) =>
-    actionRequiresCoordinatorGovernance(action.id),
+    actionRequiresCoordinatorGovernance(action),
   );
   const visibleGovernanceFreezeNotice = hasGovernanceWriteAction
     ? governanceFreezeNotice

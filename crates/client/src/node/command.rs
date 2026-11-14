@@ -8,16 +8,16 @@ use fuckipv6_common::domain::{
     default_network_icon, default_network_language, default_network_purpose,
     default_network_region, ActivityEntry, AuditEntry, AuditOutcome, CapabilityKind, ContentHash,
     CoordinatorCandidate, CoordinatorCandidateResources, CoordinatorCandidateStatus,
-    CoordinatorCandidateWillingness, CoordinatorPublicReachability, ExitContributionMode,
-    ExitContributionObligation, ExitContributionScope, ExitHealthAssessment, ExitHealthSnapshot,
-    ExitSelectionPolicy, InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
-    InvitationRedeemRequest, InvitationRedemption, InvitationStatusView, IssuedInvitation,
-    JoinRequest, JoinRequestReviewAction, JoinRequestState, LeakDetectionAssessment,
-    LeakDetectionSnapshot, MemberLifecycleAction, MemberLifecycleChange, MemberRemovalPreview,
-    MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord, NetworkEndpoint, NetworkId,
-    NetworkJoinMode, NetworkJoinPreview, NetworkMemberDirectory, NetworkProfileApplyResult,
-    NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility, PermissionDenialCode,
-    PolicyTestInput, PolicyTestResult, RelayGovernanceAction, TrafficPolicy,
+    CoordinatorCandidateWillingness, CoordinatorPublicReachability, CoordinatorWriteCredential,
+    ExitContributionMode, ExitContributionObligation, ExitContributionScope, ExitHealthAssessment,
+    ExitHealthSnapshot, ExitSelectionPolicy, InvitationCode, InvitationCreateRequest, InvitationId,
+    InvitationPreview, InvitationRedeemRequest, InvitationRedemption, InvitationStatusView,
+    IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
+    LeakDetectionAssessment, LeakDetectionSnapshot, MemberLifecycleAction, MemberLifecycleChange,
+    MemberRemovalPreview, MembershipRole, NetworkCreateProfile, NetworkDiscoveryRecord,
+    NetworkEndpoint, NetworkId, NetworkJoinMode, NetworkJoinPreview, NetworkMemberDirectory,
+    NetworkProfileApplyResult, NetworkProfilePreview, NetworkProfileUpdate, NetworkVisibility,
+    PermissionDenialCode, PolicyTestInput, PolicyTestResult, RelayGovernanceAction, TrafficPolicy,
     TrafficPolicyTestComparison, TrafficPolicyTestInput, TrafficPolicyTestVisibility,
     JOIN_REQUEST_MAX_INFORMATION_REQUEST_CHARS, JOIN_REQUEST_MAX_REASON_CHARS,
     NETWORK_PROFILE_MAX_TAG_CHARS,
@@ -472,9 +472,10 @@ impl NodeCommandKind {
     }
 
     /// Whether this write changes durable governance state rather than live
-    /// runtime state. Temporary Coordinators may coordinate running networks,
-    /// but this classification is the single source of truth for the writes
-    /// that must remain frozen until normal quorum authority returns.
+    /// runtime state. Temporary and emergency Coordinators may coordinate
+    /// running networks, but these writes remain frozen until normal quorum
+    /// authority returns. Candidate declarations are intentionally excluded:
+    /// they publish candidate health and willingness during recovery.
     pub const fn is_governance_write(self) -> bool {
         matches!(
             self,
@@ -509,7 +510,6 @@ impl NodeCommandKind {
                 | Self::ApplyTrafficPolicy
                 | Self::RollbackTrafficPolicy
                 | Self::UpdateCoordinatorCandidates
-                | Self::PublishCoordinatorCandidateDeclaration
         )
     }
 
@@ -2782,6 +2782,11 @@ pub struct NodeUpdateCoordinatorCandidatesCommand {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_from_unix_ms: Option<u64>,
     pub expires_at_unix_ms: u64,
+    /// Present after the first authoritative term is installed. Bootstrap
+    /// updates before a term are deliberately credential-free and are rejected
+    /// by the Coordinator once a term exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential: Option<CoordinatorWriteCredential>,
 }
 
 impl NodeUpdateCoordinatorCandidatesCommand {
@@ -2810,6 +2815,14 @@ impl NodeUpdateCoordinatorCandidatesCommand {
         if self.expires_at_unix_ms <= now {
             return Err(invalid("Coordinator 候选配置不能使用已过期的时间窗口")
                 .for_network(self.network_name.clone()));
+        }
+        if let Some(credential) = &self.credential {
+            if credential.term == 0 || credential.fencing_token.0 == 0 {
+                return Err(
+                    invalid("Coordinator 治理写入的任期和 fencing token 必须大于 0")
+                        .for_network(self.network_name.clone()),
+                );
+            }
         }
         Ok(())
     }
@@ -4505,6 +4518,7 @@ mod tests {
                 }],
                 effective_from_unix_ms: Some(now_unix_ms()),
                 expires_at_unix_ms: now_unix_ms().saturating_add(60_000),
+                credential: None,
             }),
             NodeCommand::PublishCoordinatorCandidateDeclaration(
                 NodePublishCoordinatorCandidateDeclarationCommand {
@@ -4646,6 +4660,10 @@ mod tests {
         ] {
             assert!(kind.is_governance_write(), "{kind:?}");
         }
+        assert!(
+            !NodeCommandKind::PublishCoordinatorCandidateDeclaration.is_governance_write(),
+            "candidate declarations must remain available during recovery"
+        );
     }
 
     #[test]
@@ -4976,6 +4994,78 @@ mod tests {
             let encoded = serde_json::to_string(&command).expect("serialize command");
             let decoded: NodeCommand = serde_json::from_str(&encoded).expect("deserialize command");
             assert_eq!(decoded, command);
+        }
+    }
+
+    #[test]
+    fn coordinator_candidate_command_credential_is_optional_and_round_trips() {
+        let now = now_unix_ms();
+        let network_id =
+            fuckipv6_common::domain::NetworkId::from_public_key(b"coordinator-command-network");
+        let leader =
+            fuckipv6_common::domain::NodeId::from_public_key(b"coordinator-command-leader");
+        let mut update = NodeUpdateCoordinatorCandidatesCommand {
+            network_name: "home".into(),
+            expected_revision: 1,
+            candidates: vec![CoordinatorCandidate {
+                node_id: leader.clone(),
+                priority: 10,
+            }],
+            effective_from_unix_ms: Some(now),
+            expires_at_unix_ms: now.saturating_add(60_000),
+            credential: None,
+        };
+
+        let bootstrap = NodeCommand::UpdateCoordinatorCandidates(update.clone());
+        let bootstrap_json = serde_json::to_value(&bootstrap).expect("serialize bootstrap");
+        assert!(
+            bootstrap_json["payload"].get("credential").is_none(),
+            "credential-free bootstrap commands must retain their compact wire shape"
+        );
+        let decoded: NodeCommand =
+            serde_json::from_value(bootstrap_json).expect("deserialize bootstrap");
+        assert_eq!(decoded, bootstrap);
+
+        update.credential = Some(CoordinatorWriteCredential {
+            network_id,
+            term: 3,
+            leader,
+            fencing_token: fuckipv6_common::domain::FencingToken(30),
+        });
+        let authorized = NodeCommand::UpdateCoordinatorCandidates(update);
+        authorized.validate().expect("authorized command");
+        let encoded = serde_json::to_value(&authorized).expect("serialize authorized command");
+        assert_eq!(encoded["payload"]["credential"]["term"], 3);
+        assert_eq!(encoded["payload"]["credential"]["fencing_token"], 30);
+        let decoded: NodeCommand =
+            serde_json::from_value(encoded).expect("deserialize authorized command");
+        assert_eq!(decoded, authorized);
+    }
+
+    #[test]
+    fn coordinator_candidate_command_rejects_zero_term_or_fencing_token() {
+        let now = now_unix_ms();
+        let base = NodeUpdateCoordinatorCandidatesCommand {
+            network_name: "home".into(),
+            expected_revision: 1,
+            candidates: Vec::new(),
+            effective_from_unix_ms: Some(now),
+            expires_at_unix_ms: now.saturating_add(60_000),
+            credential: None,
+        };
+        for (term, fencing_token) in [(0, 1), (1, 0)] {
+            let mut command = base.clone();
+            command.credential = Some(CoordinatorWriteCredential {
+                network_id: fuckipv6_common::domain::NetworkId::from_public_key(
+                    b"coordinator-command-network",
+                ),
+                term,
+                leader: fuckipv6_common::domain::NodeId::from_public_key(
+                    b"coordinator-command-leader",
+                ),
+                fencing_token: fuckipv6_common::domain::FencingToken(fencing_token),
+            });
+            assert_invalid(NodeCommand::UpdateCoordinatorCandidates(command));
         }
     }
 

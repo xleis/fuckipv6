@@ -1,12 +1,16 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
-    CoordinatorCandidateConfig, CoordinatorCandidateDeclaration, CoordinatorCandidateStatus,
-    InvitationCode, InvitationCreateRequest, InvitationId, InvitationPreview,
-    InvitationRedeemRequest, InvitationRedemption, InvitationState, InvitationStatusView,
-    IssuedInvitation, JoinRequest, JoinRequestId, JoinRequestState, MemberLifecycleChange,
-    MemberLifecycleChangeRequest, MemberRemovalPreview, MemberRemovalPreviewRequest, NetworkId,
-    NetworkJoinPreview, NetworkJoinPreviewRequest, NetworkMemberDirectory, NodeId,
+    ContentHash, CoordinatorCandidateConfig, CoordinatorCandidateDeclaration,
+    CoordinatorCandidateStatus, CoordinatorElectionProposal, CoordinatorElectionVote,
+    CoordinatorEmergencyLeaderResponse, CoordinatorEmergencyWriteCredential,
+    CoordinatorRecoveryReport, CoordinatorRecoveryResponse, CoordinatorTerm,
+    CoordinatorWriteCredential, InvitationCode, InvitationCreateRequest, InvitationId,
+    InvitationPreview, InvitationRedeemRequest, InvitationRedemption, InvitationState,
+    InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestId, JoinRequestState,
+    MemberLifecycleChange, MemberLifecycleChangeRequest, MemberRemovalPreview,
+    MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview, NetworkJoinPreviewRequest,
+    NetworkMemberDirectory, NodeId,
 };
 use fuckipv6_common::{
     codec, validate_signaling_message_len, Identity, JoinRequestBatchReviewItem,
@@ -333,6 +337,7 @@ impl CoordinatorCandidateControlError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // The runtime takeover loop consumes these pending variants.
 enum PendingCoordinatorCandidate {
     Config {
         network_id: NetworkId,
@@ -343,12 +348,94 @@ enum PendingCoordinatorCandidate {
         config_revision: u64,
     },
     Status(NetworkId),
+    TermInstall {
+        network_id: NetworkId,
+        term: u64,
+        fencing_token: u64,
+    },
+    TermLeaseRenew {
+        network_id: NetworkId,
+        term: u64,
+        fencing_token: u64,
+        expires_at_unix_ms: u64,
+    },
+    ElectionPropose {
+        network_id: NetworkId,
+        proposal_id: ContentHash,
+    },
+    ElectionVote {
+        network_id: NetworkId,
+        proposal_id: ContentHash,
+        vote: CoordinatorElectionVote,
+    },
+    ElectionTimeout {
+        network_id: NetworkId,
+        proposal_id: ContentHash,
+    },
+    Recovery {
+        network_id: NetworkId,
+    },
+    EmergencyIssue {
+        network_id: NetworkId,
+    },
+    EmergencyRenew {
+        network_id: NetworkId,
+        leader: NodeId,
+        emergency_epoch: u64,
+        candidate_config_revision: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CoordinatorCandidateOperationResponse {
+    Status(CoordinatorCandidateStatus),
+    Recovery(CoordinatorRecoveryResponse),
+    Emergency(CoordinatorEmergencyLeaderResponse),
+}
+
+impl CoordinatorCandidateOperationResponse {
+    fn into_status(
+        self,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        match self {
+            Self::Status(status) => Ok(status),
+            Self::Recovery(_) | Self::Emergency(_) => {
+                Err(CoordinatorCandidateControlError::Unavailable)
+            }
+        }
+    }
+
+    fn into_recovery(
+        self,
+    ) -> std::result::Result<CoordinatorRecoveryResponse, CoordinatorCandidateControlError> {
+        match self {
+            Self::Recovery(response) => Ok(response),
+            Self::Status(_) | Self::Emergency(_) => {
+                Err(CoordinatorCandidateControlError::Unavailable)
+            }
+        }
+    }
+
+    fn into_emergency(
+        self,
+    ) -> std::result::Result<CoordinatorEmergencyLeaderResponse, CoordinatorCandidateControlError>
+    {
+        match self {
+            Self::Emergency(response) => Ok(response),
+            Self::Status(_) | Self::Recovery(_) => {
+                Err(CoordinatorCandidateControlError::Unavailable)
+            }
+        }
+    }
 }
 
 struct PendingCoordinatorCandidateResponse {
     expected: PendingCoordinatorCandidate,
     sender: oneshot::Sender<
-        std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError>,
+        std::result::Result<
+            CoordinatorCandidateOperationResponse,
+            CoordinatorCandidateControlError,
+        >,
     >,
 }
 
@@ -363,7 +450,10 @@ impl CoordinatorCandidateResponseHub {
         expected: PendingCoordinatorCandidate,
     ) -> std::result::Result<
         oneshot::Receiver<
-            std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError>,
+            std::result::Result<
+                CoordinatorCandidateOperationResponse,
+                CoordinatorCandidateControlError,
+            >,
         >,
         CoordinatorCandidateControlError,
     > {
@@ -415,6 +505,122 @@ impl CoordinatorCandidateResponseHub {
             SignalingMessage::CoordinatorCandidateStatusAck { status } => self.matches(
                 |expected| matches!(expected, PendingCoordinatorCandidate::Status(network_id) if status.network_id == *network_id),
             ),
+            SignalingMessage::CoordinatorTermInstallAck { status } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::TermInstall {
+                        network_id,
+                        term,
+                        fencing_token,
+                    } => {
+                        status.network_id == *network_id
+                            && status.latest_term.as_ref().is_some_and(|latest| {
+                                latest.term == *term
+                                    && latest.fencing_token.0 == *fencing_token
+                            })
+                    }
+                    _ => false,
+                })
+            }
+            SignalingMessage::CoordinatorTermLeaseRenewAck { status } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::TermLeaseRenew {
+                        network_id,
+                        term,
+                        fencing_token,
+                        expires_at_unix_ms,
+                    } => {
+                        status.network_id == *network_id
+                            && status.latest_term.as_ref().is_some_and(|latest| {
+                                latest.term == *term
+                                    && latest.fencing_token.0 == *fencing_token
+                                    && latest.expires_at_unix_ms == *expires_at_unix_ms
+                            })
+                    }
+                    _ => false,
+                })
+            }
+            SignalingMessage::CoordinatorElectionProposeAck { status } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::ElectionPropose {
+                        network_id,
+                        proposal_id,
+                    } => {
+                        status.network_id == *network_id
+                            && status.latest_election.as_ref().is_some_and(|election| {
+                                election.proposal.proposal_id == *proposal_id
+                            })
+                    }
+                    _ => false,
+                })
+            }
+            SignalingMessage::CoordinatorElectionVoteAck { status } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::ElectionVote {
+                        network_id,
+                        proposal_id,
+                        vote,
+                    } => {
+                        status.network_id == *network_id
+                            && status.latest_election.as_ref().is_some_and(|election| {
+                                election.proposal.proposal_id == *proposal_id
+                                    && election.votes.contains(vote)
+                            })
+                    }
+                    _ => false,
+                })
+            }
+            SignalingMessage::CoordinatorElectionTimeoutAck { status } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::ElectionTimeout {
+                        network_id,
+                        proposal_id,
+                    } => {
+                        status.network_id == *network_id
+                            && status.latest_election.as_ref().is_some_and(|election| {
+                                election.proposal.proposal_id == *proposal_id
+                            })
+                    }
+                    _ => false,
+                })
+            }
+            SignalingMessage::CoordinatorRecoveryResponse { response } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::Recovery { network_id } => {
+                        response.status.network_id == *network_id
+                            && response.recovery.network_id == *network_id
+                    }
+                    _ => false,
+                })
+            }
+            SignalingMessage::CoordinatorEmergencyLeaderIssueAck { response } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::EmergencyIssue { network_id } => {
+                        response.status.network_id == *network_id
+                            && response.status.emergency_leader.is_some()
+                    }
+                    _ => false,
+                })
+            }
+            SignalingMessage::CoordinatorEmergencyLeaderRenewAck { response } => {
+                self.matches(|expected| match expected {
+                    PendingCoordinatorCandidate::EmergencyRenew {
+                        network_id,
+                        leader,
+                        emergency_epoch,
+                        candidate_config_revision,
+                    } => {
+                        response.renewed
+                            && response.status.network_id == *network_id
+                            && response.status.emergency_leader.as_ref().is_some_and(|lease| {
+                                lease.leader == *leader
+                                    && lease.emergency_epoch == *emergency_epoch
+                                    && lease.candidate_config_revision
+                                        == *candidate_config_revision
+                            })
+                    }
+                    _ => false,
+                })
+            }
             _ => return false,
         };
 
@@ -423,6 +629,14 @@ impl CoordinatorCandidateResponseHub {
             SignalingMessage::CoordinatorCandidateConfigAck { .. }
                 | SignalingMessage::CoordinatorCandidateDeclarationAck { .. }
                 | SignalingMessage::CoordinatorCandidateStatusAck { .. }
+                | SignalingMessage::CoordinatorTermInstallAck { .. }
+                | SignalingMessage::CoordinatorTermLeaseRenewAck { .. }
+                | SignalingMessage::CoordinatorElectionProposeAck { .. }
+                | SignalingMessage::CoordinatorElectionVoteAck { .. }
+                | SignalingMessage::CoordinatorElectionTimeoutAck { .. }
+                | SignalingMessage::CoordinatorRecoveryResponse { .. }
+                | SignalingMessage::CoordinatorEmergencyLeaderIssueAck { .. }
+                | SignalingMessage::CoordinatorEmergencyLeaderRenewAck { .. }
         );
         if !matches {
             return is_candidate_response;
@@ -431,7 +645,21 @@ impl CoordinatorCandidateResponseHub {
         let response = match message {
             SignalingMessage::CoordinatorCandidateConfigAck { status }
             | SignalingMessage::CoordinatorCandidateDeclarationAck { status }
-            | SignalingMessage::CoordinatorCandidateStatusAck { status } => status.clone(),
+            | SignalingMessage::CoordinatorCandidateStatusAck { status }
+            | SignalingMessage::CoordinatorTermInstallAck { status }
+            | SignalingMessage::CoordinatorTermLeaseRenewAck { status }
+            | SignalingMessage::CoordinatorElectionProposeAck { status }
+            | SignalingMessage::CoordinatorElectionVoteAck { status }
+            | SignalingMessage::CoordinatorElectionTimeoutAck { status } => {
+                CoordinatorCandidateOperationResponse::Status(status.clone())
+            }
+            SignalingMessage::CoordinatorRecoveryResponse { response } => {
+                CoordinatorCandidateOperationResponse::Recovery(response.clone())
+            }
+            SignalingMessage::CoordinatorEmergencyLeaderIssueAck { response }
+            | SignalingMessage::CoordinatorEmergencyLeaderRenewAck { response } => {
+                CoordinatorCandidateOperationResponse::Emergency(response.clone())
+            }
             SignalingMessage::Error { code, .. } => {
                 return self.finish(Err(CoordinatorCandidateControlError::Rejected(*code)));
             }
@@ -457,7 +685,10 @@ impl CoordinatorCandidateResponseHub {
 
     fn finish(
         &self,
-        result: std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError>,
+        result: std::result::Result<
+            CoordinatorCandidateOperationResponse,
+            CoordinatorCandidateControlError,
+        >,
     ) -> bool {
         let pending = self
             .pending
@@ -979,6 +1210,54 @@ impl SignalingClient {
     }
 
     /// 获取分配的虚拟IP (IPv6)
+    /// Build an in-memory signaling client for runtime tests. Requests are
+    /// observed on the returned receiver and authoritative responses can be
+    /// routed without opening a socket.
+    #[cfg(test)]
+    pub(crate) fn test_channel() -> (Self, mpsc::UnboundedReceiver<SignalingMessage>) {
+        let (tx, outbound_rx) = mpsc::unbounded_channel::<SignalingMessage>();
+        let (_, event_rx) = mpsc::unbounded_channel::<SignalingEvent>();
+        let (_, assigned_ip_rx) = watch::channel(None);
+        let (_, assigned_virtual_ips_rx) = watch::channel(None);
+        let (_, relay_endpoint_rx) = watch::channel(None);
+        let (_, relay_endpoints_rx) = watch::channel(Vec::new());
+        let (_, known_peers_rx) = watch::channel(Vec::new());
+        let (shutdown_tx, _) = watch::channel(false);
+        (
+            Self {
+                tx,
+                event_rx: Arc::new(RwLock::new(event_rx)),
+                assigned_ip_rx,
+                assigned_virtual_ips_rx,
+                relay_endpoint_rx,
+                relay_endpoints_rx,
+                known_peers_rx,
+                shutdown_tx,
+                task: StdMutex::new(None),
+                join_requests: Arc::new(JoinRequestResponseHub::default()),
+                join_request_gate: Arc::new(Mutex::new(())),
+                invitations: Arc::new(InvitationResponseHub::default()),
+                invitation_gate: Arc::new(Mutex::new(())),
+                network_join_previews: Arc::new(NetworkJoinPreviewResponseHub::default()),
+                network_join_preview_gate: Arc::new(Mutex::new(())),
+                coordinator_candidates: Arc::new(CoordinatorCandidateResponseHub::default()),
+                coordinator_candidate_gate: Arc::new(Mutex::new(())),
+            },
+            outbound_rx,
+        )
+    }
+
+    /// Route one control-plane response in the same way the websocket receive
+    /// loop does. Returns whether a pending coordinator operation consumed it.
+    #[cfg(test)]
+    pub(crate) fn route_coordinator_candidate_test_response(
+        &self,
+        message: SignalingMessage,
+    ) -> bool {
+        self.coordinator_candidates.route(&message)
+    }
+
+    /// 获取分配的虚拟IP (IPv6)
     pub async fn assigned_ip(&self) -> Option<Ipv6Addr> {
         *self.assigned_ip_rx.borrow()
     }
@@ -1225,6 +1504,61 @@ impl SignalingClient {
         .await
     }
 
+    #[allow(dead_code)] // Called by the runtime takeover loop.
+    pub(crate) async fn issue_emergency_leader(
+        &self,
+        network_id: NetworkId,
+    ) -> std::result::Result<CoordinatorEmergencyLeaderResponse, CoordinatorCandidateControlError>
+    {
+        self.send_coordinator_candidate_operation_response(
+            SignalingMessage::CoordinatorEmergencyLeaderIssue {
+                network_id: network_id.clone(),
+            },
+            PendingCoordinatorCandidate::EmergencyIssue { network_id },
+        )
+        .await?
+        .into_emergency()
+    }
+
+    #[allow(dead_code)] // Called by the runtime takeover loop.
+    pub(crate) async fn renew_emergency_leader(
+        &self,
+        network_id: NetworkId,
+        credential: CoordinatorEmergencyWriteCredential,
+    ) -> std::result::Result<CoordinatorEmergencyLeaderResponse, CoordinatorCandidateControlError>
+    {
+        let expected = PendingCoordinatorCandidate::EmergencyRenew {
+            network_id: network_id.clone(),
+            leader: credential.leader.clone(),
+            emergency_epoch: credential.emergency_epoch,
+            candidate_config_revision: credential.candidate_config_revision,
+        };
+        self.send_coordinator_candidate_operation_response(
+            SignalingMessage::CoordinatorEmergencyLeaderRenew {
+                network_id,
+                credential,
+            },
+            expected,
+        )
+        .await?
+        .into_emergency()
+    }
+
+    pub(crate) async fn recover_coordinator(
+        &self,
+        report: CoordinatorRecoveryReport,
+    ) -> std::result::Result<CoordinatorRecoveryResponse, CoordinatorCandidateControlError> {
+        let expected = PendingCoordinatorCandidate::Recovery {
+            network_id: report.network_id.clone(),
+        };
+        self.send_coordinator_candidate_operation_response(
+            SignalingMessage::CoordinatorRecoveryRequest { report },
+            expected,
+        )
+        .await?
+        .into_recovery()
+    }
+
     pub(crate) async fn update_coordinator_candidates(
         &self,
         config: CoordinatorCandidateConfig,
@@ -1238,6 +1572,118 @@ impl SignalingClient {
             SignalingMessage::CoordinatorCandidateConfigUpdate {
                 expected_revision,
                 config,
+            },
+            expected,
+        )
+        .await
+    }
+
+    pub(crate) async fn update_coordinator_candidates_authorized(
+        &self,
+        config: CoordinatorCandidateConfig,
+        expected_revision: u64,
+        credential: CoordinatorWriteCredential,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        let expected = PendingCoordinatorCandidate::Config {
+            network_id: config.network_id.clone(),
+            revision: config.revision,
+        };
+        self.send_coordinator_candidate_operation(
+            SignalingMessage::CoordinatorCandidateConfigUpdateAuthorized {
+                expected_revision,
+                config,
+                credential,
+            },
+            expected,
+        )
+        .await
+    }
+
+    pub(crate) async fn install_coordinator_term(
+        &self,
+        term: CoordinatorTerm,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        let expected = PendingCoordinatorCandidate::TermInstall {
+            network_id: term.network_id.clone(),
+            term: term.term,
+            fencing_token: term.fencing_token.0,
+        };
+        self.send_coordinator_candidate_operation(
+            SignalingMessage::CoordinatorTermInstall { term },
+            expected,
+        )
+        .await
+    }
+
+    pub(crate) async fn renew_coordinator_term_lease(
+        &self,
+        credential: CoordinatorWriteCredential,
+        new_expires_at_unix_ms: u64,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        let expected = PendingCoordinatorCandidate::TermLeaseRenew {
+            network_id: credential.network_id.clone(),
+            term: credential.term,
+            fencing_token: credential.fencing_token.0,
+            expires_at_unix_ms: new_expires_at_unix_ms,
+        };
+        self.send_coordinator_candidate_operation(
+            SignalingMessage::CoordinatorTermLeaseRenew {
+                credential,
+                new_expires_at_unix_ms,
+            },
+            expected,
+        )
+        .await
+    }
+
+    #[allow(dead_code)] // Called by the runtime takeover loop.
+    pub(crate) async fn propose_coordinator_election(
+        &self,
+        proposal: CoordinatorElectionProposal,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        let expected = PendingCoordinatorCandidate::ElectionPropose {
+            network_id: proposal.network_id.clone(),
+            proposal_id: proposal.proposal_id.clone(),
+        };
+        self.send_coordinator_candidate_operation(
+            SignalingMessage::CoordinatorElectionPropose { proposal },
+            expected,
+        )
+        .await
+    }
+
+    #[allow(dead_code)] // Called by the runtime takeover loop.
+    pub(crate) async fn vote_coordinator_election(
+        &self,
+        proposal_id: ContentHash,
+        vote: CoordinatorElectionVote,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        let expected = PendingCoordinatorCandidate::ElectionVote {
+            network_id: vote.network_id.clone(),
+            proposal_id: proposal_id.clone(),
+            vote: vote.clone(),
+        };
+        self.send_coordinator_candidate_operation(
+            SignalingMessage::CoordinatorElectionVote { proposal_id, vote },
+            expected,
+        )
+        .await
+    }
+
+    #[allow(dead_code)] // Called by the runtime takeover loop.
+    pub(crate) async fn timeout_coordinator_election(
+        &self,
+        network_id: NetworkId,
+        proposal_id: ContentHash,
+    ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        let expected = PendingCoordinatorCandidate::ElectionTimeout {
+            network_id: network_id.clone(),
+            proposal_id: proposal_id.clone(),
+        };
+        self.send_coordinator_candidate_operation(
+            SignalingMessage::CoordinatorElectionTimeout {
+                network_id,
+                proposal_id,
             },
             expected,
         )
@@ -1264,6 +1710,17 @@ impl SignalingClient {
         message: SignalingMessage,
         expected: PendingCoordinatorCandidate,
     ) -> std::result::Result<CoordinatorCandidateStatus, CoordinatorCandidateControlError> {
+        self.send_coordinator_candidate_operation_response(message, expected)
+            .await?
+            .into_status()
+    }
+
+    async fn send_coordinator_candidate_operation_response(
+        &self,
+        message: SignalingMessage,
+        expected: PendingCoordinatorCandidate,
+    ) -> std::result::Result<CoordinatorCandidateOperationResponse, CoordinatorCandidateControlError>
+    {
         let _gate = self.coordinator_candidate_gate.lock().await;
         let receiver = self.coordinator_candidates.register(expected)?;
         if self.send(message).is_err() {
@@ -2071,6 +2528,16 @@ fn signaling_message_to_event(msg: SignalingMessage) -> Option<SignalingEvent> {
             Some(SignalingEvent::CoordinatorCandidateStatusChanged { network_id })
         }
 
+        SignalingMessage::CoordinatorElectionChanged {
+            network_id,
+            proposal_id,
+            stage,
+        } => Some(SignalingEvent::CoordinatorElectionChanged {
+            network_id,
+            proposal_id,
+            stage,
+        }),
+
         SignalingMessage::MemberDirectoryList { .. }
         | SignalingMessage::MemberDirectoryListAck { .. }
         | SignalingMessage::JoinRequestSubmit { .. }
@@ -2098,7 +2565,24 @@ fn signaling_message_to_event(msg: SignalingMessage) -> Option<SignalingEvent> {
         | SignalingMessage::CoordinatorCandidateDeclarationPublish { .. }
         | SignalingMessage::CoordinatorCandidateDeclarationAck { .. }
         | SignalingMessage::CoordinatorCandidateStatusRequest { .. }
-        | SignalingMessage::CoordinatorCandidateStatusAck { .. } => None,
+        | SignalingMessage::CoordinatorCandidateStatusAck { .. }
+        | SignalingMessage::CoordinatorCandidateConfigUpdateAuthorized { .. }
+        | SignalingMessage::CoordinatorTermInstall { .. }
+        | SignalingMessage::CoordinatorTermInstallAck { .. }
+        | SignalingMessage::CoordinatorTermLeaseRenew { .. }
+        | SignalingMessage::CoordinatorTermLeaseRenewAck { .. }
+        | SignalingMessage::CoordinatorElectionPropose { .. }
+        | SignalingMessage::CoordinatorElectionProposeAck { .. }
+        | SignalingMessage::CoordinatorElectionVote { .. }
+        | SignalingMessage::CoordinatorElectionVoteAck { .. }
+        | SignalingMessage::CoordinatorElectionTimeout { .. }
+        | SignalingMessage::CoordinatorElectionTimeoutAck { .. }
+        | SignalingMessage::CoordinatorRecoveryRequest { .. }
+        | SignalingMessage::CoordinatorRecoveryResponse { .. }
+        | SignalingMessage::CoordinatorEmergencyLeaderIssue { .. }
+        | SignalingMessage::CoordinatorEmergencyLeaderIssueAck { .. }
+        | SignalingMessage::CoordinatorEmergencyLeaderRenew { .. }
+        | SignalingMessage::CoordinatorEmergencyLeaderRenewAck { .. } => None,
 
         _ => None,
     }
@@ -2191,6 +2675,14 @@ pub enum SignalingEvent {
     /// status instead of inferring a Leader.
     CoordinatorCandidateStatusChanged { network_id: NetworkId },
 
+    /// Candidate-only election transition. Runtime consumers must fetch
+    /// authoritative status before signing a vote or activating Leader duties.
+    CoordinatorElectionChanged {
+        network_id: NetworkId,
+        proposal_id: ContentHash,
+        stage: fuckipv6_common::domain::CoordinatorElectionStage,
+    },
+
     /// 错误
     Error { code: u16, message: String },
 }
@@ -2199,13 +2691,154 @@ pub enum SignalingEvent {
 mod tests {
     use super::*;
     use fuckipv6_common::domain::{
-        ExitContributionMode, ExitContributionObligation, ExitContributionScope, MembershipRole,
-        NetworkCreateProfile, NetworkJoinMode, NetworkRecord, NetworkVisibility, NodeId, PublicKey,
+        CoordinatorAuthority, CoordinatorCandidateConfigState, CoordinatorCandidateStatus,
+        CoordinatorElectionSession, CoordinatorElectionVote, CoordinatorEmergencyLeaderState,
+        CoordinatorEmergencyLeaderStatus, CoordinatorEmergencyState, CoordinatorLeaseState,
+        CoordinatorPhase, CoordinatorTerm, ExitContributionMode, ExitContributionObligation,
+        ExitContributionScope, FencingToken, MembershipRole, NetworkCreateProfile, NetworkJoinMode,
+        NetworkRecord, NetworkVisibility, NodeId, PublicKey,
     };
+    use fuckipv6_common::Identity;
     use futures::SinkExt;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
+
+    fn coordinator_term(term: u64, fencing_token: u64, expires_at_unix_ms: u64) -> CoordinatorTerm {
+        let network_id = NetworkId::from_public_key(b"coordinator-ack-network");
+        let identity = Identity::generate().unwrap();
+        let leader = NodeId::from_public_key(&identity.public_key());
+        let voter = identity;
+        let vote = CoordinatorElectionVote::signed(
+            network_id.clone(),
+            1,
+            term,
+            leader.clone(),
+            vec![leader.clone()],
+            expires_at_unix_ms.saturating_sub(60_000),
+            expires_at_unix_ms,
+            &voter,
+        )
+        .unwrap();
+        CoordinatorTerm {
+            network_id,
+            term,
+            leader: leader.clone(),
+            candidate_group: vec![leader.clone()],
+            candidate_config_revision: 1,
+            majority_proof: vec![leader],
+            majority_votes: vec![vote],
+            authority: CoordinatorAuthority::Full,
+            phase: CoordinatorPhase::Stable,
+            fencing_token: FencingToken(fencing_token),
+            issued_at_unix_ms: expires_at_unix_ms.saturating_sub(60_000),
+            expires_at_unix_ms,
+        }
+    }
+
+    fn coordinator_status(
+        term: &CoordinatorTerm,
+        generated_at_unix_ms: u64,
+    ) -> CoordinatorCandidateStatus {
+        CoordinatorCandidateStatus {
+            network_id: term.network_id.clone(),
+            generated_at_unix_ms,
+            config_state: CoordinatorCandidateConfigState::Missing,
+            config: None,
+            candidates: Vec::new(),
+            current_leader: Some(term.leader.clone()),
+            latest_term: Some(term.clone()),
+            lease: term.lease_status_at(generated_at_unix_ms),
+            control_plane: Default::default(),
+            emergency: CoordinatorEmergencyState::NoCandidatesConfigured,
+            emergency_leader: None,
+            latest_election: None,
+        }
+    }
+
+    fn coordinator_emergency_response(
+        network_id: NetworkId,
+        leader: NodeId,
+        emergency_epoch: u64,
+        candidate_config_revision: u64,
+        renewed: bool,
+    ) -> CoordinatorEmergencyLeaderResponse {
+        let term = coordinator_term(2, 20, 1_700_000_060_000);
+        let mut status = coordinator_status(&term, 1_700_000_001_000);
+        status.network_id = network_id.clone();
+        status.emergency = CoordinatorEmergencyState::AllCandidatesUnavailable;
+        status.emergency_leader = Some(CoordinatorEmergencyLeaderStatus {
+            network_id,
+            leader,
+            emergency_epoch,
+            candidate_config_revision,
+            unavailable_candidates: vec![NodeId::from_public_key(b"offline-candidate")],
+            issued_at_unix_ms: 1_700_000_000_000,
+            expires_at_unix_ms: 1_700_000_030_000,
+            hard_expires_at_unix_ms: 1_700_000_300_000,
+            state: CoordinatorEmergencyLeaderState::Active,
+            remaining_ms: 20_000,
+            runtime_coordination_allowed: true,
+            governance_writable: false,
+            data_plane_allowed: true,
+            health_checks_allowed: true,
+            allowed_writes: CoordinatorEmergencyLeaderStatus::allowed_runtime_writes(),
+        });
+        status.refresh_control_plane();
+        CoordinatorEmergencyLeaderResponse { status, renewed }
+    }
+
+    fn coordinator_election_material() -> (CoordinatorElectionProposal, CoordinatorElectionVote) {
+        let proposer = Identity::generate().unwrap();
+        let voter = Identity::generate().unwrap();
+        let candidate_group = vec![
+            NodeId::from_public_key(&proposer.public_key()),
+            NodeId::from_public_key(&voter.public_key()),
+        ];
+        let proposal = CoordinatorElectionProposal::signed(
+            NetworkId::from_public_key(b"coordinator-election-response-network"),
+            1,
+            2,
+            candidate_group.clone(),
+            1_000,
+            2_000,
+            &proposer,
+        )
+        .unwrap();
+        let vote = CoordinatorElectionVote::signed(
+            proposal.network_id.clone(),
+            proposal.candidate_config_revision,
+            proposal.term,
+            proposal.leader.clone(),
+            candidate_group,
+            1_000,
+            2_000,
+            &voter,
+        )
+        .unwrap();
+        (proposal, vote)
+    }
+
+    fn coordinator_election_status(
+        proposal: &CoordinatorElectionProposal,
+        votes: Vec<CoordinatorElectionVote>,
+        generated_at_unix_ms: u64,
+    ) -> CoordinatorCandidateStatus {
+        let mut session = CoordinatorElectionSession::started(proposal.clone(), 1_100)
+            .expect("valid coordinator election session");
+        session
+            .begin_voting(1_100)
+            .expect("coordinator election must enter voting");
+        for vote in votes {
+            session
+                .record_vote(vote, 1_100)
+                .expect("vote must belong to the election");
+        }
+        let mut status = coordinator_status(&coordinator_term(1, 10, 2_000), generated_at_unix_ms);
+        status.network_id = proposal.network_id.clone();
+        status.latest_election = Some(session);
+        status
+    }
 
     #[tokio::test]
     async fn close_timeout_preserves_task_owner_and_retry_succeeds() -> Result<()> {
@@ -2435,6 +3068,329 @@ mod tests {
                 .await
                 .expect("disconnect must not drop the response channel"),
             Err(InvitationControlError::Disconnected)
+        );
+    }
+
+    #[tokio::test]
+    async fn term_install_ack_requires_the_exact_installed_term_and_token() {
+        let hub = CoordinatorCandidateResponseHub::default();
+        let expected = coordinator_term(2, 20, 1_700_000_060_000);
+        let mut receiver = hub
+            .register(PendingCoordinatorCandidate::TermInstall {
+                network_id: expected.network_id.clone(),
+                term: expected.term,
+                fencing_token: expected.fencing_token.0,
+            })
+            .expect("register term install");
+
+        let wrong = coordinator_term(3, 30, 1_700_000_060_000);
+        assert!(hub.route(&SignalingMessage::CoordinatorTermInstallAck {
+            status: coordinator_status(&wrong, 1_700_000_001_000),
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "a mismatched term acknowledgement must not complete the pending install"
+        );
+
+        let status = coordinator_status(&expected, 1_700_000_001_000);
+        assert!(hub.route(&SignalingMessage::CoordinatorTermInstallAck {
+            status: status.clone(),
+        }));
+        assert_eq!(
+            receiver.await.expect("matching install response"),
+            Ok(CoordinatorCandidateOperationResponse::Status(status))
+        );
+    }
+
+    #[tokio::test]
+    async fn lease_renewal_ack_requires_the_exact_new_expiry() {
+        let hub = CoordinatorCandidateResponseHub::default();
+        let expected = coordinator_term(2, 20, 1_700_000_120_000);
+        let mut receiver = hub
+            .register(PendingCoordinatorCandidate::TermLeaseRenew {
+                network_id: expected.network_id.clone(),
+                term: expected.term,
+                fencing_token: expected.fencing_token.0,
+                expires_at_unix_ms: expected.expires_at_unix_ms,
+            })
+            .expect("register lease renewal");
+
+        let wrong = coordinator_term(2, 20, 1_700_000_180_000);
+        assert!(hub.route(&SignalingMessage::CoordinatorTermLeaseRenewAck {
+            status: coordinator_status(&wrong, 1_700_000_121_000),
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "an acknowledgement with another expiry must not complete the renewal"
+        );
+
+        let status = coordinator_status(&expected, 1_700_000_061_000);
+        assert_eq!(
+            status.lease.state,
+            CoordinatorLeaseState::Active,
+            "test acknowledgement must carry a writable projected lease"
+        );
+        assert!(hub.route(&SignalingMessage::CoordinatorTermLeaseRenewAck {
+            status: status.clone(),
+        }));
+        assert_eq!(
+            receiver.await.expect("matching renewal response"),
+            Ok(CoordinatorCandidateOperationResponse::Status(status))
+        );
+    }
+
+    #[tokio::test]
+    async fn election_proposal_ack_requires_the_exact_proposal() {
+        let (proposal, _) = coordinator_election_material();
+        let (other_proposal, _) = coordinator_election_material();
+        let hub = CoordinatorCandidateResponseHub::default();
+        let mut receiver = hub
+            .register(PendingCoordinatorCandidate::ElectionPropose {
+                network_id: proposal.network_id.clone(),
+                proposal_id: proposal.proposal_id.clone(),
+            })
+            .expect("register election proposal");
+
+        assert!(hub.route(&SignalingMessage::CoordinatorElectionProposeAck {
+            status: coordinator_election_status(&other_proposal, Vec::new(), 1_100),
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "a different election proposal must not complete the pending request"
+        );
+
+        let status = coordinator_election_status(&proposal, Vec::new(), 1_100);
+        assert!(hub.route(&SignalingMessage::CoordinatorElectionProposeAck {
+            status: status.clone(),
+        }));
+        assert_eq!(
+            receiver.await.expect("matching proposal response"),
+            Ok(CoordinatorCandidateOperationResponse::Status(status))
+        );
+    }
+
+    #[tokio::test]
+    async fn election_vote_ack_requires_the_exact_proposal_and_recorded_vote() {
+        let (proposal, vote) = coordinator_election_material();
+        let hub = CoordinatorCandidateResponseHub::default();
+        let mut receiver = hub
+            .register(PendingCoordinatorCandidate::ElectionVote {
+                network_id: proposal.network_id.clone(),
+                proposal_id: proposal.proposal_id.clone(),
+                vote: vote.clone(),
+            })
+            .expect("register election vote");
+
+        assert!(hub.route(&SignalingMessage::CoordinatorElectionVoteAck {
+            status: coordinator_election_status(&proposal, Vec::new(), 1_100),
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "an acknowledgement without the submitted vote must not complete the request"
+        );
+
+        let status = coordinator_election_status(&proposal, vec![vote], 1_100);
+        assert!(hub.route(&SignalingMessage::CoordinatorElectionVoteAck {
+            status: status.clone(),
+        }));
+        assert_eq!(
+            receiver.await.expect("matching vote response"),
+            Ok(CoordinatorCandidateOperationResponse::Status(status))
+        );
+    }
+
+    #[tokio::test]
+    async fn election_timeout_ack_requires_the_exact_proposal() {
+        let (proposal, _) = coordinator_election_material();
+        let (other_proposal, _) = coordinator_election_material();
+        let hub = CoordinatorCandidateResponseHub::default();
+        let mut receiver = hub
+            .register(PendingCoordinatorCandidate::ElectionTimeout {
+                network_id: proposal.network_id.clone(),
+                proposal_id: proposal.proposal_id.clone(),
+            })
+            .expect("register election timeout");
+
+        assert!(hub.route(&SignalingMessage::CoordinatorElectionTimeoutAck {
+            status: coordinator_election_status(&other_proposal, Vec::new(), 1_100),
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "a different election timeout must not complete the pending request"
+        );
+
+        let status = coordinator_election_status(&proposal, Vec::new(), 1_100);
+        assert!(hub.route(&SignalingMessage::CoordinatorElectionTimeoutAck {
+            status: status.clone(),
+        }));
+        assert_eq!(
+            receiver.await.expect("matching timeout response"),
+            Ok(CoordinatorCandidateOperationResponse::Status(status))
+        );
+    }
+
+    #[tokio::test]
+    async fn emergency_issue_ack_requires_the_matching_network_and_lease() {
+        let network_id = NetworkId::from_public_key(b"emergency-issue-network");
+        let leader = NodeId::from_public_key(b"emergency-issue-leader");
+        let hub = CoordinatorCandidateResponseHub::default();
+        let mut receiver = hub
+            .register(PendingCoordinatorCandidate::EmergencyIssue {
+                network_id: network_id.clone(),
+            })
+            .expect("register emergency issue");
+
+        assert!(
+            hub.route(&SignalingMessage::CoordinatorEmergencyLeaderIssueAck {
+                response: coordinator_emergency_response(
+                    NetworkId::from_public_key(b"other-emergency-issue-network"),
+                    leader.clone(),
+                    7,
+                    1,
+                    false,
+                ),
+            })
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "an emergency issue for another network must not complete the request"
+        );
+
+        let response = coordinator_emergency_response(network_id, leader, 8, 1, false);
+        assert!(
+            hub.route(&SignalingMessage::CoordinatorEmergencyLeaderIssueAck {
+                response: response.clone(),
+            })
+        );
+        assert_eq!(
+            receiver.await.expect("matching emergency issue response"),
+            Ok(CoordinatorCandidateOperationResponse::Emergency(response))
+        );
+    }
+
+    #[tokio::test]
+    async fn emergency_renew_ack_requires_the_exact_lease_and_renewal() {
+        let network_id = NetworkId::from_public_key(b"emergency-renew-network");
+        let leader = NodeId::from_public_key(b"emergency-renew-leader");
+        let hub = CoordinatorCandidateResponseHub::default();
+        let mut receiver = hub
+            .register(PendingCoordinatorCandidate::EmergencyRenew {
+                network_id: network_id.clone(),
+                leader: leader.clone(),
+                emergency_epoch: 9,
+                candidate_config_revision: 3,
+            })
+            .expect("register emergency renew");
+
+        assert!(
+            hub.route(&SignalingMessage::CoordinatorEmergencyLeaderRenewAck {
+                response: coordinator_emergency_response(
+                    network_id.clone(),
+                    leader.clone(),
+                    8,
+                    3,
+                    true,
+                ),
+            })
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "an emergency renewal for another epoch must not complete the request"
+        );
+        assert!(
+            hub.route(&SignalingMessage::CoordinatorEmergencyLeaderRenewAck {
+                response: coordinator_emergency_response(
+                    network_id.clone(),
+                    leader.clone(),
+                    9,
+                    3,
+                    false,
+                ),
+            })
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "an emergency response that did not renew must not complete the request"
+        );
+
+        let response = coordinator_emergency_response(network_id, leader, 9, 3, true);
+        assert!(
+            hub.route(&SignalingMessage::CoordinatorEmergencyLeaderRenewAck {
+                response: response.clone(),
+            })
+        );
+        assert_eq!(
+            receiver.await.expect("matching emergency renewal response"),
+            Ok(CoordinatorCandidateOperationResponse::Emergency(response))
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_response_requires_matching_status_and_recovery_network() {
+        let term = coordinator_term(2, 20, 1_700_000_060_000);
+        let status = coordinator_status(&term, 1_700_000_001_000);
+        let network_id = term.network_id.clone();
+        let recovery = fuckipv6_common::domain::CoordinatorRecoveryStatus {
+            network_id: network_id.clone(),
+            stage: fuckipv6_common::domain::CoordinatorRecoveryStage::ReadOnly,
+            role: fuckipv6_common::domain::CoordinatorRecoveryRole::Candidate,
+            governance_writable: false,
+            health_checks_allowed: true,
+            data_plane_allowed: true,
+            authoritative_term: term.term,
+            authoritative_fencing_token: term.fencing_token,
+            authoritative_leader: term.leader.clone(),
+            authoritative_candidate_config_revision: term.candidate_config_revision,
+            authoritative_audit_sequence: 7,
+            reason_code: "coordinator.recovery.stale_old_leader".into(),
+        };
+        let response = CoordinatorRecoveryResponse {
+            status,
+            recovery,
+            audit_entries: Vec::new(),
+        };
+        let hub = CoordinatorCandidateResponseHub::default();
+        let mut receiver = hub
+            .register(PendingCoordinatorCandidate::Recovery {
+                network_id: network_id.clone(),
+            })
+            .expect("register recovery");
+
+        let mut mismatched = response.clone();
+        mismatched.recovery.network_id =
+            NetworkId::from_public_key(b"recovery-response-other-network");
+        assert!(hub.route(&SignalingMessage::CoordinatorRecoveryResponse {
+            response: mismatched,
+        }));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut receiver)
+                .await
+                .is_err(),
+            "a recovery response with a mismatched network must not complete the request"
+        );
+
+        assert!(hub.route(&SignalingMessage::CoordinatorRecoveryResponse {
+            response: response.clone(),
+        }));
+        assert_eq!(
+            receiver.await.expect("matching recovery response"),
+            Ok(CoordinatorCandidateOperationResponse::Recovery(response))
         );
     }
 

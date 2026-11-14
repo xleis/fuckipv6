@@ -1498,6 +1498,16 @@ describe("node UI contract invariants", () => {
       config: null,
       current_leader: null,
       latest_term: null,
+      control_plane: {
+        state: "available",
+        governance_writable: true,
+        reason_code: "coordinator.control_plane.available",
+        quorum: {
+          received_votes: 2,
+          required_votes: 2,
+          participant_count: 3,
+        },
+      },
       emergency: "none",
     };
     snapshot.embedded_services[0].coordinator_candidates = status;
@@ -1515,29 +1525,90 @@ describe("node UI contract invariants", () => {
         emergency,
       );
     }
+
+    status.emergency = "none";
+    status.control_plane = {
+      ...status.control_plane!,
+      state: "read_only",
+      governance_writable: false,
+    };
+    expect(coordinatorGovernanceFreezeReason(snapshot, "home")).toBe(
+      "control_plane_not_writable",
+    );
+
+    status.control_plane.governance_writable = true;
+    status.emergency_leader = {
+      network_id: "net_stable_home",
+      leader: "node_emergency",
+      emergency_epoch: 3,
+      candidate_config_revision: 7,
+      unavailable_candidates: ["node_candidate"],
+      issued_at_unix_ms: 1_700_000_000_000,
+      expires_at_unix_ms: 1_700_000_030_000,
+      hard_expires_at_unix_ms: 1_700_000_300_000,
+      state: "active",
+      remaining_ms: 20_000,
+      runtime_coordination_allowed: true,
+      governance_writable: false,
+      data_plane_allowed: true,
+      health_checks_allowed: true,
+      allowed_writes: [],
+    };
+    expect(coordinatorGovernanceFreezeReason(snapshot, "home")).toBe(
+      "emergency_leader_active",
+    );
   });
 
   it("freezes only Coordinator governance writes", () => {
-    for (const actionId of [
-      "preview_member_removal",
-      "change_member_lifecycle",
+    const governanceCommands = new Set<NodeUiAction["command"]>([
+      "create_network",
+      "update_network_profile",
+      "publish_network_discovery",
+      "update_network_discovery",
+      "unpublish_network_discovery",
+      "join_network",
+      "submit_join_request",
       "review_join_request",
       "batch_review_join_requests",
+      "withdraw_join_request",
+      "resubmit_join_request",
+      "change_member_lifecycle",
       "create_invitation",
       "revoke_invitation",
       "redeem_invitation",
-    ]) {
-      expect(actionRequiresCoordinatorGovernance(actionId)).toBe(true);
-    }
-    for (const actionId of [
-      "get_coordinator_candidates",
+      "leave_network",
+      "acknowledge_membership_policy",
+      "set_network_role",
+      "set_local_exit_capability",
+      "set_node_display_name",
+      "rotate_node_identity",
+      "ban_client",
+      "unban_client",
+      "update_network_allocation",
+      "apply_configuration",
+      "rollback_configuration",
+      "apply_policy",
+      "rollback_policy",
+      "apply_traffic_policy",
+      "rollback_traffic_policy",
       "update_coordinator_candidates",
-      "publish_coordinator_candidate_declaration",
-      "list_join_requests",
-      "preview_invitation",
-    ]) {
-      expect(actionRequiresCoordinatorGovernance(actionId)).toBe(false);
+    ]);
+    const actions = manifest.pages.flatMap((page) => page.actions);
+    for (const action of actions) {
+      expect(
+        actionRequiresCoordinatorGovernance(action),
+        action.id,
+      ).toBe(governanceCommands.has(action.command));
     }
+    expect(
+      actionRequiresCoordinatorGovernance(
+        actions.find(
+          (action) =>
+            action.command ===
+            "publish_coordinator_candidate_declaration",
+        )!,
+      ),
+    ).toBe(false);
   });
 
   it("keeps Relay role actions on the shared command and selection gates", () => {

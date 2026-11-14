@@ -6918,6 +6918,16 @@ async fn handle_signaling_event(
             tracing::debug!("Coordinator 候选状态变更通知: network={network_id}");
         }
 
+        SignalingEvent::CoordinatorElectionChanged {
+            network_id,
+            proposal_id,
+            stage,
+        } => {
+            tracing::debug!(
+                "Coordinator 选举状态变更通知: network={network_id}, proposal={proposal_id:?}, stage={stage:?}"
+            );
+        }
+
         SignalingEvent::Error { code, message } => {
             tracing::error!("信令错误 {}: {}", code, message);
         }

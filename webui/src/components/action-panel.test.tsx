@@ -48,6 +48,16 @@ const snapshot: NodeSnapshot = {
       config: null,
       current_leader: null,
       latest_term: null,
+      control_plane: {
+        state: "available",
+        governance_writable: true,
+        reason_code: "coordinator.control_plane.available",
+        quorum: {
+          received_votes: 2,
+          required_votes: 2,
+          participant_count: 3,
+        },
+      },
       emergency: "none",
     },
   })),
@@ -63,7 +73,9 @@ function manifestAction(id: string): NodeUiAction {
 
 type CoordinatorGovernanceFixtureStatus =
   | CoordinatorEmergencyState
-  | "status_missing";
+  | "status_missing"
+  | "control_plane_not_writable"
+  | "emergency_leader_active";
 
 function coordinatorGovernanceSnapshot(
   status: CoordinatorGovernanceFixtureStatus,
@@ -75,6 +87,13 @@ function coordinatorGovernanceSnapshot(
   if (status === "status_missing") {
     return { ...snapshot, embedded_services: [service] };
   }
+  const emergency: CoordinatorEmergencyState =
+    status === "no_candidates_configured" ||
+    status === "configuration_pending" ||
+    status === "configuration_expired" ||
+    status === "all_candidates_unavailable"
+      ? status
+      : "none";
   const coordinatorStatus: CoordinatorCandidateStatus = {
     network_id: "net_stable_home",
     generated_at_unix_ms: 1_700_000_000_000,
@@ -90,7 +109,40 @@ function coordinatorGovernanceSnapshot(
     config: null,
     current_leader: null,
     latest_term: null,
-    emergency: status,
+    control_plane: {
+      state: status === "control_plane_not_writable" ? "read_only" : "available",
+      governance_writable: status === "none",
+      reason_code:
+        status === "control_plane_not_writable"
+          ? "coordinator.control_plane.no_leader"
+          : "coordinator.control_plane.available",
+      quorum: {
+        received_votes: 2,
+        required_votes: 2,
+        participant_count: 3,
+      },
+    },
+    emergency,
+    emergency_leader:
+      status === "emergency_leader_active"
+        ? {
+            network_id: "net_stable_home",
+            leader: "node_emergency",
+            emergency_epoch: 3,
+            candidate_config_revision: 7,
+            unavailable_candidates: ["node_candidate"],
+            issued_at_unix_ms: 1_700_000_000_000,
+            expires_at_unix_ms: 1_700_000_030_000,
+            hard_expires_at_unix_ms: 1_700_000_300_000,
+            state: "active",
+            remaining_ms: 20_000,
+            runtime_coordination_allowed: true,
+            governance_writable: false,
+            data_plane_allowed: true,
+            health_checks_allowed: true,
+            allowed_writes: [],
+          }
+        : null,
   };
   return {
     ...snapshot,
@@ -165,9 +217,6 @@ const redeemInvitation = manifest.pages
 const getCoordinatorCandidates = manifest.pages
   .flatMap((page) => page.actions)
   .find((action) => action.id === "get_coordinator_candidates") as NodeUiAction;
-const updateCoordinatorCandidates = manifest.pages
-  .flatMap((page) => page.actions)
-  .find((action) => action.id === "update_coordinator_candidates") as NodeUiAction;
 const publishCoordinatorDeclaration = manifest.pages
   .flatMap((page) => page.actions)
   .find((action) => action.id === "publish_coordinator_candidate_declaration") as NodeUiAction;
@@ -730,13 +779,11 @@ describe("action panel interaction gate", () => {
 
 describe("action panel Coordinator governance gate", () => {
   const governanceWriteActions = [
-    "preview_member_removal",
     "change_member_lifecycle",
-    "review_join_request",
-    "batch_review_join_requests",
     "create_invitation",
-    "revoke_invitation",
-    "redeem_invitation",
+    "update_coordinator_candidates",
+    "apply_configuration",
+    "rotate_node_identity",
   ].map(manifestAction);
 
   it("does not add governance noise to an empty action panel", () => {
@@ -773,6 +820,8 @@ describe("action panel Coordinator governance gate", () => {
     "configuration_pending",
     "configuration_expired",
     "all_candidates_unavailable",
+    "control_plane_not_writable",
+    "emergency_leader_active",
   ])("fails closed for %s while keeping recovery reads available", async (status) => {
     const user = userEvent.setup();
     render(
@@ -780,7 +829,6 @@ describe("action panel Coordinator governance gate", () => {
         actions={[
           ...governanceWriteActions,
           getCoordinatorCandidates,
-          updateCoordinatorCandidates,
           publishCoordinatorDeclaration,
         ]}
         actionGroups={actionGroups}
@@ -810,7 +858,6 @@ describe("action panel Coordinator governance gate", () => {
     }
     for (const action of [
       getCoordinatorCandidates,
-      updateCoordinatorCandidates,
       publishCoordinatorDeclaration,
     ]) {
       await user.click(

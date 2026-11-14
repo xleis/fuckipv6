@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 
 use fuckipv6_common::domain::{
     CoordinatorCandidate, CoordinatorCandidateResources, CoordinatorCandidateStatus,
-    CoordinatorCandidateWillingness, CoordinatorPublicReachability,
+    CoordinatorCandidateWillingness, CoordinatorPublicReachability, CoordinatorWriteCredential,
     RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot, RelayHealthSnapshot,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -241,6 +241,7 @@ enum EmbeddedServiceCommand {
         candidates: Vec<CoordinatorCandidate>,
         effective_from_unix_ms: u64,
         expires_at_unix_ms: u64,
+        credential: Option<CoordinatorWriteCredential>,
         reply: oneshot::Sender<Result<CoordinatorCandidateStatus, EmbeddedServiceError>>,
     },
     PublishCoordinatorCandidateDeclaration {
@@ -508,6 +509,7 @@ impl EmbeddedServiceManager {
                         candidates,
                         effective_from_unix_ms,
                         expires_at_unix_ms,
+                        credential,
                         reply,
                     } => {
                         let result = match (services.get(&network_name), configs.as_ref()) {
@@ -520,6 +522,7 @@ impl EmbeddedServiceManager {
                                             candidates,
                                             effective_from_unix_ms,
                                             expires_at_unix_ms,
+                                            credential,
                                         )
                                         .await
                                         .map_err(|error| EmbeddedServiceError::OperationFailed {
@@ -815,6 +818,7 @@ impl EmbeddedServiceManager {
         candidates: Vec<CoordinatorCandidate>,
         effective_from_unix_ms: u64,
         expires_at_unix_ms: u64,
+        credential: Option<CoordinatorWriteCredential>,
     ) -> Result<CoordinatorCandidateStatus, EmbeddedServiceError> {
         let (reply, response) = oneshot::channel();
         self.sender
@@ -824,6 +828,7 @@ impl EmbeddedServiceManager {
                 candidates,
                 effective_from_unix_ms,
                 expires_at_unix_ms,
+                credential,
                 reply,
             })
             .await

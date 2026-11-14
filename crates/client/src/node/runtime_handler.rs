@@ -848,6 +848,7 @@ impl NodeRuntimeHandler {
                                     command.candidates,
                                     effective_from_unix_ms,
                                     command.expires_at_unix_ms,
+                                    command.credential,
                                 )
                                 .await
                             {

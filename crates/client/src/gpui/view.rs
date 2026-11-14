@@ -53,7 +53,8 @@ use super::text_input::{NativeTextInput, TextInputEvent};
 use super::view_model::build_page_model;
 use super::view_model::{
     action_block_reason, action_coordinator_governance_freeze_reason, activity_filter_options,
-    build_command, build_page_model_with_activity_filters, coordinator_governance_freeze_reason,
+    build_command, build_page_model_with_activity_filters,
+    command_coordinator_governance_freeze_reason, coordinator_governance_freeze_reason,
     default_form_values, filter_network_members, member_exit_declared_text,
     member_exit_freshness_text, member_exit_reason_text, member_exit_source_text,
     member_exit_state_text, member_lifecycle_action_key, member_lifecycle_action_value,
@@ -76,7 +77,7 @@ use crate::network_discovery::{
 };
 use crate::node::{
     NodeApplyConfigurationCommand, NodeCommand, NodeCommandBus, NodeCommandBusError,
-    NodeCommandContext, NodeCommandOutcome, NodeCommandRequest, NodeCommandResult,
+    NodeCommandContext, NodeCommandKind, NodeCommandOutcome, NodeCommandRequest, NodeCommandResult,
     NodeControlHealth, NodeDiagnosticCheck, NodeDiagnosticLayer, NodeDiagnosticState,
     NodeDiagnosticsSnapshot, NodeJoinRequestListResult, NodeJoinRequestReviewAck,
     NodeJoinRequestReviewItem, NodeNetworkCreationNextStep, NodeNetworkJoinPreview,
@@ -310,7 +311,7 @@ fn complete_action_block_reason(
     action_block_reason(action, snapshot, selected_network)
         .map(ActionBlockDetail::Contract)
         .or_else(|| {
-            action_coordinator_governance_freeze_reason(&action.id, snapshot, selected_network)
+            action_coordinator_governance_freeze_reason(action, snapshot, selected_network)
                 .map(ActionBlockDetail::CoordinatorGovernance)
         })
 }
@@ -1052,8 +1053,8 @@ impl GpuiShell {
         action: MemberLifecycleAction,
         cx: &mut Context<Self>,
     ) {
-        if let Some(reason) = action_coordinator_governance_freeze_reason(
-            "change_member_lifecycle",
+        if let Some(reason) = command_coordinator_governance_freeze_reason(
+            NodeCommandKind::ChangeMemberLifecycle,
             &self.snapshot,
             self.selected_network.as_deref(),
         ) {
@@ -8816,8 +8817,8 @@ impl GpuiShell {
             let open_node_id = node_id.clone();
             let menu_node_id = node_id.clone();
             let hover_node_id = node_id.clone();
-            let menu_actions = if action_coordinator_governance_freeze_reason(
-                "change_member_lifecycle",
+            let menu_actions = if command_coordinator_governance_freeze_reason(
+                NodeCommandKind::ChangeMemberLifecycle,
                 &self.snapshot,
                 self.selected_network.as_deref(),
             )
@@ -13701,7 +13702,7 @@ impl GpuiShell {
                 .iter()
                 .any(|action| {
                     action_coordinator_governance_freeze_reason(
-                        &action.id,
+                        action,
                         &self.snapshot,
                         self.selected_network.as_deref(),
                     )

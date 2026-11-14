@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
-    ExitContributionRequest, ExitContributionRequestId, ExitContributionReviewAction, InvitationId,
-    InvitationState, JoinRequest, JoinRequestId, JoinRequestState, MemberLifecycleChange,
+    ContentHash, CoordinatorElectionProposal, CoordinatorElectionVote, CoordinatorRecoveryReport,
+    CoordinatorTerm, CoordinatorWriteCredential, ExitContributionRequest,
+    ExitContributionRequestId, ExitContributionReviewAction, InvitationId, InvitationState,
+    JoinRequest, JoinRequestId, JoinRequestState, MemberLifecycleChange,
     MemberLifecycleChangeRequest, MemberRemovalPreviewRequest, NetworkId, NetworkJoinPreview,
     NetworkMemberPresence, NetworkRecord, NodeId,
 };
@@ -31,6 +33,8 @@ use super::join_requests::JoinRequestStore;
 use super::member_lifecycle::MemberLifecycleStore;
 use super::members::build_member_directory;
 use super::session::SessionManager;
+
+const COORDINATOR_EMERGENCY_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 
 fn verify_registration(
     client_id: &str,
@@ -413,6 +417,22 @@ impl SignalingServer {
                 }
             }
         });
+
+        if let Some(store) = self.coordinator_candidate_store.clone() {
+            let session_manager = self.session_manager.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(COORDINATOR_EMERGENCY_RECONCILE_INTERVAL);
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    if let Err(error) =
+                        reconcile_coordinator_emergency_leases(&store, &session_manager).await
+                    {
+                        tracing::warn!(%error, "协调紧急 Coordinator Leader 在线状态失败");
+                    }
+                }
+            });
+        }
     }
 }
 
@@ -671,6 +691,13 @@ async fn handle_signaling_message(
                 relay_directory,
             )
             .await?;
+            if let Some(store) = coordinator_candidate_store {
+                if let Err(error) =
+                    reconcile_coordinator_emergency_leases(store, session_manager).await
+                {
+                    tracing::warn!(%error, "注册后协调紧急 Coordinator Leader 在线状态失败");
+                }
+            }
         }
         SignalingMessage::ConnectRequest { target_id } => {
             handle_connect_request(target_id, session_manager, tx, client_id).await?;
@@ -732,6 +759,7 @@ async fn handle_signaling_message(
                 tx,
                 client_id,
                 join_request_store,
+                coordinator_candidate_store,
             )
             .await?;
         }
@@ -746,6 +774,7 @@ async fn handle_signaling_message(
                 tx,
                 client_id,
                 join_request_store,
+                coordinator_candidate_store,
             )
             .await?;
         }
@@ -782,8 +811,15 @@ async fn handle_signaling_message(
             .await?;
         }
         SignalingMessage::InvitationCreate { request } => {
-            handle_invitation_create(request, session_manager, tx, client_id, invitation_store)
-                .await?;
+            handle_invitation_create(
+                request,
+                session_manager,
+                tx,
+                client_id,
+                invitation_store,
+                coordinator_candidate_store,
+            )
+            .await?;
         }
         SignalingMessage::InvitationList { network_id } => {
             handle_invitation_list(network_id, session_manager, tx, client_id, invitation_store)
@@ -816,6 +852,7 @@ async fn handle_signaling_message(
                 tx,
                 client_id,
                 invitation_store,
+                coordinator_candidate_store,
             )
             .await?;
         }
@@ -824,8 +861,15 @@ async fn handle_signaling_message(
                 .await?;
         }
         SignalingMessage::InvitationRedeem { request } => {
-            handle_invitation_redeem(request, session_manager, tx, client_id, invitation_store)
-                .await?;
+            handle_invitation_redeem(
+                request,
+                session_manager,
+                tx,
+                client_id,
+                invitation_store,
+                coordinator_candidate_store,
+            )
+            .await?;
         }
         SignalingMessage::NetworkJoinPreview { request } => {
             handle_network_join_preview(
@@ -868,6 +912,7 @@ async fn handle_signaling_message(
                 tx,
                 client_id,
                 member_lifecycle_store,
+                coordinator_candidate_store,
             )
             .await?;
         }
@@ -934,6 +979,7 @@ async fn handle_signaling_message(
                 tx,
                 client_id,
                 exit_contribution_store,
+                coordinator_candidate_store,
             )
             .await?;
         }
@@ -989,6 +1035,7 @@ async fn handle_signaling_message(
             handle_coordinator_candidate_config_update(
                 expected_revision,
                 config,
+                None,
                 session_manager,
                 tx,
                 client_id,
@@ -1016,36 +1063,118 @@ async fn handle_signaling_message(
             )
             .await?;
         }
-        // These variants are server-to-client events. Accepting one from a
-        // client would let it manufacture approval state in another view.
-        SignalingMessage::JoinRequestStatus { .. }
-        | SignalingMessage::JoinRequestListResponse { .. }
-        | SignalingMessage::JoinRequestReviewAck { .. }
-        | SignalingMessage::JoinRequestChanged { .. }
-        | SignalingMessage::InvitationCreateAck { .. }
-        | SignalingMessage::InvitationListAck { .. }
-        | SignalingMessage::InvitationStatusAck { .. }
-        | SignalingMessage::InvitationRevokeAck { .. }
-        | SignalingMessage::InvitationPreviewAck { .. }
-        | SignalingMessage::InvitationRedeemAck { .. }
-        | SignalingMessage::InvitationChanged { .. }
-        | SignalingMessage::MemberDirectoryListAck { .. }
-        | SignalingMessage::MemberRemovalPreviewAck { .. }
-        | SignalingMessage::MemberLifecycleChangeAck { .. }
-        | SignalingMessage::MemberLifecycleChanged { .. }
-        | SignalingMessage::ExitContributionSubmitAck { .. }
-        | SignalingMessage::ExitContributionListAck { .. }
-        | SignalingMessage::ExitContributionStatusAck { .. }
-        | SignalingMessage::ExitContributionReviewAck { .. }
-        | SignalingMessage::ExitContributionWithdrawAck { .. }
-        | SignalingMessage::ExitContributionAuthorizationListAck { .. }
-        | SignalingMessage::ExitContributionChanged { .. }
-        | SignalingMessage::ExitAvailabilityReportAck { .. }
-        | SignalingMessage::NetworkJoinPreviewAck { .. }
-        | SignalingMessage::CoordinatorCandidateConfigAck { .. }
-        | SignalingMessage::CoordinatorCandidateDeclarationAck { .. }
-        | SignalingMessage::CoordinatorCandidateStatusAck { .. }
-        | SignalingMessage::CoordinatorCandidateStatusChanged { .. } => {
+        SignalingMessage::CoordinatorRecoveryRequest { report } => {
+            handle_coordinator_recovery(
+                report,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
+        SignalingMessage::CoordinatorEmergencyLeaderIssue { network_id } => {
+            handle_coordinator_emergency_leader_issue(
+                network_id,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
+        SignalingMessage::CoordinatorEmergencyLeaderRenew {
+            network_id,
+            credential,
+        } => {
+            handle_coordinator_emergency_leader_renew(
+                network_id,
+                credential,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
+        SignalingMessage::CoordinatorCandidateConfigUpdateAuthorized {
+            expected_revision,
+            config,
+            credential,
+        } => {
+            handle_coordinator_candidate_config_update(
+                expected_revision,
+                config,
+                Some(credential),
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
+        SignalingMessage::CoordinatorTermInstall { term } => {
+            handle_coordinator_term_install(
+                term,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
+        SignalingMessage::CoordinatorTermLeaseRenew {
+            credential,
+            new_expires_at_unix_ms,
+        } => {
+            handle_coordinator_term_lease_renew(
+                credential,
+                new_expires_at_unix_ms,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
+        SignalingMessage::CoordinatorElectionPropose { proposal } => {
+            handle_coordinator_election_propose(
+                proposal,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
+        SignalingMessage::CoordinatorElectionVote { proposal_id, vote } => {
+            handle_coordinator_election_vote(
+                proposal_id,
+                vote,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
+        SignalingMessage::CoordinatorElectionTimeout {
+            network_id,
+            proposal_id,
+        } => {
+            handle_coordinator_election_timeout(
+                network_id,
+                proposal_id,
+                session_manager,
+                tx,
+                client_id,
+                coordinator_candidate_store,
+            )
+            .await?;
+        }
+        // Accepting a server-originated response from a client would let it
+        // manufacture approval or recovery state in another view.
+        message if is_server_originated_response(&message) => {
             send_binary(
                 tx,
                 session_manager,
@@ -1061,6 +1190,49 @@ async fn handle_signaling_message(
     }
 
     Ok(())
+}
+
+fn is_server_originated_response(message: &SignalingMessage) -> bool {
+    matches!(
+        message,
+        SignalingMessage::JoinRequestStatus { .. }
+            | SignalingMessage::JoinRequestListResponse { .. }
+            | SignalingMessage::JoinRequestReviewAck { .. }
+            | SignalingMessage::JoinRequestChanged { .. }
+            | SignalingMessage::InvitationCreateAck { .. }
+            | SignalingMessage::InvitationListAck { .. }
+            | SignalingMessage::InvitationStatusAck { .. }
+            | SignalingMessage::InvitationRevokeAck { .. }
+            | SignalingMessage::InvitationPreviewAck { .. }
+            | SignalingMessage::InvitationRedeemAck { .. }
+            | SignalingMessage::InvitationChanged { .. }
+            | SignalingMessage::MemberDirectoryListAck { .. }
+            | SignalingMessage::MemberRemovalPreviewAck { .. }
+            | SignalingMessage::MemberLifecycleChangeAck { .. }
+            | SignalingMessage::MemberLifecycleChanged { .. }
+            | SignalingMessage::ExitContributionSubmitAck { .. }
+            | SignalingMessage::ExitContributionListAck { .. }
+            | SignalingMessage::ExitContributionStatusAck { .. }
+            | SignalingMessage::ExitContributionReviewAck { .. }
+            | SignalingMessage::ExitContributionWithdrawAck { .. }
+            | SignalingMessage::ExitContributionAuthorizationListAck { .. }
+            | SignalingMessage::ExitContributionChanged { .. }
+            | SignalingMessage::ExitAvailabilityReportAck { .. }
+            | SignalingMessage::NetworkJoinPreviewAck { .. }
+            | SignalingMessage::CoordinatorCandidateConfigAck { .. }
+            | SignalingMessage::CoordinatorCandidateDeclarationAck { .. }
+            | SignalingMessage::CoordinatorCandidateStatusAck { .. }
+            | SignalingMessage::CoordinatorCandidateStatusChanged { .. }
+            | SignalingMessage::CoordinatorTermInstallAck { .. }
+            | SignalingMessage::CoordinatorTermLeaseRenewAck { .. }
+            | SignalingMessage::CoordinatorElectionProposeAck { .. }
+            | SignalingMessage::CoordinatorElectionVoteAck { .. }
+            | SignalingMessage::CoordinatorElectionTimeoutAck { .. }
+            | SignalingMessage::CoordinatorElectionChanged { .. }
+            | SignalingMessage::CoordinatorRecoveryResponse { .. }
+            | SignalingMessage::CoordinatorEmergencyLeaderIssueAck { .. }
+            | SignalingMessage::CoordinatorEmergencyLeaderRenewAck { .. }
+    )
 }
 
 fn require_coordinator_candidate_store<'a>(
@@ -1080,6 +1252,42 @@ fn require_coordinator_candidate_store<'a>(
         ),
     )?;
     Ok(None)
+}
+
+fn guard_emergency_governance_write(
+    store: Option<&CoordinatorCandidateStore>,
+    actor: &NodeId,
+    network_id: &NetworkId,
+    action: &str,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+) -> Result<bool> {
+    let Some(store) = store else {
+        return Ok(false);
+    };
+    match store.reject_emergency_governance_write(actor, network_id, action, unix_time_ms()) {
+        Ok(false) => Ok(false),
+        Ok(true) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::protocol_error(
+                    ErrorCode::Forbidden,
+                    "Governance is frozen during emergency Coordinator runtime authority",
+                ),
+            )?;
+            Ok(true)
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, %action, "紧急 Coordinator 治理冻结检查失败");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+            Ok(true)
+        }
+    }
 }
 
 fn coordinator_candidate_protocol_error(error: &anyhow::Error) -> SignalingMessage {
@@ -1127,9 +1335,48 @@ async fn broadcast_coordinator_candidate_status_changed(
     Ok(())
 }
 
+async fn reconcile_coordinator_emergency_leases(
+    store: &CoordinatorCandidateStore,
+    session_manager: &SessionManager,
+) -> Result<()> {
+    let now_unix_ms = unix_time_ms();
+    let presence = session_manager.member_presence(now_unix_ms).await;
+    let changed_networks = store.reconcile_emergency_leases(&presence, now_unix_ms)?;
+    for network_id in changed_networks {
+        broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id).await?;
+    }
+    Ok(())
+}
+
+async fn broadcast_coordinator_election_changed(
+    store: &CoordinatorCandidateStore,
+    session_manager: &SessionManager,
+    status: &fuckipv6_common::domain::CoordinatorCandidateStatus,
+) -> Result<()> {
+    let Some(election) = status.latest_election.as_ref() else {
+        return Ok(());
+    };
+    let recipients = store.election_notification_recipients(&status.network_id)?;
+    let message = SignalingMessage::CoordinatorElectionChanged {
+        network_id: status.network_id.clone(),
+        proposal_id: election.proposal.proposal_id.clone(),
+        stage: election.stage,
+    };
+    for peer in session_manager.get_all_peers().await {
+        let node_id = NodeId::from_public_key(&peer.public_key);
+        if recipients.contains(&node_id) {
+            session_manager
+                .send_to_client(&peer.client_id, message.clone())
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 async fn handle_coordinator_candidate_config_update(
     expected_revision: u64,
     config: fuckipv6_common::domain::CoordinatorCandidateConfig,
+    credential: Option<CoordinatorWriteCredential>,
     session_manager: &SessionManager,
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
@@ -1155,7 +1402,18 @@ async fn handle_coordinator_candidate_config_update(
         )?;
         return Ok(());
     }
-    match store.update_config(&actor, expected_revision, config, unix_time_ms()) {
+    let now_unix_ms = unix_time_ms();
+    let outcome = match credential.as_ref() {
+        Some(credential) => store.update_config_authorized(
+            &actor,
+            expected_revision,
+            config,
+            credential,
+            now_unix_ms,
+        ),
+        None => store.update_config(&actor, expected_revision, config, now_unix_ms),
+    };
+    match outcome {
         Ok(status) => {
             send_binary(
                 tx,
@@ -1169,6 +1427,233 @@ async fn handle_coordinator_candidate_config_update(
         }
         Err(error) => {
             tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 候选配置更新");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_term_install(
+    term: CoordinatorTerm,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let network_id = term.network_id.clone();
+    match store.install_term(&actor, term, unix_time_ms()) {
+        Ok(status) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorTermInstallAck {
+                    status: status.clone(),
+                },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 任期安装");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_term_lease_renew(
+    credential: CoordinatorWriteCredential,
+    new_expires_at_unix_ms: u64,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let network_id = credential.network_id.clone();
+    match store.renew_term_lease(&actor, &credential, new_expires_at_unix_ms, unix_time_ms()) {
+        Ok(status) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorTermLeaseRenewAck {
+                    status: status.clone(),
+                },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 任期续租");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_election_propose(
+    proposal: CoordinatorElectionProposal,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let network_id = proposal.network_id.clone();
+    if proposal.proposer != actor {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Forbidden,
+                "Coordinator election proposals must be signed by the authenticated actor",
+            ),
+        )?;
+        return Ok(());
+    }
+    match store.propose_election(&actor, proposal, unix_time_ms()) {
+        Ok(status) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorElectionProposeAck {
+                    status: status.clone(),
+                },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+            broadcast_coordinator_election_changed(store, session_manager, &status).await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 选举提案");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_election_vote(
+    proposal_id: ContentHash,
+    vote: CoordinatorElectionVote,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let network_id = vote.network_id.clone();
+    if vote.voter != actor {
+        send_binary(
+            tx,
+            session_manager,
+            SignalingMessage::protocol_error(
+                ErrorCode::Forbidden,
+                "Coordinator election votes must be signed by the authenticated actor",
+            ),
+        )?;
+        return Ok(());
+    }
+    match store.record_election_vote(&actor, &proposal_id, vote, unix_time_ms()) {
+        Ok(status) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorElectionVoteAck {
+                    status: status.clone(),
+                },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+            broadcast_coordinator_election_changed(store, session_manager, &status).await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 选举投票");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_election_timeout(
+    network_id: NetworkId,
+    proposal_id: ContentHash,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    match store.timeout_election(&actor, &network_id, &proposal_id, unix_time_ms()) {
+        Ok(status) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorElectionTimeoutAck {
+                    status: status.clone(),
+                },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+            broadcast_coordinator_election_changed(store, session_manager, &status).await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 选举超时");
             send_binary(
                 tx,
                 session_manager,
@@ -1260,6 +1745,162 @@ async fn handle_coordinator_candidate_status(
                 session_manager,
                 coordinator_candidate_protocol_error(&error),
             )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_recovery(
+    report: CoordinatorRecoveryReport,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let network_id = report.network_id.clone();
+    match store.recover(&actor, report, unix_time_ms()) {
+        Ok(response) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorRecoveryResponse { response },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝 Coordinator 旧 Leader 恢复请求");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_emergency_leader_issue(
+    network_id: NetworkId,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let now_unix_ms = unix_time_ms();
+    let presence = session_manager.member_presence(now_unix_ms).await;
+    let online_members = match store.emergency_online_members(&network_id, &presence) {
+        Ok(online_members) => online_members,
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "无法计算紧急 Leader 在线成员集");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+            return Ok(());
+        }
+    };
+
+    match store.issue_emergency_leader(&actor, &network_id, &online_members, now_unix_ms) {
+        Ok(response) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorEmergencyLeaderIssueAck { response },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝紧急 Coordinator Leader 签发");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_coordinator_emergency_leader_renew(
+    network_id: NetworkId,
+    credential: fuckipv6_common::domain::CoordinatorEmergencyWriteCredential,
+    session_manager: &SessionManager,
+    tx: &mpsc::UnboundedSender<Message>,
+    client_id: &Option<String>,
+    store: Option<&CoordinatorCandidateStore>,
+) -> Result<()> {
+    let Some(store) = require_coordinator_candidate_store(store, session_manager, tx)? else {
+        return Ok(());
+    };
+    let Some((actor, _public_key)) =
+        authenticated_join_actor(session_manager, tx, client_id).await?
+    else {
+        return Ok(());
+    };
+    let now_unix_ms = unix_time_ms();
+    let presence = session_manager.member_presence(now_unix_ms).await;
+    let online_members = match store.emergency_online_members(&network_id, &presence) {
+        Ok(online_members) => online_members,
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "无法计算紧急 Leader 在线成员集");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+            return Ok(());
+        }
+    };
+
+    match store.renew_emergency_leader(
+        &actor,
+        &credential,
+        &network_id,
+        &online_members,
+        now_unix_ms,
+    ) {
+        Ok(response) => {
+            send_binary(
+                tx,
+                session_manager,
+                SignalingMessage::CoordinatorEmergencyLeaderRenewAck { response },
+            )?;
+            broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                .await?;
+        }
+        Err(error) => {
+            tracing::warn!(%error, %actor, %network_id, "拒绝紧急 Coordinator Leader 续租");
+            send_binary(
+                tx,
+                session_manager,
+                coordinator_candidate_protocol_error(&error),
+            )?;
+            let text = error.to_string();
+            if text.contains("domain.coordinator_emergency_candidate_online")
+                || text.contains("domain.coordinator_emergency_leader_offline")
+            {
+                broadcast_coordinator_candidate_status_changed(store, session_manager, &network_id)
+                    .await?;
+            }
         }
     }
     Ok(())
@@ -1589,6 +2230,7 @@ async fn handle_member_lifecycle_change(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
     store: Option<&MemberLifecycleStore>,
+    coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
 ) -> Result<()> {
     let Some((actor, _public_key)) =
         authenticated_join_actor(session_manager, tx, client_id).await?
@@ -1599,6 +2241,16 @@ async fn handle_member_lifecycle_change(
         return Ok(());
     };
     let network_id = request.network_id.clone();
+    if guard_emergency_governance_write(
+        coordinator_candidate_store,
+        &actor,
+        &network_id,
+        "member_lifecycle_change",
+        session_manager,
+        tx,
+    )? {
+        return Ok(());
+    }
     let target_node_id = request.target_node_id.clone();
     let change = match store.change(&actor, request, unix_time_ms()) {
         Ok(change) => change,
@@ -1984,6 +2636,7 @@ async fn handle_exit_contribution_review(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
     store: Option<&ExitContributionRequestStore>,
+    coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
 ) -> Result<()> {
     let Some((actor, _public_key)) =
         authenticated_join_actor(session_manager, tx, client_id).await?
@@ -1993,6 +2646,16 @@ async fn handle_exit_contribution_review(
     let Some(store) = require_exit_contribution_store(store, session_manager, tx)? else {
         return Ok(());
     };
+    if guard_emergency_governance_write(
+        coordinator_candidate_store,
+        &actor,
+        &network_id,
+        "exit_contribution_review",
+        session_manager,
+        tx,
+    )? {
+        return Ok(());
+    }
     let request = match store.review(
         &network_id,
         &actor,
@@ -2100,6 +2763,7 @@ async fn handle_join_request_review(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
     store: Option<&JoinRequestStore>,
+    coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
 ) -> Result<()> {
     let Some((actor, _public_key)) =
         authenticated_join_actor(session_manager, tx, client_id).await?
@@ -2109,6 +2773,16 @@ async fn handle_join_request_review(
     let Some(store) = require_join_request_store(store, session_manager, tx)? else {
         return Ok(());
     };
+    if guard_emergency_governance_write(
+        coordinator_candidate_store,
+        &actor,
+        &network_id,
+        "join_request_review",
+        session_manager,
+        tx,
+    )? {
+        return Ok(());
+    }
 
     // Resolve applicants before the atomic decision so online notifications can
     // be delivered without another authorization-dependent read afterwards.
@@ -2331,6 +3005,7 @@ async fn handle_invitation_create(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
     store: Option<&InvitationStore>,
+    coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
 ) -> Result<()> {
     let Some((actor, _public_key)) =
         authenticated_join_actor(session_manager, tx, client_id).await?
@@ -2341,6 +3016,16 @@ async fn handle_invitation_create(
         return Ok(());
     };
     let network_id = request.network_id.clone();
+    if guard_emergency_governance_write(
+        coordinator_candidate_store,
+        &actor,
+        &network_id,
+        "invitation_create",
+        session_manager,
+        tx,
+    )? {
+        return Ok(());
+    }
     let issued = match store.create(&network_id, &actor, request, unix_time_ms()) {
         Ok(issued) => issued,
         Err(error) => {
@@ -2429,6 +3114,7 @@ async fn handle_invitation_revoke(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
     store: Option<&InvitationStore>,
+    coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
 ) -> Result<()> {
     let Some((actor, _public_key)) =
         authenticated_join_actor(session_manager, tx, client_id).await?
@@ -2438,6 +3124,16 @@ async fn handle_invitation_revoke(
     let Some(store) = require_invitation_store(store, session_manager, tx)? else {
         return Ok(());
     };
+    if guard_emergency_governance_write(
+        coordinator_candidate_store,
+        &actor,
+        &network_id,
+        "invitation_revoke",
+        session_manager,
+        tx,
+    )? {
+        return Ok(());
+    }
     let invitation = match store.revoke(
         &network_id,
         &actor,
@@ -2601,6 +3297,7 @@ async fn handle_invitation_redeem(
     tx: &mpsc::UnboundedSender<Message>,
     client_id: &Option<String>,
     store: Option<&InvitationStore>,
+    coordinator_candidate_store: Option<&CoordinatorCandidateStore>,
 ) -> Result<()> {
     let Some((actor, _public_key)) =
         authenticated_join_actor(session_manager, tx, client_id).await?
@@ -2610,6 +3307,17 @@ async fn handle_invitation_redeem(
     let Some(store) = require_invitation_store(store, session_manager, tx)? else {
         return Ok(());
     };
+    let network_id = request.network_id.clone();
+    if guard_emergency_governance_write(
+        coordinator_candidate_store,
+        &actor,
+        &network_id,
+        "invitation_redeem",
+        session_manager,
+        tx,
+    )? {
+        return Ok(());
+    }
     let invitation_id = request.invitation_id.clone();
     let redemption = match store.redeem(request, &actor, unix_time_ms()) {
         Ok(redemption) => redemption,
@@ -3008,6 +3716,161 @@ async fn handle_relay_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coordinator_recovery_response_is_rejected_as_a_client_message() {
+        let network_id = NetworkId::from_public_key(b"recovery-response-spoof");
+        let leader = NodeId::from_public_key(b"recovery-response-leader");
+        let status = fuckipv6_common::domain::CoordinatorCandidateStatus {
+            network_id: network_id.clone(),
+            generated_at_unix_ms: 1,
+            config_state: fuckipv6_common::domain::CoordinatorCandidateConfigState::Missing,
+            config: None,
+            candidates: Vec::new(),
+            current_leader: None,
+            latest_term: None,
+            lease: fuckipv6_common::domain::CoordinatorLeaseStatus::no_term(),
+            control_plane: Default::default(),
+            emergency: fuckipv6_common::domain::CoordinatorEmergencyState::NoCandidatesConfigured,
+            emergency_leader: None,
+            latest_election: None,
+        };
+        let message = SignalingMessage::CoordinatorRecoveryResponse {
+            response: fuckipv6_common::domain::CoordinatorRecoveryResponse {
+                status: status.clone(),
+                recovery: fuckipv6_common::domain::CoordinatorRecoveryStatus {
+                    network_id,
+                    stage: fuckipv6_common::domain::CoordinatorRecoveryStage::ReadOnly,
+                    role: fuckipv6_common::domain::CoordinatorRecoveryRole::Member,
+                    governance_writable: false,
+                    health_checks_allowed: true,
+                    data_plane_allowed: true,
+                    authoritative_term: 0,
+                    authoritative_fencing_token: fuckipv6_common::domain::FencingToken(0),
+                    authoritative_leader: leader,
+                    authoritative_candidate_config_revision: 0,
+                    authoritative_audit_sequence: 0,
+                    reason_code: "coordinator.recovery.snapshot_behind".into(),
+                },
+                audit_entries: Vec::new(),
+            },
+        };
+
+        assert!(is_server_originated_response(&message));
+        assert!(is_server_originated_response(
+            &SignalingMessage::CoordinatorEmergencyLeaderIssueAck {
+                response: fuckipv6_common::domain::CoordinatorEmergencyLeaderResponse {
+                    status: status.clone(),
+                    renewed: false,
+                },
+            }
+        ));
+        assert!(is_server_originated_response(
+            &SignalingMessage::CoordinatorEmergencyLeaderRenewAck {
+                response: fuckipv6_common::domain::CoordinatorEmergencyLeaderResponse {
+                    status,
+                    renewed: true,
+                },
+            }
+        ));
+    }
+
+    #[test]
+    fn emergency_governance_guard_rejects_an_invitee_with_structured_forbidden() -> Result<()> {
+        use fuckipv6_common::domain::{
+            CapabilityKind, CoordinatorCandidate, CoordinatorCandidateConfig, ExitContributionMode,
+            ExitContributionObligation, ExitContributionScope, ExitSelectionPolicy,
+            NetworkCreateProfile, NetworkJoinMode, NetworkVisibility, PublicKey,
+        };
+
+        let dir = std::env::temp_dir().join(format!(
+            "fuckipv6-emergency-governance-guard-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let owner = Identity::generate()?;
+        let candidate = Identity::generate()?;
+        let ordinary = Identity::generate()?;
+        let invitee = Identity::generate()?;
+        let owner_id = NodeId::from_public_key(&owner.public_key());
+        let candidate_id = NodeId::from_public_key(&candidate.public_key());
+        let ordinary_id = NodeId::from_public_key(&ordinary.public_key());
+        let invitee_id = NodeId::from_public_key(&invitee.public_key());
+        let now = unix_time_ms();
+        let mut network = NetworkRecord::create_owned(
+            NetworkCreateProfile {
+                name: "emergency-governance-guard".into(),
+                purpose: "emergency governance guard test".into(),
+                icon: "network".into(),
+                language: "zh-CN".into(),
+                region: "ZZ".into(),
+                tags: vec![],
+                capability_declarations: vec![CapabilityKind::Coordinator],
+                visibility: NetworkVisibility::Private,
+                join_mode: NetworkJoinMode::InviteOnly,
+                exit_contribution: ExitContributionObligation::NotRequired,
+                exit_contribution_scope: ExitContributionScope::NotApplicable,
+                exit_contribution_mode: ExitContributionMode::Disabled,
+                exit_selection_policy: ExitSelectionPolicy::default(),
+            },
+            PublicKey::from_bytes([91; 32]),
+            owner_id.clone(),
+            now.saturating_sub(1_000),
+        )?;
+        network
+            .members
+            .extend([candidate_id.clone(), ordinary_id.clone()]);
+        network.validate()?;
+        let network_path = dir.join("network.json");
+        std::fs::write(&network_path, serde_json::to_vec_pretty(&network)?)?;
+        let store =
+            CoordinatorCandidateStore::new(dir.join("coordinator_candidates.json"), network_path)?;
+        let config = CoordinatorCandidateConfig::signed(
+            network.network_id.clone(),
+            1,
+            vec![CoordinatorCandidate {
+                node_id: candidate_id,
+                priority: 10,
+            }],
+            now.saturating_sub(1),
+            now.saturating_add(3_600_000),
+            &owner,
+        )?;
+        store.update_config(&owner_id, 0, config, now)?;
+        store.issue_emergency_leader(
+            &owner_id,
+            &network.network_id,
+            &[owner_id.clone(), ordinary_id],
+            now,
+        )?;
+
+        let manager = SessionManager::new("fd00::1000/120")?;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(guard_emergency_governance_write(
+            Some(&store),
+            &invitee_id,
+            &network.network_id,
+            "invitation_redeem",
+            &manager,
+            &tx,
+        )?);
+        let Message::Binary(encoded) = rx.try_recv()? else {
+            panic!("expected a binary protocol error");
+        };
+        let SignalingMessage::Error { code, message } =
+            codec::decode::<SignalingMessage>(&encoded)?
+        else {
+            panic!("expected a protocol error");
+        };
+        assert_eq!(code, ErrorCode::Forbidden.as_u16());
+        assert_eq!(
+            message,
+            "Governance is frozen during emergency Coordinator runtime authority"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+        Ok(())
+    }
 
     #[test]
     fn join_request_changed_notification_contains_only_identity_and_state() {

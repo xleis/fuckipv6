@@ -690,6 +690,7 @@ mod tests {
                     }],
                     effective_from_unix_ms: None,
                     expires_at_unix_ms: u64::MAX,
+                    credential: None,
                 },
             ),
             NodeCommand::PublishCoordinatorCandidateDeclaration(

@@ -624,10 +624,24 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "default": null
         },
         "config_state": {
           "$ref": "#/$defs/CoordinatorCandidateConfigState"
+        },
+        "control_plane": {
+          "$ref": "#/$defs/CoordinatorControlPlaneStatus",
+          "default": {
+            "governance_writable": false,
+            "quorum": {
+              "participant_count": 0,
+              "received_votes": 0,
+              "required_votes": 0
+            },
+            "reason_code": "coordinator.control_plane.unobserved",
+            "state": "read_only"
+          }
         },
         "current_leader": {
           "anyOf": [
@@ -637,15 +651,40 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "default": null
         },
         "emergency": {
           "$ref": "#/$defs/CoordinatorEmergencyState"
+        },
+        "emergency_leader": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoordinatorEmergencyLeaderStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Independent bounded runtime-coordination authority used only when every\nconfigured candidate is offline. This is never a normal Leader term and\nnever enables governance writes."
         },
         "generated_at_unix_ms": {
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "latest_election": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoordinatorElectionSession"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Most recent persisted election, including terminal outcomes. Keeping the\nfull signed proposal and vote set makes takeover decisions auditable from\nthe same projection used by clients and operators."
         },
         "latest_term": {
           "anyOf": [
@@ -655,7 +694,19 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "default": null
+        },
+        "lease": {
+          "$ref": "#/$defs/CoordinatorLeaseStatus",
+          "default": {
+            "lease_expires_at_unix_ms": null,
+            "max_clock_skew_ms": 30000,
+            "observed_clock_skew_ms": 0,
+            "reason_code": "coordinator.lease.no_term",
+            "remaining_ms": 0,
+            "state": "no_term"
+          }
         },
         "network_id": {
           "$ref": "#/$defs/NetworkId"
@@ -680,7 +731,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "default": null
         },
         "eligible_for_election": {
           "description": "Eligibility for the election protocol, never an appointment as Leader.",
@@ -717,6 +769,376 @@
       ],
       "type": "string"
     },
+    "CoordinatorControlPlaneState": {
+      "oneOf": [
+        {
+          "const": "available",
+          "description": "A full-authority Stable term has a writable lease.",
+          "type": "string"
+        },
+        {
+          "const": "election_in_progress",
+          "description": "An election is active but has not yet committed a term.",
+          "type": "string"
+        },
+        {
+          "const": "quorum_unavailable",
+          "description": "The election ended without a strict majority, or its deadline elapsed\nbefore the durable term could be installed.",
+          "type": "string"
+        },
+        {
+          "const": "no_leader",
+          "description": "The candidate configuration is current, but no term is writable.",
+          "type": "string"
+        },
+        {
+          "const": "configuration_unavailable",
+          "description": "The candidate configuration is missing, pending, or expired.",
+          "type": "string"
+        },
+        {
+          "const": "read_only",
+          "description": "Authority is present but cannot safely perform governance writes.",
+          "type": "string"
+        }
+      ]
+    },
+    "CoordinatorControlPlaneStatus": {
+      "description": "Fail-closed projection intended for clients and operators. A missing leader\nis not a data-plane failure: `governance_writable = false` only pauses\ngovernance until a strict-majority election installs a fresh term.",
+      "properties": {
+        "governance_writable": {
+          "type": "boolean"
+        },
+        "quorum": {
+          "$ref": "#/$defs/CoordinatorQuorumStatus"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/CoordinatorControlPlaneState"
+        }
+      },
+      "required": [
+        "state",
+        "governance_writable",
+        "reason_code",
+        "quorum"
+      ],
+      "type": "object"
+    },
+    "CoordinatorElectionProposal": {
+      "description": "A candidate-signed request to elect one deterministic Leader. A proposal is\nnot authority: it can only create a persisted election session and the\nresulting term is admitted after independently verified strict-majority\nvotes. The proposer must be the preferred eligible candidate and cannot\nappoint another node or itself outside the configured ordering.",
+      "properties": {
+        "candidate_config_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "candidate_group": {
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "leader": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "proposal_id": {
+          "$ref": "#/$defs/ContentHash"
+        },
+        "proposed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "proposer": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "proposer_public_key": {
+          "$ref": "#/$defs/PublicKey"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signature": {
+          "$ref": "#/$defs/Signature"
+        },
+        "term": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "proposal_id",
+        "network_id",
+        "candidate_config_revision",
+        "term",
+        "leader",
+        "candidate_group",
+        "proposer",
+        "proposer_public_key",
+        "proposed_at_unix_ms",
+        "expires_at_unix_ms",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "CoordinatorElectionSession": {
+      "description": "Durable election state. Votes are retained for audit and the committed term\nis reconstructed from this exact session, preventing a later caller from\nsubstituting a different proof or Leader.",
+      "properties": {
+        "deadline_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "participants": {
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "proposal": {
+          "$ref": "#/$defs/CoordinatorElectionProposal"
+        },
+        "rejection_reason": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result_term": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoordinatorTerm"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stage": {
+          "$ref": "#/$defs/CoordinatorElectionStage"
+        },
+        "started_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "updated_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "votes": {
+          "items": {
+            "$ref": "#/$defs/CoordinatorElectionVote"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "proposal",
+        "stage",
+        "participants",
+        "votes",
+        "started_at_unix_ms",
+        "deadline_unix_ms",
+        "updated_at_unix_ms"
+      ],
+      "type": "object"
+    },
+    "CoordinatorElectionStage": {
+      "enum": [
+        "started",
+        "voting",
+        "committed",
+        "timed_out",
+        "rejected"
+      ],
+      "type": "string"
+    },
+    "CoordinatorElectionVote": {
+      "description": "A candidate-signed vote for one exact term and Leader. The signature binds\nthe network, candidate configuration revision, complete candidate group,\nLeader and validity interval so a vote cannot be replayed for another term.",
+      "properties": {
+        "candidate_config_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "candidate_group": {
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "leader": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signature": {
+          "$ref": "#/$defs/Signature"
+        },
+        "term": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "voter": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "voter_public_key": {
+          "$ref": "#/$defs/PublicKey"
+        }
+      },
+      "required": [
+        "schema_version",
+        "network_id",
+        "candidate_config_revision",
+        "term",
+        "leader",
+        "candidate_group",
+        "voter",
+        "voter_public_key",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "CoordinatorEmergencyLeaderState": {
+      "enum": [
+        "active",
+        "expired"
+      ],
+      "type": "string"
+    },
+    "CoordinatorEmergencyLeaderStatus": {
+      "description": "A bounded, non-governance authority granted only after the Coordinator has\nobserved every configured candidate offline. The leader is selected\ndeterministically from online non-candidate members and cannot inherit or\nmanufacture a normal term.",
+      "properties": {
+        "allowed_writes": {
+          "items": {
+            "$ref": "#/$defs/CoordinatorWriteKind"
+          },
+          "type": "array"
+        },
+        "candidate_config_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "data_plane_allowed": {
+          "type": "boolean"
+        },
+        "emergency_epoch": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "governance_writable": {
+          "type": "boolean"
+        },
+        "hard_expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "health_checks_allowed": {
+          "type": "boolean"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "leader": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "remaining_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runtime_coordination_allowed": {
+          "type": "boolean"
+        },
+        "state": {
+          "$ref": "#/$defs/CoordinatorEmergencyLeaderState"
+        },
+        "unavailable_candidates": {
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "network_id",
+        "leader",
+        "emergency_epoch",
+        "candidate_config_revision",
+        "unavailable_candidates",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms",
+        "hard_expires_at_unix_ms",
+        "state",
+        "remaining_ms",
+        "runtime_coordination_allowed",
+        "governance_writable",
+        "data_plane_allowed",
+        "health_checks_allowed",
+        "allowed_writes"
+      ],
+      "type": "object"
+    },
     "CoordinatorEmergencyState": {
       "enum": [
         "none",
@@ -726,6 +1148,74 @@
         "all_candidates_unavailable"
       ],
       "type": "string"
+    },
+    "CoordinatorLeaseState": {
+      "oneOf": [
+        {
+          "enum": [
+            "active"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "no_term",
+          "description": "No term has been admitted yet. Governance remains in bootstrap mode.",
+          "type": "string"
+        },
+        {
+          "const": "renewal_due",
+          "description": "The lease is still writable, but renewal is overdue soon.",
+          "type": "string"
+        },
+        {
+          "const": "read_only",
+          "description": "Authority is no longer writable until a fresh term is admitted.",
+          "type": "string"
+        }
+      ]
+    },
+    "CoordinatorLeaseStatus": {
+      "description": "Observable lease projection used by the control plane and UI. `reason_code`\nis stable so a clock-skew alert cannot be mistaken for an ordinary expiry.",
+      "properties": {
+        "lease_expires_at_unix_ms": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_clock_skew_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "observed_clock_skew_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason_code": {
+          "type": "string"
+        },
+        "remaining_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/CoordinatorLeaseState"
+        }
+      },
+      "required": [
+        "state",
+        "remaining_ms",
+        "observed_clock_skew_ms",
+        "max_clock_skew_ms",
+        "reason_code"
+      ],
+      "type": "object"
     },
     "CoordinatorPhase": {
       "enum": [
@@ -744,6 +1234,7 @@
       "description": "Public reachability evidence supplied by the candidate itself. Consumers\nmust treat this as a claim until the election protocol verifies a quorum.",
       "properties": {
         "public_endpoint": {
+          "default": null,
           "type": [
             "string",
             "null"
@@ -756,10 +1247,40 @@
       },
       "type": "object"
     },
+    "CoordinatorQuorumStatus": {
+      "properties": {
+        "participant_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "received_votes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "required_votes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "received_votes",
+        "required_votes",
+        "participant_count"
+      ],
+      "type": "object"
+    },
     "CoordinatorTerm": {
       "properties": {
         "authority": {
           "$ref": "#/$defs/CoordinatorAuthority"
+        },
+        "candidate_config_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "candidate_group": {
           "items": {
@@ -789,6 +1310,13 @@
           },
           "type": "array"
         },
+        "majority_votes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CoordinatorElectionVote"
+          },
+          "type": "array"
+        },
         "network_id": {
           "$ref": "#/$defs/NetworkId"
         },
@@ -806,6 +1334,7 @@
         "term",
         "leader",
         "candidate_group",
+        "candidate_config_revision",
         "majority_proof",
         "authority",
         "phase",
@@ -814,6 +1343,50 @@
         "expires_at_unix_ms"
       ],
       "type": "object"
+    },
+    "CoordinatorWriteCredential": {
+      "description": "The authority facts that every governance write must carry. The write kind\nis supplied separately so one envelope cannot be silently replayed for a\nbroader operation.",
+      "properties": {
+        "fencing_token": {
+          "$ref": "#/$defs/FencingToken"
+        },
+        "leader": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "term": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "network_id",
+        "term",
+        "leader",
+        "fencing_token"
+      ],
+      "type": "object"
+    },
+    "CoordinatorWriteKind": {
+      "enum": [
+        "publish_own_term",
+        "sync_last_policy",
+        "connection_coordination",
+        "health_check",
+        "reject_stale_state",
+        "membership",
+        "ownership",
+        "security_policy",
+        "traffic_policy",
+        "keys",
+        "candidate_set",
+        "audit_deletion",
+        "self_promotion"
+      ],
+      "type": "string"
     },
     "DiscoveryTransport": {
       "enum": [
@@ -10249,6 +10822,17 @@
             "$ref": "#/$defs/CoordinatorCandidate"
           },
           "type": "array"
+        },
+        "credential": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CoordinatorWriteCredential"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present after the first authoritative term is installed. Bootstrap\nupdates before a term are deliberately credential-free and are rejected\nby the Coordinator once a term exists."
         },
         "effective_from_unix_ms": {
           "format": "uint64",

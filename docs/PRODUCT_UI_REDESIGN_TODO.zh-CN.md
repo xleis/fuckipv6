@@ -3319,29 +3319,53 @@ netns/iptables 测试覆盖。三端 Relay UI 的权限、网络选择、健康�
 
 **验收**：正常多数接管可重复、可观察，且不会产生双 Leader 写入。
 
-### W14-04 分区与无多数保护 `[ ]`
+### W14-04 分区与无多数保护 `[x]`
 
-- [ ] 少数分区不选举新 Leader；
-- [ ] 无多数时治理写入失败关闭；
-- [ ] 网络分区期间数据面按既有连接策略继续或安全降级；
-- [ ] 分区恢复后执行状态与任期对齐；
-- [ ] 防止重复提案、过期事件和租户状态回滚；
-- [ ] UI 明确“控制面受限”而非误报节点故障；
-- [ ] 完成网络分区、延迟、丢包和时钟漂移测试；
-- [ ] 所有分区事件可审计。
+- [x] 少数分区不选举新 Leader；
+- [x] 无多数时治理写入失败关闭；
+- [x] 网络分区期间数据面按既有连接策略继续或安全降级；
+- [x] 分区恢复后执行状态与任期对齐；
+- [x] 防止重复提案、过期事件和租户状态回滚；
+- [x] UI 明确“控制面受限”而非误报节点故障；
+- [x] 完成网络分区、延迟、丢包和时钟漂移测试；
+- [x] 所有分区事件可审计。
+
+**证据**：`minority_loss_and_delay_recover_without_rolling_back_the_term` 通过确定性 store/domain 故障注入覆盖少数票、
+无多数超时、迟到票拒绝、恢复后重新取得严格多数并以 term 2 / fencing token 2 提交、旧 term 写入拒绝、重启后任期
+不回退及完整审计链；`control_plane_requires_strict_majority_before_enabling_governance` 和
+`control_plane_projects_timeout_configuration_and_clock_limits` 覆盖选举中、租约过期、配置失效和时钟边界下的
+只读失败关闭。`coordinator_takeover_poll_preserves_the_live_data_plane_session` 验证候选状态轮询不替换
+`SignalingClient`、不结束数据面任务且不发送 shutdown。GPUI、WebUI 和契约测试验证统一投影为“控制面受限”，
+并保留数据面健康状态。Coordinator candidate 测试 13 passed，client takeover 测试 6 passed，common coordinator
+测试 30 passed；`cargo fmt --all -- --check`、Clippy、WebUI typecheck/lint/test 和契约检查均通过。
+本项未声称完成真实 netns/tc netem 多节点网络损伤验收；该拓扑、进程暂停和消息重放仍由 W14-10 执行。
 
 **验收**：系统宁可暂停治理也不制造双写；分区恢复不会回滚已确认状态。
 
-### W14-05 旧 Leader 恢复 `[ ]`
+### W14-05 旧 Leader 恢复 `[x]`
 
-- [ ] 旧 Leader 恢复后先验证当前任期，不直接恢复写入；
-- [ ] 低任期写入、事件和状态同步被拒绝；
-- [ ] 旧 Leader 以普通候选或成员身份重新加入；
-- [ ] 完成状态快照/日志追赶和只读阶段；
-- [ ] 客户端拒绝旧 Leader 的治理事件；
-- [ ] 旧 Leader 健康检查和数据面能力可继续；
-- [ ] 记录恢复过程和被拒绝写入；
-- [ ] 完成旧 Leader 并发恢复测试。
+- [x] 旧 Leader 恢复后先验证当前任期，不直接恢复写入；
+- [x] 低任期写入、事件和状态同步被拒绝；
+- [x] 旧 Leader 以普通候选或成员身份重新加入；
+- [x] 完成状态快照/日志追赶和只读阶段；
+- [x] 客户端拒绝旧 Leader 的治理事件；
+- [x] 旧 Leader 健康检查和数据面能力可继续；
+- [x] 记录恢复过程和被拒绝写入；
+- [x] 完成旧 Leader 并发恢复测试。
+
+**证据**：Coordinator 新增已认证、幂等的恢复请求/响应链路。恢复节点提交自己观察到的 term、fencing token、
+Leader、候选配置 revision 和审计游标；服务端以持久化权威快照校验，拒绝未来 term、冲突 token 和越界的审计游标。
+旧 Leader 先进入只读阶段，只读追赶有界审计日志后才以候选或成员身份重入，恢复状态明确禁止治理写权限，但保留健康
+检查和既有数据面能力。旧凭据继续失败关闭，恢复、拒绝及并发重试均持久化审计。
+`old_leader_recovery_enters_read_only_before_rejoining`、`recovery_catches_up_audit_then_rejoins_without_write_authority`、
+`recovery_rejects_future_term_and_audit_cursor`、`recovered_old_credential_remains_rejected`、
+`rejoin_as_member_when_config_changes_candidate_group` 和 `concurrent_recovery_is_durable_and_audited_once` 覆盖上述路径；
+`stale_leader_governance_events_are_rejected_against_authoritative_status` 与客户端恢复网络绑定测试覆盖旧治理事件拒绝；
+`coordinator_takeover_poll_preserves_the_live_data_plane_session` 验证恢复轮询不替换 Signaling 会话、不结束数据面任务且
+保留审计游标。全量门禁为 common 417 passed、Coordinator 172 passed、client 1237 passed/3 ignored；
+目标测试 common coordinator 32 passed、Coordinator candidate 19 passed、client takeover 6 passed；
+`cargo fmt --all -- --check`、全 workspace Clippy `-D warnings`、契约 DTO/TypeScript/Java 检查及 `git diff --check` 均通过。
+本项不声称完成真实断电、断网和候选全失演练，这些仍由 W14-06/W14-10 覆盖。
 
 **验收**：旧 Leader 恢复不会形成脑裂或覆盖新状态，数据面与控制面可安全重连。
 
@@ -3360,12 +3384,12 @@ netns/iptables 测试覆盖。三端 Relay UI 的权限、网络选择、健康�
 
 ### W14-07 临时权限冻结与恢复 `[ ]`
 
-> 当前进展（2026-11-14）：候选控制面新增统一 governance gate。候选配置缺失、pending、expired 或当前配置下没有健康候选时，服务端以稳定错误码 `coordinator_candidate.error.governance_frozen` 失败关闭。该 gate 已接入成员准入/拒绝/变更、邀请创建/撤销/兑换、加入审批、Exit 贡献提交/审批/撤回；邀请兑换在操作者尚未成为成员时也会检查，并已有“冻结不消耗邀请、不改 roster/lifecycle”的副作用测试。命令授权层新增独立的治理写入意图，临时 Coordinator 对成员、角色、策略、身份、配置、邀请和候选治理写入返回 `permission.temporary_coordinator_governance_frozen`，但本地启停、路由、TUN、诊断和运行协调不被该角色规则自动冻结。状态、列表、预览、候选声明发布和既有数据面读取不在冻结范围。UI 禁用与恢复条件展示、正式候选恢复后的多数/任期验证、安全交回、管理员阈值恢复、old/new Leader 并发测试尚未完成，因此本项及 W14 均不勾选。
+> 当前进展（2026-11-14）：候选控制面新增统一 governance gate。候选配置缺失、pending、expired 或当前配置下没有健康候选时，服务端以稳定错误码 `coordinator_candidate.error.governance_frozen` 失败关闭。该 gate 已接入成员准入/拒绝/变更、邀请创建/撤销/兑换、加入审批、Exit 贡献提交/审批/撤回；邀请兑换在操作者尚未成为成员时也会检查，并已有“冻结不消耗邀请、不改 roster/lifecycle”的副作用测试。命令授权层新增独立的治理写入意图，临时 Coordinator 对成员、角色、策略、身份、配置、邀请和候选治理写入返回 `permission.temporary_coordinator_governance_frozen`，但本地启停、路由、TUN、诊断和运行协调不被该角色规则自动冻结。GPUI 与 WebUI 已按 `NodeCommandKind::is_governance_write()` 分类统一禁用治理入口，并在候选状态缺失、紧急状态、控制面不可写或紧急 Leader 活跃时展示稳定恢复原因；仅候选声明发布、状态/列表/预览和既有数据面读取保持可用。正式候选恢复后的多数与任期验证已由选举、恢复和并发测试覆盖。安全交回、管理员阈值恢复和 old/new Leader 并发演练仍未完成，因此本项及 W14 均不勾选。
 
 - [ ] 建立允许/禁止操作清单并落实服务端校验；
 - [ ] 临时 Leader 的所有治理命令返回明确受限错误；
-- [ ] UI 禁用入口并显示恢复条件；
-- [ ] 正式候选恢复后验证多数和任期；
+- [x] UI 禁用入口并显示恢复条件；
+- [x] 正式候选恢复后验证多数和任期；
 - [ ] 执行安全交回、状态校验和临时权限撤销；
 - [ ] 交回失败保持受限状态，不降级为永久权限；
 - [ ] 管理员阈值恢复流程需要多成员签名/批准；

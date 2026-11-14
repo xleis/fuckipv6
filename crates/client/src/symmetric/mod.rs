@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use fuckipv6_common::domain::{
     CoordinatorCandidate, CoordinatorCandidateConfig, CoordinatorCandidateDeclaration,
     CoordinatorCandidateResources, CoordinatorCandidateStatus, CoordinatorCandidateWillingness,
-    CoordinatorPublicReachability, NetworkId, NetworkRecord, NodeId,
+    CoordinatorPublicReachability, CoordinatorWriteCredential, NetworkId, NetworkRecord, NodeId,
     RelayAuthorizationAuditSnapshot, RelayGovernanceAuditSnapshot, RelayHealthSnapshot,
     RelayLifecycleState,
 };
@@ -636,6 +636,7 @@ impl EmbeddedCoordinator {
         candidates: Vec<CoordinatorCandidate>,
         effective_from_unix_ms: u64,
         expires_at_unix_ms: u64,
+        credential: Option<CoordinatorWriteCredential>,
     ) -> Result<CoordinatorCandidateStatus> {
         let actor = NodeId::from_public_key(&identity.public_key());
         let network_id = self
@@ -656,8 +657,15 @@ impl EmbeddedCoordinator {
             .coordinator_candidate_store
             .clone()
             .context("Coordinator 候选组不可用：缺少审批授权网络资料")?;
-        tokio::task::spawn_blocking(move || {
-            store.update_config(&actor, expected_revision, config, now_unix_ms())
+        tokio::task::spawn_blocking(move || match credential {
+            Some(credential) => store.update_config_authorized(
+                &actor,
+                expected_revision,
+                config,
+                &credential,
+                now_unix_ms(),
+            ),
+            None => store.update_config(&actor, expected_revision, config, now_unix_ms()),
         })
         .await
         .context("Coordinator 候选配置更新任务失败")?

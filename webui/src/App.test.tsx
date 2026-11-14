@@ -2708,16 +2708,47 @@ describe("React WebUI shell", () => {
   });
 
   it("leaves the selected network without touching other memberships", async () => {
-    authenticate(populatedSnapshot);
-    const remainingNetwork = populatedSnapshot.networks.find(
+    const governanceSnapshot: NodeSnapshot = {
+      ...populatedSnapshot,
+      embedded_services: (populatedSnapshot.embedded_services ?? []).map(
+        (service) =>
+          service.network_name === "home"
+            ? {
+                ...service,
+                coordinator_candidates: {
+                  network_id: "net_home",
+                  generated_at_unix_ms: 1_700_000_000_000,
+                  config_state: "current",
+                  candidates: [],
+                  config: null,
+                  current_leader: null,
+                  latest_term: null,
+                  control_plane: {
+                    state: "available",
+                    governance_writable: true,
+                    reason_code: "coordinator.control_plane.available",
+                    quorum: {
+                      received_votes: 2,
+                      required_votes: 2,
+                      participant_count: 3,
+                    },
+                  },
+                  emergency: "none",
+                },
+              }
+            : service,
+      ),
+    };
+    authenticate(governanceSnapshot);
+    const remainingNetwork = governanceSnapshot.networks.find(
       (network) => network.name === "studio",
     )!;
     const leftSnapshot: NodeSnapshot = {
-      ...populatedSnapshot,
-      revision: populatedSnapshot.revision + 1,
+      ...governanceSnapshot,
+      revision: governanceSnapshot.revision + 1,
       networks: [remainingNetwork],
       lifecycle: {
-        ...populatedSnapshot.lifecycle,
+        ...governanceSnapshot.lifecycle,
         active_networks: 1,
         configured_networks: 1,
       },

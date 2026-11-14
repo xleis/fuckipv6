@@ -5,6 +5,7 @@ All notable changes are documented here. The project follows semantic versioning
 ## Unreleased
 
 ### Services
+- **W14 候选间选举传播**: 新增仅发送给当前候选组成员的 `CoordinatorElectionChanged` 信令事件，在提案、投票和超时转换后通知候选刷新权威状态；普通网络成员不会收到选举控制面细节，客户端不得伪造该服务端事件。W14 的自动投票、接管和故障 E2E 仍未完成。
 - **统一服务生命周期管理**: 新增 `fuckipv6 service install/status/restart/stop/start/upgrade/uninstall`，统一生成并管理 Linux systemd、macOS launchd 与 Windows SCM 服务定义；内部 `__service` 角色独立于 UI 监督 control/node/WebUI。安装脚本已改为只调用统一入口，并补充安装、升级、重启、停止、卸载和服务定义测试。Linux 当前主机已通过 systemd unit 校验；macOS/Windows 仍待实机服务验证，Android 前台服务未实现，因此 W2-08 保持部分完成。
 
 ### Relay

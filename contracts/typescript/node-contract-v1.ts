@@ -167,10 +167,14 @@ export type CoordinatorCandidateStatus = {
   "candidates": Array<CoordinatorCandidateStatusEntry>;
   "config"?: CoordinatorCandidateConfig | null;
   "config_state": CoordinatorCandidateConfigState;
+  "control_plane"?: CoordinatorControlPlaneStatus;
   "current_leader"?: NodeId | null;
   "emergency": CoordinatorEmergencyState;
+  "emergency_leader"?: CoordinatorEmergencyLeaderStatus | null;
   "generated_at_unix_ms": number;
+  "latest_election"?: CoordinatorElectionSession | null;
   "latest_term"?: CoordinatorTerm | null;
+  "lease"?: CoordinatorLeaseStatus;
   "network_id": NetworkId;
 };
 
@@ -185,7 +189,91 @@ export type CoordinatorCandidateStatusEntry = {
 
 export type CoordinatorCandidateWillingness = "willing" | "unwilling";
 
+export type CoordinatorControlPlaneState = "available" | "election_in_progress" | "quorum_unavailable" | "no_leader" | "configuration_unavailable" | "read_only";
+
+export type CoordinatorControlPlaneStatus = {
+  "governance_writable": boolean;
+  "quorum": CoordinatorQuorumStatus;
+  "reason_code": string;
+  "state": CoordinatorControlPlaneState;
+};
+
+export type CoordinatorElectionProposal = {
+  "candidate_config_revision": number;
+  "candidate_group": Array<NodeId>;
+  "expires_at_unix_ms": number;
+  "leader": NodeId;
+  "network_id": NetworkId;
+  "proposal_id": ContentHash;
+  "proposed_at_unix_ms": number;
+  "proposer": NodeId;
+  "proposer_public_key": PublicKey;
+  "schema_version": number;
+  "signature": Signature;
+  "term": number;
+};
+
+export type CoordinatorElectionSession = {
+  "deadline_unix_ms": number;
+  "participants": Array<NodeId>;
+  "proposal": CoordinatorElectionProposal;
+  "rejection_reason"?: string | null;
+  "result_term"?: CoordinatorTerm | null;
+  "schema_version": number;
+  "stage": CoordinatorElectionStage;
+  "started_at_unix_ms": number;
+  "updated_at_unix_ms": number;
+  "votes": Array<CoordinatorElectionVote>;
+};
+
+export type CoordinatorElectionStage = "started" | "voting" | "committed" | "timed_out" | "rejected";
+
+export type CoordinatorElectionVote = {
+  "candidate_config_revision": number;
+  "candidate_group": Array<NodeId>;
+  "expires_at_unix_ms": number;
+  "issued_at_unix_ms": number;
+  "leader": NodeId;
+  "network_id": NetworkId;
+  "schema_version": number;
+  "signature": Signature;
+  "term": number;
+  "voter": NodeId;
+  "voter_public_key": PublicKey;
+};
+
+export type CoordinatorEmergencyLeaderState = "active" | "expired";
+
+export type CoordinatorEmergencyLeaderStatus = {
+  "allowed_writes": Array<CoordinatorWriteKind>;
+  "candidate_config_revision": number;
+  "data_plane_allowed": boolean;
+  "emergency_epoch": number;
+  "expires_at_unix_ms": number;
+  "governance_writable": boolean;
+  "hard_expires_at_unix_ms": number;
+  "health_checks_allowed": boolean;
+  "issued_at_unix_ms": number;
+  "leader": NodeId;
+  "network_id": NetworkId;
+  "remaining_ms": number;
+  "runtime_coordination_allowed": boolean;
+  "state": CoordinatorEmergencyLeaderState;
+  "unavailable_candidates": Array<NodeId>;
+};
+
 export type CoordinatorEmergencyState = "none" | "no_candidates_configured" | "configuration_pending" | "configuration_expired" | "all_candidates_unavailable";
+
+export type CoordinatorLeaseState = "active" | "no_term" | "renewal_due" | "read_only";
+
+export type CoordinatorLeaseStatus = {
+  "lease_expires_at_unix_ms"?: number | null;
+  "max_clock_skew_ms": number;
+  "observed_clock_skew_ms": number;
+  "reason_code": string;
+  "remaining_ms": number;
+  "state": CoordinatorLeaseState;
+};
 
 export type CoordinatorPhase = "stable" | "election" | "leader_ack" | "partition" | "emergency_proposal" | "emergency_leader" | "handoff" | "recovery_required";
 
@@ -194,18 +282,35 @@ export type CoordinatorPublicReachability = {
   "reachable_via_relay"?: boolean;
 };
 
+export type CoordinatorQuorumStatus = {
+  "participant_count": number;
+  "received_votes": number;
+  "required_votes": number;
+};
+
 export type CoordinatorTerm = {
   "authority": CoordinatorAuthority;
+  "candidate_config_revision": number;
   "candidate_group": Array<NodeId>;
   "expires_at_unix_ms": number;
   "fencing_token": FencingToken;
   "issued_at_unix_ms": number;
   "leader": NodeId;
   "majority_proof": Array<NodeId>;
+  "majority_votes"?: Array<CoordinatorElectionVote>;
   "network_id": NetworkId;
   "phase": CoordinatorPhase;
   "term": number;
 };
+
+export type CoordinatorWriteCredential = {
+  "fencing_token": FencingToken;
+  "leader": NodeId;
+  "network_id": NetworkId;
+  "term": number;
+};
+
+export type CoordinatorWriteKind = "publish_own_term" | "sync_last_policy" | "connection_coordination" | "health_check" | "reject_stale_state" | "membership" | "ownership" | "security_policy" | "traffic_policy" | "keys" | "candidate_set" | "audit_deletion" | "self_promotion";
 
 export type DiscoveryTransport = "quic" | "tcp" | "websocket" | "local";
 
@@ -2487,6 +2592,7 @@ export type NodeUiValidation = "none" | "non_empty" | "network_name" | "port" | 
 
 export type NodeUpdateCoordinatorCandidatesCommand = {
   "candidates": Array<CoordinatorCandidate>;
+  "credential"?: CoordinatorWriteCredential | null;
   "effective_from_unix_ms"?: number | null;
   "expected_revision": number;
   "expires_at_unix_ms": number;

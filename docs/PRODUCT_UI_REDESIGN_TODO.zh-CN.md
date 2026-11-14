@@ -3280,20 +3280,20 @@ netns/iptables 测试覆盖。三端 Relay UI 的权限、网络选择、健康�
 
 目标：在候选组内实现可验证的任期与接管；无多数时不选举，紧急 Leader 只获得临时运行权限，数据面不无条件中断。
 
-### W14-01 候选组与选举配置 `[ ]`
+### W14-01 候选组与选举配置 `[x]`
 
-> 当前进展（2026-11-15）：后端已实现管理员签名的版本化候选组（成员、优先级、生效/过期时间）、候选自签名声明（公网端点、Relay 可达性、资源、意愿、revision 绑定和短时有效期）、成员资格与签名校验、willingness 拒绝，以及候选全失时的 `AllCandidatesUnavailable` 紧急状态。正常 Coordinator 任期只从当前候选组中愿意参选的候选产生，普通成员不会仅凭声明取得正常 Leader 资格。候选配置更新使用并发 CAS，重复更新幂等，重启和旧版存储升级后仍持久。UI 仍未完整展示候选列表/健康、当前 Leader 和最近任期：GPUI 候选命令 notice 只显示配置状态、候选数量、Leader 和紧急状态，未显示候选健康和 `latest_term`；WebUI runtime 只显示 control-plane、quorum、reason 和 emergency。因此本项保持未完成。
+> 当前进展（2026-11-15）：后端已实现管理员签名的版本化候选组（成员、优先级、生效/过期时间）、候选自签名声明（公网端点、Relay 可达性、资源、意愿、revision 绑定和短时有效期）、成员资格与签名校验、willingness 拒绝，以及候选全失时的 `AllCandidatesUnavailable` 紧急状态。正常 Coordinator 任期只从当前候选组中愿意参选的候选产生，普通成员不会仅凭声明取得正常 Leader 资格。候选配置更新使用并发 CAS，重复更新幂等，重启和旧版存储升级后仍持久。UI 已补齐三端展示：GPUI node runtime、WebUI runtime 和 Android `node_runtime` 均展示当前 Leader、最近任期的 term/fencing token/Leader/phase，以及每个候选的 health、eligible 和 reason code；Android 通过 `CoordinatorPageData.fromSnapshot()` 投影并由 `CoordinatorPageContent()` 渲染。
 
 - [x] 网络管理员配置候选成员组和优先级；
 - [x] 候选节点声明公网可达性、资源和意愿；
 - [x] 普通成员不会被自动选为 Coordinator；
 - [x] 候选配置有版本、签名和生效时间；
-- [ ] UI 展示候选、健康、当前 Leader 和最近任期；
+- [x] UI 展示候选、健康、当前 Leader 和最近任期；
 - [x] 节点 owner 可拒绝本机候选角色；
 - [x] 候选全失时进入明确的紧急状态；
 - [x] 覆盖候选变更并发和离线更新。
 
-**证据**：`candidate_config_signatures_are_bound_to_permissions_and_membership`、`candidate_declarations_are_self_signed_and_revision_bound` 和 `unwilling_or_missing_candidates_never_gain_election_eligibility` 覆盖签名、成员资格、revision、声明有效期和 willingness；`concurrent_revision_updates_have_exactly_one_winner`、`config_cas_idempotency_and_restart_are_durable` 和 `legacy_v2_candidate_store_loads_and_upgrades_on_next_write` 覆盖并发、幂等、重启持久化与离线存储升级。本轮重跑 `domain::coordinator` 33 passed、`signaling::coordinator_candidates` 37 passed。
+**证据**：`candidate_config_signatures_are_bound_to_permissions_and_membership`、`candidate_declarations_are_self_signed_and_revision_bound` 和 `unwilling_or_missing_candidates_never_gain_election_eligibility` 覆盖签名、成员资格、revision、声明有效期和 willingness；`concurrent_revision_updates_have_exactly_one_winner`、`config_cas_idempotency_and_restart_are_durable` 和 `legacy_v2_candidate_store_loads_and_upgrades_on_next_write` 覆盖并发、幂等、重启持久化与离线存储升级。本轮重跑 `domain::coordinator` 33 passed、`signaling::coordinator_candidates` 37 passed。UI 回归：`cargo test -p fuckipv6-client gpui::view_model::tests --lib` 73 passed；WebUI `npm run lint`、`npm run typecheck`、`npm test -- --run`（327 passed）和 `npm run build` 通过；Android `:app:testDebugUnitTest`（12 passed）以及 `:app:lintDebug :app:assembleDebug` 通过。
 
 **验收**：节点身份与候选资格可验证；不存在通过伪造健康或自荐直接成为 Leader 的路径。
 

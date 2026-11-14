@@ -1,4 +1,4 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", windows))]
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -19,6 +19,28 @@ use fuckipv6_common::domain::{
     TransferState, FILE_SHARE_SCHEMA_VERSION,
 };
 use tokio::sync::watch;
+
+#[cfg(windows)]
+use windows_sys::Wdk::System::SystemInformation::{
+    NtQuerySystemInformation, SystemProcessInformation,
+};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE, STATUS_BUFFER_OVERFLOW,
+    STATUS_BUFFER_TOO_SMALL, STATUS_INFO_LENGTH_MISMATCH,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentProcessId, GetProcessHandleCount,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::WindowsProgramming::SYSTEM_PROCESS_INFORMATION;
 
 const CONCURRENT_TRANSFERS: usize = 4;
 const UPLOAD_WARMUP_BATCHES: usize = 16;
@@ -45,27 +67,45 @@ fn lock_process_resource_probe() -> std::sync::MutexGuard<'static, ()> {
 
 #[derive(Debug, Clone, Copy)]
 struct ProcessResources {
-    descriptors: usize,
+    handles: usize,
+    handle_count_is_exact: bool,
     threads: usize,
     rss_kib: u64,
 }
 
+#[cfg(target_os = "linux")]
 impl ProcessResources {
     fn sample() -> Self {
         Self {
-            descriptors: count_entries("/proc/self/fd"),
+            handles: count_entries("/proc/self/fd"),
+            handle_count_is_exact: true,
             threads: count_entries("/proc/self/task"),
             rss_kib: resident_set_kib(),
         }
     }
 }
 
+#[cfg(windows)]
+impl ProcessResources {
+    fn sample() -> Self {
+        let (handles, handle_count_is_exact) = process_handle_count();
+        Self {
+            handles,
+            handle_count_is_exact,
+            threads: process_thread_count(),
+            rss_kib: process_working_set_kib(),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn count_entries(path: &str) -> usize {
     fs::read_dir(path)
         .unwrap_or_else(|error| panic!("read {path}: {error}"))
         .count()
 }
 
+#[cfg(target_os = "linux")]
 fn resident_set_kib() -> u64 {
     let status = fs::read_to_string("/proc/self/status").expect("read process status");
     let line = status
@@ -79,6 +119,150 @@ fn resident_set_kib() -> u64 {
         .parse::<u64>()
         .expect("numeric VmRSS");
     value
+}
+
+#[cfg(windows)]
+fn process_handle_count() -> (usize, bool) {
+    let mut count = 0_u32;
+    let succeeded = unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) };
+    assert_ne!(succeeded, 0, "GetProcessHandleCount failed");
+    if count != 0 {
+        return (usize::try_from(count).expect("handle count"), true);
+    }
+
+    // Wine implements GetProcessHandleCount as a successful zero-valued stub.
+    // Fall back to the system process table so compatibility automation still
+    // measures the per-process handle total. Wine's table does not reliably
+    // reflect individual File handles, so active-transfer deltas from this
+    // fallback are bounded rather than treated as exact native evidence.
+    let handles = process_table_resources()
+        .map(|resources| resources.handles)
+        .expect("process table did not contain the current process");
+    (handles, false)
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy)]
+struct WindowsProcessTableResources {
+    handles: usize,
+}
+
+#[cfg(windows)]
+fn process_table_resources() -> Option<WindowsProcessTableResources> {
+    const INITIAL_BYTES: usize = 1024 * 1024;
+    const MAX_ATTEMPTS: usize = 8;
+    let process_id = unsafe { GetCurrentProcessId() } as usize;
+    let mut requested_bytes = INITIAL_BYTES;
+
+    for _ in 0..MAX_ATTEMPTS {
+        let words = requested_bytes.div_ceil(std::mem::size_of::<usize>());
+        let mut buffer = vec![0_usize; words];
+        let buffer_bytes = buffer
+            .len()
+            .checked_mul(std::mem::size_of::<usize>())
+            .expect("system process table size");
+        let mut returned_bytes = 0_u32;
+        let status = unsafe {
+            NtQuerySystemInformation(
+                SystemProcessInformation,
+                buffer.as_mut_ptr().cast(),
+                u32::try_from(buffer_bytes).expect("system process table length"),
+                &mut returned_bytes,
+            )
+        };
+        if matches!(
+            status,
+            STATUS_INFO_LENGTH_MISMATCH | STATUS_BUFFER_TOO_SMALL | STATUS_BUFFER_OVERFLOW
+        ) {
+            let needed = usize::try_from(returned_bytes).unwrap_or(requested_bytes);
+            requested_bytes = requested_bytes.max(needed).saturating_mul(2);
+            continue;
+        }
+        assert_eq!(status, 0, "NtQuerySystemInformation failed: {status:#x}");
+
+        let available_bytes = if returned_bytes == 0 {
+            buffer_bytes
+        } else {
+            usize::try_from(returned_bytes)
+                .expect("returned system process table length")
+                .min(buffer_bytes)
+        };
+        let mut offset = 0_usize;
+        while offset + std::mem::size_of::<SYSTEM_PROCESS_INFORMATION>() <= available_bytes {
+            let entry = unsafe {
+                std::ptr::read_unaligned(
+                    buffer
+                        .as_ptr()
+                        .cast::<u8>()
+                        .add(offset)
+                        .cast::<SYSTEM_PROCESS_INFORMATION>(),
+                )
+            };
+            if entry.UniqueProcessId as usize == process_id {
+                return Some(WindowsProcessTableResources {
+                    handles: usize::try_from(entry.HandleCount).expect("handle count"),
+                });
+            }
+            let next_offset = usize::try_from(entry.NextEntryOffset).expect("next entry offset");
+            if next_offset == 0 {
+                break;
+            }
+            offset = offset.checked_add(next_offset)?;
+        }
+        return None;
+    }
+    None
+}
+
+#[cfg(windows)]
+fn process_thread_count() -> usize {
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+    assert_ne!(
+        snapshot,
+        INVALID_HANDLE_VALUE,
+        "CreateToolhelp32Snapshot failed: {}",
+        unsafe { GetLastError() }
+    );
+    let process_id = unsafe { GetCurrentProcessId() };
+    let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+    entry.dwSize = u32::try_from(std::mem::size_of::<THREADENTRY32>()).expect("thread entry size");
+    let mut count = 0_usize;
+    let mut present = unsafe { Thread32First(snapshot, &mut entry) };
+    assert_ne!(present, 0, "Thread32First failed: {}", unsafe {
+        GetLastError()
+    });
+    while present != 0 {
+        if entry.th32OwnerProcessID == process_id {
+            count = count.saturating_add(1);
+        }
+        present = unsafe { Thread32Next(snapshot, &mut entry) };
+    }
+    let error = unsafe { GetLastError() };
+    let closed = unsafe { CloseHandle(snapshot) };
+    assert_ne!(closed, 0, "CloseHandle for thread snapshot failed");
+    assert_eq!(
+        error, ERROR_NO_MORE_FILES,
+        "Thread32Next failed before enumerating all threads"
+    );
+    count
+}
+
+#[cfg(windows)]
+fn process_working_set_kib() -> u64 {
+    let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+    counters.cb =
+        u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS>()).expect("memory counter size");
+    let succeeded = unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut counters,
+            std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        )
+    };
+    assert_ne!(succeeded, 0, "GetProcessMemoryInfo failed: {}", unsafe {
+        GetLastError()
+    });
+    u64::try_from(counters.WorkingSetSize / 1024).expect("working set KiB")
 }
 
 fn owner() -> NodeId {
@@ -294,7 +478,7 @@ fn assert_restored(runtime: &FileRuntime, root: &Path, baseline: ProcessResource
     assert_eq!(staging_entries(root), 0);
     let restored = ProcessResources::sample();
     assert_eq!(
-        restored.descriptors, baseline.descriptors,
+        restored.handles, baseline.handles,
         "File handles did not return to the process baseline"
     );
     assert_eq!(
@@ -304,7 +488,7 @@ fn assert_restored(runtime: &FileRuntime, root: &Path, baseline: ProcessResource
 }
 
 #[test]
-fn file_runtime_stress_restores_linux_process_resources() {
+fn file_runtime_stress_restores_process_resources() {
     let _resource_probe = lock_process_resource_probe();
     let temporary = tempfile::tempdir().expect("tempdir");
     let source = vec![0x5a_u8; 64 * 1024];
@@ -387,11 +571,18 @@ fn file_runtime_stress_restores_linux_process_resources() {
             "each admitted upload must own exactly one staging entry"
         );
         let loaded = ProcessResources::sample();
-        assert_eq!(
-            loaded.descriptors,
-            baseline.descriptors + EXPECTED_ACTIVE_DESCRIPTORS,
-            "active File transfers must remain descriptor-bounded"
-        );
+        if baseline.handle_count_is_exact {
+            assert_eq!(
+                loaded.handles,
+                baseline.handles + EXPECTED_ACTIVE_DESCRIPTORS,
+                "active File transfers must remain handle-bounded"
+            );
+        } else {
+            assert!(
+                loaded.handles <= baseline.handles + EXPECTED_ACTIVE_DESCRIPTORS,
+                "active File transfers exceeded the bounded handle allowance"
+            );
+        }
         assert_eq!(loaded.threads, baseline.threads);
 
         if batch % COMPLETE_UPLOAD_EVERY == 0 {
@@ -443,11 +634,18 @@ fn file_runtime_stress_restores_linux_process_resources() {
         );
         assert_eq!(staging_entries(temporary.path()), 0);
         let loaded = ProcessResources::sample();
-        assert_eq!(
-            loaded.descriptors,
-            baseline.descriptors + EXPECTED_ACTIVE_DESCRIPTORS,
-            "active File downloads must remain descriptor-bounded"
-        );
+        if baseline.handle_count_is_exact {
+            assert_eq!(
+                loaded.handles,
+                baseline.handles + EXPECTED_ACTIVE_DESCRIPTORS,
+                "active File downloads must remain handle-bounded"
+            );
+        } else {
+            assert!(
+                loaded.handles <= baseline.handles + EXPECTED_ACTIVE_DESCRIPTORS,
+                "active File downloads exceeded the bounded handle allowance"
+            );
+        }
         assert_eq!(loaded.threads, baseline.threads);
 
         for mut download in active {
@@ -475,9 +673,15 @@ fn file_runtime_stress_restores_linux_process_resources() {
         .max()
         .expect("second-half RSS");
 
+    let handle_label = if cfg!(windows) { "handles" } else { "fds" };
+    let handle_probe = if baseline.handle_count_is_exact {
+        "native"
+    } else {
+        "system-table-fallback"
+    };
     eprintln!(
-        "File resource baseline: fds={}, threads={}, rss={} KiB; peak rss={} KiB; final rss={} KiB; elapsed={:?}",
-        baseline.descriptors,
+        "File resource baseline: {handle_label}={}, handle_probe={handle_probe}, threads={}, rss={} KiB; peak rss={} KiB; final rss={} KiB; elapsed={:?}",
+        baseline.handles,
         baseline.threads,
         baseline.rss_kib,
         peak_rss_kib,
@@ -488,7 +692,7 @@ fn file_runtime_stress_restores_linux_process_resources() {
     assert_eq!(runtime.active_transfer_count(), 0);
     assert_eq!(staging_entries(temporary.path()), 0);
     let restored = ProcessResources::sample();
-    assert_eq!(restored.descriptors, baseline.descriptors);
+    assert_eq!(restored.handles, baseline.handles);
     assert_eq!(restored.threads, baseline.threads);
     assert!(
         final_rss_kib <= baseline.rss_kib + RSS_RETENTION_LIMIT_KIB,
@@ -503,7 +707,7 @@ fn file_runtime_stress_restores_linux_process_resources() {
 }
 
 #[test]
-fn file_transfer_large_multifile_and_resume_report_linux() {
+fn file_transfer_large_multifile_and_resume_report() {
     let _resource_probe = lock_process_resource_probe();
     let temporary = tempfile::tempdir().expect("tempdir");
     let share = share();
@@ -702,8 +906,10 @@ fn file_transfer_large_multifile_and_resume_report_linux() {
     assert_eq!(staging_entries(temporary.path()), 0);
 
     let restart_resources = ProcessResources::sample();
+    let handle_label = if cfg!(windows) { "handles" } else { "fds" };
     eprintln!(
-        "File performance Linux: large_upload={} MiB in {:?} ({:.1} MiB/s, pause_after={} chunks, resumed_bytes={}); large_download={} MiB in {:?} ({:.1} MiB/s, pause_after={} chunks, resumed_bytes={}); multi_file={}x{} MiB interleaved in {:?} ({:.1} MiB/s); fds {}->{}, threads {}->{}",
+        "File performance {}: large_upload={} MiB in {:?} ({:.1} MiB/s, pause_after={} chunks, resumed_bytes={}); large_download={} MiB in {:?} ({:.1} MiB/s, pause_after={} chunks, resumed_bytes={}); multi_file={}x{} MiB interleaved in {:?} ({:.1} MiB/s); {} {}->{}, threads {}->{}",
+        std::env::consts::OS,
         PERFORMANCE_LARGE_FILE_BYTES / (1024 * 1024),
         upload_elapsed,
         mib_per_second(
@@ -728,8 +934,9 @@ fn file_transfer_large_multifile_and_resume_report_linux() {
                 .expect("multi-file bytes"),
             multi_file_elapsed
         ),
-        baseline.descriptors,
-        restart_resources.descriptors,
+        handle_label,
+        baseline.handles,
+        restart_resources.handles,
         baseline.threads,
         restart_resources.threads,
     );

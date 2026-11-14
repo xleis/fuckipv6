@@ -3602,7 +3602,7 @@ macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态以�
 - [x] 限制目录扫描深度和条目数；
 - [x] 限制事件队列和日志增长；
 - [x] 满载时不影响 node/control 基本功能（Linux 独立三节点四传输槽位满载验收通过）；
-- [ ] 压力测试后文件句柄、线程和内存回到基线（Linux 进程内、独立三节点满载及 SIGKILL 恢复已自动化通过；macOS/Windows 待验收）；
+- [ ] 压力测试后文件句柄、线程和内存回到基线（Linux 进程内、Windows/Wine 兼容性自动化、独立三节点满载及 SIGKILL 恢复已通过；Windows/macOS 实机待验收）；
 - [x] 报告录明阈值与恢复结果。
 
 **验收**：恶意或误用传输无法耗尽节点资源，File 故障不拖垮数据面。
@@ -3654,7 +3654,7 @@ macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态以�
 520 个条目、2,560 字节的完整目录用量；修复前该测试稳定失败，修复后通过。该证据覆盖 Unix 目录扫描实现和并发配额正确性，
 不改变 macOS/Windows 实机、独立 node/control 满载隔离等仍未完成的验收边界。
 
-**补充（2026-11-13，Linux 满载进程资源基线）**：独立集成测试 `file_runtime_stress_restores_linux_process_resources`
+**补充（2026-11-13，Linux 满载进程资源基线）**：独立集成测试 `file_runtime_stress_restores_process_resources`
 启用共享根后先预热，再连续执行 1,024 批、每批 4 路上传（其中每 32 批完成并发布一组文件，其余路径直接丢弃），随后执行
 512 批、每批 4 路下载并读取完整源文件。每批满载时校验整个测试进程的 `/proc/self/fd` 仅比基线多 4、线程数不变；每批释放后
 校验活动准入为 0、staging 为空、句柄和线程数精确回到基线。测试同时采样 `/proc/self/status` 的 `VmRSS`，并要求后半程峰值
@@ -3681,9 +3681,20 @@ node/control 基本功能在 File 满载下的隔离结论；仍不扩张为 mac
 
 **补充（2026-11-14，Windows 配额扫描根绑定）**：Windows quota scan 不复用共享目录游标，而是从新打开的根句柄重新核对 volume serial/file index 后遍历；`NtQueryDirectoryFile` 每次调用受固定 64 KiB 缓冲区和枚举上限约束，reparse point 计入跳过数且不会进入根外目录。Wine 下完整的 `file_share::` 186 项通过，包括并发配额扫描、目录链接跳过和根替换测试；macOS/Windows 实机线程、RSS、句柄及长时高压基线仍未验收。
 
+**补充（2026-11-15，Linux/Windows 进程资源基线自动化）**：原 Linux 专用文件改为跨平台集成测试
+`crates/client/tests/file_share_resources.rs`。Linux 使用 `/proc/self/fd`、`/proc/self/task` 和 `/proc/self/status`；Windows 使用
+`GetProcessHandleCount`、Toolhelp 线程快照和 `GetProcessMemoryInfo`。测试继续执行 16 批预热、1,024 批四路上传和 512 批四路
+下载，每批验证活动传输、staging、句柄、线程与 RSS 上界，并在释放后要求活动数和 staging 归零、句柄和线程精确回到基线。
+Linux 复跑通过：句柄 5→5、线程 2→2、RSS 基线 5,368 KiB、峰值/最终 5,576 KiB。Windows GNU target 交叉编译及 Wine 11.22
+兼容性复跑通过：句柄 64→64、线程 2→2、RSS 峰值仅比基线高 224 KiB；64 MiB 上传/下载与 4×8 MiB 交错下载的暂停恢复和哈希
+断言也通过。Wine 将 `GetProcessHandleCount` 实现为成功但返回 0 的桩，因此测试仅在计数为 0 时回退到
+`NtQuerySystemInformation(SystemProcessInformation)`，并把证据标记为 `system-table-fallback`；回退模式只校验活动句柄有界和结束后
+回到基线，不在真实 Windows 上放宽实际传输的精确 +4 断言。该结果补充 Wine 兼容性和自动化覆盖，不证明 Windows/macOS 实机、
+真实 ACL、大小写不敏感卷、杀软/过滤驱动或长时高压资源结论，W15-06 的该检查项继续保持未完成。
+
 **未测边界**：Linux 进程内已覆盖满载上传/下载的正常完成、丢弃、staging 清理、OS 资源恢复和测试进程 SIGKILL 后的重启
-清理；独立三节点已覆盖四槽满载下的控制面响应和取消后的 FD、线程、RSS 回退。尚未执行跨平台或长时高压满载，macOS/Windows
-的线程、RSS 与句柄基线仍需实机采样。
+清理；Wine 兼容性自动化已覆盖同一进程内负载，但原生句柄差值受 Wine 桩限制；独立三节点已覆盖四槽满载下的控制面响应和取消后的
+FD、线程、RSS 回退。Windows/macOS 实机与长时高压满载仍需采样，因此不扩张为跨平台资源验收结论。
 真实 veth 断网、续传和完整 node supervisor 重启已经由 W15-03 的三节点 netns 验收覆盖，但该测试不是满载隔离或跨平台性能结论。
 
 **补充（2026-11-13，完整 node supervisor 重启）**：三节点 netns 测试按 JSON readiness 日志提取真实 node 子进程 PID，而不是把
@@ -3838,12 +3849,12 @@ x86_64-pc-windows-gnu` 通过。该结果只证明 client library（包含 File 
 相关未完成项继续保持未勾选。
 
 **性能基线（2026-11-13，Linux 本地文件系统）**：新增
-`file_transfer_large_multifile_and_resume_report_linux`。数据集包含一个 64 MiB 单文件上传、一个 64 MiB 单文件下载，两者均在
+`file_transfer_large_multifile_and_resume_report`。数据集包含一个 64 MiB 单文件上传、一个 64 MiB 单文件下载，两者均在
 第 6 个 4 MiB 分块后暂停并恢复，剩余 40 MiB 只能从下一分块继续；另以 4 个 8 MiB 文件、每文件 1 MiB 分块进行交错并发下载。
 测试逐块计算 BLAKE3，pause/resume 后最终内容哈希必须与数据集一致，同时检查活动传输归零、staging 清空，以及文件描述符和线程
 回到基线。当前环境为 AMD Ryzen 7 5800H、Linux 7.2.14-zen1-1-zen、rustc 1.99.1、16 个逻辑 CPU，基于 `1523f6c` 的
 debug 测试构建；命令为
-`cargo test -p fuckipv6-client --test file_share_resources_linux file_transfer_large_multifile_and_resume_report_linux -- --nocapture`。
+`cargo test -p fuckipv6-client --test file_share_resources file_transfer_large_multifile_and_resume_report -- --nocapture`。
 本次记录：64 MiB 上传 189.57 ms / 337.6 MiB/s，64 MiB 下载 210.19 ms / 304.5 MiB/s，4×8 MiB 交错下载 118.96 ms /
 269.0 MiB/s；文件描述符 5→5，线程 2→2。该数据仅代表本机临时目录和进程内 adapter 路径，不是 QUIC/P2P 实网吞吐、release
 构建基准或跨平台性能结论。

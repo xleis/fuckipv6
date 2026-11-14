@@ -640,10 +640,7 @@ fn enumerate_raw(directory: &File) -> FileShareResult<Vec<WindowsDirectoryEntry>
                         name,
                         attributes,
                         size: u64::try_from(size).unwrap_or(0),
-                        modified_at_unix_ms: unsafe { (*entry).LastWriteTime }
-                            .try_into()
-                            .ok()
-                            .and_then(filetime_to_unix_ms),
+                        modified_at_unix_ms: filetime_to_unix_ms(unsafe { (*entry).LastWriteTime }),
                     });
                 }
             }
@@ -666,6 +663,7 @@ fn enumerate_raw(directory: &File) -> FileShareResult<Vec<WindowsDirectoryEntry>
     Ok(entries)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_relative_checked(
     parent: &File,
     name: &str,

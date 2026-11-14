@@ -3338,7 +3338,7 @@ netns/iptables 测试覆盖。三端 Relay UI 的权限、网络选择、健康�
 `SignalingClient`、不结束数据面任务且不发送 shutdown。GPUI、WebUI 和契约测试验证统一投影为“控制面受限”，
 并保留数据面健康状态。Coordinator candidate 测试 13 passed，client takeover 测试 6 passed，common coordinator
 测试 30 passed；`cargo fmt --all -- --check`、Clippy、WebUI typecheck/lint/test 和契约检查均通过。
-本项未声称完成真实 netns/tc netem 多节点网络损伤验收；该拓扑、进程暂停和消息重放仍由 W14-10 执行。
+本项的确定性分区测试现由 W14-10 的真实 netns/nftables、进程暂停/终止及 QEMU 断电演练补充；W14-04 不单独声称完成 tc netem 全矩阵。
 
 **验收**：系统宁可暂停治理也不制造双写；分区恢复不会回滚已确认状态。
 
@@ -3369,7 +3369,7 @@ Leader、候选配置 revision 和审计游标；服务端以持久化权威快�
 
 **验收**：旧 Leader 恢复不会形成脑裂或覆盖新状态，数据面与控制面可安全重连。
 
-### W14-06 紧急临时 Leader `[ ]`
+### W14-06 紧急临时 Leader `[x]`
 
 - [x] 候选组全部失联时允许在线成员按明确规则进入临时模式；
 - [x] 临时 Leader 获得运行协调权限，而非完整治理权限；
@@ -3378,7 +3378,7 @@ Leader、候选配置 revision 和审计游标；服务端以持久化权威快�
 - [x] 临时 Leader 不能提升自己为正式 Leader；
 - [x] 数据面仅在必要范围维持，避免不可追踪的长期状态；
 - [x] 所有临时动作进入高优先级审计；
-- [ ] 完成断电、断网和候选全失演练。
+- [x] 完成断电、断网和候选全失演练。
 
 **证据**：只有服务端认证会话确认当前候选配置中的候选全部离线时，才会从在线非候选成员中按确定性规则签发紧急
 Leader。紧急租约具有软租约、硬期限和单调递增的 `emergency_epoch`，只开放发布自身任期、同步末次策略、连接协调、
@@ -3388,7 +3388,7 @@ Leader。紧急租约具有软租约、硬期限和单调递增的 `emergency_ep
 `emergency_lease_is_bounded_and_restart_never_extends_it`、`emergency_lease_expiry_cannot_be_renewed_or_revived_by_restart`
 和客户端 takeover 测试覆盖短租约、重启、过期和 UI 决策。签发、续租、撤权、过期及治理拒绝均写持久化审计；
 `emergency_audit_projects_as_high_priority_security_event` 进一步固定为 SecurityEvent / Warning。
-本项仍未完成真实多节点断电、断网和候选全失演练，因此 W14-06 不勾选，该演练由 W14-10 收口。
+真实故障演练已补齐：`w14_real_process_faults_install_one_authority_and_recover` 使用独立子进程和跨进程文件锁，覆盖锁持有进程 SIGKILL、SIGSTOP/SIGCONT、term 1 严格多数、候选 A 暂停且租约过期后的 term 2 接管、旧凭据拒绝、旧 Leader 只读恢复、三候选 SIGKILL 后紧急 Leader、运行时权限与治理冻结，以及 term 3 并发安装严格单胜者。`w14_netns_netfilter_fault_injection_records_real_process_evidence` 通过三个网络 namespace 和 nftables 全出口 drop 验证候选真实不可达、规则删除后恢复，并生成 `fuckipv6.w14.fault-injection.v3` 报告。`scripts/test-w14-coordinator-powerloss-vm.sh` 在 QEMU/KVM virtio + ext4 中提交候选配置 revision 1 后，由宿主机直接 SIGKILL QEMU（无 guest shutdown/sync），经 `e2fsck` 与 raw image `debugfs` 校验并重启同一磁盘，状态仍返回 revision 1，生成 `fuckipv6.w14.powerloss.v1`。因此断电、断网和候选全失演练均已完成。
 
 **验收**：紧急模式保障基本运行，但不成为治理后门；权限范围和持续时间均有硬限制。
 
@@ -3460,9 +3460,9 @@ Leader。紧急租约具有软租约、硬期限和单调递增的 `emergency_ep
 
 **验收**：控制面接管不以无差别断网为代价；无法保持的会话明确降级而非伪报正常。
 
-### W14-10 脑裂、接管与恢复测试 `[ ]`
+### W14-10 脑裂、接管与恢复测试 `[x]`
 
-> 当前进展（2026-11-15）：新增 `w14_fault_injection_matrix_records_state_machine_trajectory`，用三候选、严格多数 2/3 的可重复逻辑拓扑连续注入网络分区、无多数、暂停节点迟到票、时钟漂移、已提交消息重放、候选全失、紧急租约和正式候选恢复；最终验证旧 Leader 仅以只读身份重入且保留数据面能力，旧任期 credential 无法写入。测试可通过 `FUCKIPV6_W14_FAULT_REPORT` 导出 `fuckipv6.w14.fault-injection.v1` JSON，包含参与者、故障序列、任期/fencing token、控制面状态、票数、紧急租约、审计动作和最终状态。`cargo test -p fuckipv6-coordinator --lib` 为 213 passed，Coordinator Clippy `-D warnings` 通过；恢复阈值与旧会话失效还由 W14-08 的持久化恢复测试覆盖，数据面连续性由 client takeover 专项测试覆盖。该矩阵仍是确定性进程内状态机，不代表真实进程/netns 的 SIGSTOP、tc netem、断电和候选全失演练；这些真实故障演练及 W14-06 仍未完成，因此 W14-10 与 W14 均不勾选。
+> 当前进展（2026-11-15）：`w14_fault_injection_matrix_records_state_machine_trajectory` 继续用三候选、严格多数 2/3 的逻辑拓扑覆盖网络分区、无多数、暂停节点迟到票、时钟漂移、已提交消息重放、候选全失、紧急租约和正式候选恢复，并可通过 `FUCKIPV6_W14_FAULT_REPORT` 导出 `fuckipv6.w14.fault-injection.v1` 轨迹。真实多进程测试 `w14_real_process_faults_install_one_authority_and_recover` 使用独立子进程、文件锁、SIGKILL/SIGSTOP/SIGCONT 和并发 term 安装，验证唯一权威、旧凭据拒绝、旧 Leader 只读恢复、候选全失紧急状态及治理冻结；root 专项 `w14_netns_netfilter_fault_injection_records_real_process_evidence` 在三个真实网络 namespace 上通过 nftables 丢包制造分区并验证恢复，报告 schema 为 `fuckipv6.w14.fault-injection.v3`。`scripts/test-w14-coordinator-powerloss-vm.sh` 使用 QEMU/KVM virtio + ext4，在提交后由宿主 SIGKILL QEMU、无 guest shutdown/sync，再对 raw image 执行 `e2fsck`/`debugfs` 并重启同一磁盘，验证 revision 1 仍可读取，报告 schema 为 `fuckipv6.w14.powerloss.v1`。Coordinator 库测试 213 passed，专项进程测试与真实 netns 测试通过，QEMU 断电测试退出 0，Coordinator Clippy `-D warnings` 通过。
 
 - [x] 建立可重复的多节点故障注入拓扑；
 - [x] 覆盖正常多数、无多数、旧 Leader 恢复和候选全失；

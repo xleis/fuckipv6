@@ -1981,6 +1981,9 @@ impl CoordinatorCandidateStore {
         // A declaration for the previous revision cannot be promoted to the new
         // configuration. Keeping it would make offline status look fresh.
         stored.declarations.clear();
+        // Recovery projections are bound to the exact authority tuple. A new
+        // configuration revision invalidates every cursor until nodes rejoin.
+        stored.recoveries.clear();
         // Emergency proof is bound to the exact candidate revision. A new
         // configuration invalidates it even when the candidate identities match.
         stored.emergency_leader = None;
@@ -2042,6 +2045,10 @@ impl CoordinatorCandidateStore {
         }
         stored.emergency_leader = None;
         stored.latest_term = Some(term);
+        // Recovery projections name the exact term, fencing token, leader and
+        // configuration revision they observed. A successor must invalidate
+        // them atomically before the new authority is persisted.
+        stored.recoveries.clear();
         let status = status_from_file(network, Some(stored), now_unix_ms)?;
         self.persist(file)?;
         Ok(status)

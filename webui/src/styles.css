@@ -85,6 +85,93 @@ button {
   backdrop-filter: blur(18px);
 }
 
+.primary-nav.drawer {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 120;
+  width: min(88vw, 320px);
+  max-width: 320px;
+  border-right-color: var(--border-strong);
+  background: var(--surface);
+  box-shadow: var(--shadow-pop);
+  animation: navigation-drawer-enter
+    var(--motion-duration-base) var(--motion-ease-entrance);
+}
+
+.navigation-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 110;
+  padding: 0;
+  border: 0;
+  background: color-mix(in srgb, var(--background-deep) 72%, transparent);
+  backdrop-filter: blur(5px);
+  animation: navigation-backdrop-enter var(--motion-duration-fast)
+    var(--motion-ease-standard);
+}
+
+.nav-close-button {
+  margin-left: auto;
+}
+
+.bottom-navigation {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 90;
+  display: flex;
+  min-height: calc(var(--bottom-nav-h) + env(safe-area-inset-bottom, 0px));
+  padding: 0 var(--space-1) env(safe-area-inset-bottom, 0px);
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
+  backdrop-filter: blur(16px);
+}
+
+.bottom-navigation-item {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: var(--bottom-nav-h);
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: var(--space-1);
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.bottom-navigation-item[aria-current="page"] {
+  color: var(--accent);
+}
+
+.bottom-navigation-item[aria-current="page"]::before {
+  position: absolute;
+  top: 0;
+  width: 24px;
+  height: 2px;
+  border-radius: var(--radius-full);
+  background: currentColor;
+  content: "";
+}
+
+@keyframes navigation-drawer-enter {
+  from {
+    transform: translateX(-102%);
+  }
+}
+
+@keyframes navigation-backdrop-enter {
+  from {
+    opacity: 0;
+  }
+}
+
 .brand-lockup {
   display: flex;
   align-items: center;
@@ -216,7 +303,7 @@ button {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: var(--space-4);
+  gap: var(--space-3);
   padding: 0 var(--space-5);
   border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--background) 88%, transparent);
@@ -246,6 +333,7 @@ button {
   min-width: 0;
   align-items: center;
   gap: var(--space-2);
+  flex: 0 1 auto;
 }
 
 .top-status-dot {
@@ -296,12 +384,15 @@ button {
 
 .network-picker {
   display: flex;
-  min-width: 180px;
+  min-width: 0;
+  flex: 0 0 302px;
   align-items: center;
   gap: var(--space-2);
 }
 
 .network-picker > span {
+  width: 114.078125px;
+  flex: 0 0 114.078125px;
   color: var(--text-faint);
   font-size: 10px;
   font-weight: var(--font-weight-semibold);
@@ -311,9 +402,11 @@ button {
 }
 
 .network-picker select {
+  width: 180px;
   height: 32px;
   min-width: 0;
-  max-width: 220px;
+  max-width: 180px;
+  flex: 0 0 180px;
   padding: 0 28px 0 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -623,9 +716,11 @@ button:disabled {
 
 .workspace {
   display: grid;
+  width: 100%;
   min-width: 0;
   min-height: 0;
-  grid-template-columns: minmax(0, 1fr) var(--action-panel-compact-w);
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
   gap: var(--space-5);
   padding: var(--space-5);
   overflow: auto;
@@ -723,9 +818,26 @@ button:disabled {
 }
 .page-heading {
   display: flex;
+  min-width: 0;
+  min-height: 44px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+.page-heading-copy {
+  display: flex;
+  min-width: 0;
   align-items: center;
   gap: var(--space-3);
-  margin-bottom: var(--space-5);
+}
+.page-heading-actions {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex: 0 1 auto;
+  justify-content: flex-end;
+  margin-left: auto;
 }
 .page-heading-icon {
   display: grid;
@@ -796,8 +908,9 @@ button:disabled {
 .hero-status {
   display: flex;
   align-items: center;
-  gap: var(--space-4);
-  padding: var(--space-5);
+  gap: var(--space-3);
+  min-height: 88px;
+  padding: var(--space-4);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--surface);
@@ -814,6 +927,10 @@ button:disabled {
 }
 .hero-status-icon {
   color: var(--accent);
+}
+.hero-status-icon svg {
+  width: 24px;
+  height: 24px;
 }
 .hero-status.good .hero-status-icon {
   color: var(--success);
@@ -836,8 +953,23 @@ button:disabled {
   letter-spacing: 0.08em;
 }
 .hero-status-copy h2 {
-  margin: 3px 0;
-  font-size: var(--font-size-xl);
+  margin: 2px 0;
+  font-size: var(--font-size-lg);
+}
+.hero-node-identity {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-faint);
+  font-size: var(--font-size-xs);
+}
+.hero-node-identity code {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .hero-status-copy p {
   margin: 0;
@@ -864,7 +996,20 @@ button:disabled {
   background: var(--surface-raised);
 }
 .overview-stack {
-  max-width: 980px;
+  width: 100%;
+  max-width: none;
+}
+.overview-content-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  align-items: start;
+}
+.overview-column {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: var(--space-4);
 }
 .overview-primary-action {
   flex: 0 0 auto;
@@ -922,7 +1067,8 @@ button:disabled {
 }
 .traffic-session-meta > span {
   display: grid;
-  min-width: 180px;
+  min-width: 0;
+  flex: 1 1 180px;
   gap: 3px;
   padding: var(--space-2);
   border: 1px solid var(--border);
@@ -933,9 +1079,20 @@ button:disabled {
 .traffic-session-meta code {
   color: var(--text);
 }
-.traffic-session-validation-time,
-.traffic-session-empty {
+.traffic-session-validation-time {
   margin: 0 0 var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.traffic-session-empty {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  margin: var(--space-3) 0 0;
+  padding: var(--space-1) var(--space-2);
+  border-radius: 6px;
+  background: var(--surface-raised);
   color: var(--text-muted);
   font-size: var(--font-size-xs);
 }
@@ -3204,7 +3361,7 @@ button:disabled {
   stroke: var(--text);
   stroke-width: 2.5;
 }
-@media (max-width: 900px) {
+@media (max-width: 1023px) {
   .topology-filters {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -3231,7 +3388,7 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 }
-@media (max-width: 600px) {
+@media (max-width: 599px) {
   .topology-filters,
   .topology-node-detail-grid {
     grid-template-columns: 1fr;
@@ -3289,52 +3446,130 @@ button:disabled {
 .log-level.info {
   color: var(--accent);
 }
-.actions-panel {
-  align-self: start;
+.page-command-surface {
+  position: relative;
+  display: flex;
   min-width: 0;
+  flex-direction: column;
+  align-items: flex-end;
+}
+.page-command-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+.page-command-primary {
+  gap: var(--space-2);
+  min-height: 36px;
+  padding-inline: var(--space-4);
+}
+.page-command-icon,
+.page-command-more {
+  width: 36px;
+  height: 36px;
+  border-color: var(--border-soft);
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+}
+.page-command-more[aria-expanded="true"] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.page-command-menu {
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  display: grid;
+  width: min(390px, calc(100vw - 2 * var(--space-4)));
+  max-height: min(72dvh, 620px);
+  gap: var(--space-2);
+  padding: var(--space-3);
+  overflow: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  background: var(--surface);
-  box-shadow: var(--shadow-sm);
+  background: var(--panel-solid);
+  box-shadow: var(--shadow-pop);
 }
-.panel-title {
-  padding: var(--space-3) var(--space-4);
-  border-bottom: 1px solid var(--border);
-  color: var(--text-muted);
+.page-command-menu-groups {
+  display: grid;
+  gap: var(--space-2);
+}
+.page-command-menu-group {
+  display: grid;
+  gap: 2px;
+}
+.page-command-menu-group + .page-command-menu-group {
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-soft);
+}
+.page-command-menu-group h2 {
+  margin: 0;
+  padding: var(--space-2) var(--space-2) var(--space-1);
+  color: var(--text-faint);
   font-size: 10px;
   font-weight: var(--font-weight-semibold);
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
-.panel-heading {
-  display: flex;
+.page-command-menu-item {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: var(--space-2);
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  border-bottom: 1px solid var(--border);
-}
-.panel-heading > .panel-title {
-  padding: 0;
+  padding: var(--space-2);
   border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  text-align: left;
 }
-.panel-count,
-.action-group-count {
-  color: var(--text-faint);
+.page-command-menu-item:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.page-command-menu-item:focus-visible {
+  outline-offset: -2px;
+}
+.page-command-menu-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+}
+.page-command-menu-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.page-command-menu-copy strong {
+  overflow: hidden;
+  color: inherit;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.page-command-menu-copy small {
+  overflow: hidden;
+  color: var(--warning);
   font-size: 10px;
-  font-variant-numeric: tabular-nums;
-}
-.actions-panel > .empty-copy {
-  padding: 0 var(--space-4) var(--space-4);
-}
-.actions-panel > .empty-copy[role="status"] {
-  padding-top: var(--space-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .action-search {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  margin: var(--space-3) var(--space-3) 0;
+  margin: 0;
   padding: 0 var(--space-2) 0 var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -3365,46 +3600,72 @@ button:disabled {
   height: 24px;
   flex: 0 0 auto;
 }
-.action-groups {
+.page-command-menu > .empty-copy {
+  margin: 0;
+  padding: var(--space-3);
+}
+.page-operation-status {
   display: grid;
-  padding-top: var(--space-2);
+  margin-bottom: var(--space-4);
 }
-.action-group + .action-group {
-  border-top: 1px solid var(--border);
+.action-workspace-overlay {
+  position: fixed;
+  z-index: 120;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: color-mix(in srgb, var(--background-deep) 74%, transparent);
+  backdrop-filter: blur(8px);
 }
-.action-group-head {
+.action-workspace {
+  display: grid;
+  width: min(720px, 100%);
+  max-height: min(88dvh, 860px);
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel-solid);
+  box-shadow: var(--shadow-pop);
+}
+.action-workspace-heading {
   display: flex;
-  width: 100%;
-  min-height: 38px;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-4);
-  border: 0;
-  background: transparent;
-  color: var(--text-muted);
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
+}
+.action-workspace-heading > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.action-workspace-heading span {
+  color: var(--text-faint);
   font-size: 10px;
   font-weight: var(--font-weight-semibold);
-  letter-spacing: 0.06em;
-  text-align: left;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
-.action-group-head:hover {
-  background: var(--surface-hover);
-  color: var(--text);
+.action-workspace-heading h2 {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  line-height: var(--line-height-lg);
 }
-.action-group-meta {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
+.action-workspace-body {
+  min-height: 0;
+  overflow: auto;
 }
-.action-group.unavailable .action-group-head {
-  color: var(--warning);
+.action-workspace-body > .action-card {
+  border: 0;
+  background: transparent;
 }
-.action-list {
-  display: grid;
+.action-workspace-body .action-form {
+  padding-top: var(--space-4);
 }
-.actions-panel > .operation-status {
+.operation-status {
   margin: var(--space-3) var(--space-3) 0;
 }
 .operation-status {
@@ -6918,12 +7179,6 @@ button:disabled {
   }
 }
 
-@media (min-width: 1280px) {
-  .workspace {
-    grid-template-columns: minmax(0, 1fr) var(--action-panel-w);
-  }
-}
-
 @media (max-width: 1240px) {
   .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -6948,64 +7203,43 @@ button:disabled {
   }
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1023px) {
   body {
-    overflow: auto;
+    overflow: hidden;
   }
-  .app-shell {
+  .app-shell[data-navigation-mode="compact"],
+  .app-shell[data-navigation-mode="mobile"] {
     grid-template-columns: 1fr;
-    height: auto;
-    min-height: 100vh;
-  }
-  .primary-nav {
-    position: sticky;
-    z-index: 30;
-    top: 0;
-    flex-direction: row;
-    overflow-x: auto;
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
-  }
-  .brand-lockup {
-    min-height: 52px;
-  }
-  .brand-lockup > div:last-child {
-    display: none;
-  }
-  .module-list {
-    display: flex;
-    padding: 4px;
-  }
-  .module-button {
-    width: auto;
-    min-width: 92px;
-    height: 44px;
-    justify-content: center;
-  }
-  .module-button.selected::before {
-    top: auto;
-    right: 12px;
-    bottom: -1px;
-    left: 12px;
-    width: auto;
-    height: 2px;
-  }
-  .nav-footer {
-    display: none;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
   }
   .app-main {
-    grid-template-rows: auto auto minmax(0, 1fr);
+    grid-template-rows: var(--topbar-h) auto minmax(0, 1fr);
   }
   .global-bar {
-    min-height: 56px;
-    flex-wrap: wrap;
-    padding-block: var(--space-2);
+    height: var(--topbar-h);
+    min-height: var(--topbar-h);
+    flex-wrap: nowrap;
+    padding-block: 0;
   }
   .global-context {
-    flex-basis: 100%;
+    flex-basis: auto;
   }
   .network-picker {
-    flex: 1;
+    min-width: 150px;
+    flex: 0 1 180px;
+  }
+  .network-picker > span {
+    display: none;
+  }
+  .global-actions .language-control .toolbar-button span,
+  .global-actions .language-control .toolbar-button svg:last-child {
+    display: none;
+  }
+  .global-actions .language-control .toolbar-button {
+    width: 34px;
+    padding: 0;
   }
   .workspace {
     grid-template-columns: 1fr;
@@ -7024,9 +7258,6 @@ button:disabled {
   .topology-legend-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .actions-panel {
-    width: 100%;
-  }
   .configuration-heading {
     grid-template-columns: auto minmax(0, 1fr);
   }
@@ -7043,7 +7274,7 @@ button:disabled {
   }
 }
 
-@media (max-width: 600px) {
+@media (max-width: 599px) {
   .network-actions-menu {
     position: fixed !important;
     inset: auto var(--space-3) var(--space-3) !important;
@@ -7062,22 +7293,6 @@ button:disabled {
   .network-actions-menu .context-item {
     min-height: 44px;
   }
-  .brand-lockup {
-    display: none;
-  }
-  .module-list {
-    width: 100%;
-    gap: 0;
-  }
-  .module-button {
-    min-width: 0;
-    flex: 1;
-    padding: 0 4px;
-    font-size: var(--font-size-xs);
-  }
-  .module-button span {
-    display: none;
-  }
   .global-bar {
     gap: var(--space-2);
     padding-inline: var(--space-3);
@@ -7092,8 +7307,18 @@ button:disabled {
   }
   .network-picker {
     min-width: 0;
+    flex-basis: 120px;
+  }
+  .network-picker select {
+    width: 100%;
+    max-width: none;
+    flex-basis: auto;
   }
   .network-picker > span {
+    display: none;
+  }
+  .top-status span:last-child,
+  .top-status-group > .top-status.traffic {
     display: none;
   }
   .local-toolbar {
@@ -7115,6 +7340,7 @@ button:disabled {
   }
   .workspace {
     padding: var(--space-3);
+    padding-bottom: calc(var(--bottom-nav-h) + var(--space-3));
   }
   .metric-grid,
   .network-grid,
@@ -7230,7 +7456,36 @@ button:disabled {
     min-height: 0;
   }
   .page-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .page-heading-actions {
+    width: 100%;
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+  .page-command-surface {
     align-items: flex-start;
+    width: 100%;
+  }
+  .page-command-toolbar {
+    justify-content: flex-start;
+  }
+  .page-command-menu {
+    right: auto;
+    left: 0;
+  }
+  .action-workspace-overlay {
+    align-items: end;
+    padding: 0;
+  }
+  .action-workspace {
+    width: 100%;
+    max-height: 92dvh;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  }
+  .action-workspace-heading {
+    padding: var(--space-4);
   }
   .auth-card {
     padding: var(--space-6) var(--space-4);
@@ -8265,5 +8520,1484 @@ button:disabled {
   .traffic-delete-confirm > div > button,
   .traffic-delete-confirm-actions > button {
     width: 100%;
+  }
+}
+
+@media (min-width: 1280px) {
+  [data-testid="top-lifecycle-status"] {
+    width: 423.625px;
+    flex: 0 0 auto;
+  }
+
+  [data-testid="top-traffic-status"] {
+    width: 211.03125px;
+    flex: 0 0 auto;
+  }
+}
+
+@media (max-width: 1279px) {
+  .top-status span:last-child,
+  .network-picker > span {
+    display: none;
+  }
+
+  .network-picker {
+    flex-basis: 150px;
+  }
+
+  .network-picker select {
+    width: 150px;
+    max-width: 150px;
+    flex-basis: 150px;
+  }
+
+  .top-status-group {
+    gap: var(--space-2);
+  }
+
+  .top-status-group > .top-status + .top-status {
+    padding-left: var(--space-2);
+  }
+}
+
+@media (max-width: 1023px) {
+  .overview-content-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .overview-column {
+    display: contents;
+  }
+
+  .hero-status {
+    align-items: flex-start;
+  }
+
+  .overview-primary-action {
+    align-self: center;
+  }
+
+  .top-status-group > .top-status.traffic {
+    display: none;
+  }
+}
+
+@media (max-width: 599px) {
+  .network-picker {
+    min-width: 0;
+    flex-basis: 120px;
+  }
+
+  .network-picker select {
+    width: 100%;
+    max-width: none;
+    flex-basis: auto;
+  }
+}
+
+/* Modern topology workspace
+   -------------------------------------------------------------------------
+   The topology screen uses a compact icon rail, one contextual top bar and a
+   canvas-first information hierarchy. Secondary controls live inside floating
+   menus or disclosure rows instead of permanent button columns. */
+
+.app-shell[data-navigation-mode="desktop"] {
+  grid-template-columns: 82px minmax(0, 1fr);
+  background: var(--background-deep);
+}
+
+.primary-nav:not(.drawer) {
+  align-items: center;
+  border-right-color: color-mix(in srgb, var(--border) 78%, transparent);
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--surface) 72%, var(--background-deep)),
+      var(--background-deep) 34%
+    );
+}
+
+.primary-nav:not(.drawer) .brand-lockup {
+  width: 100%;
+  min-height: 58px;
+  justify-content: center;
+  padding: 0;
+}
+
+.primary-nav:not(.drawer) .brand-mark {
+  width: 44px;
+  height: 44px;
+  border-radius: 13px;
+  background:
+    radial-gradient(circle at 32% 22%, var(--accent-soft), transparent 58%),
+    color-mix(in srgb, var(--surface-raised) 80%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent),
+    0 14px 34px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.primary-nav:not(.drawer) .brand-lockup > div:last-child {
+  display: none;
+}
+
+.primary-nav:not(.drawer) .module-list {
+  width: 100%;
+  gap: 8px;
+  padding: 14px 8px;
+}
+
+.primary-nav:not(.drawer) .module-button {
+  width: 100%;
+  height: 58px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  border-radius: 13px;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-weight: var(--font-weight-medium);
+  line-height: 1;
+  text-align: center;
+}
+
+.primary-nav:not(.drawer) .module-button > svg {
+  width: 21px;
+  height: 21px;
+  stroke-width: 1.7;
+}
+
+.primary-nav:not(.drawer) .module-button:hover {
+  background: color-mix(in srgb, var(--surface-hover) 68%, transparent);
+  color: var(--text);
+}
+
+.primary-nav:not(.drawer) .module-button.selected {
+  border: 0;
+  background:
+    radial-gradient(circle at 50% 15%, var(--accent-soft), transparent 72%),
+    color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--accent);
+}
+
+.primary-nav:not(.drawer) .module-button.selected::before {
+  top: 14px;
+  bottom: 14px;
+  left: -8px;
+  width: 3px;
+  background: linear-gradient(180deg, transparent, var(--accent), transparent);
+  box-shadow: 0 0 12px var(--accent);
+}
+
+.primary-nav:not(.drawer) .nav-footer {
+  display: none;
+}
+
+.app-main {
+  grid-template-rows: 58px auto minmax(0, 1fr);
+  background:
+    radial-gradient(circle at 78% -8%, var(--accent-soft), transparent 38rem),
+    var(--background);
+}
+
+.global-bar {
+  height: 58px;
+  min-height: 58px;
+  gap: 14px;
+  padding: 0 22px;
+  border-bottom-color: color-mix(in srgb, var(--border) 82%, transparent);
+  background: color-mix(in srgb, var(--background-deep) 88%, transparent);
+}
+
+.global-context {
+  overflow: hidden;
+  flex: 1 1 auto;
+}
+
+.top-status {
+  gap: 10px;
+}
+
+.top-status > div {
+  display: grid;
+  align-items: start;
+  gap: 1px;
+  line-height: 1.15;
+}
+
+.top-status strong {
+  color: var(--text);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.top-status span:last-child {
+  font-size: 10px;
+}
+
+.top-status-dot {
+  width: 8px;
+  height: 8px;
+  box-shadow: 0 0 0 4px var(--success-soft);
+}
+
+.global-search-topbar {
+  width: min(310px, 30vw);
+  min-width: 210px;
+  flex: 0 1 310px;
+}
+
+.global-search-topbar input {
+  height: 34px;
+  border-color: color-mix(in srgb, var(--border) 84%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--surface) 64%, transparent);
+  font-size: var(--font-size-xs);
+}
+
+.global-actions {
+  gap: 7px;
+}
+
+.global-actions .icon-button {
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--surface) 54%, transparent);
+}
+
+.page-switcher {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.page-switcher-trigger {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 48%, transparent);
+  color: var(--text-muted);
+  font-size: 11px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.page-switcher-trigger::-webkit-details-marker,
+.topology-options > summary::-webkit-details-marker,
+.topology-legend > summary::-webkit-details-marker,
+.topology-governance-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.page-switcher-trigger:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.page-switcher[open] .page-switcher-trigger svg {
+  transform: rotate(180deg);
+}
+
+.page-switcher-menu {
+  position: absolute;
+  z-index: 140;
+  top: calc(100% + 8px);
+  right: 0;
+  display: grid;
+  width: 190px;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-raised) 96%, transparent);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(20px);
+}
+
+.page-switcher-menu button {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.page-switcher-menu button:hover,
+.page-switcher-menu button[aria-checked="true"] {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.workspace {
+  gap: 16px;
+  padding: 18px 22px 22px;
+  scrollbar-gutter: stable;
+}
+
+.page-content-stack {
+  gap: 14px;
+}
+
+.page-content-topology,
+.topology-page {
+  min-width: 0;
+}
+
+.topology-page {
+  gap: 14px;
+}
+
+.topology-hero {
+  display: flex;
+  min-width: 0;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 1px 2px 0;
+}
+
+.topology-hero-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.topology-eyebrow {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.topology-hero h1 {
+  margin: 0;
+  color: var(--text);
+  font-size: clamp(26px, 2.15vw, 32px);
+  font-weight: 680;
+  letter-spacing: -0.035em;
+  line-height: 1.12;
+}
+
+.topology-hero-copy p {
+  margin: 2px 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.topology-hero-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.topology-hero-actions .page-command-surface,
+.topology-hero-actions .page-command-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.topology-hero-actions .page-command-primary {
+  min-height: 36px;
+  padding-inline: 13px;
+  border-radius: 9px;
+  box-shadow: 0 0 20px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.primary-icon-button {
+  display: inline-grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  color: var(--accent);
+}
+
+.topology-state-band {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(280px, 1.65fr) repeat(3, minmax(125px, 0.7fr));
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+  border-radius: 11px;
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--success-soft) 34%, transparent),
+      transparent 35%
+    ),
+    color-mix(in srgb, var(--surface) 34%, transparent);
+}
+
+.topology-state-primary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 13px;
+  padding: 14px 17px;
+}
+
+.topology-state-icon {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--success) 38%, var(--border));
+  border-radius: 11px;
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.topology-state-icon.warn {
+  border-color: color-mix(in srgb, var(--warning) 38%, var(--border));
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.topology-state-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.topology-state-copy strong {
+  color: var(--success);
+  font-size: var(--font-size-sm);
+}
+
+.topology-state-copy > span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topology-stat {
+  display: grid;
+  min-width: 0;
+  align-content: center;
+  gap: 2px;
+  padding: 12px 17px;
+  border-left: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+}
+
+.topology-stat > span,
+.topology-stat small {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.topology-stat strong {
+  color: var(--text);
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.topology-view {
+  position: relative;
+  gap: 10px;
+}
+
+.topology-view > .topology-state-notices {
+  margin-bottom: 2px;
+}
+
+.topology-stage {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  overflow: hidden;
+  grid-template-rows: auto auto;
+  align-content: start;
+  border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+  border-radius: 15px;
+  background: #0a1017;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 2%, transparent),
+    0 18px 45px color-mix(in srgb, black 16%, transparent);
+}
+
+.topology-stage .topology-canvas {
+  height: clamp(300px, 36vh, 340px);
+  min-height: 300px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background-color: #0a1017;
+  background-image:
+    linear-gradient(
+      color-mix(in srgb, var(--border) 32%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--border) 32%, transparent) 1px,
+      transparent 1px
+    ),
+    radial-gradient(
+      ellipse at 52% 44%,
+      color-mix(in srgb, var(--accent) 7%, transparent),
+      transparent 58%
+    );
+  background-size:
+    46px 46px,
+    46px 46px,
+    100% 100%;
+}
+
+.topology-stage .topology-canvas svg {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+}
+
+.topology-stage .topology-canvas-pending {
+  min-height: 300px;
+}
+
+.topology-floating-toolbar,
+.topology-stage-actions {
+  position: absolute;
+  z-index: 8;
+  top: 14px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--background-deep) 82%, transparent);
+  box-shadow: 0 10px 30px color-mix(in srgb, black 18%, transparent);
+  backdrop-filter: blur(14px);
+}
+
+.topology-floating-toolbar {
+  left: 14px;
+}
+
+.topology-stage-actions {
+  right: 14px;
+}
+
+.topology-icon-button {
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  list-style: none;
+  cursor: pointer;
+}
+
+.topology-icon-button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.topology-icon-button[aria-pressed="true"],
+.topology-view-switch button[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--background-deep);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.topology-zoom-status {
+  min-width: 38px;
+  color: var(--text-faint);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.topology-view-switch {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.topology-view-switch button {
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.topology-options {
+  position: relative;
+}
+
+.topology-options-panel {
+  position: absolute;
+  z-index: 12;
+  top: calc(100% + 9px);
+  right: 0;
+  display: grid;
+  width: min(360px, calc(100vw - 130px));
+  max-height: min(520px, calc(100vh - 150px));
+  gap: 12px;
+  overflow-y: auto;
+  padding: 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-raised) 97%, transparent);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(22px);
+}
+
+.topology-options-panel .topology-color-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.topology-options-panel .topology-color-switch button,
+.topology-options-panel .topology-control-button {
+  min-height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.topology-options-panel .topology-color-switch button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: none;
+}
+
+.topology-option-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.topology-options-panel .topology-contrast-toggle {
+  min-height: 34px;
+  padding: 0 2px;
+}
+
+.topology-options-panel .topology-filters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--background-deep) 34%, transparent);
+}
+
+.topology-options-panel .topology-filter-search,
+.topology-options-panel .topology-filter-count,
+.topology-options-panel .topology-filter-clear {
+  grid-column: 1 / -1;
+}
+
+.topology-options-panel .topology-filters label {
+  gap: 3px;
+}
+
+.topology-options-panel .topology-filters select,
+.topology-options-panel .topology-filters input {
+  min-height: 32px;
+}
+
+.topology-layout-status {
+  margin: 0;
+  padding: 7px 9px;
+  border-left: 2px solid var(--accent);
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  font-size: 10px;
+}
+
+.topology-canvas-footer {
+  position: relative;
+  z-index: 7;
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 14px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  background: color-mix(in srgb, var(--background-deep) 94%, transparent);
+  backdrop-filter: blur(16px);
+}
+
+.topology-network-chips {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.topology-network-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.topology-network-chips button {
+  display: inline-flex;
+  min-height: 27px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.topology-network-chips button > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.topology-network-chips button:hover,
+.topology-network-chips button.active {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--text);
+}
+
+.topology-legend {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.topology-legend > summary {
+  display: inline-flex;
+  min-height: 27px;
+  align-items: center;
+  padding: 0 9px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--text-muted);
+  font-size: 10px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.topology-legend > summary:hover {
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.topology-legend-grid {
+  position: absolute;
+  z-index: 11;
+  right: 0;
+  bottom: calc(100% + 9px);
+  display: grid;
+  width: min(610px, calc(100vw - 120px));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--surface-raised) 97%, transparent);
+  box-shadow: var(--shadow-lg);
+  backdrop-filter: blur(22px);
+}
+
+.topology-legend-note {
+  position: absolute;
+  right: 14px;
+  bottom: calc(100% + 9px);
+}
+
+.topology-insights {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.78fr);
+  gap: 28px;
+  padding-top: 2px;
+}
+
+.topology-insight-card {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 10px;
+}
+
+.topology-insight-card + .topology-insight-card {
+  padding-left: 28px;
+  border-left: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+}
+
+.topology-insight-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-muted);
+}
+
+.topology-insight-heading > div {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 9px;
+}
+
+.topology-insight-heading h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--font-size-sm);
+  font-weight: 650;
+}
+
+.topology-insight-heading span {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.topology-insight-heading > svg {
+  flex: 0 0 auto;
+  opacity: 0.7;
+}
+
+.topology-path {
+  display: flex;
+  min-width: 0;
+  min-height: 48px;
+  align-items: center;
+  gap: 7px;
+  overflow-x: auto;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--border) 86%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--surface) 42%, transparent);
+  scrollbar-width: none;
+}
+
+.topology-path::-webkit-scrollbar {
+  display: none;
+}
+
+.topology-path-segment {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-faint);
+}
+
+.topology-path-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.topology-path-node svg {
+  color: var(--accent);
+}
+
+.topology-event-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.topology-event-list li {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 9px;
+  padding: 8px 2px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 64%, transparent);
+}
+
+.topology-event-list li:last-child {
+  border-bottom: 0;
+}
+
+.topology-event-dot {
+  width: 7px;
+  height: 7px;
+  margin-top: 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+
+.topology-event-dot.active {
+  border-color: var(--success);
+  background: var(--success);
+}
+
+.topology-event-dot.stale {
+  border-color: var(--warning);
+  background: var(--warning);
+}
+
+.topology-event-list li > span:nth-child(2) {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.topology-event-list strong {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: var(--font-weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topology-event-list small,
+.topology-event-list time {
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.topology-insight-empty {
+  margin: 0;
+  padding: 14px;
+  border: 1px dashed var(--border);
+  border-radius: 9px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.topology-governance-disclosure {
+  border-top: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
+}
+
+.topology-governance-disclosure > summary {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-faint);
+  font-size: 10px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.topology-governance-disclosure > summary:hover {
+  color: var(--text);
+}
+
+.topology-governance-disclosure[open] > summary {
+  margin-bottom: 10px;
+  color: var(--text-secondary);
+}
+
+.topology-selection-bar {
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+/* Canvas nodes are cards, not oversized status dots. Capability and health
+   encodings remain visible without turning each node into a dense panel. */
+.topology-node {
+  cursor: grab;
+}
+
+.topology-node-card {
+  fill: color-mix(in srgb, var(--surface-raised) 91%, #0a1017);
+  stroke-width: 1.4;
+  filter: drop-shadow(0 10px 18px rgb(0 0 0 / 28%));
+  transition:
+    fill var(--motion-duration-fast) var(--motion-ease-standard),
+    stroke-width var(--motion-duration-fast) var(--motion-ease-standard);
+}
+
+.topology-node.self .topology-node-card {
+  fill: color-mix(in srgb, var(--success-soft) 42%, var(--surface-raised));
+  stroke-width: 1.8;
+}
+
+.topology-node:hover .topology-node-card,
+.topology-node:focus-visible .topology-node-card {
+  fill: color-mix(in srgb, var(--surface-hover) 88%, var(--background-deep));
+  stroke-width: 2.2;
+  filter:
+    drop-shadow(0 12px 22px rgb(0 0 0 / 34%))
+    drop-shadow(0 0 8px color-mix(in srgb, var(--accent) 20%, transparent));
+}
+
+.topology-node.selected .topology-node-card {
+  stroke: var(--accent);
+  stroke-width: 2.4;
+  filter:
+    drop-shadow(0 12px 22px rgb(0 0 0 / 34%))
+    drop-shadow(0 0 9px color-mix(in srgb, var(--accent) 40%, transparent));
+}
+
+.topology-node:focus-visible {
+  outline: none;
+}
+
+.topology-node-name {
+  fill: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  pointer-events: none;
+}
+
+.topology-node-meta {
+  fill: var(--text-muted);
+  font-size: 9px;
+  pointer-events: none;
+}
+
+.topology-node-self-tag {
+  fill: var(--success);
+  font-size: 7px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  pointer-events: none;
+}
+
+.topology-node-status {
+  pointer-events: none;
+}
+
+.topology-node-core {
+  stroke: var(--background-deep);
+  stroke-width: 1.5;
+}
+
+.topology-node-core.good {
+  fill: var(--success);
+}
+
+.topology-node-core.warn {
+  fill: var(--warning);
+}
+
+.topology-node-core.bad {
+  fill: var(--danger);
+}
+
+.topology-node-core.unknown {
+  fill: var(--text-muted);
+}
+
+.topology-node-selection-mark circle {
+  fill: var(--accent);
+  stroke: var(--background-deep);
+  stroke-width: 2;
+}
+
+.topology-node-selection-mark text {
+  fill: var(--background-deep);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.topology-health-badge > :is(circle, rect, path) {
+  fill: var(--background-deep);
+  stroke-width: 1.3;
+}
+
+.topology-health-badge.good > :is(circle, rect, path) {
+  stroke: var(--success);
+}
+
+.topology-health-badge.warn > :is(circle, rect, path) {
+  stroke: var(--warning);
+}
+
+.topology-health-badge.bad > :is(circle, rect, path) {
+  stroke: var(--danger);
+}
+
+.topology-health-badge.unknown > :is(circle, rect, path) {
+  stroke: var(--text-muted);
+}
+
+.topology-health-badge text {
+  font-size: 7px;
+  font-weight: 800;
+}
+
+.topology-node-shared circle {
+  fill: var(--background-deep);
+  stroke: var(--border-strong);
+  stroke-width: 1.2;
+}
+
+.topology-node-shared text {
+  fill: var(--text-muted);
+  font-size: 7px;
+  font-weight: 700;
+}
+
+.topology-boundary ellipse {
+  opacity: 0.18;
+}
+
+.topology-boundary-label {
+  opacity: 0.48;
+  font-size: 10px;
+}
+
+.topology-connection line {
+  opacity: 0.72;
+  filter: drop-shadow(
+    0 0 4px color-mix(in srgb, var(--accent) 20%, transparent)
+  );
+}
+
+/* Focused node details are an intentional overlay, never a permanent side
+   column competing with the graph. */
+.topology-detail-backdrop {
+  position: fixed;
+  z-index: 190;
+  inset: 0;
+  padding: 0;
+  border: 0;
+  background: color-mix(in srgb, var(--background-deep) 58%, transparent);
+  backdrop-filter: blur(4px);
+  animation: topology-backdrop-in var(--motion-duration-fast)
+    var(--motion-ease-standard);
+}
+
+.topology-detail-drawer {
+  position: fixed;
+  z-index: 200;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(430px, 92vw);
+  max-height: none;
+  overflow-y: auto;
+  padding: 22px;
+  border: 0;
+  border-left: 1px solid var(--border-strong);
+  border-radius: 0;
+  background:
+    radial-gradient(circle at 100% 0, var(--accent-soft), transparent 24rem),
+    var(--surface);
+  box-shadow: -24px 0 64px color-mix(in srgb, black 36%, transparent);
+  animation: topology-drawer-in var(--motion-duration-base)
+    var(--motion-ease-entrance);
+}
+
+.topology-detail-drawer .topology-node-detail-grid {
+  grid-template-columns: 1fr;
+}
+
+.topology-detail-drawer .topology-node-detail-grid > div {
+  grid-template-columns: minmax(100px, 0.7fr) minmax(0, 1.3fr);
+  align-items: start;
+}
+
+.topology-detail-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+@keyframes topology-backdrop-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes topology-drawer-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
+@media (max-width: 1180px) {
+  .topology-state-band {
+    grid-template-columns: minmax(260px, 1.55fr) repeat(3, minmax(110px, 0.7fr));
+  }
+
+  .topology-state-primary,
+  .topology-stat {
+    padding-inline: 13px;
+  }
+
+  .topology-insights {
+    gap: 18px;
+  }
+
+  .topology-insight-card + .topology-insight-card {
+    padding-left: 18px;
+  }
+}
+
+@media (max-width: 1023px) {
+  .app-shell[data-navigation-mode="desktop"] {
+    grid-template-columns: 1fr;
+  }
+
+  .app-main {
+    grid-template-rows: 58px auto minmax(0, 1fr);
+  }
+
+  .workspace {
+    padding: 15px 16px 18px;
+  }
+
+  .topology-state-band {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .topology-state-primary {
+    grid-column: 1 / -1;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .topology-stat:nth-child(2) {
+    border-left: 0;
+  }
+
+  .topology-insights {
+    grid-template-columns: 1fr;
+  }
+
+  .topology-insight-card + .topology-insight-card {
+    padding-top: 14px;
+    padding-left: 0;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+}
+
+@media (max-width: 760px) {
+  .global-bar {
+    gap: 8px;
+    padding-inline: 12px;
+  }
+
+  .global-context {
+    max-width: 210px;
+  }
+
+  .page-switcher {
+    display: none;
+  }
+
+  .global-search-topbar {
+    width: auto;
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .topology-hero {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .topology-hero-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .topology-state-band {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .topology-stat {
+    border-top: 1px solid var(--border);
+  }
+
+  .topology-stat:nth-child(3) {
+    border-left: 0;
+  }
+
+  .topology-stat:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .topology-stage .topology-canvas {
+    height: 410px;
+  }
+
+  .topology-stage-actions {
+    top: 58px;
+    right: 10px;
+  }
+
+  .topology-floating-toolbar {
+    top: 10px;
+    left: 10px;
+  }
+
+  .topology-canvas-footer {
+    align-items: flex-start;
+    flex-direction: column;
+    padding-block: 8px;
+  }
+
+  .topology-network-chips {
+    width: 100%;
+  }
+
+  .topology-legend {
+    align-self: flex-end;
+  }
+
+  .topology-options-panel {
+    width: min(340px, calc(100vw - 28px));
+  }
+
+  .topology-legend-grid {
+    position: fixed;
+    right: 14px;
+    bottom: 14px;
+    left: 14px;
+    width: auto;
+    max-height: 70vh;
+    overflow-y: auto;
+  }
+}
+
+@media (max-width: 599px) {
+  .app-main {
+    grid-template-rows: 54px auto minmax(0, 1fr);
+  }
+
+  .global-bar {
+    height: 54px;
+    min-height: 54px;
+  }
+
+  .top-status span:last-child,
+  .global-actions .global-action-reason {
+    display: none;
+  }
+
+  .global-actions {
+    gap: 4px;
+  }
+
+  .workspace {
+    padding: 12px;
+    padding-bottom: calc(var(--bottom-nav-h) + 12px);
+  }
+
+  .topology-hero h1 {
+    font-size: 27px;
+  }
+
+  .topology-hero-actions .page-command-primary span {
+    display: none;
+  }
+
+  .topology-hero-actions .page-command-primary {
+    width: 36px;
+    padding: 0;
+  }
+
+  .topology-state-band {
+    grid-template-columns: 1fr;
+  }
+
+  .topology-state-primary,
+  .topology-stat,
+  .topology-stat:last-child {
+    grid-column: auto;
+    border-left: 0;
+  }
+
+  .topology-state-primary,
+  .topology-stat {
+    border-bottom: 1px solid var(--border);
+  }
+
+  .topology-stat {
+    grid-template-columns: 1fr auto;
+  }
+
+  .topology-stat small {
+    grid-column: 1 / -1;
+  }
+
+  .topology-stat:last-child {
+    border-bottom: 0;
+  }
+
+  .topology-stage {
+    border-radius: 12px;
+  }
+
+  .topology-stage .topology-canvas {
+    height: 390px;
+  }
+
+  .topology-floating-toolbar {
+    max-width: calc(100% - 20px);
+  }
+
+  .topology-zoom-status {
+    display: none;
+  }
+
+  .topology-stage-actions {
+    top: 56px;
+  }
+
+  .topology-options-panel {
+    position: fixed;
+    top: auto;
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+    width: auto;
+    max-height: 72vh;
+  }
+
+  .topology-legend-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .topology-detail-drawer {
+    width: 100vw;
+    padding: 18px;
+  }
+
+  .topology-detail-drawer .topology-node-detail-grid > div {
+    grid-template-columns: 1fr;
   }
 }

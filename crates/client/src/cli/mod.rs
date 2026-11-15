@@ -2,7 +2,7 @@ pub mod commands;
 pub mod network_commands;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::logging;
 use crate::ui::{resolve_ui_request, UiCapabilities, UiMode, UiModeError, UiModeRequest};
@@ -259,6 +259,12 @@ pub enum Commands {
     Default {
         /// 网络名称
         network: String,
+    },
+
+    /// 网络治理与灾难恢复操作
+    Network {
+        #[command(subcommand)]
+        command: NetworkCommands,
     },
 
     /// 启动客户端（传统方式）
@@ -573,6 +579,175 @@ pub enum LxtRescueCommands {
         #[arg(long, default_value = "/etc/fuckipv6/lxt-rescue.key")]
         key_file: std::path::PathBuf,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NetworkCommands {
+    /// 管理员阈值恢复：离线请求、审批、复核和在线执行
+    Recovery {
+        #[command(subcommand)]
+        command: RecoveryCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RecoveryCommands {
+    /// 使用本机权威网络记录创建一个不含审批的恢复请求
+    Request {
+        /// 本地保存的网络名称
+        #[arg(long)]
+        network: String,
+
+        /// 恢复后的 Owner Node ID
+        #[arg(long)]
+        owner: String,
+
+        /// 恢复后的管理员 Node ID（可重复）
+        #[arg(long = "administrator")]
+        administrators: Vec<String>,
+
+        /// 恢复后的精确成员 Node ID（可重复；省略时保留当前成员）
+        #[arg(long = "target-member")]
+        target_members: Vec<String>,
+
+        /// 恢复原因
+        #[arg(long, value_enum)]
+        reason: RecoveryReasonArg,
+
+        /// 请求有效期，默认 24 小时，最大 7 天
+        #[arg(long, default_value_t = 86_400_000)]
+        validity_ms: u64,
+
+        /// 可选的公开 nonce；省略时生成不可预测的本地 nonce
+        #[arg(long)]
+        nonce: Option<String>,
+
+        /// 请求 JSON 输出路径
+        #[arg(long)]
+        output: std::path::PathBuf,
+    },
+
+    /// 复核恢复请求并用本机节点身份签发独立审批文件
+    Approve {
+        /// 待审批的恢复请求 JSON
+        #[arg(long)]
+        request: std::path::PathBuf,
+
+        /// 审批 JSON 输出路径
+        #[arg(long)]
+        output: std::path::PathBuf,
+
+        /// 非交互环境必须显式确认
+        #[arg(long)]
+        confirm: bool,
+    },
+
+    /// 离线校验请求、审批签名、阈值和网络快照
+    Verify {
+        /// 恢复请求 JSON
+        #[arg(long)]
+        request: std::path::PathBuf,
+
+        /// 独立审批 JSON（可重复）
+        #[arg(long = "approval")]
+        approvals: Vec<std::path::PathBuf>,
+
+        /// 可选的本地网络名称；提供时执行权威快照与阈值校验
+        #[arg(long)]
+        network: Option<String>,
+
+        /// 以 JSON 输出复核结果
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// 将阈值已满足的请求提交给在线 Coordinator
+    Submit {
+        /// 恢复请求 JSON
+        #[arg(long)]
+        request: std::path::PathBuf,
+
+        /// 独立审批 JSON（可重复）
+        #[arg(long = "approval", required = true)]
+        approvals: Vec<std::path::PathBuf>,
+
+        /// 可选的本地网络名称；省略时按 network_id 匹配唯一本地记录
+        #[arg(long)]
+        network: Option<String>,
+
+        /// 非交互环境必须显式确认
+        #[arg(long)]
+        confirm: bool,
+
+        /// 以 JSON 输出服务端状态
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// 查询一个恢复请求的服务端权威状态
+    Status {
+        /// 本地保存的网络名称
+        #[arg(long)]
+        network: String,
+
+        /// 恢复请求 ID
+        #[arg(long)]
+        request_id: String,
+
+        /// 以 JSON 输出服务端状态
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// 撤销一个仍处于 pending 的恢复请求
+    Revoke {
+        /// 本地保存的网络名称
+        #[arg(long)]
+        network: String,
+
+        /// 恢复请求 ID
+        #[arg(long)]
+        request_id: String,
+
+        /// 持久审计的撤销原因
+        #[arg(long)]
+        reason: String,
+
+        /// 非交互环境必须显式确认
+        #[arg(long)]
+        confirm: bool,
+
+        /// 以 JSON 输出服务端状态
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// 执行阈值已满足的恢复请求；仅接受服务端 Ack
+    Execute {
+        /// 本地保存的网络名称
+        #[arg(long)]
+        network: String,
+
+        /// 恢复请求 ID
+        #[arg(long)]
+        request_id: String,
+
+        /// 非交互环境必须显式确认
+        #[arg(long)]
+        confirm: bool,
+
+        /// 以 JSON 输出服务端状态
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RecoveryReasonArg {
+    LostCredentials,
+    CompromisedAuthority,
+    DisasterRecovery,
+    Other,
 }
 
 fn requested_ui_mode(
@@ -936,7 +1111,8 @@ async fn run_command(command: Commands, launch_plan: Option<UiLaunchPlan>) -> Re
         | Commands::Down { .. }
         | Commands::List
         | Commands::Leave { .. }
-        | Commands::Default { .. }) => run_network_command(command, launch_plan).await?,
+        | Commands::Default { .. }
+        | Commands::Network { .. }) => run_network_command(command, launch_plan).await?,
         command @ (Commands::Start { .. }
         | Commands::Status { .. }
         | Commands::Diagnostics { .. }
@@ -1043,6 +1219,94 @@ async fn run_network_command(command: Commands, launch_plan: Option<UiLaunchPlan
         Commands::Default { network } => {
             logging::init_default()?;
             network_commands::set_default(&network)?;
+        }
+        Commands::Network { command } => {
+            logging::init_default()?;
+            match command {
+                NetworkCommands::Recovery { command } => match command {
+                    RecoveryCommands::Request {
+                        network,
+                        owner,
+                        administrators,
+                        target_members,
+                        reason,
+                        validity_ms,
+                        nonce,
+                        output,
+                    } => network_commands::recovery_request(
+                        &network,
+                        &owner,
+                        administrators,
+                        target_members,
+                        reason,
+                        validity_ms,
+                        nonce,
+                        &output,
+                    )?,
+                    RecoveryCommands::Approve {
+                        request,
+                        output,
+                        confirm,
+                    } => network_commands::recovery_approve(&request, &output, confirm)?,
+                    RecoveryCommands::Verify {
+                        request,
+                        approvals,
+                        network,
+                        json,
+                    } => network_commands::recovery_verify(
+                        &request,
+                        &approvals,
+                        network.as_deref(),
+                        json,
+                    )?,
+                    RecoveryCommands::Submit {
+                        request,
+                        approvals,
+                        network,
+                        confirm,
+                        json,
+                    } => {
+                        network_commands::recovery_submit(
+                            &request,
+                            &approvals,
+                            network.as_deref(),
+                            confirm,
+                            json,
+                        )
+                        .await?
+                    }
+                    RecoveryCommands::Status {
+                        network,
+                        request_id,
+                        json,
+                    } => network_commands::recovery_status(&network, &request_id, json).await?,
+                    RecoveryCommands::Revoke {
+                        network,
+                        request_id,
+                        reason,
+                        confirm,
+                        json,
+                    } => {
+                        network_commands::recovery_revoke(
+                            &network,
+                            &request_id,
+                            &reason,
+                            confirm,
+                            json,
+                        )
+                        .await?
+                    }
+                    RecoveryCommands::Execute {
+                        network,
+                        request_id,
+                        confirm,
+                        json,
+                    } => {
+                        network_commands::recovery_execute(&network, &request_id, confirm, json)
+                            .await?
+                    }
+                },
+            }
         }
         _ => unreachable!("run_network_command received non-network command"),
     }

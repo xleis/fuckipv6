@@ -6,23 +6,24 @@ use fuckipv6_common::domain::JoinRequestReviewAction;
 use fuckipv6_common::domain::{
     parse_policy_test_input, ActivityCategory, ActivityEntry, ActivitySeverity,
     ApplicationIdentity, AuditOutcome, CapabilityKind, CapabilityState, ContentHash,
-    CoordinatorCandidate, CoordinatorCandidateResources, CoordinatorCandidateWillingness,
-    CoordinatorControlPlaneState, CoordinatorControlPlaneStatus, CoordinatorEmergencyLeaderState,
-    CoordinatorEmergencyLeaderStatus, CoordinatorEmergencyState, CoordinatorPublicReachability,
-    EffectiveAccessReason, EffectivePolicyLayer, ExitAvailabilitySource, ExitAvailabilityState,
-    ExitContributionAvailability, ExitContributionMode, ExitContributionObligation,
-    ExitContributionScope, ExitSelectionCandidate, ExitSelectionMode, ExitSelectionPolicy,
-    ExitSelectionSource, InvitationCode, InvitationId, InvitationRedeemRequest,
-    MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode, NetworkMember,
-    NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberStatus,
-    NetworkProfileUpdate, NetworkVisibility, NodeId, RelayAuthorizationAuditSnapshot,
-    RelayAuthorizationDiagnostic, RelayAuthorizationSourceDiagnostic, RelayExistingSessionPolicy,
-    RelayGovernanceAction, RelayGovernanceEvent, RelayHealthIssue, RelayHealthSnapshot,
-    RelayHealthStatus, RelayLifecycleState, RelayLimitPolicy, RelayLimitSource,
-    RelayMeasurementState, RelayReachabilityState, TopologyNode, TopologyNodeHealth,
-    TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy, TrafficFailureKind, TrafficFlow,
-    TrafficMatch, TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput, TrafficProtectionState,
-    TrafficProtocol, TrafficRoutingHitSample, TrafficRoutingObservation, TrafficRoutingPageModel,
+    CoordinatorCandidate, CoordinatorCandidateHealth, CoordinatorCandidateResources,
+    CoordinatorCandidateStatus, CoordinatorCandidateWillingness, CoordinatorControlPlaneState,
+    CoordinatorControlPlaneStatus, CoordinatorEmergencyLeaderState, CoordinatorEmergencyState,
+    CoordinatorPublicReachability, EffectiveAccessReason, EffectivePolicyLayer,
+    ExitAvailabilitySource, ExitAvailabilityState, ExitContributionAvailability,
+    ExitContributionMode, ExitContributionObligation, ExitContributionScope,
+    ExitSelectionCandidate, ExitSelectionMode, ExitSelectionPolicy, ExitSelectionSource,
+    InvitationCode, InvitationId, InvitationRedeemRequest, MemberLifecycleAction, MembershipRole,
+    NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
+    NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId,
+    RelayAuthorizationAuditSnapshot, RelayAuthorizationDiagnostic,
+    RelayAuthorizationSourceDiagnostic, RelayExistingSessionPolicy, RelayGovernanceAction,
+    RelayGovernanceEvent, RelayHealthIssue, RelayHealthSnapshot, RelayHealthStatus,
+    RelayLifecycleState, RelayLimitPolicy, RelayLimitSource, RelayMeasurementState,
+    RelayReachabilityState, TopologyNode, TopologyNodeHealth, TopologySnapshot, TrafficAction,
+    TrafficDefaultConfirmedBy, TrafficFailureKind, TrafficFlow, TrafficMatch, TrafficMatchRisk,
+    TrafficPolicy, TrafficPolicyTestInput, TrafficProtectionState, TrafficProtocol,
+    TrafficRoutingHitSample, TrafficRoutingObservation, TrafficRoutingPageModel,
     TrafficRoutingRuleActivityEffect, TrafficRoutingRuleImpactView, TrafficRoutingTarget,
     TrafficRoutingTargetKind, TrafficRoutingTargetRef, TrafficRoutingWorkflowState,
     TrafficSessionEventKind,
@@ -4751,12 +4752,7 @@ fn project_node_runtime(
             let coordinator = service.coordinator_candidates.as_ref();
             row(
                 service.network_name.clone(),
-                coordinator_control_plane_detail(
-                    locale,
-                    coordinator.map(|status| &status.control_plane),
-                    coordinator.and_then(|status| status.emergency_leader.as_ref()),
-                    local_node_id,
-                ),
+                coordinator_control_plane_detail(locale, coordinator, local_node_id),
             )
         })
         .collect::<Vec<_>>();
@@ -4893,12 +4889,13 @@ fn project_node_runtime(
 
 fn coordinator_control_plane_detail(
     locale: Locale,
-    control_plane: Option<&CoordinatorControlPlaneStatus>,
-    emergency_leader: Option<&CoordinatorEmergencyLeaderStatus>,
+    coordinator: Option<&CoordinatorCandidateStatus>,
     local_node_id: Option<&str>,
 ) -> String {
     let unobserved = CoordinatorControlPlaneStatus::default();
-    let control_plane = control_plane.unwrap_or(&unobserved);
+    let control_plane = coordinator
+        .map(|status| &status.control_plane)
+        .unwrap_or(&unobserved);
     let state = if control_plane.state == CoordinatorControlPlaneState::Available {
         t(locale, "runtime.control_plane.available")
     } else if control_plane.reason_code == "coordinator.control_plane.unobserved" {
@@ -4914,7 +4911,7 @@ fn coordinator_control_plane_detail(
     let received = relay_format_u64(locale, control_plane.quorum.received_votes as u64);
     let required = relay_format_u64(locale, control_plane.quorum.required_votes as u64);
     let participants = relay_format_u64(locale, control_plane.quorum.participant_count as u64);
-    let detail = tr(
+    let mut detail = tr(
         locale,
         "runtime.control_plane.detail",
         &[
@@ -4926,7 +4923,86 @@ fn coordinator_control_plane_detail(
             ("reason_code", control_plane.reason_code.as_str()),
         ],
     );
-    let Some(emergency_leader) = emergency_leader else {
+    let Some(coordinator) = coordinator else {
+        return detail;
+    };
+
+    let leader = coordinator
+        .current_leader
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| t(locale, "runtime.coordinator.leader.none").to_string());
+    detail.push_str(&format!(
+        " · {} {leader}",
+        t(locale, "runtime.coordinator.leader")
+    ));
+    let latest_term = coordinator
+        .latest_term
+        .as_ref()
+        .map(|term| {
+            tr(
+                locale,
+                "runtime.coordinator.latest_term.value",
+                &[
+                    ("term", &relay_format_u64(locale, term.term)),
+                    (
+                        "fencing_token",
+                        &relay_format_u64(locale, term.fencing_token.0),
+                    ),
+                    ("leader", term.leader.as_str()),
+                    ("phase", &coordinator_phase_label(locale, term.phase)),
+                ],
+            )
+        })
+        .unwrap_or_else(|| t(locale, "runtime.coordinator.latest_term.none").to_string());
+    detail.push_str(&format!(
+        " · {} {latest_term}",
+        t(locale, "runtime.coordinator.latest_term")
+    ));
+    if coordinator.candidates.is_empty() {
+        detail.push_str(&format!(
+            " · {} {}",
+            t(locale, "runtime.coordinator.candidates"),
+            t(locale, "runtime.coordinator.candidates.none")
+        ));
+    } else {
+        let candidates = coordinator
+            .candidates
+            .iter()
+            .map(|candidate| {
+                tr(
+                    locale,
+                    "runtime.coordinator.candidate_entry",
+                    &[
+                        ("node_id", candidate.node_id.as_str()),
+                        (
+                            "health",
+                            &coordinator_candidate_health_label(locale, candidate.health),
+                        ),
+                        (
+                            "eligible",
+                            t(
+                                locale,
+                                if candidate.eligible_for_election {
+                                    "runtime.coordinator.eligible.yes"
+                                } else {
+                                    "runtime.coordinator.eligible.no"
+                                },
+                            ),
+                        ),
+                        ("reason_code", candidate.reason_code.as_str()),
+                    ],
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(t(locale, "common.list_separator"));
+        detail.push_str(&format!(
+            " · {} {candidates}",
+            t(locale, "runtime.coordinator.candidates")
+        ));
+    }
+
+    let Some(emergency_leader) = coordinator.emergency_leader.as_ref() else {
         return detail;
     };
 
@@ -4973,6 +5049,48 @@ fn coordinator_control_plane_detail(
         parts.push(t(locale, "runtime.emergency.handoff_on_recovery").to_string());
     }
     format!("{detail} · {}", parts.join(" · "))
+}
+
+fn coordinator_phase_label(
+    locale: Locale,
+    phase: fuckipv6_common::domain::CoordinatorPhase,
+) -> String {
+    let key = match phase {
+        fuckipv6_common::domain::CoordinatorPhase::Stable => "runtime.coordinator.phase.stable",
+        fuckipv6_common::domain::CoordinatorPhase::Election => "runtime.coordinator.phase.election",
+        fuckipv6_common::domain::CoordinatorPhase::LeaderAck => {
+            "runtime.coordinator.phase.leader_ack"
+        }
+        fuckipv6_common::domain::CoordinatorPhase::Partition => {
+            "runtime.coordinator.phase.partition"
+        }
+        fuckipv6_common::domain::CoordinatorPhase::EmergencyProposal => {
+            "runtime.coordinator.phase.emergency_proposal"
+        }
+        fuckipv6_common::domain::CoordinatorPhase::EmergencyLeader => {
+            "runtime.coordinator.phase.emergency_leader"
+        }
+        fuckipv6_common::domain::CoordinatorPhase::Handoff => "runtime.coordinator.phase.handoff",
+        fuckipv6_common::domain::CoordinatorPhase::RecoveryRequired => {
+            "runtime.coordinator.phase.recovery_required"
+        }
+    };
+    t(locale, key).to_string()
+}
+
+fn coordinator_candidate_health_label(
+    locale: Locale,
+    health: CoordinatorCandidateHealth,
+) -> String {
+    let key = match health {
+        CoordinatorCandidateHealth::Healthy => "runtime.coordinator.health.healthy",
+        CoordinatorCandidateHealth::Degraded => "runtime.coordinator.health.degraded",
+        CoordinatorCandidateHealth::Unwilling => "runtime.coordinator.health.unwilling",
+        CoordinatorCandidateHealth::Stale => "runtime.coordinator.health.stale",
+        CoordinatorCandidateHealth::Missing => "runtime.coordinator.health.missing",
+        CoordinatorCandidateHealth::Ineligible => "runtime.coordinator.health.ineligible",
+    };
+    t(locale, key).to_string()
 }
 
 fn runtime_duration_label(locale: Locale, duration_ms: u64) -> String {
@@ -8725,10 +8843,12 @@ mod tests {
         NodeUiValidation,
     };
     use fuckipv6_common::domain::{
-        ActivityEntry, AuditId, AuditOutcome, CoordinatorCandidateConfigState,
-        CoordinatorCandidateStatus, CoordinatorControlPlaneState, CoordinatorControlPlaneStatus,
-        CoordinatorEmergencyLeaderState, CoordinatorEmergencyLeaderStatus,
-        CoordinatorEmergencyState, CoordinatorQuorumStatus, CoordinatorWriteKind, DomainSuffix,
+        ActivityEntry, AuditId, AuditOutcome, CoordinatorAuthority,
+        CoordinatorCandidateConfigState, CoordinatorCandidateHealth, CoordinatorCandidateStatus,
+        CoordinatorCandidateStatusEntry, CoordinatorControlPlaneState,
+        CoordinatorControlPlaneStatus, CoordinatorEmergencyLeaderState,
+        CoordinatorEmergencyLeaderStatus, CoordinatorEmergencyState, CoordinatorPhase,
+        CoordinatorQuorumStatus, CoordinatorTerm, CoordinatorWriteKind, DomainSuffix, FencingToken,
         MembershipState, NetworkMemberPresence, NodeId, PortRange, RelayGovernanceAuditSnapshot,
         RelayUsageSnapshot, TopologyBoundary, TopologyConnection, TopologyConnectionState,
         TopologyNode, TopologyNodeNetwork, TrafficDefaultPolicy, TrafficFailureKind,
@@ -10483,6 +10603,144 @@ mod tests {
             .detail
             .contains("coordinator.control_plane.unobserved"));
         assert!(!control_plane.rows[1].detail.contains("no_majority"));
+    }
+
+    #[test]
+    fn runtime_control_plane_displays_leader_latest_term_and_candidate_health() {
+        let network_id = NetworkId::from_public_key(b"coordinator-runtime-ui-network");
+        let leader = NodeId::from_public_key(b"coordinator-runtime-ui-leader");
+        let stale = NodeId::from_public_key(b"coordinator-runtime-ui-stale");
+        let mut snapshot = populated_snapshot();
+        snapshot.embedded_services.clear();
+        snapshot
+            .embedded_services
+            .push(NodeEmbeddedServiceSnapshot {
+                network_name: "home".into(),
+                status: NodeEmbeddedServiceStatus::Running,
+                signaling_addr: None,
+                relay_status: NodeEmbeddedServiceStatus::Stopped,
+                relay_addr: None,
+                relay_health: None,
+                relay_authorization: None,
+                relay_governance: None,
+                coordinator_candidates: Some(CoordinatorCandidateStatus {
+                    network_id: network_id.clone(),
+                    generated_at_unix_ms: 1_700_000_100_000,
+                    config_state: CoordinatorCandidateConfigState::Current,
+                    config: None,
+                    candidates: vec![
+                        CoordinatorCandidateStatusEntry {
+                            node_id: leader.clone(),
+                            priority: 1,
+                            health: CoordinatorCandidateHealth::Healthy,
+                            eligible_for_election: true,
+                            reason_code: "coordinator.candidate.eligible".into(),
+                            declaration: None,
+                        },
+                        CoordinatorCandidateStatusEntry {
+                            node_id: stale.clone(),
+                            priority: 2,
+                            health: CoordinatorCandidateHealth::Stale,
+                            eligible_for_election: false,
+                            reason_code: "coordinator.candidate.declaration_expired".into(),
+                            declaration: None,
+                        },
+                    ],
+                    current_leader: Some(leader.clone()),
+                    latest_term: Some(CoordinatorTerm {
+                        network_id,
+                        term: 4,
+                        leader: leader.clone(),
+                        candidate_group: vec![leader.clone(), stale.clone()],
+                        candidate_config_revision: 3,
+                        majority_proof: vec![leader.clone()],
+                        majority_votes: Vec::new(),
+                        authority: CoordinatorAuthority::Full,
+                        phase: CoordinatorPhase::Stable,
+                        fencing_token: FencingToken(44),
+                        issued_at_unix_ms: 1_700_000_000_000,
+                        expires_at_unix_ms: 1_700_000_300_000,
+                    }),
+                    lease: Default::default(),
+                    control_plane: CoordinatorControlPlaneStatus {
+                        state: CoordinatorControlPlaneState::Available,
+                        governance_writable: true,
+                        reason_code: "coordinator.control_plane.available".into(),
+                        quorum: CoordinatorQuorumStatus {
+                            received_votes: 2,
+                            required_votes: 2,
+                            participant_count: 2,
+                        },
+                    },
+                    emergency: CoordinatorEmergencyState::None,
+                    emergency_leader: None,
+                    latest_election: None,
+                }),
+            });
+
+        let page = node_ui_manifest()
+            .pages
+            .into_iter()
+            .find(|page| page.id == "node_runtime")
+            .expect("runtime page");
+        let model =
+            build_page_model_for_page(&page, &snapshot, Locale::ZhCn).expect("runtime model");
+        let control_plane = model
+            .sections
+            .iter()
+            .find(|section| section.title == t(Locale::ZhCn, "runtime.section.control_plane"))
+            .expect("control plane section");
+        let detail = &control_plane.rows[0].detail;
+
+        assert!(detail.contains(&format!(
+            "{} {leader}",
+            t(Locale::ZhCn, "runtime.coordinator.leader")
+        )));
+        let term = tr(
+            Locale::ZhCn,
+            "runtime.coordinator.latest_term.value",
+            &[
+                ("term", "4"),
+                ("fencing_token", "44"),
+                ("leader", &leader.to_string()),
+                ("phase", t(Locale::ZhCn, "runtime.coordinator.phase.stable")),
+            ],
+        );
+        assert!(detail.contains(&term));
+        let healthy = tr(
+            Locale::ZhCn,
+            "runtime.coordinator.candidate_entry",
+            &[
+                ("node_id", &leader.to_string()),
+                (
+                    "health",
+                    t(Locale::ZhCn, "runtime.coordinator.health.healthy"),
+                ),
+                (
+                    "eligible",
+                    t(Locale::ZhCn, "runtime.coordinator.eligible.yes"),
+                ),
+                ("reason_code", "coordinator.candidate.eligible"),
+            ],
+        );
+        let stale = tr(
+            Locale::ZhCn,
+            "runtime.coordinator.candidate_entry",
+            &[
+                ("node_id", &stale.to_string()),
+                (
+                    "health",
+                    t(Locale::ZhCn, "runtime.coordinator.health.stale"),
+                ),
+                (
+                    "eligible",
+                    t(Locale::ZhCn, "runtime.coordinator.eligible.no"),
+                ),
+                ("reason_code", "coordinator.candidate.declaration_expired"),
+            ],
+        );
+        assert!(detail.contains(&healthy));
+        assert!(detail.contains(&stale));
     }
 
     fn relay_health_fixture(

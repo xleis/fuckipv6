@@ -7,11 +7,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
-    CoordinatorCandidateConfig, CoordinatorCandidateDeclaration, CoordinatorCandidateStatus,
-    CoordinatorEmergencyLeaderStatus, CoordinatorRecoveryReport, CoordinatorRecoveryStatus,
-    CoordinatorTerm, CoordinatorWriteCredential, ExitHealthEvidence, ExitHealthEvidenceState,
-    ExitHealthLayer, ExitHealthProtocol, ExitHealthRetest, ExitHealthRetestPhase,
-    ExitHealthSnapshot, ExitHealthSource, ExitHealthTarget, InvitationCode,
+    AdminRecoveryStatusView, CoordinatorCandidateConfig, CoordinatorCandidateDeclaration,
+    CoordinatorCandidateStatus, CoordinatorEmergencyLeaderStatus, CoordinatorRecoveryReport,
+    CoordinatorRecoveryStatus, CoordinatorTerm, CoordinatorWriteCredential, ExitHealthEvidence,
+    ExitHealthEvidenceState, ExitHealthLayer, ExitHealthProtocol, ExitHealthRetest,
+    ExitHealthRetestPhase, ExitHealthSnapshot, ExitHealthSource, ExitHealthTarget, InvitationCode,
     InvitationCreateRequest, InvitationId, InvitationPreview, InvitationRedeemRequest,
     InvitationRedemption, InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestId,
     LeakDetectionEvidence, LeakDetectionEvidenceState, LeakDetectionIsolationAction,
@@ -28,14 +28,16 @@ use fuckipv6_common::{
 use futures::future::join_all;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{interval, sleep, timeout, Instant, MissedTickBehavior};
+use tokio::time::{sleep, sleep_until, timeout, Instant};
 
 use super::command::{
-    NodePublishCoordinatorCandidateDeclarationCommand, NodeUpdateCoordinatorCandidatesCommand,
+    NodeAdminRecoveryListCommand, NodeAdminRecoveryStatusCommand, NodeExecuteAdminRecoveryCommand,
+    NodePublishCoordinatorCandidateDeclarationCommand, NodeRevokeAdminRecoveryCommand,
+    NodeSubmitAdminRecoveryCommand, NodeUpdateCoordinatorCandidatesCommand,
 };
 use super::coordinator_takeover::{
     active_local_emergency, decide_coordinator_takeover, CoordinatorTakeoverDecision,
-    COORDINATOR_TAKEOVER_POLL_INTERVAL,
+    CoordinatorTakeoverPollBackoff,
 };
 use super::state::effective_membership_state;
 use super::{
@@ -63,8 +65,8 @@ use crate::node::runtime_metadata;
 use crate::owner_security::audit::OwnerSecurityAudit;
 use crate::routing::leak_detection::{collect_leak_detection, LeakDetectionContext};
 use crate::signaling::client::{
-    CoordinatorCandidateControlError, InvitationControlError, JoinRequestControlError,
-    JoinRequestStatusSnapshot, SignalingClient,
+    AdminRecoveryControlError, CoordinatorCandidateControlError, InvitationControlError,
+    JoinRequestControlError, JoinRequestStatusSnapshot, SignalingClient,
 };
 use crate::symmetric::{
     EmbeddedServiceError, EmbeddedServiceManager, EmbeddedServiceSnapshot,
@@ -179,6 +181,12 @@ pub(crate) enum RuntimeControlError {
         message_key: &'static str,
         message: String,
     },
+    #[error("{message}")]
+    AdminRecovery {
+        code: NodeProblemCode,
+        message_key: &'static str,
+        message: String,
+    },
 }
 
 impl RuntimeControlError {
@@ -206,6 +214,7 @@ impl RuntimeControlError {
             Self::JoinRequest { code, .. } => *code,
             Self::Invitation { code, .. } => *code,
             Self::CoordinatorCandidate { code, .. } => *code,
+            Self::AdminRecovery { code, .. } => *code,
         }
     }
 
@@ -217,6 +226,7 @@ impl RuntimeControlError {
             Self::JoinRequest { message_key, .. } => message_key,
             Self::Invitation { message_key, .. } => message_key,
             Self::CoordinatorCandidate { message_key, .. } => message_key,
+            Self::AdminRecovery { message_key, .. } => message_key,
             _ => self.problem_code().message_key(),
         }
     }
@@ -265,6 +275,17 @@ impl RuntimeControlError {
                     ..
                 }
                 | Self::CoordinatorCandidate {
+                    code: NodeProblemCode::AuthenticationRequired
+                        | NodeProblemCode::InvalidRequest
+                        | NodeProblemCode::NotFound
+                        | NodeProblemCode::Conflict
+                        | NodeProblemCode::PermissionDenied
+                        | NodeProblemCode::Cancelled
+                        | NodeProblemCode::Unsupported
+                        | NodeProblemCode::Internal,
+                    ..
+                }
+                | Self::AdminRecovery {
                     code: NodeProblemCode::AuthenticationRequired
                         | NodeProblemCode::InvalidRequest
                         | NodeProblemCode::NotFound
@@ -397,6 +418,51 @@ fn coordinator_candidate_invalid(message: impl Into<String>) -> RuntimeControlEr
     RuntimeControlError::CoordinatorCandidate {
         code: NodeProblemCode::InvalidRequest,
         message_key: "coordinator_candidate.error.invalid",
+        message: message.into(),
+    }
+}
+
+fn map_admin_recovery_error(error: AdminRecoveryControlError) -> RuntimeControlError {
+    let message = error.to_string();
+    let message_key = error.message_key();
+    let code = match error {
+        AdminRecoveryControlError::Disconnected
+        | AdminRecoveryControlError::Unavailable
+        | AdminRecoveryControlError::Rejected {
+            code: 429 | 503, ..
+        } => NodeProblemCode::Unavailable,
+        AdminRecoveryControlError::TimedOut => NodeProblemCode::TimedOut,
+        AdminRecoveryControlError::Rejected { code: 401, .. } => {
+            NodeProblemCode::AuthenticationRequired
+        }
+        AdminRecoveryControlError::Rejected { code: 403, .. } => NodeProblemCode::PermissionDenied,
+        AdminRecoveryControlError::Rejected { code: 404, .. } => NodeProblemCode::NotFound,
+        AdminRecoveryControlError::Rejected {
+            code: 409 | 412, ..
+        } => NodeProblemCode::Conflict,
+        AdminRecoveryControlError::Rejected { .. } | AdminRecoveryControlError::InvalidResponse => {
+            NodeProblemCode::InvalidRequest
+        }
+    };
+    RuntimeControlError::AdminRecovery {
+        code,
+        message_key,
+        message,
+    }
+}
+
+fn admin_recovery_unavailable(message: impl Into<String>) -> RuntimeControlError {
+    RuntimeControlError::AdminRecovery {
+        code: NodeProblemCode::Unavailable,
+        message_key: "admin_recovery.error.unavailable",
+        message: message.into(),
+    }
+}
+
+fn admin_recovery_invalid(message: impl Into<String>) -> RuntimeControlError {
+    RuntimeControlError::AdminRecovery {
+        code: NodeProblemCode::InvalidRequest,
+        message_key: "admin_recovery.error.invalid_request",
         message: message.into(),
     }
 }
@@ -846,6 +912,7 @@ struct LiveNetworkRuntimeLauncher {
     events: NodeEventBus,
     registry: MultiNetworkRegistry,
     failover_audit: Option<Arc<OwnerSecurityAudit>>,
+    coordinator_takeover_wakeup: mpsc::UnboundedSender<()>,
 }
 
 impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
@@ -854,6 +921,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
         let events = self.events.clone();
         let registry = self.registry.clone();
         let failover_audit = self.failover_audit.clone();
+        let coordinator_takeover_wakeup = self.coordinator_takeover_wakeup.clone();
 
         Box::pin(async move {
             let mut runtime = commands::prepare_client_runtime_ext(
@@ -888,6 +956,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
                     ))
                 }
             })?;
+            runtime.set_coordinator_takeover_wakeup(coordinator_takeover_wakeup);
 
             let tun_name = runtime.tun_name().to_string();
             let assigned_ipv6 = runtime.assigned_ip;
@@ -1059,6 +1128,13 @@ struct CoordinatorContinuityMetrics {
     recoveries: u64,
     last_recovery_duration: Option<Duration>,
     last_failure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CoordinatorTakeoverRefreshOutcome {
+    Idle,
+    Healthy,
+    Failed,
 }
 
 impl CoordinatorContinuityMetrics {
@@ -1973,6 +2049,10 @@ enum RuntimeControlCommand {
         command: CoordinatorCandidateRuntimeCommand,
         reply: oneshot::Sender<Result<CoordinatorCandidateStatus, RuntimeControlError>>,
     },
+    AdminRecovery {
+        command: AdminRecoveryRuntimeCommand,
+        reply: oneshot::Sender<Result<AdminRecoveryExecutionResult, RuntimeControlError>>,
+    },
     Stop {
         networks: Vec<String>,
         all: bool,
@@ -2116,6 +2196,19 @@ enum CoordinatorCandidateRuntimeCommand {
         credential: CoordinatorWriteCredential,
         new_expires_at_unix_ms: u64,
     },
+}
+
+enum AdminRecoveryRuntimeCommand {
+    Submit(NodeSubmitAdminRecoveryCommand),
+    Status(NodeAdminRecoveryStatusCommand),
+    List(NodeAdminRecoveryListCommand),
+    Revoke(NodeRevokeAdminRecoveryCommand),
+    Execute(NodeExecuteAdminRecoveryCommand),
+}
+
+enum AdminRecoveryExecutionResult {
+    Status(AdminRecoveryStatusView),
+    List(Vec<AdminRecoveryStatusView>),
 }
 
 fn routing_summary_timestamp() -> u64 {
@@ -2308,29 +2401,15 @@ impl NetworkRuntimeManager {
         services: EmbeddedServiceManager,
         failover_audit: Option<Arc<OwnerSecurityAudit>>,
     ) -> Self {
+        let (coordinator_takeover_wakeup, coordinator_takeover_wakeups) = mpsc::unbounded_channel();
         let launcher = Arc::new(LiveNetworkRuntimeLauncher {
             state: state.clone(),
             events: events.clone(),
             registry: registry.clone(),
             failover_audit,
+            coordinator_takeover_wakeup,
         });
-        Self::spawn_with_launcher(
-            configs, options, state, events, lifecycle, registry, services, launcher,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn spawn_with_launcher(
-        configs: ConfigManager,
-        options: RuntimeOptions,
-        state: NodeStateStore,
-        events: NodeEventBus,
-        lifecycle: NodeLifecycle,
-        registry: MultiNetworkRegistry,
-        services: EmbeddedServiceManager,
-        launcher: Arc<dyn NetworkRuntimeLauncher>,
-    ) -> Self {
-        Self::spawn_with_launcher_and_timeout(
+        Self::spawn_with_launcher_and_timeouts_inner(
             configs,
             options,
             state,
@@ -2339,39 +2418,13 @@ impl NetworkRuntimeManager {
             registry,
             services,
             launcher,
-            ROUTING_UPDATE_TIMEOUT,
+            RuntimeTimeouts::default(),
+            Some(coordinator_takeover_wakeups),
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn spawn_with_launcher_and_timeout(
-        configs: ConfigManager,
-        options: RuntimeOptions,
-        state: NodeStateStore,
-        events: NodeEventBus,
-        lifecycle: NodeLifecycle,
-        registry: MultiNetworkRegistry,
-        services: EmbeddedServiceManager,
-        launcher: Arc<dyn NetworkRuntimeLauncher>,
-        routing_update_timeout: Duration,
-    ) -> Self {
-        Self::spawn_with_launcher_and_timeouts(
-            configs,
-            options,
-            state,
-            events,
-            lifecycle,
-            registry,
-            services,
-            launcher,
-            RuntimeTimeouts {
-                routing_update: routing_update_timeout,
-                ..RuntimeTimeouts::default()
-            },
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     fn spawn_with_launcher_and_timeouts(
         configs: ConfigManager,
         options: RuntimeOptions,
@@ -2382,6 +2435,25 @@ impl NetworkRuntimeManager {
         services: EmbeddedServiceManager,
         launcher: Arc<dyn NetworkRuntimeLauncher>,
         timeouts: RuntimeTimeouts,
+    ) -> Self {
+        Self::spawn_with_launcher_and_timeouts_inner(
+            configs, options, state, events, lifecycle, registry, services, launcher, timeouts,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_with_launcher_and_timeouts_inner(
+        configs: ConfigManager,
+        options: RuntimeOptions,
+        state: NodeStateStore,
+        events: NodeEventBus,
+        lifecycle: NodeLifecycle,
+        registry: MultiNetworkRegistry,
+        services: EmbeddedServiceManager,
+        launcher: Arc<dyn NetworkRuntimeLauncher>,
+        timeouts: RuntimeTimeouts,
+        coordinator_takeover_wakeups: Option<mpsc::UnboundedReceiver<()>>,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(16);
         tokio::spawn(run_actor(
@@ -2400,6 +2472,7 @@ impl NetworkRuntimeManager {
                 cleanup_failures: BTreeMap::new(),
                 completed_cleanup: BTreeMap::new(),
                 timeouts,
+                coordinator_takeover_wakeups,
             },
         ));
         Self {
@@ -2903,6 +2976,93 @@ impl NetworkRuntimeManager {
             .map_err(|_| RuntimeControlError::ActorClosed)?
     }
 
+    pub async fn submit_admin_recovery(
+        &self,
+        command: NodeSubmitAdminRecoveryCommand,
+    ) -> Result<AdminRecoveryStatusView, RuntimeControlError> {
+        match self
+            .send_admin_recovery(AdminRecoveryRuntimeCommand::Submit(command))
+            .await?
+        {
+            AdminRecoveryExecutionResult::Status(status) => Ok(status),
+            AdminRecoveryExecutionResult::List(_) => Err(admin_recovery_unavailable(
+                "管理员恢复提交返回了不匹配的列表响应",
+            )),
+        }
+    }
+
+    pub async fn get_admin_recovery_status(
+        &self,
+        command: NodeAdminRecoveryStatusCommand,
+    ) -> Result<AdminRecoveryStatusView, RuntimeControlError> {
+        match self
+            .send_admin_recovery(AdminRecoveryRuntimeCommand::Status(command))
+            .await?
+        {
+            AdminRecoveryExecutionResult::Status(status) => Ok(status),
+            AdminRecoveryExecutionResult::List(_) => Err(admin_recovery_unavailable(
+                "管理员恢复状态查询返回了不匹配的列表响应",
+            )),
+        }
+    }
+
+    pub async fn list_admin_recoveries(
+        &self,
+        command: NodeAdminRecoveryListCommand,
+    ) -> Result<Vec<AdminRecoveryStatusView>, RuntimeControlError> {
+        match self
+            .send_admin_recovery(AdminRecoveryRuntimeCommand::List(command))
+            .await?
+        {
+            AdminRecoveryExecutionResult::List(statuses) => Ok(statuses),
+            AdminRecoveryExecutionResult::Status(_) => Err(admin_recovery_unavailable(
+                "管理员恢复列表返回了不匹配的单项响应",
+            )),
+        }
+    }
+
+    pub async fn revoke_admin_recovery(
+        &self,
+        command: NodeRevokeAdminRecoveryCommand,
+    ) -> Result<AdminRecoveryStatusView, RuntimeControlError> {
+        match self
+            .send_admin_recovery(AdminRecoveryRuntimeCommand::Revoke(command))
+            .await?
+        {
+            AdminRecoveryExecutionResult::Status(status) => Ok(status),
+            AdminRecoveryExecutionResult::List(_) => Err(admin_recovery_unavailable(
+                "管理员恢复撤销返回了不匹配的列表响应",
+            )),
+        }
+    }
+
+    pub async fn execute_admin_recovery(
+        &self,
+        command: NodeExecuteAdminRecoveryCommand,
+    ) -> Result<AdminRecoveryStatusView, RuntimeControlError> {
+        match self
+            .send_admin_recovery(AdminRecoveryRuntimeCommand::Execute(command))
+            .await?
+        {
+            AdminRecoveryExecutionResult::Status(status) => Ok(status),
+            AdminRecoveryExecutionResult::List(_) => Err(admin_recovery_unavailable(
+                "管理员恢复执行返回了不匹配的列表响应",
+            )),
+        }
+    }
+
+    async fn send_admin_recovery(
+        &self,
+        command: AdminRecoveryRuntimeCommand,
+    ) -> Result<AdminRecoveryExecutionResult, RuntimeControlError> {
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::AdminRecovery { command, reply })
+            .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
     pub async fn stop(
         &self,
         networks: Vec<String>,
@@ -3079,8 +3239,21 @@ async fn run_actor(
     refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     refresh.tick().await;
 
-    let mut takeover_tick = interval(COORDINATOR_TAKEOVER_POLL_INTERVAL);
-    takeover_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let coordinator_takeover_seed = actor
+        .configs
+        .load_node_identity()
+        .map(|identity| {
+            let digest = blake3::hash(&identity.public_key());
+            u64::from_le_bytes(
+                digest.as_bytes()[..8]
+                    .try_into()
+                    .expect("blake3 digest contains at least eight bytes"),
+            )
+        })
+        .unwrap_or(0x5741_3443_4F4F_5244);
+    let mut takeover_backoff = CoordinatorTakeoverPollBackoff::new(coordinator_takeover_seed);
+    let mut takeover_deadline = Instant::now() + takeover_backoff.delay();
+    let mut coordinator_takeover_wakeups = actor.coordinator_takeover_wakeups.take();
     loop {
         tokio::select! {
             command = receiver.recv() => {
@@ -3211,6 +3384,10 @@ async fn run_actor(
                         let result = actor.execute_coordinator_candidate_command(command).await;
                         let _ = reply.send(result);
                     }
+                    RuntimeControlCommand::AdminRecovery { command, reply } => {
+                        let result = actor.execute_admin_recovery_command(command).await;
+                        let _ = reply.send(result);
+                    }
                     RuntimeControlCommand::Shutdown { _operation, reply } => {
                         let result = actor.shutdown().await;
                         let _ = reply.send(result);
@@ -3221,8 +3398,35 @@ async fn run_actor(
             _ = refresh.tick() => {
                 actor.refresh_local_exit_client_counts().await;
             }
-            _ = takeover_tick.tick() => {
-                actor.refresh_coordinator_takeover().await;
+            _ = sleep_until(takeover_deadline) => {
+                if matches!(
+                    actor.refresh_coordinator_takeover().await,
+                    CoordinatorTakeoverRefreshOutcome::Failed
+                ) {
+                    takeover_backoff.record_failure();
+                } else {
+                    takeover_backoff.record_success();
+                }
+                takeover_deadline = Instant::now() + takeover_backoff.delay();
+            }
+            received = async {
+                match coordinator_takeover_wakeups.as_mut() {
+                    Some(wakeups) => wakeups.recv().await.is_some(),
+                    None => std::future::pending::<bool>().await,
+                }
+            }, if coordinator_takeover_wakeups.is_some() => {
+                if received {
+                    takeover_backoff.record_success();
+                    if matches!(
+                        actor.refresh_coordinator_takeover().await,
+                        CoordinatorTakeoverRefreshOutcome::Failed
+                    ) {
+                        takeover_backoff.record_failure();
+                    }
+                    takeover_deadline = Instant::now() + takeover_backoff.delay();
+                } else {
+                    coordinator_takeover_wakeups = None;
+                }
             }
         }
     }
@@ -3242,6 +3446,7 @@ struct NetworkRuntimeActor {
     cleanup_failures: BTreeMap<String, RuntimeCleanupOutcome>,
     completed_cleanup: BTreeMap<String, RuntimeCleanupOutcome>,
     timeouts: RuntimeTimeouts,
+    coordinator_takeover_wakeups: Option<mpsc::UnboundedReceiver<()>>,
 }
 
 impl NetworkRuntimeActor {
@@ -4023,6 +4228,130 @@ impl NetworkRuntimeActor {
         }
     }
 
+    async fn execute_admin_recovery_command(
+        &mut self,
+        command: AdminRecoveryRuntimeCommand,
+    ) -> Result<AdminRecoveryExecutionResult, RuntimeControlError> {
+        match command {
+            AdminRecoveryRuntimeCommand::Submit(command) => {
+                let NodeSubmitAdminRecoveryCommand {
+                    network_name,
+                    request,
+                } = command;
+                let (network_id, signaling) = self.admin_recovery_signaling(&network_name).await?;
+                if request.proposal.network_id != network_id {
+                    return Err(admin_recovery_invalid(
+                        "管理员恢复请求属于其他网络，拒绝提交",
+                    ));
+                }
+                signaling
+                    .submit_admin_recovery(request)
+                    .await
+                    .map(AdminRecoveryExecutionResult::Status)
+                    .map_err(map_admin_recovery_error)
+            }
+            AdminRecoveryRuntimeCommand::Status(command) => {
+                let NodeAdminRecoveryStatusCommand {
+                    network_name,
+                    request_id,
+                } = command;
+                let (network_id, signaling) = self.admin_recovery_signaling(&network_name).await?;
+                signaling
+                    .get_admin_recovery_status(network_id, request_id)
+                    .await
+                    .map(AdminRecoveryExecutionResult::Status)
+                    .map_err(map_admin_recovery_error)
+            }
+            AdminRecoveryRuntimeCommand::List(command) => {
+                let (network_id, signaling) =
+                    self.admin_recovery_signaling(&command.network_name).await?;
+                signaling
+                    .list_admin_recoveries(network_id)
+                    .await
+                    .map(AdminRecoveryExecutionResult::List)
+                    .map_err(map_admin_recovery_error)
+            }
+            AdminRecoveryRuntimeCommand::Revoke(command) => {
+                let NodeRevokeAdminRecoveryCommand {
+                    network_name,
+                    request_id,
+                    reason,
+                } = command;
+                let (network_id, signaling) = self.admin_recovery_signaling(&network_name).await?;
+                signaling
+                    .revoke_admin_recovery(network_id, request_id, reason)
+                    .await
+                    .map(AdminRecoveryExecutionResult::Status)
+                    .map_err(map_admin_recovery_error)
+            }
+            AdminRecoveryRuntimeCommand::Execute(command) => {
+                let NodeExecuteAdminRecoveryCommand {
+                    network_name,
+                    request_id,
+                } = command;
+                let (network_id, signaling) = self.admin_recovery_signaling(&network_name).await?;
+                signaling
+                    .execute_admin_recovery(network_id, request_id)
+                    .await
+                    .map(AdminRecoveryExecutionResult::Status)
+                    .map_err(map_admin_recovery_error)
+            }
+        }
+    }
+
+    /// Break-glass recovery is deliberately bound to an already authenticated
+    /// live data-plane connection. Falling back to a fresh unqualified
+    /// connection would weaken the transport identity and could make an Ack
+    /// loss indistinguishable from an unauthenticated execution attempt.
+    async fn admin_recovery_signaling(
+        &mut self,
+        network_name: &str,
+    ) -> Result<(NetworkId, Arc<SignalingClient>), RuntimeControlError> {
+        self.reconcile_finished_sessions().await;
+        let network = self
+            .configs
+            .list_networks()
+            .map_err(|error| {
+                RuntimeControlError::Persistence(format!("加载管理员恢复网络配置失败: {error:#}"))
+            })?
+            .into_iter()
+            .find(|network| network.name == network_name)
+            .ok_or_else(|| {
+                RuntimeControlError::NotFound(format!("网络 [{network_name}] 不存在"))
+            })?;
+        let network_id = network
+            .network_id
+            .as_deref()
+            .ok_or_else(|| {
+                admin_recovery_unavailable(format!(
+                    "网络 [{network_name}] 缺少稳定网络 ID，拒绝管理员恢复"
+                ))
+            })
+            .and_then(|network_id| {
+                NetworkId::parse(network_id.to_owned()).map_err(|error| {
+                    admin_recovery_invalid(format!(
+                        "网络 [{network_name}] 的稳定网络 ID 无效: {error:#}"
+                    ))
+                })
+            })?;
+        let session = self.sessions.get(network_name).ok_or_else(|| {
+            admin_recovery_unavailable(format!(
+                "网络 [{network_name}] 没有活动的数据面运行会话，管理员恢复必须使用已认证连接"
+            ))
+        })?;
+        if session.network_id.as_deref() != Some(network_id.as_str()) {
+            return Err(admin_recovery_unavailable(format!(
+                "网络 [{network_name}] 的活动运行会话尚未绑定权威网络 ID"
+            )));
+        }
+        let signaling = session.signaling.clone().ok_or_else(|| {
+            admin_recovery_unavailable(format!(
+                "网络 [{network_name}] 的活动运行会话没有已认证的 Coordinator 信令连接"
+            ))
+        })?;
+        Ok((network_id, signaling))
+    }
+
     fn record_coordinator_control_failure(&mut self, network_name: &str, reason: String) {
         let Some(session) = self.sessions.get_mut(network_name) else {
             return;
@@ -4063,7 +4392,7 @@ impl NetworkRuntimeActor {
     /// every round fetches authoritative status before signing a proposal or
     /// vote. A missed acknowledgement is therefore repaired by the next poll
     /// instead of being inferred from a replayed event.
-    async fn refresh_coordinator_takeover(&mut self) {
+    async fn refresh_coordinator_takeover(&mut self) -> CoordinatorTakeoverRefreshOutcome {
         if self
             .sessions
             .values()
@@ -4090,20 +4419,23 @@ impl NetworkRuntimeActor {
             })
             .collect::<Vec<_>>();
         if sessions.is_empty() {
-            return;
+            return CoordinatorTakeoverRefreshOutcome::Idle;
         }
         let identity = match self.configs.load_node_identity() {
             Ok(identity) => identity,
             Err(error) => {
                 tracing::debug!(%error, "Coordinator 接管轮次无法加载本机身份");
-                return;
+                return CoordinatorTakeoverRefreshOutcome::Failed;
             }
         };
         let local_node = NodeId::from_public_key(&identity.public_key());
+        let mut saw_authority = false;
+        let mut saw_failure = false;
 
         for (network_name, signaling, network_id, recovery_cursor) in sessions {
             let Some(network_id) = network_id.as_deref() else {
                 tracing::warn!(network = %network_name, "Coordinator 接管轮次缺少网络 ID");
+                saw_failure = true;
                 continue;
             };
             let network_id = match NetworkId::parse(network_id.to_owned()) {
@@ -4114,6 +4446,7 @@ impl NetworkRuntimeActor {
                         %error,
                         "Coordinator 接管轮次跳过无效网络 ID"
                     );
+                    saw_failure = true;
                     continue;
                 }
             };
@@ -4127,6 +4460,7 @@ impl NetworkRuntimeActor {
                         &network_name,
                         format!("无法刷新权威候选状态: {error}"),
                     );
+                    saw_failure = true;
                     continue;
                 }
             };
@@ -4143,6 +4477,7 @@ impl NetworkRuntimeActor {
                         &network_name,
                         format!("无法验证恢复快照，治理保持只读: {error}"),
                     );
+                    saw_failure = true;
                     continue;
                 }
             };
@@ -4160,9 +4495,11 @@ impl NetworkRuntimeActor {
                         recovery.recovery.data_plane_allowed,
                     ),
                 );
+                saw_failure = true;
                 continue;
             }
             let status = recovery.status;
+            saw_authority = true;
             let now_unix_ms = unix_time_ms();
             let emergency = match active_local_emergency(&status, &local_node, now_unix_ms) {
                 Ok(emergency) => emergency,
@@ -4171,6 +4508,7 @@ impl NetworkRuntimeActor {
                         &network_name,
                         format!("拒绝不可信的紧急租约: {error}"),
                     );
+                    saw_failure = true;
                     continue;
                 }
             };
@@ -4185,6 +4523,7 @@ impl NetworkRuntimeActor {
                         &network_name,
                         format!("拒绝不可信的候选状态: {error}"),
                     );
+                    saw_failure = true;
                     continue;
                 }
             };
@@ -4241,6 +4580,7 @@ impl NetworkRuntimeActor {
                                     %error,
                                     "Coordinator 接管响应包含不可信的紧急租约"
                                 );
+                                saw_failure = true;
                                 continue;
                             }
                         };
@@ -4268,8 +4608,16 @@ impl NetworkRuntimeActor {
                         %error,
                         "Coordinator 接管动作失败，将在下一轮重新读取权威状态"
                     );
+                    saw_failure = true;
                 }
             }
+        }
+        if saw_failure {
+            CoordinatorTakeoverRefreshOutcome::Failed
+        } else if saw_authority {
+            CoordinatorTakeoverRefreshOutcome::Healthy
+        } else {
+            CoordinatorTakeoverRefreshOutcome::Failed
         }
     }
 
@@ -8003,6 +8351,15 @@ fn local_exit_error_with_network(
             message_key,
             message: format!("{context}：{message}"),
         },
+        RuntimeControlError::AdminRecovery {
+            code,
+            message_key,
+            message,
+        } => RuntimeControlError::AdminRecovery {
+            code,
+            message_key,
+            message: format!("{context}：{message}"),
+        },
     }
 }
 
@@ -8977,6 +9334,145 @@ mod tests {
         }
     }
 
+    async fn spawn_test_coordinator_runtime(
+        harness: &TestHarness,
+        network_name: &str,
+        network_id: NetworkId,
+        signaling: Arc<SignalingClient>,
+        coordinator_takeover_wakeups: mpsc::UnboundedReceiver<()>,
+    ) -> (
+        mpsc::Sender<RuntimeControlCommand>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (shutdown, mut shutdown_rx) = watch::channel(false);
+        let (routing_control, _routing_rx) = mpsc::unbounded_channel();
+        let data_plane = tokio::spawn(async move {
+            let _ = shutdown_rx.changed().await;
+            NetworkRuntimeExit {
+                cleanup: RuntimeCleanupOutcome::default(),
+                retained_owner: None,
+            }
+        });
+        let actor = NetworkRuntimeActor {
+            configs: harness.configs.clone(),
+            options: RuntimeOptions::default(),
+            state: harness.state.clone(),
+            events: harness.events.clone(),
+            lifecycle: harness.lifecycle.clone(),
+            registry: harness.registry.clone(),
+            services: harness.services.clone(),
+            launcher: Arc::new(harness.fake.clone()),
+            sessions: HashMap::from([(
+                network_name.to_string(),
+                NetworkRuntimeSession {
+                    network_id: Some(network_id.to_string()),
+                    signaling: Some(signaling),
+                    coordinator_recovery: None,
+                    coordinator_emergency: None,
+                    coordinator_continuity: CoordinatorContinuityMetrics::default(),
+                    tun_name: format!("fuckipv6-{network_name}"),
+                    routing_control,
+                    shutdown,
+                    handle: data_plane,
+                },
+            )]),
+            retained_owners: HashMap::new(),
+            cleanup_failures: BTreeMap::new(),
+            completed_cleanup: BTreeMap::new(),
+            timeouts: RuntimeTimeouts::default(),
+            coordinator_takeover_wakeups: Some(coordinator_takeover_wakeups),
+        };
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_actor(command_rx, actor));
+        (command_tx, task)
+    }
+
+    async fn shutdown_test_coordinator_runtime(
+        command_tx: mpsc::Sender<RuntimeControlCommand>,
+        task: tokio::task::JoinHandle<()>,
+    ) {
+        let operation = OperationGate::new()
+            .try_acquire()
+            .expect("acquire runtime shutdown operation");
+        let (reply, response) = oneshot::channel();
+        command_tx
+            .send(RuntimeControlCommand::Shutdown {
+                _operation: operation,
+                reply,
+            })
+            .await
+            .expect("runtime command channel closed");
+        timeout(Duration::from_secs(2), response)
+            .await
+            .expect("runtime shutdown timed out")
+            .expect("runtime shutdown response closed")
+            .expect("runtime shutdown failed");
+        timeout(Duration::from_secs(2), task)
+            .await
+            .expect("runtime actor did not exit")
+            .expect("runtime actor task failed");
+    }
+
+    fn route_test_coordinator_runtime_message(
+        store: &fuckipv6_coordinator::signaling::coordinator_candidates::CoordinatorCandidateStore,
+        signaling: &SignalingClient,
+        actor: &NodeId,
+        network_id: &NetworkId,
+        message: fuckipv6_common::SignalingMessage,
+    ) -> &'static str {
+        use fuckipv6_common::SignalingMessage;
+
+        let now = unix_time_ms();
+        match message {
+            SignalingMessage::CoordinatorCandidateStatusRequest {
+                network_id: requested,
+            } => {
+                assert_eq!(&requested, network_id);
+                let status = store
+                    .status(actor, network_id, now)
+                    .expect("coordinator store status failed");
+                assert!(signaling.route_coordinator_candidate_test_response(
+                    SignalingMessage::CoordinatorCandidateStatusAck { status },
+                ));
+                "status"
+            }
+            SignalingMessage::CoordinatorRecoveryRequest { report } => {
+                assert_eq!(&report.network_id, network_id);
+                let response = store
+                    .recover(actor, report, now)
+                    .expect("coordinator store recovery failed");
+                assert!(!response.recovery.governance_writable);
+                assert!(signaling.route_coordinator_candidate_test_response(
+                    SignalingMessage::CoordinatorRecoveryResponse { response },
+                ));
+                "recovery"
+            }
+            SignalingMessage::CoordinatorElectionPropose { proposal } => {
+                assert_eq!(&proposal.proposer, actor);
+                assert_eq!(&proposal.network_id, network_id);
+                let status = store
+                    .propose_election(actor, proposal, now)
+                    .expect("coordinator election proposal failed");
+                assert!(signaling.route_coordinator_candidate_test_response(
+                    SignalingMessage::CoordinatorElectionProposeAck { status },
+                ));
+                "propose"
+            }
+            SignalingMessage::CoordinatorElectionVote { proposal_id, vote } => {
+                assert_eq!(&vote.voter, actor);
+                assert_eq!(&vote.network_id, network_id);
+                let status = store
+                    .record_election_vote(actor, &proposal_id, vote, now)
+                    .expect("coordinator election vote failed");
+                assert!(signaling.route_coordinator_candidate_test_response(
+                    SignalingMessage::CoordinatorElectionVoteAck { status },
+                ));
+                "vote"
+            }
+            other => panic!("unexpected Coordinator runtime request: {other:?}"),
+        }
+    }
+
     fn create_command(name: &str, auto_connect: bool) -> NodeCreateNetworkCommand {
         NodeCreateNetworkCommand {
             name: name.into(),
@@ -9219,6 +9715,423 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn coordinator_takeover_background_candidate_failure_e2e() {
+        use fuckipv6_common::domain::{
+            CapabilityKind, CoordinatorCandidate, CoordinatorCandidateConfig,
+            CoordinatorCandidateDeclaration, CoordinatorCandidateHealth,
+            CoordinatorCandidateResources, CoordinatorCandidateWillingness,
+            CoordinatorElectionProposal, CoordinatorElectionStage, CoordinatorElectionVote,
+            CoordinatorPublicReachability, ExitContributionMode, ExitContributionObligation,
+            ExitContributionScope, ExitSelectionPolicy, NetworkCreateProfile, NetworkJoinMode,
+            NetworkRecord, NetworkVisibility, PublicKey,
+        };
+        use fuckipv6_common::Identity;
+        use fuckipv6_coordinator::signaling::coordinator_candidates::CoordinatorCandidateStore;
+
+        let owner = Identity::generate().expect("owner identity");
+        let candidate_a = Identity::generate().expect("candidate A identity");
+        let candidate_b = Identity::generate().expect("candidate B identity");
+        let candidate_c = Identity::generate().expect("candidate C identity");
+        let owner_id = NodeId::from_public_key(&owner.public_key());
+        let candidate_a_id = NodeId::from_public_key(&candidate_a.public_key());
+        let candidate_b_id = NodeId::from_public_key(&candidate_b.public_key());
+        let candidate_c_id = NodeId::from_public_key(&candidate_c.public_key());
+        let now = unix_time_ms();
+
+        let mut network = NetworkRecord::create_owned(
+            NetworkCreateProfile {
+                name: "background-takeover-e2e".into(),
+                purpose: "Verify automatic coordinator takeover through live runtimes".into(),
+                icon: "network".into(),
+                language: "zh-CN".into(),
+                region: "ZZ".into(),
+                tags: Vec::new(),
+                capability_declarations: vec![CapabilityKind::Coordinator],
+                visibility: NetworkVisibility::Private,
+                join_mode: NetworkJoinMode::InviteOnly,
+                exit_contribution: ExitContributionObligation::NotRequired,
+                exit_contribution_scope: ExitContributionScope::NotApplicable,
+                exit_contribution_mode: ExitContributionMode::Disabled,
+                exit_selection_policy: ExitSelectionPolicy::default(),
+            },
+            PublicKey::from_bytes([17; 32]),
+            owner_id.clone(),
+            now.saturating_sub(30_000),
+        )
+        .expect("create network record");
+        network.members.extend([
+            candidate_a_id.clone(),
+            candidate_b_id.clone(),
+            candidate_c_id.clone(),
+        ]);
+        network.validate().expect("validate network record");
+        let network_id = network.network_id.clone();
+
+        let candidate_config = CoordinatorCandidateConfig::signed(
+            network_id.clone(),
+            1,
+            vec![
+                CoordinatorCandidate {
+                    node_id: candidate_a_id.clone(),
+                    priority: 1,
+                },
+                CoordinatorCandidate {
+                    node_id: candidate_b_id.clone(),
+                    priority: 2,
+                },
+                CoordinatorCandidate {
+                    node_id: candidate_c_id.clone(),
+                    priority: 3,
+                },
+            ],
+            now.saturating_sub(25_000),
+            now.saturating_add(30 * 60 * 1000),
+            &owner,
+        )
+        .expect("sign candidate config");
+
+        let b_harness = TestHarness::new("coordinator-background-takeover-b").await;
+        let c_harness = TestHarness::new("coordinator-background-takeover-c").await;
+        candidate_b
+            .save_to_file(b_harness.configs.node_identity_path())
+            .expect("install candidate B identity");
+        candidate_c
+            .save_to_file(c_harness.configs.node_identity_path())
+            .expect("install candidate C identity");
+        assert_eq!(
+            NodeId::from_public_key(&b_harness.configs.load_node_identity().unwrap().public_key()),
+            candidate_b_id
+        );
+        assert_eq!(
+            NodeId::from_public_key(&c_harness.configs.load_node_identity().unwrap().public_key()),
+            candidate_c_id
+        );
+
+        for (harness, network_name) in [
+            (&b_harness, "background-takeover-b"),
+            (&c_harness, "background-takeover-c"),
+        ] {
+            harness
+                .configs
+                .create_network(network_name, "ws://127.0.0.1:6666", true)
+                .expect("create runtime network config");
+            harness
+                .configs
+                .set_network_id_metadata(network_name, network_id.as_str())
+                .expect("bind runtime network id");
+        }
+
+        let network_path = b_harness
+            .config_dir
+            .join("background-takeover-network.json");
+        let store_path = b_harness.config_dir.join("background-takeover-store.json");
+        std::fs::write(
+            &network_path,
+            serde_json::to_vec_pretty(&network).expect("serialize network record"),
+        )
+        .expect("write network record");
+        let store = CoordinatorCandidateStore::new(&store_path, &network_path)
+            .expect("create coordinator candidate store");
+        store
+            .update_config(&owner_id, 0, candidate_config.clone(), now)
+            .expect("install candidate config");
+
+        let declaration_issued_at = now.saturating_sub(20_000);
+        let declarations = [
+            (&candidate_a, now.saturating_sub(10_000), "203.0.113.31:443"),
+            (&candidate_b, now + 60_000, "203.0.113.32:443"),
+            (&candidate_c, now + 60_000, "203.0.113.33:443"),
+        ];
+        for (identity, expires_at_unix_ms, endpoint) in declarations {
+            let declaration = CoordinatorCandidateDeclaration::signed(
+                network_id.clone(),
+                candidate_config.revision,
+                CoordinatorPublicReachability {
+                    public_endpoint: Some(endpoint.parse().expect("candidate endpoint")),
+                    reachable_via_relay: true,
+                },
+                CoordinatorCandidateResources {
+                    cpu_cores: 4,
+                    memory_bytes: 512 * 1024 * 1024,
+                    max_connections: 1_000,
+                },
+                CoordinatorCandidateWillingness::Willing,
+                declaration_issued_at,
+                expires_at_unix_ms,
+                identity,
+            )
+            .expect("sign candidate declaration");
+            store
+                .publish_declaration(
+                    &NodeId::from_public_key(&identity.public_key()),
+                    declaration,
+                    declaration_issued_at,
+                )
+                .expect("publish candidate declaration");
+        }
+
+        let proposal_issued_at = now.saturating_sub(15_000);
+        let proposal = CoordinatorElectionProposal::signed(
+            network_id.clone(),
+            candidate_config.revision,
+            1,
+            vec![
+                candidate_a_id.clone(),
+                candidate_b_id.clone(),
+                candidate_c_id.clone(),
+            ],
+            proposal_issued_at,
+            now.saturating_sub(5_000),
+            &candidate_a,
+        )
+        .expect("sign term 1 proposal");
+        store
+            .propose_election(&candidate_a_id, proposal.clone(), proposal_issued_at)
+            .expect("start term 1 election");
+        for (voter, identity) in [
+            (&candidate_a_id, &candidate_a),
+            (&candidate_b_id, &candidate_b),
+        ] {
+            let vote = CoordinatorElectionVote::signed(
+                network_id.clone(),
+                proposal.candidate_config_revision,
+                proposal.term,
+                proposal.leader.clone(),
+                proposal.candidate_group.clone(),
+                now.saturating_sub(14_000),
+                now + 30_000,
+                identity,
+            )
+            .expect("sign term 1 vote");
+            store
+                .record_election_vote(
+                    voter,
+                    &proposal.proposal_id,
+                    vote,
+                    now.saturating_sub(14_000),
+                )
+                .expect("record term 1 vote");
+        }
+        let failed_leader_status = store
+            .status(&owner_id, &network_id, now)
+            .expect("load term 1 status");
+        let term_one = failed_leader_status
+            .latest_term
+            .as_ref()
+            .expect("term 1 is installed");
+        assert_eq!(term_one.leader, candidate_a_id);
+        assert!(!failed_leader_status.lease.is_writable());
+        assert!(failed_leader_status
+            .candidates
+            .iter()
+            .find(|candidate| candidate.node_id == candidate_a_id)
+            .is_some_and(|candidate| {
+                candidate.health == CoordinatorCandidateHealth::Stale
+                    && !candidate.eligible_for_election
+            }));
+        assert_eq!(
+            failed_leader_status
+                .preferred_election_candidate()
+                .map(|candidate| &candidate.node_id),
+            Some(&candidate_b_id)
+        );
+
+        let (b_signaling, mut b_outbound) = SignalingClient::test_channel();
+        let (c_signaling, mut c_outbound) = SignalingClient::test_channel();
+        let b_signaling = Arc::new(b_signaling);
+        let c_signaling = Arc::new(c_signaling);
+        let (b_wakeup_tx, b_wakeup_rx) = mpsc::unbounded_channel();
+        let (c_wakeup_tx, c_wakeup_rx) = mpsc::unbounded_channel();
+        let (b_command_tx, b_runtime) = spawn_test_coordinator_runtime(
+            &b_harness,
+            "background-takeover-b",
+            network_id.clone(),
+            b_signaling.clone(),
+            b_wakeup_rx,
+        )
+        .await;
+        let (c_command_tx, c_runtime) = spawn_test_coordinator_runtime(
+            &c_harness,
+            "background-takeover-c",
+            network_id.clone(),
+            c_signaling.clone(),
+            c_wakeup_rx,
+        )
+        .await;
+        b_wakeup_tx
+            .send(())
+            .expect("queue candidate B authority refresh");
+        c_wakeup_tx
+            .send(())
+            .expect("queue candidate C authority refresh");
+
+        let responder_b_id = candidate_b_id.clone();
+        let responder_c_id = candidate_c_id.clone();
+        let responder = tokio::spawn(async move {
+            let mut proposal_seen = false;
+            timeout(Duration::from_secs(10), async {
+                while !proposal_seen {
+                    tokio::select! {
+                        message = b_outbound.recv() => {
+                            let message = message.expect("candidate B signaling channel closed");
+                            if route_test_coordinator_runtime_message(
+                                &store,
+                                b_signaling.as_ref(),
+                                &responder_b_id,
+                                &network_id,
+                                message,
+                            ) == "propose"
+                            {
+                                proposal_seen = true;
+                            }
+                        }
+                        message = c_outbound.recv() => {
+                            let message = message.expect("candidate C signaling channel closed");
+                            route_test_coordinator_runtime_message(
+                                &store,
+                                c_signaling.as_ref(),
+                                &responder_c_id,
+                                &network_id,
+                                message,
+                            );
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("candidate B did not propose after candidate A failed");
+            b_wakeup_tx
+                .send(())
+                .expect("wake candidate B for election voting");
+            c_wakeup_tx
+                .send(())
+                .expect("wake candidate C for election voting");
+
+            let committed_status = timeout(Duration::from_secs(10), async {
+                loop {
+                    let status = store
+                        .status(&owner_id, &network_id, unix_time_ms())
+                        .expect("poll committed takeover status");
+                    if status
+                        .latest_term
+                        .as_ref()
+                        .is_some_and(|term| term.term == 2 && term.leader == responder_b_id)
+                    {
+                        break status;
+                    }
+                    tokio::select! {
+                        message = b_outbound.recv() => {
+                            let message = message.expect("candidate B signaling channel closed");
+                            route_test_coordinator_runtime_message(
+                                &store,
+                                b_signaling.as_ref(),
+                                &responder_b_id,
+                                &network_id,
+                                message,
+                            );
+                        }
+                        message = c_outbound.recv() => {
+                            let message = message.expect("candidate C signaling channel closed");
+                            route_test_coordinator_runtime_message(
+                                &store,
+                                c_signaling.as_ref(),
+                                &responder_c_id,
+                                &network_id,
+                                message,
+                            );
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("runtime candidates did not commit term 2");
+
+            b_wakeup_tx
+                .send(())
+                .expect("wake candidate B after takeover");
+            c_wakeup_tx
+                .send(())
+                .expect("wake candidate C after takeover");
+            let mut b_refreshes = 0_u8;
+            let mut c_refreshes = 0_u8;
+            timeout(Duration::from_secs(10), async {
+                while b_refreshes < 2 || c_refreshes < 2 {
+                    tokio::select! {
+                        message = b_outbound.recv() => {
+                            let message = message.expect("candidate B signaling channel closed");
+                            let kind = route_test_coordinator_runtime_message(
+                                &store,
+                                b_signaling.as_ref(),
+                                &responder_b_id,
+                                &network_id,
+                                message,
+                            );
+                            assert!(matches!(kind, "status" | "recovery"));
+                            b_refreshes += 1;
+                        }
+                        message = c_outbound.recv() => {
+                            let message = message.expect("candidate C signaling channel closed");
+                            let kind = route_test_coordinator_runtime_message(
+                                &store,
+                                c_signaling.as_ref(),
+                                &responder_c_id,
+                                &network_id,
+                                message,
+                            );
+                            assert!(matches!(kind, "status" | "recovery"));
+                            c_refreshes += 1;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("runtime candidates did not refresh the committed term");
+            committed_status
+        });
+        let committed_status = responder.await.expect("coordinator responder task failed");
+
+        let term_two = committed_status
+            .latest_term
+            .as_ref()
+            .expect("term 2 must be installed");
+        assert_eq!(term_two.term, 2);
+        assert_eq!(term_two.fencing_token.0, 2);
+        assert_eq!(term_two.leader, candidate_b_id);
+        assert_eq!(
+            committed_status.current_leader.as_ref(),
+            Some(&candidate_b_id)
+        );
+        assert!(committed_status.lease.is_writable());
+        assert_eq!(
+            committed_status
+                .config
+                .as_ref()
+                .map(|config| config.revision),
+            Some(candidate_config.revision)
+        );
+        let election = committed_status
+            .latest_election
+            .as_ref()
+            .expect("term 2 election evidence");
+        assert_eq!(election.stage, CoordinatorElectionStage::Committed);
+        assert!(election
+            .votes
+            .iter()
+            .any(|vote| vote.voter == candidate_b_id));
+        assert!(election
+            .votes
+            .iter()
+            .any(|vote| vote.voter == candidate_c_id));
+        assert!(!b_runtime.is_finished());
+        assert!(!c_runtime.is_finished());
+
+        shutdown_test_coordinator_runtime(b_command_tx, b_runtime).await;
+        shutdown_test_coordinator_runtime(c_command_tx, c_runtime).await;
+        b_harness.shutdown().await;
+        c_harness.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn coordinator_takeover_poll_preserves_the_live_data_plane_session() {
         use fuckipv6_common::domain::{
             CoordinatorCandidateConfigState, CoordinatorEmergencyState, CoordinatorLeaseStatus,
@@ -9277,6 +10190,7 @@ mod tests {
             cleanup_failures: BTreeMap::new(),
             completed_cleanup: BTreeMap::new(),
             timeouts: RuntimeTimeouts::default(),
+            coordinator_takeover_wakeups: None,
         };
 
         let response_client = signaling.clone();
@@ -9456,6 +10370,170 @@ mod tests {
         harness.shutdown().await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn coordinator_takeover_reconnect_wakeup_refreshes_without_waiting_for_poll() {
+        use fuckipv6_common::domain::{
+            CoordinatorCandidateConfigState, CoordinatorEmergencyState, CoordinatorLeaseStatus,
+        };
+        use fuckipv6_common::SignalingMessage;
+
+        let harness = TestHarness::new("coordinator-takeover-wakeup").await;
+        harness
+            .configs
+            .create_network("takeover-wakeup", "ws://127.0.0.1:6666", true)
+            .expect("create network configuration");
+        let network_id = NetworkId::from_public_key(b"coordinator-takeover-wakeup");
+        harness
+            .configs
+            .set_network_id_metadata("takeover-wakeup", network_id.as_str())
+            .expect("bind network id");
+
+        let (signaling, mut outbound) = SignalingClient::test_channel();
+        let signaling = Arc::new(signaling);
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let (routing_tx, _routing_rx) = mpsc::unbounded_channel();
+        let data_plane = tokio::spawn(async move {
+            let _ = shutdown_rx.changed().await;
+            NetworkRuntimeExit {
+                cleanup: RuntimeCleanupOutcome::default(),
+                retained_owner: None,
+            }
+        });
+
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (wakeup_tx, wakeup_rx) = mpsc::unbounded_channel();
+        let actor = NetworkRuntimeActor {
+            configs: harness.configs.clone(),
+            options: RuntimeOptions::default(),
+            state: harness.state.clone(),
+            events: harness.events.clone(),
+            lifecycle: harness.lifecycle.clone(),
+            registry: harness.registry.clone(),
+            services: harness.services.clone(),
+            launcher: Arc::new(harness.fake.clone()),
+            sessions: HashMap::from([(
+                "takeover-wakeup".to_string(),
+                NetworkRuntimeSession {
+                    network_id: Some(network_id.to_string()),
+                    signaling: Some(signaling.clone()),
+                    coordinator_recovery: None,
+                    coordinator_emergency: None,
+                    coordinator_continuity: CoordinatorContinuityMetrics::default(),
+                    tun_name: "fuckipv6-takeover-wakeup".into(),
+                    routing_control: routing_tx,
+                    shutdown: shutdown_tx.clone(),
+                    handle: data_plane,
+                },
+            )]),
+            retained_owners: HashMap::new(),
+            cleanup_failures: BTreeMap::new(),
+            completed_cleanup: BTreeMap::new(),
+            timeouts: RuntimeTimeouts {
+                local_exit_update: Duration::ZERO,
+                ..RuntimeTimeouts::default()
+            },
+            coordinator_takeover_wakeups: Some(wakeup_rx),
+        };
+        let actor_task = tokio::spawn(run_actor(command_rx, actor));
+
+        let response_client = signaling.clone();
+        let expected_network_id = network_id.clone();
+        let responder = tokio::spawn(async move {
+            let status = CoordinatorCandidateStatus {
+                network_id: expected_network_id.clone(),
+                generated_at_unix_ms: 1_000,
+                config_state: CoordinatorCandidateConfigState::Missing,
+                config: None,
+                candidates: Vec::new(),
+                current_leader: None,
+                latest_term: None,
+                lease: CoordinatorLeaseStatus::no_term(),
+                control_plane: Default::default(),
+                emergency: CoordinatorEmergencyState::NoCandidatesConfigured,
+                emergency_leader: None,
+                latest_election: None,
+            };
+
+            // The regular first poll cannot arrive for at least 4.5 seconds.
+            // A queued reconnect wakeup must refresh authority well before that.
+            let request = timeout(Duration::from_secs(2), outbound.recv())
+                .await
+                .expect("reconnect wakeup did not refresh coordinator authority")
+                .expect("outbound signaling channel closed");
+            let SignalingMessage::CoordinatorCandidateStatusRequest {
+                network_id: requested,
+            } = request
+            else {
+                panic!("expected coordinator status request, got {request:?}");
+            };
+            assert_eq!(requested, expected_network_id);
+            assert!(response_client.route_coordinator_candidate_test_response(
+                SignalingMessage::CoordinatorCandidateStatusAck {
+                    status: status.clone(),
+                },
+            ));
+
+            let request = timeout(Duration::from_secs(2), outbound.recv())
+                .await
+                .expect("reconnect refresh did not request recovery authority")
+                .expect("outbound signaling channel closed");
+            let SignalingMessage::CoordinatorRecoveryRequest { report } = request else {
+                panic!("expected coordinator recovery request, got {request:?}");
+            };
+            assert_eq!(report.network_id, expected_network_id);
+            let recovery = CoordinatorRecoveryStatus {
+                network_id: expected_network_id.clone(),
+                stage: fuckipv6_common::domain::CoordinatorRecoveryStage::ReadOnly,
+                role: fuckipv6_common::domain::CoordinatorRecoveryRole::Candidate,
+                governance_writable: false,
+                health_checks_allowed: true,
+                data_plane_allowed: true,
+                authoritative_term: 0,
+                authoritative_fencing_token: fuckipv6_common::domain::FencingToken(0),
+                authoritative_leader: NodeId::from_public_key(b"reconnect-test-leader"),
+                authoritative_candidate_config_revision: 0,
+                authoritative_audit_sequence: 11,
+                reason_code: "coordinator.recovery.stale_old_leader".into(),
+            };
+            assert!(response_client.route_coordinator_candidate_test_response(
+                SignalingMessage::CoordinatorRecoveryResponse {
+                    response: fuckipv6_common::domain::CoordinatorRecoveryResponse {
+                        status,
+                        recovery,
+                        audit_entries: Vec::new(),
+                    },
+                },
+            ));
+        });
+
+        wakeup_tx
+            .send(())
+            .expect("coordinator takeover wakeup receiver closed");
+        responder.await.expect("responder task failed");
+
+        let operation = OperationGate::new()
+            .try_acquire()
+            .expect("acquire shutdown operation");
+        let (reply, response) = oneshot::channel();
+        command_tx
+            .send(RuntimeControlCommand::Shutdown {
+                _operation: operation,
+                reply,
+            })
+            .await
+            .expect("runtime actor command channel closed");
+        timeout(Duration::from_secs(2), response)
+            .await
+            .expect("runtime actor shutdown timed out")
+            .expect("runtime actor shutdown response closed")
+            .expect("runtime actor shutdown failed");
+        timeout(Duration::from_secs(2), actor_task)
+            .await
+            .expect("runtime actor did not exit")
+            .expect("runtime actor task failed");
+        harness.shutdown().await;
+    }
+
     #[tokio::test]
     async fn emergency_issue_ack_for_remote_leader_does_not_enable_local_authority() {
         use fuckipv6_common::domain::{
@@ -9586,6 +10664,7 @@ mod tests {
             cleanup_failures: BTreeMap::new(),
             completed_cleanup: BTreeMap::new(),
             timeouts: RuntimeTimeouts::default(),
+            coordinator_takeover_wakeups: None,
         };
 
         let response_client = signaling.clone();

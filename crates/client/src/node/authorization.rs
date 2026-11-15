@@ -618,6 +618,9 @@ fn is_network_governance(kind: NodeCommandKind) -> bool {
             | NodeCommandKind::BanClient
             | NodeCommandKind::UnbanClient
             | NodeCommandKind::UpdateNetworkAllocation
+            | NodeCommandKind::SubmitAdminRecovery
+            | NodeCommandKind::RevokeAdminRecovery
+            | NodeCommandKind::ExecuteAdminRecovery
     )
 }
 
@@ -816,7 +819,9 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::GetPolicyHistory
         | NodeCommandKind::GetTrafficPolicy
         | NodeCommandKind::GetTrafficPolicyHistory
-        | NodeCommandKind::GetCoordinatorCandidates => NodePermission::ViewState,
+        | NodeCommandKind::GetCoordinatorCandidates
+        | NodeCommandKind::GetAdminRecoveryStatus
+        | NodeCommandKind::ListAdminRecoveries => NodePermission::ViewState,
         NodeCommandKind::PreviewTrafficPolicy
         | NodeCommandKind::PreviewTrafficPolicyRollback
         | NodeCommandKind::ApplyTrafficPolicy
@@ -863,7 +868,10 @@ fn required_permission(kind: NodeCommandKind) -> NodePermission {
         | NodeCommandKind::RollbackPolicy
         | NodeCommandKind::TestPolicy
         | NodeCommandKind::UpdateCoordinatorCandidates
-        | NodeCommandKind::PublishCoordinatorCandidateDeclaration => NodePermission::ManageNetworks,
+        | NodeCommandKind::PublishCoordinatorCandidateDeclaration
+        | NodeCommandKind::SubmitAdminRecovery
+        | NodeCommandKind::RevokeAdminRecovery
+        | NodeCommandKind::ExecuteAdminRecovery => NodePermission::ManageNetworks,
     }
 }
 
@@ -937,7 +945,9 @@ fn policy_target_kind(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         | NodeCommandKind::PreviewMemberRemoval
         | NodeCommandKind::RefreshDiscoveryIndex
         | NodeCommandKind::RetryDiscoveryIndex
-        | NodeCommandKind::GetCoordinatorCandidates => (PolicyAction::Read, ResourceKind::Network),
+        | NodeCommandKind::GetCoordinatorCandidates
+        | NodeCommandKind::GetAdminRecoveryStatus
+        | NodeCommandKind::ListAdminRecoveries => (PolicyAction::Read, ResourceKind::Network),
         NodeCommandKind::GetConfiguration
         | NodeCommandKind::PreviewConfiguration
         | NodeCommandKind::GetConfigurationHistory => (PolicyAction::Read, ResourceKind::Keys),
@@ -974,6 +984,9 @@ fn policy_target_kind(kind: NodeCommandKind) -> (PolicyAction, ResourceKind) {
         | NodeCommandKind::UpdateCoordinatorCandidates
         | NodeCommandKind::PublishCoordinatorCandidateDeclaration
         | NodeCommandKind::RestartNode => (PolicyAction::Update, ResourceKind::Network),
+        NodeCommandKind::SubmitAdminRecovery
+        | NodeCommandKind::RevokeAdminRecovery
+        | NodeCommandKind::ExecuteAdminRecovery => (PolicyAction::Recover, ResourceKind::Network),
         NodeCommandKind::CreateNetwork | NodeCommandKind::StartNode => {
             (PolicyAction::Create, ResourceKind::Network)
         }
@@ -1077,6 +1090,21 @@ fn command_network_targets(command: &NodeCommand) -> NetworkTargets {
             NetworkTargets::Named(vec![command.network_name.clone()])
         }
         NodeCommand::PublishCoordinatorCandidateDeclaration(command) => {
+            NetworkTargets::Named(vec![command.network_name.clone()])
+        }
+        NodeCommand::SubmitAdminRecovery(command) => {
+            NetworkTargets::Named(vec![command.network_name.clone()])
+        }
+        NodeCommand::GetAdminRecoveryStatus(command) => {
+            NetworkTargets::Named(vec![command.network_name.clone()])
+        }
+        NodeCommand::ListAdminRecoveries(command) => {
+            NetworkTargets::Named(vec![command.network_name.clone()])
+        }
+        NodeCommand::RevokeAdminRecovery(command) => {
+            NetworkTargets::Named(vec![command.network_name.clone()])
+        }
+        NodeCommand::ExecuteAdminRecovery(command) => {
             NetworkTargets::Named(vec![command.network_name.clone()])
         }
         NodeCommand::ListJoinRequests(command) => {

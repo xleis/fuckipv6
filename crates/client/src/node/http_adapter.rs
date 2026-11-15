@@ -1372,6 +1372,8 @@ fn status_for_command_result(result: &NodeCommandResult) -> StatusCode {
         | NodeCommandOutcome::TrafficPolicyRolledBack(_)
         | NodeCommandOutcome::TrafficPolicyTest(_)
         | NodeCommandOutcome::CoordinatorCandidates(_)
+        | NodeCommandOutcome::AdminRecoveryStatus(_)
+        | NodeCommandOutcome::AdminRecoveries(_)
         | NodeCommandOutcome::MemberRemovalPreview(_)
         | NodeCommandOutcome::MemberLifecycleChanged(_)
         | NodeCommandOutcome::Completed { .. } => StatusCode::OK,
@@ -1460,7 +1462,10 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         NodeCommand::SetNetworkRole(_) | NodeCommand::UpdateCoordinatorCandidates(_) => {
             OperationKind::NetworkRoleUpdate
         }
-        NodeCommand::PublishCoordinatorCandidateDeclaration(_) => OperationKind::NetworkApply,
+        NodeCommand::PublishCoordinatorCandidateDeclaration(_)
+        | NodeCommand::SubmitAdminRecovery(_)
+        | NodeCommand::RevokeAdminRecovery(_)
+        | NodeCommand::ExecuteAdminRecovery(_) => OperationKind::NetworkApply,
         NodeCommand::SetLocalExitCapability(command) if command.enabled => {
             OperationKind::CapabilityEnable
         }
@@ -1498,6 +1503,8 @@ fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::GetInvitationStatus(_)
         | NodeCommand::PreviewInvitation(_)
         | NodeCommand::GetCoordinatorCandidates(_)
+        | NodeCommand::GetAdminRecoveryStatus(_)
+        | NodeCommand::ListAdminRecoveries(_)
         | NodeCommand::GetConfigurationHistory => OperationKind::ConfigurationHistory,
         NodeCommand::GetPolicy
         | NodeCommand::PreviewPolicy(_)
@@ -1563,6 +1570,11 @@ fn operation_target(command: &NodeCommand, local_node_id: &NodeId) -> DomainObje
         NodeCommand::PublishCoordinatorCandidateDeclaration(command) => {
             network_target(&command.network_name)
         }
+        NodeCommand::SubmitAdminRecovery(command) => network_target(&command.network_name),
+        NodeCommand::GetAdminRecoveryStatus(command) => network_target(&command.network_name),
+        NodeCommand::ListAdminRecoveries(command) => network_target(&command.network_name),
+        NodeCommand::RevokeAdminRecovery(command) => network_target(&command.network_name),
+        NodeCommand::ExecuteAdminRecovery(command) => network_target(&command.network_name),
         NodeCommand::SetLocalExitCapability(_) => node_target(),
         NodeCommand::RebuildTun { network_name } => network_target(network_name),
         NodeCommand::BanClient(command) | NodeCommand::UnbanClient(command) => {

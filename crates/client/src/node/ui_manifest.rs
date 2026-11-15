@@ -504,7 +504,9 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         | NodeCommandKind::PreviewTrafficPolicyRollback
         | NodeCommandKind::GetTrafficPolicyHistory
         | NodeCommandKind::TestTrafficPolicy
-        | NodeCommandKind::GetCoordinatorCandidates => NodeUiAudit::none(),
+        | NodeCommandKind::GetCoordinatorCandidates
+        | NodeCommandKind::GetAdminRecoveryStatus
+        | NodeCommandKind::ListAdminRecoveries => NodeUiAudit::none(),
         NodeCommandKind::CreateNetwork => NodeUiAudit::record("network.create"),
         NodeCommandKind::UpdateNetworkProfile => NodeUiAudit::record("network.profile.update"),
         NodeCommandKind::PublishNetworkDiscovery => {
@@ -569,6 +571,15 @@ pub fn audit_for_command(command: NodeCommandKind) -> NodeUiAudit {
         }
         NodeCommandKind::PublishCoordinatorCandidateDeclaration => {
             NodeUiAudit::record("coordinator.candidate.declaration.publish")
+        }
+        NodeCommandKind::SubmitAdminRecovery => {
+            NodeUiAudit::record("network.admin_recovery.submit")
+        }
+        NodeCommandKind::RevokeAdminRecovery => {
+            NodeUiAudit::record("network.admin_recovery.revoke")
+        }
+        NodeCommandKind::ExecuteAdminRecovery => {
+            NodeUiAudit::record("network.admin_recovery.execute")
         }
         NodeCommandKind::Shutdown => NodeUiAudit::record("node.shutdown"),
     }
@@ -3132,9 +3143,12 @@ const fn action_group_for_command(command: NodeCommandKind) -> NodeUiActionGroup
         | NodeCommandKind::TestPolicy
         | NodeCommandKind::GetCoordinatorCandidates
         | NodeCommandKind::UpdateCoordinatorCandidates
-        | NodeCommandKind::PublishCoordinatorCandidateDeclaration => {
-            NodeUiActionGroup::Configuration
-        }
+        | NodeCommandKind::PublishCoordinatorCandidateDeclaration
+        | NodeCommandKind::SubmitAdminRecovery
+        | NodeCommandKind::GetAdminRecoveryStatus
+        | NodeCommandKind::ListAdminRecoveries
+        | NodeCommandKind::RevokeAdminRecovery
+        | NodeCommandKind::ExecuteAdminRecovery => NodeUiActionGroup::Configuration,
         NodeCommandKind::GetSnapshot | NodeCommandKind::GetDiagnostics => {
             NodeUiActionGroup::Inspect
         }

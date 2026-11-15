@@ -2439,6 +2439,9 @@ function NodeRuntime({
           : embeddedServices.map((service) => {
               const coordinator = service.coordinator_candidates;
               const controlPlane = coordinator?.control_plane;
+              const currentLeader = coordinator?.current_leader ?? null;
+              const latestTerm = coordinator?.latest_term ?? null;
+              const candidates = coordinator?.candidates ?? [];
               const emergencyLeader = coordinator?.emergency_leader;
               const unobserved = controlPlane == null;
               const stateLabel = controlPlane?.state === "available"
@@ -2488,8 +2491,11 @@ function NodeRuntime({
                   className="compact-row"
                   data-control-plane-state={controlPlane?.state ?? "unobserved"}
                   data-emergency-scope={emergencyScope}
+                  data-current-leader={currentLeader ?? "none"}
                   data-emergency-state={emergencyState}
                   data-governance-writable={writable ? "true" : "false"}
+                  data-latest-fencing-token={latestTerm?.fencing_token ?? "none"}
+                  data-latest-term={latestTerm?.term ?? "none"}
                   data-testid={`runtime-control-plane-${service.network_name}`}
                   key={service.network_name}
                 >
@@ -2505,6 +2511,65 @@ function NodeRuntime({
                       {label(locale, "runtime.control_plane.participants")}{" "}
                       {participants} · <code>{reasonCode}</code>
                     </small>
+                    <small data-testid={`runtime-coordinator-leader-${service.network_name}`}>
+                      {label(locale, "runtime.coordinator.leader")}{" "}
+                      {currentLeader ? (
+                        <code>{currentLeader}</code>
+                      ) : (
+                        label(locale, "runtime.coordinator.leader.none")
+                      )}
+                    </small>
+                    <small data-testid={`runtime-coordinator-term-${service.network_name}`}>
+                      {label(locale, "runtime.coordinator.latest_term")}{" "}
+                      {latestTerm ? (
+                        <>
+                          <code>{latestTerm.term}</code> ·{" "}
+                          {label(locale, "runtime.coordinator.fencing_token")}{" "}
+                          <code>{latestTerm.fencing_token}</code> ·{" "}
+                          {label(locale, "runtime.coordinator.leader")}{" "}
+                          <code>{latestTerm.leader}</code> ·{" "}
+                          {label(
+                            locale,
+                            `runtime.coordinator.phase.${latestTerm.phase}`,
+                          )}
+                        </>
+                      ) : (
+                        label(locale, "runtime.coordinator.latest_term.none")
+                      )}
+                    </small>
+                    {candidates.length === 0 ? (
+                      <small data-testid={`runtime-coordinator-candidates-${service.network_name}`}>
+                        {label(locale, "runtime.coordinator.candidates")}{" "}
+                        {label(locale, "runtime.coordinator.candidates.none")}
+                      </small>
+                    ) : (
+                      candidates.map((candidate) => (
+                        <small
+                          data-candidate-eligible={
+                            candidate.eligible_for_election ? "true" : "false"
+                          }
+                          data-candidate-health={candidate.health}
+                          data-testid={`runtime-coordinator-candidate-${service.network_name}-${candidate.node_id}`}
+                          key={candidate.node_id}
+                        >
+                          {label(locale, "runtime.coordinator.candidates")}{" "}
+                          <code>{candidate.node_id}</code> ·{" "}
+                          {label(
+                            locale,
+                            `runtime.coordinator.health.${candidate.health}`,
+                          )}{" "}
+                          · {label(locale, "runtime.coordinator.eligible")}{" "}
+                          {label(
+                            locale,
+                            candidate.eligible_for_election
+                              ? "runtime.coordinator.eligible.yes"
+                              : "runtime.coordinator.eligible.no",
+                          )}{" "}
+                          · {label(locale, "runtime.coordinator.reason")}{" "}
+                          <code>{candidate.reason_code}</code>
+                        </small>
+                      ))
+                    )}
                     {emergencyLeader ? (
                       <small
                         data-testid={`runtime-emergency-${service.network_name}`}

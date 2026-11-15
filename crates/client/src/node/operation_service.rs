@@ -708,7 +708,10 @@ pub(crate) fn operation_kind(command: &NodeCommand) -> OperationKind {
         NodeCommand::SetNetworkRole(_) | NodeCommand::UpdateCoordinatorCandidates(_) => {
             OperationKind::NetworkRoleUpdate
         }
-        NodeCommand::PublishCoordinatorCandidateDeclaration(_) => OperationKind::NetworkApply,
+        NodeCommand::PublishCoordinatorCandidateDeclaration(_)
+        | NodeCommand::SubmitAdminRecovery(_)
+        | NodeCommand::RevokeAdminRecovery(_)
+        | NodeCommand::ExecuteAdminRecovery(_) => OperationKind::NetworkApply,
         NodeCommand::SetLocalExitCapability(command) if command.enabled => {
             OperationKind::CapabilityEnable
         }
@@ -754,6 +757,8 @@ pub(crate) fn operation_kind(command: &NodeCommand) -> OperationKind {
         | NodeCommand::GetInvitationStatus(_)
         | NodeCommand::PreviewInvitation(_)
         | NodeCommand::GetCoordinatorCandidates(_)
+        | NodeCommand::GetAdminRecoveryStatus(_)
+        | NodeCommand::ListAdminRecoveries(_)
         | NodeCommand::GetConfigurationHistory => OperationKind::ConfigurationHistory,
     }
 }
@@ -808,6 +813,11 @@ pub(crate) fn operation_target(command: &NodeCommand, local_node_id: &NodeId) ->
         NodeCommand::PublishCoordinatorCandidateDeclaration(command) => {
             network_target(&command.network_name)
         }
+        NodeCommand::SubmitAdminRecovery(command) => network_target(&command.network_name),
+        NodeCommand::GetAdminRecoveryStatus(command) => network_target(&command.network_name),
+        NodeCommand::ListAdminRecoveries(command) => network_target(&command.network_name),
+        NodeCommand::RevokeAdminRecovery(command) => network_target(&command.network_name),
+        NodeCommand::ExecuteAdminRecovery(command) => network_target(&command.network_name),
         NodeCommand::SetLocalExitCapability(_) => node_target(),
         NodeCommand::BanClient(command) | NodeCommand::UnbanClient(command) => {
             network_target(&command.network_name)

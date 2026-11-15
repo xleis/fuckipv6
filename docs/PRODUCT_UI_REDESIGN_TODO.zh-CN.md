@@ -3280,20 +3280,20 @@ netns/iptables 测试覆盖。三端 Relay UI 的权限、网络选择、健康�
 
 目标：在候选组内实现可验证的任期与接管；无多数时不选举，紧急 Leader 只获得临时运行权限，数据面不无条件中断。
 
-### W14-01 候选组与选举配置 `[ ]`
+### W14-01 候选组与选举配置 `[x]`
 
-> 当前进展（2026-11-15）：后端已实现管理员签名的版本化候选组（成员、优先级、生效/过期时间）、候选自签名声明（公网端点、Relay 可达性、资源、意愿、revision 绑定和短时有效期）、成员资格与签名校验、willingness 拒绝，以及候选全失时的 `AllCandidatesUnavailable` 紧急状态。正常 Coordinator 任期只从当前候选组中愿意参选的候选产生，普通成员不会仅凭声明取得正常 Leader 资格。候选配置更新使用并发 CAS，重复更新幂等，重启和旧版存储升级后仍持久。UI 仍未完整展示候选列表/健康、当前 Leader 和最近任期：GPUI 候选命令 notice 只显示配置状态、候选数量、Leader 和紧急状态，未显示候选健康和 `latest_term`；WebUI runtime 只显示 control-plane、quorum、reason 和 emergency。因此本项保持未完成。
+> 当前进展（2026-11-15）：后端已实现管理员签名的版本化候选组（成员、优先级、生效/过期时间）、候选自签名声明（公网端点、Relay 可达性、资源、意愿、revision 绑定和短时有效期）、成员资格与签名校验、willingness 拒绝，以及候选全失时的 `AllCandidatesUnavailable` 紧急状态。正常 Coordinator 任期只从当前候选组中愿意参选的候选产生，普通成员不会仅凭声明取得正常 Leader 资格。候选配置更新使用并发 CAS，重复更新幂等，重启和旧版存储升级后仍持久。UI 已补齐三端展示：GPUI node runtime、WebUI runtime 和 Android `node_runtime` 均展示当前 Leader、最近任期的 term/fencing token/Leader/phase，以及每个候选的 health、eligible 和 reason code；Android 通过 `CoordinatorPageData.fromSnapshot()` 投影并由 `CoordinatorPageContent()` 渲染。
 
 - [x] 网络管理员配置候选成员组和优先级；
 - [x] 候选节点声明公网可达性、资源和意愿；
 - [x] 普通成员不会被自动选为 Coordinator；
 - [x] 候选配置有版本、签名和生效时间；
-- [ ] UI 展示候选、健康、当前 Leader 和最近任期；
+- [x] UI 展示候选、健康、当前 Leader 和最近任期；
 - [x] 节点 owner 可拒绝本机候选角色；
 - [x] 候选全失时进入明确的紧急状态；
 - [x] 覆盖候选变更并发和离线更新。
 
-**证据**：`candidate_config_signatures_are_bound_to_permissions_and_membership`、`candidate_declarations_are_self_signed_and_revision_bound` 和 `unwilling_or_missing_candidates_never_gain_election_eligibility` 覆盖签名、成员资格、revision、声明有效期和 willingness；`concurrent_revision_updates_have_exactly_one_winner`、`config_cas_idempotency_and_restart_are_durable` 和 `legacy_v2_candidate_store_loads_and_upgrades_on_next_write` 覆盖并发、幂等、重启持久化与离线存储升级。本轮重跑 `domain::coordinator` 33 passed、`signaling::coordinator_candidates` 36 passed。
+**证据**：`candidate_config_signatures_are_bound_to_permissions_and_membership`、`candidate_declarations_are_self_signed_and_revision_bound` 和 `unwilling_or_missing_candidates_never_gain_election_eligibility` 覆盖签名、成员资格、revision、声明有效期和 willingness；`concurrent_revision_updates_have_exactly_one_winner`、`config_cas_idempotency_and_restart_are_durable` 和 `legacy_v2_candidate_store_loads_and_upgrades_on_next_write` 覆盖并发、幂等、重启持久化与离线存储升级。本轮重跑 `domain::coordinator` 33 passed、`signaling::coordinator_candidates` 37 passed。UI 回归：`cargo test -p fuckipv6-client gpui::view_model::tests --lib` 73 passed；WebUI `npm run lint`、`npm run typecheck`、`npm test -- --run`（327 passed）和 `npm run build` 通过；Android `:app:testDebugUnitTest`（12 passed）以及 `:app:lintDebug :app:assembleDebug` 通过。
 
 **验收**：节点身份与候选资格可验证；不存在通过伪造健康或自荐直接成为 Leader 的路径。
 
@@ -3310,24 +3310,24 @@ netns/iptables 测试覆盖。三端 Relay UI 的权限、网络选择、健康�
 - [x] 定义持久化与恢复语义；
 - [x] 完成任期回退和重放测试。
 
-**证据**：`terms_survive_restart_and_old_writes_are_rejected_and_audited` 验证任期跨重启、旧写拒绝和审计；`lease_renewal_extends_authority_and_expiry_enters_read_only`、`bounded_clock_rollback_marks_authority_read_only` 分别验证租约到期与时钟回拨边界；`concurrent_split_brain_successors_install_exactly_one_authority` 验证并发同任期安装只有一个权威；common `stale_terms_and_fencing_tokens_are_rejected_after_recovery`、`stale_and_expired_write_credentials_fail_closed` 和 `lease_projection_distinguishes_renewal_expiry_and_clock_skew` 覆盖恢复、旧凭据、重放和租约投影。本轮 common coordinator 33 passed、Coordinator candidate 36 passed。
+**证据**：`terms_survive_restart_and_old_writes_are_rejected_and_audited` 验证任期跨重启、旧写拒绝和审计；`lease_renewal_extends_authority_and_expiry_enters_read_only`、`bounded_clock_rollback_marks_authority_read_only` 分别验证租约到期与时钟回拨边界；`concurrent_split_brain_successors_install_exactly_one_authority` 验证并发同任期安装只有一个权威；common `stale_terms_and_fencing_tokens_are_rejected_after_recovery`、`stale_and_expired_write_credentials_fail_closed` 和 `lease_projection_distinguishes_renewal_expiry_and_clock_skew` 覆盖恢复、旧凭据、重放和租约投影。本轮 common coordinator 33 passed、Coordinator candidate 37 passed。
 
 **验收**：任何旧 Leader 无法覆盖新任期；所有治理写入可识别权威任期。
 
 ### W14-03 正常多数接管 `[ ]`
 
-> 当前进展（2026-11-15）：运行时每 5 秒读取一次权威候选状态和恢复快照，再决定 proposal、vote、timeout、紧急签发或续租；动作失败不会在本地推断成功，下一轮会重新读取权威状态。候选偏好、健康、当前任期/租约和严格多数共同约束新 Leader 安装，迟到票、重复票和冲突票均失败关闭。已具备 `quorum` 和 `latest_election` 的候选、票集合、阶段与结果投影，长时间数据面会话也能跨真实 term 1 → term 2 切换保持。仍缺显式选举退避/抖动、自研共识协议的正式审计结论，以及由真实客户端运行时自动完成后台节点故障接管的完整 E2E，因此本项保持未完成。
+> 当前进展（2026-11-15）：运行时以 5 秒为基础间隔读取权威候选状态和恢复快照，再决定 proposal、vote、timeout、紧急签发或续租；动作失败不会在本地推断成功，失败后按 5/10/20/40/60 秒有界退避并在成功时重置。轮询抖动由稳定 identity 确定性生成 ±10%，避免客户端同步重试且保持事故可复现。信令 `Reconnected` 会经 wakeup channel 立即刷新候选权威状态和恢复快照，不等待下一轮常规轮询。候选偏好、健康、当前任期/租约和严格多数共同约束新 Leader 安装，迟到票、重复票和冲突票均失败关闭。已具备 `quorum` 和 `latest_election` 的候选、票集合、阶段与结果投影，长时间数据面会话也能跨真实 term 1 → term 2 切换保持。真实后台运行时 E2E 已用两个独立 `run_actor`、两套节点身份和同一个持久化 store 验证：候选 A 声明过期后，B 自动提案 term 2、B/C 自动投票，经真实严格多数事务提交新 Leader，B/C runtime 在接管后保持存活。该路径发现并修复了 election commit 未原子失效旧 recovery/emergency 投影的问题，新增 `election_commit_invalidates_recovery_projections_from_the_previous_term` 回归。[内部安全审计](W14_COORDINATOR_PROTOCOL_AUDIT.zh-CN.md)确认了严格多数、旧任期/旧 token、迟到/重复/冲突票、配置 revision、TOCTOU、租约/fencing 和失败关闭路径，但它不是独立正式审计。仍缺自研共识协议的正式外部审计结论，因此本项保持未完成。
 
 - [x] Leader 失联后按候选组和健康状态发起选举；
 - [x] 仅在达到配置多数/法定人数时产生新 Leader；
 - [ ] 选择协议采用经过评估的成熟实现或经过审计的自研设计；
-- [ ] 选举过程有超时、退避和幂等重试；
-- [ ] 客户端重连后刷新 Leader 与任期中继信息；
+- [x] 选举过程有超时、退避和幂等重试；
+- [x] 客户端重连后刷新 Leader 与任期中继信息；
 - [x] 数据面连接不因控制面选举无条件中断；
-- [ ] 完成后台节点故障接管 E2E；
+- [x] 完成后台节点故障接管 E2E；
 - [x] 记录选举阶段、参与者集合和结果。
 
-**证据**：client takeover 决策测试 12 passed，覆盖首选/非首选候选、候选人等待、过期 proposal 超时和 malformed proposal 失败关闭；Coordinator `three_candidate_election_commits_only_after_strict_majority`、`persisted_election_commits_only_after_strict_majority`、`election_timeout_is_durable_and_rejects_late_votes` 和 `election_session_requires_strict_majority_and_is_idempotent` 验证严格多数、持久化、超时与幂等；`w14_fault_injection_matrix_records_state_machine_trajectory` 记录阶段、参与者集合和结果。`coordinator_takeover_poll_preserves_the_live_data_plane_session` 验证控制面故障/恢复轮询不终止数据面；`quic_p2p_mesh_long_lived_stream_spans_real_coordinator_term_takeover` 验证 term 1 → term 2 期间 96 个媒体尺寸 frame 按序到达且 QUIC 连接未重建。当前实现只有固定 5 秒轮询，没有显式 backoff/jitter，不能把“超时、退避和幂等重试”整项勾选。
+**证据**：client takeover 决策测试 14 passed，runtime 接管测试 3 passed，覆盖首选/非首选候选、候选人等待、过期 proposal 超时、malformed proposal、有界指数退避、确定性 jitter、重连立即刷新、数据面会话保持和后台候选故障自动接管；`takeover_poll_backoff_is_deterministic_bounded_and_resettable` 验证 5/10/20/40/60 秒上限及成功重置，`takeover_poll_jitter_differs_by_stable_seed` 验证稳定 identity 的抖动差异，`coordinator_takeover_reconnect_wakeup_refreshes_without_waiting_for_poll` 在 2 秒内观察到状态与恢复请求。`coordinator_takeover_background_candidate_failure_e2e` 使用 B/C 两个真实后台 runtime、独立身份和真实持久化 store，在 A 的声明过期后自动提案、投票并提交 term 2；验证 fencing token 2、B 为新 Leader、lease 可写、election committed，且两个 runtime 保持存活。Coordinator `three_candidate_election_commits_only_after_strict_majority`、`persisted_election_commits_only_after_strict_majority`、`election_timeout_is_durable_and_rejects_late_votes` 和 `election_session_requires_strict_majority_and_is_idempotent` 验证严格多数、持久化、超时与幂等；`election_commit_invalidates_recovery_projections_from_the_previous_term` 验证新任期提交会原子清除旧 recovery/emergency authority 投影，后续持久化读取和恢复不会因旧快照失败；`w14_fault_injection_matrix_records_state_machine_trajectory` 记录阶段、参与者集合和结果。`coordinator_takeover_poll_preserves_the_live_data_plane_session` 验证控制面故障/恢复轮询不终止数据面；`quic_p2p_mesh_long_lived_stream_spans_real_coordinator_term_takeover` 验证 term 1 → term 2 期间 96 个媒体尺寸 frame 按序到达且 QUIC 连接未重建。内部审计与残余风险见 `docs/W14_COORDINATOR_PROTOCOL_AUDIT.zh-CN.md`；正式独立审计仍未完成。
 
 **验收**：正常多数接管可重复、可观察，且不会产生双 Leader 写入。
 

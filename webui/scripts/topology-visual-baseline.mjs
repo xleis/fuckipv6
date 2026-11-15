@@ -715,7 +715,23 @@ async function clickElement(session, expression, description) {
 
 async function typeTopologyFilter(session, value) {
   const input = `.topology-filters input[type='search']`;
-  await clickElement(session, `document.querySelector(${JSON.stringify(input)})`, "topology search input");
+  await clickElement(
+    session,
+    `document.querySelector(".topology-options > summary")`,
+    "topology options trigger",
+  );
+  await waitFor(
+    session,
+    `document.querySelector(".topology-options")?.open === true &&
+      Boolean(document.querySelector(${JSON.stringify(input)}))`,
+    "topology options panel",
+    5_000,
+  );
+  await clickElement(
+    session,
+    `document.querySelector(${JSON.stringify(input)})`,
+    "topology search input",
+  );
   await session.send("Input.insertText", { text: value });
   await waitFor(
     session,
@@ -727,6 +743,11 @@ async function typeTopologyFilter(session, value) {
     })()`,
     "filtered topology graph",
     5_000,
+  );
+  await clickElement(
+    session,
+    `document.querySelector(".topology-options > summary")`,
+    "topology options trigger",
   );
 }
 

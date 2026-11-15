@@ -967,6 +967,11 @@ async function topologySemantics(session) {
           presentation_state: view?.getAttribute("data-topology-state"),
           rect: rect(view),
         },
+        stage: {
+          rect: rect(document.querySelector(".topology-stage")),
+          footer: rect(document.querySelector(".topology-canvas-footer")),
+        },
+        insights: rect(document.querySelector(".topology-insights")),
         canvas: {
           layout_pending: canvas?.getAttribute("data-layout-pending"),
           rendered_nodes: Number(canvas?.getAttribute("data-rendered-nodes")),

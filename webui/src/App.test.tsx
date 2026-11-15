@@ -54,14 +54,6 @@ import {
 } from "./api/owner-audit";
 import { installTestI18nRuntime } from "./test/runtime";
 
-function actionHead(container: HTMLElement, actionId: string): HTMLElement {
-  return within(container)
-    .getAllByRole("button", {
-      name: `translated:action.${actionId}`,
-    })
-    .find((button) => button.hasAttribute("aria-expanded"))!;
-}
-
 function actionSubmitButton(
   container: HTMLElement,
   actionId: string,
@@ -71,6 +63,45 @@ function actionSubmitButton(
       name: `translated:action.${actionId}`,
     })
     .find((button) => !button.hasAttribute("aria-expanded"))!;
+}
+
+async function openPageAction(
+  user: ReturnType<typeof userEvent.setup>,
+  actionId: string,
+): Promise<HTMLElement> {
+  const actionName = `translated:action.${actionId}`;
+  const existing = screen.queryByTestId(`action-card-${actionId}`);
+  if (existing) return existing;
+  const surface = await screen.findByTestId("page-command-surface");
+  const direct = within(surface)
+    .getAllByRole("button")
+    .find((button) => {
+      const accessibleName =
+        button.getAttribute("aria-label") ?? button.textContent?.trim();
+      return accessibleName === actionName;
+    });
+  if (direct) {
+    await user.click(direct);
+    return screen.findByTestId(`action-card-${actionId}`);
+  }
+  const menuButton = within(surface).getByRole("button", {
+    name: "translated:common.more_actions",
+  });
+  if (menuButton.getAttribute("aria-expanded") !== "true") {
+    await user.click(menuButton);
+  }
+  const menuItem = await waitFor(() => {
+    const menu = screen.getByRole("menu", {
+      name: "translated:common.actions_panel_title",
+    });
+    const item = within(menu)
+      .getAllByRole("menuitem")
+      .find((candidate) => candidate.textContent?.includes(actionName));
+    if (!item) throw new Error(`page action not found: ${actionId}`);
+    return item;
+  });
+  await user.click(menuItem);
+  return screen.findByTestId(`action-card-${actionId}`);
 }
 
 vi.mock("./api/client", async (importOriginal) => {
@@ -303,6 +334,12 @@ class SilentWebSocket {
       listener(event);
     }
   }
+}
+
+function mockViewportWidth(width: number): void {
+  vi.spyOn(document.documentElement, "clientWidth", "get").mockReturnValue(
+    width,
+  );
 }
 
 function renderApp() {
@@ -694,19 +731,52 @@ function mockConfigurationCommands(): void {
   );
 }
 
-async function expectModuleTabs(module: string, tabs: string[]): Promise<void> {
-  const user = userEvent.setup();
+async function expectModulePages(
+  user: ReturnType<typeof userEvent.setup>,
+  module: string,
+  pages: string[],
+): Promise<void> {
   await user.click(
     screen.getByRole("button", { name: `translated:nav.${module}` }),
   );
-  const tablist = screen.getByRole("tablist", {
-    name: "translated:common.page_sections",
-  });
+  if (pages.length === 1) {
+    expect(document.querySelector(".page-switcher")).not.toBeInTheDocument();
+    return;
+  }
+  const switcher = document.querySelector<HTMLDetailsElement>(".page-switcher");
+  expect(switcher).not.toBeNull();
+  const trigger = switcher!.querySelector("summary");
+  expect(trigger).not.toBeNull();
+  await user.click(trigger!);
   expect(
-    within(tablist)
-      .getAllByRole("tab")
-      .map((tab) => tab.textContent),
-  ).toEqual(tabs.map((tab) => `translated:nav.${tab}`));
+    within(switcher!)
+      .getAllByRole("menuitemradio")
+      .map((item) => item.textContent),
+  ).toEqual(pages.map((page) => `translated:nav.${page}`));
+  await user.click(trigger!);
+}
+
+async function selectModulePage(
+  user: ReturnType<typeof userEvent.setup>,
+  module: string,
+  page: string,
+): Promise<void> {
+  await user.click(
+    screen.getByRole("button", { name: `translated:nav.${module}` }),
+  );
+  const switcher = document.querySelector<HTMLDetailsElement>(".page-switcher");
+  if (!switcher) {
+    expect(page).toBe(module);
+    return;
+  }
+  const trigger = switcher.querySelector("summary");
+  expect(trigger).not.toBeNull();
+  await user.click(trigger!);
+  await user.click(
+    within(switcher).getByRole("menuitemradio", {
+      name: `translated:nav.${page}`,
+    }),
+  );
 }
 
 beforeEach(() => {
@@ -743,6 +813,7 @@ describe("React WebUI shell", () => {
 
   it("renders five modules and all thirteen manifest-backed secondary pages", async () => {
     authenticate();
+    const user = userEvent.setup();
     renderApp();
 
     expect(
@@ -754,21 +825,21 @@ describe("React WebUI shell", () => {
       }),
     ).toHaveLength(5);
 
-    await expectModuleTabs("overview", ["overview"]);
-    await expectModuleTabs("nodes", [
+    await expectModulePages(user, "overview", ["overview"]);
+    await expectModulePages(user, "nodes", [
       "peers",
       "node_runtime",
       "routing",
       "identity",
     ]);
-    await expectModuleTabs("networks", [
+    await expectModulePages(user, "networks", [
       "networks",
       "topology",
       "exit_node",
       "relay",
     ]);
-    await expectModuleTabs("activity", ["traffic", "activity", "logs"]);
-    await expectModuleTabs("settings", ["settings"]);
+    await expectModulePages(user, "activity", ["traffic", "activity", "logs"]);
+    await expectModulePages(user, "settings", ["settings"]);
   });
 
   it("shows verifiable identity details with rotation impact and a recovery entry", async () => {
@@ -785,12 +856,7 @@ describe("React WebUI shell", () => {
     renderApp();
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
-    await user.click(
-      screen.getByRole("button", { name: "translated:nav.nodes" }),
-    );
-    await user.click(
-      screen.getByRole("tab", { name: "translated:nav.identity" }),
-    );
+    await selectModulePage(user, "nodes", "identity");
 
     expect(
       await screen.findByRole("heading", { name: "translated:page.identity" }),
@@ -867,32 +933,25 @@ describe("React WebUI shell", () => {
     renderApp();
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
-    await user.click(
-      screen.getByRole("button", { name: "translated:nav.nodes" }),
-    );
-    await user.click(
-      screen.getByRole("tab", { name: "translated:nav.identity" }),
-    );
-    const panel = await screen.findByRole("complementary", {
-      name: "translated:common.actions_panel_title",
-    });
-    await user.click(actionHead(panel, "rotate_node_identity"));
+    await selectModulePage(user, "nodes", "identity");
+    const actionCard = await openPageAction(user, "rotate_node_identity");
     expect(
-      within(panel).getByRole("textbox", {
+      within(actionCard).getByRole("textbox", {
         name: "translated:field.expected_fingerprint",
       }),
     ).toHaveValue(oldFingerprint);
-    await user.click(actionSubmitButton(panel, "rotate_node_identity"));
-    const dialog = await screen.findByRole("dialog");
+    await user.click(actionSubmitButton(actionCard, "rotate_node_identity"));
+    const dialog = await screen.findByTestId("action-confirmation");
     await user.click(
       within(dialog).getByRole("button", {
         name: "translated:common.confirm_action",
       }),
     );
 
-    expect(
-      await within(panel).findByText("translated:outcome.identity_rotated"),
-    ).toBeInTheDocument();
+    const operationStatus = await screen.findByTestId("operation-status");
+    expect(operationStatus).toHaveTextContent(
+      "translated:operation.state.succeeded",
+    );
     expect(screen.getByText("node-rotated")).toBeInTheDocument();
     expect(screen.getByText(newFingerprint)).toBeInTheDocument();
     expect(screen.queryByText("node-current")).not.toBeInTheDocument();
@@ -948,12 +1007,7 @@ describe("React WebUI shell", () => {
     renderApp();
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
-    await user.click(
-      screen.getByRole("button", { name: "translated:nav.nodes" }),
-    );
-    await user.click(
-      screen.getByRole("tab", { name: "translated:nav.node_runtime" }),
-    );
+    await selectModulePage(user, "nodes", "node_runtime");
 
     const interfaces = await screen.findByTestId("runtime-interfaces");
     expect(within(interfaces).getByText("fk-home")).toBeInTheDocument();
@@ -1022,17 +1076,9 @@ describe("React WebUI shell", () => {
     renderApp();
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
-    await user.click(
-      screen.getByRole("button", { name: "translated:nav.nodes" }),
-    );
-    await user.click(
-      screen.getByRole("tab", { name: "translated:nav.node_runtime" }),
-    );
-    const panel = await screen.findByRole("complementary", {
-      name: "translated:common.actions_panel_title",
-    });
-    await user.click(actionHead(panel, "get_node_diagnostics"));
-    await user.click(actionSubmitButton(panel, "get_node_diagnostics"));
+    await selectModulePage(user, "nodes", "node_runtime");
+    const actionCard = await openPageAction(user, "get_node_diagnostics");
+    await user.click(actionSubmitButton(actionCard, "get_node_diagnostics"));
     const diagnosticsPanel = await screen.findByTestId("runtime-diagnostics");
     await waitFor(() =>
       expect(diagnosticsPanel).toHaveTextContent("diagnostic-w7-05"),
@@ -1189,17 +1235,9 @@ describe("React WebUI shell", () => {
     renderApp();
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
-    await user.click(
-      screen.getByRole("button", { name: "translated:nav.nodes" }),
-    );
-    await user.click(
-      screen.getByRole("tab", { name: "translated:nav.node_runtime" }),
-    );
-    const panel = await screen.findByRole("complementary", {
-      name: "translated:common.actions_panel_title",
-    });
-    await user.click(actionHead(panel, "get_node_diagnostics"));
-    await user.click(actionSubmitButton(panel, "get_node_diagnostics"));
+    await selectModulePage(user, "nodes", "node_runtime");
+    const actionCard = await openPageAction(user, "get_node_diagnostics");
+    await user.click(actionSubmitButton(actionCard, "get_node_diagnostics"));
     await waitFor(() =>
       expect(waitForOperation).toHaveBeenCalledWith(
         "op-cancel-diagnostics",
@@ -1337,6 +1375,50 @@ describe("React WebUI shell", () => {
     authenticate({
       ...populatedSnapshot,
       lifecycle: { ...populatedSnapshot.lifecycle, phase: "running" },
+      memberships: [
+        {
+          network_name: "home",
+          network_id: "net_home_routing",
+          node_id: "node-visual-01",
+          state: "active",
+          role: "member",
+          local_policy_revision: 4,
+          network_policy_revision: 4,
+          privacy_policy_revision: 2,
+          member_limit: 16,
+          exit_contribution: "not_required",
+          exit_contribution_scope: "all_members",
+          terms_hash: null,
+          current_terms: null,
+          current_terms_hash: null,
+          policy_confirmation_required: false,
+          acknowledged_at_unix_ms: null,
+          created_at_unix_ms: 1_700_000_000_000,
+          updated_at_unix_ms: 1_700_000_100_000,
+          suspension_reason: null,
+        },
+        {
+          network_name: "studio",
+          network_id: "net_studio_routing",
+          node_id: "node-visual-01",
+          state: "active",
+          role: "member",
+          local_policy_revision: 4,
+          network_policy_revision: 4,
+          privacy_policy_revision: 2,
+          member_limit: 16,
+          exit_contribution: "not_required",
+          exit_contribution_scope: "all_members",
+          terms_hash: null,
+          current_terms: null,
+          current_terms_hash: null,
+          policy_confirmation_required: false,
+          acknowledged_at_unix_ms: null,
+          created_at_unix_ms: 1_700_000_000_000,
+          updated_at_unix_ms: 1_700_000_100_000,
+          suspension_reason: null,
+        },
+      ],
       networks: [...populatedSnapshot.networks, officeNetwork, rejectNetwork],
       configuration: {
         networks: [
@@ -1346,17 +1428,13 @@ describe("React WebUI shell", () => {
         ],
       },
       routing_summaries: routingSummaries,
+      traffic_routing_page: trafficRoutingPageFixture(),
     });
     const user = userEvent.setup();
     renderApp();
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
-    await user.click(
-      screen.getByRole("button", { name: "translated:nav.nodes" }),
-    );
-    await user.click(
-      screen.getByRole("tab", { name: "translated:nav.node_runtime" }),
-    );
+    await selectModulePage(user, "nodes", "node_runtime");
 
     const routing = await screen.findByTestId("runtime-routing");
     expect(routing.querySelectorAll("[data-routing-network]")).toHaveLength(4);
@@ -1409,9 +1487,9 @@ describe("React WebUI shell", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByRole("combobox", {
-        name: "translated:common.current_network",
+        name: "translated:traffic.routing.test.network",
       }),
-    ).toHaveValue("studio");
+    ).toHaveValue("net_studio_routing");
   });
 
   it("mounts one authoritative traffic workflow and no duplicate exit-node editor", async () => {
@@ -1423,12 +1501,7 @@ describe("React WebUI shell", () => {
     const { container } = renderApp();
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
-    await user.click(
-      screen.getByRole("button", { name: "translated:nav.nodes" }),
-    );
-    await user.click(
-      screen.getByRole("tab", { name: "translated:nav.routing" }),
-    );
+    await selectModulePage(user, "nodes", "routing");
 
     expect(
       await screen.findByRole("heading", { name: "translated:page.routing" }),
@@ -1436,24 +1509,20 @@ describe("React WebUI shell", () => {
     expect(
       container.querySelectorAll(".traffic-routing-workspace"),
     ).toHaveLength(1);
-    const actionPanel = container.querySelector(
-      '[data-ui-region="action-panel"]',
-    );
-    expect(actionPanel).not.toBeNull();
+    const commandSurface = await screen.findByTestId("page-command-surface");
+    expect(commandSurface).toBeInTheDocument();
+    expect(
+      container.querySelector('[data-ui-region="action-panel"]'),
+    ).toBeNull();
     const routingPage = manifest.pages.find((page) => page.id === "routing");
     const trafficActionLabels = (routingPage?.actions ?? [])
       .filter((action) => action.id.includes("traffic_policy"))
       .map((action) => `translated:${action.label_key}`);
     for (const label of trafficActionLabels) {
-      expect(within(actionPanel as HTMLElement).queryByText(label)).toBeNull();
+      expect(within(commandSurface).queryByText(label)).toBeNull();
     }
 
-    await user.click(
-      screen.getByRole("button", { name: "translated:nav.networks" }),
-    );
-    await user.click(
-      screen.getByRole("tab", { name: "translated:nav.exit_node" }),
-    );
+    await selectModulePage(user, "networks", "exit_node");
     await screen.findByRole("heading", { name: "translated:page.exit_node" });
     expect(container.querySelector(".traffic-routing-workspace")).toBeNull();
     expect(container.querySelector("[data-routing-authority]")).toBeNull();
@@ -1681,12 +1750,7 @@ describe("React WebUI shell", () => {
     const { container } = renderApp();
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
-    await user.click(
-      screen.getByRole("button", { name: "translated:nav.networks" }),
-    );
-    await user.click(
-      screen.getByRole("tab", { name: "translated:nav.exit_node" }),
-    );
+    await selectModulePage(user, "networks", "exit_node");
 
     expect(
       await screen.findByRole("heading", { name: "translated:page.exit_node" }),
@@ -1853,7 +1917,117 @@ describe("React WebUI shell", () => {
     ).toBeNull();
   });
 
-  it("exposes the shared four-region shell with a persistent action panel", async () => {
+  it("uses the desktop sidebar at the 1024px navigation breakpoint", async () => {
+    mockViewportWidth(1024);
+    authenticate();
+    const { container } = renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    const shell = container.querySelector<HTMLElement>(".app-shell");
+    expect(shell).toHaveAttribute("data-navigation-mode", "desktop");
+    expect(shell?.querySelector(".primary-nav:not(.drawer)")).toBeInTheDocument();
+    expect(container.querySelector(".bottom-navigation")).toBeNull();
+    expect(
+      screen.queryByRole("button", {
+        name: "translated:common.open_navigation",
+      }),
+    ).toBeNull();
+  });
+
+  it("uses a dismissible navigation drawer on compact viewports", async () => {
+    mockViewportWidth(960);
+    authenticate();
+    const user = userEvent.setup();
+    const { container } = renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    const shell = container.querySelector<HTMLElement>(".app-shell");
+    expect(shell).toHaveAttribute("data-navigation-mode", "compact");
+    expect(shell?.querySelector(".primary-nav:not(.drawer)")).toBeNull();
+    expect(container.querySelector(".bottom-navigation")).toBeNull();
+
+    const trigger = screen.getByRole("button", {
+      name: "translated:common.open_navigation",
+    });
+    await user.click(trigger);
+    expect(
+      screen.getByRole("dialog", {
+        name: "translated:common.main_navigation",
+      }),
+    ).toBeInTheDocument();
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+
+    await user.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", {
+          name: "translated:common.main_navigation",
+        }),
+      ).toBeNull(),
+    );
+    await waitFor(() => expect(trigger).toHaveFocus());
+
+    await user.click(trigger);
+    const backdrop = container.querySelector<HTMLElement>(
+      ".navigation-backdrop",
+    );
+    expect(backdrop).toBeInTheDocument();
+    fireEvent.click(backdrop as HTMLElement);
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", {
+          name: "translated:common.main_navigation",
+        }),
+      ).toBeNull(),
+    );
+  });
+
+  it("uses bottom navigation below the mobile breakpoint", async () => {
+    mockViewportWidth(599);
+    authenticate();
+    const { container } = renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
+    const shell = container.querySelector<HTMLElement>(".app-shell");
+    expect(shell).toHaveAttribute("data-navigation-mode", "mobile");
+    expect(shell?.querySelector(".primary-nav")).toBeNull();
+    expect(container.querySelector(".bottom-navigation")).toBeInTheDocument();
+    expect(
+      within(
+        container.querySelector<HTMLElement>(
+          ".bottom-navigation",
+        ) as HTMLElement,
+      ).getAllByRole("button"),
+    ).toHaveLength(5);
+    expect(
+      screen.queryByRole("button", {
+        name: "translated:common.open_navigation",
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps loading navigation responsive and dismissible", async () => {
+    mockViewportWidth(960);
+    authenticate();
+    vi.mocked(loadSnapshot).mockReturnValue(new Promise(() => undefined));
+    renderApp();
+
+    const trigger = await screen.findByRole("button", {
+      name: "translated:common.open_navigation",
+    });
+    expect(trigger.closest(".app-shell")).toHaveAttribute(
+      "data-navigation-mode",
+      "compact",
+    );
+    fireEvent.click(trigger);
+    expect(
+      screen.getByRole("dialog", {
+        name: "translated:common.main_navigation",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("exposes a single-column three-region shell without a persistent action panel", async () => {
     authenticate();
     const { container } = renderApp();
 
@@ -1862,20 +2036,25 @@ describe("React WebUI shell", () => {
       container.querySelectorAll<HTMLElement>("[data-ui-region]"),
     ).map((element) => element.dataset.uiRegion);
 
-    expect(regions).toEqual(["sidebar", "topbar", "content", "action-panel"]);
+    expect(regions).toEqual(["sidebar", "topbar", "content"]);
     const workspace = container.querySelector<HTMLElement>(".workspace");
     const content = workspace?.querySelector<HTMLElement>(
       '[data-ui-region="content"]',
     );
-    const actionPanel = workspace?.querySelector<HTMLElement>(
-      '[data-ui-region="action-panel"]',
-    );
     expect(content).toBeInTheDocument();
-    expect(actionPanel).toBeInTheDocument();
-    expect(content?.nextElementSibling).toBe(actionPanel);
+    expect(workspace?.querySelector(".actions-panel")).toBeNull();
+    expect(
+      workspace?.querySelector('[data-ui-region="action-panel"]'),
+    ).toBeNull();
+    expect(
+      content?.querySelectorAll(".page-heading-actions .primary-button").length,
+    ).toBeLessThanOrEqual(1);
+    expect(
+      await screen.findByTestId("page-command-surface"),
+    ).toBeInTheDocument();
   });
 
-  it("searches objects locally and navigates with network context", async () => {
+  it("searches objects locally and navigates to their pages", async () => {
     authenticate(populatedSnapshot);
     const user = userEvent.setup();
     renderApp();
@@ -1897,9 +2076,7 @@ describe("React WebUI shell", () => {
     expect(
       await screen.findByRole("heading", { name: "translated:page.networks" }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByLabelText("translated:common.current_network"),
-    ).toHaveValue("home");
+    expect(screen.getByTestId("joined-networks-section")).toBeInTheDocument();
     expect(search).toHaveValue("");
 
     await user.type(search, "peer-tokyo");
@@ -1911,9 +2088,38 @@ describe("React WebUI shell", () => {
     expect(
       await screen.findByRole("heading", { name: "translated:page.peers" }),
     ).toBeInTheDocument();
+    expect(screen.getByText("peer-tokyo")).toBeInTheDocument();
+  });
+
+  it("shows classified host permission failures with actionable recovery", async () => {
+    authenticate({
+      ...snapshot,
+      lifecycle: { ...snapshot.lifecycle, phase: "failed" },
+      last_error: {
+        code: "permission_denied",
+        category: "authorization",
+        message: "open /run/fuckipv6-dns.lock: Permission denied",
+        message_key: "error.network.permission_denied",
+        params: {},
+        network_name: "home",
+        retryable: false,
+        recovery: {
+          kind: "request_access",
+          hint_key: "recovery.request_access",
+        },
+      },
+    });
+    renderApp();
+
+    await screen.findByRole("heading", { name: "translated:page.overview" });
     expect(
-      screen.getByLabelText("translated:common.current_network"),
-    ).toHaveValue("home");
+      screen.getByText(
+        "translated:error.network.permission_denied · translated:recovery.request_access",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("translated:error.operation_unavailable"),
+    ).toBeNull();
   });
 
   it("supports global search keyboard focus, empty state, and clearing", async () => {
@@ -1962,7 +2168,7 @@ describe("React WebUI shell", () => {
     expect(search).toHaveValue("");
   });
 
-  it("uses the shared shell and action-panel tokens", () => {
+  it("uses the shared single-column shell and page-command styles", () => {
     const styles = readFileSync(
       resolve(process.cwd(), "src/styles.css"),
       "utf8",
@@ -1974,11 +2180,11 @@ describe("React WebUI shell", () => {
       "grid-template-rows: var(--topbar-h) auto minmax(0, 1fr)",
     );
     expect(styles).toMatch(
-      /\.workspace\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\) var\(--action-panel-compact-w\)/s,
+      /\.workspace\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\)/s,
     );
-    expect(styles).toMatch(
-      /@media \(min-width: 1280px\)[\s\S]*?\.workspace\s*\{[^}]*var\(--action-panel-w\)/,
-    );
+    expect(styles).toContain(".page-command-surface");
+    expect(styles).toContain(".action-workspace");
+    expect(styles).not.toContain("action-panel");
     expect(styles).not.toContain("--sidebar-width");
     expect(styles).not.toContain("--topbar-height");
   });
@@ -1988,7 +2194,7 @@ describe("React WebUI shell", () => {
       status: "uninitialized",
       value: snapshot,
       action: "start_node",
-      secondaryAction: null,
+      quickAction: null,
     },
     {
       status: "running",
@@ -2000,8 +2206,8 @@ describe("React WebUI shell", () => {
           permissions: ["view_state", "manage_networks", "stop_node"],
         },
       },
-      action: "stop_node",
-      secondaryAction: "restart_node",
+      action: "restart_node",
+      quickAction: "get_node_diagnostics",
     },
     {
       status: "degraded",
@@ -2016,12 +2222,12 @@ describe("React WebUI shell", () => {
           retryable: true,
         },
       },
-      action: "get_node_diagnostics",
-      secondaryAction: "restart_node",
+      action: "restart_node",
+      quickAction: "get_node_diagnostics",
     },
   ])(
     "navigates from overview to the executable runtime action for $status",
-    async ({ value, action, secondaryAction }) => {
+    async ({ value, action, quickAction }) => {
       authenticate(value as NodeSnapshot);
       const user = userEvent.setup();
       renderApp();
@@ -2038,38 +2244,40 @@ describe("React WebUI shell", () => {
           name: "translated:page.node_runtime",
         }),
       ).toBeInTheDocument();
-      const panel = await screen.findByRole("complementary", {
-        name: "translated:common.actions_panel_title",
-      });
-      await waitFor(() => {
-        expect(
-          screen
-            .getAllByRole("button", { name: `translated:action.${action}` })
-            .some((button) =>
-              button.classList.contains("runtime-primary-action"),
-            ),
-        ).toBe(true);
-      });
-      const primaryAction = screen
-        .getAllByRole("button", { name: `translated:action.${action}` })
-        .find((button) => button.classList.contains("runtime-primary-action"));
-      if (!primaryAction) throw new Error("runtime primary action is missing");
-      expect(primaryAction).toHaveClass("runtime-primary-action");
-      const secondary = document.querySelector(".runtime-secondary-action");
-      if (secondaryAction) {
-        expect(secondary).toHaveTextContent(
-          `translated:action.${secondaryAction}`,
+      const primaryAction = await waitFor(() => {
+        const button = document.querySelector<HTMLButtonElement>(
+          ".page-command-primary",
         );
-      } else {
-        expect(secondary).not.toBeInTheDocument();
+        if (!button) throw new Error("runtime primary action is missing");
+        return button;
+      });
+      expect(primaryAction).toHaveTextContent(`translated:action.${action}`);
+      const runtimeStatus = screen.getByTestId("runtime-status");
+      expect(runtimeStatus.querySelector("button")).not.toBeInTheDocument();
+      expect(
+        screen.getByTestId("runtime-diagnostics").querySelector("button"),
+      ).not.toBeInTheDocument();
+      if (quickAction) {
+        expect(
+          screen.getByRole("button", {
+            name: `translated:action.${quickAction}`,
+          }),
+        ).toHaveClass("page-command-icon");
       }
+      expect(
+        document.querySelector(
+          '.page-command-icon[aria-label="translated:action.start_node"]',
+        ),
+      ).not.toBeInTheDocument();
+      expect(
+        document.querySelector(
+          '.page-command-icon[aria-label="translated:action.stop_node"]',
+        ),
+      ).not.toBeInTheDocument();
       await user.click(primaryAction);
 
-      expect(actionHead(panel, action)).toHaveAttribute(
-        "aria-expanded",
-        "true",
-      );
-      expect(panel.querySelector(".action-form")).toBeInTheDocument();
+      const actionCard = await screen.findByTestId(`action-card-${action}`);
+      expect(actionCard.querySelector(".action-form")).toBeInTheDocument();
     },
   );
 
@@ -2114,28 +2322,26 @@ describe("React WebUI shell", () => {
         name: "translated:overview.manage_runtime",
       }),
     );
-    const secondary = await waitFor(() => {
+    const primaryAction = await waitFor(() => {
       const button = document.querySelector<HTMLButtonElement>(
-        ".runtime-secondary-action",
+        ".page-command-primary",
       );
       if (!button) throw new Error("runtime restart action is missing");
       return button;
     });
-    expect(secondary).toHaveTextContent("translated:action.restart_node");
-    await user.click(secondary);
+    expect(primaryAction).toHaveTextContent("translated:action.restart_node");
+    await user.click(primaryAction);
 
-    const panel = screen.getByRole("complementary", {
-      name: "translated:common.actions_panel_title",
-    });
-    await user.click(actionSubmitButton(panel, "restart_node"));
-    const dialog = await screen.findByRole("dialog");
+    const actionCard = await openPageAction(user, "restart_node");
+    await user.click(actionSubmitButton(actionCard, "restart_node"));
+    const dialog = await screen.findByTestId("action-confirmation");
     await user.click(
       within(dialog).getByRole("button", {
         name: "translated:common.confirm_action",
       }),
     );
     await waitFor(() => {
-      expect(panel.querySelector(".form-error")).toHaveTextContent(
+      expect(actionCard.querySelector(".form-error")).toHaveTextContent(
         "translated:error.node_restart_failed",
       );
     });
@@ -2190,34 +2396,31 @@ describe("React WebUI shell", () => {
         name: "translated:overview.manage_runtime",
       }),
     );
-    const secondary = await waitFor(() => {
+    const primaryAction = await waitFor(() => {
       const button = document.querySelector<HTMLButtonElement>(
-        ".runtime-secondary-action",
+        ".page-command-primary",
       );
       if (!button) throw new Error("runtime restart action is missing");
       return button;
     });
-    await user.click(secondary);
+    await user.click(primaryAction);
 
-    const panel = screen.getByRole("complementary", {
-      name: "translated:common.actions_panel_title",
-    });
-    await user.click(actionSubmitButton(panel, "restart_node"));
-    let dialog = await screen.findByRole("dialog");
+    const actionCard = await openPageAction(user, "restart_node");
+    await user.click(actionSubmitButton(actionCard, "restart_node"));
+    const confirmation = await screen.findByTestId("action-confirmation");
     await user.click(
-      within(dialog).getByRole("button", {
+      within(confirmation).getByRole("button", {
         name: "translated:common.confirm_action",
       }),
     );
 
-    dialog = await screen.findByRole("dialog");
-    expect(
-      within(dialog).getByRole("heading", {
-        name: "translated:owner_auth.reauth.title",
-      }),
-    ).toBeInTheDocument();
+    const reauthHeading = await screen.findByRole("heading", {
+      name: "translated:owner_auth.reauth.title",
+    });
+    const reauthDialog = reauthHeading.closest<HTMLElement>('[role="dialog"]');
+    expect(reauthDialog).not.toBeNull();
     await user.click(
-      within(dialog).getByRole("button", {
+      within(reauthDialog!).getByRole("button", {
         name: "translated:owner_auth.passkey.reauth_button",
       }),
     );
@@ -2244,10 +2447,7 @@ describe("React WebUI shell", () => {
     renderApp();
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
-    await user.click(
-      screen.getByRole("button", { name: "translated:nav.networks" }),
-    );
-    await user.click(screen.getByRole("tab", { name: "translated:nav.relay" }));
+    await selectModulePage(user, "networks", "relay");
     await user.click(
       await screen.findByRole("checkbox", {
         name: "translated:relay.durable_audit.confirm",
@@ -2301,10 +2501,7 @@ describe("React WebUI shell", () => {
     renderApp();
 
     await screen.findByRole("heading", { name: "translated:page.overview" });
-    await user.click(
-      screen.getByRole("button", { name: "translated:nav.networks" }),
-    );
-    await user.click(screen.getByRole("tab", { name: "translated:nav.relay" }));
+    await selectModulePage(user, "networks", "relay");
     await user.click(
       await screen.findByRole("checkbox", {
         name: "translated:relay.durable_audit.confirm",
@@ -2348,33 +2545,37 @@ describe("React WebUI shell", () => {
         name: "translated:overview.manage_runtime",
       }),
     );
-    const secondary = await waitFor(() => {
+    const primaryAction = await waitFor(() => {
       const button = document.querySelector<HTMLButtonElement>(
-        ".runtime-secondary-action",
+        ".page-command-primary",
       );
       if (!button) throw new Error("runtime restart action is missing");
       return button;
     });
-    await user.click(secondary);
+    await user.click(primaryAction);
 
-    const panel = screen.getByRole("complementary", {
-      name: "translated:common.actions_panel_title",
-    });
-    await user.click(actionSubmitButton(panel, "restart_node"));
-    let dialog = await screen.findByRole("dialog");
+    const actionCard = await openPageAction(user, "restart_node");
+    await user.click(actionSubmitButton(actionCard, "restart_node"));
+    const confirmation = await screen.findByTestId("action-confirmation");
     await user.click(
-      within(dialog).getByRole("button", {
+      within(confirmation).getByRole("button", {
         name: "translated:common.confirm_action",
       }),
     );
 
-    dialog = await screen.findByRole("dialog");
+    const reauthHeading = await screen.findByRole("heading", {
+      name: "translated:owner_auth.reauth.title",
+    });
+    const reauthDialog = reauthHeading.closest<HTMLElement>('[role="dialog"]');
+    expect(reauthDialog).not.toBeNull();
     await user.click(
-      within(dialog).getByRole("button", { name: "translated:common.cancel" }),
+      within(reauthDialog!).getByRole("button", {
+        name: "translated:common.cancel",
+      }),
     );
 
     await waitFor(() =>
-      expect(panel.querySelector(".form-error")).toHaveTextContent(
+      expect(actionCard.querySelector(".form-error")).toHaveTextContent(
         "translated:owner_auth.reauth.cancelled",
       ),
     );
@@ -2405,7 +2606,7 @@ describe("React WebUI shell", () => {
       name: "translated:page.node_runtime",
     });
     expect(
-      document.querySelector(".runtime-primary-action"),
+      document.querySelector(".page-command-primary"),
     ).not.toBeInTheDocument();
   });
 
@@ -2428,7 +2629,7 @@ describe("React WebUI shell", () => {
       name: "translated:page.node_runtime",
     });
     expect(
-      document.querySelector(".runtime-primary-action"),
+      document.querySelector(".page-command-primary"),
     ).not.toBeInTheDocument();
   });
 
@@ -2585,16 +2786,17 @@ describe("React WebUI shell", () => {
           name: "translated:page.networks",
         }),
       ).toBeInTheDocument();
-      expect(
-        screen.getByRole("tab", { name: "translated:nav.networks" }),
-      ).toHaveAttribute("aria-selected", "true");
-      const panel = screen.getByRole("complementary", {
-        name: "translated:common.actions_panel_title",
-      });
-      expect(actionHead(panel, action)).toHaveAttribute(
-        "aria-expanded",
-        "true",
+      expect(document.querySelector(".page-switcher > summary")).toHaveTextContent(
+        "translated:nav.networks",
       );
+      const actionCard = await screen.findByTestId(`action-card-${action}`);
+      const actionDialog = actionCard.closest<HTMLElement>('[role="dialog"]');
+      expect(actionDialog).not.toBeNull();
+      expect(
+        within(actionDialog!).getByRole("heading", {
+          name: `translated:action.${action}`,
+        }),
+      ).toBeInTheDocument();
     },
   );
 
@@ -2627,13 +2829,9 @@ describe("React WebUI shell", () => {
     expect(
       within(results).getByText("translated:discovery.search.private_note"),
     ).toBeInTheDocument();
-    const panel = screen.getByRole("complementary", {
-      name: "translated:common.actions_panel_title",
-    });
-    expect(actionHead(panel, "refresh_discovery_index")).toHaveAttribute(
-      "aria-expanded",
-      "true",
-    );
+    expect(
+      await screen.findByTestId("action-card-refresh_discovery_index"),
+    ).toBeInTheDocument();
     expect(within(results).getByText("family")).toBeInTheDocument();
     expect(within(results).getByText("studio")).toBeInTheDocument();
 
@@ -2691,18 +2889,14 @@ describe("React WebUI shell", () => {
         name: "translated:discovery.result.open_join",
       }),
     );
-    const panel = screen.getByRole("complementary", {
-      name: "translated:common.actions_panel_title",
-    });
-    expect(actionHead(panel, "preview_join_network")).toHaveAttribute(
-      "aria-expanded",
-      "true",
+    const actionCard = await screen.findByTestId(
+      "action-card-preview_join_network",
     );
     expect(
-      within(panel).getByLabelText("translated:field.network_id"),
+      within(actionCard).getByLabelText("translated:field.network_id"),
     ).toHaveValue("network-family");
     expect(
-      within(panel).queryByLabelText("translated:field.ticket_or_url"),
+      within(actionCard).queryByLabelText("translated:field.ticket_or_url"),
     ).not.toBeInTheDocument();
     expect(sendCommand).not.toHaveBeenCalled();
   });
@@ -2789,29 +2983,19 @@ describe("React WebUI shell", () => {
       }),
     );
 
-    const panel = screen.getByRole("complementary", {
-      name: "translated:common.actions_panel_title",
-    });
-    const leaveAction = within(panel).getByTestId("action-card-leave_network");
-    expect(actionHead(leaveAction, "leave_network")).toHaveAttribute(
-      "aria-expanded",
-      "true",
-    );
+    const leaveAction = await screen.findByTestId("action-card-leave_network");
     expect(
       within(leaveAction).getByLabelText("translated:field.network_name"),
     ).toHaveValue("home");
 
     await user.click(actionSubmitButton(leaveAction, "leave_network"));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await screen.findByTestId("action-confirmation");
     await user.click(
       within(dialog).getByRole("button", {
         name: "translated:common.confirm_action",
       }),
     );
 
-    expect(
-      await within(panel).findByText("translated:outcome.network_left"),
-    ).toBeInTheDocument();
     expect(sendCommand).toHaveBeenCalledTimes(1);
     expect(vi.mocked(sendCommand).mock.calls[0][0].request.command).toEqual({
       command: "leave_network",

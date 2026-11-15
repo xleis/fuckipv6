@@ -8851,6 +8851,7 @@ button:disabled {
 }
 
 .topology-page {
+  align-content: start;
   gap: 14px;
 }
 
@@ -9012,6 +9013,7 @@ button:disabled {
 
 .topology-view {
   position: relative;
+  align-content: start;
   gap: 10px;
 }
 

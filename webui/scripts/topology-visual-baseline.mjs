@@ -975,6 +975,20 @@ async function topologySemantics(session) {
       };
       const canvas = document.querySelector(".topology-canvas");
       const view = document.querySelector(".topology-view");
+      const stage = document.querySelector(".topology-stage");
+      const layoutStyle = (element) => {
+        if (!element) return null;
+        const style = getComputedStyle(element);
+        return {
+          display: style.display,
+          height: style.height,
+          minHeight: style.minHeight,
+          alignContent: style.alignContent,
+          alignItems: style.alignItems,
+          gridTemplateRows: style.gridTemplateRows,
+          overflow: style.overflow,
+        };
+      };
       return {
         title: document.title,
         locale: document.documentElement.lang,
@@ -987,9 +1001,16 @@ async function topologySemantics(session) {
           mode: view?.getAttribute("data-view"),
           presentation_state: view?.getAttribute("data-topology-state"),
           rect: rect(view),
+          style: layoutStyle(view),
         },
         stage: {
-          rect: rect(document.querySelector(".topology-stage")),
+          rect: rect(stage),
+          style: layoutStyle(stage),
+          children: [...(stage?.children ?? [])].map((element) => ({
+            class_name: element.className,
+            position: getComputedStyle(element).position,
+            rect: rect(element),
+          })),
           footer: rect(document.querySelector(".topology-canvas-footer")),
         },
         insights: rect(document.querySelector(".topology-insights")),

@@ -892,17 +892,31 @@ async function navigateToTopology(session, nodeCount) {
   );
   await waitFor(
     session,
-    `[...document.querySelectorAll('[role="tab"]')].some((element) => element.textContent?.trim() === "Topology")`,
-    "Topology tab",
+    `Boolean(document.querySelector(".page-switcher"))`,
+    "page switcher",
   );
   await evaluate(
     session,
     `(() => {
-      const tab = [...document.querySelectorAll('[role="tab"]')].find(
+      const switcher = document.querySelector(".page-switcher");
+      if (!switcher) return false;
+      switcher.open = true;
+      return true;
+    })()`,
+  );
+  await waitFor(
+    session,
+    `[...document.querySelectorAll(".page-switcher-menu button")].some((element) => element.textContent?.trim() === "Topology")`,
+    "Topology page option",
+  );
+  await evaluate(
+    session,
+    `(() => {
+      const option = [...document.querySelectorAll(".page-switcher-menu button")].find(
         (element) => element.textContent?.trim() === "Topology",
       );
-      tab?.click();
-      return Boolean(tab);
+      option?.click();
+      return Boolean(option);
     })()`,
   );
   await waitFor(

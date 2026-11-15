@@ -1,4 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Activity,
+  ArrowRight,
+  Network,
+  RefreshCw,
+  Route,
+  SlidersHorizontal,
+  X,
+} from "lucide-react";
+import type { ReactNode } from "react";
 import type {
   BatchMemberAction,
   DirectoryLoad,
@@ -18,6 +28,7 @@ import {
   retainTopologySelection,
 } from "../topology-actions";
 import { i18n, label, outcomeSummary } from "../contract/invariants";
+import { tr } from "../i18n";
 import {
   memberExitDeclaredText,
   memberExitFreshnessText,
@@ -37,6 +48,7 @@ type Props = {
   actions: NodeUiAction[];
   onSubmitAction?: TopologyActionSubmit;
   presentationSignals?: TopologyPresentationSignals;
+  headingActions?: ReactNode;
 };
 
 function validNetworkId(
@@ -105,39 +117,94 @@ function TopologyNodeDetail({
   networkId,
   member,
   generatedAtUnixMs,
+  onClose,
 }: {
   node: TopologyNode | null;
   locale: Locale;
   networkId: string | null;
   member: NetworkMember | null;
   generatedAtUnixMs: number;
+  onClose(): void;
 }) {
+  const drawerRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!node) return;
+    const previousFocus = document.activeElement as HTMLElement | null;
+    closeButtonRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = drawerRef.current?.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+      );
+      if (!focusable || focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last?.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      previousFocus?.focus();
+    };
+  }, [node, onClose]);
   if (!node) {
-    return (
-      <section className="topology-node-detail topology-node-detail-empty">
-        <strong>{label(locale, "topology.detail.empty_title")}</strong>
-        <p>{label(locale, "topology.detail.empty_hint")}</p>
-      </section>
-    );
+    return null;
   }
   const membership = node.networks.find(
     (network) => network.network_id === networkId,
   );
   return (
-    <section
-      className="topology-node-detail"
-      aria-live="polite"
-      data-testid="topology-node-detail"
-    >
+    <>
+      <button
+        className="topology-detail-backdrop"
+        type="button"
+        tabIndex={-1}
+        aria-label={label(locale, "topology.detail.close")}
+        onClick={onClose}
+      />
+      <section
+        ref={drawerRef}
+        className="topology-node-detail topology-detail-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="topology-detail-title"
+        aria-live="polite"
+        data-testid="topology-node-detail"
+      >
       <div className="topology-node-detail-heading">
         <div>
           <span>{label(locale, "topology.detail.title")}</span>
-          <h2>{node.display_name?.trim() || node.node_id}</h2>
+          <h2 id="topology-detail-title">
+            {node.display_name?.trim() || node.node_id}
+          </h2>
           <code>{node.node_id}</code>
         </div>
-        <span className={`status-pill ${node.health}`}>
-          {label(locale, `topology.health.${node.health}`)}
-        </span>
+        <div className="topology-detail-heading-actions">
+          <span className={`status-pill ${node.health}`}>
+            {label(locale, `topology.health.${node.health}`)}
+          </span>
+          <button
+            ref={closeButtonRef}
+            className="icon-button"
+            type="button"
+            aria-label={label(locale, "topology.detail.close")}
+            onClick={onClose}
+          >
+            <X size={16} />
+          </button>
+        </div>
       </div>
       <dl className="topology-node-detail-grid">
         <div>
@@ -265,7 +332,8 @@ function TopologyNodeDetail({
           </dd>
         </div>
       </dl>
-    </section>
+      </section>
+    </>
   );
 }
 
@@ -276,6 +344,7 @@ export function TopologyPage({
   actions,
   onSubmitAction,
   presentationSignals,
+  headingActions,
 }: Props) {
   const [selectedNetworkId, setSelectedNetworkId] = useState<string | null>(null);
   const networkId = validNetworkId(
@@ -455,6 +524,43 @@ export function TopologyPage({
   }, [topology]);
   const detailNode =
     topology?.nodes.find((node) => node.node_id === detailNodeId) ?? null;
+  const currentNode =
+    topology?.nodes.find((node) => node.is_self) ?? topology?.nodes[0] ?? null;
+  const exitNode =
+    topology?.nodes.find(
+      (node) =>
+        node.capabilities?.includes("exit") &&
+        node.networks.some((network) => network.network_id === networkId),
+    ) ??
+    topology?.nodes.find((node) => node.capabilities?.includes("exit")) ??
+    null;
+  const relayNode =
+    topology?.nodes.find(
+      (node) =>
+        node.node_id !== currentNode?.node_id &&
+        node.node_id !== exitNode?.node_id &&
+        node.capabilities?.includes("relay") &&
+        (node.networks.some((network) => network.network_id === networkId) ||
+          !networkId),
+    ) ?? null;
+  const pathNodes = [currentNode, relayNode, exitNode].filter(
+    (node, index, nodes): node is TopologyNode =>
+      Boolean(node) && nodes.findIndex((item) => item?.node_id === node?.node_id) === index,
+  );
+  const activeConnections =
+    topology?.connections.filter((connection) => connection.state === "active")
+      .length ?? 0;
+  const healthyNodes =
+    topology?.nodes.filter((node) => node.health === "healthy").length ?? 0;
+  const currentNetwork = topology?.boundaries.find(
+    (boundary) => boundary.network_id === networkId,
+  );
+  const recentConnections = [...(topology?.connections ?? [])]
+    .sort(
+      (left, right) =>
+        (right.observed_at_unix_ms ?? 0) - (left.observed_at_unix_ms ?? 0),
+    )
+    .slice(0, 3);
 
   function selectNetwork(nextNetworkId: string): void {
     if (nextNetworkId === networkId) return;
@@ -473,15 +579,11 @@ export function TopologyPage({
       else next.add(nodeId);
       return next;
     });
-    setDetailNodeId(nodeId);
     setSelectionNotice("");
   }, []);
 
   const openNode = useCallback((nodeId: string): void => {
     setDetailNodeId(nodeId);
-    document
-      .getElementById("topology-node-detail")
-      ?.scrollIntoView({ block: "nearest" });
   }, []);
 
   const clearSelection = useCallback((): void => {
@@ -543,6 +645,83 @@ export function TopologyPage({
 
   return (
     <div className="topology-page">
+      <header className="topology-hero">
+        <div className="topology-hero-copy">
+          <span className="topology-eyebrow">
+            {label(locale, "topology.hero.eyebrow")}
+          </span>
+          <h1 id="page-title">{label(locale, "page.topology")}</h1>
+          <p>
+            {tr(locale, "topology.hero.summary", {
+              networks: String(topology.boundaries.length),
+              nodes: String(topology.nodes.length),
+              exit: exitNode
+                ? (exitNode.display_name?.trim() || exitNode.node_id)
+                : label(locale, "common.none"),
+            })}
+          </p>
+        </div>
+        <div className="topology-hero-actions">
+          {headingActions}
+          <button
+            className="primary-icon-button"
+            type="button"
+            title={label(locale, "topology.hero.sync")}
+            aria-label={label(locale, "topology.hero.sync")}
+            disabled={directoryLoad.state === "loading" || !listAction}
+            onClick={() => void refreshDirectory()}
+          >
+            <RefreshCw
+              className={directoryLoad.state === "loading" ? "spin" : undefined}
+              size={18}
+            />
+          </button>
+        </div>
+      </header>
+
+      <section className="topology-state-band" aria-label={label(locale, "topology.hero.status")}>
+        <div className="topology-state-primary">
+          <span className={`topology-state-icon ${presentationSignals?.stale ? "warn" : "good"}`}>
+            <Route size={20} aria-hidden="true" />
+          </span>
+          <span className="topology-state-copy">
+            <strong>
+              {presentationSignals?.stale
+                ? label(locale, "state.stale.title")
+                : label(locale, "topology.hero.verified")}
+            </strong>
+            <span>
+              {pathNodes.length > 0
+                ? tr(locale, "topology.hero.path", {
+                    path: pathNodes
+                      .map((node) => node.display_name?.trim() || node.node_id)
+                      .join(" → "),
+                  })
+                : label(locale, "topology.path.empty")}
+            </span>
+          </span>
+        </div>
+        <div className="topology-stat">
+          <span>{label(locale, "topology.metric.connections")}</span>
+          <strong>{activeConnections}</strong>
+          <small>{label(locale, "topology.connection.active")}</small>
+        </div>
+        <div className="topology-stat">
+          <span>{label(locale, "topology.metric.nodes")}</span>
+          <strong>{topology.nodes.length}</strong>
+          <small>
+            {tr(locale, "topology.metric.healthy", {
+              count: String(healthyNodes),
+            })}
+          </small>
+        </div>
+        <div className="topology-stat">
+          <span>{label(locale, "topology.metric.network")}</span>
+          <strong>{topology.boundaries.length}</strong>
+          <small>{currentNetwork?.name ?? label(locale, "common.none")}</small>
+        </div>
+      </section>
+
       <TopologyView
         topology={topology}
         locale={locale}
@@ -557,36 +736,125 @@ export function TopologyPage({
         lifecycleActions={lifecycleActionsFor}
         onPrepareLifecycle={prepareLifecycle}
         onClearSelection={clearSelection}
+        onSelectNetwork={selectNetwork}
         selectionNotice={selectionNotice}
       />
-      <section id="topology-node-detail">
+
+      <div className="topology-insights">
+        <section className="topology-insight-card">
+          <div className="topology-insight-heading">
+            <div>
+              <h2>{label(locale, "topology.path.title")}</h2>
+              <span>{label(locale, "topology.path.auto")}</span>
+            </div>
+            <Route size={16} aria-hidden="true" />
+          </div>
+          {pathNodes.length > 0 ? (
+            <div className="topology-path">
+              {pathNodes.map((node, index) => (
+                <span className="topology-path-segment" key={node.node_id}>
+                  {index > 0 ? (
+                    <ArrowRight size={14} aria-hidden="true" />
+                  ) : null}
+                  <span className="topology-path-node">
+                    <Network size={14} aria-hidden="true" />
+                    <span>{node.display_name?.trim() || node.node_id}</span>
+                  </span>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <p className="topology-insight-empty">
+              {label(locale, "topology.path.empty")}
+            </p>
+          )}
+        </section>
+
+        <section className="topology-insight-card">
+          <div className="topology-insight-heading">
+            <div>
+              <h2>{label(locale, "topology.events.title")}</h2>
+              <span>{label(locale, "topology.events.window")}</span>
+            </div>
+            <Activity size={16} aria-hidden="true" />
+          </div>
+          {recentConnections.length > 0 ? (
+            <ul className="topology-event-list">
+              {recentConnections.map((connection, index) => (
+                <li key={connection.connection_id}>
+                  <span className={`topology-event-dot ${connection.state}`} />
+                  <span>
+                    <strong>
+                      {tr(locale, "topology.events.connection", {
+                        from:
+                          topology.nodes.find(
+                            (node) => node.node_id === connection.from,
+                          )?.display_name ?? connection.from,
+                        to:
+                          topology.nodes.find(
+                            (node) => node.node_id === connection.to,
+                          )?.display_name ?? connection.to,
+                        state: label(
+                          locale,
+                          `topology.connection.${connection.state}`,
+                        ),
+                      })}
+                    </strong>
+                    <small>
+                      {connection.observed_at_unix_ms
+                        ? i18n().formatTimestamp(
+                            locale,
+                            connection.observed_at_unix_ms,
+                          )
+                        : label(locale, "common.unknown")}
+                    </small>
+                  </span>
+                  <time>{index + 1}</time>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="topology-insight-empty">
+              {label(locale, "topology.events.empty")}
+            </p>
+          )}
+        </section>
+      </div>
+
+      <details className="topology-governance-disclosure">
+        <summary>
+          <SlidersHorizontal size={16} aria-hidden="true" />
+          <span>{label(locale, "topology.governance.more")}</span>
+        </summary>
+        <TopologyGovernancePanel
+          key={networkId ?? "no-network"}
+          topology={topology}
+          locale={locale}
+          networks={topology.boundaries}
+          networkId={networkId}
+          onNetworkIdChange={selectNetwork}
+          selected={selectedSet}
+          directoryLoad={directoryLoad}
+          lifecycleAction={lifecycleAction}
+          previewAction={previewAction}
+          requestedAction={requestedBatchAction}
+          onActionChange={setRequestedBatchAction}
+          onSubmit={onSubmitAction}
+          onRefreshDirectory={() => void refreshDirectory()}
+          onSelectedChange={setSelected}
+        />
+      </details>
+
+      {detailNode ? (
         <TopologyNodeDetail
           node={detailNode}
           locale={locale}
           networkId={networkId}
-          member={
-            detailNode ? (membersByNodeId.get(detailNode.node_id) ?? null) : null
-          }
+          member={membersByNodeId.get(detailNode.node_id) ?? null}
           generatedAtUnixMs={topologyGeneratedAtUnixMs}
+          onClose={() => setDetailNodeId(null)}
         />
-      </section>
-      <TopologyGovernancePanel
-        key={networkId ?? "no-network"}
-        topology={topology}
-        locale={locale}
-        networks={topology.boundaries}
-        networkId={networkId}
-        onNetworkIdChange={selectNetwork}
-        selected={selectedSet}
-        directoryLoad={directoryLoad}
-        lifecycleAction={lifecycleAction}
-        previewAction={previewAction}
-        requestedAction={requestedBatchAction}
-        onActionChange={setRequestedBatchAction}
-        onSubmit={onSubmitAction}
-        onRefreshDirectory={() => void refreshDirectory()}
-        onSelectedChange={setSelected}
-      />
+      ) : null}
     </div>
   );
 }

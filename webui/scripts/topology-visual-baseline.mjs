@@ -989,6 +989,20 @@ async function topologySemantics(session) {
           overflow: style.overflow,
         };
       };
+      const layoutAncestors = [
+        ".topology-page",
+        ".page-content-topology",
+        ".workspace",
+        ".app-main",
+      ].map((selector) => {
+        const element = document.querySelector(selector);
+        return {
+          selector,
+          class_name: element?.className ?? "",
+          rect: rect(element),
+          style: layoutStyle(element),
+        };
+      });
       return {
         title: document.title,
         locale: document.documentElement.lang,
@@ -1014,6 +1028,7 @@ async function topologySemantics(session) {
           footer: rect(document.querySelector(".topology-canvas-footer")),
         },
         insights: rect(document.querySelector(".topology-insights")),
+        layout_ancestors: layoutAncestors,
         canvas: {
           layout_pending: canvas?.getAttribute("data-layout-pending"),
           rendered_nodes: Number(canvas?.getAttribute("data-rendered-nodes")),

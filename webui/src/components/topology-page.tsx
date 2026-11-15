@@ -611,12 +611,12 @@ export function TopologyPage({
     nodeId: string,
     action: BatchMemberAction,
   ): void => {
+    const governance = document.getElementById("topology-governance");
+    const disclosure = governance?.closest("details");
+    if (disclosure instanceof HTMLDetailsElement) disclosure.open = true;
     setSelected(new Set([nodeId]));
-    setDetailNodeId(nodeId);
     setRequestedBatchAction(action);
-    document
-      .getElementById("topology-governance")
-      ?.scrollIntoView({ block: "nearest" });
+    (disclosure ?? governance)?.scrollIntoView({ block: "nearest" });
   }, []);
 
   function lifecycleActionsFor(nodeId: string): MemberLifecycleAction[] {

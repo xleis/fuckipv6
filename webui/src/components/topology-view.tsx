@@ -1204,7 +1204,7 @@ const GraphView = memo(function GraphView({
               </title>
               <text
                 x={anchor.x - rx + 14}
-                y={anchor.y - ry + 16}
+                y={Math.max(12, anchor.y - ry - 7)}
                 className="topology-boundary-label"
                 fill={visual.color}
               >

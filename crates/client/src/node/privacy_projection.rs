@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use fuckipv6_common::domain::{
     field_is_visible, project_activity_entry, project_member_directory, project_topology_snapshot,
-    ActivityEntry, CoordinatorCandidateStatus, FieldPrivacyPolicy, InvitationPreview,
-    InvitationRedemption, InvitationStatusView, IssuedInvitation, JoinRequest,
+    ActivityEntry, AdminRecoveryStatusView, CoordinatorCandidateStatus, FieldPrivacyPolicy,
+    InvitationPreview, InvitationRedemption, InvitationStatusView, IssuedInvitation, JoinRequest,
     MemberLifecycleChange, MemberRemovalPreview, MembershipState, NetworkId,
     NetworkMemberDirectory, NetworkProfileApplyResult, NetworkProfilePreview, NodeId,
     PolicyTestResult, PrivacyField, PrivacyObjectState, PrivacyViewer, ProjectedActivityEntry,
@@ -295,6 +295,8 @@ pub enum ProjectedNodeCommandOutcome {
     TrafficPolicyRolledBack(Box<TrafficPolicyRollbackResult>),
     TrafficPolicyTest(Box<TrafficPolicyTestComparison>),
     CoordinatorCandidates(Box<CoordinatorCandidateStatus>),
+    AdminRecoveryStatus(Box<AdminRecoveryStatusView>),
+    AdminRecoveries(Vec<AdminRecoveryStatusView>),
     Accepted { operation_id: String },
     Completed { message: String },
     Rejected(NodeProblem),
@@ -538,6 +540,12 @@ pub fn project_node_command_result(
         }
         NodeCommandOutcome::CoordinatorCandidates(status) => {
             ProjectedNodeCommandOutcome::CoordinatorCandidates(status.clone())
+        }
+        NodeCommandOutcome::AdminRecoveryStatus(status) => {
+            ProjectedNodeCommandOutcome::AdminRecoveryStatus(status.clone())
+        }
+        NodeCommandOutcome::AdminRecoveries(statuses) => {
+            ProjectedNodeCommandOutcome::AdminRecoveries(statuses.clone())
         }
         NodeCommandOutcome::Accepted { operation_id } => ProjectedNodeCommandOutcome::Accepted {
             operation_id: operation_id.clone(),

@@ -594,7 +594,12 @@ fn command_timeout(command: &crate::node::NodeCommand) -> Duration {
         | NodeCommandKind::TestTrafficPolicy
         | NodeCommandKind::GetCoordinatorCandidates
         | NodeCommandKind::UpdateCoordinatorCandidates
-        | NodeCommandKind::PublishCoordinatorCandidateDeclaration => COMMAND_TIMEOUT,
+        | NodeCommandKind::PublishCoordinatorCandidateDeclaration
+        | NodeCommandKind::SubmitAdminRecovery
+        | NodeCommandKind::GetAdminRecoveryStatus
+        | NodeCommandKind::ListAdminRecoveries
+        | NodeCommandKind::RevokeAdminRecovery
+        | NodeCommandKind::ExecuteAdminRecovery => COMMAND_TIMEOUT,
     }
 }
 

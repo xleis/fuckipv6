@@ -35,7 +35,6 @@ const JOIN_REQUEST_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const INVITATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const NETWORK_JOIN_PREVIEW_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const COORDINATOR_CANDIDATE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
-#[allow(dead_code)] // Consumed when the W14 administrator recovery operator flow is wired.
 const ADMIN_RECOVERY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, thiserror::Error)]
@@ -77,9 +76,7 @@ pub struct SignalingClient {
     network_join_preview_gate: Arc<Mutex<()>>,
     coordinator_candidates: Arc<CoordinatorCandidateResponseHub>,
     coordinator_candidate_gate: Arc<Mutex<()>>,
-    #[allow(dead_code)] // Read by the pending W14 administrator recovery operator flow.
     admin_recoveries: Arc<AdminRecoveryResponseHub>,
-    #[allow(dead_code)] // Read by the pending W14 administrator recovery operator flow.
     admin_recovery_gate: Arc<Mutex<()>>,
 }
 
@@ -713,7 +710,6 @@ impl CoordinatorCandidateResponseHub {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[allow(dead_code)] // Projected by the pending W14 administrator recovery operator flow.
 pub(crate) enum AdminRecoveryControlError {
     #[error("管理员恢复控制连接已断开")]
     Disconnected,
@@ -728,19 +724,50 @@ pub(crate) enum AdminRecoveryControlError {
 }
 
 impl AdminRecoveryControlError {
-    #[allow(dead_code)] // Projected by the pending W14 administrator recovery operator flow.
-    pub(crate) fn message_key(&self) -> &str {
+    pub(crate) fn message_key(&self) -> &'static str {
         match self {
             Self::Disconnected | Self::Unavailable => "admin_recovery.error.unavailable",
             Self::TimedOut => "admin_recovery.error.timeout",
             Self::InvalidResponse => "admin_recovery.error.invalid_response",
-            Self::Rejected { key, .. } if key.starts_with("admin_recovery.error.") => key,
-            Self::Rejected { code: 401, .. } => "admin_recovery.error.unauthorized",
-            Self::Rejected { code: 403, .. } => "admin_recovery.error.permission_denied",
-            Self::Rejected { code: 404, .. } => "admin_recovery.error.not_found",
-            Self::Rejected { code: 429, .. } => "admin_recovery.error.rate_limited",
-            Self::Rejected { code: 503, .. } => "admin_recovery.error.overloaded",
-            Self::Rejected { .. } => "admin_recovery.error.rejected",
+            Self::Rejected { key, .. } => match key.as_str() {
+                "admin_recovery.error.already_executed" => "admin_recovery.error.already_executed",
+                "admin_recovery.error.expired" => "admin_recovery.error.expired",
+                "admin_recovery.error.internal" => "admin_recovery.error.internal",
+                "admin_recovery.error.invalid_request" => "admin_recovery.error.invalid_request",
+                "admin_recovery.error.invalid_response" => "admin_recovery.error.invalid_response",
+                "admin_recovery.error.invalid_revocation_reason" => {
+                    "admin_recovery.error.invalid_revocation_reason"
+                }
+                "admin_recovery.error.network_mismatch" => "admin_recovery.error.network_mismatch",
+                "admin_recovery.error.not_executable" => "admin_recovery.error.not_executable",
+                "admin_recovery.error.not_found" => "admin_recovery.error.not_found",
+                "admin_recovery.error.overloaded" => "admin_recovery.error.overloaded",
+                "admin_recovery.error.permission_denied" => {
+                    "admin_recovery.error.permission_denied"
+                }
+                "admin_recovery.error.rate_limited" => "admin_recovery.error.rate_limited",
+                "admin_recovery.error.rejected" => "admin_recovery.error.rejected",
+                "admin_recovery.error.replayed" => "admin_recovery.error.replayed",
+                "admin_recovery.error.request_id_conflict" => {
+                    "admin_recovery.error.request_id_conflict"
+                }
+                "admin_recovery.error.revoked" => "admin_recovery.error.revoked",
+                "admin_recovery.error.stale_snapshot" => "admin_recovery.error.stale_snapshot",
+                "admin_recovery.error.threshold_not_met" => {
+                    "admin_recovery.error.threshold_not_met"
+                }
+                "admin_recovery.error.timeout" => "admin_recovery.error.timeout",
+                "admin_recovery.error.unauthorized" => "admin_recovery.error.unauthorized",
+                "admin_recovery.error.unavailable" => "admin_recovery.error.unavailable",
+                _ => match self {
+                    Self::Rejected { code: 401, .. } => "admin_recovery.error.unauthorized",
+                    Self::Rejected { code: 403, .. } => "admin_recovery.error.permission_denied",
+                    Self::Rejected { code: 404, .. } => "admin_recovery.error.not_found",
+                    Self::Rejected { code: 429, .. } => "admin_recovery.error.rate_limited",
+                    Self::Rejected { code: 503, .. } => "admin_recovery.error.overloaded",
+                    _ => "admin_recovery.error.rejected",
+                },
+            },
         }
     }
 }
@@ -752,7 +779,6 @@ enum AdminRecoveryResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Constructed by the pending W14 administrator recovery operator flow.
 enum PendingAdminRecovery {
     Submit {
         network_id: NetworkId,
@@ -786,7 +812,6 @@ struct AdminRecoveryResponseHub {
 }
 
 impl AdminRecoveryResponseHub {
-    #[allow(dead_code)] // Called by the pending W14 administrator recovery operator flow.
     fn register(
         &self,
         expected: PendingAdminRecovery,
@@ -1976,7 +2001,6 @@ impl SignalingClient {
         }
     }
 
-    #[allow(dead_code)] // Called by the pending W14 administrator recovery operator flow.
     pub(crate) async fn submit_admin_recovery(
         &self,
         request: AdminRecoveryRequest,
@@ -2000,7 +2024,6 @@ impl SignalingClient {
         }
     }
 
-    #[allow(dead_code)] // Called by the pending W14 administrator recovery operator flow.
     pub(crate) async fn get_admin_recovery_status(
         &self,
         network_id: NetworkId,
@@ -2024,7 +2047,6 @@ impl SignalingClient {
         }
     }
 
-    #[allow(dead_code)] // Called by the pending W14 administrator recovery operator flow.
     pub(crate) async fn list_admin_recoveries(
         &self,
         network_id: NetworkId,
@@ -2043,7 +2065,6 @@ impl SignalingClient {
         }
     }
 
-    #[allow(dead_code)] // Called by the pending W14 administrator recovery operator flow.
     pub(crate) async fn revoke_admin_recovery(
         &self,
         network_id: NetworkId,
@@ -2069,7 +2090,6 @@ impl SignalingClient {
         }
     }
 
-    #[allow(dead_code)] // Called by the pending W14 administrator recovery operator flow.
     pub(crate) async fn execute_admin_recovery(
         &self,
         network_id: NetworkId,
@@ -2093,7 +2113,6 @@ impl SignalingClient {
         }
     }
 
-    #[allow(dead_code)] // Called by the pending W14 administrator recovery operator flow.
     async fn send_admin_recovery_operation(
         &self,
         message: SignalingMessage,

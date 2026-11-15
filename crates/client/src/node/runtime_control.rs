@@ -7,11 +7,11 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuckipv6_common::domain::{
-    CoordinatorCandidateConfig, CoordinatorCandidateDeclaration, CoordinatorCandidateStatus,
-    CoordinatorEmergencyLeaderStatus, CoordinatorRecoveryReport, CoordinatorRecoveryStatus,
-    CoordinatorTerm, CoordinatorWriteCredential, ExitHealthEvidence, ExitHealthEvidenceState,
-    ExitHealthLayer, ExitHealthProtocol, ExitHealthRetest, ExitHealthRetestPhase,
-    ExitHealthSnapshot, ExitHealthSource, ExitHealthTarget, InvitationCode,
+    AdminRecoveryStatusView, CoordinatorCandidateConfig, CoordinatorCandidateDeclaration,
+    CoordinatorCandidateStatus, CoordinatorEmergencyLeaderStatus, CoordinatorRecoveryReport,
+    CoordinatorRecoveryStatus, CoordinatorTerm, CoordinatorWriteCredential, ExitHealthEvidence,
+    ExitHealthEvidenceState, ExitHealthLayer, ExitHealthProtocol, ExitHealthRetest,
+    ExitHealthRetestPhase, ExitHealthSnapshot, ExitHealthSource, ExitHealthTarget, InvitationCode,
     InvitationCreateRequest, InvitationId, InvitationPreview, InvitationRedeemRequest,
     InvitationRedemption, InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestId,
     LeakDetectionEvidence, LeakDetectionEvidenceState, LeakDetectionIsolationAction,
@@ -31,7 +31,9 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, sleep_until, timeout, Instant};
 
 use super::command::{
-    NodePublishCoordinatorCandidateDeclarationCommand, NodeUpdateCoordinatorCandidatesCommand,
+    NodeAdminRecoveryListCommand, NodeAdminRecoveryStatusCommand, NodeExecuteAdminRecoveryCommand,
+    NodePublishCoordinatorCandidateDeclarationCommand, NodeRevokeAdminRecoveryCommand,
+    NodeSubmitAdminRecoveryCommand, NodeUpdateCoordinatorCandidatesCommand,
 };
 use super::coordinator_takeover::{
     active_local_emergency, decide_coordinator_takeover, CoordinatorTakeoverDecision,
@@ -63,8 +65,8 @@ use crate::node::runtime_metadata;
 use crate::owner_security::audit::OwnerSecurityAudit;
 use crate::routing::leak_detection::{collect_leak_detection, LeakDetectionContext};
 use crate::signaling::client::{
-    CoordinatorCandidateControlError, InvitationControlError, JoinRequestControlError,
-    JoinRequestStatusSnapshot, SignalingClient,
+    AdminRecoveryControlError, CoordinatorCandidateControlError, InvitationControlError,
+    JoinRequestControlError, JoinRequestStatusSnapshot, SignalingClient,
 };
 use crate::symmetric::{
     EmbeddedServiceError, EmbeddedServiceManager, EmbeddedServiceSnapshot,
@@ -179,6 +181,12 @@ pub(crate) enum RuntimeControlError {
         message_key: &'static str,
         message: String,
     },
+    #[error("{message}")]
+    AdminRecovery {
+        code: NodeProblemCode,
+        message_key: &'static str,
+        message: String,
+    },
 }
 
 impl RuntimeControlError {
@@ -206,6 +214,7 @@ impl RuntimeControlError {
             Self::JoinRequest { code, .. } => *code,
             Self::Invitation { code, .. } => *code,
             Self::CoordinatorCandidate { code, .. } => *code,
+            Self::AdminRecovery { code, .. } => *code,
         }
     }
 
@@ -217,6 +226,7 @@ impl RuntimeControlError {
             Self::JoinRequest { message_key, .. } => message_key,
             Self::Invitation { message_key, .. } => message_key,
             Self::CoordinatorCandidate { message_key, .. } => message_key,
+            Self::AdminRecovery { message_key, .. } => message_key,
             _ => self.problem_code().message_key(),
         }
     }
@@ -265,6 +275,17 @@ impl RuntimeControlError {
                     ..
                 }
                 | Self::CoordinatorCandidate {
+                    code: NodeProblemCode::AuthenticationRequired
+                        | NodeProblemCode::InvalidRequest
+                        | NodeProblemCode::NotFound
+                        | NodeProblemCode::Conflict
+                        | NodeProblemCode::PermissionDenied
+                        | NodeProblemCode::Cancelled
+                        | NodeProblemCode::Unsupported
+                        | NodeProblemCode::Internal,
+                    ..
+                }
+                | Self::AdminRecovery {
                     code: NodeProblemCode::AuthenticationRequired
                         | NodeProblemCode::InvalidRequest
                         | NodeProblemCode::NotFound
@@ -397,6 +418,51 @@ fn coordinator_candidate_invalid(message: impl Into<String>) -> RuntimeControlEr
     RuntimeControlError::CoordinatorCandidate {
         code: NodeProblemCode::InvalidRequest,
         message_key: "coordinator_candidate.error.invalid",
+        message: message.into(),
+    }
+}
+
+fn map_admin_recovery_error(error: AdminRecoveryControlError) -> RuntimeControlError {
+    let message = error.to_string();
+    let message_key = error.message_key();
+    let code = match error {
+        AdminRecoveryControlError::Disconnected
+        | AdminRecoveryControlError::Unavailable
+        | AdminRecoveryControlError::Rejected {
+            code: 429 | 503, ..
+        } => NodeProblemCode::Unavailable,
+        AdminRecoveryControlError::TimedOut => NodeProblemCode::TimedOut,
+        AdminRecoveryControlError::Rejected { code: 401, .. } => {
+            NodeProblemCode::AuthenticationRequired
+        }
+        AdminRecoveryControlError::Rejected { code: 403, .. } => NodeProblemCode::PermissionDenied,
+        AdminRecoveryControlError::Rejected { code: 404, .. } => NodeProblemCode::NotFound,
+        AdminRecoveryControlError::Rejected {
+            code: 409 | 412, ..
+        } => NodeProblemCode::Conflict,
+        AdminRecoveryControlError::Rejected { .. } | AdminRecoveryControlError::InvalidResponse => {
+            NodeProblemCode::InvalidRequest
+        }
+    };
+    RuntimeControlError::AdminRecovery {
+        code,
+        message_key,
+        message,
+    }
+}
+
+fn admin_recovery_unavailable(message: impl Into<String>) -> RuntimeControlError {
+    RuntimeControlError::AdminRecovery {
+        code: NodeProblemCode::Unavailable,
+        message_key: "admin_recovery.error.unavailable",
+        message: message.into(),
+    }
+}
+
+fn admin_recovery_invalid(message: impl Into<String>) -> RuntimeControlError {
+    RuntimeControlError::AdminRecovery {
+        code: NodeProblemCode::InvalidRequest,
+        message_key: "admin_recovery.error.invalid_request",
         message: message.into(),
     }
 }
@@ -1983,6 +2049,10 @@ enum RuntimeControlCommand {
         command: CoordinatorCandidateRuntimeCommand,
         reply: oneshot::Sender<Result<CoordinatorCandidateStatus, RuntimeControlError>>,
     },
+    AdminRecovery {
+        command: AdminRecoveryRuntimeCommand,
+        reply: oneshot::Sender<Result<AdminRecoveryExecutionResult, RuntimeControlError>>,
+    },
     Stop {
         networks: Vec<String>,
         all: bool,
@@ -2126,6 +2196,19 @@ enum CoordinatorCandidateRuntimeCommand {
         credential: CoordinatorWriteCredential,
         new_expires_at_unix_ms: u64,
     },
+}
+
+enum AdminRecoveryRuntimeCommand {
+    Submit(NodeSubmitAdminRecoveryCommand),
+    Status(NodeAdminRecoveryStatusCommand),
+    List(NodeAdminRecoveryListCommand),
+    Revoke(NodeRevokeAdminRecoveryCommand),
+    Execute(NodeExecuteAdminRecoveryCommand),
+}
+
+enum AdminRecoveryExecutionResult {
+    Status(AdminRecoveryStatusView),
+    List(Vec<AdminRecoveryStatusView>),
 }
 
 fn routing_summary_timestamp() -> u64 {
@@ -2893,6 +2976,93 @@ impl NetworkRuntimeManager {
             .map_err(|_| RuntimeControlError::ActorClosed)?
     }
 
+    pub async fn submit_admin_recovery(
+        &self,
+        command: NodeSubmitAdminRecoveryCommand,
+    ) -> Result<AdminRecoveryStatusView, RuntimeControlError> {
+        match self
+            .send_admin_recovery(AdminRecoveryRuntimeCommand::Submit(command))
+            .await?
+        {
+            AdminRecoveryExecutionResult::Status(status) => Ok(status),
+            AdminRecoveryExecutionResult::List(_) => Err(admin_recovery_unavailable(
+                "管理员恢复提交返回了不匹配的列表响应",
+            )),
+        }
+    }
+
+    pub async fn get_admin_recovery_status(
+        &self,
+        command: NodeAdminRecoveryStatusCommand,
+    ) -> Result<AdminRecoveryStatusView, RuntimeControlError> {
+        match self
+            .send_admin_recovery(AdminRecoveryRuntimeCommand::Status(command))
+            .await?
+        {
+            AdminRecoveryExecutionResult::Status(status) => Ok(status),
+            AdminRecoveryExecutionResult::List(_) => Err(admin_recovery_unavailable(
+                "管理员恢复状态查询返回了不匹配的列表响应",
+            )),
+        }
+    }
+
+    pub async fn list_admin_recoveries(
+        &self,
+        command: NodeAdminRecoveryListCommand,
+    ) -> Result<Vec<AdminRecoveryStatusView>, RuntimeControlError> {
+        match self
+            .send_admin_recovery(AdminRecoveryRuntimeCommand::List(command))
+            .await?
+        {
+            AdminRecoveryExecutionResult::List(statuses) => Ok(statuses),
+            AdminRecoveryExecutionResult::Status(_) => Err(admin_recovery_unavailable(
+                "管理员恢复列表返回了不匹配的单项响应",
+            )),
+        }
+    }
+
+    pub async fn revoke_admin_recovery(
+        &self,
+        command: NodeRevokeAdminRecoveryCommand,
+    ) -> Result<AdminRecoveryStatusView, RuntimeControlError> {
+        match self
+            .send_admin_recovery(AdminRecoveryRuntimeCommand::Revoke(command))
+            .await?
+        {
+            AdminRecoveryExecutionResult::Status(status) => Ok(status),
+            AdminRecoveryExecutionResult::List(_) => Err(admin_recovery_unavailable(
+                "管理员恢复撤销返回了不匹配的列表响应",
+            )),
+        }
+    }
+
+    pub async fn execute_admin_recovery(
+        &self,
+        command: NodeExecuteAdminRecoveryCommand,
+    ) -> Result<AdminRecoveryStatusView, RuntimeControlError> {
+        match self
+            .send_admin_recovery(AdminRecoveryRuntimeCommand::Execute(command))
+            .await?
+        {
+            AdminRecoveryExecutionResult::Status(status) => Ok(status),
+            AdminRecoveryExecutionResult::List(_) => Err(admin_recovery_unavailable(
+                "管理员恢复执行返回了不匹配的列表响应",
+            )),
+        }
+    }
+
+    async fn send_admin_recovery(
+        &self,
+        command: AdminRecoveryRuntimeCommand,
+    ) -> Result<AdminRecoveryExecutionResult, RuntimeControlError> {
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::AdminRecovery { command, reply })
+            .await?;
+        response
+            .await
+            .map_err(|_| RuntimeControlError::ActorClosed)?
+    }
+
     pub async fn stop(
         &self,
         networks: Vec<String>,
@@ -3212,6 +3382,10 @@ async fn run_actor(
                     }
                     RuntimeControlCommand::CoordinatorCandidates { command, reply } => {
                         let result = actor.execute_coordinator_candidate_command(command).await;
+                        let _ = reply.send(result);
+                    }
+                    RuntimeControlCommand::AdminRecovery { command, reply } => {
+                        let result = actor.execute_admin_recovery_command(command).await;
                         let _ = reply.send(result);
                     }
                     RuntimeControlCommand::Shutdown { _operation, reply } => {
@@ -4052,6 +4226,130 @@ impl NetworkRuntimeActor {
                 result
             }
         }
+    }
+
+    async fn execute_admin_recovery_command(
+        &mut self,
+        command: AdminRecoveryRuntimeCommand,
+    ) -> Result<AdminRecoveryExecutionResult, RuntimeControlError> {
+        match command {
+            AdminRecoveryRuntimeCommand::Submit(command) => {
+                let NodeSubmitAdminRecoveryCommand {
+                    network_name,
+                    request,
+                } = command;
+                let (network_id, signaling) = self.admin_recovery_signaling(&network_name).await?;
+                if request.proposal.network_id != network_id {
+                    return Err(admin_recovery_invalid(
+                        "管理员恢复请求属于其他网络，拒绝提交",
+                    ));
+                }
+                signaling
+                    .submit_admin_recovery(request)
+                    .await
+                    .map(AdminRecoveryExecutionResult::Status)
+                    .map_err(map_admin_recovery_error)
+            }
+            AdminRecoveryRuntimeCommand::Status(command) => {
+                let NodeAdminRecoveryStatusCommand {
+                    network_name,
+                    request_id,
+                } = command;
+                let (network_id, signaling) = self.admin_recovery_signaling(&network_name).await?;
+                signaling
+                    .get_admin_recovery_status(network_id, request_id)
+                    .await
+                    .map(AdminRecoveryExecutionResult::Status)
+                    .map_err(map_admin_recovery_error)
+            }
+            AdminRecoveryRuntimeCommand::List(command) => {
+                let (network_id, signaling) =
+                    self.admin_recovery_signaling(&command.network_name).await?;
+                signaling
+                    .list_admin_recoveries(network_id)
+                    .await
+                    .map(AdminRecoveryExecutionResult::List)
+                    .map_err(map_admin_recovery_error)
+            }
+            AdminRecoveryRuntimeCommand::Revoke(command) => {
+                let NodeRevokeAdminRecoveryCommand {
+                    network_name,
+                    request_id,
+                    reason,
+                } = command;
+                let (network_id, signaling) = self.admin_recovery_signaling(&network_name).await?;
+                signaling
+                    .revoke_admin_recovery(network_id, request_id, reason)
+                    .await
+                    .map(AdminRecoveryExecutionResult::Status)
+                    .map_err(map_admin_recovery_error)
+            }
+            AdminRecoveryRuntimeCommand::Execute(command) => {
+                let NodeExecuteAdminRecoveryCommand {
+                    network_name,
+                    request_id,
+                } = command;
+                let (network_id, signaling) = self.admin_recovery_signaling(&network_name).await?;
+                signaling
+                    .execute_admin_recovery(network_id, request_id)
+                    .await
+                    .map(AdminRecoveryExecutionResult::Status)
+                    .map_err(map_admin_recovery_error)
+            }
+        }
+    }
+
+    /// Break-glass recovery is deliberately bound to an already authenticated
+    /// live data-plane connection. Falling back to a fresh unqualified
+    /// connection would weaken the transport identity and could make an Ack
+    /// loss indistinguishable from an unauthenticated execution attempt.
+    async fn admin_recovery_signaling(
+        &mut self,
+        network_name: &str,
+    ) -> Result<(NetworkId, Arc<SignalingClient>), RuntimeControlError> {
+        self.reconcile_finished_sessions().await;
+        let network = self
+            .configs
+            .list_networks()
+            .map_err(|error| {
+                RuntimeControlError::Persistence(format!("加载管理员恢复网络配置失败: {error:#}"))
+            })?
+            .into_iter()
+            .find(|network| network.name == network_name)
+            .ok_or_else(|| {
+                RuntimeControlError::NotFound(format!("网络 [{network_name}] 不存在"))
+            })?;
+        let network_id = network
+            .network_id
+            .as_deref()
+            .ok_or_else(|| {
+                admin_recovery_unavailable(format!(
+                    "网络 [{network_name}] 缺少稳定网络 ID，拒绝管理员恢复"
+                ))
+            })
+            .and_then(|network_id| {
+                NetworkId::parse(network_id.to_owned()).map_err(|error| {
+                    admin_recovery_invalid(format!(
+                        "网络 [{network_name}] 的稳定网络 ID 无效: {error:#}"
+                    ))
+                })
+            })?;
+        let session = self.sessions.get(network_name).ok_or_else(|| {
+            admin_recovery_unavailable(format!(
+                "网络 [{network_name}] 没有活动的数据面运行会话，管理员恢复必须使用已认证连接"
+            ))
+        })?;
+        if session.network_id.as_deref() != Some(network_id.as_str()) {
+            return Err(admin_recovery_unavailable(format!(
+                "网络 [{network_name}] 的活动运行会话尚未绑定权威网络 ID"
+            )));
+        }
+        let signaling = session.signaling.clone().ok_or_else(|| {
+            admin_recovery_unavailable(format!(
+                "网络 [{network_name}] 的活动运行会话没有已认证的 Coordinator 信令连接"
+            ))
+        })?;
+        Ok((network_id, signaling))
     }
 
     fn record_coordinator_control_failure(&mut self, network_name: &str, reason: String) {
@@ -8049,6 +8347,15 @@ fn local_exit_error_with_network(
             message_key,
             message,
         } => RuntimeControlError::CoordinatorCandidate {
+            code,
+            message_key,
+            message: format!("{context}：{message}"),
+        },
+        RuntimeControlError::AdminRecovery {
+            code,
+            message_key,
+            message,
+        } => RuntimeControlError::AdminRecovery {
             code,
             message_key,
             message: format!("{context}：{message}"),

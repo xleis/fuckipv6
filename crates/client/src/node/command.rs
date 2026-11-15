@@ -6,7 +6,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use fuckipv6_common::domain::{
     default_network_icon, default_network_language, default_network_purpose,
-    default_network_region, ActivityEntry, AuditEntry, AuditOutcome, CapabilityKind, ContentHash,
+    default_network_region, ActivityEntry, AdminRecoveryRequest, AdminRecoveryRequestId,
+    AdminRecoveryStatusView, AuditEntry, AuditOutcome, CapabilityKind, ContentHash,
     CoordinatorCandidate, CoordinatorCandidateResources, CoordinatorCandidateStatus,
     CoordinatorCandidateWillingness, CoordinatorPublicReachability, CoordinatorWriteCredential,
     ExitContributionMode, ExitContributionObligation, ExitContributionScope, ExitHealthAssessment,
@@ -154,11 +155,16 @@ pub enum NodeCommandKind {
     GetCoordinatorCandidates,
     UpdateCoordinatorCandidates,
     PublishCoordinatorCandidateDeclaration,
+    SubmitAdminRecovery,
+    GetAdminRecoveryStatus,
+    ListAdminRecoveries,
+    RevokeAdminRecovery,
+    ExecuteAdminRecovery,
     Shutdown,
 }
 
 impl NodeCommandKind {
-    pub const ALL: [Self; 72] = [
+    pub const ALL: [Self; 77] = [
         Self::GetSnapshot,
         Self::GetUiManifest,
         Self::GetDiagnostics,
@@ -230,12 +236,17 @@ impl NodeCommandKind {
         Self::GetCoordinatorCandidates,
         Self::UpdateCoordinatorCandidates,
         Self::PublishCoordinatorCandidateDeclaration,
+        Self::SubmitAdminRecovery,
+        Self::GetAdminRecoveryStatus,
+        Self::ListAdminRecoveries,
+        Self::RevokeAdminRecovery,
+        Self::ExecuteAdminRecovery,
         Self::Shutdown,
     ];
 
     /// Commands that must be reachable through a user-visible manifest action.
     /// The manifest bootstrap command is deliberately excluded.
-    pub const ACTIONS: [Self; 71] = [
+    pub const ACTIONS: [Self; 76] = [
         Self::GetSnapshot,
         Self::GetDiagnostics,
         Self::StartNetworks,
@@ -306,6 +317,11 @@ impl NodeCommandKind {
         Self::GetCoordinatorCandidates,
         Self::UpdateCoordinatorCandidates,
         Self::PublishCoordinatorCandidateDeclaration,
+        Self::SubmitAdminRecovery,
+        Self::GetAdminRecoveryStatus,
+        Self::ListAdminRecoveries,
+        Self::RevokeAdminRecovery,
+        Self::ExecuteAdminRecovery,
         Self::Shutdown,
     ];
 
@@ -335,6 +351,8 @@ impl NodeCommandKind {
                 | Self::RedeemInvitation
                 | Self::UpdateCoordinatorCandidates
                 | Self::PublishCoordinatorCandidateDeclaration
+                | Self::RevokeAdminRecovery
+                | Self::ExecuteAdminRecovery
         )
     }
 
@@ -414,6 +432,11 @@ impl NodeCommandKind {
             Self::PublishCoordinatorCandidateDeclaration => {
                 "publish_coordinator_candidate_declaration"
             }
+            Self::SubmitAdminRecovery => "submit_admin_recovery",
+            Self::GetAdminRecoveryStatus => "get_admin_recovery_status",
+            Self::ListAdminRecoveries => "list_admin_recoveries",
+            Self::RevokeAdminRecovery => "revoke_admin_recovery",
+            Self::ExecuteAdminRecovery => "execute_admin_recovery",
         }
     }
 
@@ -468,6 +491,9 @@ impl NodeCommandKind {
                 | Self::RollbackTrafficPolicy
                 | Self::UpdateCoordinatorCandidates
                 | Self::PublishCoordinatorCandidateDeclaration
+                | Self::SubmitAdminRecovery
+                | Self::RevokeAdminRecovery
+                | Self::ExecuteAdminRecovery
         )
     }
 
@@ -476,6 +502,9 @@ impl NodeCommandKind {
     /// running networks, but these writes remain frozen until normal quorum
     /// authority returns. Candidate declarations are intentionally excluded:
     /// they publish candidate health and willingness during recovery.
+    /// Administrator recovery is intentionally excluded as well: it is the
+    /// break-glass path that must remain available while Coordinator governance
+    /// is frozen, but it still passes the network-scope authorization checks.
     pub const fn is_governance_write(self) -> bool {
         matches!(
             self,
@@ -688,6 +717,17 @@ pub enum NodeCommand {
     /// Publish this node's signed health/willingness declaration; `Unwilling`
     /// is the owner's explicit refusal of the local candidate role.
     PublishCoordinatorCandidateDeclaration(NodePublishCoordinatorCandidateDeclarationCommand),
+    /// Submit an independently approved administrator recovery request.
+    SubmitAdminRecovery(NodeSubmitAdminRecoveryCommand),
+    /// Read one authoritative recovery request projection.
+    GetAdminRecoveryStatus(NodeAdminRecoveryStatusCommand),
+    /// List authoritative recovery requests for one live network runtime.
+    ListAdminRecoveries(NodeAdminRecoveryListCommand),
+    /// Revoke a pending request while preserving its audit record.
+    RevokeAdminRecovery(NodeRevokeAdminRecoveryCommand),
+    /// Execute a threshold-approved recovery against the live data-plane
+    /// connection. Success is accepted only from the Coordinator status Ack.
+    ExecuteAdminRecovery(NodeExecuteAdminRecoveryCommand),
 }
 
 impl NodeCommand {
@@ -767,6 +807,11 @@ impl NodeCommand {
             Self::PublishCoordinatorCandidateDeclaration(_) => {
                 NodeCommandKind::PublishCoordinatorCandidateDeclaration
             }
+            Self::SubmitAdminRecovery(_) => NodeCommandKind::SubmitAdminRecovery,
+            Self::GetAdminRecoveryStatus(_) => NodeCommandKind::GetAdminRecoveryStatus,
+            Self::ListAdminRecoveries(_) => NodeCommandKind::ListAdminRecoveries,
+            Self::RevokeAdminRecovery(_) => NodeCommandKind::RevokeAdminRecovery,
+            Self::ExecuteAdminRecovery(_) => NodeCommandKind::ExecuteAdminRecovery,
         }
     }
 
@@ -894,6 +939,11 @@ impl NodeCommand {
             Self::GetCoordinatorCandidates(command) => command.validate(),
             Self::UpdateCoordinatorCandidates(command) => command.validate(),
             Self::PublishCoordinatorCandidateDeclaration(command) => command.validate(),
+            Self::SubmitAdminRecovery(command) => command.validate(),
+            Self::GetAdminRecoveryStatus(command) => command.validate(),
+            Self::ListAdminRecoveries(command) => command.validate(),
+            Self::RevokeAdminRecovery(command) => command.validate(),
+            Self::ExecuteAdminRecovery(command) => command.validate(),
         }
     }
 }
@@ -2855,6 +2905,74 @@ impl NodePublishCoordinatorCandidateDeclarationCommand {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeSubmitAdminRecoveryCommand {
+    pub network_name: String,
+    pub request: AdminRecoveryRequest,
+}
+
+impl NodeSubmitAdminRecoveryCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_name(&self.network_name)?;
+        self.request.validate_structure().map_err(|error| {
+            invalid(format!("管理员恢复请求无效: {error}")).for_network(self.network_name.clone())
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeAdminRecoveryStatusCommand {
+    pub network_name: String,
+    pub request_id: AdminRecoveryRequestId,
+}
+
+impl NodeAdminRecoveryStatusCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_name(&self.network_name)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeAdminRecoveryListCommand {
+    pub network_name: String,
+}
+
+impl NodeAdminRecoveryListCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_name(&self.network_name)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeRevokeAdminRecoveryCommand {
+    pub network_name: String,
+    pub request_id: AdminRecoveryRequestId,
+    pub reason: String,
+}
+
+impl NodeRevokeAdminRecoveryCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_name(&self.network_name)?;
+        if self.reason.trim().is_empty() || self.reason.chars().count() > 512 {
+            return Err(invalid("撤销管理员恢复请求时必须提供 1..=512 字符的原因")
+                .for_network(self.network_name.clone()));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeExecuteAdminRecoveryCommand {
+    pub network_name: String,
+    pub request_id: AdminRecoveryRequestId,
+}
+
+impl NodeExecuteAdminRecoveryCommand {
+    fn validate(&self) -> Result<(), NodeProblem> {
+        validate_network_name(&self.network_name)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, JsonSchema, Serialize, Deserialize)]
 #[serde(tag = "status", content = "data", rename_all = "snake_case")]
 pub enum NodeCommandOutcome {
@@ -2904,6 +3022,8 @@ pub enum NodeCommandOutcome {
     TrafficPolicyRolledBack(Box<TrafficPolicyRollbackResult>),
     TrafficPolicyTest(Box<TrafficPolicyTestComparison>),
     CoordinatorCandidates(Box<CoordinatorCandidateStatus>),
+    AdminRecoveryStatus(Box<AdminRecoveryStatusView>),
+    AdminRecoveries(Vec<AdminRecoveryStatusView>),
     Accepted { operation_id: String },
     Completed { message: String },
     Rejected(NodeProblem),

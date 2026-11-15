@@ -896,6 +896,81 @@ impl NodeRuntimeHandler {
                         },
                     }
                 }
+                super::NodeCommand::SubmitAdminRecovery(command) => match runtime {
+                    Some(runtime) => match runtime.submit_admin_recovery(command).await {
+                        Ok(status) => NodeCommandResult::completed(
+                            request_id,
+                            NodeCommandOutcome::AdminRecoveryStatus(Box::new(status)),
+                        ),
+                        Err(error) => runtime_rejection(request_id, error),
+                    },
+                    None => runtime_rejection(
+                        request_id,
+                        RuntimeControlError::Unavailable(
+                            "管理员恢复必须通过活动的数据面运行时会话执行".into(),
+                        ),
+                    ),
+                },
+                super::NodeCommand::GetAdminRecoveryStatus(command) => match runtime {
+                    Some(runtime) => match runtime.get_admin_recovery_status(command).await {
+                        Ok(status) => NodeCommandResult::completed(
+                            request_id,
+                            NodeCommandOutcome::AdminRecoveryStatus(Box::new(status)),
+                        ),
+                        Err(error) => runtime_rejection(request_id, error),
+                    },
+                    None => runtime_rejection(
+                        request_id,
+                        RuntimeControlError::Unavailable(
+                            "管理员恢复状态必须通过活动的数据面运行时查询".into(),
+                        ),
+                    ),
+                },
+                super::NodeCommand::ListAdminRecoveries(command) => match runtime {
+                    Some(runtime) => match runtime.list_admin_recoveries(command).await {
+                        Ok(statuses) => NodeCommandResult::completed(
+                            request_id,
+                            NodeCommandOutcome::AdminRecoveries(statuses),
+                        ),
+                        Err(error) => runtime_rejection(request_id, error),
+                    },
+                    None => runtime_rejection(
+                        request_id,
+                        RuntimeControlError::Unavailable(
+                            "管理员恢复列表必须通过活动的数据面运行时查询".into(),
+                        ),
+                    ),
+                },
+                super::NodeCommand::RevokeAdminRecovery(command) => match runtime {
+                    Some(runtime) => match runtime.revoke_admin_recovery(command).await {
+                        Ok(status) => NodeCommandResult::completed(
+                            request_id,
+                            NodeCommandOutcome::AdminRecoveryStatus(Box::new(status)),
+                        ),
+                        Err(error) => runtime_rejection(request_id, error),
+                    },
+                    None => runtime_rejection(
+                        request_id,
+                        RuntimeControlError::Unavailable(
+                            "管理员恢复撤销必须通过活动的数据面运行时执行".into(),
+                        ),
+                    ),
+                },
+                super::NodeCommand::ExecuteAdminRecovery(command) => match runtime {
+                    Some(runtime) => match runtime.execute_admin_recovery(command).await {
+                        Ok(status) => NodeCommandResult::completed(
+                            request_id,
+                            NodeCommandOutcome::AdminRecoveryStatus(Box::new(status)),
+                        ),
+                        Err(error) => runtime_rejection(request_id, error),
+                    },
+                    None => runtime_rejection(
+                        request_id,
+                        RuntimeControlError::Unavailable(
+                            "管理员恢复执行必须通过活动的数据面运行时执行".into(),
+                        ),
+                    ),
+                },
                 super::NodeCommand::TestPolicy(input) => NodeCommandResult::completed(
                     request_id,
                     NodeCommandOutcome::PolicyTest(Box::new(input.evaluate())),

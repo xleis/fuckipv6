@@ -2538,6 +2538,19 @@ impl GpuiShell {
                     status.emergency
                 ));
             }
+            NodeCommandOutcome::AdminRecoveryStatus(status) => {
+                self.notice = Some(format!(
+                    "管理员恢复 · {} · state={:?} · approvals={}/{} · can_execute={}",
+                    status.request_id,
+                    status.state,
+                    status.signature_count,
+                    status.required_signatures,
+                    status.can_execute
+                ));
+            }
+            NodeCommandOutcome::AdminRecoveries(statuses) => {
+                self.notice = Some(format!("管理员恢复请求 · {} 项", statuses.len()));
+            }
             NodeCommandOutcome::Accepted { operation_id } => {
                 self.notice = Some(tr(
                     self.locale,

@@ -350,6 +350,24 @@ describe("TopologyPage interactions and governance", () => {
     expect(await screen.findByRole("menu")).toBeInTheDocument();
   });
 
+  it("keeps modifier selection separate from the node detail overlay", async () => {
+    const onSubmit = vi.fn(directorySubmit(directory()));
+    render(
+      <TopologyPage
+        topology={snapshot()}
+        locale="zh-CN"
+        actions={governanceActions}
+        onSubmitAction={onSubmit}
+      />,
+    );
+
+    const bob = screen.getByRole("option", { name: /Bob/ });
+    fireEvent.click(bob, { shiftKey: true });
+
+    expect(screen.getByText(translated("topology.selection.count"))).toBeInTheDocument();
+    expect(screen.queryByTestId("topology-node-detail")).not.toBeInTheDocument();
+  });
+
   it("clears selection with an explicit notice when filters change", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn(directorySubmit(directory()));

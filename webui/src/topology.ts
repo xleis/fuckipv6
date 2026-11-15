@@ -391,7 +391,21 @@ export function topologyGraphBudget(
 const ANCHOR_SLOTS = 12;
 const NODE_SLOTS_PER_RING = 16;
 
-function anchorPosition(width: number, height: number, slot: number) {
+function anchorPosition(
+  width: number,
+  height: number,
+  slot: number,
+  boundaryCount: number,
+) {
+  if (boundaryCount === 1) {
+    return { x: width / 2, y: height / 2 };
+  }
+  if (boundaryCount === 2) {
+    return {
+      x: width * (slot === 0 ? 0.36 : 0.68),
+      y: height * (slot === 0 ? 0.52 : 0.46),
+    };
+  }
   const ring = Math.floor(slot / ANCHOR_SLOTS);
   const index = slot % ANCHOR_SLOTS;
   const radiusX = width * (0.34 + ring * 0.16);
@@ -403,11 +417,34 @@ function anchorPosition(width: number, height: number, slot: number) {
   };
 }
 
-function nodePosition(anchorX: number, anchorY: number, slot: number) {
+function nodeOrbitRadius(groupSize: number, ring: number): number {
+  if (groupSize <= 1) return 0;
+  const base =
+    groupSize === 2
+      ? 96
+      : groupSize === 3
+        ? 118
+        : groupSize === 4
+          ? 138
+          : 158;
+  return base + ring * 42;
+}
+
+function nodePosition(
+  anchorX: number,
+  anchorY: number,
+  slot: number,
+  groupSize: number,
+) {
+  if (groupSize <= 1) return { x: anchorX, y: anchorY };
   const ring = Math.floor(slot / NODE_SLOTS_PER_RING);
   const index = slot % NODE_SLOTS_PER_RING;
-  const radius = 56 + ring * 30;
-  const angle = (Math.PI * 2 * index) / NODE_SLOTS_PER_RING - Math.PI / 2;
+  const nodesInRing = Math.min(groupSize - ring * NODE_SLOTS_PER_RING, NODE_SLOTS_PER_RING);
+  const radius = nodeOrbitRadius(groupSize, ring);
+  // Radially distribute the nodes actually present in this ring. Reusing all
+  // sixteen fixed slots packed every small group into the top arc, which made
+  // the card-based renderer overlap even for a two-node network.
+  const angle = (Math.PI * 2 * index) / nodesInRing - Math.PI / 2;
   return {
     x: anchorX + radius * Math.cos(angle),
     y: anchorY + radius * Math.sin(angle),
@@ -418,13 +455,22 @@ function nodePosition(anchorX: number, anchorY: number, slot: number) {
 /// once around its first sorted network, and repeated refreshes are identical.
 export function layoutTopology(
   snapshot: TopologySnapshot,
-  width = 720,
-  height = 360,
+  width = 1200,
+  height = 400,
 ): TopologyLayout {
+  const nodeCountByNetwork = new Map<string, number>();
+  for (const node of snapshot.nodes) {
+    const networkId = node.networks[0]?.network_id;
+    if (!networkId) continue;
+    nodeCountByNetwork.set(
+      networkId,
+      (nodeCountByNetwork.get(networkId) ?? 0) + 1,
+    );
+  }
   const anchors = snapshot.boundaries.map((boundary, slot) => ({
     networkId: boundary.network_id,
     slot,
-    ...anchorPosition(width, height, slot),
+    ...anchorPosition(width, height, slot, snapshot.boundaries.length),
   }));
   const anchorByNetwork = new Map(anchors.map((anchor) => [anchor.networkId, anchor]));
   const nextSlot = new Map<string, number>();
@@ -440,7 +486,12 @@ export function layoutTopology(
       nodeId: node.node_id,
       anchorNetworkId: anchor.networkId,
       slot,
-      ...nodePosition(anchor.x, anchor.y, slot),
+      ...nodePosition(
+        anchor.x,
+        anchor.y,
+        slot,
+        nodeCountByNetwork.get(anchor.networkId) ?? 1,
+      ),
     });
   }
   return { width, height, anchors, placements };

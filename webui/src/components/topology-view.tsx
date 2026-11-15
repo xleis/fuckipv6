@@ -17,9 +17,12 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   AlertTriangle,
   Info,
+  List,
   LoaderCircle,
   LocateFixed,
   Minus,
+  MoreHorizontal,
+  Network,
   Pause,
   Play,
   Plus,
@@ -101,6 +104,7 @@ type Props = {
   lifecycleActions?: (nodeId: string) => MemberLifecycleAction[];
   onPrepareLifecycle?: (nodeId: string, action: BatchMemberAction) => void;
   onClearSelection?: () => void;
+  onSelectNetwork?: (networkId: string) => void;
   selectionNotice?: string;
 };
 
@@ -168,7 +172,7 @@ type NodeMenuState = {
   layoutPosition?: TopologyNodePosition;
 };
 
-const NODE_RING_RADIUS = 17;
+const NODE_STATUS_RADIUS = 10;
 const MEMBERSHIP_ROLES = ["owner", "administrator", "member"] as const;
 const NARROW_VIEWPORT_QUERY = "(max-width: 600px)";
 const TOUCH_LONG_PRESS_MS = 450;
@@ -1165,13 +1169,18 @@ const GraphView = memo(function GraphView({
           const visual = visuals.get(anchor.networkId);
           if (!boundary || !visual) return null;
           const memberSlots = placementsByNetwork.get(anchor.networkId) ?? [];
-          const ring = memberSlots.reduce(
-            (maximum, placement) => Math.max(maximum, placement.slot),
-            0,
+          const rx = Math.max(
+            86,
+            ...memberSlots.map(
+              (placement) => Math.abs(placement.x - anchor.x) + 88,
+            ),
           );
-          const ringCount = Math.floor(ring / 16);
-          const rx = 64 + ringCount * 30 + 22;
-          const ry = 58 + ringCount * 30 + 18;
+          const ry = Math.max(
+            76,
+            ...memberSlots.map(
+              (placement) => Math.abs(placement.y - anchor.y) + 36,
+            ),
+          );
           const hidden = hiddenMemberCount(topology, anchor.networkId, index);
           return (
             <g key={`boundary-${anchor.networkId}`} className="topology-boundary">
@@ -1194,9 +1203,8 @@ const GraphView = memo(function GraphView({
                   : ""}
               </title>
               <text
-                x={anchor.x}
-                y={anchor.y - ry - 6}
-                textAnchor="middle"
+                x={anchor.x - rx + 14}
+                y={anchor.y - ry + 16}
                 className="topology-boundary-label"
                 fill={visual.color}
               >
@@ -1501,6 +1509,11 @@ const TopologyNodeGlyph = memo(function TopologyNodeGlyph({
   const segments = capabilitySegments(node, mode);
   const health = healthEncoding(node.health);
   const shared = node.networks.length > 1;
+  const rawName = node.display_name?.trim() || node.node_id;
+  const displayName =
+    rawName.length > 19 ? `${rawName.slice(0, 18)}…` : rawName;
+  const roleText = nodeRoleText(locale, node, undefined);
+  const metaText = `${roleText} · ${healthLabel(locale, node.health)}`;
   const dragRef = useRef<{
     pointerId: number;
     startClientX: number;
@@ -1700,51 +1713,71 @@ const TopologyNodeGlyph = memo(function TopologyNodeGlyph({
       }}
     >
       <title>{ariaLabel}</title>
-      <circle r="24" className="topology-node-halo" stroke={networkColor} />
+      <rect
+        x="-82"
+        y="-32"
+        width="164"
+        height="64"
+        rx="13"
+        className="topology-node-card"
+        stroke={networkColor}
+      />
       {selected ? (
-        <g className="topology-node-selection-mark" transform="translate(-17 17)">
-          <circle r="7" />
-          <text x="0" y="2.4" textAnchor="middle">
+        <g className="topology-node-selection-mark" transform="translate(-74 -23)">
+          <circle r="8" />
+          <text x="0" y="2.6" textAnchor="middle">
             ✓
           </text>
         </g>
       ) : null}
-      {segments.map((segment) => (
-        <path
-          key={segment.capability}
-          d={arcPath(0, 0, NODE_RING_RADIUS, segment.startAngle, segment.endAngle)}
-          fill="none"
-          stroke={segment.enabled ? segment.color : "var(--border)"}
-          strokeWidth={segment.enabled ? 4 : 2}
-          strokeDasharray={segment.enabled ? undefined : "2 2"}
-          strokeLinecap="round"
-          className={segment.enabled ? "capability-enabled" : "capability-disabled"}
-        />
-      ))}
-      <circle r="11" className={`topology-node-core ${health.tone}`} />
-      {node.is_self && (
-        <text x="0" y="2.5" textAnchor="middle" className="topology-node-self">
-          ●
-        </text>
-      )}
-      <HealthBadge encoding={health} x={14} y={-14} />
-      {shared && (
-        <g className="topology-node-shared" transform="translate(-15 -14)">
+      <g className="topology-node-status" transform="translate(-59 -10)">
+        {segments.map((segment) => (
+          <path
+            key={segment.capability}
+            d={arcPath(
+              0,
+              0,
+              NODE_STATUS_RADIUS,
+              segment.startAngle,
+              segment.endAngle,
+            )}
+            fill="none"
+            stroke={segment.enabled ? segment.color : "var(--border)"}
+            strokeWidth={segment.enabled ? 3 : 1.5}
+            strokeDasharray={segment.enabled ? undefined : "2 2"}
+            strokeLinecap="round"
+            className={
+              segment.enabled ? "capability-enabled" : "capability-disabled"
+            }
+          />
+        ))}
+        <circle r="5" className={`topology-node-core ${health.tone}`} />
+      </g>
+      <text x="-38" y="-6" className="topology-node-name">
+        {displayName}
+      </text>
+      <text x="-38" y="14" className="topology-node-meta">
+        {metaText}
+      </text>
+      <HealthBadge encoding={health} x={59} y={-20} />
+      {shared ? (
+        <g className="topology-node-shared" transform="translate(59 18)">
           <title>
             {label(locale, "topology.node.networks_count").replace(
               "{count}",
               String(node.networks.length),
             )}
           </title>
-          <circle r="7" />
-          <text x="0" y="2.5" textAnchor="middle">
+          <circle r="8" />
+          <text x="0" y="2.7" textAnchor="middle">
             ×{node.networks.length}
           </text>
         </g>
-      )}
-      <text x="0" y="38" textAnchor="middle" className="topology-node-label">
-        {node.display_name?.trim() || node.node_id.slice(0, 12)}
-      </text>
+      ) : node.is_self ? (
+        <text x="59" y="21" textAnchor="middle" className="topology-node-self-tag">
+          {label(locale, "topology.list.self")}
+        </text>
+      ) : null}
     </g>
   );
 }, areTopologyNodeGlyphPropsEqual);
@@ -2295,6 +2328,7 @@ export function TopologyView({
   lifecycleActions,
   onPrepareLifecycle,
   onClearSelection,
+  onSelectNetwork,
   selectionNotice = "",
 }: Props): JSX.Element {
   const presentation = topologyPresentation(topology, presentationSignals);
@@ -2565,73 +2599,21 @@ export function TopologyView({
         presentation={presentation}
         locale={locale}
       />
-      <div
-        className="topology-toolbar"
-        role="group"
-        aria-label={label(locale, "topology.view.label")}
-      >
+      <div className="topology-stage">
         <div
-          className="topology-view-switch"
-          role="group"
-          aria-label={label(locale, "topology.view.label")}
-        >
-          <button
-            type="button"
-            aria-pressed={view === "graph"}
-            onClick={() => changeView("graph")}
-          >
-            {label(locale, "topology.view.graph")}
-          </button>
-          <button
-            type="button"
-            aria-pressed={view === "list"}
-            onClick={() => changeView("list")}
-          >
-            {label(locale, "topology.view.list")}
-          </button>
-        </div>
-        <div
-          className="topology-color-switch"
-          role="group"
-          aria-label={label(locale, "topology.mode.label")}
-        >
-          <button
-            type="button"
-            aria-pressed={mode === "default"}
-            onClick={() => setMode("default")}
-          >
-            {label(locale, "topology.mode.default")}
-          </button>
-          <button
-            type="button"
-            aria-pressed={mode === "colorblind"}
-            onClick={() => setMode("colorblind")}
-          >
-            {label(locale, "topology.mode.colorblind")}
-          </button>
-          <label className="topology-contrast-toggle">
-            <input
-              type="checkbox"
-              checked={highContrast}
-              onChange={(event) => setHighContrast(event.currentTarget.checked)}
-            />
-            <span>{label(locale, "topology.mode.high_contrast")}</span>
-          </label>
-        </div>
-        <div
-          className="topology-navigation-controls"
+          className="topology-floating-toolbar"
           role="group"
           aria-label={label(locale, "topology.navigation.label")}
         >
           <button
             type="button"
-            className="topology-control-button topology-zoom-button"
+            className="topology-icon-button"
             aria-label={label(locale, "topology.zoom.out")}
             title={label(locale, "topology.zoom.out")}
             disabled={view !== "graph" || zoomIndex <= 0}
             onClick={() => zoomBy(-1)}
           >
-            <Minus size={15} aria-hidden="true" />
+            <Minus size={16} aria-hidden="true" />
           </button>
           <span
             className="topology-zoom-status"
@@ -2645,7 +2627,7 @@ export function TopologyView({
           </span>
           <button
             type="button"
-            className="topology-control-button topology-zoom-button"
+            className="topology-icon-button"
             aria-label={label(locale, "topology.zoom.in")}
             title={label(locale, "topology.zoom.in")}
             disabled={
@@ -2653,11 +2635,11 @@ export function TopologyView({
             }
             onClick={() => zoomBy(1)}
           >
-            <Plus size={15} aria-hidden="true" />
+            <Plus size={16} aria-hidden="true" />
           </button>
           <button
             type="button"
-            className="topology-control-button"
+            className="topology-icon-button"
             aria-label={label(locale, "topology.zoom.reset")}
             title={label(locale, "topology.zoom.reset")}
             disabled={view !== "graph" || zoom === 1}
@@ -2667,76 +2649,195 @@ export function TopologyView({
           </button>
           <button
             type="button"
-            className="topology-control-button topology-control-wide"
-            aria-label={label(locale, "topology.layout.reset")}
-            title={label(locale, "topology.layout.reset")}
-            disabled={view !== "graph" || fixedPositions.size === 0}
-            onClick={resetLayout}
-          >
-            <PinOff size={15} aria-hidden="true" />
-            <span>{label(locale, "topology.layout.reset")}</span>
-          </button>
-          <button
-            type="button"
-            className="topology-control-button topology-control-wide"
-            aria-label={label(
-              locale,
-              frozenTopology
-                ? "topology.freeze.unfreeze"
-                : "topology.freeze.freeze",
-            )}
-            aria-pressed={Boolean(frozenTopology)}
-            onClick={toggleFrozen}
-          >
-            {frozenTopology ? (
-              <Play size={15} aria-hidden="true" />
-            ) : (
-              <Pause size={15} aria-hidden="true" />
-            )}
-            <span>
-              {label(
-                locale,
-                frozenTopology
-                  ? "topology.freeze.unfreeze"
-                  : "topology.freeze.freeze",
-              )}
-            </span>
-          </button>
-          <button
-            type="button"
-            className="topology-control-button topology-control-wide"
+            className="topology-icon-button"
             aria-label={label(locale, "topology.locate.current")}
+            title={label(locale, "topology.locate.current")}
             disabled={!focusTargetNodeId}
             onClick={locateCurrentNode}
           >
             <LocateFixed size={15} aria-hidden="true" />
-            <span>{label(locale, "topology.locate.current")}</span>
           </button>
         </div>
+
+        <div
+          className="topology-stage-actions"
+          role="group"
+          aria-label={label(locale, "topology.view.label")}
+        >
+          <div className="topology-view-switch" role="group">
+            <button
+              type="button"
+              aria-label={label(locale, "topology.view.graph")}
+              aria-pressed={view === "graph"}
+              title={label(locale, "topology.view.graph")}
+              onClick={() => changeView("graph")}
+            >
+              <Network size={16} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              aria-label={label(locale, "topology.view.list")}
+              aria-pressed={view === "list"}
+              title={label(locale, "topology.view.list")}
+              onClick={() => changeView("list")}
+            >
+              <List size={16} aria-hidden="true" />
+            </button>
+          </div>
+          <details className="topology-options">
+            <summary
+              className="topology-icon-button"
+              aria-label={label(locale, "topology.view.label")}
+            >
+              <MoreHorizontal size={17} aria-hidden="true" />
+            </summary>
+            <div className="topology-options-panel">
+              <div
+                className="topology-color-switch"
+                role="group"
+                aria-label={label(locale, "topology.mode.label")}
+              >
+                <button
+                  type="button"
+                  aria-pressed={mode === "default"}
+                  onClick={() => setMode("default")}
+                >
+                  {label(locale, "topology.mode.default")}
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={mode === "colorblind"}
+                  onClick={() => setMode("colorblind")}
+                >
+                  {label(locale, "topology.mode.colorblind")}
+                </button>
+              </div>
+              <label className="topology-contrast-toggle">
+                <input
+                  type="checkbox"
+                  checked={highContrast}
+                  onChange={(event) =>
+                    setHighContrast(event.currentTarget.checked)
+                  }
+                />
+                <span>{label(locale, "topology.mode.high_contrast")}</span>
+              </label>
+              <div className="topology-option-actions">
+                <button
+                  type="button"
+                  className="topology-control-button topology-control-wide"
+                  disabled={view !== "graph" || fixedPositions.size === 0}
+                  onClick={resetLayout}
+                >
+                  <PinOff size={15} aria-hidden="true" />
+                  <span>{label(locale, "topology.layout.reset")}</span>
+                </button>
+                <button
+                  type="button"
+                  className="topology-control-button topology-control-wide"
+                  aria-pressed={Boolean(frozenTopology)}
+                  onClick={toggleFrozen}
+                >
+                  {frozenTopology ? (
+                    <Play size={15} aria-hidden="true" />
+                  ) : (
+                    <Pause size={15} aria-hidden="true" />
+                  )}
+                  <span>
+                    {label(
+                      locale,
+                      frozenTopology
+                        ? "topology.freeze.unfreeze"
+                        : "topology.freeze.freeze",
+                    )}
+                  </span>
+                </button>
+              </div>
+              <FilterToolbar
+                topology={sourceTopology}
+                locale={locale}
+                filters={activeFilters}
+                visibleCount={displayed.nodes.length}
+                onChange={changeFilters}
+              />
+              {layoutStorageStatus === "unavailable" ? (
+                <p className="topology-layout-status warning" role="status">
+                  {label(locale, "topology.layout.storage_unavailable")}
+                </p>
+              ) : layoutStorageStatus === "invalid" ||
+                layoutStorageStatus === "unsupported_version" ? (
+                <p className="topology-layout-status warning" role="status">
+                  {label(locale, "topology.layout.storage_invalid")}
+                </p>
+              ) : fixedPositions.size > 0 ? (
+                <p className="topology-layout-status" role="status">
+                  {tr(locale, "topology.layout.pinned", {
+                    count: String(fixedPositions.size),
+                  })}
+                </p>
+              ) : null}
+            </div>
+          </details>
+        </div>
+
+        {displayed.nodes.length === 0 ? (
+          <div className="empty-state">
+            {label(locale, "topology.filters.empty")}
+          </div>
+        ) : view === "graph" ? (
+          <GraphView
+            topology={displayed}
+            index={displayedIndex}
+            locale={locale}
+            mode={mode}
+            zoom={zoom}
+            fixedPositions={fixedPositions}
+            focusRequest={focusRequest}
+            focusTargetNodeId={focusTargetNodeId}
+            selectedNodeIds={selectedNodeIds}
+            onOpenNode={onOpenNode}
+            onToggleNode={onToggleNode}
+            onPinNode={pinNodePosition}
+            onShowHover={showHover}
+            onHideHover={hideHover}
+            onShowMenu={showMenu}
+          />
+        ) : (
+          <ListView
+            topology={displayed}
+            index={displayedIndex}
+            locale={locale}
+            mode={mode}
+            focusRequest={focusRequest}
+            focusTargetNodeId={focusTargetNodeId}
+            selectedNodeIds={selectedNodeIds}
+            onOpenNode={onOpenNode}
+            onToggleNode={onToggleNode}
+            onShowHover={showHover}
+            onHideHover={hideHover}
+            onShowMenu={showMenu}
+          />
+        )}
+        <footer className="topology-canvas-footer">
+          <div className="topology-network-chips">
+            {displayed.boundaries.map((boundary) => (
+              <button
+                type="button"
+                className={
+                  boundary.network_id === networkId ? "active" : undefined
+                }
+                aria-pressed={boundary.network_id === networkId}
+                key={boundary.network_id}
+                onClick={() => onSelectNetwork?.(boundary.network_id)}
+              >
+                <span aria-hidden="true" />
+                {boundary.name}
+              </button>
+            ))}
+          </div>
+          <Legend topology={displayed} locale={locale} mode={mode} />
+        </footer>
       </div>
-      {layoutStorageStatus === "unavailable" ? (
-        <p className="topology-layout-status warning" role="status">
-          {label(locale, "topology.layout.storage_unavailable")}
-        </p>
-      ) : layoutStorageStatus === "invalid" ||
-        layoutStorageStatus === "unsupported_version" ? (
-        <p className="topology-layout-status warning" role="status">
-          {label(locale, "topology.layout.storage_invalid")}
-        </p>
-      ) : fixedPositions.size > 0 ? (
-        <p className="topology-layout-status" role="status">
-          {tr(locale, "topology.layout.pinned", {
-            count: String(fixedPositions.size),
-          })}
-        </p>
-      ) : null}
-      <FilterToolbar
-        topology={sourceTopology}
-        locale={locale}
-        filters={activeFilters}
-        visibleCount={displayed.nodes.length}
-        onChange={changeFilters}
-      />
       {selectionCount > 0 ? (
         <section className="topology-selection-bar" aria-live="polite">
           <div>
@@ -2765,46 +2866,6 @@ export function TopologyView({
           {selectionNotice}
         </p>
       ) : null}
-      <p className="topology-selection-refresh-hint">
-        {label(locale, "topology.selection.refresh_hint")}
-      </p>
-      {displayed.nodes.length === 0 ? (
-        <div className="empty-state">{label(locale, "topology.filters.empty")}</div>
-      ) : view === "graph" ? (
-        <GraphView
-          topology={displayed}
-          index={displayedIndex}
-          locale={locale}
-          mode={mode}
-          zoom={zoom}
-          fixedPositions={fixedPositions}
-          focusRequest={focusRequest}
-          focusTargetNodeId={focusTargetNodeId}
-          selectedNodeIds={selectedNodeIds}
-          onOpenNode={onOpenNode}
-          onToggleNode={onToggleNode}
-          onPinNode={pinNodePosition}
-          onShowHover={showHover}
-          onHideHover={hideHover}
-          onShowMenu={showMenu}
-        />
-      ) : (
-        <ListView
-          topology={displayed}
-          index={displayedIndex}
-          locale={locale}
-          mode={mode}
-          focusRequest={focusRequest}
-          focusTargetNodeId={focusTargetNodeId}
-          selectedNodeIds={selectedNodeIds}
-          onOpenNode={onOpenNode}
-          onToggleNode={onToggleNode}
-          onShowHover={showHover}
-          onHideHover={hideHover}
-          onShowMenu={showMenu}
-        />
-      )}
-      <Legend topology={displayed} locale={locale} mode={mode} />
       {hoverNode ? (
         <NodeHoverCard
           node={hoverNode}

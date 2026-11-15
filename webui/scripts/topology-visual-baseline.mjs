@@ -983,6 +983,7 @@ async function topologySemantics(session) {
         })),
         nodes: [...document.querySelectorAll("g.topology-node[role='option']")].map((element) => ({
           node_id: element.getAttribute("data-node-id"),
+          transform: element.getAttribute("transform"),
           health: ${JSON.stringify(HEALTH_VALUES)}.find((value) => element.classList.contains(value)) ?? null,
           selected: element.getAttribute("data-selected"),
           shared: Boolean(element.querySelector(".topology-node-shared")),

@@ -846,11 +846,24 @@ async function dragNodeBy(session, nodeId, dx, dy) {
 }
 
 async function clickTopologyControl(session, ariaLabel) {
+  await clickElement(
+    session,
+    `document.querySelector(".topology-options > summary")`,
+    "topology options trigger",
+  );
+  await waitFor(
+    session,
+    `document.querySelector(".topology-options")?.open === true`,
+    "topology options panel",
+    5_000,
+  );
   const point = await evaluate(
     session,
     `(() => {
       const control = [...document.querySelectorAll("button")].find(
-        (element) => element.getAttribute("aria-label") === ${JSON.stringify(ariaLabel)},
+        (element) =>
+          element.getAttribute("aria-label") === ${JSON.stringify(ariaLabel)} ||
+          element.textContent?.trim() === ${JSON.stringify(ariaLabel)},
       );
       if (!control) throw new Error("topology control is missing");
       const rect = control.getBoundingClientRect();

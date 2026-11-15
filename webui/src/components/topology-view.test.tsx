@@ -1096,6 +1096,8 @@ describe("Topology page integration", () => {
         name: translated("topology.aria.graph_title"),
       }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Shared Node")).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: /Shared Node/ }),
+    ).toBeInTheDocument();
   });
 });

@@ -214,7 +214,16 @@ async fn serve_connection(
     loop {
         let (kind, payload) = tokio::select! {
             _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
-            received = connection.receive::<Value>() => received?,
+            received = connection.receive::<Value>() => match received {
+                Ok(frame) => frame,
+                // A client that closes its socket between requests (health
+                // probes, one-shot CLI calls, adapters that reconnect per poll)
+                // is a normal disconnect. Treating it as a connection error
+                // turns every probe into an error line and makes long-running
+                // hosts grow the log without bound.
+                Err(error) if is_clean_disconnect(&error) => return Ok(()),
+                Err(error) => return Err(error),
+            },
         };
 
         let request: LocalRequest = match kind {
@@ -710,6 +719,26 @@ fn command_bus_error(error: NodeCommandBusError) -> LocalError {
     }
 }
 
+/// Reports whether an IPC failure is a peer that simply stopped talking.
+///
+/// EOF, peer reset and broken pipe all mean "the other end is gone"; they carry
+/// no service fault and must not be reported as connection errors.
+fn is_clean_disconnect(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| {
+                matches!(
+                    io.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                )
+            })
+    })
+}
+
 fn log_connection_result(result: std::result::Result<Result<()>, tokio::task::JoinError>) {
     match result {
         Ok(Ok(())) => {}
@@ -722,6 +751,22 @@ fn log_connection_result(result: std::result::Result<Result<()>, tokio::task::Jo
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn peer_disconnects_are_not_connection_errors() {
+        let eof = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+            .context("读取本地 IPC 帧头失败");
+        assert!(is_clean_disconnect(&eof));
+        let reset = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        assert!(is_clean_disconnect(&reset));
+        let broken = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        assert!(is_clean_disconnect(&broken));
+
+        let timeout = anyhow::anyhow!("读取本地 IPC 帧超时");
+        assert!(!is_clean_disconnect(&timeout));
+        let malformed = anyhow::anyhow!("本地 IPC 帧 magic 不匹配");
+        assert!(!is_clean_disconnect(&malformed));
+    }
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
 

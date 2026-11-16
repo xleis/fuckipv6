@@ -5,6 +5,7 @@
 //! starts `__node`; every UI connects to the node over the authenticated local
 //! IPC boundary instead of constructing a second node runtime.
 
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::io::Write;
@@ -57,6 +58,15 @@ const FORCE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 const TASK_ABORT_TIMEOUT: Duration = Duration::from_secs(5);
 const RESTART_BACKOFF_MIN: Duration = Duration::from_millis(250);
 const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(5);
+// Steady-state supervision runs at 1 Hz. The 100 ms readiness poll stays limited
+// to startup and stop transitions: probing a healthy node ten times a second
+// costs one authenticated IPC handshake per probe and dominates both CPU and
+// log volume on long-running hosts.
+const SUPERVISION_INTERVAL: Duration = Duration::from_secs(1);
+// A node that keeps dying must surface as a failed control plane instead of an
+// unbounded respawn loop that hides the fault behind a healthy-looking parent.
+const NODE_CRASH_BUDGET_WINDOW: Duration = Duration::from_secs(300);
+const NODE_CRASH_BUDGET_LIMIT: u32 = 5;
 
 /// Shutdown listeners are registered before any long-running service becomes
 /// visible to callers. In particular, binding the WebUI socket before polling
@@ -535,6 +545,7 @@ async fn run_service(
                     controller,
                     node_http,
                     surface_lease,
+                    crate::ui::UiModeRequest::WebUi,
                 ),
             )
             .await?,
@@ -582,6 +593,50 @@ async fn run_service(
     result
 }
 
+/// Bounded restart accounting for the managed node process.
+///
+/// A node that exits unsuccessfully more than `limit` times inside `window` is a
+/// persistent fault. Retrying forever keeps a half-alive control plane and hides
+/// the failure from service managers, so the supervisor stops instead and lets
+/// the exit status surface.
+struct NodeRestartBudget {
+    window: Duration,
+    limit: u32,
+    failures: VecDeque<Instant>,
+}
+
+impl NodeRestartBudget {
+    fn new(window: Duration, limit: u32) -> Self {
+        Self {
+            window,
+            limit,
+            failures: VecDeque::new(),
+        }
+    }
+
+    /// Records one unsuccessful node exit and reports whether another restart is
+    /// still within budget.
+    fn record(&mut self, now: Instant) -> bool {
+        self.failures.push_back(now);
+        while self
+            .failures
+            .front()
+            .is_some_and(|first| now.saturating_duration_since(*first) > self.window)
+        {
+            self.failures.pop_front();
+        }
+        (self.failures.len() as u32) <= self.limit
+    }
+
+    fn reset(&mut self) {
+        self.failures.clear();
+    }
+
+    fn recorded(&self) -> usize {
+        self.failures.len()
+    }
+}
+
 async fn run_control_loop<F>(options: InternalOptions, shutdown: F) -> Result<()>
 where
     F: Future<Output = ()> + Send,
@@ -591,12 +646,19 @@ where
     let mut restart_delay = RESTART_BACKOFF_MIN;
     let mut unhealthy_since: Option<Instant> = None;
     let mut startup_grace_until: Option<Instant> = None;
+    let mut restarts = NodeRestartBudget::new(NODE_CRASH_BUDGET_WINDOW, NODE_CRASH_BUDGET_LIMIT);
     let mut shutdown = Box::pin(shutdown);
 
     loop {
+        let steady_state = child.is_some() || adopted_node;
+        let poll_interval = if steady_state {
+            SUPERVISION_INTERVAL
+        } else {
+            READY_POLL_INTERVAL
+        };
         tokio::select! {
             _ = &mut shutdown => break,
-            _ = sleep(READY_POLL_INTERVAL) => {}
+            _ = sleep(poll_interval) => {}
         }
 
         if child.is_none() && !adopted_node {
@@ -624,6 +686,13 @@ where
                 if was_success {
                     return Ok(());
                 }
+                if !restarts.record(Instant::now()) {
+                    bail!(
+                        "节点进程在 {} 秒内连续异常退出 {} 次；停止自动重启，避免无界重试掩盖数据面故障",
+                        NODE_CRASH_BUDGET_WINDOW.as_secs(),
+                        NODE_CRASH_BUDGET_LIMIT
+                    );
+                }
                 sleep(restart_delay).await;
                 restart_delay = (restart_delay * 2).min(RESTART_BACKOFF_MAX);
                 continue;
@@ -634,6 +703,7 @@ where
             restart_delay = RESTART_BACKOFF_MIN;
             unhealthy_since = None;
             startup_grace_until = None;
+            restarts.reset();
             continue;
         }
 
@@ -1326,6 +1396,51 @@ mod tests {
             instance_lock_path(directory, "node"),
             directory.join("node.lock")
         );
+    }
+
+    #[test]
+    fn node_restart_budget_stops_after_the_limit() {
+        let mut budget = NodeRestartBudget::new(Duration::from_secs(60), 2);
+        let start = Instant::now();
+        assert!(budget.record(start));
+        assert!(budget.record(start + Duration::from_secs(1)));
+        assert!(
+            !budget.record(start + Duration::from_secs(2)),
+            "third failure inside the window must exhaust the budget"
+        );
+        assert_eq!(budget.recorded(), 3);
+    }
+
+    #[test]
+    fn node_restart_budget_forgets_failures_outside_the_window() {
+        let mut budget = NodeRestartBudget::new(Duration::from_secs(10), 1);
+        let start = Instant::now();
+        assert!(budget.record(start));
+        assert!(!budget.record(start + Duration::from_secs(5)));
+        assert!(
+            budget.record(start + Duration::from_secs(30)),
+            "a failure older than the window must not count against the budget"
+        );
+        assert_eq!(budget.recorded(), 1);
+    }
+
+    #[test]
+    fn node_restart_budget_resets_after_a_healthy_probe() {
+        let mut budget = NodeRestartBudget::new(Duration::from_secs(60), 1);
+        let start = Instant::now();
+        assert!(budget.record(start));
+        budget.reset();
+        assert_eq!(budget.recorded(), 0);
+        assert!(budget.record(start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn steady_state_supervision_is_cheaper_than_startup_polling() {
+        assert!(
+            SUPERVISION_INTERVAL >= Duration::from_secs(1),
+            "steady-state probes must not hammer the node IPC endpoint"
+        );
+        assert!(READY_POLL_INTERVAL < SUPERVISION_INTERVAL);
     }
 
     #[test]

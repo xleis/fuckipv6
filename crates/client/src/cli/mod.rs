@@ -53,6 +53,14 @@ pub struct Cli {
     #[arg(long, visible_alias = "gui", conflicts_with_all = ["headless", "webui"])]
     pub gpui: bool,
 
+    /// 为桌面外壳（Tauri WebView 窗口）提供本地浏览器界面；仅监听 127.0.0.1
+    #[arg(
+        long,
+        conflicts_with_all = ["headless", "webui", "gpui"],
+        help_heading = "UI"
+    )]
+    pub webview_shell: bool,
+
     /// 统一控制中心 WebUI 监听端口 (默认 8080)
     #[arg(long, default_value = "8080")]
     pub webui_port: u16,
@@ -699,6 +707,17 @@ pub enum RecoveryCommands {
         json: bool,
     },
 
+    /// 列出当前网络的权威恢复请求
+    List {
+        /// 本地保存的网络名称
+        #[arg(long)]
+        network: String,
+
+        /// 以 JSON 输出服务端状态
+        #[arg(long)]
+        json: bool,
+    },
+
     /// 撤销一个仍处于 pending 的恢复请求
     Revoke {
         /// 本地保存的网络名称
@@ -754,12 +773,14 @@ fn requested_ui_mode(
     headless: bool,
     webui: bool,
     gpui: bool,
+    webview_shell: bool,
 ) -> Result<UiModeRequest, UiModeError> {
-    match (headless, webui, gpui) {
-        (true, false, false) => Ok(UiModeRequest::Headless),
-        (false, true, false) => Ok(UiModeRequest::WebUi),
-        (false, false, true) => Ok(UiModeRequest::Gpui),
-        (false, false, false) => Ok(UiModeRequest::Auto),
+    match (headless, webui, gpui, webview_shell) {
+        (true, false, false, false) => Ok(UiModeRequest::Headless),
+        (false, true, false, false) => Ok(UiModeRequest::WebUi),
+        (false, false, true, false) => Ok(UiModeRequest::Gpui),
+        (false, false, false, true) => Ok(UiModeRequest::WebViewShell),
+        (false, false, false, false) => Ok(UiModeRequest::Auto),
         _ => Err(UiModeError::ConflictingFlags),
     }
 }
@@ -799,7 +820,7 @@ impl UiLaunchPlan {
     ) -> commands::RuntimeOptions {
         let (headless, gui) = match self.ui_mode.effective {
             UiMode::Headless => (true, false),
-            UiMode::WebUi => (false, true),
+            UiMode::WebUi | UiMode::WebViewShell => (false, true),
             // RuntimeOptions still carries the legacy two-bit adapter shape.
             // GPUI is neither the headless node core nor the browser-hosted
             // `gui` adapter; the native launch decision lives in `ui_mode`.
@@ -860,7 +881,7 @@ fn command_ui_intent(command: &Commands) -> Result<Option<CommandUiIntent>, UiMo
             gpui,
             webui_port,
             ..
-        } => (requested_ui_mode(*headless, *webui, *gpui)?, *webui_port),
+        } => (requested_ui_mode(*headless, *webui, *gpui, false)?, *webui_port),
         _ => return Ok(None),
     };
     Ok(Some(CommandUiIntent {
@@ -879,7 +900,7 @@ fn resolve_launch_plan(
             .transpose();
     }
 
-    let requested = requested_ui_mode(cli.headless, cli.webui, cli.gpui)?;
+    let requested = requested_ui_mode(cli.headless, cli.webui, cli.gpui, cli.webview_shell)?;
     UiLaunchPlan::resolve(requested, cli.webui_port, capabilities).map(Some)
 }
 
@@ -1045,6 +1066,7 @@ async fn run_default_app(
         controller.clone(),
         node_http,
         surface_lease,
+        plan.ui_mode.requested,
     )
     .await?;
 
@@ -1074,6 +1096,7 @@ async fn run_default_app(
     match ui_mode.effective {
         UiMode::Gpui => unreachable!("GPUI is rejected before the WebUI server starts"),
         UiMode::WebUi => crate::ui::run_webui_window(plan.webui_port).await?,
+        UiMode::WebViewShell => crate::ui::run_webview_shell_bootstrap(plan.webui_port).await?,
         UiMode::Headless => {
             println!("========================================================================");
             println!("🚀 fuckipv6 统一控制中心已就绪 (无头模式)");
@@ -1280,6 +1303,9 @@ async fn run_network_command(command: Commands, launch_plan: Option<UiLaunchPlan
                         request_id,
                         json,
                     } => network_commands::recovery_status(&network, &request_id, json).await?,
+                    RecoveryCommands::List { network, json } => {
+                        network_commands::recovery_list(&network, json).await?
+                    }
                     RecoveryCommands::Revoke {
                         network,
                         request_id,

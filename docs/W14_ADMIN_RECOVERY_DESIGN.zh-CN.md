@@ -1,8 +1,10 @@
 # W14 管理员阈值恢复与本地/离线灾备设计
 
-> 状态：设计稿（2026-11-15）。本文定义网络治理 roster 的管理员阈值恢复，不替代 W3/J-16 的节点 owner
-> 本机 Passkey 恢复。实现映射基于当前仓库中已有的领域、Coordinator 与 Signaling 代码；GPUI、WebUI、
-> Android 操作界面和真实灾难演练仍需按本文补齐。
+> 状态：功能代码与真实多节点灾难演练已完成（2026-11-16）。本文定义网络治理 roster 的管理员阈值恢复，
+> 不替代 W3/J-16 的节点 owner 本机 Passkey 恢复。GPUI、WebUI、Android 和本地 CLI 已接入同一命令与状态
+> 语义；`w14_admin_recovery_multinode_offline_trustee_drill` 与 root 专项 `w14_admin_recovery_netns_drill`
+> 已用真实进程覆盖离线 Trustee 审批、控制面中断、执行、旧会话失效和幂等重跑。仍缺独立第三方的正式安全
+> 审计结论，因此 W14-08 已勾选、W14 总体仍等待 W14-03 的审计结论。
 
 ## 1. 目标与边界
 
@@ -177,13 +179,23 @@ Pending ──execute accepted──> Executing ──partial failure──> Pen
   失效编排。
 - `crates/client/src/signaling/client.rs`：提交、状态、列表、撤销和执行的请求/响应关联及稳定错误键。
 - `websocket_admin_recovery_ack_precedes_old_session_close`：真实 WebSocket Ack 先于旧会话关闭。
+- node 命令层、本地 CLI、GPUI、WebUI 和 Android Compose：提交、状态、列表、撤销和执行的等价流程；
+  execute 在提交前强制读取同 request ID 的最新权威状态，仅当 Pending 且 `can_execute == true` 时发出一次，
+  Ack 丢失后只查询状态而不自动重放。
+- `crates/coordinator/tests/w14_admin_recovery_multinode.rs`：真实多节点灾难演练。Coordinator 与每个离线
+  Trustee 都是独立进程，Trustee 只持有自己目录下的私钥并输出一个 detached approval；演练覆盖 2/3 阈值、
+  单审批与“旧管理员 + Trustee”混合请求的失败关闭、两次控制面 SIGKILL/重启后的请求持久化、执行 Ack 先于
+  Close、旧会话与旧邀请失效、快照外 pending applicant 存活、新 Owner 可用以及重复执行幂等。报告 schema 为
+  `fuckipv6.w14.admin-recovery.drill.v1`，可用 `FUCKIPV6_W14_ADMIN_RECOVERY_REPORT` 导出。
+- `scripts/test-w14-admin-recovery-netns.sh`：root 专项，在独立网络 namespace 中运行同一演练并用 nftables
+  切断 Operator 到 Coordinator 的路径，验证中断期间不推断成功、恢复后流程继续。
+- 服务端错误映射：`admin_recovery_protocol_error` 现在把 `domain.admin_recovery_threshold_not_met`、
+  `_expired`、`_stale_snapshot`、`_network_mismatch` 显式映射到公开稳定键，阈值不足不再退化为
+  `admin_recovery.error.internal`；`admin_recovery_domain_rejections_keep_stable_public_keys` 固定该边界。
 
 仍需实现：
 
-- 将 `submit_admin_recovery`、`get_admin_recovery_status`、`list_admin_recoveries`、
-  `revoke_admin_recovery` 和 `execute_admin_recovery` 接入 node 命令层，移除临时 `dead_code` 标记。
-- GPUI、WebUI、Android 和本地 CLI 的等价流程。
-- 真实多节点灾难演练：设备丢失、离线 Trustee 审批、网络中断、执行中断和旧会话失效。
+- 正式外部安全审计：需要独立第三方对候选人 threshold 恢复、持久化事务和失效编排出具审计结论。
 
 ## 10. 验收矩阵
 
@@ -203,3 +215,8 @@ Pending ──execute accepted──> Executing ──partial failure──> Pen
 
 **完成标准**：上述矩阵由领域、Coordinator、客户端、真实 WebSocket、三端 UI/Android 和至少一次真实
 多节点离线 Trustee 演练共同覆盖后，W14-08 才可整体勾选。
+
+该标准已于 2026-11-16 满足：领域与存储测试覆盖全部行，`websocket_admin_recovery_ack_precedes_old_session_close`
+覆盖真实 WebSocket 的 Ack/Close 顺序，`w14_admin_recovery_multinode_offline_trustee_drill` 覆盖真实多进程离线
+Trustee 演练，`w14_admin_recovery_netns_drill` 覆盖真实网络中断。矩阵中的“执行 Ack 丢失”“部分失效失败”两行由
+存储层测试与演练中的重复执行幂等断言共同覆盖；正式外部安全审计仍归 W14-03，不影响本项验收。

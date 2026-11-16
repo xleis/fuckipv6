@@ -2326,13 +2326,46 @@ async fn handle_admin_recovery_execute(
     Ok(())
 }
 
+/// Domain validation errors that carry an administrator-recovery code. They
+/// fail closed inside the domain layer with a `domain.admin_recovery_*` code,
+/// so without this translation a threshold or snapshot rejection would surface
+/// to every client as a generic internal error and could not be told apart from
+/// a real Coordinator fault. Keeping the mapping explicit means a new domain
+/// code is never published to clients by accident.
+const ADMIN_RECOVERY_DOMAIN_CODES: [(&str, &str); 4] = [
+    (
+        "domain.admin_recovery_threshold_not_met",
+        "admin_recovery.error.threshold_not_met",
+    ),
+    (
+        "domain.admin_recovery_expired",
+        "admin_recovery.error.expired",
+    ),
+    (
+        "domain.admin_recovery_stale_snapshot",
+        "admin_recovery.error.stale_snapshot",
+    ),
+    (
+        "domain.admin_recovery_network_mismatch",
+        "admin_recovery.error.network_mismatch",
+    ),
+];
+
+fn admin_recovery_domain_code(text: &str) -> Option<&'static str> {
+    ADMIN_RECOVERY_DOMAIN_CODES
+        .iter()
+        .find(|(needle, _)| text.contains(needle))
+        .map(|(_, public_key)| *public_key)
+}
+
 fn admin_recovery_protocol_error(error: &anyhow::Error) -> SignalingMessage {
     let text = format!("{error:#}");
+    let domain_code = admin_recovery_domain_code(&text);
     let code = if text.contains("admin_recovery.error.permission_denied") {
         ErrorCode::Forbidden
     } else if text.contains("admin recovery request not found") {
         ErrorCode::NotFound
-    } else if text.contains("admin_recovery.error.") {
+    } else if text.contains("admin_recovery.error.") || domain_code.is_some() {
         ErrorCode::BadRequest
     } else {
         ErrorCode::Internal
@@ -2340,6 +2373,7 @@ fn admin_recovery_protocol_error(error: &anyhow::Error) -> SignalingMessage {
     let message = match code {
         ErrorCode::Forbidden => "admin_recovery.error.permission_denied",
         ErrorCode::NotFound => "admin_recovery.error.not_found",
+        ErrorCode::BadRequest if domain_code.is_some() => domain_code.unwrap_or_default(),
         ErrorCode::BadRequest => {
             const PUBLIC_KEYS: [&str; 11] = [
                 "admin_recovery.error.already_executed",
@@ -4611,5 +4645,51 @@ mod tests {
             &lease_signature
         ));
         Ok(())
+    }
+
+    #[test]
+    fn admin_recovery_domain_rejections_keep_stable_public_keys() {
+        let cases = [
+            (
+                "domain.admin_recovery_threshold_not_met",
+                "admin_recovery.error.threshold_not_met",
+            ),
+            (
+                "domain.admin_recovery_expired",
+                "admin_recovery.error.expired",
+            ),
+            (
+                "domain.admin_recovery_stale_snapshot",
+                "admin_recovery.error.stale_snapshot",
+            ),
+            (
+                "domain.admin_recovery_network_mismatch",
+                "admin_recovery.error.network_mismatch",
+            ),
+        ];
+        for (domain_key, public_key) in cases {
+            let error = anyhow::anyhow!("{domain_key}");
+            match admin_recovery_protocol_error(&error) {
+                SignalingMessage::Error { code, message } => {
+                    assert_eq!(message, public_key, "wrong public key for {domain_key}");
+                    assert_eq!(
+                        code,
+                        ErrorCode::BadRequest.as_u16(),
+                        "wrong status for {domain_key}"
+                    );
+                }
+                other => panic!("unexpected recovery error message: {other:?}"),
+            }
+        }
+
+        // Unrelated internal failures must not be published as recovery keys.
+        let internal = anyhow::anyhow!("disk exploded while persisting recovery state");
+        match admin_recovery_protocol_error(&internal) {
+            SignalingMessage::Error { code, message } => {
+                assert_eq!(code, ErrorCode::Internal.as_u16());
+                assert_eq!(message, "admin_recovery.error.internal");
+            }
+            other => panic!("unexpected internal error message: {other:?}"),
+        }
     }
 }

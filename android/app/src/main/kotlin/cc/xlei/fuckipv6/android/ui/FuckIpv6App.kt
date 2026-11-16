@@ -48,6 +48,7 @@ fun FuckIpv6App(
     contracts: SharedContracts,
     relay: RelayPageData? = null,
     coordinator: CoordinatorPageData? = null,
+    adminRecovery: AdminRecoveryPageData? = null,
 ) {
     val systemLocale = LocalLocale.current.platformLocale
     val initialModule = contracts.navigation.modules.first()
@@ -125,6 +126,7 @@ fun FuckIpv6App(
                 modifier = Modifier.weight(1f),
                 relay = relay,
                 coordinator = coordinator,
+                adminRecovery = adminRecovery,
             )
         }
     }
@@ -151,6 +153,7 @@ fun PageContent(
     modifier: Modifier = Modifier,
     relay: RelayPageData? = null,
     coordinator: CoordinatorPageData? = null,
+    adminRecovery: AdminRecoveryPageData? = null,
 ) {
     Column(
         modifier = modifier
@@ -165,8 +168,23 @@ fun PageContent(
             style = MaterialTheme.typography.headlineSmall,
         )
         when {
-            pageId == "node_runtime" && coordinator != null ->
-                CoordinatorPageContent(contracts = contracts, locale = locale, data = coordinator)
+            pageId == "node_runtime" && (adminRecovery != null || coordinator != null) ->
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    adminRecovery?.let {
+                        AdminRecoveryPageContent(
+                            contracts = contracts,
+                            locale = locale,
+                            data = it,
+                        )
+                    }
+                    coordinator?.let {
+                        CoordinatorPageContent(
+                            contracts = contracts,
+                            locale = locale,
+                            data = it,
+                        )
+                    }
+                }
             pageId == "relay" && relay != null && relay.backendAvailable ->
                 RelayPageContent(contracts = contracts, locale = locale, data = relay)
             else -> SurfaceNotice(state = state, locale = locale, contracts = contracts)

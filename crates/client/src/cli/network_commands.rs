@@ -2,10 +2,10 @@ use crate::cli::commands::{self, RuntimeOptions};
 use crate::cli::RecoveryReasonArg;
 use crate::config_manager::ConfigManager;
 use crate::node::{
-    NodeAdminRecoveryStatusCommand, NodeCommand, NodeCommandOutcome, NodeCreateNetworkCommand,
-    NodeExecuteAdminRecoveryCommand, NodeJoinNetworkCommand, NodeNetworkSelection,
-    NodeRevokeAdminRecoveryCommand, NodeRoutingMode, NodeSubmitAdminRecoveryCommand,
-    NodeUpdateRoutingCommand,
+    NodeAdminRecoveryListCommand, NodeAdminRecoveryStatusCommand, NodeCommand, NodeCommandOutcome,
+    NodeCreateNetworkCommand, NodeExecuteAdminRecoveryCommand, NodeJoinNetworkCommand,
+    NodeNetworkSelection, NodeRevokeAdminRecoveryCommand, NodeRoutingMode,
+    NodeSubmitAdminRecoveryCommand, NodeUpdateRoutingCommand,
 };
 use crate::signaling::client::SignalingClient;
 use anyhow::{Context, Result};
@@ -633,6 +633,33 @@ pub async fn recovery_status(network_name: &str, request_id: &str, json: bool) -
     print_recovery_status(&status, json)
 }
 
+pub async fn recovery_list(network_name: &str, json: bool) -> Result<()> {
+    let session = commands::cli_node_session().await?;
+    let outcome = commands::execute_cli_node_command(
+        &session,
+        NodeCommand::ListAdminRecoveries(NodeAdminRecoveryListCommand {
+            network_name: network_name.to_string(),
+        }),
+    )
+    .await;
+    session.shutdown();
+    let recoveries = match outcome? {
+        NodeCommandOutcome::AdminRecoveries(recoveries) => recoveries,
+        _ => anyhow::bail!("节点返回了非管理员恢复列表结果"),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&recoveries)?);
+    } else if recoveries.is_empty() {
+        println!("当前没有管理员恢复请求。");
+    } else {
+        println!("管理员恢复请求：共 {} 项", recoveries.len());
+        for status in &recoveries {
+            print_recovery_status(status, false)?;
+        }
+    }
+    Ok(())
+}
+
 pub async fn recovery_revoke(
     network_name: &str,
     request_id: &str,
@@ -684,15 +711,28 @@ pub async fn recovery_execute(
         }
     };
     print_recovery_status(&current, json)?;
-    if !current.can_execute {
-        session.shutdown();
-        anyhow::bail!(
-            "服务端当前不允许执行该请求: {}",
+    let denial_key = if current.request_id != request_id {
+        Some("admin_recovery.error.request_mismatch")
+    } else if current.state != AdminRecoveryState::Pending {
+        Some(
             current
                 .denial_key
                 .as_deref()
-                .unwrap_or("admin_recovery.error.not_executable")
-        );
+                .unwrap_or("admin_recovery.error.not_executable"),
+        )
+    } else if !current.can_execute {
+        Some(
+            current
+                .denial_key
+                .as_deref()
+                .unwrap_or("admin_recovery.error.not_executable"),
+        )
+    } else {
+        None
+    };
+    if let Some(denial_key) = denial_key {
+        session.shutdown();
+        anyhow::bail!("服务端当前不允许执行该请求: {denial_key}");
     }
     if let Err(error) = confirm_action(
         "执行后将立即替换 Owner/管理员并撤销旧会话；当前会话将失效。确认执行？输入 yes: ",

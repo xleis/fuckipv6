@@ -50,6 +50,7 @@ pub const NODE_UI_PAGE_STATES: [NodeUiPageState; 13] = [
 #[serde(rename_all = "snake_case")]
 pub enum NodeUiActionBlockReason {
     NodeNotRunning,
+    NodeNotStopped,
     NoOnlineNetwork,
     NoNetworkSelected,
     PermissionDenied,
@@ -63,8 +64,9 @@ pub enum NodeUiActionBlockReason {
     BackendUnavailable,
 }
 
-pub const NODE_UI_ACTION_BLOCK_REASONS: [NodeUiActionBlockReason; 12] = [
+pub const NODE_UI_ACTION_BLOCK_REASONS: [NodeUiActionBlockReason; 13] = [
     NodeUiActionBlockReason::NodeNotRunning,
+    NodeUiActionBlockReason::NodeNotStopped,
     NodeUiActionBlockReason::NoOnlineNetwork,
     NodeUiActionBlockReason::NoNetworkSelected,
     NodeUiActionBlockReason::PermissionDenied,
@@ -82,6 +84,7 @@ impl NodeUiActionBlockReason {
     pub const fn message_key(self) -> &'static str {
         match self {
             Self::NodeNotRunning => "blocked.node_not_running",
+            Self::NodeNotStopped => "blocked.node_not_stopped",
             Self::NoOnlineNetwork => "blocked.no_online_network",
             Self::NoNetworkSelected => "blocked.no_network_selected",
             Self::PermissionDenied => "blocked.permission_denied",
@@ -599,6 +602,7 @@ pub enum NodeUiBackendStatus {
 pub enum NodeUiAvailability {
     Always,
     NodeRunning,
+    NodeStopped,
     NetworkOnline,
     NetworkSelected,
 }
@@ -652,6 +656,9 @@ pub enum NodeUiInputKind {
     UrlOrTicket,
     DiscoveryIndexUrl,
     TimeoutMs,
+    AdminRecoveryRequestJson,
+    AdminRecoveryRequestId,
+    AdminRecoveryReason,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
@@ -700,6 +707,9 @@ pub enum NodeUiValidation {
     CoordinatorUrl,
     CoordinatorCandidatesJson,
     CoordinatorWillingness,
+    AdminRecoveryRequestJson,
+    AdminRecoveryRequestId,
+    AdminRecoveryReason,
 }
 
 pub fn node_ui_manifest() -> NodeUiManifest {
@@ -2211,7 +2221,7 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                         NodeCommandKind::StartNode,
                         NodeUiBackendStatus::Implemented,
                         NodePermission::ManageNetworks,
-                        NodeUiAvailability::Always,
+                        NodeUiAvailability::NodeStopped,
                         vec![],
                         None,
                     ),
@@ -2268,6 +2278,144 @@ pub fn node_ui_manifest() -> NodeUiManifest {
                             "confirm.cleanup_node_residuals.title",
                             "confirm.cleanup_node_residuals.consequence",
                             false,
+                        )),
+                    ),
+                    action(
+                        "submit_admin_recovery",
+                        "action.submit_admin_recovery",
+                        NodeCommandKind::SubmitAdminRecovery,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::NetworkSelected,
+                        vec![
+                            field(
+                                "network_name",
+                                "field.network_name",
+                                NodeUiInputKind::NetworkName,
+                                true,
+                                NodeUiValidation::NetworkName,
+                            ),
+                            field(
+                                "request_json",
+                                "field.admin_recovery_request_json",
+                                NodeUiInputKind::AdminRecoveryRequestJson,
+                                true,
+                                NodeUiValidation::AdminRecoveryRequestJson,
+                            ),
+                        ],
+                        Some(confirmation(
+                            NodeCommandKind::SubmitAdminRecovery,
+                            "confirm.submit_admin_recovery.title",
+                            "confirm.submit_admin_recovery.consequence",
+                            false,
+                        )),
+                    ),
+                    action(
+                        "get_admin_recovery_status",
+                        "action.get_admin_recovery_status",
+                        NodeCommandKind::GetAdminRecoveryStatus,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::NetworkSelected,
+                        vec![
+                            field(
+                                "network_name",
+                                "field.network_name",
+                                NodeUiInputKind::NetworkName,
+                                true,
+                                NodeUiValidation::NetworkName,
+                            ),
+                            field(
+                                "request_id",
+                                "field.admin_recovery_request_id",
+                                NodeUiInputKind::AdminRecoveryRequestId,
+                                true,
+                                NodeUiValidation::AdminRecoveryRequestId,
+                            ),
+                        ],
+                        None,
+                    ),
+                    action(
+                        "list_admin_recoveries",
+                        "action.list_admin_recoveries",
+                        NodeCommandKind::ListAdminRecoveries,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ViewState,
+                        NodeUiAvailability::NetworkSelected,
+                        vec![field(
+                            "network_name",
+                            "field.network_name",
+                            NodeUiInputKind::NetworkName,
+                            true,
+                            NodeUiValidation::NetworkName,
+                        )],
+                        None,
+                    ),
+                    action(
+                        "revoke_admin_recovery",
+                        "action.revoke_admin_recovery",
+                        NodeCommandKind::RevokeAdminRecovery,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::NetworkSelected,
+                        vec![
+                            field(
+                                "network_name",
+                                "field.network_name",
+                                NodeUiInputKind::NetworkName,
+                                true,
+                                NodeUiValidation::NetworkName,
+                            ),
+                            field(
+                                "request_id",
+                                "field.admin_recovery_request_id",
+                                NodeUiInputKind::AdminRecoveryRequestId,
+                                true,
+                                NodeUiValidation::AdminRecoveryRequestId,
+                            ),
+                            field(
+                                "reason",
+                                "field.admin_recovery_reason",
+                                NodeUiInputKind::AdminRecoveryReason,
+                                true,
+                                NodeUiValidation::AdminRecoveryReason,
+                            ),
+                        ],
+                        Some(confirmation(
+                            NodeCommandKind::RevokeAdminRecovery,
+                            "confirm.revoke_admin_recovery.title",
+                            "confirm.revoke_admin_recovery.consequence",
+                            true,
+                        )),
+                    ),
+                    action(
+                        "execute_admin_recovery",
+                        "action.execute_admin_recovery",
+                        NodeCommandKind::ExecuteAdminRecovery,
+                        NodeUiBackendStatus::Implemented,
+                        NodePermission::ManageNetworks,
+                        NodeUiAvailability::NetworkSelected,
+                        vec![
+                            field(
+                                "network_name",
+                                "field.network_name",
+                                NodeUiInputKind::NetworkName,
+                                true,
+                                NodeUiValidation::NetworkName,
+                            ),
+                            field(
+                                "request_id",
+                                "field.admin_recovery_request_id",
+                                NodeUiInputKind::AdminRecoveryRequestId,
+                                true,
+                                NodeUiValidation::AdminRecoveryRequestId,
+                            ),
+                        ],
+                        Some(confirmation(
+                            NodeCommandKind::ExecuteAdminRecovery,
+                            "confirm.execute_admin_recovery.title",
+                            "confirm.execute_admin_recovery.consequence",
+                            true,
                         )),
                     ),
                 ],
@@ -3211,6 +3359,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "blocked.node_not_running",
+                "blocked.node_not_stopped",
                 "blocked.no_online_network",
                 "blocked.no_network_selected",
                 "blocked.permission_denied",

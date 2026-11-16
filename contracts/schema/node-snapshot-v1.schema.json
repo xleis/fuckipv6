@@ -6820,21 +6820,39 @@
     },
     "UiMode": {
       "description": "The actual control surface selected for this node process.\n\n`WebUi` is the browser-hosted control plane for headless hosts. A process\nwith a desktop session must use `Gpui`; it must not expose the WebUI as a\nsecond desktop surface.",
-      "enum": [
-        "gpui",
-        "web_ui",
-        "headless"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "gpui",
+            "web_ui",
+            "headless"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "web_view_shell",
+          "description": "Desktop window rendered by an embedded web view. The process still\nserves the browser surface, but only on loopback and only because an\nexplicit desktop shell asked for it — it is never a headless fallback.",
+          "type": "string"
+        }
+      ]
     },
     "UiModeRequest": {
-      "enum": [
-        "auto",
-        "gpui",
-        "web_ui",
-        "headless"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "auto",
+            "gpui",
+            "web_ui",
+            "headless"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "web_view_shell",
+          "description": "Explicit desktop shell request that embeds a web view (Tauri).",
+          "type": "string"
+        }
+      ]
     },
     "UiModeResolution": {
       "properties": {

@@ -4187,6 +4187,100 @@ mod tests {
         }
     }
 
+    fn valid_admin_recovery_request() -> AdminRecoveryRequest {
+        let owner = fuckipv6_common::domain::NodeId::from_public_key(b"admin-recovery-owner");
+        let member = fuckipv6_common::domain::NodeId::from_public_key(b"admin-recovery-member");
+        let network_id = NetworkId::from_public_key(b"admin-recovery-network");
+        let administrators = Vec::new();
+        let members = vec![owner.clone(), member.clone()];
+
+        #[derive(serde::Serialize)]
+        struct SnapshotPayload<'a> {
+            network_revision: u64,
+            owner: &'a fuckipv6_common::domain::NodeId,
+            administrators: &'a [fuckipv6_common::domain::NodeId],
+            members: &'a [fuckipv6_common::domain::NodeId],
+        }
+
+        let roster_digest = ContentHash::from_bytes(
+            &serde_json::to_vec(&SnapshotPayload {
+                network_revision: 7,
+                owner: &owner,
+                administrators: &administrators,
+                members: &members,
+            })
+            .expect("serialize admin recovery roster payload"),
+        );
+        let snapshot = fuckipv6_common::domain::AdminRecoverySnapshot {
+            network_revision: 7,
+            owner: owner.clone(),
+            administrators,
+            members,
+            roster_digest,
+        };
+        let target = fuckipv6_common::domain::AdminRecoveryTarget {
+            owner: owner.clone(),
+            administrators: Vec::new(),
+            members: vec![owner.clone(), member],
+        };
+        let initiated_by =
+            fuckipv6_common::domain::NodeId::from_public_key(b"admin-recovery-initiator");
+        let reason = fuckipv6_common::domain::AdminRecoveryReason::LostCredentials;
+        let nonce = "admin-recovery-command-fixture";
+        let issued_at_unix_ms = 1_700_000_000_000;
+        let expires_at_unix_ms = issued_at_unix_ms + 60_000;
+        let revocation = fuckipv6_common::domain::AdminRecoveryRevocationPlan::default();
+
+        // Request IDs bind the proposal fields; mirror the production payload
+        // shape so this fixture exercises the same structural validation.
+        #[derive(serde::Serialize)]
+        struct RequestIdPayload<'a> {
+            schema_version: u16,
+            network_id: &'a NetworkId,
+            snapshot: &'a fuckipv6_common::domain::AdminRecoverySnapshot,
+            target: &'a fuckipv6_common::domain::AdminRecoveryTarget,
+            initiated_by: &'a fuckipv6_common::domain::NodeId,
+            reason: fuckipv6_common::domain::AdminRecoveryReason,
+            nonce: &'a str,
+            issued_at_unix_ms: u64,
+            expires_at_unix_ms: u64,
+            revocation: &'a fuckipv6_common::domain::AdminRecoveryRevocationPlan,
+        }
+
+        let payload = RequestIdPayload {
+            schema_version: fuckipv6_common::domain::ADMIN_RECOVERY_SCHEMA_VERSION,
+            network_id: &network_id,
+            snapshot: &snapshot,
+            target: &target,
+            initiated_by: &initiated_by,
+            reason,
+            nonce,
+            issued_at_unix_ms,
+            expires_at_unix_ms,
+            revocation: &revocation,
+        };
+        let request_id = AdminRecoveryRequestId::from_public_key(
+            &serde_json::to_vec(&payload).expect("serialize admin recovery request ID payload"),
+        );
+        AdminRecoveryRequest::new(fuckipv6_common::domain::AdminRecoveryProposal {
+            schema_version: fuckipv6_common::domain::ADMIN_RECOVERY_SCHEMA_VERSION,
+            request_id,
+            network_id,
+            snapshot,
+            target,
+            initiated_by,
+            reason,
+            nonce: nonce.into(),
+            issued_at_unix_ms,
+            expires_at_unix_ms,
+            revocation,
+        })
+    }
+
+    fn valid_admin_recovery_request_id() -> AdminRecoveryRequestId {
+        AdminRecoveryRequestId::from_public_key(b"admin-recovery-request")
+    }
+
     fn valid_traffic_policy(revision: u64) -> TrafficPolicy {
         use fuckipv6_common::domain::{
             DomainName, PortRange, TrafficAction, TrafficDefaultConfirmedBy, TrafficDefaultPolicy,
@@ -4658,6 +4752,26 @@ mod tests {
                     validity_ms: 30_000,
                 },
             ),
+            NodeCommand::SubmitAdminRecovery(NodeSubmitAdminRecoveryCommand {
+                network_name: "home".into(),
+                request: valid_admin_recovery_request(),
+            }),
+            NodeCommand::GetAdminRecoveryStatus(NodeAdminRecoveryStatusCommand {
+                network_name: "home".into(),
+                request_id: valid_admin_recovery_request_id(),
+            }),
+            NodeCommand::ListAdminRecoveries(NodeAdminRecoveryListCommand {
+                network_name: "home".into(),
+            }),
+            NodeCommand::RevokeAdminRecovery(NodeRevokeAdminRecoveryCommand {
+                network_name: "home".into(),
+                request_id: valid_admin_recovery_request_id(),
+                reason: "Authority changed during incident response.".into(),
+            }),
+            NodeCommand::ExecuteAdminRecovery(NodeExecuteAdminRecoveryCommand {
+                network_name: "home".into(),
+                request_id: valid_admin_recovery_request_id(),
+            }),
             NodeCommand::Shutdown,
         ]
     }
@@ -4718,8 +4832,8 @@ mod tests {
 
     #[test]
     fn command_kind_inventory_and_sensitive_reauth_contract_are_complete() {
-        assert_eq!(NodeCommandKind::ALL.len(), 72);
-        assert_eq!(NodeCommandKind::ACTIONS.len(), 71);
+        assert_eq!(NodeCommandKind::ALL.len(), 77);
+        assert_eq!(NodeCommandKind::ACTIONS.len(), 76);
         for kind in [
             NodeCommandKind::CreateInvitation,
             NodeCommandKind::RevokeInvitation,
@@ -4728,12 +4842,17 @@ mod tests {
             NodeCommandKind::ChangeMemberLifecycle,
             NodeCommandKind::ApplyTrafficPolicy,
             NodeCommandKind::RollbackTrafficPolicy,
+            NodeCommandKind::RevokeAdminRecovery,
+            NodeCommandKind::ExecuteAdminRecovery,
         ] {
             assert!(kind.requires_recent_reauthentication(), "{kind:?}");
         }
         for kind in [
             NodeCommandKind::ListInvitations,
             NodeCommandKind::GetInvitationStatus,
+            NodeCommandKind::SubmitAdminRecovery,
+            NodeCommandKind::GetAdminRecoveryStatus,
+            NodeCommandKind::ListAdminRecoveries,
         ] {
             assert!(!kind.requires_recent_reauthentication(), "{kind:?}");
         }
@@ -5671,6 +5790,8 @@ mod tests {
             NodeCommandKind::PreviewTrafficPolicyRollback,
             NodeCommandKind::GetTrafficPolicyHistory,
             NodeCommandKind::TestTrafficPolicy,
+            NodeCommandKind::GetAdminRecoveryStatus,
+            NodeCommandKind::ListAdminRecoveries,
         ] {
             assert!(!kind.is_write(), "{kind:?}");
         }
@@ -5705,6 +5826,8 @@ mod tests {
                     | NodeCommandKind::PreviewTrafficPolicyRollback
                     | NodeCommandKind::GetTrafficPolicyHistory
                     | NodeCommandKind::TestTrafficPolicy
+                    | NodeCommandKind::GetAdminRecoveryStatus
+                    | NodeCommandKind::ListAdminRecoveries
             ) {
                 assert!(kind.is_write(), "{kind:?}");
             }

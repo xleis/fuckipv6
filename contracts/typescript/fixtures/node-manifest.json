@@ -17,6 +17,7 @@
   ],
   "action_block_reasons": [
     "node_not_running",
+    "node_not_stopped",
     "no_online_network",
     "no_network_selected",
     "permission_denied",
@@ -1813,7 +1814,7 @@
             "policy": "record_outcome",
             "action": "node.start"
           },
-          "availability": "always",
+          "availability": "node_stopped",
           "fields": [],
           "confirmation": null
         },
@@ -1887,6 +1888,176 @@
             "title_key": "confirm.cleanup_node_residuals.title",
             "consequence_key": "confirm.cleanup_node_residuals.consequence",
             "destructive": false,
+            "recent_authentication_required": true
+          }
+        },
+        {
+          "id": "submit_admin_recovery",
+          "label_key": "action.submit_admin_recovery",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
+          "command": "submit_admin_recovery",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "network.admin_recovery.submit"
+          },
+          "availability": "network_selected",
+          "fields": [
+            {
+              "id": "network_name",
+              "label_key": "field.network_name",
+              "input": "network_name",
+              "required": true,
+              "validation": "network_name"
+            },
+            {
+              "id": "request_json",
+              "label_key": "field.admin_recovery_request_json",
+              "input": "admin_recovery_request_json",
+              "required": true,
+              "validation": "admin_recovery_request_json"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.submit_admin_recovery.title",
+            "consequence_key": "confirm.submit_admin_recovery.consequence",
+            "destructive": false,
+            "recent_authentication_required": false
+          }
+        },
+        {
+          "id": "get_admin_recovery_status",
+          "label_key": "action.get_admin_recovery_status",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
+          "command": "get_admin_recovery_status",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "network_selected",
+          "fields": [
+            {
+              "id": "network_name",
+              "label_key": "field.network_name",
+              "input": "network_name",
+              "required": true,
+              "validation": "network_name"
+            },
+            {
+              "id": "request_id",
+              "label_key": "field.admin_recovery_request_id",
+              "input": "admin_recovery_request_id",
+              "required": true,
+              "validation": "admin_recovery_request_id"
+            }
+          ],
+          "confirmation": null
+        },
+        {
+          "id": "list_admin_recoveries",
+          "label_key": "action.list_admin_recoveries",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
+          "command": "list_admin_recoveries",
+          "backend_status": "implemented",
+          "permission": "view_state",
+          "audit": {
+            "policy": "none",
+            "action": null
+          },
+          "availability": "network_selected",
+          "fields": [
+            {
+              "id": "network_name",
+              "label_key": "field.network_name",
+              "input": "network_name",
+              "required": true,
+              "validation": "network_name"
+            }
+          ],
+          "confirmation": null
+        },
+        {
+          "id": "revoke_admin_recovery",
+          "label_key": "action.revoke_admin_recovery",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
+          "command": "revoke_admin_recovery",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "network.admin_recovery.revoke"
+          },
+          "availability": "network_selected",
+          "fields": [
+            {
+              "id": "network_name",
+              "label_key": "field.network_name",
+              "input": "network_name",
+              "required": true,
+              "validation": "network_name"
+            },
+            {
+              "id": "request_id",
+              "label_key": "field.admin_recovery_request_id",
+              "input": "admin_recovery_request_id",
+              "required": true,
+              "validation": "admin_recovery_request_id"
+            },
+            {
+              "id": "reason",
+              "label_key": "field.admin_recovery_reason",
+              "input": "admin_recovery_reason",
+              "required": true,
+              "validation": "admin_recovery_reason"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.revoke_admin_recovery.title",
+            "consequence_key": "confirm.revoke_admin_recovery.consequence",
+            "destructive": true,
+            "recent_authentication_required": true
+          }
+        },
+        {
+          "id": "execute_admin_recovery",
+          "label_key": "action.execute_admin_recovery",
+          "group": "configuration",
+          "group_label_key": "action_group.configuration",
+          "command": "execute_admin_recovery",
+          "backend_status": "implemented",
+          "permission": "manage_networks",
+          "audit": {
+            "policy": "record_outcome",
+            "action": "network.admin_recovery.execute"
+          },
+          "availability": "network_selected",
+          "fields": [
+            {
+              "id": "network_name",
+              "label_key": "field.network_name",
+              "input": "network_name",
+              "required": true,
+              "validation": "network_name"
+            },
+            {
+              "id": "request_id",
+              "label_key": "field.admin_recovery_request_id",
+              "input": "admin_recovery_request_id",
+              "required": true,
+              "validation": "admin_recovery_request_id"
+            }
+          ],
+          "confirmation": {
+            "title_key": "confirm.execute_admin_recovery.title",
+            "consequence_key": "confirm.execute_admin_recovery.consequence",
+            "destructive": true,
             "recent_authentication_required": true
           }
         }

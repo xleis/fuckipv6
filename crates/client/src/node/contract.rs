@@ -216,20 +216,24 @@ fn enum_string_values(value: &Value, key: &str, output: &mut Vec<String>) {
 mod tests {
     use super::*;
     use crate::node::{
+        NodeAdminRecoveryListCommand, NodeAdminRecoveryStatusCommand,
         NodeApplyConfigurationCommand, NodeChangeMemberLifecycleCommand,
         NodeClientBlacklistCommand, NodeCreateInvitationCommand, NodeCreateNetworkCommand,
-        NodeGetInvitationStatusCommand, NodeJoinNetworkCommand, NodeListInvitationsCommand,
-        NodeMemberRemovalPreviewCommand, NodeNetworkAllocation, NodeNetworkDiscoveryCommand,
-        NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection,
-        NodePreviewConfigurationCommand, NodePreviewInvitationCommand,
+        NodeExecuteAdminRecoveryCommand, NodeGetInvitationStatusCommand, NodeJoinNetworkCommand,
+        NodeListInvitationsCommand, NodeMemberRemovalPreviewCommand, NodeNetworkAllocation,
+        NodeNetworkDiscoveryCommand, NodeNetworkProfileCommand, NodeNetworkRole,
+        NodeNetworkSelection, NodePreviewConfigurationCommand, NodePreviewInvitationCommand,
         NodePreviewTrafficPolicyCommand, NodePreviewTrafficPolicyRollbackCommand,
-        NodeProbePeerCommand, NodeRedeemInvitationCommand, NodeRevokeInvitationCommand,
-        NodeRollbackConfigurationCommand, NodeRollbackTrafficPolicyCommand,
-        NodeRotateNodeIdentityCommand, NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand,
+        NodeProbePeerCommand, NodeRedeemInvitationCommand, NodeRevokeAdminRecoveryCommand,
+        NodeRevokeInvitationCommand, NodeRollbackConfigurationCommand,
+        NodeRollbackTrafficPolicyCommand, NodeRotateNodeIdentityCommand, NodeSetNetworkRoleCommand,
+        NodeSetNodeDisplayNameCommand, NodeSubmitAdminRecoveryCommand,
         NodeUpdateNetworkAllocationCommand, NodeUpdateRoutingCommand,
     };
     use fuckipv6_common::{
         domain::{
+            AdminRecoveryReason, AdminRecoveryRequest, AdminRecoveryRequestId,
+            AdminRecoveryRevocationPlan, AdminRecoverySnapshot, AdminRecoveryTarget,
             ApplicationIdentity, ContentHash, DomainName, InvitationCode, InvitationId,
             InvitationRedeemRequest, MemberLifecycleAction, MembershipRole, NetworkId,
             NetworkProfileUpdate, NodeId, PortRange, TrafficAction, TrafficDefaultConfirmedBy,
@@ -286,6 +290,33 @@ mod tests {
                 application: ApplicationIdentity::ExecutablePath("/usr/bin/curl".into()),
             },
         )
+    }
+
+    fn sample_admin_recovery_request() -> AdminRecoveryRequest {
+        let owner = NodeId::from_public_key(b"contract-admin-recovery-owner");
+        AdminRecoveryRequest::new(fuckipv6_common::domain::AdminRecoveryProposal {
+            schema_version: fuckipv6_common::domain::ADMIN_RECOVERY_SCHEMA_VERSION,
+            request_id: AdminRecoveryRequestId::from_public_key(b"contract-admin-recovery"),
+            network_id: NetworkId::from_public_key(b"contract-admin-recovery-network"),
+            snapshot: AdminRecoverySnapshot {
+                network_revision: 1,
+                owner: owner.clone(),
+                administrators: Vec::new(),
+                members: vec![owner.clone()],
+                roster_digest: ContentHash::from_bytes(b"contract-admin-recovery-roster"),
+            },
+            target: AdminRecoveryTarget {
+                owner: owner.clone(),
+                administrators: Vec::new(),
+                members: vec![owner.clone()],
+            },
+            initiated_by: owner,
+            reason: AdminRecoveryReason::LostCredentials,
+            nonce: "contract-admin-recovery".into(),
+            issued_at_unix_ms: 1_700_000_000_000,
+            expires_at_unix_ms: 1_700_000_060_000,
+            revocation: AdminRecoveryRevocationPlan::default(),
+        })
     }
 
     fn sample_commands() -> Vec<NodeCommand> {
@@ -709,6 +740,32 @@ mod tests {
                     validity_ms: 60_000,
                 },
             ),
+            NodeCommand::SubmitAdminRecovery(NodeSubmitAdminRecoveryCommand {
+                network_name: "home".into(),
+                request: sample_admin_recovery_request(),
+            }),
+            NodeCommand::GetAdminRecoveryStatus(NodeAdminRecoveryStatusCommand {
+                network_name: "home".into(),
+                request_id: AdminRecoveryRequestId::from_public_key(
+                    b"contract-admin-recovery-request",
+                ),
+            }),
+            NodeCommand::ListAdminRecoveries(NodeAdminRecoveryListCommand {
+                network_name: "home".into(),
+            }),
+            NodeCommand::RevokeAdminRecovery(NodeRevokeAdminRecoveryCommand {
+                network_name: "home".into(),
+                request_id: AdminRecoveryRequestId::from_public_key(
+                    b"contract-admin-recovery-request",
+                ),
+                reason: "Authority rotation.".into(),
+            }),
+            NodeCommand::ExecuteAdminRecovery(NodeExecuteAdminRecoveryCommand {
+                network_name: "home".into(),
+                request_id: AdminRecoveryRequestId::from_public_key(
+                    b"contract-admin-recovery-request",
+                ),
+            }),
             NodeCommand::Shutdown,
         ]
     }

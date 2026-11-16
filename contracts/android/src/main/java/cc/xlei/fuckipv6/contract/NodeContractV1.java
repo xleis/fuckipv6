@@ -9,7 +9,7 @@ import java.util.Map;
 public final class NodeContractV1 {
     public static final int SCHEMA_VERSION = 1;
     public static final String[] DTO_CLASS_NAMES = {
-        "ActivityEntry", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "ConfirmedTrafficDirectFallback", "CoordinatorCandidate", "CoordinatorCandidateConfig", "CoordinatorCandidateDeclaration", "CoordinatorCandidateResources", "CoordinatorCandidateStatus", "CoordinatorCandidateStatusEntry", "CoordinatorControlPlaneStatus", "CoordinatorElectionProposal", "CoordinatorElectionSession", "CoordinatorElectionVote", "CoordinatorEmergencyLeaderStatus", "CoordinatorLeaseStatus", "CoordinatorPublicReachability", "CoordinatorQuorumStatus", "CoordinatorTerm", "CoordinatorWriteCredential", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitContributionAvailability", "ExitContributionRestrictions", "ExitContributionTimeWindow", "ExitContributionTrafficQuota", "ExitHealthAssessment", "ExitHealthEvidence", "ExitHealthRetest", "ExitHealthSnapshot", "ExitNodeCapabilities", "ExitSelectionCandidate", "ExitSelectionGroupRule", "ExitSelectionMemberRule", "ExitSelectionPolicy", "ExitSelectionResolution", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "LeakDetectionAssessment", "LeakDetectionEnvironment", "LeakDetectionEvidence", "LeakDetectionSnapshot", "LocalExitCapabilitySnapshot", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkJoinPreview", "NetworkJoinTerms", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeApplyPolicyCommand", "NodeApplyTrafficPolicyCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCoordinatorCandidateStatusCommand", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeExitSelectionSnapshot", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodePreviewPolicyCommand", "NodePreviewPolicyRollbackCommand", "NodePreviewTrafficPolicyCommand", "NodePreviewTrafficPolicyRollbackCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodePublishCoordinatorCandidateDeclarationCommand", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRollbackPolicyCommand", "NodeRollbackTrafficPolicyCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetLocalExitCapabilityCommand", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitJoinRequestCommand", "NodeTestTrafficPolicyCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateCoordinatorCandidatesCommand", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyAffectedObject", "PolicyApplyResult", "PolicyCurrent", "PolicyDiffEntry", "PolicyHistoryEntry", "PolicyHistorySnapshot", "PolicyPrecedenceExplanation", "PolicyPreview", "PolicyRiskSummary", "PolicyRollbackResult", "PolicyRuleExplanation", "PolicySnapshot", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "PortRange", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "RelayAuthorizationAuditSnapshot", "RelayAuthorizationDiagnostic", "RelayAuthorizationSourceDiagnostic", "RelayGovernanceAuditSnapshot", "RelayGovernanceEvent", "RelayHealthSnapshot", "RelayLimitPolicy", "RelayUsageSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TrafficDefaultPolicy", "TrafficFailureDecision", "TrafficFailurePolicy", "TrafficFlow", "TrafficMatch", "TrafficPolicy", "TrafficPolicyAffectedObject", "TrafficPolicyApplyResult", "TrafficPolicyCurrent", "TrafficPolicyDiffEntry", "TrafficPolicyDraft", "TrafficPolicyHistoryEntry", "TrafficPolicyHistorySnapshot", "TrafficPolicyPreview", "TrafficPolicyRollbackResult", "TrafficPolicyTestComparison", "TrafficPolicyTestDelta", "TrafficPolicyTestInput", "TrafficRoutingDefaultPolicyView", "TrafficRoutingHardConstraints", "TrafficRoutingHitSample", "TrafficRoutingMoveAction", "TrafficRoutingNavigation", "TrafficRoutingObservedHit", "TrafficRoutingPageModel", "TrafficRoutingRuleImpact", "TrafficRoutingRuleView", "TrafficRoutingTarget", "TrafficRoutingTargetRef", "TrafficRule", "TrafficRuleRisk", "TrafficSessionEvent", "TrafficSessionSnapshot", "TrafficSessionValidation", "TunCapabilities", "UiModeResolution", "ApplicationIdentity", "ExitContributionMemberScope", "ExitHealthTarget", "ExitSelectionMode", "ExitSelectionSource", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector", "TrafficAction", "TrafficMatchRisk", "TrafficPolicyTestContextSource", "TrafficPolicyTestDecision", "TrafficRoutingObservation", "TrafficRoutingRuleActivityEffect", "TrafficRoutingRuleImpactView", "TrafficRoutingWorkflowState"
+        "ActivityEntry", "AdminRecoveryApproval", "AdminRecoveryImpact", "AdminRecoveryProposal", "AdminRecoveryRequest", "AdminRecoveryRevocationPlan", "AdminRecoverySnapshot", "AdminRecoveryStatusView", "AdminRecoveryTarget", "ConfigurationApplyResult", "ConfigurationDiffEntry", "ConfigurationDocument", "ConfigurationHistoryEntry", "ConfigurationPreview", "ConfigurationValidationIssue", "ConfirmedTrafficDirectFallback", "CoordinatorCandidate", "CoordinatorCandidateConfig", "CoordinatorCandidateDeclaration", "CoordinatorCandidateResources", "CoordinatorCandidateStatus", "CoordinatorCandidateStatusEntry", "CoordinatorControlPlaneStatus", "CoordinatorElectionProposal", "CoordinatorElectionSession", "CoordinatorElectionVote", "CoordinatorEmergencyLeaderStatus", "CoordinatorLeaseStatus", "CoordinatorPublicReachability", "CoordinatorQuorumStatus", "CoordinatorTerm", "CoordinatorWriteCredential", "DomainActorRef", "DomainObjectRef", "EffectiveAccess", "ExitContributionAvailability", "ExitContributionRestrictions", "ExitContributionTimeWindow", "ExitContributionTrafficQuota", "ExitHealthAssessment", "ExitHealthEvidence", "ExitHealthRetest", "ExitHealthSnapshot", "ExitNodeCapabilities", "ExitSelectionCandidate", "ExitSelectionGroupRule", "ExitSelectionMemberRule", "ExitSelectionPolicy", "ExitSelectionResolution", "FieldPrivacyPolicy", "FieldVisibilityRule", "InvitationPreview", "InvitationRecord", "InvitationRedeemRequest", "InvitationRedemption", "InvitationStatusView", "IssuedInvitation", "JoinApplicantProfile", "JoinRequest", "JoinRequestGrantPreview", "LeakDetectionAssessment", "LeakDetectionEnvironment", "LeakDetectionEvidence", "LeakDetectionSnapshot", "LocalExitCapabilitySnapshot", "MemberLifecycleChange", "MemberRemovalPreview", "MembershipTerms", "NetworkAcl", "NetworkAclGrant", "NetworkAdminProfileProjection", "NetworkDiscoveryDocument", "NetworkDiscoveryRecord", "NetworkEndpoint", "NetworkJoinPreview", "NetworkJoinTerms", "NetworkLocalSecretProjection", "NetworkMember", "NetworkMemberDirectory", "NetworkMemberPresence", "NetworkMemberProfileProjection", "NetworkProfileApplyResult", "NetworkProfileDiffEntry", "NetworkProfilePreview", "NetworkProfileProjections", "NetworkProfileUpdate", "NetworkProfileWarning", "NetworkPublicProfileDocument", "NetworkPublicProfileProjection", "NetworkPublicProfileRecord", "NodeAccessControlSnapshot", "NodeAcknowledgeMembershipPolicyCommand", "NodeAdminRecoveryListCommand", "NodeAdminRecoveryStatusCommand", "NodeApiCommandResponse", "NodeApiErrorResponse", "NodeApiManifestResponse", "NodeApiObjectResponse", "NodeApiOperationResponse", "NodeApiSnapshotResponse", "NodeApplyConfigurationCommand", "NodeApplyPolicyCommand", "NodeApplyTrafficPolicyCommand", "NodeBatchReviewJoinRequestsCommand", "NodeBlacklistSnapshot", "NodeCapabilityRegistrySnapshot", "NodeCapabilitySnapshot", "NodeChangeMemberLifecycleCommand", "NodeCleanupFailureSnapshot", "NodeCleanupStepSnapshot", "NodeClientBlacklistCommand", "NodeCommandHttpRequest", "NodeCommandHttpResponse", "NodeCommandRequest", "NodeCommandResult", "NodeConfigurationSnapshot", "NodeContributionVeto", "NodeCoordinatorCandidateStatusCommand", "NodeCreateInvitationCommand", "NodeCreateNetworkCommand", "NodeCreatedNetwork", "NodeDiagnosticCheck", "NodeDiagnosticRecoveryAction", "NodeDiagnosticsSnapshot", "NodeDiscoveryIndexError", "NodeDiscoveryIndexMetrics", "NodeDiscoveryIndexRecordSnapshot", "NodeDiscoveryIndexSnapshot", "NodeEmbeddedServiceSnapshot", "NodeEvent", "NodeEventCursor", "NodeExecuteAdminRecoveryCommand", "NodeExitSelectionSnapshot", "NodeGetInvitationStatusCommand", "NodeHttpContract", "NodeHttpErrorResponse", "NodeIdentityRotationSnapshot", "NodeIdentitySnapshot", "NodeInterfaceAddress", "NodeInterfaceSnapshot", "NodeJoinNetworkCommand", "NodeJoinRequestListResult", "NodeJoinRequestReviewAck", "NodeJoinRequestReviewItem", "NodeJoinRequestReviewOutcome", "NodeLeaveNetworkCommand", "NodeLifecycleSnapshot", "NodeListInvitationsCommand", "NodeListJoinRequestsCommand", "NodeLocalAccessPolicy", "NodeLogEntry", "NodeManifestResponse", "NodeMemberRemovalPreviewCommand", "NodeNetworkAllocation", "NodeNetworkAllocationSnapshot", "NodeNetworkConfigSnapshot", "NodeNetworkDiscoveryCommand", "NodeNetworkJoinPreview", "NodeNetworkJoinResult", "NodeNetworkLeaveResult", "NodeNetworkMembersCommand", "NodeNetworkMembershipSnapshot", "NodeNetworkProfileCommand", "NodeNetworkProfileSnapshot", "NodeNetworkSnapshot", "NodeOperationSnapshot", "NodePeerProbeSnapshot", "NodePeerSnapshot", "NodePermissionSnapshot", "NodePreviewConfigurationCommand", "NodePreviewInvitationCommand", "NodePreviewJoinNetworkCommand", "NodePreviewPolicyCommand", "NodePreviewPolicyRollbackCommand", "NodePreviewTrafficPolicyCommand", "NodePreviewTrafficPolicyRollbackCommand", "NodeProbePeerCommand", "NodeProblem", "NodeProblemDetails", "NodePublishCoordinatorCandidateDeclarationCommand", "NodeRedeemInvitationCommand", "NodeResidualCleanupResult", "NodeResubmitJoinRequestCommand", "NodeReviewJoinRequestCommand", "NodeRevokeAdminRecoveryCommand", "NodeRevokeInvitationCommand", "NodeRollbackConfigurationCommand", "NodeRollbackPolicyCommand", "NodeRollbackTrafficPolicyCommand", "NodeRotateNodeIdentityCommand", "NodeRoutingSummarySnapshot", "NodeRuntimeResidueSnapshot", "NodeSetLocalExitCapabilityCommand", "NodeSetNetworkRoleCommand", "NodeSetNodeDisplayNameCommand", "NodeSignedNetworkProfileSnapshot", "NodeSnapshot", "NodeSnapshotResponse", "NodeSubmitAdminRecoveryCommand", "NodeSubmitJoinRequestCommand", "NodeTestTrafficPolicyCommand", "NodeTrafficSnapshot", "NodeUiAction", "NodeUiAudit", "NodeUiConfirmation", "NodeUiField", "NodeUiManifest", "NodeUiPage", "NodeUpdateCoordinatorCandidatesCommand", "NodeUpdateNetworkAllocationCommand", "NodeUpdateRoutingCommand", "NodeValidationIssue", "NodeWithdrawJoinRequestCommand", "OperationError", "OperationRecovery", "PermissionRule", "PolicyAffectedObject", "PolicyApplyResult", "PolicyCurrent", "PolicyDiffEntry", "PolicyHistoryEntry", "PolicyHistorySnapshot", "PolicyPrecedenceExplanation", "PolicyPreview", "PolicyRiskSummary", "PolicyRollbackResult", "PolicyRuleExplanation", "PolicySnapshot", "PolicyTestInput", "PolicyTestRequest", "PolicyTestResult", "PolicyValidationIssue", "PortRange", "ProjectedActivityEntry", "ProjectedNodeCommandResult", "ProjectedNodeEmbeddedServiceSnapshot", "ProjectedNodeEvent", "ProjectedNodeIdentitySnapshot", "ProjectedNodeInterfaceSnapshot", "ProjectedNodeNetworkJoinResult", "ProjectedNodeNetworkLeaveResult", "ProjectedNodeNetworkSnapshot", "ProjectedNodePeerSnapshot", "ProjectedNodeSnapshot", "RelayAuthorizationAuditSnapshot", "RelayAuthorizationDiagnostic", "RelayAuthorizationSourceDiagnostic", "RelayGovernanceAuditSnapshot", "RelayGovernanceEvent", "RelayHealthSnapshot", "RelayLimitPolicy", "RelayUsageSnapshot", "TopologyBoundary", "TopologyCluster", "TopologyConnection", "TopologyNode", "TopologyNodeNetwork", "TopologySnapshot", "TrafficDefaultPolicy", "TrafficFailureDecision", "TrafficFailurePolicy", "TrafficFlow", "TrafficMatch", "TrafficPolicy", "TrafficPolicyAffectedObject", "TrafficPolicyApplyResult", "TrafficPolicyCurrent", "TrafficPolicyDiffEntry", "TrafficPolicyDraft", "TrafficPolicyHistoryEntry", "TrafficPolicyHistorySnapshot", "TrafficPolicyPreview", "TrafficPolicyRollbackResult", "TrafficPolicyTestComparison", "TrafficPolicyTestDelta", "TrafficPolicyTestInput", "TrafficRoutingDefaultPolicyView", "TrafficRoutingHardConstraints", "TrafficRoutingHitSample", "TrafficRoutingMoveAction", "TrafficRoutingNavigation", "TrafficRoutingObservedHit", "TrafficRoutingPageModel", "TrafficRoutingRuleImpact", "TrafficRoutingRuleView", "TrafficRoutingTarget", "TrafficRoutingTargetRef", "TrafficRule", "TrafficRuleRisk", "TrafficSessionEvent", "TrafficSessionSnapshot", "TrafficSessionValidation", "TunCapabilities", "UiModeResolution", "ApplicationIdentity", "ExitContributionMemberScope", "ExitHealthTarget", "ExitSelectionMode", "ExitSelectionSource", "NodeApiEvent", "NodeApiObject", "NodeCommand", "NodeCommandOutcome", "NodeEventKind", "NodeNetworkScope", "NodeNetworkSelection", "NodeRoutingDefaultAction", "NodeRoutingTargetSnapshot", "NodeWsMessage", "PermissionCondition", "ProjectedNodeCommandOutcome", "ProjectedNodeEventKind", "SubjectSelector", "TrafficAction", "TrafficMatchRisk", "TrafficPolicyTestContextSource", "TrafficPolicyTestDecision", "TrafficRoutingObservation", "TrafficRoutingRuleActivityEffect", "TrafficRoutingRuleImpactView", "TrafficRoutingWorkflowState"
     };
 
     public enum AclAction {
@@ -85,6 +85,58 @@ public final class NodeContractV1 {
                 }
             }
             throw new IllegalArgumentException("unknown ActivitySeverity wire value: " + value);
+        }
+    }
+
+    public enum AdminRecoveryReason {
+        LOST_CREDENTIALS("lost_credentials"),
+        COMPROMISED_AUTHORITY("compromised_authority"),
+        DISASTER_RECOVERY("disaster_recovery"),
+        OTHER("other");
+
+        private final String wireName;
+
+        AdminRecoveryReason(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static AdminRecoveryReason fromWireName(String value) {
+            for (AdminRecoveryReason candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown AdminRecoveryReason wire value: " + value);
+        }
+    }
+
+    public enum AdminRecoveryState {
+        PENDING("pending"),
+        EXECUTED("executed"),
+        REVOKED("revoked"),
+        EXPIRED("expired");
+
+        private final String wireName;
+
+        AdminRecoveryState(String wireName) {
+            this.wireName = wireName;
+        }
+
+        public String wireName() {
+            return wireName;
+        }
+
+        public static AdminRecoveryState fromWireName(String value) {
+            for (AdminRecoveryState candidate : values()) {
+                if (candidate.wireName.equals(value)) {
+                    return candidate;
+                }
+            }
+            throw new IllegalArgumentException("unknown AdminRecoveryState wire value: " + value);
         }
     }
 
@@ -1896,6 +1948,8 @@ public final class NodeContractV1 {
         CLEANUP_NODE_RESIDUALS("cleanup_node_residuals"),
         CREATE_INVITATION("create_invitation"),
         CREATE_NETWORK("create_network"),
+        EXECUTE_ADMIN_RECOVERY("execute_admin_recovery"),
+        GET_ADMIN_RECOVERY_STATUS("get_admin_recovery_status"),
         GET_BLACKLIST("get_blacklist"),
         GET_CONFIGURATION("get_configuration"),
         GET_CONFIGURATION_HISTORY("get_configuration_history"),
@@ -1911,6 +1965,7 @@ public final class NodeContractV1 {
         GET_UI_MANIFEST("get_ui_manifest"),
         JOIN_NETWORK("join_network"),
         LEAVE_NETWORK("leave_network"),
+        LIST_ADMIN_RECOVERIES("list_admin_recoveries"),
         LIST_INVITATIONS("list_invitations"),
         LIST_JOIN_REQUESTS("list_join_requests"),
         LIST_NETWORK_MEMBERS("list_network_members"),
@@ -1934,6 +1989,7 @@ public final class NodeContractV1 {
         RESUBMIT_JOIN_REQUEST("resubmit_join_request"),
         RETRY_DISCOVERY_INDEX("retry_discovery_index"),
         REVIEW_JOIN_REQUEST("review_join_request"),
+        REVOKE_ADMIN_RECOVERY("revoke_admin_recovery"),
         REVOKE_INVITATION("revoke_invitation"),
         ROLLBACK_CONFIGURATION("rollback_configuration"),
         ROLLBACK_POLICY("rollback_policy"),
@@ -1947,6 +2003,7 @@ public final class NodeContractV1 {
         START_NODE("start_node"),
         STOP_NETWORKS("stop_networks"),
         STOP_NODE("stop_node"),
+        SUBMIT_ADMIN_RECOVERY("submit_admin_recovery"),
         SUBMIT_JOIN_REQUEST("submit_join_request"),
         TEST_POLICY("test_policy"),
         TEST_TRAFFIC_POLICY("test_traffic_policy"),
@@ -2594,6 +2651,7 @@ public final class NodeContractV1 {
 
     public enum NodeUiActionBlockReason {
         NODE_NOT_RUNNING("node_not_running"),
+        NODE_NOT_STOPPED("node_not_stopped"),
         NO_ONLINE_NETWORK("no_online_network"),
         NO_NETWORK_SELECTED("no_network_selected"),
         PERMISSION_DENIED("permission_denied"),
@@ -2683,6 +2741,7 @@ public final class NodeContractV1 {
     public enum NodeUiAvailability {
         ALWAYS("always"),
         NODE_RUNNING("node_running"),
+        NODE_STOPPED("node_stopped"),
         NETWORK_ONLINE("network_online"),
         NETWORK_SELECTED("network_selected");
 
@@ -2776,7 +2835,10 @@ public final class NodeContractV1 {
         ROUTING_MODE("routing_mode"),
         URL_OR_TICKET("url_or_ticket"),
         DISCOVERY_INDEX_URL("discovery_index_url"),
-        TIMEOUT_MS("timeout_ms");
+        TIMEOUT_MS("timeout_ms"),
+        ADMIN_RECOVERY_REQUEST_JSON("admin_recovery_request_json"),
+        ADMIN_RECOVERY_REQUEST_ID("admin_recovery_request_id"),
+        ADMIN_RECOVERY_REASON("admin_recovery_reason");
 
         private final String wireName;
 
@@ -2876,7 +2938,10 @@ public final class NodeContractV1 {
         INVITATION_CODE("invitation_code"),
         COORDINATOR_URL("coordinator_url"),
         COORDINATOR_CANDIDATES_JSON("coordinator_candidates_json"),
-        COORDINATOR_WILLINGNESS("coordinator_willingness");
+        COORDINATOR_WILLINGNESS("coordinator_willingness"),
+        ADMIN_RECOVERY_REQUEST_JSON("admin_recovery_request_json"),
+        ADMIN_RECOVERY_REQUEST_ID("admin_recovery_request_id"),
+        ADMIN_RECOVERY_REASON("admin_recovery_reason");
 
         private final String wireName;
 
@@ -4222,7 +4287,8 @@ public final class NodeContractV1 {
     public enum UiMode {
         GPUI("gpui"),
         WEB_UI("web_ui"),
-        HEADLESS("headless");
+        HEADLESS("headless"),
+        WEB_VIEW_SHELL("web_view_shell");
 
         private final String wireName;
 
@@ -4248,7 +4314,8 @@ public final class NodeContractV1 {
         AUTO("auto"),
         GPUI("gpui"),
         WEB_UI("web_ui"),
-        HEADLESS("headless");
+        HEADLESS("headless"),
+        WEB_VIEW_SHELL("web_view_shell");
 
         private final String wireName;
 
@@ -4306,6 +4373,156 @@ public final class NodeContractV1 {
             this.resource = resource;
             this.severity = severity;
             this.summary = summary;
+        }
+    }
+
+    /** DTO for AdminRecoveryApproval. */
+    public static final class AdminRecoveryApproval {
+        public final String signature;
+        public final Long signed_at_unix_ms;
+        public final String signer;
+        public final String signer_public_key;
+
+        public AdminRecoveryApproval(String signature, Long signed_at_unix_ms, String signer, String signer_public_key) {
+            this.signature = signature;
+            this.signed_at_unix_ms = signed_at_unix_ms;
+            this.signer = signer;
+            this.signer_public_key = signer_public_key;
+        }
+    }
+
+    /** DTO for AdminRecoveryImpact. */
+    public static final class AdminRecoveryImpact {
+        public final List<String> administrators_added;
+        public final List<String> administrators_removed;
+        public final List<String> members_added;
+        public final List<String> members_removed;
+        public final String owner_after;
+        public final String owner_before;
+
+        public AdminRecoveryImpact(List<String> administrators_added, List<String> administrators_removed, List<String> members_added, List<String> members_removed, String owner_after, String owner_before) {
+            this.administrators_added = administrators_added;
+            this.administrators_removed = administrators_removed;
+            this.members_added = members_added;
+            this.members_removed = members_removed;
+            this.owner_after = owner_after;
+            this.owner_before = owner_before;
+        }
+    }
+
+    /** DTO for AdminRecoveryProposal. */
+    public static final class AdminRecoveryProposal {
+        public final Long expires_at_unix_ms;
+        public final String initiated_by;
+        public final Long issued_at_unix_ms;
+        public final String network_id;
+        public final String nonce;
+        public final AdminRecoveryReason reason;
+        public final String request_id;
+        public final AdminRecoveryRevocationPlan revocation;
+        public final Integer schema_version;
+        public final AdminRecoverySnapshot snapshot;
+        public final AdminRecoveryTarget target;
+
+        public AdminRecoveryProposal(Long expires_at_unix_ms, String initiated_by, Long issued_at_unix_ms, String network_id, String nonce, AdminRecoveryReason reason, String request_id, AdminRecoveryRevocationPlan revocation, Integer schema_version, AdminRecoverySnapshot snapshot, AdminRecoveryTarget target) {
+            this.expires_at_unix_ms = expires_at_unix_ms;
+            this.initiated_by = initiated_by;
+            this.issued_at_unix_ms = issued_at_unix_ms;
+            this.network_id = network_id;
+            this.nonce = nonce;
+            this.reason = reason;
+            this.request_id = request_id;
+            this.revocation = revocation;
+            this.schema_version = schema_version;
+            this.snapshot = snapshot;
+            this.target = target;
+        }
+    }
+
+    /** DTO for AdminRecoveryRequest. */
+    public static final class AdminRecoveryRequest {
+        public final List<AdminRecoveryApproval> approvals;
+        public final AdminRecoveryProposal proposal;
+
+        public AdminRecoveryRequest(List<AdminRecoveryApproval> approvals, AdminRecoveryProposal proposal) {
+            this.approvals = approvals;
+            this.proposal = proposal;
+        }
+    }
+
+    /** DTO for AdminRecoveryRevocationPlan. */
+    public static final class AdminRecoveryRevocationPlan {
+        public final Boolean old_sessions;
+        public final Boolean pending_invitations;
+        public final Boolean unconfirmed_writes;
+
+        public AdminRecoveryRevocationPlan(Boolean old_sessions, Boolean pending_invitations, Boolean unconfirmed_writes) {
+            this.old_sessions = old_sessions;
+            this.pending_invitations = pending_invitations;
+            this.unconfirmed_writes = unconfirmed_writes;
+        }
+    }
+
+    /** DTO for AdminRecoverySnapshot. */
+    public static final class AdminRecoverySnapshot {
+        public final List<String> administrators;
+        public final List<String> members;
+        public final Long network_revision;
+        public final String owner;
+        public final String roster_digest;
+
+        public AdminRecoverySnapshot(List<String> administrators, List<String> members, Long network_revision, String owner, String roster_digest) {
+            this.administrators = administrators;
+            this.members = members;
+            this.network_revision = network_revision;
+            this.owner = owner;
+            this.roster_digest = roster_digest;
+        }
+    }
+
+    /** DTO for AdminRecoveryStatusView. */
+    public static final class AdminRecoveryStatusView {
+        public final Boolean can_execute;
+        public final String denial_key;
+        public final Long expires_at_unix_ms;
+        public final AdminRecoveryImpact impact;
+        public final String initiator;
+        public final Long issued_at_unix_ms;
+        public final String network_id;
+        public final List<String> participants;
+        public final String request_id;
+        public final Long required_signatures;
+        public final AdminRecoveryRevocationPlan revocation;
+        public final Long signature_count;
+        public final AdminRecoveryState state;
+
+        public AdminRecoveryStatusView(Boolean can_execute, String denial_key, Long expires_at_unix_ms, AdminRecoveryImpact impact, String initiator, Long issued_at_unix_ms, String network_id, List<String> participants, String request_id, Long required_signatures, AdminRecoveryRevocationPlan revocation, Long signature_count, AdminRecoveryState state) {
+            this.can_execute = can_execute;
+            this.denial_key = denial_key;
+            this.expires_at_unix_ms = expires_at_unix_ms;
+            this.impact = impact;
+            this.initiator = initiator;
+            this.issued_at_unix_ms = issued_at_unix_ms;
+            this.network_id = network_id;
+            this.participants = participants;
+            this.request_id = request_id;
+            this.required_signatures = required_signatures;
+            this.revocation = revocation;
+            this.signature_count = signature_count;
+            this.state = state;
+        }
+    }
+
+    /** DTO for AdminRecoveryTarget. */
+    public static final class AdminRecoveryTarget {
+        public final List<String> administrators;
+        public final List<String> members;
+        public final String owner;
+
+        public AdminRecoveryTarget(List<String> administrators, List<String> members, String owner) {
+            this.administrators = administrators;
+            this.members = members;
+            this.owner = owner;
         }
     }
 
@@ -6056,6 +6273,26 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeAdminRecoveryListCommand. */
+    public static final class NodeAdminRecoveryListCommand {
+        public final String network_name;
+
+        public NodeAdminRecoveryListCommand(String network_name) {
+            this.network_name = network_name;
+        }
+    }
+
+    /** DTO for NodeAdminRecoveryStatusCommand. */
+    public static final class NodeAdminRecoveryStatusCommand {
+        public final String network_name;
+        public final String request_id;
+
+        public NodeAdminRecoveryStatusCommand(String network_name, String request_id) {
+            this.network_name = network_name;
+            this.request_id = request_id;
+        }
+    }
+
     /** DTO for NodeApiCommandResponse. */
     public static final class NodeApiCommandResponse {
         public final NodeOperationSnapshot operation;
@@ -6672,6 +6909,17 @@ public final class NodeContractV1 {
         public NodeEventCursor(Long sequence, Long snapshot_revision) {
             this.sequence = sequence;
             this.snapshot_revision = snapshot_revision;
+        }
+    }
+
+    /** DTO for NodeExecuteAdminRecoveryCommand. */
+    public static final class NodeExecuteAdminRecoveryCommand {
+        public final String network_name;
+        public final String request_id;
+
+        public NodeExecuteAdminRecoveryCommand(String network_name, String request_id) {
+            this.network_name = network_name;
+            this.request_id = request_id;
         }
     }
 
@@ -7663,6 +7911,19 @@ public final class NodeContractV1 {
         }
     }
 
+    /** DTO for NodeRevokeAdminRecoveryCommand. */
+    public static final class NodeRevokeAdminRecoveryCommand {
+        public final String network_name;
+        public final String reason;
+        public final String request_id;
+
+        public NodeRevokeAdminRecoveryCommand(String network_name, String reason, String request_id) {
+            this.network_name = network_name;
+            this.reason = reason;
+            this.request_id = request_id;
+        }
+    }
+
     /** DTO for NodeRevokeInvitationCommand. */
     public static final class NodeRevokeInvitationCommand {
         public final Long expected_revision;
@@ -7887,6 +8148,17 @@ public final class NodeContractV1 {
         public NodeSnapshotResponse(Integer schema_version, ProjectedNodeSnapshot snapshot) {
             this.schema_version = schema_version;
             this.snapshot = snapshot;
+        }
+    }
+
+    /** DTO for NodeSubmitAdminRecoveryCommand. */
+    public static final class NodeSubmitAdminRecoveryCommand {
+        public final String network_name;
+        public final AdminRecoveryRequest request;
+
+        public NodeSubmitAdminRecoveryCommand(String network_name, AdminRecoveryRequest request) {
+            this.network_name = network_name;
+            this.request = request;
         }
     }
 
@@ -9703,11 +9975,11 @@ public final class NodeContractV1 {
     /** DTO for UiModeResolution. */
     public static final class UiModeResolution {
         public final DisplayEnvironment display;
-        public final UiMode effective;
+        public final String effective;
         public final Boolean gpui_available;
-        public final UiModeRequest requested;
+        public final String requested;
 
-        public UiModeResolution(DisplayEnvironment display, UiMode effective, Boolean gpui_available, UiModeRequest requested) {
+        public UiModeResolution(DisplayEnvironment display, String effective, Boolean gpui_available, String requested) {
             this.display = display;
             this.effective = effective;
             this.gpui_available = gpui_available;
@@ -10703,6 +10975,51 @@ public final class NodeContractV1 {
                 this.payload = payload;
             }
         }
+
+        public static final class SubmitAdminRecovery extends NodeCommand {
+            public final NodeSubmitAdminRecoveryCommand payload;
+
+            public SubmitAdminRecovery(NodeSubmitAdminRecoveryCommand payload) {
+                super(NodeCommandKind.SUBMIT_ADMIN_RECOVERY);
+                this.payload = payload;
+            }
+        }
+
+        public static final class GetAdminRecoveryStatus extends NodeCommand {
+            public final NodeAdminRecoveryStatusCommand payload;
+
+            public GetAdminRecoveryStatus(NodeAdminRecoveryStatusCommand payload) {
+                super(NodeCommandKind.GET_ADMIN_RECOVERY_STATUS);
+                this.payload = payload;
+            }
+        }
+
+        public static final class ListAdminRecoveries extends NodeCommand {
+            public final NodeAdminRecoveryListCommand payload;
+
+            public ListAdminRecoveries(NodeAdminRecoveryListCommand payload) {
+                super(NodeCommandKind.LIST_ADMIN_RECOVERIES);
+                this.payload = payload;
+            }
+        }
+
+        public static final class RevokeAdminRecovery extends NodeCommand {
+            public final NodeRevokeAdminRecoveryCommand payload;
+
+            public RevokeAdminRecovery(NodeRevokeAdminRecoveryCommand payload) {
+                super(NodeCommandKind.REVOKE_ADMIN_RECOVERY);
+                this.payload = payload;
+            }
+        }
+
+        public static final class ExecuteAdminRecovery extends NodeCommand {
+            public final NodeExecuteAdminRecoveryCommand payload;
+
+            public ExecuteAdminRecovery(NodeExecuteAdminRecoveryCommand payload) {
+                super(NodeCommandKind.EXECUTE_ADMIN_RECOVERY);
+                this.payload = payload;
+            }
+        }
     }
 
     /** Tagged union DTO for NodeCommandOutcome. */
@@ -11123,6 +11440,24 @@ public final class NodeContractV1 {
 
             public CoordinatorCandidates(CoordinatorCandidateStatus data) {
                 super("coordinator_candidates");
+                this.data = data;
+            }
+        }
+
+        public static final class AdminRecoveryStatus extends NodeCommandOutcome {
+            public final AdminRecoveryStatusView data;
+
+            public AdminRecoveryStatus(AdminRecoveryStatusView data) {
+                super("admin_recovery_status");
+                this.data = data;
+            }
+        }
+
+        public static final class AdminRecoveries extends NodeCommandOutcome {
+            public final List<AdminRecoveryStatusView> data;
+
+            public AdminRecoveries(List<AdminRecoveryStatusView> data) {
+                super("admin_recoveries");
                 this.data = data;
             }
         }
@@ -12009,6 +12344,24 @@ public final class NodeContractV1 {
             }
         }
 
+        public static final class AdminRecoveryStatus extends ProjectedNodeCommandOutcome {
+            public final AdminRecoveryStatusView data;
+
+            public AdminRecoveryStatus(AdminRecoveryStatusView data) {
+                super("admin_recovery_status");
+                this.data = data;
+            }
+        }
+
+        public static final class AdminRecoveries extends ProjectedNodeCommandOutcome {
+            public final List<AdminRecoveryStatusView> data;
+
+            public AdminRecoveries(List<AdminRecoveryStatusView> data) {
+                super("admin_recoveries");
+                this.data = data;
+            }
+        }
+
         public static final class Accepted extends ProjectedNodeCommandOutcome {
             public final AcceptedData data;
 
@@ -12648,6 +13001,8 @@ public final class NodeContractV1 {
             command == NodeCommandKind.CLEANUP_NODE_RESIDUALS ||
             command == NodeCommandKind.CREATE_INVITATION ||
             command == NodeCommandKind.CREATE_NETWORK ||
+            command == NodeCommandKind.EXECUTE_ADMIN_RECOVERY ||
+            command == NodeCommandKind.GET_ADMIN_RECOVERY_STATUS ||
             command == NodeCommandKind.GET_BLACKLIST ||
             command == NodeCommandKind.GET_CONFIGURATION ||
             command == NodeCommandKind.GET_CONFIGURATION_HISTORY ||
@@ -12662,6 +13017,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.GET_TRAFFIC_POLICY_HISTORY ||
             command == NodeCommandKind.JOIN_NETWORK ||
             command == NodeCommandKind.LEAVE_NETWORK ||
+            command == NodeCommandKind.LIST_ADMIN_RECOVERIES ||
             command == NodeCommandKind.LIST_INVITATIONS ||
             command == NodeCommandKind.LIST_JOIN_REQUESTS ||
             command == NodeCommandKind.LIST_NETWORK_MEMBERS ||
@@ -12685,6 +13041,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.RESUBMIT_JOIN_REQUEST ||
             command == NodeCommandKind.RETRY_DISCOVERY_INDEX ||
             command == NodeCommandKind.REVIEW_JOIN_REQUEST ||
+            command == NodeCommandKind.REVOKE_ADMIN_RECOVERY ||
             command == NodeCommandKind.REVOKE_INVITATION ||
             command == NodeCommandKind.ROLLBACK_CONFIGURATION ||
             command == NodeCommandKind.ROLLBACK_POLICY ||
@@ -12698,6 +13055,7 @@ public final class NodeContractV1 {
             command == NodeCommandKind.START_NODE ||
             command == NodeCommandKind.STOP_NETWORKS ||
             command == NodeCommandKind.STOP_NODE ||
+            command == NodeCommandKind.SUBMIT_ADMIN_RECOVERY ||
             command == NodeCommandKind.SUBMIT_JOIN_REQUEST ||
             command == NodeCommandKind.TEST_POLICY ||
             command == NodeCommandKind.TEST_TRAFFIC_POLICY ||

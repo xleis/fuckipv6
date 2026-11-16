@@ -1,5 +1,207 @@
 {
   "$defs": {
+    "AdminRecoveryApproval": {
+      "description": "One independently verifiable approval. It carries the public key so an\noffline trustee does not need to be a network member.",
+      "properties": {
+        "signature": {
+          "$ref": "#/$defs/Signature"
+        },
+        "signed_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signer": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "signer_public_key": {
+          "$ref": "#/$defs/PublicKey"
+        }
+      },
+      "required": [
+        "signer",
+        "signer_public_key",
+        "signed_at_unix_ms",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "AdminRecoveryProposal": {
+      "properties": {
+        "expires_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "initiated_by": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "issued_at_unix_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "network_id": {
+          "$ref": "#/$defs/NetworkId"
+        },
+        "nonce": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/$defs/AdminRecoveryReason"
+        },
+        "request_id": {
+          "$ref": "#/$defs/AdminRecoveryRequestId"
+        },
+        "revocation": {
+          "$ref": "#/$defs/AdminRecoveryRevocationPlan",
+          "default": {
+            "old_sessions": true,
+            "pending_invitations": true,
+            "unconfirmed_writes": true
+          }
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/AdminRecoverySnapshot"
+        },
+        "target": {
+          "$ref": "#/$defs/AdminRecoveryTarget"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_id",
+        "network_id",
+        "snapshot",
+        "target",
+        "initiated_by",
+        "reason",
+        "nonce",
+        "issued_at_unix_ms",
+        "expires_at_unix_ms"
+      ],
+      "type": "object"
+    },
+    "AdminRecoveryReason": {
+      "enum": [
+        "lost_credentials",
+        "compromised_authority",
+        "disaster_recovery",
+        "other"
+      ],
+      "type": "string"
+    },
+    "AdminRecoveryRequest": {
+      "properties": {
+        "approvals": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AdminRecoveryApproval"
+          },
+          "type": "array"
+        },
+        "proposal": {
+          "$ref": "#/$defs/AdminRecoveryProposal"
+        }
+      },
+      "required": [
+        "proposal"
+      ],
+      "type": "object"
+    },
+    "AdminRecoveryRequestId": {
+      "type": "string"
+    },
+    "AdminRecoveryRevocationPlan": {
+      "properties": {
+        "old_sessions": {
+          "description": "Revoke every session that was live when the snapshot was approved.",
+          "type": "boolean"
+        },
+        "pending_invitations": {
+          "description": "Revoke every active or exhausted invitation issued under the old roster.",
+          "type": "boolean"
+        },
+        "unconfirmed_writes": {
+          "description": "Cancel every pending or information-requested join request.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "old_sessions",
+        "pending_invitations",
+        "unconfirmed_writes"
+      ],
+      "type": "object"
+    },
+    "AdminRecoverySnapshot": {
+      "description": "A complete roster snapshot. The revision is displayed to operators, while\nthe digest makes membership-only changes stale even though roster edits do\nnot advance the signed public-profile revision.",
+      "properties": {
+        "administrators": {
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "members": {
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "network_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "owner": {
+          "$ref": "#/$defs/NodeId"
+        },
+        "roster_digest": {
+          "$ref": "#/$defs/ContentHash"
+        }
+      },
+      "required": [
+        "network_revision",
+        "owner",
+        "administrators",
+        "members",
+        "roster_digest"
+      ],
+      "type": "object"
+    },
+    "AdminRecoveryTarget": {
+      "description": "Exact post-recovery roster shown before approval. The target must remain a\nvalid network record; recovery changes governance, never network identity.",
+      "properties": {
+        "administrators": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "members": {
+          "items": {
+            "$ref": "#/$defs/NodeId"
+          },
+          "type": "array"
+        },
+        "owner": {
+          "$ref": "#/$defs/NodeId"
+        }
+      },
+      "required": [
+        "owner",
+        "members"
+      ],
+      "type": "object"
+    },
     "ApplicationIdentity": {
       "description": "A concrete application identity used by traffic rules. A display name is\ndeliberately not part of the identity: it is presentation-only and cannot\nauthorize or select a route.",
       "oneOf": [
@@ -1257,6 +1459,32 @@
       ],
       "type": "object"
     },
+    "NodeAdminRecoveryListCommand": {
+      "properties": {
+        "network_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "network_name"
+      ],
+      "type": "object"
+    },
+    "NodeAdminRecoveryStatusCommand": {
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "request_id": {
+          "$ref": "#/$defs/AdminRecoveryRequestId"
+        }
+      },
+      "required": [
+        "network_name",
+        "request_id"
+      ],
+      "type": "object"
+    },
     "NodeApplyConfigurationCommand": {
       "properties": {
         "expected_revision": {
@@ -1563,6 +1791,21 @@
         "signaling_port",
         "relay_port",
         "auto_connect"
+      ],
+      "type": "object"
+    },
+    "NodeExecuteAdminRecoveryCommand": {
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "request_id": {
+          "$ref": "#/$defs/AdminRecoveryRequestId"
+        }
+      },
+      "required": [
+        "network_name",
+        "request_id"
       ],
       "type": "object"
     },
@@ -2206,6 +2449,25 @@
       ],
       "type": "object"
     },
+    "NodeRevokeAdminRecoveryCommand": {
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "request_id": {
+          "$ref": "#/$defs/AdminRecoveryRequestId"
+        }
+      },
+      "required": [
+        "network_name",
+        "request_id",
+        "reason"
+      ],
+      "type": "object"
+    },
     "NodeRevokeInvitationCommand": {
       "properties": {
         "expected_revision": {
@@ -2363,6 +2625,21 @@
           ]
         }
       },
+      "type": "object"
+    },
+    "NodeSubmitAdminRecoveryCommand": {
+      "properties": {
+        "network_name": {
+          "type": "string"
+        },
+        "request": {
+          "$ref": "#/$defs/AdminRecoveryRequest"
+        }
+      },
+      "required": [
+        "network_name",
+        "request"
+      ],
       "type": "object"
     },
     "NodeSubmitJoinRequestCommand": {
@@ -4629,6 +4906,91 @@
         },
         "payload": {
           "$ref": "#/$defs/NodePublishCoordinatorCandidateDeclarationCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Submit an independently approved administrator recovery request.",
+      "properties": {
+        "command": {
+          "const": "submit_admin_recovery",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeSubmitAdminRecoveryCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Read one authoritative recovery request projection.",
+      "properties": {
+        "command": {
+          "const": "get_admin_recovery_status",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeAdminRecoveryStatusCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "List authoritative recovery requests for one live network runtime.",
+      "properties": {
+        "command": {
+          "const": "list_admin_recoveries",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeAdminRecoveryListCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Revoke a pending request while preserving its audit record.",
+      "properties": {
+        "command": {
+          "const": "revoke_admin_recovery",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeRevokeAdminRecoveryCommand"
+        }
+      },
+      "required": [
+        "command",
+        "payload"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Execute a threshold-approved recovery against the live data-plane\nconnection. Success is accepted only from the Coordinator status Ack.",
+      "properties": {
+        "command": {
+          "const": "execute_admin_recovery",
+          "type": "string"
+        },
+        "payload": {
+          "$ref": "#/$defs/NodeExecuteAdminRecoveryCommand"
         }
       },
       "required": [

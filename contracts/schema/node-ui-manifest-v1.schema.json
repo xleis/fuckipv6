@@ -97,6 +97,11 @@
             "get_coordinator_candidates",
             "update_coordinator_candidates",
             "publish_coordinator_candidate_declaration",
+            "submit_admin_recovery",
+            "get_admin_recovery_status",
+            "list_admin_recoveries",
+            "revoke_admin_recovery",
+            "execute_admin_recovery",
             "shutdown"
           ],
           "type": "string"
@@ -153,6 +158,7 @@
       "description": "Canonical reasons that can disable a manifest action. The enum is flat so\nWebUI, GPUI, generated bindings and Android consume the same fail-closed\nvocabulary even when their local capability snapshots have richer details.",
       "enum": [
         "node_not_running",
+        "node_not_stopped",
         "no_online_network",
         "no_network_selected",
         "permission_denied",
@@ -210,6 +216,7 @@
       "enum": [
         "always",
         "node_running",
+        "node_stopped",
         "network_online",
         "network_selected"
       ],
@@ -327,7 +334,10 @@
         "routing_mode",
         "url_or_ticket",
         "discovery_index_url",
-        "timeout_ms"
+        "timeout_ms",
+        "admin_recovery_request_json",
+        "admin_recovery_request_id",
+        "admin_recovery_reason"
       ],
       "type": "string"
     },
@@ -420,7 +430,10 @@
         "invitation_code",
         "coordinator_url",
         "coordinator_candidates_json",
-        "coordinator_willingness"
+        "coordinator_willingness",
+        "admin_recovery_request_json",
+        "admin_recovery_request_id",
+        "admin_recovery_reason"
       ],
       "type": "string"
     }

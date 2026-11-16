@@ -142,14 +142,22 @@ pub fn button(
 ) -> Stateful<Div> {
     let colors = DARK_THEME.colors;
     let (background, foreground) = if disabled {
-        (colors.surface, colors.text_faint)
+        (colors.surface.with_alpha(0x66), colors.text_faint)
     } else {
         match variant {
             ButtonVariant::Primary => (colors.accent, colors.background_deep),
-            ButtonVariant::Secondary => (colors.panel_raised, colors.text),
+            ButtonVariant::Secondary => (colors.background_deep, colors.text),
             ButtonVariant::Ghost => (colors.panel_raised.with_alpha(0), colors.text_muted),
             ButtonVariant::Danger => (colors.danger_soft, colors.danger_text),
         }
+    };
+    // Flat paper: no component outlines at all.
+    let border = colors.border.with_alpha(0x00);
+    let hover_background = match variant {
+        ButtonVariant::Primary => colors.accent_secondary,
+        ButtonVariant::Secondary => colors.surface_hover,
+        ButtonVariant::Ghost => colors.surface_hover.with_alpha(0xb3),
+        ButtonVariant::Danger => colors.danger,
     };
     let glow = (variant == ButtonVariant::Primary && !disabled)
         .then(|| colors.accent_glow.with_alpha(0x38));
@@ -167,7 +175,16 @@ pub fn button(
         .h(px(DIMENSIONS.control_md_px as f32))
         .px(px(SPACING_PX[3] as f32))
         .rounded(px(RADII.md_px as f32))
+        .border_1()
+        .border_color(rgba(border.rgba_hex()))
         .bg(rgba(background.rgba_hex()))
+        .when(!disabled, |element| {
+            element.hover(move |style| {
+                style
+                    .bg(rgba(hover_background.rgba_hex()))
+                    .border_color(rgba(border.rgba_hex()))
+            })
+        })
         .text_color(rgba(foreground.rgba_hex()))
         .text_size(px(TYPOGRAPHY.sm.size_px as f32))
         .line_height(px((TYPOGRAPHY.sm.size_px as f32
@@ -176,17 +193,8 @@ pub fn button(
         .font_weight(FontWeight(TYPOGRAPHY.medium_weight as f32))
         .opacity(if disabled { 0.62 } else { 1.0 })
         .child(label);
-    if let Some(glow) = glow {
-        button.shadow(vec![gpui::BoxShadow::new(
-            px(0.0),
-            px(10.0),
-            rgba(glow.rgba_hex()).into(),
-        )
-        .blur_radius(px(24.0))
-        .spread_radius(px(-12.0))])
-    } else {
-        button
-    }
+    let _ = glow;
+    button
 }
 
 pub fn text_input(

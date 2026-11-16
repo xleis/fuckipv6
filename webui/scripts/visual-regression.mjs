@@ -14,14 +14,58 @@ const OUTPUT_ROOT = resolve(
 );
 const GPUI_OUTPUT_ROOT = join(OUTPUT_ROOT, "gpui");
 const WEBUI_OUTPUT_ROOT = join(OUTPUT_ROOT, "webui");
-const GPUI_IMAGE = join(GPUI_OUTPUT_ROOT, "overview.png");
-const GPUI_METADATA = join(GPUI_OUTPUT_ROOT, "overview.json");
-const GPUI_GEOMETRY = join(GPUI_OUTPUT_ROOT, "overview.geometry.json");
-const WEBUI_IMAGE = join(WEBUI_OUTPUT_ROOT, "overview.png");
-const WEBUI_METADATA = join(WEBUI_OUTPUT_ROOT, "overview.json");
-const DIFF_IMAGE = join(OUTPUT_ROOT, "diff.png");
-const REPORT = join(OUTPUT_ROOT, "visual-regression.json");
 const SKIP_BUILD = process.argv.includes("--skip-build");
+const REUSE_GPUI = process.argv.includes("--reuse-gpui");
+
+const PAGES = {
+  overview: {
+    gpuiImage: join(GPUI_OUTPUT_ROOT, "overview.png"),
+    gpuiMetadata: join(GPUI_OUTPUT_ROOT, "overview.json"),
+    gpuiGeometry: join(GPUI_OUTPUT_ROOT, "overview.geometry.json"),
+    webuiImage: join(WEBUI_OUTPUT_ROOT, "overview.png"),
+    webuiMetadata: join(WEBUI_OUTPUT_ROOT, "overview.json"),
+    diffImage: join(OUTPUT_ROOT, "diff.png"),
+    report: join(OUTPUT_ROOT, "visual-regression.json"),
+    semanticKeys: [
+      "title",
+      "locale",
+      "font_family",
+      "viewport",
+      "modules",
+      "page_switcher",
+      "topbar_search",
+      "network_picker",
+      "primary_status",
+      "page_heading",
+      "shell_regions",
+      "actions",
+      "shortcuts",
+      "network_statuses",
+    ],
+  },
+  topology: {
+    gpuiImage: join(GPUI_OUTPUT_ROOT, "topology.png"),
+    gpuiMetadata: join(GPUI_OUTPUT_ROOT, "topology.json"),
+    gpuiGeometry: join(GPUI_OUTPUT_ROOT, "topology.geometry.json"),
+    webuiImage: join(WEBUI_OUTPUT_ROOT, "topology.png"),
+    webuiMetadata: join(WEBUI_OUTPUT_ROOT, "topology.json"),
+    diffImage: join(OUTPUT_ROOT, "topology-diff.png"),
+    report: join(OUTPUT_ROOT, "topology-report.json"),
+    semanticKeys: [
+      "title",
+      "locale",
+      "font_family",
+      "viewport",
+      "modules",
+      "page_switcher",
+      "topbar_search",
+      "network_picker",
+      "page_heading",
+      "shell_regions",
+      "topology",
+    ],
+  },
+};
 
 const THRESHOLDS = {
   geometryPx: numberFromEnv("VISUAL_GEOMETRY_TOLERANCE_PX", 1.5),
@@ -34,21 +78,6 @@ const THRESHOLDS = {
 const TEXT_METRIC_GEOMETRY_ALLOWANCES = {
   hero_copy: { width: 2.5 },
 };
-
-const SEMANTIC_KEYS = [
-  "title",
-  "locale",
-  "font_family",
-  "viewport",
-  "modules",
-  "page_tabs",
-  "primary_status",
-  "page_heading",
-  "action_panel",
-  "actions",
-  "shortcuts",
-  "network_statuses",
-];
 
 function numberFromEnv(name, fallback) {
   const raw = process.env[name];
@@ -80,9 +109,9 @@ async function readJson(path) {
   return JSON.parse(await readFile(path, "utf8"));
 }
 
-function compareSemantics(gpui, webui) {
+function compareSemantics(gpui, webui, semanticKeys) {
   const differences = [];
-  for (const key of SEMANTIC_KEYS) {
+  for (const key of semanticKeys) {
     const left = JSON.stringify(gpui?.[key]);
     const right = JSON.stringify(webui?.[key]);
     if (left !== right) {
@@ -210,10 +239,7 @@ function pixelFailures(metrics) {
   return failures;
 }
 
-async function main() {
-  await mkdir(GPUI_OUTPUT_ROOT, { recursive: true });
-  await mkdir(WEBUI_OUTPUT_ROOT, { recursive: true });
-
+async function captureGpuiPage(page, paths) {
   await run(
     "cargo",
     [
@@ -226,7 +252,12 @@ async function main() {
       "--",
       "--nocapture",
     ],
-    { env: { GPUI_VISUAL_SNAPSHOT: GPUI_IMAGE } },
+    {
+      env: {
+        GPUI_VISUAL_PAGE: page,
+        GPUI_VISUAL_SNAPSHOT: paths.gpuiImage,
+      },
+    },
   );
 
   await run(
@@ -243,52 +274,49 @@ async function main() {
     ],
     {
       env: {
+        GPUI_VISUAL_PAGE: page,
         GPUI_VISUAL_GEOMETRY: "1",
-        GPUI_VISUAL_GEOMETRY_JSON: GPUI_GEOMETRY,
+        GPUI_VISUAL_GEOMETRY_JSON: paths.gpuiGeometry,
       },
     },
   );
+}
 
-  const snapshotArgs = ["run", "visual:snapshot", "--prefix", "webui"];
-  if (SKIP_BUILD) snapshotArgs.push("--", "--skip-build");
-  await run("npm", snapshotArgs, {
-    env: { VISUAL_OUTPUT_DIR: WEBUI_OUTPUT_ROOT },
-  });
-
+async function comparePage(page, paths) {
   const [gpuiMetadata, webuiMetadata, gpuiGeometry, webuiBuffer, gpuiBuffer] =
     await Promise.all([
-      readJson(GPUI_METADATA),
-      readJson(WEBUI_METADATA),
-      readJson(GPUI_GEOMETRY),
-      readFile(WEBUI_IMAGE),
-      readFile(GPUI_IMAGE),
+      readJson(paths.gpuiMetadata),
+      readJson(paths.webuiMetadata),
+      readJson(paths.gpuiGeometry),
+      readFile(paths.webuiImage),
+      readFile(paths.gpuiImage),
     ]);
 
   const semanticDifferences = compareSemantics(
     gpuiMetadata.semantics,
     webuiMetadata.semantics,
+    paths.semanticKeys,
   );
   const geometryComparison = compareGeometry(
     gpuiGeometry,
     webuiMetadata.semantics.geometry,
     THRESHOLDS.geometryPx,
   );
-  const geometryDifferences = geometryComparison.differences;
   const metrics = comparePixels(gpuiBuffer, webuiBuffer);
   const failedPixelChecks = pixelFailures(metrics);
   const passed =
     semanticDifferences.length === 0 &&
-    geometryDifferences.length === 0 &&
+    geometryComparison.differences.length === 0 &&
     failedPixelChecks.length === 0;
 
-  await writeFile(DIFF_IMAGE, PNG.sync.write(metrics.diff));
+  await writeFile(paths.diffImage, PNG.sync.write(metrics.diff));
   const report = {
     schema_version: 1,
     result: passed ? "passed" : "failed",
     fixture: {
       viewport: { width: 1440, height: 900, device_scale_factor: 2 },
       locale: "en",
-      page: "overview",
+      page,
     },
     acceptable_differences: [
       "platform font rasterization and subpixel text metrics",
@@ -301,12 +329,12 @@ async function main() {
       differences: semanticDifferences,
     },
     geometry: {
-      passed: geometryDifferences.length === 0,
+      passed: geometryComparison.differences.length === 0,
       tolerance_px: THRESHOLDS.geometryPx,
       text_metric_allowances: TEXT_METRIC_GEOMETRY_ALLOWANCES,
       checked_properties: geometryComparison.checkedProperties,
       max_delta_px: geometryComparison.maxDeltaPx,
-      differences: geometryDifferences,
+      differences: geometryComparison.differences,
     },
     pixels: {
       ...roundedPixelMetrics(metrics),
@@ -327,16 +355,38 @@ async function main() {
       },
     },
     artifacts: {
-      gpui: GPUI_IMAGE,
-      webui: WEBUI_IMAGE,
-      diff: DIFF_IMAGE,
-      report: REPORT,
+      gpui: paths.gpuiImage,
+      webui: paths.webuiImage,
+      diff: paths.diffImage,
+      report: paths.report,
     },
   };
-  await writeFile(REPORT, `${JSON.stringify(report, null, 2)}\n`);
+  await writeFile(paths.report, `${JSON.stringify(report, null, 2)}\n`);
+  return report;
+}
 
-  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-  if (!passed) {
+async function main() {
+  await mkdir(GPUI_OUTPUT_ROOT, { recursive: true });
+  await mkdir(WEBUI_OUTPUT_ROOT, { recursive: true });
+
+  if (!REUSE_GPUI) {
+    await captureGpuiPage("overview", PAGES.overview);
+    await captureGpuiPage("topology", PAGES.topology);
+  }
+
+  const snapshotArgs = ["run", "visual:snapshot", "--prefix", "webui"];
+  if (SKIP_BUILD) snapshotArgs.push("--", "--skip-build");
+  await run("npm", snapshotArgs, {
+    env: { VISUAL_OUTPUT_DIR: WEBUI_OUTPUT_ROOT },
+  });
+
+  const reports = [];
+  for (const [page, paths] of Object.entries(PAGES)) {
+    const report = await comparePage(page, paths);
+    reports.push(report);
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  }
+  if (reports.some((report) => report.result !== "passed")) {
     throw new Error("cross-surface visual regression failed");
   }
 }

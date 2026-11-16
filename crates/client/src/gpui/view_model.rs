@@ -5,25 +5,25 @@ use base64::Engine;
 use fuckipv6_common::domain::JoinRequestReviewAction;
 use fuckipv6_common::domain::{
     parse_policy_test_input, ActivityCategory, ActivityEntry, ActivitySeverity,
-    ApplicationIdentity, AuditOutcome, CapabilityKind, CapabilityState, ContentHash,
-    CoordinatorCandidate, CoordinatorCandidateHealth, CoordinatorCandidateResources,
-    CoordinatorCandidateStatus, CoordinatorCandidateWillingness, CoordinatorControlPlaneState,
-    CoordinatorControlPlaneStatus, CoordinatorEmergencyLeaderState, CoordinatorEmergencyState,
-    CoordinatorPublicReachability, EffectiveAccessReason, EffectivePolicyLayer,
-    ExitAvailabilitySource, ExitAvailabilityState, ExitContributionAvailability,
-    ExitContributionMode, ExitContributionObligation, ExitContributionScope,
-    ExitSelectionCandidate, ExitSelectionMode, ExitSelectionPolicy, ExitSelectionSource,
-    InvitationCode, InvitationId, InvitationRedeemRequest, MemberLifecycleAction, MembershipRole,
-    NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberDirectory, NetworkMemberGroup,
-    NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileUpdate, NetworkVisibility, NodeId,
-    RelayAuthorizationAuditSnapshot, RelayAuthorizationDiagnostic,
-    RelayAuthorizationSourceDiagnostic, RelayExistingSessionPolicy, RelayGovernanceAction,
-    RelayGovernanceEvent, RelayHealthIssue, RelayHealthSnapshot, RelayHealthStatus,
-    RelayLifecycleState, RelayLimitPolicy, RelayLimitSource, RelayMeasurementState,
-    RelayReachabilityState, TopologyNode, TopologyNodeHealth, TopologySnapshot, TrafficAction,
-    TrafficDefaultConfirmedBy, TrafficFailureKind, TrafficFlow, TrafficMatch, TrafficMatchRisk,
-    TrafficPolicy, TrafficPolicyTestInput, TrafficProtectionState, TrafficProtocol,
-    TrafficRoutingHitSample, TrafficRoutingObservation, TrafficRoutingPageModel,
+    AdminRecoveryRequest, AdminRecoveryRequestId, ApplicationIdentity, AuditOutcome,
+    CapabilityKind, CapabilityState, ContentHash, CoordinatorCandidate, CoordinatorCandidateHealth,
+    CoordinatorCandidateResources, CoordinatorCandidateStatus, CoordinatorCandidateWillingness,
+    CoordinatorControlPlaneState, CoordinatorControlPlaneStatus, CoordinatorEmergencyLeaderState,
+    CoordinatorEmergencyState, CoordinatorPublicReachability, EffectiveAccessReason,
+    EffectivePolicyLayer, ExitAvailabilitySource, ExitAvailabilityState,
+    ExitContributionAvailability, ExitContributionMode, ExitContributionObligation,
+    ExitContributionScope, ExitSelectionCandidate, ExitSelectionMode, ExitSelectionPolicy,
+    ExitSelectionSource, InvitationCode, InvitationId, InvitationRedeemRequest,
+    MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode, NetworkMember,
+    NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberOnlineState, NetworkMemberStatus,
+    NetworkProfileUpdate, NetworkVisibility, NodeId, RelayAuthorizationAuditSnapshot,
+    RelayAuthorizationDiagnostic, RelayAuthorizationSourceDiagnostic, RelayExistingSessionPolicy,
+    RelayGovernanceAction, RelayGovernanceEvent, RelayHealthIssue, RelayHealthSnapshot,
+    RelayHealthStatus, RelayLifecycleState, RelayLimitPolicy, RelayLimitSource,
+    RelayMeasurementState, RelayReachabilityState, TopologyNode, TopologyNodeHealth,
+    TopologySnapshot, TrafficAction, TrafficDefaultConfirmedBy, TrafficFailureKind, TrafficFlow,
+    TrafficMatch, TrafficMatchRisk, TrafficPolicy, TrafficPolicyTestInput, TrafficProtectionState,
+    TrafficProtocol, TrafficRoutingHitSample, TrafficRoutingObservation, TrafficRoutingPageModel,
     TrafficRoutingRuleActivityEffect, TrafficRoutingRuleImpactView, TrafficRoutingTarget,
     TrafficRoutingTargetKind, TrafficRoutingTargetRef, TrafficRoutingWorkflowState,
     TrafficSessionEventKind,
@@ -34,28 +34,29 @@ use fuckipv6_common::NetworkMode;
 
 use crate::node::{
     node_ui_manifest, LocalExitCapabilityStage, NodeAcknowledgeMembershipPolicyCommand,
-    NodeApplyConfigurationCommand, NodeApplyPolicyCommand, NodeApplyTrafficPolicyCommand,
-    NodeBatchReviewJoinRequestsCommand, NodeChangeMemberLifecycleCommand,
-    NodeClientBlacklistCommand, NodeCommand, NodeCommandKind, NodeControlHealth,
-    NodeCoordinatorCandidateStatusCommand, NodeCreateInvitationCommand, NodeCreateNetworkCommand,
-    NodeEmbeddedServiceStatus, NodeGetInvitationStatusCommand, NodeInterfaceKind,
-    NodeInterfaceOwnership, NodeInterfaceStatus, NodeJoinNetworkCommand, NodeJoinRequestReviewItem,
-    NodeLeaveNetworkCommand, NodeListInvitationsCommand, NodeListJoinRequestsCommand,
-    NodeMemberRemovalPreviewCommand, NodeNetworkAllocation, NodeNetworkDiscoveryCommand,
-    NodeNetworkMembersCommand, NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection,
-    NodeNetworkStatus, NodePermission, NodePhase, NodePreviewConfigurationCommand,
-    NodePreviewInvitationCommand, NodePreviewJoinNetworkCommand, NodePreviewPolicyCommand,
-    NodePreviewPolicyRollbackCommand, NodePreviewTrafficPolicyCommand,
-    NodePreviewTrafficPolicyRollbackCommand, NodePrimaryStatus, NodeProbePeerCommand,
-    NodeProblemCode, NodePublishCoordinatorCandidateDeclarationCommand,
+    NodeAdminRecoveryListCommand, NodeAdminRecoveryStatusCommand, NodeApplyConfigurationCommand,
+    NodeApplyPolicyCommand, NodeApplyTrafficPolicyCommand, NodeBatchReviewJoinRequestsCommand,
+    NodeChangeMemberLifecycleCommand, NodeClientBlacklistCommand, NodeCommand, NodeCommandKind,
+    NodeControlHealth, NodeCoordinatorCandidateStatusCommand, NodeCreateInvitationCommand,
+    NodeCreateNetworkCommand, NodeEmbeddedServiceStatus, NodeExecuteAdminRecoveryCommand,
+    NodeGetInvitationStatusCommand, NodeInterfaceKind, NodeInterfaceOwnership, NodeInterfaceStatus,
+    NodeJoinNetworkCommand, NodeJoinRequestReviewItem, NodeLeaveNetworkCommand,
+    NodeListInvitationsCommand, NodeListJoinRequestsCommand, NodeMemberRemovalPreviewCommand,
+    NodeNetworkAllocation, NodeNetworkDiscoveryCommand, NodeNetworkMembersCommand,
+    NodeNetworkProfileCommand, NodeNetworkRole, NodeNetworkSelection, NodeNetworkStatus,
+    NodePermission, NodePhase, NodePreviewConfigurationCommand, NodePreviewInvitationCommand,
+    NodePreviewJoinNetworkCommand, NodePreviewPolicyCommand, NodePreviewPolicyRollbackCommand,
+    NodePreviewTrafficPolicyCommand, NodePreviewTrafficPolicyRollbackCommand, NodePrimaryStatus,
+    NodeProbePeerCommand, NodeProblemCode, NodePublishCoordinatorCandidateDeclarationCommand,
     NodeRedeemInvitationCommand, NodeResubmitJoinRequestCommand, NodeReviewJoinRequestCommand,
-    NodeRevokeInvitationCommand, NodeRollbackConfigurationCommand, NodeRollbackPolicyCommand,
-    NodeRollbackTrafficPolicyCommand, NodeRotateNodeIdentityCommand, NodeRoutingDefaultAction,
-    NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
+    NodeRevokeAdminRecoveryCommand, NodeRevokeInvitationCommand, NodeRollbackConfigurationCommand,
+    NodeRollbackPolicyCommand, NodeRollbackTrafficPolicyCommand, NodeRotateNodeIdentityCommand,
+    NodeRoutingDefaultAction, NodeRoutingMode, NodeRoutingSummaryStatus, NodeRoutingTargetSnapshot,
     NodeSetLocalExitCapabilityCommand, NodeSetNetworkRoleCommand, NodeSetNodeDisplayNameCommand,
-    NodeSnapshot, NodeSubmitJoinRequestCommand, NodeTestTrafficPolicyCommand, NodeUiAction,
-    NodeUiActionBlockReason, NodeUiAvailability, NodeUiBackendStatus, NodeUiManifest, NodeUiPage,
-    NodeUiPermission, NodeUpdateCoordinatorCandidatesCommand, NodeUpdateNetworkAllocationCommand,
+    NodeSnapshot, NodeSubmitAdminRecoveryCommand, NodeSubmitJoinRequestCommand,
+    NodeTestTrafficPolicyCommand, NodeUiAction, NodeUiActionBlockReason, NodeUiAvailability,
+    NodeUiBackendStatus, NodeUiManifest, NodeUiPage, NodeUiPermission,
+    NodeUpdateCoordinatorCandidatesCommand, NodeUpdateNetworkAllocationCommand,
     NodeUpdateRoutingCommand, NodeWithdrawJoinRequestCommand,
 };
 use crate::policy_transaction::PolicySnapshot;
@@ -457,11 +458,16 @@ pub enum ActionBinding {
     GetCoordinatorCandidates,
     UpdateCoordinatorCandidates,
     PublishCoordinatorCandidateDeclaration,
+    SubmitAdminRecovery,
+    GetAdminRecoveryStatus,
+    ListAdminRecoveries,
+    RevokeAdminRecovery,
+    ExecuteAdminRecovery,
     ShutdownNode,
 }
 
 impl ActionBinding {
-    pub const ALL: [Self; 72] = [
+    pub const ALL: [Self; 77] = [
         Self::RefreshSnapshot,
         Self::GetDiagnostics,
         Self::CreateNetwork,
@@ -533,6 +539,11 @@ impl ActionBinding {
         Self::GetCoordinatorCandidates,
         Self::UpdateCoordinatorCandidates,
         Self::PublishCoordinatorCandidateDeclaration,
+        Self::SubmitAdminRecovery,
+        Self::GetAdminRecoveryStatus,
+        Self::ListAdminRecoveries,
+        Self::RevokeAdminRecovery,
+        Self::ExecuteAdminRecovery,
         Self::ShutdownNode,
     ];
 
@@ -611,6 +622,11 @@ impl ActionBinding {
             Self::PublishCoordinatorCandidateDeclaration => {
                 "publish_coordinator_candidate_declaration"
             }
+            Self::SubmitAdminRecovery => "submit_admin_recovery",
+            Self::GetAdminRecoveryStatus => "get_admin_recovery_status",
+            Self::ListAdminRecoveries => "list_admin_recoveries",
+            Self::RevokeAdminRecovery => "revoke_admin_recovery",
+            Self::ExecuteAdminRecovery => "execute_admin_recovery",
             Self::ShutdownNode => "shutdown_node",
         }
     }
@@ -619,6 +635,7 @@ impl ActionBinding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionBlockReason {
     NodeNotRunning,
+    NodeNotStopped,
     NoOnlineNetwork,
     NoNetworkSelected,
     PermissionDenied,
@@ -632,6 +649,7 @@ impl ActionBlockReason {
     pub const fn contract_reason(self) -> NodeUiActionBlockReason {
         match self {
             Self::NodeNotRunning => NodeUiActionBlockReason::NodeNotRunning,
+            Self::NodeNotStopped => NodeUiActionBlockReason::NodeNotStopped,
             Self::NoOnlineNetwork => NodeUiActionBlockReason::NoOnlineNetwork,
             Self::NoNetworkSelected => NodeUiActionBlockReason::NoNetworkSelected,
             Self::PermissionDenied => NodeUiActionBlockReason::PermissionDenied,
@@ -1490,6 +1508,7 @@ pub struct OverviewTrafficSession {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverviewModel {
     pub node_name: String,
+    pub node_id: Option<String>,
     pub primary_status: NodePrimaryStatus,
     pub primary_page_id: Option<String>,
     pub issues: Vec<String>,
@@ -2109,6 +2128,26 @@ pub fn bind_action(action: &NodeUiAction) -> Result<ActionBinding, ModelError> {
             ActionBinding::PublishCoordinatorCandidateDeclaration,
             NodeCommandKind::PublishCoordinatorCandidateDeclaration,
         ),
+        "submit_admin_recovery" => (
+            ActionBinding::SubmitAdminRecovery,
+            NodeCommandKind::SubmitAdminRecovery,
+        ),
+        "get_admin_recovery_status" => (
+            ActionBinding::GetAdminRecoveryStatus,
+            NodeCommandKind::GetAdminRecoveryStatus,
+        ),
+        "list_admin_recoveries" => (
+            ActionBinding::ListAdminRecoveries,
+            NodeCommandKind::ListAdminRecoveries,
+        ),
+        "revoke_admin_recovery" => (
+            ActionBinding::RevokeAdminRecovery,
+            NodeCommandKind::RevokeAdminRecovery,
+        ),
+        "execute_admin_recovery" => (
+            ActionBinding::ExecuteAdminRecovery,
+            NodeCommandKind::ExecuteAdminRecovery,
+        ),
         "shutdown_node" => (ActionBinding::ShutdownNode, NodeCommandKind::Shutdown),
         _ => {
             return Err(ModelError::UnknownAction {
@@ -2166,6 +2205,11 @@ pub fn action_block_reason(
         NodeUiAvailability::Always => None,
         NodeUiAvailability::NodeRunning => (snapshot.lifecycle.phase != NodePhase::Running)
             .then_some(ActionBlockReason::NodeNotRunning),
+        NodeUiAvailability::NodeStopped => (!matches!(
+            snapshot.lifecycle.phase,
+            NodePhase::Stopped | NodePhase::Failed
+        ))
+        .then_some(ActionBlockReason::NodeNotStopped),
         NodeUiAvailability::NetworkOnline => (!snapshot
             .networks
             .iter()
@@ -2329,6 +2373,14 @@ pub fn default_form_values(
                 }
                 ("publish_coordinator_candidate_declaration", "max_connections") => "128".into(),
                 ("publish_coordinator_candidate_declaration", "validity_ms") => "60000".into(),
+                (
+                    "get_admin_recovery_status" | "revoke_admin_recovery" | "execute_admin_recovery",
+                    "request_id",
+                ) => AdminRecoveryRequestId::from_public_key(b"default-admin-recovery").to_string(),
+                (
+                    "revoke_admin_recovery",
+                    "reason",
+                ) => "Administrative recovery".into(),
                 ("preview_configuration" | "apply_configuration", "expected_revision") => {
                     "0".into()
                 }
@@ -3184,6 +3236,92 @@ pub fn build_command(
                 },
             ))
         }
+        Ok(ActionBinding::SubmitAdminRecovery) => {
+            let request_json = required("request_json")?;
+            let request =
+                serde_json::from_str::<AdminRecoveryRequest>(&request_json).map_err(|_| {
+                    CommandBuildError::InvalidField {
+                        action_id: action.id.clone(),
+                        field_id: "request_json".into(),
+                        value: request_json.clone(),
+                    }
+                })?;
+            request
+                .validate_structure()
+                .map_err(|_| CommandBuildError::InvalidField {
+                    action_id: action.id.clone(),
+                    field_id: "request_json".into(),
+                    value: request_json,
+                })?;
+            Ok(NodeCommand::SubmitAdminRecovery(
+                NodeSubmitAdminRecoveryCommand {
+                    network_name: required("network_name")?,
+                    request,
+                },
+            ))
+        }
+        Ok(ActionBinding::GetAdminRecoveryStatus) => {
+            let request_id = required("request_id")?;
+            let request_id = AdminRecoveryRequestId::parse(request_id.clone()).map_err(|_| {
+                CommandBuildError::InvalidField {
+                    action_id: action.id.clone(),
+                    field_id: "request_id".into(),
+                    value: request_id.clone(),
+                }
+            })?;
+            Ok(NodeCommand::GetAdminRecoveryStatus(
+                NodeAdminRecoveryStatusCommand {
+                    network_name: required("network_name")?,
+                    request_id,
+                },
+            ))
+        }
+        Ok(ActionBinding::ListAdminRecoveries) => Ok(NodeCommand::ListAdminRecoveries(
+            NodeAdminRecoveryListCommand {
+                network_name: required("network_name")?,
+            },
+        )),
+        Ok(ActionBinding::RevokeAdminRecovery) => {
+            let request_id = required("request_id")?;
+            let request_id = AdminRecoveryRequestId::parse(request_id.clone()).map_err(|_| {
+                CommandBuildError::InvalidField {
+                    action_id: action.id.clone(),
+                    field_id: "request_id".into(),
+                    value: request_id.clone(),
+                }
+            })?;
+            let reason = required("reason")?;
+            if reason.trim().is_empty() || reason.chars().count() > 512 {
+                return Err(CommandBuildError::InvalidField {
+                    action_id: action.id.clone(),
+                    field_id: "reason".into(),
+                    value: reason,
+                });
+            }
+            Ok(NodeCommand::RevokeAdminRecovery(
+                NodeRevokeAdminRecoveryCommand {
+                    network_name: required("network_name")?,
+                    request_id,
+                    reason,
+                },
+            ))
+        }
+        Ok(ActionBinding::ExecuteAdminRecovery) => {
+            let request_id = required("request_id")?;
+            let request_id = AdminRecoveryRequestId::parse(request_id.clone()).map_err(|_| {
+                CommandBuildError::InvalidField {
+                    action_id: action.id.clone(),
+                    field_id: "request_id".into(),
+                    value: request_id.clone(),
+                }
+            })?;
+            Ok(NodeCommand::ExecuteAdminRecovery(
+                NodeExecuteAdminRecoveryCommand {
+                    network_name: required("network_name")?,
+                    request_id,
+                },
+            ))
+        }
         Ok(ActionBinding::ShutdownNode) => Ok(NodeCommand::Shutdown),
         Err(ModelError::UnknownAction { action_id, .. }) => {
             Err(CommandBuildError::UnknownAction { action_id })
@@ -3368,6 +3506,11 @@ pub fn validate_form_contract(action: &NodeUiAction) -> Result<(), String> {
             "max_connections",
             "validity_ms",
         ]),
+        "submit_admin_recovery" => HashSet::from(["network_name", "request_json"]),
+        "get_admin_recovery_status" => HashSet::from(["network_name", "request_id"]),
+        "list_admin_recoveries" => HashSet::from(["network_name"]),
+        "revoke_admin_recovery" => HashSet::from(["network_name", "request_id", "reason"]),
+        "execute_admin_recovery" => HashSet::from(["network_name", "request_id"]),
         "start_node" | "stop_node" | "restart_node" | "shutdown_node" => HashSet::from([]),
         _ => return Err(format!("unknown action {}", action.id)),
     };
@@ -4150,24 +4293,52 @@ fn project_traffic_session(snapshot: &NodeSnapshot, locale: Locale) -> OverviewT
     }
 }
 
+/// Prefer the stable product copy when a catalog entry exists. The backend
+/// message is only a compatibility fallback for older or third-party nodes;
+/// raw host-command details are never promoted into the primary UI copy.
+pub(crate) fn problem_message(locale: Locale, problem: &crate::node::NodeProblem) -> String {
+    let params = problem
+        .params
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    let localized = tr(locale, &problem.message_key, &params);
+    if localized == problem.message_key && !problem.message.trim().is_empty() {
+        problem.message.clone()
+    } else {
+        localized
+    }
+}
+
+pub(crate) fn problem_message_with_recovery(
+    locale: Locale,
+    problem: &crate::node::NodeProblem,
+) -> String {
+    let mut message = problem_message(locale, problem);
+    if let Some(recovery) = &problem.recovery {
+        let hint = t(locale, &recovery.hint_key);
+        if hint != recovery.hint_key && !message.contains(hint) {
+            message.push_str(" · ");
+            message.push_str(hint);
+        }
+    }
+    message
+}
+
 fn project_overview(snapshot: &NodeSnapshot, locale: Locale) -> OverviewModel {
     let primary_status = snapshot.primary_status();
     let traffic_session = project_traffic_session(snapshot, locale);
+    let node_id = snapshot
+        .identity
+        .as_ref()
+        .map(|identity| identity.node_id.trim())
+        .filter(|node_id| !node_id.is_empty())
+        .map(str::to_string);
     let node_name = snapshot
         .identity
         .as_ref()
-        .and_then(|identity| {
-            identity
-                .display_name
-                .as_deref()
-                .filter(|name| !name.trim().is_empty())
-        })
-        .or_else(|| {
-            snapshot
-                .identity
-                .as_ref()
-                .map(|identity| identity.node_id.as_str())
-        })
+        .and_then(|identity| identity.display_name.as_deref())
+        .filter(|name| !name.trim().is_empty())
         .unwrap_or_else(|| t(locale, "overview.node_name_fallback"));
 
     let mut issues = Vec::new();
@@ -4194,13 +4365,11 @@ fn project_overview(snapshot: &NodeSnapshot, locale: Locale) -> OverviewModel {
     }
 
     if let Some(problem) = &snapshot.last_error {
-        let localized = tr(locale, &problem.message_key, &[]);
-        let text = if localized == problem.message_key {
-            t(locale, "status.primary.degraded.detail").to_string()
-        } else {
-            localized
-        };
-        push_issue("last_error".into(), text, &mut issues);
+        push_issue(
+            "last_error".into(),
+            problem_message_with_recovery(locale, problem),
+            &mut issues,
+        );
     }
 
     for network in &snapshot.networks {
@@ -4317,6 +4486,7 @@ fn project_overview(snapshot: &NodeSnapshot, locale: Locale) -> OverviewModel {
 
     OverviewModel {
         node_name: node_name.to_string(),
+        node_id,
         primary_status,
         primary_page_id: Some("node_runtime".into()),
         issues,
@@ -4541,14 +4711,7 @@ fn project_node_runtime(
     let last_error = snapshot
         .last_error
         .as_ref()
-        .map(|problem| {
-            let localized = tr(locale, &problem.message_key, &[]);
-            if localized == problem.message_key {
-                t(locale, "common.unknown").to_string()
-            } else {
-                localized
-            }
-        })
+        .map(|problem| problem_message_with_recovery(locale, problem))
         .unwrap_or_else(|| t(locale, "common.none").to_string());
     let network_rows = snapshot
         .networks
@@ -8740,6 +8903,7 @@ fn ui_mode_key(mode: UiMode) -> &'static str {
     match mode {
         UiMode::Gpui => "choice.ui_mode.gpui",
         UiMode::WebUi => "choice.ui_mode.web_ui",
+        UiMode::WebViewShell => "choice.ui_mode.webview_shell",
         UiMode::Headless => "choice.ui_mode.headless",
     }
 }
@@ -11077,10 +11241,13 @@ mod tests {
         office.tun_name = "fk-office".into();
         office.status = NodeNetworkStatus::Degraded;
         snapshot.networks.push(office);
-        snapshot.last_error = Some(NodeProblem::new(
-            NodeProblemCode::Unavailable,
-            "raw backend summary must not be shown",
-        ));
+        snapshot.last_error = Some(
+            NodeProblem::new(
+                NodeProblemCode::PermissionDenied,
+                "raw backend summary must not be shown",
+            )
+            .with_message_key("error.network.permission_denied"),
+        );
         snapshot
             .embedded_services
             .push(NodeEmbeddedServiceSnapshot {
@@ -11111,7 +11278,11 @@ mod tests {
         );
         assert_eq!(
             overview.issues[1],
-            t(Locale::En, "error.operation_unavailable")
+            format!(
+                "{} · {}",
+                t(Locale::En, "error.network.permission_denied"),
+                t(Locale::En, "recovery.request_access")
+            )
         );
         assert_eq!(
             overview.issues[2],
@@ -11128,6 +11299,26 @@ mod tests {
             .issues
             .iter()
             .all(|issue| !issue.contains("raw backend summary")));
+    }
+
+    #[test]
+    fn problem_copy_prefers_stable_product_key_and_appends_recovery() {
+        let problem = NodeProblem::new(
+            NodeProblemCode::PermissionDenied,
+            "insufficient host permissions",
+        )
+        .with_message_key("error.network.permission_denied");
+
+        assert_eq!(
+            problem_message_with_recovery(Locale::ZhCn, &problem),
+            format!(
+                "{} · {}",
+                t(Locale::ZhCn, "error.network.permission_denied"),
+                t(Locale::ZhCn, "recovery.request_access")
+            )
+        );
+        assert!(!problem_message_with_recovery(Locale::ZhCn, &problem)
+            .contains("insufficient host permissions"));
     }
 
     #[test]
@@ -11540,7 +11731,7 @@ mod tests {
 
     #[test]
     fn every_manifest_action_has_an_explicit_binding() {
-        assert_eq!(ActionBinding::ALL.len(), 72);
+        assert_eq!(ActionBinding::ALL.len(), 77);
         let manifest = node_ui_manifest();
         let actual = manifest
             .pages
@@ -11579,6 +11770,96 @@ mod tests {
             bind_action(&action),
             Err(ModelError::ActionCommandMismatch { .. })
         ));
+    }
+
+    fn admin_recovery_request_fixture_json() -> String {
+        let owner = NodeId::from_public_key(b"gpui-admin-recovery-owner");
+        let member = NodeId::from_public_key(b"gpui-admin-recovery-member");
+        let network_id = NetworkId::from_public_key(b"gpui-admin-recovery-network");
+        let administrators = Vec::new();
+        let members = vec![owner.clone(), member.clone()];
+
+        #[derive(serde::Serialize)]
+        struct SnapshotPayload<'a> {
+            network_revision: u64,
+            owner: &'a NodeId,
+            administrators: &'a [NodeId],
+            members: &'a [NodeId],
+        }
+
+        let roster_digest = ContentHash::from_bytes(
+            &serde_json::to_vec(&SnapshotPayload {
+                network_revision: 7,
+                owner: &owner,
+                administrators: &administrators,
+                members: &members,
+            })
+            .expect("serialize admin recovery roster payload"),
+        );
+        let snapshot = fuckipv6_common::domain::AdminRecoverySnapshot {
+            network_revision: 7,
+            owner: owner.clone(),
+            administrators,
+            members,
+            roster_digest,
+        };
+        let target = fuckipv6_common::domain::AdminRecoveryTarget {
+            owner: owner.clone(),
+            administrators: Vec::new(),
+            members: vec![owner.clone(), member],
+        };
+        let initiated_by = NodeId::from_public_key(b"gpui-admin-recovery-initiator");
+        let reason = fuckipv6_common::domain::AdminRecoveryReason::LostCredentials;
+        let nonce = "gpui-admin-recovery-command-fixture";
+        let issued_at_unix_ms = 1_700_000_000_000;
+        let expires_at_unix_ms = issued_at_unix_ms + 60_000;
+        let revocation = fuckipv6_common::domain::AdminRecoveryRevocationPlan::default();
+
+        #[derive(serde::Serialize)]
+        struct RequestIdPayload<'a> {
+            schema_version: u16,
+            network_id: &'a NetworkId,
+            snapshot: &'a fuckipv6_common::domain::AdminRecoverySnapshot,
+            target: &'a fuckipv6_common::domain::AdminRecoveryTarget,
+            initiated_by: &'a NodeId,
+            reason: fuckipv6_common::domain::AdminRecoveryReason,
+            nonce: &'a str,
+            issued_at_unix_ms: u64,
+            expires_at_unix_ms: u64,
+            revocation: &'a fuckipv6_common::domain::AdminRecoveryRevocationPlan,
+        }
+
+        let payload = RequestIdPayload {
+            schema_version: fuckipv6_common::domain::ADMIN_RECOVERY_SCHEMA_VERSION,
+            network_id: &network_id,
+            snapshot: &snapshot,
+            target: &target,
+            initiated_by: &initiated_by,
+            reason,
+            nonce,
+            issued_at_unix_ms,
+            expires_at_unix_ms,
+            revocation: &revocation,
+        };
+        let request_id = AdminRecoveryRequestId::from_public_key(
+            &serde_json::to_vec(&payload).expect("serialize admin recovery request ID payload"),
+        );
+        serde_json::to_string(&AdminRecoveryRequest::new(
+            fuckipv6_common::domain::AdminRecoveryProposal {
+                schema_version: fuckipv6_common::domain::ADMIN_RECOVERY_SCHEMA_VERSION,
+                request_id,
+                network_id,
+                snapshot,
+                target,
+                initiated_by,
+                reason,
+                nonce: nonce.into(),
+                issued_at_unix_ms,
+                expires_at_unix_ms,
+                revocation,
+            },
+        ))
+        .expect("serialize admin recovery request")
     }
 
     fn traffic_policy_command_fixtures() -> (String, String, String, String) {
@@ -11750,6 +12031,10 @@ mod tests {
                 ) {
                     values.insert("confirm_risk".into(), "true".into());
                 }
+                if action.id == "submit_admin_recovery" {
+                    values.insert("request_json".into(), admin_recovery_request_fixture_json());
+                }
+
                 if action.id == "test_traffic_policy" {
                     let (_, current, candidate, input) = traffic_policy_command_fixtures();
                     values.insert("current_json".into(), current);
@@ -12950,6 +13235,30 @@ mod tests {
         assert_eq!(dual_section.rows.len(), 2);
         assert!(dual_section.rows.iter().any(|row| row.title == "home"));
         assert!(dual_section.rows.iter().any(|row| row.title == "office"));
+    }
+
+    #[test]
+    fn start_node_action_is_blocked_until_the_runtime_is_stopped_or_failed() {
+        let action = node_ui_manifest()
+            .pages
+            .into_iter()
+            .flat_map(|page| page.actions)
+            .find(|action| action.id == "start_node")
+            .expect("start node action");
+        assert_eq!(action.availability, NodeUiAvailability::NodeStopped);
+
+        let mut snapshot = populated_snapshot();
+        for phase in [NodePhase::Starting, NodePhase::Running, NodePhase::Stopping] {
+            snapshot.lifecycle.phase = phase;
+            assert_eq!(
+                action_block_reason(&action, &snapshot, Some("home")),
+                Some(ActionBlockReason::NodeNotStopped)
+            );
+        }
+        for phase in [NodePhase::Stopped, NodePhase::Failed] {
+            snapshot.lifecycle.phase = phase;
+            assert_eq!(action_block_reason(&action, &snapshot, Some("home")), None);
+        }
     }
 
     #[test]

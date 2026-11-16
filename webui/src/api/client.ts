@@ -185,6 +185,7 @@ type PendingSnapshotRequest = {
 };
 
 let snapshotWorker: Worker | null = null;
+let snapshotWorkerUnavailable = false;
 let snapshotWorkerRequestSequence = 0;
 let lastWorkerSnapshot: NodeSnapshot | null = null;
 let lastWorkerSnapshotToken = 0;
@@ -195,23 +196,40 @@ function rejectPendingSnapshotRequests(error: unknown): void {
   pendingSnapshotRequests.clear();
 }
 
-function getSnapshotWorker(): Worker {
+function getSnapshotWorker(): Worker | null {
   if (snapshotWorker) return snapshotWorker;
-  const worker = new Worker(new URL("./snapshot-worker.ts", import.meta.url), {
-    type: "module",
-  });
+  if (snapshotWorkerUnavailable) return null;
+  let worker: Worker;
+  try {
+    worker = new Worker(new URL("./snapshot-worker.ts", import.meta.url), {
+      type: "module",
+    });
+  } catch {
+    // Some embedded webviews cannot load module workers (or the host does not
+    // serve the worker chunk). Snapshot parsing then runs on the main thread.
+    snapshotWorkerUnavailable = true;
+    return null;
+  }
   worker.onmessage = (event: MessageEvent<SnapshotWorkerResponse>) => {
     const pending = pendingSnapshotRequests.get(event.data.requestId);
     if (!pending) return;
     pendingSnapshotRequests.delete(event.data.requestId);
     pending.resolve(event.data);
   };
-  worker.onerror = (event) => {
-    rejectPendingSnapshotRequests(
-      new Error(event.message || "snapshot worker failed"),
-    );
+  worker.onerror = () => {
+    snapshotWorkerUnavailable = true;
     worker.terminate();
     if (snapshotWorker === worker) snapshotWorker = null;
+    // Re-run the in-flight requests inline instead of surfacing a hard error:
+    // the worker is an optimisation, never the only path to a snapshot.
+    const pending = [...pendingSnapshotRequests.values()];
+    pendingSnapshotRequests.clear();
+    for (const request of pending) {
+      loadSnapshotInline().then(
+        (snapshot) => request.resolve({ kind: "snapshot", snapshot } as SnapshotWorkerResponse),
+        request.reject,
+      );
+    }
   };
   snapshotWorker = worker;
   return worker;
@@ -219,6 +237,7 @@ function getSnapshotWorker(): Worker {
 
 function loadSnapshotInWorker(previous?: NodeSnapshot): Promise<NodeSnapshot> {
   const worker = getSnapshotWorker();
+  if (!worker) return loadSnapshotInline();
   const requestId = ++snapshotWorkerRequestSequence;
   const baseMatches = previous !== undefined && previous === lastWorkerSnapshot;
   return new Promise<SnapshotWorkerResponse>((resolve, reject) => {

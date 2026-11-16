@@ -109,10 +109,11 @@ import type {
   RelayAuditExportRequest,
 } from "../api/owner-audit";
 import {
-  executionBlockReason,
   i18n,
   label,
   primaryStatus,
+  problemText,
+  problemTextWithRecovery,
   trafficProtectionStatus,
   type ActionValues,
 } from "../contract/invariants";
@@ -145,6 +146,8 @@ type PageContentProps = {
   locale: Locale;
   selectedNetwork: string;
   recentDiagnostics: NodeDiagnosticsSnapshot | null;
+  headingActions?: ReactNode;
+  pageStatus?: ReactNode;
   footer?: ReactNode;
   onSelectNetwork(name: string): void;
   onNavigate(pageId: string): void;
@@ -261,8 +264,7 @@ function routingProblemLabel(
   problem: NodeProblem | null | undefined,
 ): string | null {
   if (!problem) return null;
-  const localized = tr(locale, problem.message_key, problem.params ?? {});
-  return localized === problem.message_key ? problem.message : localized;
+  return problemText(problem, locale);
 }
 
 function NetworkContextMenu({
@@ -770,33 +772,6 @@ const OVERVIEW_ACTIVITY_ACTIONS = new Set([
   "node.shutdown",
 ]);
 
-type RuntimePageAction = { id: string; labelKey: string };
-
-function runtimeActionPlan(statusId: string): {
-  primary: RuntimePageAction;
-  secondary?: RuntimePageAction;
-} | null {
-  if (statusId === "uninitialized" || statusId === "stopped") {
-    return { primary: { id: "start_node", labelKey: "action.start_node" } };
-  }
-  if (statusId === "running") {
-    return {
-      primary: { id: "stop_node", labelKey: "action.stop_node" },
-      secondary: { id: "restart_node", labelKey: "action.restart_node" },
-    };
-  }
-  if (statusId === "degraded" || statusId === "failed") {
-    return {
-      primary: {
-        id: "get_node_diagnostics",
-        labelKey: "action.get_node_diagnostics",
-      },
-      secondary: { id: "restart_node", labelKey: "action.restart_node" },
-    };
-  }
-  return null;
-}
-
 function overviewIssues(snapshot: NodeSnapshot, locale: Locale): string[] {
   const issues: Array<{ key: string; text: string }> = [];
   const seen = new Set<string>();
@@ -817,17 +792,7 @@ function overviewIssues(snapshot: NodeSnapshot, locale: Locale): string[] {
   }
 
   if (snapshot.last_error) {
-    const problem = tr(
-      locale,
-      snapshot.last_error.message_key,
-      snapshot.last_error.params ?? {},
-    );
-    add(
-      "last_error",
-      problem && problem !== snapshot.last_error.message_key
-        ? problem
-        : label(locale, "status.primary.degraded.detail"),
-    );
+    add("last_error", problemTextWithRecovery(snapshot.last_error, locale));
   }
 
   for (const network of snapshot.networks) {
@@ -891,6 +856,12 @@ function recentOverviewActivity(
     }));
 }
 
+function abbreviatedNodeId(nodeId: string): string {
+  const characters = Array.from(nodeId);
+  if (characters.length <= 20) return nodeId;
+  return `${characters.slice(0, 12).join("")}…${characters.slice(-6).join("")}`;
+}
+
 function Overview({
   snapshot,
   locale,
@@ -909,9 +880,9 @@ function Overview({
   const issues = overviewIssues(snapshot, locale);
   const activity = recentOverviewActivity(snapshot, locale);
   const nodeName =
-    snapshot.identity?.display_name ||
-    snapshot.identity?.node_id ||
+    snapshot.identity?.display_name?.trim() ||
     label(locale, "overview.node_name_fallback");
+  const nodeId = snapshot.identity?.node_id?.trim();
   const shortcut = (actionId: string) => {
     onNavigate("networks");
     onRequestAction(actionId);
@@ -932,6 +903,15 @@ function Overview({
         <div className="hero-status-copy">
           <span>{label(locale, "common.primary_status")}</span>
           <h2>{nodeName}</h2>
+          {nodeId ? (
+            <div
+              className="hero-node-identity"
+              aria-label={`${label(locale, "overview.node_id")}: ${nodeId}`}
+            >
+              <span>{label(locale, "overview.node_id")}</span>
+              <code title={nodeId}>{abbreviatedNodeId(nodeId)}</code>
+            </div>
+          ) : null}
           <p>
             <strong>{status.label}</strong> · {status.detail}
           </p>
@@ -945,28 +925,85 @@ function Overview({
         </button>
       </section>
 
-      {issues.length > 0 ? (
-        <section
-          className="surface-card issues-card"
-          data-testid="overview-issues"
-        >
-          <div className="card-heading">
-            <h3>{label(locale, "overview.need_attention")}</h3>
-            <AlertTriangle size={17} />
-          </div>
-          {issues.map((issue) => (
-            <p className="issue-row" key={issue}>
-              <AlertTriangle size={15} />
-              <span>{issue}</span>
-            </p>
-          ))}
-        </section>
-      ) : null}
+      <div className="overview-content-grid">
+        <div className="overview-column">
+        {issues.length > 0 ? (
+          <section
+            className="surface-card issues-card overview-issues-card"
+            data-testid="overview-issues"
+          >
+            <div className="card-heading">
+              <h3>{label(locale, "overview.need_attention")}</h3>
+              <AlertTriangle size={17} />
+            </div>
+            {issues.map((issue) => (
+              <p className="issue-row" key={issue}>
+                <AlertTriangle size={15} />
+                <span>{issue}</span>
+              </p>
+            ))}
+          </section>
+        ) : null}
 
-      <section
-        className={`surface-card traffic-session-card ${traffic.tone}`}
-        data-testid="overview-traffic-session"
-      >
+          <section
+            className="surface-card overview-networks-card"
+            data-testid="overview-networks"
+          >
+          <div className="card-heading">
+            <h3>{label(locale, "overview.networks_title")}</h3>
+            <span>{snapshot.networks.length}</span>
+          </div>
+          {snapshot.networks.length === 0
+            ? empty(label(locale, "common.no_running_networks"))
+            : snapshot.networks.map((network) => {
+                const config = snapshot.configuration?.networks.find(
+                  (candidate) => candidate.network_name === network.name,
+                );
+                const routing = config
+                  ? label(locale, `choice.routing.${config.routing_mode}`)
+                  : "—";
+                const exit = config?.exit_node
+                  ? tr(locale, "overview.exit.selected", {
+                      node: config.exit_node,
+                    })
+                  : label(locale, "overview.exit.none");
+                return (
+                  <button
+                    className="compact-row overview-network-row"
+                    type="button"
+                    key={network.name}
+                    onClick={() => {
+                      onSelectNetwork(network.name);
+                      onNavigate("networks");
+                    }}
+                  >
+                    <CircleDot size={15} className={statusTone(network.status)} />
+                    <span>
+                      <strong>{network.name}</strong>
+                      <small>
+                        {tr(locale, "overview.network.detail", {
+                          peers: network.peer_count,
+                          tun: network.tun_name,
+                        })}
+                      </small>
+                      <small>
+                        {tr(locale, "overview.network.path", { routing, exit })}
+                      </small>
+                    </span>
+                    <span className={`status-pill ${statusTone(network.status)}`}>
+                      {label(locale, `status.network.${network.status}`)}
+                    </span>
+                  </button>
+                );
+              })}
+          </section>
+        </div>
+
+        <div className="overview-column">
+        <section
+          className={`surface-card traffic-session-card overview-traffic-card ${traffic.tone}`}
+          data-testid="overview-traffic-session"
+        >
         <div className="card-heading">
           <div>
             <h3>{label(locale, "traffic.session.title")}</h3>
@@ -1010,9 +1047,9 @@ function Overview({
             </code>
           </span>
         </div>
-        <h4>{label(locale, "traffic.session.validation.title")}</h4>
         {trafficValidation ? (
           <>
+            <h4>{label(locale, "traffic.session.validation.title")}</h4>
             <p className="traffic-session-validation-time">
               {tr(locale, "traffic.session.validation.observed_at", {
                 time: formatTimestamp(
@@ -1050,93 +1087,44 @@ function Overview({
             {label(locale, "traffic.session.validation.none")}
           </p>
         )}
-        <h4>{label(locale, "traffic.session.events.title")}</h4>
-        {trafficEvents.length === 0 ? (
-          <p className="traffic-session-empty">
-            {label(locale, "traffic.session.events.empty")}
-          </p>
-        ) : (
-          <div className="traffic-session-events">
-            {trafficEvents.map((event, index) => (
-              <div
-                className="traffic-session-event"
-                data-event-kind={event.kind}
-                key={`${event.occurred_at_unix_ms}-${event.kind}-${index}`}
-              >
-                <CircleDot size={14} className={statusTone(event.state)} />
-                <span>
-                  <strong>
-                    {label(locale, `traffic.session.event.${event.kind}`)}
-                  </strong>
-                  <small>
-                    {label(locale, `traffic.session.state.${event.state}`)} ·{" "}
-                    {formatTimestamp(locale, event.occurred_at_unix_ms)}
-                  </small>
-                  {event.failure ? (
-                    <code>
-                      {label(locale, "traffic.session.failure")}:{" "}
-                      {trafficFailureLabel(locale, event.failure)}
-                    </code>
-                  ) : null}
-                  {event.reason_code ? <code>{event.reason_code}</code> : null}
-                </span>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-      <section className="surface-card" data-testid="overview-networks">
-        <div className="card-heading">
-          <h3>{label(locale, "overview.networks_title")}</h3>
-          <span>{snapshot.networks.length}</span>
-        </div>
-        {snapshot.networks.length === 0
-          ? empty(label(locale, "common.no_running_networks"))
-          : snapshot.networks.map((network) => {
-              const config = snapshot.configuration?.networks.find(
-                (candidate) => candidate.network_name === network.name,
-              );
-              const routing = config
-                ? label(locale, `choice.routing.${config.routing_mode}`)
-                : "—";
-              const exit = config?.exit_node
-                ? tr(locale, "overview.exit.selected", {
-                    node: config.exit_node,
-                  })
-                : label(locale, "overview.exit.none");
-              return (
-                <button
-                  className="compact-row overview-network-row"
-                  type="button"
-                  key={network.name}
-                  onClick={() => {
-                    onSelectNetwork(network.name);
-                    onNavigate("networks");
-                  }}
+        {trafficEvents.length > 0 ? (
+          <>
+            <h4>{label(locale, "traffic.session.events.title")}</h4>
+            <div className="traffic-session-events">
+              {trafficEvents.map((event, index) => (
+                <div
+                  className="traffic-session-event"
+                  data-event-kind={event.kind}
+                  key={`${event.occurred_at_unix_ms}-${event.kind}-${index}`}
                 >
-                  <CircleDot size={15} className={statusTone(network.status)} />
+                  <CircleDot size={14} className={statusTone(event.state)} />
                   <span>
-                    <strong>{network.name}</strong>
+                    <strong>
+                      {label(locale, `traffic.session.event.${event.kind}`)}
+                    </strong>
                     <small>
-                      {tr(locale, "overview.network.detail", {
-                        peers: network.peer_count,
-                        tun: network.tun_name,
-                      })}
+                      {label(locale, `traffic.session.state.${event.state}`)} ·{" "}
+                      {formatTimestamp(locale, event.occurred_at_unix_ms)}
                     </small>
-                    <small>
-                      {tr(locale, "overview.network.path", { routing, exit })}
-                    </small>
+                    {event.failure ? (
+                      <code>
+                        {label(locale, "traffic.session.failure")}:{" "}
+                        {trafficFailureLabel(locale, event.failure)}
+                      </code>
+                    ) : null}
+                    {event.reason_code ? <code>{event.reason_code}</code> : null}
                   </span>
-                  <span className={`status-pill ${statusTone(network.status)}`}>
-                    {label(locale, `status.network.${network.status}`)}
-                  </span>
-                </button>
-              );
-            })}
-      </section>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : null}
+        </section>
 
-      <section className="surface-card" data-testid="overview-activity">
+        <section
+          className="surface-card overview-activity-card"
+          data-testid="overview-activity"
+        >
         <div className="card-heading">
           <h3>{label(locale, "overview.activity_title")}</h3>
           <Activity size={17} />
@@ -1163,7 +1151,9 @@ function Overview({
                 </span>
               </div>
             ))}
-      </section>
+        </section>
+        </div>
+      </div>
 
       <section className="surface-card" data-testid="overview-shortcuts">
         <div className="card-heading">
@@ -1300,11 +1290,9 @@ const DIAGNOSTIC_LAYERS: NodeDiagnosticLayer[] = [
 function DiagnosticsPanel({
   diagnostics,
   locale,
-  onRequestAction,
 }: {
   diagnostics: NodeDiagnosticsSnapshot | null;
   locale: Locale;
-  onRequestAction(actionId: string): void;
 }) {
   const [copyFeedback, setCopyFeedback] = useState<
     "id" | "report" | "failed" | null
@@ -1324,13 +1312,6 @@ function DiagnosticsPanel({
       <section className="surface-card" data-testid="runtime-diagnostics">
         <div className="card-heading">
           <h3>{label(locale, "diagnostic.title")}</h3>
-          <button
-            className="secondary-button"
-            type="button"
-            onClick={() => onRequestAction("get_node_diagnostics")}
-          >
-            {label(locale, "diagnostic.run")}
-          </button>
         </div>
         <div className="empty-state">
           <strong>{label(locale, "diagnostic.empty_title")}</strong>
@@ -1432,13 +1413,6 @@ function DiagnosticsPanel({
     <section className="surface-card" data-testid="runtime-diagnostics">
       <div className="card-heading">
         <h3>{label(locale, "diagnostic.title")}</h3>
-        <button
-          className="secondary-button"
-          type="button"
-          onClick={() => onRequestAction("get_node_diagnostics")}
-        >
-          {label(locale, "diagnostic.run")}
-        </button>
       </div>
 
       <dl className="detail-list diagnostic-metadata">
@@ -2020,30 +1994,13 @@ function DiagnosticsPanel({
 }
 
 function NodeRuntime({
-  page,
   snapshot,
   locale,
-  selectedNetwork,
   recentDiagnostics,
   onSelectNetwork,
   onNavigate,
-  onRequestAction,
 }: PageContentProps) {
   const status = primaryStatus(snapshot, locale);
-  const actionPlan = runtimeActionPlan(status.id);
-  const executableActions = [
-    actionPlan?.primary,
-    actionPlan?.secondary,
-  ].flatMap((requestedAction, index) => {
-    if (!requestedAction) return [];
-    const action = page.actions.find(
-      (candidate) => candidate.id === requestedAction.id,
-    );
-    if (!action || executionBlockReason(action, snapshot, selectedNetwork)) {
-      return [];
-    }
-    return [{ action, primary: index === 0 }];
-  });
   const phase = label(locale, `status.phase.${snapshot.lifecycle.phase}`);
   const controlHealth = label(
     locale,
@@ -2053,11 +2010,7 @@ function NodeRuntime({
     ? snapshot.lifecycle.failed_networks.join(", ")
     : label(locale, "common.none");
   const lastError = snapshot.last_error
-    ? tr(
-        locale,
-        snapshot.last_error.message_key,
-        snapshot.last_error.params ?? {},
-      )
+    ? problemTextWithRecovery(snapshot.last_error, locale)
     : label(locale, "common.none");
   const interfaces = snapshot.interfaces ?? [];
   const interfaceProblems = snapshot.interface_problems ?? [];
@@ -2087,7 +2040,10 @@ function NodeRuntime({
 
   return (
     <div className="page-stack runtime-stack">
-      <section className={`hero-status ${statusTone(status.id)}`}>
+      <section
+        className={`hero-status ${statusTone(status.id)}`}
+        data-testid="runtime-status"
+      >
         <div className="hero-status-icon">
           {status.id === "running" ? (
             <CheckCircle2 size={30} />
@@ -2102,24 +2058,6 @@ function NodeRuntime({
           <h2>{status.label}</h2>
           <p>{status.detail}</p>
         </div>
-        {executableActions.length > 0 ? (
-          <div className="runtime-action-group">
-            {executableActions.map(({ action, primary }) => (
-              <button
-                className={
-                  primary
-                    ? "primary-button runtime-primary-action"
-                    : "secondary-button runtime-secondary-action"
-                }
-                type="button"
-                key={action.id}
-                onClick={() => onRequestAction(action.id)}
-              >
-                {label(locale, action.label_key)}
-              </button>
-            ))}
-          </div>
-        ) : null}
       </section>
 
       <div className="metric-grid">
@@ -2148,7 +2086,6 @@ function NodeRuntime({
       <DiagnosticsPanel
         diagnostics={recentDiagnostics}
         locale={locale}
-        onRequestAction={onRequestAction}
       />
 
       <section className="surface-card" data-testid="runtime-state">
@@ -2373,11 +2310,6 @@ function NodeRuntime({
             <AlertTriangle size={17} />
           </div>
           {interfaceProblems.map((problem, index) => {
-            const localized = tr(
-              locale,
-              problem.message_key,
-              problem.params ?? {},
-            );
             return (
               <div
                 className="compact-row"
@@ -2389,11 +2321,7 @@ function NodeRuntime({
                     {problem.network_name ??
                       label(locale, "runtime.interface.host")}
                   </strong>
-                  <small>
-                    {localized === problem.message_key
-                      ? problem.message
-                      : localized}
-                  </small>
+                  <small>{problemText(problem, locale)}</small>
                 </span>
               </div>
             );
@@ -3166,11 +3094,11 @@ function Peers({
   // scoped to this component instance and does not cross a memo boundary.
   // eslint-disable-next-line react-hooks/incompatible-library
   const table = useReactTable({
-    data: snapshot.peers,
+    data: snapshot.peers ?? [],
     columns,
     getCoreRowModel: getCoreRowModel(),
   });
-  if (snapshot.peers.length === 0)
+  if ((snapshot.peers ?? []).length === 0)
     return empty(label(locale, "common.no_data"));
   return (
     <div className="table-shell">
@@ -4304,7 +4232,7 @@ function ExitQualityCard({
           selectableExitIds.has(candidate.exit),
       ) ?? [];
     return candidates.flatMap((candidate) => {
-      const peer = snapshot.peers.find(
+      const peer = (snapshot.peers ?? []).find(
         (item) =>
           item.network_name === networkName &&
           item.peer_id === candidate.exit,
@@ -6148,6 +6076,7 @@ export function PageContent(props: PageContentProps) {
             TOPOLOGY_ACTION_IDS.has(action.id),
           )}
           onSubmitAction={props.onSubmitAction}
+          headingActions={props.headingActions}
         />
       );
       break;
@@ -6196,16 +6125,33 @@ export function PageContent(props: PageContentProps) {
       content = empty(label(locale, "common.unknown_page"));
   }
   const Icon = PAGE_ICONS[page.id] ?? CircleDot;
+  if (page.id === "topology") {
+    return (
+      <section
+        className="page-content page-content-topology"
+        aria-labelledby="page-title"
+      >
+        {content}
+        {props.footer}
+      </section>
+    );
+  }
   return (
     <section className="page-content" aria-labelledby="page-title">
       <header className="page-heading">
-        <div className="page-heading-icon">
-          <Icon size={20} />
+        <div className="page-heading-copy">
+          <div className="page-heading-icon">
+            <Icon size={20} />
+          </div>
+          <div>
+            <h1 id="page-title">{label(locale, page.title_key)}</h1>
+          </div>
         </div>
-        <div>
-          <h1 id="page-title">{label(locale, page.title_key)}</h1>
-        </div>
+        {props.headingActions ? (
+          <div className="page-heading-actions">{props.headingActions}</div>
+        ) : null}
       </header>
+      {props.pageStatus}
       {content}
       {props.footer}
     </section>

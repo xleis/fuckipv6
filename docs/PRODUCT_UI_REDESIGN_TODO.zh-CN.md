@@ -60,7 +60,7 @@
 | W11 流量路由 | `[~]` | P1 | W7,W10 | W11-01 四类决策与首条命中、W11-02 匹配条件、W11-03 应用身份与子进程继承、W11-04 未知应用与失败策略、W11-05 规则测试器领域契约、W11-06 原子应用/差异/回滚/崩溃恢复、W11-07 有界自动恢复协调器契约和 W11-09 隔离路由 E2E/失败关闭/网络报告已完成；W11-08 WebUI 已接入同一权威页面的结构化编辑、测试、应用、历史和回滚入口，GPUI 已接入同一页面的权威投影、规则/目标/影响展示和精确跳转，真实命中观测、GPUI/WebUI/Android 三端一致、生产后端接线及真实平台监听/适配待完成 |
 | W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05、W12-08 和 W12-10 已完成：本机启停、贡献治理、管理员选择、分层健康、故障切换/撤权及 Exit 页面权威分层均有自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收，并通过真实增量证明 IPv4 目标流量归入规范 IPv6 Peer 身份且两侧 Peer/网络级 P2P 计数一致；W12-07 的非浏览器完整文件下载与自动 DNS 清理、两侧 Exit 可达和 W12-09 的 24 小时稳定性仍待完成 |
 | W13 Relay | `[x]` | P1 | W10 | W13-01 至 W13-07 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；真实 Relay 子进程运营者导出只含最小 usage/health/governance 字段，不包含载荷、虚拟地址、密钥或显示名；生产数据面故障转移写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复、真实子进程连接风暴/慢连接/资源上限/吞吐/延迟/CPU/RSS、满载期间 Snapshot/Manifest 可用性及 Relay/Coordinator/Exit 同时故障恢复均有进程或 netns 证据。GPUI、WebUI 与 Android Compose Relay 页面现统一消费共享 Manifest、`NodeSnapshot`、健康/治理投影和 `SetNetworkRole` 命令；Android 在快照或真实命令回调缺失时失败关闭，不注入示例状态。Android 的 VpnService、节点 IPC 和真机 E2E 仍归 W16，不在本项冒充平台数据面完成 |
-| W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | 任期、多数接管、紧急权限冻结 |
+| W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | W14-01/02/04/05/06/07/08/09/10 已完成：候选组、任期与 fencing、严格多数接管、分区无多数保护、旧 Leader 恢复、紧急临时 Leader、临时权限冻结、管理员阈值恢复、数据面连续性及脑裂/断电测试均有自动化与真实进程证据；真实多节点离线 Trustee 恢复演练（`fuckipv6.w14.admin-recovery.drill.v1`）与 root netns 分区演练已完成。W14-03 仅剩“经过审计的自研设计”一项，需要独立第三方对自研选举/任期协议出具正式审计结论 |
 | W15 File | `[ ]` | P2 | W10 | ACL、配额、上传下载、续传 |
 | W16 Android | `[ ]` | P2 | W2,W4,W5,W7-W15 | Compose、VpnService、全能力 |
 | W17 跨平台硬化 | `[ ]` | P2 | W6-W16 | Linux/macOS/Windows 实机证据 |
@@ -3316,7 +3316,7 @@ netns/iptables 测试覆盖。三端 Relay UI 的权限、网络选择、健康�
 
 ### W14-03 正常多数接管 `[ ]`
 
-> 当前进展（2026-11-15）：运行时以 5 秒为基础间隔读取权威候选状态和恢复快照，再决定 proposal、vote、timeout、紧急签发或续租；动作失败不会在本地推断成功，失败后按 5/10/20/40/60 秒有界退避并在成功时重置。轮询抖动由稳定 identity 确定性生成 ±10%，避免客户端同步重试且保持事故可复现。信令 `Reconnected` 会经 wakeup channel 立即刷新候选权威状态和恢复快照，不等待下一轮常规轮询。候选偏好、健康、当前任期/租约和严格多数共同约束新 Leader 安装，迟到票、重复票和冲突票均失败关闭。已具备 `quorum` 和 `latest_election` 的候选、票集合、阶段与结果投影，长时间数据面会话也能跨真实 term 1 → term 2 切换保持。真实后台运行时 E2E 已用两个独立 `run_actor`、两套节点身份和同一个持久化 store 验证：候选 A 声明过期后，B 自动提案 term 2、B/C 自动投票，经真实严格多数事务提交新 Leader，B/C runtime 在接管后保持存活。该路径发现并修复了 election commit 未原子失效旧 recovery/emergency 投影的问题，新增 `election_commit_invalidates_recovery_projections_from_the_previous_term` 回归。[内部安全审计](W14_COORDINATOR_PROTOCOL_AUDIT.zh-CN.md)确认了严格多数、旧任期/旧 token、迟到/重复/冲突票、配置 revision、TOCTOU、租约/fencing 和失败关闭路径，但它不是独立正式审计。仍缺自研共识协议的正式外部审计结论，因此本项保持未完成。
+> 当前进展（2026-11-16）：运行时以 5 秒为基础间隔读取权威候选状态和恢复快照，再决定 proposal、vote、timeout、紧急签发或续租；动作失败不会在本地推断成功，失败后按 5/10/20/40/60 秒有界退避并在成功时重置。轮询抖动由稳定 identity 确定性生成 ±10%，避免客户端同步重试且保持事故可复现。信令 `Reconnected` 会经 wakeup channel 立即刷新候选权威状态和恢复快照，不等待下一轮常规轮询。候选偏好、健康、当前任期/租约和严格多数共同约束新 Leader 安装，迟到票、重复票和冲突票均失败关闭。已具备 `quorum` 和 `latest_election` 的候选、票集合、阶段与结果投影，长时间数据面会话也能跨真实 term 1 → term 2 切换保持。真实后台运行时 E2E 已用两个独立 `run_actor`、两套节点身份和同一个持久化 store 验证：候选 A 声明过期后，B 自动提案 term 2、B/C 自动投票，经真实严格多数事务提交新 Leader，B/C runtime 在接管后保持存活。该路径发现并修复了 election commit 未原子失效旧 recovery/emergency 投影的问题，新增 `election_commit_invalidates_recovery_projections_from_the_previous_term` 回归。[内部安全审计](W14_COORDINATOR_PROTOCOL_AUDIT.zh-CN.md)确认了严格多数、旧任期/旧 token、迟到/重复/冲突票、配置 revision、TOCTOU、租约/fencing 和失败关闭路径，但它不是独立正式审计。仍缺自研共识协议的正式外部审计结论，因此本项保持未完成。真实多节点离线 Trustee 灾难演练已于 2026-11-16 补齐（见 W14-08 证据），因此本项只剩“选择协议采用经过评估的成熟实现或经过审计的自研设计”一条未勾选：仓库内部审计不能替代第三方正式结论，该条必须由独立审计机构出具报告后才能完成。
 
 - [x] Leader 失联后按候选组和健康状态发起选举；
 - [x] 仅在达到配置多数/法定人数时产生新 Leader；
@@ -3404,9 +3404,9 @@ Leader。紧急租约具有软租约、硬期限和单调递增的 `emergency_ep
 
 **验收**：紧急模式保障基本运行，但不成为治理后门；权限范围和持续时间均有硬限制。
 
-### W14-07 临时权限冻结与恢复 `[ ]`
+### W14-07 临时权限冻结与恢复 `[x]`
 
-> 当前进展（2026-11-14）：候选控制面新增统一 governance gate。候选配置缺失、pending、expired 或当前配置下没有健康候选时，服务端以稳定错误码 `coordinator_candidate.error.governance_frozen` 失败关闭。该 gate 已接入成员准入/拒绝/变更、邀请创建/撤销/兑换、加入审批、Exit 贡献提交/审批/撤回；邀请兑换在操作者尚未成为成员时也会检查，并已有“冻结不消耗邀请、不改 roster/lifecycle”的副作用测试。命令授权层新增独立的治理写入意图，临时 Coordinator 对成员、角色、策略、身份、配置、邀请和候选治理写入返回 `permission.temporary_coordinator_governance_frozen`，但本地启停、路由、TUN、诊断和运行协调不被该角色规则自动冻结。GPUI 与 WebUI 已按 `NodeCommandKind::is_governance_write()` 分类统一禁用治理入口，并在候选状态缺失、紧急状态、控制面不可写或紧急 Leader 活跃时展示稳定恢复原因；仅候选声明发布、状态/列表/预览和既有数据面读取保持可用。正式候选恢复后只有在严格多数、候选配置 revision 和 successor term 全部验证通过时，`install_term` 才在同一持久化事务内清除紧急租约并撤销旧 emergency credential；校验失败时租约和治理冻结保持不变。管理员阈值恢复的后端协议、持久化与失效编排已具备实现与测试证据，但 GPUI、WebUI、Android 等价安全流程及真实恢复演练仍未完成，因此本项及 W14 均不勾选。
+> 当前进展（2026-11-15）：候选控制面新增统一 governance gate。候选配置缺失、pending、expired 或当前配置下没有健康候选时，服务端以稳定错误码 `coordinator_candidate.error.governance_frozen` 失败关闭。该 gate 已接入成员准入/拒绝/变更、邀请创建/撤销/兑换、加入审批、Exit 贡献提交/审批/撤回；邀请兑换在操作者尚未成为成员时也会检查，并已有“冻结不消耗邀请、不改 roster/lifecycle”的副作用测试。命令授权层新增独立的治理写入意图，临时 Coordinator 对成员、角色、策略、身份、配置、邀请和候选治理写入返回 `permission.temporary_coordinator_governance_frozen`，但本地启停、路由、TUN、诊断和运行协调不被该角色规则自动冻结。GPUI 与 WebUI 已按 `NodeCommandKind::is_governance_write()` 分类统一禁用治理入口，并在候选状态缺失、紧急状态、控制面不可写或紧急 Leader 活跃时展示稳定恢复原因；仅候选声明发布、状态/列表/预览和既有数据面读取保持可用。正式候选恢复后只有在严格多数、候选配置 revision 和 successor term 全部验证通过时，`install_term` 才在同一持久化事务内清除紧急租约并撤销旧 emergency credential；校验失败时租约和治理冻结保持不变。管理员阈值恢复的后端协议、持久化、失效编排以及 GPUI、WebUI、Android、本地 CLI 等价安全流程均已落地。真实多节点恢复演练已于 2026-11-16 完成：`w14_admin_recovery_multinode_offline_trustee_drill` 用真实 Coordinator 子进程、三次独立离线 Trustee 设备进程、两次控制面 SIGKILL/重启和真实 WebSocket 会话验证了离线 Trustee 阈值、执行前持久化、Ack 先于 Close、旧会话与旧邀请失效、新权威可用和重复执行幂等；root 专项 `w14_admin_recovery_netns_drill` （`scripts/test-w14-admin-recovery-netns.sh`）在独立网络 namespace 上用 nftables 分区验证中断期间不推断成功。监督式冻结语义、交回和撤权均已由测试覆盖，因此本项勾选；W14 总体仍受 W14-03 的正式外部审计约束。
 
 - [x] 建立允许/禁止操作清单并落实服务端校验；
 - [x] 临时 Leader 的所有治理命令返回明确受限错误；
@@ -3414,7 +3414,7 @@ Leader。紧急租约具有软租约、硬期限和单调递增的 `emergency_ep
 - [x] 正式候选恢复后验证多数和任期；
 - [x] 执行安全交回、状态校验和临时权限撤销；
 - [x] 交回失败保持受限状态，不降级为永久权限；
-- [ ] 管理员阈值恢复流程需要多成员签名/批准；
+- [x] 管理员阈值恢复流程需要多成员签名/批准；
 - [x] 覆盖恢复期间并发展开 old/new Leader 测试。
 
 **证据**：`successor_term_install_atomically_revokes_emergency_authority` 验证严格多数 successor term 安装后新任期
@@ -3422,21 +3422,21 @@ Leader。紧急租约具有软租约、硬期限和单调递增的 `emergency_ep
 `failed_successor_install_preserves_emergency_lease_and_freeze` 验证多数证明不足时任期不落盘、紧急租约继续有效、
 治理仍冻结且只能续租临时运行权限。`concurrent_split_brain_successors_install_exactly_one_authority` 让两个同任期、
 不同 Leader 的 successor 并发安装，验证只有一个成功、另一个被任期/fencing 拒绝、最终只有一套权威凭据可写且紧急撤权
-审计恰好一条。管理员阈值恢复后端已落地，但端到端安全流程和真实多节点恢复演练仍未完成。
+审计恰好一条。管理员阈值恢复后端及三端安全流程已落地；`w14_admin_recovery_multinode_offline_trustee_drill` 与 `w14_admin_recovery_netns_drill` 补齐真实多节点恢复演练（schema `fuckipv6.w14.admin-recovery.drill.v1`），覆盖离线 Trustee 阈值、控制面两次重启、执行期旧会话失效、申请者存活和重复执行幂等。
 
 **验收**：临时状态不可被静默延长或转正；交回失败时仍保持最小权限。
 
-### W14-08 管理员阈值恢复 `[ ]`
+### W14-08 管理员阈值恢复 `[x]`
 
-> 当前进展（2026-11-15）：后端领域层已定义当前管理员严格多数阈值、离线灾备 Trustee 阈值、网络/成员快照版本与摘要，并对请求有效期、撤销计划、签名集合和过期/成员变更/网络错配执行校验；同一请求的重复签名、重放、伪造签名和阈值不足均失败关闭。Coordinator 新增恢复请求的提交、状态、列表、撤销和执行协议，持久化请求、执行结果与不可静默删除的审计；执行在服务互斥锁内重新校验当前权威，原子替换 roster/revision 并失效旧会话、邀请和未确认写入，部分失效失败可幂等续跑。恢复 Ack 被明确归类为服务端发起消息，客户端响应关联校验 request/network，未请求或错配 Ack 不会进入通用事件流。真实 WebSocket 回归进一步修正了执行成功后的断连顺序：执行者旧连接必须先收到 `AdminRecoveryExecuteAck`，随后才收到 Close；其他旧权威立即断连，不在快照内的 pending applicant 保持信令连接。本地/离线灾备流程、信任边界、三端 UI 语义、CLI 草案、状态机和验收矩阵见 [W14_ADMIN_RECOVERY_DESIGN.zh-CN.md](W14_ADMIN_RECOVERY_DESIGN.zh-CN.md)。仍缺 GPUI、WebUI、Android 等价安全流程及真实恢复演练，因此 W14-08 和 W14 均不勾选。
+> 当前进展（2026-11-15）：后端领域层已定义当前管理员严格多数阈值、离线灾备 Trustee 阈值、网络/成员快照版本与摘要，并对请求有效期、撤销计划、签名集合和过期/成员变更/网络错配执行校验；同一请求的重复签名、重放、伪造签名和阈值不足均失败关闭。Coordinator 新增恢复请求的提交、状态、列表、撤销和执行协议，持久化请求、执行结果与不可静默删除的审计；执行在服务互斥锁内重新校验当前权威，原子替换 roster/revision 并失效旧会话、邀请和未确认写入，部分失效失败可幂等续跑。恢复 Ack 被明确归类为服务端发起消息，客户端响应关联校验 request/network，未请求或错配 Ack 不会进入通用事件流。真实 WebSocket 回归进一步修正了执行成功后的断连顺序：执行者旧连接必须先收到 `AdminRecoveryExecuteAck`，随后才收到 Close；其他旧权威立即断连，不在快照内的 pending applicant 保持信令连接。node 命令层、本地 CLI、GPUI、WebUI 和 Android Compose 的提交、状态、列表、撤销、执行功能代码均已完成；三端执行前都读取同一 request ID 的最新权威状态，仅在 Pending 且 `can_execute == true` 时发出一次执行，结果不明时只查询状态而不自动重放。本地/离线灾备流程、信任边界、三端 UI 语义、状态机和验收矩阵见 [W14_ADMIN_RECOVERY_DESIGN.zh-CN.md](W14_ADMIN_RECOVERY_DESIGN.zh-CN.md)。真实多节点灾难演练已于 2026-11-16 完成，见下方证据；本项验收矩阵的“至少一次真实多节点离线 Trustee 演练”已满足，因此 W14-08 勾选。W14 总体仍等待 W14-03 的正式外部审计结论。
 
 - [x] 定义管理员阈值、签名集合和成员快照版本；
 - [x] 全部 Passkey 丢失等灾难场景提供本地/离线恢复设计；
-- [ ] 恢复请求展示影响、参与者、有效期和撤销路径；
+- [x] 恢复请求展示影响、参与者、有效期和撤销路径；
 - [x] 防止少数管理员伪造多数签名；
 - [x] 恢复后使旧会话、邀请和未确认写入失效；
 - [x] 恢复动作形成不可静默删除的审计；
-- [ ] 完成后端、GPUI、WebUI 和 Android 等价安全流程；
+- [x] 完成后端、GPUI、WebUI 和 Android 等价安全流程；
 - [x] 完成签名重放、成员变更和阈值不足测试。
 
 **证据**：`strict_majority_signatures_are_required_and_duplicates_are_rejected`、
@@ -3454,13 +3454,29 @@ Leader。紧急租约具有软租约、硬期限和单调递增的 `emergency_ep
 `administrator_recovery_acknowledgements_are_rejected_as_client_messages` 固定协议编解码和服务端 Ack 防伪边界；
 客户端测试覆盖未请求/错配 Ack 丢弃、断线失败和稳定公开错误键。
 [W14_ADMIN_RECOVERY_DESIGN.zh-CN.md](W14_ADMIN_RECOVERY_DESIGN.zh-CN.md) 进一步定义全部管理员凭据丢失时的
-离线 Trustee 审批、本地 CLI、三端影响/参与者/有效期/撤销展示、失败关闭与验收矩阵。真实灾难恢复尚未演练，
-且三端等价操作流程未完成，因此本项仍未通过验收。
+离线 Trustee 审批、本地 CLI、三端影响/参与者/有效期/撤销展示、失败关闭与验收矩阵。三端功能代码已经完成，
+但真实多节点灾难恢复尚未演练，正式外部安全审计仍缺，因此本项仍未通过验收。
 
 `websocket_admin_recovery_ack_precedes_old_session_close` 启动真实 Coordinator 信令服务并建立 owner、admin 与
 pending applicant 三条 WebSocket：提交并执行阈值恢复后，断言执行者先收到 `Executed` Ack、随后才收到 Close；另一名
 旧权威被立即断开；未进入批准成员快照的 applicant 仍可查询恢复列表。该测试同时校验新 owner/revision、清空旧管理员
 和 invalidation 审计已持久化，防止后续改动再次让成功的恢复以裸 Close 结束。
+
+`w14_admin_recovery_multinode_offline_trustee_drill`（`crates/coordinator/tests/w14_admin_recovery_multinode.rs`）是
+真实多节点灾备演练的主体证据，报告 schema 为 `fuckipv6.w14.admin-recovery.drill.v1`，可通过
+`FUCKIPV6_W14_ADMIN_RECOVERY_REPORT` 导出：三个 Trustee 设备各自以独立子进程、独立私钥目录生成 detached approval，
+阈值 2/3；单个 Trustee 审批与“1 名旧管理员 + 1 名 Trustee”混合请求在真实服务端失败关闭
+（`admin_recovery.error.threshold_not_met`，不再退化为 internal）；导出请求、提交、执行分三步完成，其间两次 SIGKILL
+Coordinator 子进程并重启，提交后的请求保持 Pending 且仍可执行；执行后执行者先收到 `Executed` Ack 再收到 Close，
+另一条旧权威会话立即断开，不在快照内的 pending applicant 保持可用，旧邀请被撤销，`network.json` 前进一个 revision
+并换上新 Owner；新 Owner 重新连接后可查询 `Executed`，重复执行返回同一结果且不再推进 revision、不重复写失效审计。
+root 专项 `w14_admin_recovery_netns_drill` 由 `scripts/test-w14-admin-recovery-netns.sh` 在独立网络 namespace 中运行
+同一演练，并用 nftables 切断 Operator 到 Coordinator 的路径，断言中断期间收不到任何 Ack、恢复后流程继续。
+
+该演练同时发现并修复了一个真实缺陷：服务端 `admin_recovery_protocol_error` 只识别 `admin_recovery.error.*` 前缀，
+领域层以 `domain.admin_recovery_threshold_not_met` / `_expired` / `_stale_snapshot` / `_network_mismatch` 失败关闭时会被
+映射成 `admin_recovery.error.internal`，三端无法区分“阈值不足”和“Coordinator 内部故障”。现在这些领域码显式映射到
+公开稳定键，并新增 `admin_recovery_domain_rejections_keep_stable_public_keys` 回归，防止再次退化。
 
 **验收**：灾难恢复不依赖单个隐藏后门；恢复权限与正常治理权限有清晰边界。
 
@@ -4027,7 +4043,7 @@ pending applicant 三条 WebSocket：提交并执行阈值恢复后，断言执�
 - [ ] W11 流量路由完成；
 - [ ] W12 Exit 完成；
 - [x] W13 Relay 完成；
-- [ ] W14 Coordinator 自动接管完成。
+- [ ] W14 Coordinator 自动接管完成（仅剩 W14-03 正式外部审计结论）。
 
 **完成标志**：用户可以创建/发现/加入网络，管理员治理成员与权限，节点 owner 配置路由并选择可用 Exit，Relay 独立治理，Coordinator 可安全接管。
 

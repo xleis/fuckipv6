@@ -106,7 +106,7 @@ export function searchNodeSnapshot(
     );
   }
 
-  for (const peer of snapshot.peers) {
+  for (const peer of snapshot.peers ?? []) {
     push(
       {
         id: `peer:${peer.network_name}:${peer.peer_id}`,

@@ -278,6 +278,91 @@ async function evaluate(session, expression) {
   return result.result.value;
 }
 
+async function waitForExpression(session, expression, description, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await evaluate(session, expression)) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+  }
+  throw new Error(`timed out waiting for ${description}`);
+}
+
+async function clickSelector(session, selector) {
+  const clicked = await evaluate(
+    session,
+    `(() => {
+      const element = document.querySelector(${JSON.stringify(selector)});
+      if (!(element instanceof HTMLElement)) return false;
+      element.click();
+      return true;
+    })()`,
+  );
+  if (!clicked) throw new Error(`could not find ${selector}`);
+}
+
+async function clickText(session, selector, text) {
+  const clicked = await evaluate(
+    session,
+    `(() => {
+      const element = [...document.querySelectorAll(${JSON.stringify(selector)})]
+        .find((candidate) => candidate.textContent?.trim() === ${JSON.stringify(text)});
+      if (!(element instanceof HTMLElement)) return false;
+      element.click();
+      return true;
+    })()`,
+  );
+  if (!clicked) throw new Error(`could not find ${selector} containing ${text}`);
+}
+
+async function selectModulePage(session, moduleLabel, pageLabel) {
+  await clickText(session, ".module-button", moduleLabel);
+  await waitForExpression(
+    session,
+    `document.querySelector('.module-button[aria-current="page"]')?.textContent?.trim() === ${JSON.stringify(moduleLabel)}`,
+    `${moduleLabel} module selection`,
+  );
+  const currentLabel = await evaluate(
+    session,
+    `document.querySelector(".page-switcher-trigger")?.textContent?.trim() ?? ""`,
+  );
+  if (currentLabel !== pageLabel) {
+    await clickSelector(session, ".page-switcher-trigger");
+    await waitForExpression(
+      session,
+      `document.querySelector('.page-switcher[open] [role="menuitemradio"]') !== null`,
+      `${moduleLabel} page switcher`,
+    );
+    await clickText(session, '.page-switcher-menu [role="menuitemradio"]', pageLabel);
+    await waitForExpression(
+      session,
+      `document.querySelector(".page-switcher-trigger")?.textContent?.trim() === ${JSON.stringify(pageLabel)}`,
+      `${pageLabel} page selection`,
+    );
+  }
+}
+
+async function captureScreenshot(session, filename) {
+  const screenshot = await session.send("Page.captureScreenshot", {
+    format: "png",
+    fromSurface: true,
+    captureBeyondViewport: false,
+  });
+  const image = Buffer.from(screenshot.data, "base64");
+  const dimensions = pngDimensions(image);
+  const expected = {
+    width: VIEWPORT.width * VIEWPORT.deviceScaleFactor,
+    height: VIEWPORT.height * VIEWPORT.deviceScaleFactor,
+  };
+  if (dimensions.width !== expected.width || dimensions.height !== expected.height) {
+    throw new Error(
+      `unexpected screenshot dimensions ${dimensions.width}x${dimensions.height}; expected ${expected.width}x${expected.height}`,
+    );
+  }
+  const path = join(OUTPUT_ROOT, filename);
+  await writeFile(path, image);
+  return { image, dimensions, path };
+}
+
 async function waitForReady(session, timeoutMs = 20_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -326,6 +411,14 @@ async function main() {
     const fixture = JSON.parse(
       await readFile(join(FIXTURE_ROOT, "product-visual-snapshot.json"), "utf8"),
     );
+    const topologyScenarios = JSON.parse(
+      await readFile(join(FIXTURE_ROOT, "topology-presentation-scenarios.json"), "utf8"),
+    );
+    const topologyScenario = topologyScenarios.scenarios.find(
+      (scenario) => scenario.id === "multi-network",
+    );
+    if (!topologyScenario) throw new Error("multi-network topology visual fixture is missing");
+    fixture.snapshot.topology = topologyScenario.topology;
     await prepareSharedAssets(sharedAssets);
     fixtureServer = await startFixtureServer(manifest, fixture, sharedAssets);
 
@@ -373,22 +466,8 @@ async function main() {
     await cdp.send("Page.navigate", { url: `${fixtureServer.origin}/` });
     await waitForReady(cdp);
 
-    const screenshot = await cdp.send("Page.captureScreenshot", {
-      format: "png",
-      fromSurface: true,
-      captureBeyondViewport: false,
-    });
-    const image = Buffer.from(screenshot.data, "base64");
-    const dimensions = pngDimensions(image);
-    const expected = {
-      width: VIEWPORT.width * VIEWPORT.deviceScaleFactor,
-      height: VIEWPORT.height * VIEWPORT.deviceScaleFactor,
-    };
-    if (dimensions.width !== expected.width || dimensions.height !== expected.height) {
-      throw new Error(
-        `unexpected screenshot dimensions ${dimensions.width}x${dimensions.height}; expected ${expected.width}x${expected.height}`,
-      );
-    }
+    const overviewCapture = await captureScreenshot(cdp, "overview.png");
+    const { image, dimensions } = overviewCapture;
 
     const semantics = await evaluate(
       cdp,
@@ -398,34 +477,76 @@ async function main() {
           .split(",")[0]
           .trim()
           .replace(/^["']|["']$/g, "");
+        const pageOptions = [...document.querySelectorAll('.page-switcher-menu [role="menuitemradio"]')]
+          .map(text)
+          .filter(Boolean);
+        const currentPage =
+          text(document.querySelector(".page-switcher-trigger")) ||
+          text(document.querySelector('.module-button[aria-current="page"]')) ||
+          text(document.querySelector(".workspace h1"));
         return {
           title: document.title,
           locale: document.documentElement.lang,
           font_family: fontFamily,
           viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
           modules: [...document.querySelectorAll(".module-button")].map(text),
-          page_tabs: [...document.querySelectorAll('[role="tab"]')].map(text),
+          page_switcher: {
+            current: currentPage,
+            options: pageOptions.length > 0 ? pageOptions : [currentPage],
+          },
+          topbar_search: {
+            placeholder:
+              document.querySelector(".global-search-topbar input")?.getAttribute("placeholder") ??
+              "",
+          },
+          network_picker: document.querySelector(".network-picker")
+            ? text(document.querySelector(".network-picker"))
+            : null,
           primary_status: {
             label: text(document.querySelector(".top-status strong")),
             detail: text(document.querySelector(".top-status span:last-child")),
           },
           page_heading: text(document.querySelector(".workspace h1")),
-          action_panel: text(document.querySelector(".actions-panel .panel-title")),
-          actions: [...document.querySelectorAll(".actions-panel .action-card-head span")].map(text),
+          shell_regions: [...document.querySelectorAll("[data-ui-region]")].map(
+            (element) => element.getAttribute("data-ui-region"),
+          ),
+          actions: [...document.querySelectorAll(".page-command-menu-item strong")].map(text),
+          persistent_action_surface: Boolean(
+            document.querySelector(
+              '[data-ui-region="action-panel"], .actions-panel, .visual-actions',
+            ),
+          ),
           shortcuts: [...document.querySelectorAll('[data-testid="overview-shortcuts"] .overview-shortcuts > *')].map(
             (element) => text(element.querySelector("span") ?? element),
           ),
           network_statuses: [...document.querySelectorAll('[data-testid="overview-networks"] .status-pill')].map(text),
           geometry: Object.fromEntries(
             [
-              ["sidebar", ".primary-nav"],
+              ["sidebar_icon_rail", ".primary-nav"],
               ["topbar", ".global-bar"],
               ["toolbar", ".local-toolbar"],
               ["workspace", ".workspace"],
-              ["content", ".page-content-stack"],
+              ["overview_stack", ".overview-stack"],
               ["page_heading", ".page-heading"],
               ["hero", ".hero-status"],
               ["hero_copy", ".hero-status-copy"],
+              ["global_context", ".global-context"],
+              ["top_status_group", ".top-status-group"],
+              ["primary_status", '[data-testid="top-lifecycle-status"]'],
+              ["traffic_session_status", '[data-testid="top-traffic-status"]'],
+              ["network_picker", ".network-picker"],
+              ["network_picker_label", ".network-picker > span"],
+              ["network_picker_trigger", ".network-picker select"],
+              ["language_control", ".language-control"],
+              ["global_actions", ".global-actions"],
+              ["traffic_session", '[data-testid="overview-traffic-session"]'],
+              ["traffic_heading", '[data-testid="overview-traffic-session"] .card-heading'],
+              ["traffic_summary", '[data-testid="overview-traffic-session"] .traffic-session-summary'],
+              ["traffic_meta", '[data-testid="overview-traffic-session"] .traffic-session-meta'],
+              ["traffic_validation_title", '[data-testid="overview-traffic-session"] h4:nth-of-type(1)'],
+              ["traffic_validation", '[data-testid="overview-traffic-session"] > .traffic-session-empty:nth-of-type(1)'],
+              ["traffic_events_title", '[data-testid="overview-traffic-session"] h4:nth-of-type(2)'],
+              ["traffic_events", '[data-testid="overview-traffic-session"] > .traffic-session-empty:nth-of-type(2)'],
               ["networks", '[data-testid="overview-networks"]'],
               ["networks_heading", '[data-testid="overview-networks"] .card-heading'],
               ["network_first", '[data-testid="overview-networks"] .compact-row'],
@@ -437,9 +558,6 @@ async function main() {
               ["shortcuts_heading", '[data-testid="overview-shortcuts"] .card-heading'],
               ["shortcuts_grid", '[data-testid="overview-shortcuts"] .overview-shortcuts'],
               ["shortcut_first", '[data-testid="overview-shortcuts"] .overview-shortcuts > :first-child'],
-              ["actions", ".actions-panel"],
-              ["action_title", ".actions-panel .panel-heading"],
-              ["action_first", ".actions-panel .action-card-head"],
             ].map(([name, selector]) => {
               const element = document.querySelector(selector);
               if (!element) return [name, null];
@@ -474,7 +592,7 @@ async function main() {
               background_image: style.backgroundImage,
             };
           }),
-          hierarchy: [...document.querySelectorAll(".primary-nav, .global-bar, .local-toolbar, .workspace > *")].map(
+          hierarchy: [...document.querySelectorAll(".primary-nav, .global-bar, .workspace > *")].map(
             (element) => ({
               tag: element.tagName.toLowerCase(),
               classes: [...element.classList],
@@ -490,15 +608,31 @@ async function main() {
     if (JSON.stringify(semantics.modules) !== JSON.stringify(expectedModules)) {
       throw new Error(`unexpected module order: ${JSON.stringify(semantics.modules)}`);
     }
-    if (JSON.stringify(semantics.page_tabs) !== JSON.stringify(["Overview"])) {
-      throw new Error(`unexpected page tabs: ${JSON.stringify(semantics.page_tabs)}`);
+    if (
+      semantics.page_switcher.current !== "Overview" ||
+      semantics.topbar_search.placeholder.length === 0 ||
+      semantics.network_picker !== null
+    ) {
+      throw new Error(`unexpected topbar hierarchy: ${JSON.stringify({
+        page_switcher: semantics.page_switcher,
+        topbar_search: semantics.topbar_search,
+        network_picker: semantics.network_picker,
+      })}`);
     }
     if (
       semantics.primary_status.label !== "Running normally" ||
-      semantics.page_heading !== "Node overview" ||
-      semantics.action_panel !== "Available actions"
+      semantics.page_heading !== "Node overview"
     ) {
       throw new Error("visual fixture did not render the expected English overview state");
+    }
+    if (
+      JSON.stringify(semantics.shell_regions) !==
+      JSON.stringify(["sidebar", "topbar", "content"])
+    ) {
+      throw new Error(`unexpected shell region order: ${JSON.stringify(semantics.shell_regions)}`);
+    }
+    if (semantics.persistent_action_surface) {
+      throw new Error("overview retained a persistent action surface");
     }
     if (semantics.overview_network_rows.length !== 2) {
       throw new Error("overview fixture did not render both compact network rows");
@@ -512,9 +646,237 @@ async function main() {
       }
     }
 
-    const imagePath = join(OUTPUT_ROOT, "overview.png");
+    await selectModulePage(cdp, "Nodes", "Node runtime");
+    await waitForExpression(
+      cdp,
+      `Boolean(document.querySelector(".page-command-primary"))`,
+      "Node runtime command surface",
+    );
+
+    const commandSemantics = await evaluate(
+      cdp,
+      `(() => {
+        const text = (element) => element?.textContent?.trim() ?? "";
+        return {
+          heading: text(document.querySelector(".workspace h1")),
+          primary: [...document.querySelectorAll(".page-command-primary")].map(text),
+          quick: [...document.querySelectorAll(".page-command-icon")].map((button) =>
+            button.getAttribute("aria-label"),
+          ),
+          more: document.querySelectorAll(".page-command-more").length,
+          persistent_action_surface: Boolean(
+            document.querySelector(
+              '[data-ui-region="action-panel"], .actions-panel, .visual-actions',
+            ),
+          ),
+        };
+      })()`,
+    );
+    if (commandSemantics.heading !== "Node runtime") {
+      throw new Error(`unexpected runtime heading: ${JSON.stringify(commandSemantics.heading)}`);
+    }
+    if (commandSemantics.primary.length !== 1 || commandSemantics.more !== 1) {
+      throw new Error(`runtime command hierarchy is invalid: ${JSON.stringify(commandSemantics)}`);
+    }
+    if (commandSemantics.quick.length < 2 || commandSemantics.persistent_action_surface) {
+      throw new Error(`runtime quick actions or shell layout is invalid: ${JSON.stringify(commandSemantics)}`);
+    }
+    const commandCapture = await captureScreenshot(cdp, "node-runtime-commands.png");
+    await writeFile(
+      join(OUTPUT_ROOT, "node-runtime-commands.json"),
+      `${JSON.stringify({ schema_version: 1, surface: "webui", dimensions: commandCapture.dimensions, semantics: commandSemantics }, null, 2)}\n`,
+    );
+
+    await clickSelector(cdp, "button.page-command-more");
+    await waitForExpression(
+      cdp,
+      `Boolean(document.querySelector('.page-command-menu[role="menu"]'))`,
+      "grouped command menu",
+    );
+    const menuSemantics = await evaluate(
+      cdp,
+      `(() => {
+        const text = (element) => element?.textContent?.trim() ?? "";
+        return {
+          groups: [...document.querySelectorAll(".page-command-menu-group h2")].map(text),
+          items: [...document.querySelectorAll(".page-command-menu-item strong")].map(text),
+          search_placeholder: document.querySelector(
+            '.page-command-menu input[type="search"]',
+          )?.getAttribute("placeholder"),
+          role: document.querySelector(".page-command-menu")?.getAttribute("role"),
+        };
+      })()`,
+    );
+    if (
+      menuSemantics.role !== "menu" ||
+      menuSemantics.items.length === 0 ||
+      menuSemantics.groups.length === 0 ||
+      !menuSemantics.search_placeholder
+    ) {
+      throw new Error(`runtime command menu is not grouped and searchable: ${JSON.stringify(menuSemantics)}`);
+    }
+    const menuCapture = await captureScreenshot(cdp, "node-runtime-menu.png");
+    await writeFile(
+      join(OUTPUT_ROOT, "node-runtime-menu.json"),
+      `${JSON.stringify({ schema_version: 1, surface: "webui", dimensions: menuCapture.dimensions, semantics: menuSemantics }, null, 2)}\n`,
+    );
+
+    await clickText(cdp, ".page-command-menu-item strong", "Clean up runtime residue");
+    await waitForExpression(
+      cdp,
+      `Boolean(document.querySelector('.action-workspace[role="dialog"]'))`,
+      "action workspace dialog",
+    );
+    const workspaceSemantics = await evaluate(
+      cdp,
+      `(() => ({
+        role: document.querySelector(".action-workspace")?.getAttribute("role"),
+        modal: document.querySelector(".action-workspace")?.getAttribute("aria-modal"),
+        title: document.querySelector(".action-workspace h2")?.textContent?.trim() ?? "",
+        menu_open: Boolean(document.querySelector(".page-command-menu")),
+        persistent_action_surface: Boolean(
+          document.querySelector(
+            '[data-ui-region="action-panel"], .actions-panel, .visual-actions',
+          ),
+        ),
+      }))()`,
+    );
+    if (
+      workspaceSemantics.role !== "dialog" ||
+      workspaceSemantics.modal !== "true" ||
+      workspaceSemantics.title !== "Clean up runtime residue" ||
+      workspaceSemantics.menu_open ||
+      workspaceSemantics.persistent_action_surface
+    ) {
+      throw new Error(`action workspace is not a focused dialog: ${JSON.stringify(workspaceSemantics)}`);
+    }
+    const workspaceCapture = await captureScreenshot(cdp, "node-runtime-workspace.png");
+    await writeFile(
+      join(OUTPUT_ROOT, "node-runtime-workspace.json"),
+      `${JSON.stringify({ schema_version: 1, surface: "webui", dimensions: workspaceCapture.dimensions, semantics: workspaceSemantics }, null, 2)}\n`,
+    );
+
+    await clickSelector(cdp, ".action-workspace-heading > button[aria-label]");
+    await waitForExpression(
+      cdp,
+      `!document.querySelector(".action-workspace")`,
+      "action workspace close",
+    );
+    await selectModulePage(cdp, "Networks", "Topology");
+    await waitForExpression(
+      cdp,
+      `Boolean(document.querySelector(".topology-page .topology-canvas"))`,
+      "Topology canvas",
+    );
+
+    const topologyCapture = await captureScreenshot(cdp, "topology.png");
+    const topologySemantics = await evaluate(
+      cdp,
+      `(() => {
+        const text = (element) => element?.textContent?.trim() ?? "";
+        const geometry = Object.fromEntries(
+          [
+            ["sidebar_icon_rail", ".primary-nav"],
+            ["topbar", ".global-bar"],
+            ["page_switcher", ".page-switcher"],
+            ["topbar_search", ".global-search-topbar"],
+            ["workspace", ".workspace"],
+            ["page_heading", ".topology-hero h1"],
+            ["topology_hero", ".topology-hero"],
+            ["topology_state", ".topology-state-band"],
+            ["topology_canvas_stage", ".topology-stage"],
+            ["topology_canvas", ".topology-canvas"],
+            ["topology_floating_toolbar", ".topology-floating-toolbar"],
+            ["topology_canvas_footer", ".topology-canvas-footer"],
+            ["topology_detail", ".topology-detail-drawer"],
+          ].map(([name, selector]) => {
+            const element = document.querySelector(selector);
+            if (!element) return [name, null];
+            const bounds = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            return [
+              name,
+              {
+                x: bounds.x,
+                y: bounds.y,
+                width: bounds.width,
+                height: bounds.height,
+                background_color: style.backgroundColor,
+                background_image: style.backgroundImage,
+                border_color: style.borderColor,
+                border_radius: style.borderRadius,
+              },
+            ];
+          }),
+        );
+        return {
+          title: document.title,
+          locale: document.documentElement.lang,
+          font_family: getComputedStyle(document.body).fontFamily
+            .split(",")[0]
+            .trim()
+            .replace(/^["']|["']$/g, ""),
+          viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
+          modules: [...document.querySelectorAll(".module-button")].map(text),
+          page_switcher: {
+            current: text(document.querySelector(".page-switcher-trigger")),
+            options: [...document.querySelectorAll('.page-switcher-menu [role="menuitemradio"]')]
+              .map(text)
+              .filter(Boolean),
+          },
+          topbar_search: {
+            placeholder:
+              document.querySelector(".global-search-topbar input")?.getAttribute("placeholder") ??
+              "",
+          },
+          network_picker: document.querySelector(".network-picker")
+            ? text(document.querySelector(".network-picker"))
+            : null,
+          page_heading: text(document.querySelector(".topology-hero h1")),
+          shell_regions: [...document.querySelectorAll("[data-ui-region]")].map(
+            (element) => element.getAttribute("data-ui-region"),
+          ),
+          topology: {
+            boundaries: document.querySelectorAll(".topology-network-chips button").length,
+            nodes: document.querySelectorAll("g.topology-node").length,
+            detail_open: Boolean(document.querySelector(".topology-detail-drawer")),
+          },
+          geometry,
+        };
+      })()`,
+    );
+    if (
+      topologySemantics.page_heading !== "Topology" ||
+      topologySemantics.network_picker !== null ||
+      topologySemantics.topology.detail_open ||
+      topologySemantics.topology.boundaries === 0 ||
+      topologySemantics.topology.nodes === 0
+    ) {
+      throw new Error(`invalid topology hierarchy: ${JSON.stringify(topologySemantics)}`);
+    }
+    await writeFile(
+      join(OUTPUT_ROOT, "topology.json"),
+      `${JSON.stringify(
+        {
+          schema_version: 1,
+          surface: "webui",
+          fixture_revision: fixture.snapshot.revision,
+          fixture_locale: fixture.locale,
+          chrome: (await cdp.send("Browser.getVersion")).product,
+          platform: process.platform,
+          node: process.version,
+          dimensions: topologyCapture.dimensions,
+          sha256: createHash("sha256").update(topologyCapture.image).digest("hex"),
+          semantics: topologySemantics,
+        },
+        null,
+        2,
+      )}
+`,
+    );
+
+    const imagePath = overviewCapture.path;
     const metadataPath = join(OUTPUT_ROOT, "overview.json");
-    await writeFile(imagePath, image);
     await writeFile(
       metadataPath,
       `${JSON.stringify(
@@ -534,7 +896,9 @@ async function main() {
         2,
       )}\n`,
     );
-    process.stdout.write(`${imagePath}\n${metadataPath}\n`);
+    process.stdout.write(
+      `${imagePath}\n${metadataPath}\n${topologyCapture.path}\n${join(OUTPUT_ROOT, "topology.json")}\n`,
+    );
   } catch (error) {
     if (chrome && chrome.exitCode === null) {
       const chromeStderr = chrome.stderr.read();

@@ -1146,30 +1146,50 @@
   background: var(--accent);
 }
 
-.ui-action-panel[data-ui-region="action-panel"] {
+.ui-page-command-surface {
   display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  min-width: 0;
-  min-height: 0;
-  max-height: 42dvh;
-  padding: var(--space-4);
-  border-top: 1px solid var(--border);
-  background: var(--panel-solid);
-  overflow: auto;
-  overscroll-behavior: contain;
-}
-
-.ui-action-panel-title {
-  color: var(--text-secondary);
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-semibold);
-  letter-spacing: 0.04em;
-}
-
-.ui-action-panel-body {
-  display: grid;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
   gap: var(--space-2);
+  min-width: 0;
+}
+
+.ui-page-command-menu {
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  display: grid;
+  width: min(360px, calc(100vw - 2 * var(--space-4)));
+  max-height: min(70dvh, 520px);
+  gap: var(--space-2);
+  padding: var(--space-3);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel-solid);
+  box-shadow: var(--shadow-pop);
+}
+
+.ui-action-workspace {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: color-mix(in srgb, var(--background-deep) 72%, transparent);
+}
+
+.ui-action-workspace-dialog {
+  width: min(720px, 100%);
+  max-height: min(88dvh, 860px);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel-solid);
+  box-shadow: var(--shadow-pop);
 }
 
 .ui-detail[data-ui-region="detail"] {
@@ -1437,7 +1457,7 @@
   }
 }
 
-@media (min-width: 900px) {
+@media (min-width: 1024px) {
   .ui-app-shell {
     grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
   }
@@ -1467,19 +1487,13 @@
   }
 
   .ui-workspace {
-    grid-template-columns: minmax(0, 1fr) var(--action-panel-compact-w);
-  }
-
-  .ui-action-panel[data-ui-region="action-panel"] {
-    max-height: none;
-    border-top: 0;
-    border-left: 1px solid var(--border);
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
 @media (min-width: 1280px) {
   .ui-workspace {
-    grid-template-columns: minmax(0, 1fr) var(--action-panel-w);
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .ui-detail[data-ui-region="detail"] {

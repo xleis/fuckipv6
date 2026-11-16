@@ -48,6 +48,8 @@ import type {
   NodeUiActionBlockReason,
   NodeUiField,
   NodeJoinRequestReviewItem,
+  AdminRecoveryRequest,
+  AdminRecoveryStatusView,
   NodeUiManifest,
   NodeUiPageState,
   NodeUiPage,
@@ -89,6 +91,7 @@ const PAGE_STATES = [
 
 const ACTION_BLOCK_REASONS = [
   "node_not_running",
+  "node_not_stopped",
   "no_online_network",
   "no_network_selected",
   "permission_denied",
@@ -172,6 +175,11 @@ const EXPECTED_ACTIONS: Record<string, string> = {
   update_coordinator_candidates: "update_coordinator_candidates",
   publish_coordinator_candidate_declaration:
     "publish_coordinator_candidate_declaration",
+  submit_admin_recovery: "submit_admin_recovery",
+  get_admin_recovery_status: "get_admin_recovery_status",
+  list_admin_recoveries: "list_admin_recoveries",
+  revoke_admin_recovery: "revoke_admin_recovery",
+  execute_admin_recovery: "execute_admin_recovery",
   get_configuration: "get_configuration",
   preview_configuration: "preview_configuration",
   apply_configuration: "apply_configuration",
@@ -206,6 +214,7 @@ const PERMISSIONS = new Set([
 const AVAILABILITIES = new Set([
   "always",
   "node_running",
+  "node_stopped",
   "network_online",
   "network_selected",
 ]);
@@ -261,6 +270,9 @@ const INPUT_KINDS = new Set([
   "coordinator_candidates_json",
   "coordinator_willingness",
   "invitation_code",
+  "admin_recovery_request_json",
+  "admin_recovery_request_id",
+  "admin_recovery_reason",
   "timeout_ms",
   "revision",
   "configuration_json",
@@ -317,6 +329,9 @@ const VALIDATIONS = new Set([
   "coordinator_candidates_json",
   "coordinator_willingness",
   "invitation_code",
+  "admin_recovery_request_json",
+  "admin_recovery_request_id",
+  "admin_recovery_reason",
 ]);
 const OUTCOME_STATUSES = new Set([
   "snapshot",
@@ -362,6 +377,8 @@ const OUTCOME_STATUSES = new Set([
   "traffic_policy_history",
   "traffic_policy_rolled_back",
   "traffic_policy_test",
+  "admin_recovery_status",
+  "admin_recoveries",
   "identity_rotated",
   "accepted",
   "completed",
@@ -550,6 +567,9 @@ function tunBlockReason(
 }
 
 function fail(message: string): never {
+  // Surface the exact contract assertion in the browser console; the thrown
+  // error is retried by the query layer and would otherwise be invisible.
+  console.error("fuckipv6-contract:", message);
   throw new ContractError(message);
 }
 
@@ -575,6 +595,11 @@ function booleanValueRaw(value: unknown, message: string): boolean {
 function nonNegativeInteger(value: unknown, message: string): number {
   if (!Number.isSafeInteger(value) || Number(value) < 0) fail(message);
   return Number(value);
+}
+
+function optionalArrayValue(value: unknown, message: string): void {
+  if (value === undefined || value === null) return;
+  arrayValue(value, message);
 }
 
 function arrayValue(value: unknown, message: string): unknown[] {
@@ -749,10 +774,13 @@ export function validateSnapshot(snapshot: unknown): NodeSnapshot {
     "active_networks invalid",
   );
   arrayValue(value.lifecycle.failed_networks, "failed_networks invalid");
-  arrayValue(value.networks, "networks invalid");
-  arrayValue(value.peers, "peers invalid");
-  arrayValue(value.logs, "logs invalid");
-  arrayValue(value.embedded_services, "embedded_services invalid");
+  // The node omits empty optional collections instead of emitting `[]` (the
+  // projected snapshot marks them `skip_serializing_if`). Absent means empty;
+  // a present-but-wrong value is still rejected.
+  optionalArrayValue(value.networks, "networks invalid");
+  optionalArrayValue(value.peers, "peers invalid");
+  optionalArrayValue(value.logs, "logs invalid");
+  optionalArrayValue(value.embedded_services, "embedded_services invalid");
   if (
     !record(value.configuration) ||
     !Array.isArray(value.configuration.networks)
@@ -768,23 +796,24 @@ export function validateSnapshot(snapshot: unknown): NodeSnapshot {
   if (value.traffic_session !== undefined)
     validateTrafficSessionSnapshot(value.traffic_session);
   if (value.tun_capabilities !== undefined) {
+    const tun = value.tun_capabilities as unknown as Record<string, unknown>;
     if (
-      !record(value.tun_capabilities) ||
-      !Number.isSafeInteger(value.tun_capabilities.schema_version) ||
-      value.tun_capabilities.schema_version < 0 ||
-      !TUN_PLATFORMS.has(value.tun_capabilities.platform) ||
-      typeof value.tun_capabilities.supported !== "boolean" ||
-      typeof value.tun_capabilities.can_rebuild !== "boolean" ||
-      !Array.isArray(value.tun_capabilities.reasons)
+      !record(tun) ||
+      !Number.isSafeInteger(tun.schema_version) ||
+      (tun.schema_version as number) < 0 ||
+      !TUN_PLATFORMS.has(tun.platform as string) ||
+      typeof tun.supported !== "boolean" ||
+      typeof tun.can_rebuild !== "boolean" ||
+      (tun.reasons !== undefined && !Array.isArray(tun.reasons))
     ) {
       fail("TUN capabilities invalid");
     }
-    for (const reason of value.tun_capabilities.reasons) {
-      if (!TUN_CAPABILITY_REASONS.has(reason))
-        fail(`TUN capability reason invalid: ${reason}`);
+    for (const reason of (tun.reasons as unknown[]) ?? []) {
+      if (!TUN_CAPABILITY_REASONS.has(reason as string))
+        fail(`TUN capability reason invalid: ${String(reason)}`);
     }
   }
-  for (const network of value.networks) {
+  for (const network of value.networks ?? []) {
     if (!record(network)) fail("network snapshot invalid");
     stringValue(network.name, "network name invalid", true);
     if (!NETWORK_STATUSES.has(network.status))
@@ -859,7 +888,7 @@ export function validateSnapshot(snapshot: unknown): NodeSnapshot {
       }
     }
   }
-  for (const peer of value.peers) {
+  for (const peer of value.peers ?? []) {
     if (!record(peer)) fail("peer snapshot invalid");
     stringValue(peer.peer_id, "peer id invalid", true);
     stringValue(peer.network_name, "peer network invalid", true);
@@ -1060,6 +1089,12 @@ export function executionBlockReason(
   )
     return "node_not_running";
   if (
+    action.availability === "node_stopped" &&
+    snapshot.lifecycle.phase !== "stopped" &&
+    snapshot.lifecycle.phase !== "failed"
+  )
+    return "node_not_stopped";
+  if (
     action.availability === "network_online" &&
     !snapshot.networks.some((network) => network.status === "online")
   ) {
@@ -1137,6 +1172,9 @@ export function defaultFieldValue(
   if (field.id === "signaling_port") return "6666";
   if (field.id === "relay_port") return "6667";
   if (field.id === "timeout_ms") return "1500";
+  if (field.input === "admin_recovery_request_json") return "";
+  if (field.input === "admin_recovery_request_id") return "";
+  if (field.input === "admin_recovery_reason") return "";
   if (field.id === "candidates_json") {
     const status = snapshot.embedded_services?.find(
       (service) => service.network_name === network,
@@ -1233,6 +1271,58 @@ function validJoinRequestText(value: string, maxLength: number): boolean {
     !/\p{Cc}/u.test(value) &&
     [...value].length <= maxLength
   );
+}
+
+function validAdminRecoveryRequestId(value: string): boolean {
+  if (!/^recovery_[A-Za-z0-9_-]{43}$/.test(value)) return false;
+  try {
+    const decoded = atob(
+      value
+        .slice("recovery_".length)
+        .replace(/-/g, "+")
+        .replace(/_/g, "/") + "=",
+    );
+    return decoded.length === 32;
+  } catch {
+    return false;
+  }
+}
+
+function validAdminRecoveryReason(value: string): boolean {
+  return (
+    value.trim() !== "" &&
+    value.trim() === value &&
+    !/\p{Cc}/u.test(value) &&
+    [...value].length <= 512
+  );
+}
+
+function parseAdminRecoveryRequest(
+  value: string | boolean | undefined,
+  locale: Locale,
+): AdminRecoveryRequest {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(String(value ?? ""));
+  } catch {
+    throw new Error(
+      label(locale, "validation.admin_recovery_request_json_invalid"),
+    );
+  }
+  if (!record(parsed) || !record(parsed.proposal)) {
+    throw new Error(
+      label(locale, "validation.admin_recovery_request_json_invalid"),
+    );
+  }
+  if (
+    parsed.approvals !== undefined &&
+    !Array.isArray(parsed.approvals)
+  ) {
+    throw new Error(
+      label(locale, "validation.admin_recovery_request_json_invalid"),
+    );
+  }
+  return parsed as AdminRecoveryRequest;
 }
 
 function parseJoinRequestReviews(
@@ -2721,6 +2811,24 @@ export function validateActionValues(
       ) {
         errors.push(label(locale, "validation.member_lifecycle_reason"));
       }
+    } else if (field.validation === "admin_recovery_request_json") {
+      try {
+        parseAdminRecoveryRequest(value, locale);
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : String(error));
+      }
+    } else if (
+      field.validation === "admin_recovery_request_id" &&
+      !validAdminRecoveryRequestId(String(value).trim())
+    ) {
+      errors.push(
+        label(locale, "validation.admin_recovery_request_id_invalid"),
+      );
+    } else if (
+      field.validation === "admin_recovery_reason" &&
+      !validAdminRecoveryReason(String(value))
+    ) {
+      errors.push(label(locale, "validation.admin_recovery_reason_invalid"));
     } else if (field.validation === "network_name") {
       const name = String(value).trim();
       if (!/^[A-Za-z0-9._-]+$/.test(name) || name === "." || name === "..") {
@@ -3762,6 +3870,44 @@ export function buildCommand(
       } catch (error) {
         throw new Error(trafficPolicyJsonErrorText(error, locale));
       }
+    case "submit_admin_recovery":
+      return {
+        command: "submit_admin_recovery",
+        payload: {
+          network_name: requiredString("network_name"),
+          request: parseAdminRecoveryRequest(values.request_json, locale),
+        },
+      };
+    case "get_admin_recovery_status":
+      return {
+        command: "get_admin_recovery_status",
+        payload: {
+          network_name: requiredString("network_name"),
+          request_id: requiredString("request_id"),
+        },
+      };
+    case "list_admin_recoveries":
+      return {
+        command: "list_admin_recoveries",
+        payload: { network_name: requiredString("network_name") },
+      };
+    case "revoke_admin_recovery":
+      return {
+        command: "revoke_admin_recovery",
+        payload: {
+          network_name: requiredString("network_name"),
+          request_id: requiredString("request_id"),
+          reason: requiredString("reason"),
+        },
+      };
+    case "execute_admin_recovery":
+      return {
+        command: "execute_admin_recovery",
+        payload: {
+          network_name: requiredString("network_name"),
+          request_id: requiredString("request_id"),
+        },
+      };
     case "start_node":
       return { command: "start_node" };
     case "stop_node":
@@ -4132,12 +4278,137 @@ function memberDirectory(value: unknown): NetworkMemberDirectory {
   return value as NetworkMemberDirectory;
 }
 
+const ADMIN_RECOVERY_STATES = new Set([
+  "pending",
+  "executed",
+  "revoked",
+  "expired",
+]);
+
+function adminRecoveryStringList(value: unknown, message: string): string[] {
+  const values = arrayValue(value, message).map((entry) =>
+    stringValue(entry, message, true),
+  );
+  unique(values, message);
+  return values;
+}
+
+function adminRecoveryStatus(value: unknown): AdminRecoveryStatusView {
+  if (!record(value)) fail("admin recovery status invalid");
+  const requestId = stringValue(
+    value.request_id,
+    "admin recovery request id invalid",
+    true,
+  );
+  if (!validAdminRecoveryRequestId(requestId))
+    fail("admin recovery request id invalid");
+  stringValue(value.network_id, "admin recovery network id invalid", true);
+  const state = stringValue(value.state, "admin recovery state invalid", true);
+  if (!ADMIN_RECOVERY_STATES.has(state))
+    fail("admin recovery state invalid");
+  if (!record(value.impact)) fail("admin recovery impact invalid");
+  adminRecoveryStringList(
+    value.impact.administrators_added,
+    "admin recovery administrators added invalid",
+  );
+  adminRecoveryStringList(
+    value.impact.administrators_removed,
+    "admin recovery administrators removed invalid",
+  );
+  adminRecoveryStringList(
+    value.impact.members_added,
+    "admin recovery members added invalid",
+  );
+  adminRecoveryStringList(
+    value.impact.members_removed,
+    "admin recovery members removed invalid",
+  );
+  stringValue(
+    value.impact.owner_before,
+    "admin recovery previous owner invalid",
+    true,
+  );
+  stringValue(
+    value.impact.owner_after,
+    "admin recovery target owner invalid",
+    true,
+  );
+  stringValue(value.initiator, "admin recovery initiator invalid", true);
+  const participants = adminRecoveryStringList(
+    value.participants,
+    "admin recovery participants invalid",
+  );
+  const signatureCount = nonNegativeInteger(
+    value.signature_count,
+    "admin recovery signature count invalid",
+  );
+  const requiredSignatures = nonNegativeInteger(
+    value.required_signatures,
+    "admin recovery required signatures invalid",
+  );
+  if (
+    signatureCount !== participants.length ||
+    requiredSignatures === 0 ||
+    signatureCount < 0
+  ) {
+    fail("admin recovery signature counts are inconsistent");
+  }
+  const issuedAt = nonNegativeInteger(
+    value.issued_at_unix_ms,
+    "admin recovery issue time invalid",
+  );
+  const expiresAt = nonNegativeInteger(
+    value.expires_at_unix_ms,
+    "admin recovery expiry time invalid",
+  );
+  if (issuedAt === 0 || expiresAt <= issuedAt)
+    fail("admin recovery validity window invalid");
+  if (!record(value.revocation)) fail("admin recovery revocation invalid");
+  for (const flag of [
+    "old_sessions",
+    "pending_invitations",
+    "unconfirmed_writes",
+  ]) {
+    booleanValueRaw(
+      value.revocation[flag],
+      `admin recovery revocation ${flag} invalid`,
+    );
+  }
+  const canExecute = booleanValueRaw(
+    value.can_execute,
+    "admin recovery can_execute invalid",
+  );
+  if (value.denial_key !== undefined && value.denial_key !== null) {
+    stringValue(
+      value.denial_key,
+      "admin recovery denial key invalid",
+      true,
+    );
+  }
+  if (canExecute) {
+    if (state !== "pending" || value.denial_key != null)
+      fail("admin recovery executable state is inconsistent");
+  } else if (state !== "pending" && value.denial_key == null) {
+    fail("admin recovery terminal state must expose its denial");
+  } else if (state === "pending" && value.denial_key == null) {
+    fail("admin recovery pending state must be executable or explain why not");
+  }
+  return value as AdminRecoveryStatusView;
+}
+
 export function validateCommandOutcome(value: unknown): NodeCommandOutcome {
   if (!record(value) || !OUTCOME_STATUSES.has(String(value.status)))
     fail("unknown command outcome");
   const outcome = value as NodeCommandOutcome;
   if (outcome.status === "snapshot") validateSnapshot(outcome.data);
   if (outcome.status === "network_members") memberDirectory(outcome.data);
+  if (outcome.status === "admin_recovery_status")
+    adminRecoveryStatus(outcome.data);
+  if (outcome.status === "admin_recoveries") {
+    arrayValue(outcome.data, "admin recovery list invalid").forEach(
+      adminRecoveryStatus,
+    );
+  }
   if (outcome.status === "member_removal_preview")
     memberRemovalPreview(outcome.data);
   if (outcome.status === "member_lifecycle_changed")
@@ -4268,7 +4539,22 @@ export function problemText(
   locale: Locale,
 ): string {
   if (!problem) return label(locale, "common.unknown");
-  return label(locale, problem.message_key || `error.${problem.code}`);
+  const key = problem.message_key || `error.${problem.code}`;
+  const localized = i18n().tr(locale, key, problem.params ?? {});
+  if (localized !== key) return localized;
+  const fallback = problem.message.trim();
+  return fallback || key;
+}
+
+export function problemTextWithRecovery(
+  problem: NodeProblem | null | undefined,
+  locale: Locale,
+): string {
+  const message = problemText(problem, locale);
+  if (!problem?.recovery) return message;
+  const hint = label(locale, problem.recovery.hint_key);
+  if (hint === problem.recovery.hint_key || message.includes(hint)) return message;
+  return `${message} · ${hint}`;
 }
 
 export function outcomeSummary(
@@ -4282,6 +4568,22 @@ export function outcomeSummary(
     });
   }
   if (outcome.status === "completed") return label(locale, "outcome.completed");
+  if (outcome.status === "admin_recovery_status") {
+    return i18n().tr(locale, "outcome.admin_recovery_status", {
+      request: outcome.data.request_id,
+      state: label(locale, `admin_recovery.state.${outcome.data.state}`),
+      signatures: i18n().formatInteger(locale, outcome.data.signature_count),
+      required: i18n().formatInteger(
+        locale,
+        outcome.data.required_signatures,
+      ),
+    });
+  }
+  if (outcome.status === "admin_recoveries") {
+    return i18n().tr(locale, "outcome.admin_recoveries", {
+      count: i18n().formatInteger(locale, outcome.data.length),
+    });
+  }
   if (outcome.status === "configuration") {
     return i18n().tr(locale, "outcome.configuration_loaded", {
       revision: i18n().formatInteger(locale, outcome.data.revision),

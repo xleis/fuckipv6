@@ -16,7 +16,7 @@
     {
       "id": "networks",
       "label_key": "nav.networks",
-      "default_page_id": "networks",
+      "default_page_id": "topology",
       "page_ids": ["networks", "topology", "exit_node", "relay"]
     },
     {

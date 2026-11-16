@@ -206,7 +206,7 @@ export function pageHasContent(
     case "topology":
       return Boolean(snapshot.topology?.boundaries.length);
     case "peers":
-      return snapshot.peers.length > 0;
+      return (snapshot.peers?.length ?? 0) > 0;
     case "routing":
     case "exit_node":
     case "relay":

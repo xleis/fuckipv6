@@ -39,8 +39,8 @@
 
   const LAYOUT_BREAKPOINTS = Object.freeze({
     mobile: Object.freeze({ minWidth: 0, maxWidth: 599 }),
-    compact: Object.freeze({ minWidth: 600, maxWidth: 899 }),
-    desktop: Object.freeze({ minWidth: 900, maxWidth: 1279 }),
+    compact: Object.freeze({ minWidth: 600, maxWidth: 1023 }),
+    desktop: Object.freeze({ minWidth: 1024, maxWidth: 1279 }),
     wide: Object.freeze({ minWidth: 1280, maxWidth: Infinity })
   });
 

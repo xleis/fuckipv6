@@ -1,14 +1,41 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   AlertTriangle,
+  Ban,
   Check,
   ChevronRight,
   Copy,
+  KeyRound,
+  Link2,
+  ListChecks,
+  MoreHorizontal,
+  Network,
+  Play,
+  Plus,
+  Power,
+  Radio,
+  RefreshCw,
+  RotateCw,
   Search,
   ShieldAlert,
+  ShieldCheck,
+  SlidersHorizontal,
+  Square,
+  Stethoscope,
+  Trash2,
+  UserPlus,
+  Users,
   X,
 } from "lucide-react";
-import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type FormEvent,
+  type JSX,
+} from "react";
+import { createPortal } from "react-dom";
 import type {
   ExitContributionMode,
   ExitContributionObligation,
@@ -33,6 +60,7 @@ import type {
   NodeUiActionGroup,
   NodeUiField,
   NodeJoinRequestListResult,
+  AdminRecoveryStatusView,
 } from "../../../contracts/typescript/node-contract-v1";
 import {
   actionRequiresCoordinatorGovernance,
@@ -54,6 +82,7 @@ import { pageStateDefinition, type PageStateKind } from "../state-matrix";
 type ActionPanelProps = {
   actions: NodeUiAction[];
   actionGroups: NodeUiActionGroup[];
+  pageId?: string;
   snapshot: NodeSnapshot;
   selectedNetwork: string;
   locale: Locale;
@@ -79,6 +108,116 @@ export type ActionSubmission = {
   outcome?: NodeCommandOutcome;
   operation?: NodeOperationSnapshot;
 };
+
+const PRIMARY_ACTION_CANDIDATES: Record<string, string[]> = {
+  networks: ["create_network"],
+  peers: ["probe_peer"],
+  node_runtime: ["restart_node", "stop_node", "start_node"],
+  routing: ["update_routing"],
+  exit_node: ["set_local_exit_capability", "set_exit_node_role"],
+  relay: ["set_relay_role"],
+  identity: ["set_node_display_name"],
+};
+
+const QUICK_ACTION_IDS: Record<string, string[]> = {
+  networks: [
+    "list_network_members",
+    "list_invitations",
+    "refresh_discovery_index",
+  ],
+  peers: ["get_blacklist"],
+  node_runtime: ["refresh_snapshot", "get_node_diagnostics"],
+  routing: ["get_traffic_policy"],
+  exit_node: [],
+  relay: [],
+  identity: [],
+  settings: [],
+};
+
+const ACTION_ICON_IDS = {
+  refresh_snapshot: RefreshCw,
+  refresh_discovery_index: RefreshCw,
+  retry_discovery_index: RefreshCw,
+  get_node_diagnostics: Stethoscope,
+  start_node: Play,
+  stop_node: Square,
+  restart_node: RotateCw,
+  start_networks: Play,
+  stop_networks: Square,
+  restart_networks: RotateCw,
+  cleanup_node_residuals: Trash2,
+  create_network: Plus,
+  list_network_members: Users,
+  list_invitations: UserPlus,
+  get_blacklist: Ban,
+  get_traffic_policy: ListChecks,
+  probe_peer: Radio,
+  set_local_exit_capability: Power,
+  set_exit_node_role: Network,
+  set_relay_role: Radio,
+  set_node_display_name: KeyRound,
+  add_member: UserPlus,
+  remove_member: Trash2,
+  rotate_node_identity: RotateCw,
+  update_routing: SlidersHorizontal,
+} as const;
+
+function inferCommandPageId(actions: NodeUiAction[]): string {
+  const ids = new Set(actions.map((action) => action.id));
+  if (ids.has("create_network")) return "networks";
+  if (ids.has("probe_peer")) return "peers";
+  if (
+    ids.has("refresh_snapshot") ||
+    ids.has("start_node") ||
+    ids.has("restart_node")
+  ) {
+    return "node_runtime";
+  }
+  if (ids.has("update_routing")) return "routing";
+  if (ids.has("set_local_exit_capability") || ids.has("set_exit_node_role")) {
+    return "exit_node";
+  }
+  if (ids.has("set_relay_role")) return "relay";
+  if (ids.has("set_node_display_name")) return "identity";
+  return "";
+}
+
+function commandPrimaryAction(
+  pageId: string,
+  actions: NodeUiAction[],
+  snapshot: NodeSnapshot,
+): NodeUiAction | undefined {
+  const candidates = PRIMARY_ACTION_CANDIDATES[pageId] ?? [];
+  if (pageId === "node_runtime") {
+    const ordered =
+      snapshot.lifecycle.phase === "running"
+        ? ["restart_node", "stop_node"]
+        : snapshot.lifecycle.phase === "stopped" ||
+            snapshot.lifecycle.phase === "failed"
+          ? ["start_node"]
+          : [];
+    for (const id of ordered) {
+      const action = actions.find((candidate) => candidate.id === id);
+      if (action) return action;
+    }
+  }
+  for (const id of candidates) {
+    const action = actions.find((candidate) => candidate.id === id);
+    if (action) return action;
+  }
+  return undefined;
+}
+
+function commandActionIcon(actionId: string): JSX.Element {
+  const Icon =
+    ACTION_ICON_IDS[actionId as keyof typeof ACTION_ICON_IDS] ??
+    (actionId.includes("invitation")
+      ? Link2
+      : actionId.includes("ban")
+        ? ShieldCheck
+        : SlidersHorizontal);
+  return <Icon size={15} aria-hidden="true" />;
+}
 
 const numberInputs = new Set(["port", "timeout_ms"]);
 const joinRequestReasonMaxLength = 1000;
@@ -254,6 +393,58 @@ function FieldControl({
       </label>
     );
   }
+  if (field.input === "admin_recovery_request_json") {
+    return (
+      <label className="form-field" htmlFor={id}>
+        <span>{fieldLabel}</span>
+        <textarea
+          id={id}
+          value={String(value)}
+          required={field.required}
+          rows={12}
+          spellCheck={false}
+          placeholder={label(
+            locale,
+            "placeholder.admin_recovery_request_json",
+          )}
+          onChange={(event) => onChange(event.target.value)}
+        />
+        <small className="field-help">
+          {label(locale, "admin_recovery.request_json_help")}
+        </small>
+      </label>
+    );
+  }
+  if (field.input === "admin_recovery_reason") {
+    const reason = String(value);
+    const helpId = `${id}-help`;
+    return (
+      <label className="form-field" htmlFor={id}>
+        <span>{fieldLabel}</span>
+        <input
+          id={id}
+          type="text"
+          value={reason}
+          required={field.required}
+          maxLength={512}
+          aria-describedby={helpId}
+          placeholder={label(locale, "placeholder.admin_recovery_reason")}
+          autoComplete="off"
+          onChange={(event) => onChange(event.target.value)}
+        />
+        <small
+          className="field-help"
+          id={helpId}
+          data-character-count={[...reason].length}
+        >
+          {tr(locale, "admin_recovery.reason_counter", {
+            count: [...reason].length,
+            max: 512,
+          })}
+        </small>
+      </label>
+    );
+  }
   if (field.input === "join_request_reason") {
     const reason = String(value);
     const helpId = `${id}-help`;
@@ -303,6 +494,8 @@ function FieldControl({
         placeholder={
           field.input === "fingerprint"
             ? label(locale, "placeholder.fingerprint")
+            : field.input === "admin_recovery_request_id"
+              ? label(locale, "placeholder.admin_recovery_request_id")
             : undefined
         }
         min={
@@ -1565,7 +1758,10 @@ function InvitationListCard({
       >
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />
-          <Dialog.Content className="dialog-content confirm-dialog">
+          <Dialog.Content
+            className="dialog-content confirm-dialog"
+            data-testid="action-confirmation"
+          >
             <div className="dialog-heading">
               <div className="dialog-icon danger">
                 <AlertTriangle size={20} />
@@ -1830,7 +2026,7 @@ function InvitationPreviewCard({
   );
 }
 
-function OperationStatusCard({
+export function OperationStatusCard({
   operation,
   locale,
   onCancel,
@@ -2463,7 +2659,10 @@ function JoinRequestListCard({
       >
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />
-          <Dialog.Content className="dialog-content join-request-review-dialog">
+          <Dialog.Content
+            className="dialog-content join-request-review-dialog"
+            data-testid="join-request-review-dialog"
+          >
             <Dialog.Title>
               {dialog?.batch
                 ? tr(locale, "join_requests.batch_dialog_title", {
@@ -2636,6 +2835,229 @@ function coordinatorGovernanceReasonText(
   return reason ? label(locale, `coordinator_governance.reason.${reason}`) : "";
 }
 
+function adminRecoveryStateLabel(
+  state: AdminRecoveryStatusView["state"],
+  locale: Locale,
+): string {
+  return label(locale, `admin_recovery.state.${state}`);
+}
+
+function adminRecoveryDenialLabel(
+  denialKey: string | null | undefined,
+  locale: Locale,
+): string {
+  if (!denialKey) return label(locale, "common.none");
+  const localized = label(locale, denialKey);
+  return localized === denialKey ? denialKey : localized;
+}
+
+function adminRecoveryYesNo(value: boolean, locale: Locale): string {
+  return label(locale, value ? "common.yes" : "common.no");
+}
+
+function AdminRecoveryStatusCard({
+  status,
+  locale,
+  refreshedAtUnixMs,
+}: {
+  status: AdminRecoveryStatusView;
+  locale: Locale;
+  refreshedAtUnixMs?: number;
+}) {
+  return (
+    <section
+      className="network-profile-result"
+      data-testid="admin-recovery-status"
+      aria-live="polite"
+    >
+      <div className="network-profile-result-heading">
+        <div>
+          <span>{label(locale, "admin_recovery.status_title")}</span>
+          <strong>{adminRecoveryStateLabel(status.state, locale)}</strong>
+        </div>
+        {status.can_execute ? (
+          <ShieldCheck size={16} />
+        ) : (
+          <ShieldAlert size={16} />
+        )}
+      </div>
+      <dl className="profile-definition-list">
+        <div>
+          <dt>{label(locale, "field.admin_recovery_request_id")}</dt>
+          <dd>
+            <code>{status.request_id}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "admin_recovery.network_id")}</dt>
+          <dd>
+            <code>{status.network_id}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "admin_recovery.impact.owner_before")}</dt>
+          <dd>
+            <code>{status.impact.owner_before}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "admin_recovery.impact.owner_after")}</dt>
+          <dd>
+            <code>{status.impact.owner_after}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "admin_recovery.impact.administrators_added")}</dt>
+          <dd>
+            {profileList(status.impact.administrators_added, locale)}
+          </dd>
+        </div>
+        <div>
+          <dt>
+            {label(locale, "admin_recovery.impact.administrators_removed")}
+          </dt>
+          <dd>
+            {profileList(status.impact.administrators_removed, locale)}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "admin_recovery.impact.members_added")}</dt>
+          <dd>{profileList(status.impact.members_added, locale)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "admin_recovery.impact.members_removed")}</dt>
+          <dd>{profileList(status.impact.members_removed, locale)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "admin_recovery.initiator")}</dt>
+          <dd>
+            <code>{status.initiator}</code>
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "admin_recovery.participants")}</dt>
+          <dd>{profileList(status.participants, locale)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "admin_recovery.signatures")}</dt>
+          <dd>
+            {tr(locale, "admin_recovery.signature_count", {
+              count: i18n().formatInteger(locale, status.signature_count),
+              required: i18n().formatInteger(
+                locale,
+                status.required_signatures,
+              ),
+            })}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "admin_recovery.issued_at")}</dt>
+          <dd>
+            {i18n().formatTimestamp(locale, status.issued_at_unix_ms)}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "admin_recovery.expires_at")}</dt>
+          <dd>
+            {i18n().formatTimestamp(locale, status.expires_at_unix_ms)}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "admin_recovery.revocation.old_sessions")}</dt>
+          <dd>
+            {adminRecoveryYesNo(status.revocation.old_sessions, locale)}
+          </dd>
+        </div>
+        <div>
+          <dt>
+            {label(locale, "admin_recovery.revocation.pending_invitations")}
+          </dt>
+          <dd>
+            {adminRecoveryYesNo(
+              status.revocation.pending_invitations,
+              locale,
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>
+            {label(locale, "admin_recovery.revocation.unconfirmed_writes")}
+          </dt>
+          <dd>
+            {adminRecoveryYesNo(
+              status.revocation.unconfirmed_writes,
+              locale,
+            )}
+          </dd>
+        </div>
+        <div>
+          <dt>{label(locale, "admin_recovery.can_execute")}</dt>
+          <dd>{adminRecoveryYesNo(status.can_execute, locale)}</dd>
+        </div>
+        <div>
+          <dt>{label(locale, "admin_recovery.denial")}</dt>
+          <dd>{adminRecoveryDenialLabel(status.denial_key, locale)}</dd>
+        </div>
+      </dl>
+      {refreshedAtUnixMs ? (
+        <p className="profile-muted">
+          {tr(locale, "admin_recovery.refreshed_at", {
+            time: i18n().formatTimestamp(locale, refreshedAtUnixMs),
+          })}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function AdminRecoveryListCard({
+  items,
+  locale,
+  loadedAtUnixMs,
+}: {
+  items: AdminRecoveryStatusView[];
+  locale: Locale;
+  loadedAtUnixMs: number;
+}) {
+  return (
+    <section
+      className="network-profile-result"
+      data-testid="admin-recovery-list"
+      aria-live="polite"
+    >
+      <div className="network-profile-result-heading">
+        <div>
+          <span>{label(locale, "admin_recovery.list_title")}</span>
+          <strong>
+            {tr(locale, "admin_recovery.list_count", {
+              count: i18n().formatInteger(locale, items.length),
+            })}
+          </strong>
+        </div>
+        <ListChecks size={16} />
+      </div>
+      <p className="profile-muted">
+        {tr(locale, "admin_recovery.loaded_at", {
+          time: i18n().formatTimestamp(locale, loadedAtUnixMs),
+        })}
+      </p>
+      {items.length === 0 ? (
+        <p className="profile-muted">{label(locale, "admin_recovery.empty")}</p>
+      ) : (
+        <div className="admin-recovery-list">
+          {items.map((status) => (
+            <AdminRecoveryStatusCard
+              key={status.request_id}
+              status={status}
+              locale={locale}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function ActionCard({
   action,
   snapshot,
@@ -2660,7 +3082,9 @@ function ActionCard({
   previewMemberRemovalAction,
   changeMemberLifecycleAction,
   networkMembersAction,
+  adminRecoveryStatusAction,
   open,
+  showHeader = true,
   onOpen,
   onClose,
   onRequestedActionOpened,
@@ -2689,7 +3113,9 @@ function ActionCard({
   previewMemberRemovalAction?: NodeUiAction;
   changeMemberLifecycleAction?: NodeUiAction;
   networkMembersAction?: NodeUiAction;
+  adminRecoveryStatusAction?: NodeUiAction;
   open: boolean;
+  showHeader?: boolean;
   onOpen(): void;
   onClose(): void;
   onRequestedActionOpened(): void;
@@ -2721,6 +3147,14 @@ function ActionCard({
   } | null>(null);
   const [networkMembers, setNetworkMembers] =
     useState<NetworkMemberDirectory | null>(null);
+  const [adminRecoveryStatus, setAdminRecoveryStatus] = useState<{
+    status: AdminRecoveryStatusView;
+    refreshedAtUnixMs: number;
+  } | null>(null);
+  const [adminRecoveries, setAdminRecoveries] = useState<{
+    items: AdminRecoveryStatusView[];
+    loadedAtUnixMs: number;
+  } | null>(null);
   const [joinConfirmed, setJoinConfirmed] = useState(false);
   const [joinExitConfirmed, setJoinExitConfirmed] = useState(false);
   const [issuedInvitation, setIssuedInvitation] =
@@ -2827,6 +3261,8 @@ function ActionCard({
     setJoinPreview(null);
     setJoinRequests(null);
     setNetworkMembers(null);
+    setAdminRecoveryStatus(null);
+    setAdminRecoveries(null);
     setJoinConfirmed(false);
     setJoinExitConfirmed(false);
     setIssuedInvitation(null);
@@ -2907,6 +3343,146 @@ function ActionCard({
     }
   }
 
+  function applyAdminRecoveryOutcome(outcome: NodeCommandOutcome): boolean {
+    if (outcome.status === "admin_recovery_status") {
+      setAdminRecoveryStatus({
+        status: outcome.data,
+        refreshedAtUnixMs: Date.now(),
+      });
+      setAdminRecoveries((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          items: current.items.map((status) =>
+            status.request_id === outcome.data.request_id
+              ? outcome.data
+              : status,
+          ),
+        };
+      });
+      return true;
+    }
+    if (outcome.status === "admin_recoveries") {
+      setAdminRecoveries({
+        items: outcome.data,
+        loadedAtUnixMs: Date.now(),
+      });
+      return true;
+    }
+    return false;
+  }
+
+  async function refreshAdminRecoveryStatus(
+    networkName: string,
+    requestId: string,
+    showSummary: boolean,
+  ): Promise<AdminRecoveryStatusView | null> {
+    if (!adminRecoveryStatusAction) {
+      setFailure(label(locale, "admin_recovery.error.status_unavailable"));
+      return null;
+    }
+    try {
+      const submission = await onSubmit(
+        adminRecoveryStatusAction,
+        { network_name: networkName, request_id: requestId },
+        () => {},
+      );
+      if (submission.outcome?.status === "admin_recovery_status") {
+        if (submission.outcome.data.request_id !== requestId) {
+          setFailure(label(locale, "admin_recovery.error.request_mismatch"));
+          return null;
+        }
+        applyAdminRecoveryOutcome(submission.outcome);
+        if (showSummary) {
+          setResult(outcomeSummary(submission.outcome, locale));
+        }
+        return submission.outcome.data;
+      }
+      if (submission.outcome?.status === "rejected") {
+        setFailure(outcomeSummary(submission.outcome, locale));
+        return null;
+      }
+      if (submission.operation) {
+        setFailure(operationFailureSummary(submission.operation, locale));
+        return null;
+      }
+      setFailure(label(locale, "admin_recovery.error.status_unavailable"));
+      return null;
+    } catch (error) {
+      setFailure(error instanceof Error ? error.message : String(error));
+      return null;
+    }
+  }
+
+  async function executeAdminRecovery(): Promise<void> {
+    const networkName = String(values.network_name ?? "").trim();
+    const requestId = String(values.request_id ?? "").trim();
+    setErrors([]);
+    setFailure("");
+    setResult("");
+
+    // Execute is never optimistic and is never retried by the client. A fresh
+    // server status is mandatory before issuing this irreversible command.
+    const preflight = await refreshAdminRecoveryStatus(
+      networkName,
+      requestId,
+      false,
+    );
+    if (!preflight) return;
+    if (preflight.request_id !== requestId) {
+      setFailure(label(locale, "admin_recovery.error.request_mismatch"));
+      return;
+    }
+    if (preflight.state !== "pending") {
+      setFailure(
+        adminRecoveryDenialLabel(preflight.denial_key, locale),
+      );
+      return;
+    }
+    if (!preflight.can_execute) {
+      setFailure(
+        adminRecoveryDenialLabel(
+          preflight.denial_key ??
+            "admin_recovery.error.threshold_not_met",
+          locale,
+        ),
+      );
+      return;
+    }
+
+    try {
+      const submission = await onSubmit(action, values, () => {});
+      if (submission.outcome?.status === "rejected") {
+        applyAdminRecoveryOutcome(submission.outcome);
+        setFailure(outcomeSummary(submission.outcome, locale));
+        return;
+      }
+      if (submission.outcome?.status === "admin_recovery_status") {
+        applyAdminRecoveryOutcome(submission.outcome);
+        setResult(outcomeSummary(submission.outcome, locale));
+        setOpen(true);
+        return;
+      }
+      if (submission.outcome) {
+        setResult(outcomeSummary(submission.outcome, locale));
+        setOpen(true);
+        return;
+      }
+
+      // The execute response was lost or ambiguous. Query server truth only:
+      // replaying an irreversible execute command is forbidden here.
+      setFailure(label(locale, "admin_recovery.error.outcome_unknown"));
+      await refreshAdminRecoveryStatus(networkName, requestId, false);
+    } catch (error) {
+      setFailure(
+        error instanceof Error && error.message
+          ? `${label(locale, "admin_recovery.error.outcome_unknown")} · ${error.message}`
+          : label(locale, "admin_recovery.error.outcome_unknown"),
+      );
+      await refreshAdminRecoveryStatus(networkName, requestId, false);
+    }
+  }
+
   async function submit(): Promise<void> {
     const validation = validateActionValues(action, values, locale);
     if (validation.length > 0) {
@@ -2917,6 +3493,10 @@ function ActionCard({
     setFailure("");
     setResult("");
     setProfileOutcome(null);
+    if (action.id === "execute_admin_recovery") {
+      await executeAdminRecovery();
+      return;
+    }
     try {
       const submission = await onSubmit(action, values, () => {});
       if (submission.outcome?.status === "rejected") {
@@ -2932,6 +3512,7 @@ function ActionCard({
             outcomeSummary(submission.outcome, locale),
         );
         applyInvitationOutcome(submission.outcome);
+        applyAdminRecoveryOutcome(submission.outcome);
         if (
           submission.outcome.status === "network_profile_preview" ||
           submission.outcome.status === "network_profile_updated"
@@ -2955,8 +3536,15 @@ function ActionCard({
           setJoinRequests(null);
           setOpen(true);
         } else if (
+          submission.outcome.status === "admin_recovery_status" ||
+          submission.outcome.status === "admin_recoveries"
+        ) {
+          setOpen(true);
+        } else if (
           !submission.outcome.status.startsWith("invitation_") &&
           submission.outcome.status !== "invitations" &&
+          submission.outcome.status !== "network_profile_preview" &&
+          submission.outcome.status !== "network_profile_updated" &&
           submission.outcome.status !== "member_removal_preview" &&
           submission.outcome.status !== "member_lifecycle_changed"
         ) {
@@ -3203,26 +3791,28 @@ function ActionCard({
           : "action-card"
       }
     >
-      <button
-        type="button"
-        className="action-card-head"
-        aria-expanded={open}
-        onClick={() => {
-          if (open) {
-            onClose();
-          } else {
-            setJoinRequests(null);
-            setNetworkMembers(null);
-            onOpen();
-          }
-        }}
-      >
-        <span>{label(locale, action.label_key)}</span>
-        <ChevronRight
-          className={open ? "action-chevron open" : "action-chevron"}
-          size={16}
-        />
-      </button>
+      {showHeader ? (
+        <button
+          type="button"
+          className="action-card-head"
+          aria-expanded={open}
+          onClick={() => {
+            if (open) {
+              onClose();
+            } else {
+              setJoinRequests(null);
+              setNetworkMembers(null);
+              onOpen();
+            }
+          }}
+        >
+          <span>{label(locale, action.label_key)}</span>
+          <ChevronRight
+            className={open ? "action-chevron open" : "action-chevron"}
+            size={16}
+          />
+        </button>
+      ) : null}
       {result ? (
         <p className="form-success" role="status">
           {result}
@@ -3255,6 +3845,24 @@ function ActionCard({
           governanceBlockedReason={governanceBlockedReason}
           onSubmit={onSubmit}
           onLifecycleChanged={handleLifecycleChanged}
+        />
+      ) : null}
+      {adminRecoveryStatus &&
+      (action.id === "submit_admin_recovery" ||
+        action.id === "get_admin_recovery_status" ||
+        action.id === "revoke_admin_recovery" ||
+        action.id === "execute_admin_recovery") ? (
+        <AdminRecoveryStatusCard
+          status={adminRecoveryStatus.status}
+          refreshedAtUnixMs={adminRecoveryStatus.refreshedAtUnixMs}
+          locale={locale}
+        />
+      ) : null}
+      {adminRecoveries && action.id === "list_admin_recoveries" ? (
+        <AdminRecoveryListCard
+          items={adminRecoveries.items}
+          loadedAtUnixMs={adminRecoveries.loadedAtUnixMs}
+          locale={locale}
         />
       ) : null}
       {joinRequests ? (
@@ -3390,7 +3998,10 @@ function ActionCard({
       <Dialog.Root open={confirming} onOpenChange={setConfirming}>
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />
-          <Dialog.Content className="dialog-content confirm-dialog">
+          <Dialog.Content
+            className="dialog-content confirm-dialog"
+            data-testid="action-confirmation"
+          >
             <div className="dialog-heading">
               <div
                 className={
@@ -3486,25 +4097,22 @@ export function ActionPanel(props: ActionPanelProps) {
     >
       <ShieldAlert size={15} />
       <div>
-        <strong>
-          {label(locale, "coordinator_governance.frozen.title")}
-        </strong>
+        <strong>{label(locale, "coordinator_governance.frozen.title")}</strong>
         <span>{governanceBlockedReason}</span>
-        <small>
-          {label(locale, "coordinator_governance.frozen.recovery")}
-        </small>
+        <small>{label(locale, "coordinator_governance.frozen.recovery")}</small>
       </div>
     </div>
   ) : null;
   const [query, setQuery] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
   const [openActionId, setOpenActionId] = useState<string | null>(null);
   const [requestedCardKeys, setRequestedCardKeys] = useState<
     Record<string, number>
   >({});
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(
-    () => new Set(),
-  );
+  const commandSurfaceRef = useRef<HTMLDivElement>(null);
   const groupHeadingId = useId();
+  const workspaceTitleId = useId();
+  const menuId = useId();
   const hasIntegratedJoinReview = actions.some(
     (action) => action.id === "list_join_requests",
   );
@@ -3521,79 +4129,94 @@ export function ActionPanel(props: ActionPanelProps) {
   const visibleGovernanceFreezeNotice = hasGovernanceWriteAction
     ? governanceFreezeNotice
     : null;
+  const commandPageId = props.pageId ?? inferCommandPageId(renderedActions);
+  const primaryCandidate = commandPrimaryAction(
+    commandPageId,
+    renderedActions,
+    props.snapshot,
+  );
+  const primaryAction =
+    primaryCandidate && !actionBlockReason(primaryCandidate)
+      ? primaryCandidate
+      : undefined;
+  const quickActions = (QUICK_ACTION_IDS[commandPageId] ?? []).flatMap(
+    (actionId) => {
+      if (actionId === primaryAction?.id) return [];
+      const action = renderedActions.find(
+        (candidate) => candidate.id === actionId,
+      );
+      return action && !actionBlockReason(action) ? [action] : [];
+    },
+  );
+  const requestedAction =
+    props.requestedAction &&
+    renderedActions.some(
+      (action) => action.id === props.requestedAction?.actionId,
+    )
+      ? props.requestedAction
+      : null;
+  const effectiveOpenActionId = requestedAction?.actionId ?? openActionId;
+  const openAction = effectiveOpenActionId
+    ? renderedActions.find((action) => action.id === effectiveOpenActionId)
+    : undefined;
 
-  const effectiveOpenActionId = props.requestedAction?.actionId ?? openActionId;
-
-  if (renderedActions.length === 0) {
-    return (
-      <aside
-        className="actions-panel"
-        data-ui-region="action-panel"
-        aria-label={label(locale, "common.actions_panel_title")}
-      >
-        <div className="panel-heading">
-          <div className="panel-title">
-            {label(locale, "common.actions_panel_title")}
-          </div>
-          <span className="panel-count">
-            {tr(locale, "common.actions_panel_count", { count: 0 })}
-          </span>
-        </div>
-        <p className="empty-copy">
-          {label(locale, "common.page_actions_empty")}
-        </p>
-        {visibleGovernanceFreezeNotice}
-        {props.operation ? (
-          <OperationStatusCard
-            operation={props.operation}
-            locale={locale}
-            onCancel={props.onCancel}
-            onRetry={props.onRetryOperation}
-          />
-        ) : null}
-      </aside>
+  function actionBlockReason(action: NodeUiAction): string {
+    if (props.interactionBlocked) {
+      return label(
+        locale,
+        pageStateDefinition(props.interactionBlocked).titleKey,
+      );
+    }
+    const executionBlocked = executionBlockReason(
+      action,
+      props.snapshot,
+      props.selectedNetwork,
     );
+    if (executionBlocked) return blockReasonText(executionBlocked, locale);
+    if (
+      actionRequiresCoordinatorGovernance(action) &&
+      governanceBlockedReason
+    ) {
+      return governanceBlockedReason;
+    }
+    return "";
   }
 
-  const normalizedQuery = query.trim().toLocaleLowerCase(locale);
-  const matchingActions = normalizedQuery
-    ? renderedActions.filter((action) =>
-        [
-          label(locale, action.label_key),
-          label(locale, action.group_label_key),
-        ].some((text) =>
-          text.toLocaleLowerCase(locale).includes(normalizedQuery),
-        ),
-      )
-    : renderedActions;
-  const availableActions = matchingActions.filter(
-    (action) => action.backend_status !== "unavailable",
-  );
-  const unavailableActions = matchingActions.filter(
-    (action) => action.backend_status === "unavailable",
-  );
-  const grouped = new Map<
-    string,
-    { labelKey: string; actions: NodeUiAction[] }
-  >();
-  for (const action of availableActions) {
-    const group = grouped.get(action.group);
-    if (group) group.actions.push(action);
-    else
-      grouped.set(action.group, {
-        labelKey: action.group_label_key,
-        actions: [action],
-      });
+  function closeWorkspace(): void {
+    setOpenActionId(null);
+    if (requestedAction) props.onRequestedActionOpened();
   }
 
-  function toggleGroup(group: string): void {
-    setCollapsedGroups((current) => {
-      const next = new Set(current);
-      if (next.has(group)) next.delete(group);
-      else next.add(group);
-      return next;
-    });
+  function openWorkspace(action: NodeUiAction): void {
+    setOpenActionId(action.id);
+    setMenuOpen(false);
+    setQuery("");
   }
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!commandSurfaceRef.current?.contains(event.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [menuOpen]);
+
+  useEffect(() => {
+    if (!menuOpen && !openAction) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (menuOpen) {
+        setMenuOpen(false);
+      } else {
+        closeWorkspace();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  });
 
   function renderAction(action: NodeUiAction) {
     const requestId =
@@ -3618,10 +4241,9 @@ export function ActionPanel(props: ActionPanelProps) {
             : undefined
         }
         open={effectiveOpenActionId === action.id}
+        showHeader={false}
         onOpen={() => setOpenActionId(action.id)}
-        onClose={() =>
-          setOpenActionId((current) => (current === action.id ? null : current))
-        }
+        onClose={closeWorkspace}
         joinAction={actions.find(
           (candidate) => candidate.id === "join_network",
         )}
@@ -3658,6 +4280,9 @@ export function ActionPanel(props: ActionPanelProps) {
         networkMembersAction={actions.find(
           (candidate) => candidate.id === "list_network_members",
         )}
+        adminRecoveryStatusAction={actions.find(
+          (candidate) => candidate.id === "get_admin_recovery_status",
+        )}
         onRequestedActionOpened={() => {
           setOpenActionId(action.id);
           if (props.requestedAction?.requestId) {
@@ -3674,60 +4299,114 @@ export function ActionPanel(props: ActionPanelProps) {
     );
   }
 
-  function renderGroup(
-    key: string,
-    heading: string,
-    groupActions: NodeUiAction[],
-    unavailable = false,
-  ) {
-    const collapsed = !normalizedQuery && collapsedGroups.has(key);
+  const normalizedQuery = query.trim().toLocaleLowerCase(locale);
+  const matchingActions = normalizedQuery
+    ? renderedActions.filter((action) =>
+        [
+          label(locale, action.label_key),
+          label(locale, action.group_label_key),
+        ].some((text) =>
+          text.toLocaleLowerCase(locale).includes(normalizedQuery),
+        ),
+      )
+    : renderedActions;
+  const menuGroups = props.actionGroups.flatMap((group) => {
+    const groupActions = matchingActions.filter(
+      (action) => action.group === group,
+    );
+    return groupActions.length
+      ? [
+          {
+            group,
+            heading: label(locale, groupActions[0].group_label_key),
+            actions: groupActions,
+          },
+        ]
+      : [];
+  });
+  const knownGroups = new Set(props.actionGroups);
+  const uncategorized = matchingActions.filter(
+    (action) => !knownGroups.has(action.group),
+  );
+
+  function commandButton(
+    action: NodeUiAction,
+    className: string,
+    iconOnly = false,
+  ): JSX.Element {
+    const blockedReason = actionBlockReason(action);
     return (
-      <section
-        className={unavailable ? "action-group unavailable" : "action-group"}
-        key={key}
-        aria-labelledby={`${groupHeadingId}-${key}`}
+      <button
+        key={action.id}
+        type="button"
+        className={className}
+        disabled={Boolean(blockedReason)}
+        title={blockedReason || undefined}
+        aria-label={iconOnly ? label(locale, action.label_key) : undefined}
+        onClick={() => openWorkspace(action)}
       >
-        <button
-          type="button"
-          className="action-group-head"
-          aria-expanded={!collapsed}
-          aria-controls={`${groupHeadingId}-${key}-actions`}
-          onClick={() => toggleGroup(key)}
-        >
-          <span id={`${groupHeadingId}-${key}`}>{heading}</span>
-          <span className="action-group-meta">
-            <span className="action-group-count">{groupActions.length}</span>
-            <ChevronRight
-              className={collapsed ? "action-chevron" : "action-chevron open"}
-              size={14}
-            />
-          </span>
-        </button>
-        {!collapsed ? (
-          <div className="action-list" id={`${groupHeadingId}-${key}-actions`}>
-            {groupActions.map(renderAction)}
-          </div>
-        ) : null}
-      </section>
+        {iconOnly ? commandActionIcon(action.id) : null}
+        {iconOnly ? null : <span>{label(locale, action.label_key)}</span>}
+        {iconOnly ? null : <ChevronRight size={15} aria-hidden="true" />}
+      </button>
     );
   }
 
-  return (
-    <aside
-      className="actions-panel"
-      data-ui-region="action-panel"
-      aria-label={label(locale, "common.actions_panel_title")}
-    >
-      <div className="panel-heading">
-        <div className="panel-title">
-          {label(locale, "common.actions_panel_title")}
-        </div>
-        <span className="panel-count">
-          {tr(locale, "common.actions_panel_count", {
-            count: renderedActions.length,
-          })}
+  function menuItem(action: NodeUiAction): JSX.Element {
+    const blockedReason = actionBlockReason(action);
+    return (
+      <button
+        type="button"
+        role="menuitem"
+        className="page-command-menu-item"
+        key={action.id}
+        disabled={Boolean(blockedReason)}
+        aria-disabled={Boolean(blockedReason)}
+        title={blockedReason || undefined}
+        onClick={() => openWorkspace(action)}
+      >
+        <span className="page-command-menu-icon">
+          {commandActionIcon(action.id)}
         </span>
-      </div>
+        <span className="page-command-menu-copy">
+          <strong>{label(locale, action.label_key)}</strong>
+          {blockedReason ? <small>{blockedReason}</small> : null}
+        </span>
+      </button>
+    );
+  }
+
+  const surface = (
+    <div
+      className="page-command-surface"
+      ref={commandSurfaceRef}
+      aria-label={label(locale, "common.actions_panel_title")}
+      data-testid="page-command-surface"
+    >
+      {renderedActions.length > 0 ? (
+        <div className="page-command-toolbar" role="toolbar">
+          {primaryAction && !openAction
+            ? commandButton(
+                primaryAction,
+                "primary-button page-command-primary",
+              )
+            : null}
+          {quickActions.map((action) =>
+            commandButton(action, "icon-button page-command-icon", true),
+          )}
+          <button
+            type="button"
+            className="icon-button page-command-more"
+            aria-label={label(locale, "common.more_actions")}
+            aria-expanded={menuOpen}
+            aria-controls={menuId}
+            onClick={() => setMenuOpen((current) => !current)}
+          >
+            <MoreHorizontal size={17} />
+          </button>
+        </div>
+      ) : null}
+      {visibleGovernanceFreezeNotice}
       {props.operation ? (
         <OperationStatusCard
           operation={props.operation}
@@ -3736,55 +4415,110 @@ export function ActionPanel(props: ActionPanelProps) {
           onRetry={props.onRetryOperation}
         />
       ) : null}
-      {visibleGovernanceFreezeNotice}
-      <label className="action-search">
-        <Search size={15} aria-hidden="true" />
-        <input
-          type="search"
-          value={query}
-          aria-label={label(locale, "common.actions_search_placeholder")}
-          placeholder={label(locale, "common.actions_search_placeholder")}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-        {query ? (
-          <button
-            type="button"
-            className="icon-button"
-            aria-label={label(locale, "common.actions_search_clear")}
-            onClick={() => setQuery("")}
-          >
-            <X size={14} />
-          </button>
-        ) : null}
-      </label>
-      {matchingActions.length === 0 ? (
-        <p className="empty-copy" role="status">
-          {label(locale, "common.actions_no_results")}
-        </p>
-      ) : (
-        <div className="action-groups">
-          {props.actionGroups.flatMap((group) => {
-            const section = grouped.get(group);
-            return section
-              ? [
-                  renderGroup(
-                    group,
-                    label(locale, section.labelKey),
-                    section.actions,
-                  ),
-                ]
-              : [];
-          })}
-          {unavailableActions.length > 0
-            ? renderGroup(
-                "unavailable",
-                label(locale, "common.actions_unavailable_heading"),
-                unavailableActions,
-                true,
-              )
-            : null}
+      {menuOpen ? (
+        <div
+          className="page-command-menu"
+          id={menuId}
+          role="menu"
+          aria-label={label(locale, "common.actions_panel_title")}
+        >
+          <label className="action-search">
+            <Search size={15} aria-hidden="true" />
+            <input
+              type="search"
+              value={query}
+              aria-label={label(locale, "common.actions_search_placeholder")}
+              placeholder={label(locale, "common.actions_search_placeholder")}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            {query ? (
+              <button
+                type="button"
+                className="icon-button"
+                aria-label={label(locale, "common.actions_search_clear")}
+                onClick={() => setQuery("")}
+              >
+                <X size={14} />
+              </button>
+            ) : null}
+          </label>
+          {matchingActions.length === 0 ? (
+            <p className="empty-copy" role="status">
+              {label(locale, "common.actions_no_results")}
+            </p>
+          ) : (
+            <div className="page-command-menu-groups">
+              {menuGroups.map((group) => (
+                <section
+                  key={group.group}
+                  className="page-command-menu-group"
+                  aria-labelledby={`${groupHeadingId}-${group.group}`}
+                >
+                  <h2 id={`${groupHeadingId}-${group.group}`}>
+                    {group.heading}
+                  </h2>
+                  {group.actions.map(menuItem)}
+                </section>
+              ))}
+              {uncategorized.length ? (
+                <section
+                  className="page-command-menu-group"
+                  aria-labelledby={`${groupHeadingId}-other`}
+                >
+                  <h2 id={`${groupHeadingId}-other`}>
+                    {label(locale, "common.actions_unavailable_heading")}
+                  </h2>
+                  {uncategorized.map(menuItem)}
+                </section>
+              ) : null}
+            </div>
+          )}
         </div>
-      )}
-    </aside>
+      ) : null}
+    </div>
+  );
+
+  return (
+    <>
+      {surface}
+      {openAction && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="action-workspace-overlay"
+              onMouseDown={(event) => {
+                if (event.currentTarget === event.target) closeWorkspace();
+              }}
+            >
+              <section
+                className="action-workspace"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby={workspaceTitleId}
+              >
+                <header className="action-workspace-heading">
+                  <div>
+                    <span>{label(locale, openAction.group_label_key)}</span>
+                    <h2 id={workspaceTitleId}>
+                      {label(locale, openAction.label_key)}
+                    </h2>
+                  </div>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    aria-label={label(locale, "common.close")}
+                    onClick={closeWorkspace}
+                  >
+                    <X size={17} />
+                  </button>
+                </header>
+                <div className="action-workspace-body">
+                  {renderAction(openAction)}
+                </div>
+              </section>
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
   );
 }

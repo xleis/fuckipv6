@@ -11,6 +11,7 @@ import type {
   NodeCommand,
   NodeCommandOutcome,
   NodeOperationSnapshot,
+  NodeProblem,
   NodeSnapshot,
   NetworkMemberDirectory,
   NodeUiAction,
@@ -36,6 +37,8 @@ import {
   initialActionValues,
   operationStateIsTerminal,
   outcomeSummary,
+  problemText,
+  problemTextWithRecovery,
   primaryStatus,
   trafficProtectionStatus,
   validateAcceptedCommandResponse,
@@ -202,6 +205,28 @@ beforeEach(() => {
 });
 
 describe("node UI contract invariants", () => {
+  it("prefers stable problem copy and appends its recovery hint", () => {
+    const problem: NodeProblem = {
+      code: "permission_denied",
+      category: "authorization",
+      message: "raw host permission detail",
+      message_key: "error.network.permission_denied",
+      params: {},
+      retryable: false,
+      recovery: {
+        kind: "request_access",
+        hint_key: "recovery.request_access",
+      },
+    };
+
+    expect(problemText(problem, "en")).toBe(
+      "translated:error.network.permission_denied",
+    );
+    expect(problemTextWithRecovery(problem, "en")).toBe(
+      "translated:error.network.permission_denied · translated:recovery.request_access",
+    );
+  });
+
   it("accepts the frozen thirteen-page manifest fixture", () => {
     const validated = validateManifestResponse(manifestResponse(manifest));
     expect(validated.pages.map((page) => page.id)).toEqual([
@@ -1671,6 +1696,25 @@ describe("node UI contract invariants", () => {
         enabled: true,
       },
     });
+  });
+
+  it("allows Start node only while the runtime is stopped or failed", () => {
+    const action = manifest.pages
+      .flatMap((page) => page.actions)
+      .find((candidate) => candidate.id === "start_node")!;
+    expect(action.availability).toBe("node_stopped");
+
+    const snapshot = emptySnapshot();
+    for (const phase of ["starting", "running", "stopping"] as const) {
+      snapshot.lifecycle.phase = phase;
+      expect(executionBlockReason(action, snapshot, "home")).toBe(
+        "node_not_stopped",
+      );
+    }
+    for (const phase of ["stopped", "failed"] as const) {
+      snapshot.lifecycle.phase = phase;
+      expect(executionBlockReason(action, snapshot, "home")).toBeNull();
+    }
   });
 
   it("uses the shared canonical reason for unsupported exit-node actions", () => {

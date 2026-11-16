@@ -2356,9 +2356,16 @@ export function TopologyView({
   const menuRef = useRef<HTMLDivElement>(null);
   const menuNodeIdRef = useRef<string | null>(null);
   const activeFilters = filters ?? internalFilters;
+  const scopedFilters = useMemo(
+    () => ({
+      ...activeFilters,
+      networkId: networkId ?? activeFilters.networkId,
+    }),
+    [activeFilters, networkId],
+  );
   const fixedPositions = layoutPersistence.positions;
   const layoutStorageStatus = layoutPersistence.status;
-  const deferredFilters = useDeferredValue(activeFilters);
+  const deferredFilters = useDeferredValue(scopedFilters);
   const sourceTopology = frozenTopology ?? topology;
   const sourceIndex = useMemo(
     () => (sourceTopology ? cachedTopologyIndex(sourceTopology) : null),

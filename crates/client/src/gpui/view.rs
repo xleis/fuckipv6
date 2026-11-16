@@ -1,22 +1,22 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use fuckipv6_common::design_tokens::{DARK_THEME, DIMENSIONS};
 use fuckipv6_common::domain::{
-    ActivityCategory, ActivitySeverity, AuditOutcome, CapabilityKind, ExitContributionMode,
-    ExitHealthEvidenceState, ExitHealthLayer, ExitHealthProtocol, ExitHealthSource,
-    ExitHealthState, ExitHealthTarget, IdempotencyKey, InvitationPreview, InvitationState,
-    InvitationStatusView, IssuedInvitation, JoinRequest, JoinRequestReviewAction, JoinRequestState,
-    LeakDetectionDnsMode, LeakDetectionEvidenceState, LeakDetectionIsolationAction,
-    LeakDetectionPlatform, LeakDetectionProtocol, LeakDetectionSource, LeakDetectionState,
-    LeakDetectionTarget, MemberLifecycleAction, MembershipRole, NetworkId, NetworkJoinMode,
-    NetworkMember, NetworkMemberDirectory, NetworkMemberGroup, NetworkMemberObservationSource,
-    NetworkMemberOnlineState, NetworkMemberStatus, NetworkProfileApplyResult,
-    NetworkProfilePreview, NetworkProfileProjections, NetworkProfileWarningCode,
-    NetworkPublicProfileDocument, NetworkVisibility, OperationError, OperationState,
-    TopologyConnectionState, TopologySnapshot, TrafficProtectionState,
-    JOIN_REQUEST_MAX_REASON_CHARS,
+    ActivityCategory, ActivitySeverity, AdminRecoveryState, AdminRecoveryStatusView, AuditOutcome,
+    CapabilityKind, ExitContributionMode, ExitHealthEvidenceState, ExitHealthLayer,
+    ExitHealthProtocol, ExitHealthSource, ExitHealthState, ExitHealthTarget, IdempotencyKey,
+    InvitationPreview, InvitationState, InvitationStatusView, IssuedInvitation, JoinRequest,
+    JoinRequestReviewAction, JoinRequestState, LeakDetectionDnsMode, LeakDetectionEvidenceState,
+    LeakDetectionIsolationAction, LeakDetectionPlatform, LeakDetectionProtocol,
+    LeakDetectionSource, LeakDetectionState, LeakDetectionTarget, MemberLifecycleAction,
+    MembershipRole, NetworkId, NetworkJoinMode, NetworkMember, NetworkMemberDirectory,
+    NetworkMemberGroup, NetworkMemberObservationSource, NetworkMemberOnlineState,
+    NetworkMemberStatus, NetworkProfileApplyResult, NetworkProfilePreview,
+    NetworkProfileProjections, NetworkProfileWarningCode, NetworkPublicProfileDocument,
+    NetworkVisibility, OperationError, OperationState, TopologyConnectionState, TopologySnapshot,
+    TrafficProtectionState, JOIN_REQUEST_MAX_REASON_CHARS,
 };
 #[cfg(test)]
 use fuckipv6_common::domain::{
@@ -29,13 +29,13 @@ use fuckipv6_common::i18n::{
 };
 use fuckipv6_common::ui_components::SemanticState;
 use fuckipv6_common::ui_layout::{
-    navigation_module_for_page, navigation_modules, ActionPanelPresentation, AppRegion,
-    LayoutClass, NavigationModule,
+    navigation_module_for_page, navigation_modules, AppRegion, LayoutClass, NavigationMode,
+    NavigationModule,
 };
 use gpui::{
-    actions, div, prelude::*, px, rgba, size, uniform_list, App, Bounds, ClipboardItem, Context,
-    Div, Entity, FocusHandle, KeyBinding, Menu, MenuItem, Render, Role, SharedString, Window,
-    WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, relative, rgba, size, uniform_list, App, Bounds, ClipboardItem,
+    Context, Div, Entity, FocusHandle, KeyBinding, Menu, MenuItem, Render, Role, SharedString,
+    Window, WindowBounds, WindowOptions,
 };
 use gpui_base::input::{InputEvent, Textarea, TextareaState};
 
@@ -58,11 +58,11 @@ use super::view_model::{
     default_form_values, filter_network_members, member_exit_declared_text,
     member_exit_freshness_text, member_exit_reason_text, member_exit_source_text,
     member_exit_state_text, member_lifecycle_action_key, member_lifecycle_action_value,
-    membership_role_value, network_membership_id, network_status_key, retain_member_selection,
-    routing_target_search_rows, search_node_snapshot, sort_network_members,
-    topology_member_actions, topology_node_detail, topology_presentation,
-    traffic_protection_state_key, validate_manifest_bindings, ActionBinding, ActionBlockReason,
-    ActivityFilters, CoordinatorGovernanceFreezeReason, MemberCapabilityFilter,
+    membership_role_value, network_membership_id, network_status_key,
+    problem_message_with_recovery, retain_member_selection, routing_target_search_rows,
+    search_node_snapshot, sort_network_members, topology_member_actions, topology_node_detail,
+    topology_presentation, traffic_protection_state_key, validate_manifest_bindings, ActionBinding,
+    ActionBlockReason, ActivityFilters, CoordinatorGovernanceFreezeReason, MemberCapabilityFilter,
     MemberDirectoryFilters, MemberHealthFilter, OverviewModel, PageKind, RowModel, RowNavigation,
     SearchResult, SectionModel, TopologyPresentationCondition, TopologyPresentationSignals,
 };
@@ -76,14 +76,16 @@ use crate::network_discovery::{
     DiscoveryResult, DiscoveryVisibilityFilter,
 };
 use crate::node::{
-    NodeApplyConfigurationCommand, NodeCommand, NodeCommandBus, NodeCommandBusError,
-    NodeCommandContext, NodeCommandKind, NodeCommandOutcome, NodeCommandRequest, NodeCommandResult,
-    NodeControlHealth, NodeDiagnosticCheck, NodeDiagnosticLayer, NodeDiagnosticState,
-    NodeDiagnosticsSnapshot, NodeJoinRequestListResult, NodeJoinRequestReviewAck,
+    NodeAdminRecoveryStatusCommand, NodeApplyConfigurationCommand, NodeCommand, NodeCommandBus,
+    NodeCommandBusError, NodeCommandContext, NodeCommandKind, NodeCommandOutcome,
+    NodeCommandRequest, NodeCommandResult, NodeControlHealth, NodeDiagnosticCheck,
+    NodeDiagnosticLayer, NodeDiagnosticState, NodeDiagnosticsSnapshot,
+    NodeExecuteAdminRecoveryCommand, NodeJoinRequestListResult, NodeJoinRequestReviewAck,
     NodeJoinRequestReviewItem, NodeNetworkCreationNextStep, NodeNetworkJoinPreview,
-    NodeNetworkStatus, NodeOperationSnapshot, NodePermission, NodePreviewConfigurationCommand,
-    NodePrimaryStatus, NodeProblem, NodeRollbackConfigurationCommand, NodeSnapshot, NodeStateStore,
-    NodeUiAction, NodeUiBackendStatus, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage,
+    NodeNetworkStatus, NodeOperationSnapshot, NodePermission, NodePhase,
+    NodePreviewConfigurationCommand, NodePrimaryStatus, NodeProblem,
+    NodeRollbackConfigurationCommand, NodeSnapshot, NodeStateStore, NodeUiAction,
+    NodeUiBackendStatus, NodeUiField, NodeUiInputKind, NodeUiManifest, NodeUiPage,
     OperationClientError, NODE_UI_ACTION_GROUPS,
 };
 use crate::remote_node::RemoteOperationClient;
@@ -96,6 +98,8 @@ const OPERATION_LOOKUP_FAILURE_LIMIT: u16 = 300;
 const COLOR_BG: u32 = DARK_THEME.colors.background.rgba_hex();
 const COLOR_SIDEBAR: u32 = DARK_THEME.colors.background_deep.rgba_hex();
 const COLOR_PANEL: u32 = DARK_THEME.colors.surface.rgba_hex();
+const COLOR_PANEL_SOLID: u32 = DARK_THEME.colors.panel_solid.rgba_hex();
+const COLOR_TEXT_MUTED: u32 = DARK_THEME.colors.text_muted.rgba_hex();
 const COLOR_PANEL_RAISED: u32 = DARK_THEME.colors.panel_raised.rgba_hex();
 const COLOR_DIVIDER: u32 = DARK_THEME.colors.border.rgba_hex();
 const COLOR_TEXT: u32 = DARK_THEME.colors.text.rgba_hex();
@@ -116,24 +120,20 @@ fn lucide_icon(data: &'static [u8], size: f32, color: u32) -> gpui::AnyElement {
 
 fn surface_card() -> Div {
     let colors = DARK_THEME.colors;
-    div()
-        .rounded(px(16.0))
-        .border_1()
-        .border_color(rgba(COLOR_DIVIDER))
-        .bg(gpui::linear_gradient(
-            150.0,
-            gpui::linear_color_stop(rgba(colors.surface.rgba_hex()), 0.0),
-            gpui::linear_color_stop(
-                rgba(colors.background_deep.with_alpha(0xeb).rgba_hex()),
-                1.0,
-            ),
-        ))
-        .shadow(vec![gpui::BoxShadow::new(
-            px(0.0),
-            px(1.0),
-            rgba(0x00000066).into(),
-        )
-        .blur_radius(px(3.0))])
+    // Browser gradients interpolate premultiplied alpha, while GPUI's shader
+    // interpolates straight RGBA. Composite the matching WebUI stops first so
+    // the same semantic token pair renders consistently in both surfaces.
+    let surface_start_alpha = ((colors.surface.a as u16 * 94 + 50) / 100) as u8;
+    let surface_start = colors
+        .surface
+        .with_alpha(surface_start_alpha)
+        .composite_over(colors.background);
+    let surface_end = colors
+        .background_deep
+        .with_alpha(0xeb)
+        .composite_over(colors.background);
+    let _ = (surface_start, surface_end);
+    div().bg(rgba(COLOR_PANEL_SOLID))
 }
 
 fn empty_state(text: impl Into<SharedString>) -> Div {
@@ -159,7 +159,7 @@ fn card_heading(title: impl Into<SharedString>, icon: gpui::AnyElement) -> Div {
         .child(
             div()
                 .text_size(px(14.0))
-                .line_height(px(21.7))
+                .line_height(px(21.6875))
                 .font_weight(gpui::FontWeight(600.0))
                 .text_color(rgba(COLOR_TEXT))
                 .child(title.into()),
@@ -204,13 +204,108 @@ const A11Y_ROOT_ROLE: Role = Role::Application;
 const A11Y_NAVIGATION_ROLE: Role = Role::Navigation;
 const A11Y_MAIN_ROLE: Role = Role::Main;
 const A11Y_HEADING_ROLE: Role = Role::Heading;
-const A11Y_TAB_LIST_ROLE: Role = Role::TabList;
 const A11Y_TAB_PANEL_ROLE: Role = Role::TabPanel;
 
 /// The native shell consumes the same ordered region contract as the WebUI.
 /// These identifiers are also used as stable GPUI element IDs for tests,
 /// keyboard traversal, and future accessibility inspection.
-const APP_REGION_ORDER: [AppRegion; 4] = AppRegion::ALL;
+const APP_REGION_ORDER: [AppRegion; 3] = AppRegion::ALL;
+
+const PRIMARY_ACTION_CANDIDATES: &[(&str, &[&str])] = &[
+    ("networks", &["create_network"]),
+    ("peers", &["probe_peer"]),
+    ("node_runtime", &["restart_node", "stop_node", "start_node"]),
+    ("routing", &["update_routing"]),
+    (
+        "exit_node",
+        &["set_local_exit_capability", "set_exit_node_role"],
+    ),
+    ("relay", &["set_relay_role"]),
+    ("identity", &["set_node_display_name"]),
+];
+
+const QUICK_ACTION_IDS: &[(&str, &[&str])] = &[
+    (
+        "networks",
+        &[
+            "list_network_members",
+            "list_invitations",
+            "refresh_discovery_index",
+        ],
+    ),
+    ("peers", &["get_blacklist"]),
+    (
+        "node_runtime",
+        &["refresh_snapshot", "get_node_diagnostics"],
+    ),
+    ("routing", &["get_traffic_policy"]),
+];
+
+const TOPOLOGY_COMMAND_ID: &str = "__topology_batch_actions__";
+
+fn command_primary_action_id(
+    page_id: &str,
+    actions: &[NodeUiAction],
+    snapshot: &NodeSnapshot,
+) -> Option<String> {
+    let candidates = if page_id == "node_runtime" {
+        match snapshot.lifecycle.phase {
+            NodePhase::Running => ["restart_node", "stop_node"].as_slice(),
+            NodePhase::Stopped | NodePhase::Failed => ["start_node"].as_slice(),
+            NodePhase::Starting | NodePhase::Stopping => [].as_slice(),
+        }
+    } else {
+        PRIMARY_ACTION_CANDIDATES
+            .iter()
+            .find(|(candidate_page, _)| *candidate_page == page_id)
+            .map(|(_, ids)| *ids)
+            .unwrap_or_default()
+    };
+    candidates
+        .iter()
+        .find(|id| actions.iter().any(|action| action.id == **id))
+        .map(|id| (*id).to_string())
+}
+
+fn command_quick_action_ids(page_id: &str) -> &'static [&'static str] {
+    QUICK_ACTION_IDS
+        .iter()
+        .find(|(candidate_page, _)| *candidate_page == page_id)
+        .map(|(_, ids)| *ids)
+        .unwrap_or_default()
+}
+
+fn command_action_icon_data(action_id: &str) -> &'static [u8] {
+    match action_id {
+        "refresh_snapshot"
+        | "refresh_discovery_index"
+        | "retry_discovery_index"
+        | "restart_node"
+        | "restart_networks"
+        | "rotate_node_identity" => {
+            include_bytes!("../../assets/icons/refresh-cw.svg")
+        }
+        "get_node_diagnostics" => include_bytes!("../../assets/icons/stethoscope.svg"),
+        "start_node" | "start_networks" => include_bytes!("../../assets/icons/play.svg"),
+        "stop_node" | "stop_networks" => include_bytes!("../../assets/icons/square.svg"),
+        "cleanup_node_residuals" | "remove_member" => {
+            include_bytes!("../../assets/icons/trash-2.svg")
+        }
+        "create_network" => include_bytes!("../../assets/icons/plus.svg"),
+        "list_network_members" => include_bytes!("../../assets/icons/users.svg"),
+        "list_invitations" | "add_member" => include_bytes!("../../assets/icons/user-plus.svg"),
+        "get_blacklist" => include_bytes!("../../assets/icons/ban.svg"),
+        "get_traffic_policy" => include_bytes!("../../assets/icons/list-checks.svg"),
+        "probe_peer" | "set_relay_role" => include_bytes!("../../assets/icons/radio-tower.svg"),
+        "set_local_exit_capability" => include_bytes!("../../assets/icons/power.svg"),
+        "set_exit_node_role" => include_bytes!("../../assets/icons/network.svg"),
+        "set_node_display_name" => include_bytes!("../../assets/icons/key-round.svg"),
+        "update_routing" => include_bytes!("../../assets/icons/settings.svg"),
+        _ if action_id.contains("invitation") => include_bytes!("../../assets/icons/user-plus.svg"),
+        _ if action_id.contains("ban") => include_bytes!("../../assets/icons/ban.svg"),
+        _ => include_bytes!("../../assets/icons/settings.svg"),
+    }
+}
 
 fn app_region_id(region: AppRegion) -> SharedString {
     SharedString::from(format!("gpui-region-{}", region.name()))
@@ -254,6 +349,18 @@ struct PendingTopologyLifecycle {
     network_id: NetworkId,
     node_id: String,
     action: MemberLifecycleAction,
+}
+
+/// Numbers the topology workspace state band shows next to the path verdict.
+struct TopologyWorkspaceStats {
+    path_ready: bool,
+    path_label: String,
+    path_detail: String,
+    connections: String,
+    nodes: String,
+    nodes_hint: String,
+    networks: String,
+    networks_hint: String,
 }
 
 fn visible_overview_primary_page<'a>(
@@ -334,7 +441,10 @@ struct GpuiShell {
     search_input: Option<Entity<NativeTextInput>>,
     action_panel_query: String,
     action_panel_search_input: Option<Entity<NativeTextInput>>,
-    collapsed_action_groups: HashSet<String>,
+    action_menu_open: bool,
+    action_menu_dismissed_pointer: Option<(f32, f32)>,
+    navigation_drawer_open: bool,
+    page_switcher_open: bool,
     discovery_search_input: Option<Entity<NativeTextInput>>,
     discovery_query: String,
     discovery_debounced_query: String,
@@ -348,6 +458,8 @@ struct GpuiShell {
     configuration: GpuiConfigurationWorkflow,
     configuration_editor: Option<Entity<TextareaState>>,
     configuration_editor_placeholder: Option<String>,
+    admin_recovery_request_editor: Option<Entity<TextareaState>>,
+    admin_recovery_request_editor_placeholder: Option<String>,
     configuration_initial_load_requested: bool,
     focus_handle: FocusHandle,
     content_focus_handle: FocusHandle,
@@ -375,6 +487,11 @@ struct GpuiShell {
     recent_invitations: Option<Vec<InvitationStatusView>>,
     recent_invitation_status: Option<InvitationStatusView>,
     recent_invitation_preview: Option<InvitationPreview>,
+    recent_admin_recovery_status: Option<AdminRecoveryStatusView>,
+    recent_admin_recovery_status_at_unix_ms: Option<u64>,
+    recent_admin_recoveries: Option<Vec<AdminRecoveryStatusView>>,
+    recent_admin_recoveries_at_unix_ms: Option<u64>,
+    pending_admin_recovery_execute: Option<NodeExecuteAdminRecoveryCommand>,
     invitation_terms_confirmed: bool,
     invitation_exit_contribution_confirmed: bool,
     invitation_copy_notice: Option<String>,
@@ -389,6 +506,7 @@ struct GpuiShell {
     hovered_topology_node_id: Option<String>,
     topology_menu_node_id: Option<String>,
     topology_selection: BTreeSet<String>,
+    topology_zoom: f32,
     topology_directory_request: Option<TopologyDirectoryRequest>,
     topology_directory_ready: Option<TopologyDirectoryReady>,
     topology_directory_error: Option<TopologyDirectoryError>,
@@ -420,7 +538,7 @@ impl GpuiShell {
             locale,
             snapshot,
             manifest: None,
-            selected_page: "overview".into(),
+            selected_page: start_page_from_env(),
             selected_network,
             pending_confirmation: None,
             expanded_actions: HashMap::new(),
@@ -430,7 +548,10 @@ impl GpuiShell {
             search_input: None,
             action_panel_query: String::new(),
             action_panel_search_input: None,
-            collapsed_action_groups: HashSet::new(),
+            action_menu_open: false,
+            action_menu_dismissed_pointer: None,
+            navigation_drawer_open: false,
+            page_switcher_open: false,
             discovery_search_input: None,
             discovery_query: String::new(),
             discovery_debounced_query: String::new(),
@@ -444,6 +565,8 @@ impl GpuiShell {
             configuration: GpuiConfigurationWorkflow::default(),
             configuration_editor: None,
             configuration_editor_placeholder: None,
+            admin_recovery_request_editor: None,
+            admin_recovery_request_editor_placeholder: None,
             configuration_initial_load_requested: false,
             focus_handle: cx.focus_handle(),
             content_focus_handle: cx.focus_handle(),
@@ -471,6 +594,11 @@ impl GpuiShell {
             recent_invitations: None,
             recent_invitation_status: None,
             recent_invitation_preview: None,
+            recent_admin_recovery_status: None,
+            recent_admin_recovery_status_at_unix_ms: None,
+            recent_admin_recoveries: None,
+            recent_admin_recoveries_at_unix_ms: None,
+            pending_admin_recovery_execute: None,
             invitation_terms_confirmed: false,
             invitation_exit_contribution_confirmed: false,
             invitation_copy_notice: None,
@@ -485,6 +613,7 @@ impl GpuiShell {
             hovered_topology_node_id: None,
             topology_menu_node_id: None,
             topology_selection: BTreeSet::new(),
+            topology_zoom: 1.0,
             topology_directory_request: None,
             topology_directory_ready: None,
             topology_directory_error: None,
@@ -1555,7 +1684,28 @@ impl GpuiShell {
             })
             .collect();
         match build_command(&action, &values) {
-            Ok(command) => self.submit_raw(command, cx),
+            Ok(command) => {
+                if action_id == "execute_admin_recovery" {
+                    let NodeCommand::ExecuteAdminRecovery(command) = command else {
+                        self.error = Some(
+                            t(self.locale, "admin_recovery.error.outcome_unknown").to_string(),
+                        );
+                        self.pending_confirmation = None;
+                        cx.notify();
+                        return;
+                    };
+                    self.pending_admin_recovery_execute = Some(command.clone());
+                    self.submit_raw(
+                        NodeCommand::GetAdminRecoveryStatus(NodeAdminRecoveryStatusCommand {
+                            network_name: command.network_name,
+                            request_id: command.request_id,
+                        }),
+                        cx,
+                    );
+                } else {
+                    self.submit_raw(command, cx);
+                }
+            }
             Err(error) => {
                 self.error = Some(tr(
                     self.locale,
@@ -1863,6 +2013,76 @@ impl GpuiShell {
         }
     }
 
+    fn sync_admin_recovery_request_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let field_exists = self.manifest.as_ref().is_some_and(|manifest| {
+            manifest
+                .pages
+                .iter()
+                .flat_map(|page| &page.actions)
+                .any(|action| {
+                    action.id == "submit_admin_recovery"
+                        && action
+                            .fields
+                            .iter()
+                            .any(|field| field.input == NodeUiInputKind::AdminRecoveryRequestJson)
+                })
+        });
+        if !field_exists {
+            return;
+        }
+
+        let key = self.field_key("submit_admin_recovery", "request_json");
+        let value = self.form_values.get(&key).cloned().unwrap_or_default();
+        let placeholder = t(self.locale, "placeholder.admin_recovery_request_json").to_string();
+        if self.admin_recovery_request_editor.is_none() {
+            let editor = cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .placeholder(placeholder.clone())
+                    .default_value(value)
+            });
+            cx.subscribe(
+                &editor,
+                move |shell: &mut Self, editor, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        let value = editor.read(cx).value().to_string();
+                        shell.form_values.insert(key.clone(), value);
+                        cx.notify();
+                    }
+                },
+            )
+            .detach();
+            self.admin_recovery_request_editor = Some(editor);
+            self.admin_recovery_request_editor_placeholder = Some(placeholder);
+            return;
+        }
+
+        let Some(editor) = self.admin_recovery_request_editor.clone() else {
+            return;
+        };
+        if editor.read(cx).value().as_ref() != value {
+            editor.update(cx, |editor, cx| editor.set_value(value, window, cx));
+        }
+        if self.admin_recovery_request_editor_placeholder.as_deref() != Some(placeholder.as_str()) {
+            editor.update(cx, |editor, cx| {
+                editor.set_placeholder(placeholder.clone(), window, cx)
+            });
+            self.admin_recovery_request_editor_placeholder = Some(placeholder);
+        }
+    }
+
+    fn remember_admin_recovery_status(&mut self, status: &AdminRecoveryStatusView) {
+        self.recent_admin_recovery_status = Some(status.clone());
+        self.recent_admin_recovery_status_at_unix_ms = Some(unix_time_ms());
+        if let Some(recoveries) = &mut self.recent_admin_recoveries {
+            if let Some(existing) = recoveries
+                .iter_mut()
+                .find(|existing| existing.request_id == status.request_id)
+            {
+                *existing = status.clone();
+            }
+        }
+    }
+
     fn focus_configuration_issue(
         &mut self,
         path: String,
@@ -1889,11 +2109,20 @@ impl GpuiShell {
         let result = match result {
             Ok(result) => result,
             Err(error) => {
+                let recovery_outcome_unknown = self.pending_admin_recovery_execute.take().is_some();
                 let message = tr(
                     self.locale,
                     "gpui.command_channel_error",
                     &[("error", &error.to_string())],
                 );
+                let message = if recovery_outcome_unknown {
+                    format!(
+                        "{message} {}",
+                        t(self.locale, "admin_recovery.error.outcome_unknown")
+                    )
+                } else {
+                    message
+                };
                 if self.configuration.operation.is_some() {
                     self.configuration.set_error(message.clone());
                     self.configuration.finish();
@@ -1902,6 +2131,16 @@ impl GpuiShell {
                 return;
             }
         };
+
+        if self.pending_admin_recovery_execute.is_some()
+            && !matches!(
+                &result.outcome,
+                NodeCommandOutcome::AdminRecoveryStatus(_) | NodeCommandOutcome::Rejected(_)
+            )
+        {
+            self.pending_admin_recovery_execute = None;
+            self.error = Some(t(self.locale, "admin_recovery.error.outcome_unknown").to_string());
+        }
 
         match result.outcome {
             NodeCommandOutcome::Snapshot(snapshot) => {
@@ -1949,6 +2188,7 @@ impl GpuiShell {
                 ));
             }
             NodeCommandOutcome::Rejected(problem) => {
+                self.pending_admin_recovery_execute = None;
                 if self.configuration.operation.is_some() {
                     self.configuration.record_rejection(&problem);
                     self.configuration.finish();
@@ -2539,17 +2779,66 @@ impl GpuiShell {
                 ));
             }
             NodeCommandOutcome::AdminRecoveryStatus(status) => {
-                self.notice = Some(format!(
-                    "管理员恢复 · {} · state={:?} · approvals={}/{} · can_execute={}",
-                    status.request_id,
-                    status.state,
-                    status.signature_count,
-                    status.required_signatures,
-                    status.can_execute
-                ));
+                let status = *status;
+                self.remember_admin_recovery_status(&status);
+                if let Some(pending) = self.pending_admin_recovery_execute.take() {
+                    let request_matches = status.request_id == pending.request_id;
+                    let network_matches = self
+                        .snapshot
+                        .memberships
+                        .iter()
+                        .find(|membership| membership.network_name == pending.network_name)
+                        .is_some_and(|membership| {
+                            membership.network_id == status.network_id.as_str()
+                        });
+                    if request_matches
+                        && network_matches
+                        && status.state == AdminRecoveryState::Pending
+                        && status.can_execute
+                    {
+                        self.notice = Some(
+                            t(self.locale, "admin_recovery.execution_revalidated").to_string(),
+                        );
+                        self.submit_raw(NodeCommand::ExecuteAdminRecovery(pending), cx);
+                    } else {
+                        let denial_key = if !request_matches {
+                            "admin_recovery.error.request_mismatch"
+                        } else if !network_matches {
+                            "admin_recovery.error.network_mismatch"
+                        } else {
+                            status
+                                .denial_key
+                                .as_deref()
+                                .unwrap_or("admin_recovery.error.threshold_not_met")
+                        };
+                        self.error = Some(t(self.locale, denial_key).to_string());
+                    }
+                } else {
+                    self.notice = Some(tr(
+                        self.locale,
+                        "outcome.admin_recovery_status",
+                        &[
+                            ("request", status.request_id.as_str()),
+                            (
+                                "state",
+                                t(self.locale, admin_recovery_state_key(status.state)),
+                            ),
+                            ("signatures", &status.signature_count.to_string()),
+                            ("required", &status.required_signatures.to_string()),
+                        ],
+                    ));
+                }
             }
             NodeCommandOutcome::AdminRecoveries(statuses) => {
-                self.notice = Some(format!("管理员恢复请求 · {} 项", statuses.len()));
+                self.notice = Some(tr(
+                    self.locale,
+                    "outcome.admin_recoveries",
+                    &[("count", &statuses.len().to_string())],
+                ));
+                self.recent_admin_recovery_status_at_unix_ms = Some(unix_time_ms());
+                self.recent_admin_recoveries_at_unix_ms =
+                    self.recent_admin_recovery_status_at_unix_ms;
+                self.recent_admin_recoveries = Some(statuses);
             }
             NodeCommandOutcome::Accepted { operation_id } => {
                 self.notice = Some(tr(
@@ -2592,6 +2881,7 @@ impl GpuiShell {
                         | NodeUiInputKind::ExitContribution
                         | NodeUiInputKind::ExitContributionScope
                         | NodeUiInputKind::JoinRequestReviewAction
+                        | NodeUiInputKind::AdminRecoveryRequestJson
                 ) {
                     let key = self.field_key(&action.id, &field.id);
                     text_fields.push((
@@ -3142,6 +3432,20 @@ impl GpuiShell {
             .find(|page| page.id == self.selected_page)
     }
 
+    fn clamp_selected_page_to_manifest(&mut self) {
+        let Some(manifest) = self.manifest.as_ref() else {
+            return;
+        };
+        if manifest.pages.iter().any(|page| page.id == self.selected_page) {
+            return;
+        }
+        self.selected_page = manifest
+            .pages
+            .first()
+            .map(|page| page.id.clone())
+            .unwrap_or_else(|| "overview".to_string());
+    }
+
     fn module_landing_page(&self, module: &NavigationModule) -> String {
         let Some(manifest) = self.manifest.as_ref() else {
             return module.default_page_id.clone();
@@ -3160,42 +3464,69 @@ impl GpuiShell {
             .unwrap_or_else(|| module.default_page_id.clone())
     }
 
-    fn language_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn language_selector(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let selected_label = t(self.locale, self.language_preference.label_key()).to_string();
-        let mut selector = div().relative().child(
-            div()
-                .id("language-menu-trigger")
-                .role(Role::Button)
-                .aria_label(t(self.locale, "common.language").to_string())
-                .focusable()
-                .tab_stop(true)
-                .flex()
-                .items_center()
-                .gap_2()
-                .h(px(34.0))
-                .px_3()
-                .rounded(px(9.0))
-                .bg(rgba(DARK_THEME.colors.surface.rgba_hex()))
-                .text_size(px(12.0))
-                .font_weight(gpui::FontWeight(600.0))
-                .text_color(rgba(COLOR_TEXT_SECONDARY))
-                .child(lucide_icon(
-                    include_bytes!("../../assets/icons/globe-2.svg"),
-                    16.0,
-                    COLOR_TEXT_SECONDARY,
-                ))
-                .child(selected_label)
-                .child(lucide_icon(
-                    include_bytes!("../../assets/icons/chevron-down.svg"),
-                    14.0,
-                    COLOR_MUTED,
-                ))
-                .on_click(cx.listener(|shell, _, _, cx| {
-                    shell.language_menu_open = !shell.language_menu_open;
-                    shell.network_menu_open = false;
+        let mut selector = div()
+            .debug_selector(|| "visual-language-control".into())
+            .relative()
+            .on_mouse_down_out(cx.listener(|shell, _, _, cx| {
+                if shell.language_menu_open {
+                    shell.language_menu_open = false;
                     cx.notify();
-                })),
-        );
+                }
+            }))
+            .child(
+                div()
+                    .id("language-menu-trigger")
+                    .role(Role::Button)
+                    .aria_label(t(self.locale, "common.language").to_string())
+                    .focusable()
+                    .tab_stop(true)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .h(px(34.0))
+                    .when(compact, |trigger| trigger.w(px(34.0)).px_0())
+                    .when(!compact, |trigger| trigger.px_3())
+                    .rounded(px(9.0))
+                    .bg(rgba(DARK_THEME.colors.surface.rgba_hex()))
+                    .text_size(px(12.0)).line_height(px(18.0))
+                    .font_weight(gpui::FontWeight(600.0))
+                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                    .child(lucide_icon(
+                        include_bytes!("../../assets/icons/globe-2.svg"),
+                        16.0,
+                        COLOR_TEXT_SECONDARY,
+                    ))
+                    .when(!compact, |trigger| {
+                        trigger.child(selected_label).child(lucide_icon(
+                            include_bytes!("../../assets/icons/chevron-down.svg"),
+                            14.0,
+                            COLOR_MUTED,
+                        ))
+                    })
+                    .on_click(cx.listener(|shell, event: &gpui::ClickEvent, _, cx| {
+                        if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                            return;
+                        }
+                        shell.language_menu_open = !shell.language_menu_open;
+                        shell.network_menu_open = false;
+                        shell.action_menu_open = false;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }))
+                    .on_key_down(cx.listener(|shell, event: &gpui::KeyDownEvent, _, cx| {
+                        if !is_unmodified_activation_key(event) {
+                            return;
+                        }
+                        shell.language_menu_open = !shell.language_menu_open;
+                        shell.network_menu_open = false;
+                        shell.action_menu_open = false;
+                        cx.stop_propagation();
+                        cx.notify();
+                    })),
+            );
 
         if self.language_menu_open {
             selector = selector.child(
@@ -3210,6 +3541,12 @@ impl GpuiShell {
                     .p_1()
                     .rounded_md()
                     .bg(rgba(COLOR_PANEL_RAISED))
+                    .on_mouse_down_out(cx.listener(|shell, _, _, cx| {
+                        if shell.language_menu_open {
+                            shell.language_menu_open = false;
+                            cx.notify();
+                        }
+                    }))
                     .children(LanguagePreference::ALL.into_iter().map(|preference| {
                         let selected = self.language_preference == preference;
                         button(
@@ -3234,87 +3571,122 @@ impl GpuiShell {
         selector
     }
 
-    fn network_picker(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected_label = self
-            .selected_network
-            .clone()
-            .or_else(|| {
-                self.snapshot
-                    .networks
-                    .first()
-                    .map(|network| network.name.clone())
+    fn page_switcher(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let current_label = self
+            .page()
+            .map(|page| t(self.locale, &page.nav_label_key).to_string())
+            .unwrap_or_else(|| t(self.locale, "common.module_pages").to_string());
+        let pages = self
+            .manifest
+            .as_ref()
+            .and_then(|manifest| {
+                navigation_module_for_page(&self.selected_page).map(|module| {
+                    module
+                        .page_ids
+                        .iter()
+                        .filter_map(|page_id| {
+                            manifest.pages.iter().find(|page| &page.id == page_id)
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
             })
-            .unwrap_or_else(|| t(self.locale, "common.no_running_networks").to_string());
-        let disabled = self.snapshot.networks.is_empty();
-        let mut picker = div()
+            .unwrap_or_default();
+        let mut switcher = div()
+            .debug_selector(|| "visual-page-switcher".into())
             .relative()
-            .flex()
-            .items_center()
-            .gap_2()
+            .on_mouse_down_out(cx.listener(|shell, _, _, cx| {
+                if shell.page_switcher_open {
+                    shell.page_switcher_open = false;
+                    cx.notify();
+                }
+            }))
             .child(
                 div()
-                    .text_size(px(10.0))
-                    .font_weight(gpui::FontWeight(600.0))
-                    .text_color(rgba(COLOR_FAINT))
-                    .child(
-                        t(self.locale, "common.current_network")
-                            .to_string()
-                            .to_uppercase(),
-                    ),
-            )
-            .child(
-                div()
-                    .id("network-picker-trigger")
+                    .id("page-switcher-trigger")
+                    .debug_selector(|| "visual-page-switcher-trigger".into())
                     .role(Role::Button)
-                    .aria_label(t(self.locale, "common.current_network").to_string())
+                    .aria_label(t(self.locale, "common.module_pages").to_string())
+                    .aria_expanded(self.page_switcher_open)
                     .focusable()
-                    .tab_stop(!disabled)
+                    .tab_stop(true)
                     .flex()
                     .items_center()
-                    .justify_between()
                     .gap_2()
-                    .h(px(32.0))
-                    .min_w(px(180.0))
-                    .max_w(px(220.0))
+                    .h(px(34.0))
                     .px_3()
                     .rounded(px(9.0))
-                    .bg(rgba(DARK_THEME.colors.input_background.rgba_hex()))
-                    .text_size(px(12.0))
-                    .text_color(rgba(if disabled { COLOR_FAINT } else { COLOR_TEXT }))
-                    .opacity(if disabled { 0.6 } else { 1.0 })
-                    .child(selected_label)
+                    .border_1()
+                    .border_color(rgba(COLOR_DIVIDER))
+                    .bg(rgba(DARK_THEME.colors.surface.with_alpha(0x9e).rgba_hex()))
+                    .hover(|style| {
+                        style
+                            .border_color(rgba(COLOR_DIVIDER))
+                            .bg(rgba(DARK_THEME.colors.surface_hover.with_alpha(0xb3).rgba_hex()))
+                    })
+                    .text_size(px(12.0)).line_height(px(18.0))
+                    .font_weight(gpui::FontWeight(600.0))
+                    .text_color(rgba(COLOR_TEXT))
+                    .child(lucide_icon(
+                        page_icon_data(&self.selected_page),
+                        15.0,
+                        COLOR_ACCENT,
+                    ))
+                    .when(!compact, |trigger| trigger.child(current_label))
                     .child(lucide_icon(
                         include_bytes!("../../assets/icons/chevron-down.svg"),
                         14.0,
                         COLOR_MUTED,
                     ))
-                    .on_click(cx.listener(|shell, _, _, cx| {
-                        shell.network_menu_open = !shell.network_menu_open;
+                    .on_click(cx.listener(|shell, event: &gpui::ClickEvent, _, cx| {
+                        if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                            return;
+                        }
+                        shell.page_switcher_open = !shell.page_switcher_open;
                         shell.language_menu_open = false;
+                        shell.network_menu_open = false;
+                        shell.action_menu_open = false;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }))
+                    .on_key_down(cx.listener(|shell, event: &gpui::KeyDownEvent, _, cx| {
+                        if !is_unmodified_activation_key(event) {
+                            return;
+                        }
+                        shell.page_switcher_open = !shell.page_switcher_open;
+                        shell.language_menu_open = false;
+                        shell.network_menu_open = false;
+                        shell.action_menu_open = false;
+                        cx.stop_propagation();
                         cx.notify();
                     })),
             );
 
-        if self.network_menu_open && !self.snapshot.networks.is_empty() {
-            picker = picker.child(
+        if self.page_switcher_open && !pages.is_empty() {
+            switcher = switcher.child(
                 div()
+                    .id("page-switcher-menu")
+                    .debug_selector(|| "visual-page-switcher-menu".into())
                     .absolute()
-                    .top(px(42.0))
-                    .right(px(0.0))
+                    .top(px(38.0))
+                    .left(px(0.0))
                     .w(px(220.0))
                     .flex()
                     .flex_col()
                     .gap_1()
                     .p_1()
                     .rounded_md()
+                    .border_1()
+                    .border_color(rgba(COLOR_DIVIDER))
                     .bg(rgba(COLOR_PANEL_RAISED))
-                    .children(self.snapshot.networks.iter().map(|network| {
-                        let network_name = network.name.clone();
-                        let selected =
-                            self.selected_network.as_deref() == Some(network.name.as_str());
+                    
+                    .children(pages.into_iter().map(|page| {
+                        let selected = page.id == self.selected_page;
+                        let page_id = page.id.clone();
+                        let key_page_id = page.id.clone();
                         button(
-                            SharedString::from(format!("network-{}", network.name)),
-                            network.name.clone(),
+                            SharedString::from(format!("page-switcher-{}", page.id)),
+                            t(self.locale, &page.nav_label_key).to_string(),
                             if selected {
                                 ButtonVariant::Secondary
                             } else {
@@ -3322,20 +3694,110 @@ impl GpuiShell {
                             },
                             false,
                         )
+                        .debug_selector({
+                            let id = page.id.clone();
+                            move || format!("visual-page-switcher-{id}")
+                        })
                         .w_full()
+                        .justify_start()
+                        .child(lucide_icon(
+                            page_icon_data(&page.id),
+                            16.0,
+                            if selected { COLOR_ACCENT } else { COLOR_MUTED },
+                        ))
                         .on_click(cx.listener(move |shell, _, _, cx| {
-                            shell.network_menu_open = false;
-                            shell.select_network_context(network_name.clone(), cx);
+                            shell.selected_page = page_id.clone();
+                            shell.page_switcher_open = false;
+                            shell.pending_confirmation = None;
+                            shell.expanded_actions.clear();
+                            shell.error = None;
+                            shell.notice = None;
+                            shell.clear_action_menu_search(cx);
+                            cx.stop_propagation();
                             cx.notify();
                         }))
+                        .on_key_down(cx.listener(
+                            move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                                if !is_unmodified_activation_key(event) {
+                                    return;
+                                }
+                                shell.selected_page = key_page_id.clone();
+                                shell.page_switcher_open = false;
+                                shell.pending_confirmation = None;
+                                shell.expanded_actions.clear();
+                                shell.error = None;
+                                shell.notice = None;
+                                shell.clear_action_menu_search(cx);
+                                cx.stop_propagation();
+                                cx.notify();
+                            },
+                        ))
                     })),
             );
         }
 
-        picker
+        switcher
     }
 
-    fn top_status(&self) -> impl IntoElement {
+    fn topbar_search(&self, compact: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let search_input = self
+            .search_input
+            .as_ref()
+            .map(|input| input.clone().into_any_element());
+        let clear_search = (!self.search_query.trim().is_empty()).then(|| {
+            button(
+                SharedString::from("clear-global-search"),
+                "",
+                ButtonVariant::Ghost,
+                false,
+            )
+            .absolute()
+            .right(px(4.0))
+            .top(px(3.0))
+            .w(px(28.0))
+            .h(px(28.0))
+            .px_0()
+            .aria_label(t(self.locale, "common.search_clear").to_string())
+            .child(lucide_icon(
+                include_bytes!("../../assets/icons/x.svg"),
+                14.0,
+                COLOR_MUTED,
+            ))
+            .on_click(cx.listener(|shell, _, _, cx| shell.clear_search(cx)))
+        });
+        div()
+            .id("global-search")
+            .debug_selector(|| "visual-topbar-search".into())
+            .relative()
+            .flex()
+            .items_center()
+            .h(px(34.0))
+            .when(compact, |search| search.w(px(34.0)))
+            .when(!compact, |search| {
+                search
+                    .w(px(280.0))
+                    .rounded(px(9.0))
+                    .border_1()
+                    .border_color(rgba(COLOR_DIVIDER))
+                    .bg(rgba(DARK_THEME.colors.surface.with_alpha(0x73).rgba_hex()))
+            })
+            .child(
+                div()
+                    .absolute()
+                    .left(px(11.0))
+                    .top(px(9.0))
+                    .child(lucide_icon(
+                        include_bytes!("../../assets/icons/search.svg"),
+                        15.0,
+                        COLOR_FAINT,
+                    )),
+            )
+            .when(!compact, |search| search.children(search_input))
+            .children(clear_search)
+    }
+
+    fn top_status(&self, layout: LayoutClass) -> impl IntoElement {
+        let show_details = layout == LayoutClass::Wide;
         let primary_status = self.snapshot.primary_status();
         let palette = semantic_palette(primary_status_semantic(primary_status));
         let traffic_state = self.snapshot.traffic_session.state;
@@ -3348,14 +3810,20 @@ impl GpuiShell {
             .as_deref()
             .unwrap_or_else(|| t(self.locale, "traffic.session.no_reason"));
         div()
+            .debug_selector(|| "visual-top-status-group".into())
             .flex()
+            .w_full()
             .items_center()
             .gap_3()
             .min_w(px(0.0))
             .overflow_hidden()
             .child(
                 div()
+                    .debug_selector(|| "visual-primary-status".into())
                     .flex()
+                    .h(px(18.59375))
+                    .when(show_details, |status| status.w(px(423.625)))
+                    .flex_shrink_0()
                     .items_center()
                     .gap_2()
                     .min_w(px(0.0))
@@ -3376,34 +3844,40 @@ impl GpuiShell {
                             .child(
                                 div()
                                     .flex_shrink_0()
+                                    .text_size(px(12.0)).line_height(px(18.0))
+                                    .line_height(px(18.0))
                                     .font_weight(gpui::FontWeight(600.0))
                                     .text_color(rgba(COLOR_TEXT))
                                     .child(t(self.locale, primary_status.label_key()).to_string()),
                             )
-                            .child(
-                                div()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_xs()
-                                    .text_color(rgba(COLOR_MUTED))
-                                    .child(t(self.locale, primary_status.detail_key()).to_string()),
-                            ),
+                            .when(show_details, |copy| {
+                                copy.child(
+                                    div()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_size(px(11.0)).line_height(px(16.0))
+                                        .line_height(px(16.5))
+                                        .text_color(rgba(COLOR_MUTED))
+                                        .child(
+                                            t(self.locale, primary_status.detail_key()).to_string(),
+                                        ),
+                                )
+                            }),
                     ),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .w(px(1.0))
-                    .h(px(24.0))
-                    .bg(rgba(COLOR_DIVIDER)),
             )
             .child(
                 div()
                     .debug_selector(|| "visual-traffic-session-status".into())
                     .flex()
+                    .h(px(18.59375))
+                    .when(show_details, |status| status.w(px(211.03125)))
+                    .flex_shrink_0()
                     .items_center()
                     .gap_2()
+                    .pl_3()
+                    .border_l(px(1.0))
+                    .border_color(rgba(COLOR_DIVIDER))
                     .min_w(px(0.0))
                     .child(
                         div()
@@ -3426,85 +3900,139 @@ impl GpuiShell {
                                     .text_color(rgba(COLOR_TEXT))
                                     .child(traffic_label.to_string()),
                             )
-                            .child(
-                                div()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .text_xs()
-                                    .text_color(rgba(COLOR_MUTED))
-                                    .child(traffic_detail.to_string()),
-                            ),
+                            .when(show_details, |copy| {
+                                copy.child(
+                                    div()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_xs()
+                                        .text_color(rgba(COLOR_MUTED))
+                                        .child(traffic_detail.to_string()),
+                                )
+                            }),
                     ),
             )
     }
 
-    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn header(&self, layout: LayoutClass, cx: &mut Context<Self>) -> impl IntoElement {
         let disabled = self.pending_commands > 0;
-        div()
+        let compact = matches!(layout, LayoutClass::Mobile | LayoutClass::Compact);
+        let mut header = div()
             .id(app_region_id(AppRegion::Topbar))
             .debug_selector(|| "visual-topbar".into())
             .h(px(DIMENSIONS.topbar_px as f32))
             .flex()
             .items_center()
-            .gap_4()
-            .px_5()
-            .child(div().flex_1().min_w(px(0.0)).child(self.top_status()))
-            .child(self.network_picker(cx))
-            .child(self.language_selector(cx))
-            .child(
+            .gap_3()
+            .border_b_1()
+            .border_color(rgba(COLOR_DIVIDER))
+            .bg(rgba(COLOR_BG))
+            .px_5();
+
+        if compact {
+            header = header.child(
                 button(
-                    SharedString::from("refresh-snapshot"),
-                    "",
-                    ButtonVariant::Secondary,
-                    disabled,
-                )
-                .aria_label(if disabled {
-                    t(self.locale, "common.operation_in_progress").to_string()
-                } else {
-                    t(self.locale, "common.refresh").to_string()
-                })
-                .w(px(34.0))
-                .h(px(34.0))
-                .px_0()
-                .child(lucide_icon(
-                    include_bytes!("../../assets/icons/refresh-cw.svg"),
-                    17.0,
-                    COLOR_TEXT_SECONDARY,
-                ))
-                .on_click(cx.listener(|shell, _, _, cx| {
-                    if shell.pending_commands == 0 {
-                        shell.submit_raw(NodeCommand::GetSnapshot, cx);
-                    }
-                })),
-            )
-            .child(
-                button(
-                    SharedString::from("quit-application"),
+                    SharedString::from("open-navigation-drawer"),
                     "",
                     ButtonVariant::Secondary,
                     false,
                 )
-                .aria_label(t(self.locale, "common.quit").to_string())
-                .w(px(34.0))
-                .h(px(34.0))
+                .debug_selector(|| "visual-navigation-drawer-trigger".into())
+                .aria_label(t(self.locale, "common.open_navigation").to_string())
+                .aria_expanded(self.navigation_drawer_open)
+                .w(px(36.0))
+                .h(px(36.0))
                 .px_0()
                 .child(lucide_icon(
-                    include_bytes!("../../assets/icons/log-out.svg"),
-                    17.0,
+                    include_bytes!("../../assets/icons/menu.svg"),
+                    18.0,
                     COLOR_TEXT_SECONDARY,
                 ))
-                .on_click(cx.listener(|_, _, window, _| window.remove_window())),
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    shell.navigation_drawer_open = !shell.navigation_drawer_open;
+                    shell.language_menu_open = false;
+                    shell.network_menu_open = false;
+                    shell.action_menu_open = false;
+                    cx.notify();
+                })),
+            );
+        }
+
+        header = header
+            .child(self.page_switcher(compact, cx))
+            .child(self.topbar_search(compact, cx))
+            .child(
+                div()
+                    .debug_selector(|| "visual-global-context".into())
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(self.top_status(layout)),
             )
+            .child(
+                div()
+                    .debug_selector(|| "visual-global-actions".into())
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(self.language_selector(compact, cx))
+                    .child(
+                        button(
+                            SharedString::from("refresh-snapshot"),
+                            "",
+                            ButtonVariant::Secondary,
+                            disabled,
+                        )
+                        .aria_label(if disabled {
+                            t(self.locale, "common.operation_in_progress").to_string()
+                        } else {
+                            t(self.locale, "common.refresh").to_string()
+                        })
+                        .w(px(34.0))
+                        .h(px(34.0))
+                        .px_0()
+                        .child(lucide_icon(
+                            include_bytes!("../../assets/icons/refresh-cw.svg"),
+                            17.0,
+                            COLOR_TEXT_SECONDARY,
+                        ))
+                        .on_click(cx.listener(|shell, _, _, cx| {
+                            if shell.pending_commands == 0 {
+                                shell.submit_raw(NodeCommand::GetSnapshot, cx);
+                            }
+                        })),
+                    )
+                    .child(
+                        button(
+                            SharedString::from("quit-application"),
+                            "",
+                            ButtonVariant::Secondary,
+                            false,
+                        )
+                        .aria_label(t(self.locale, "common.quit").to_string())
+                        .w(px(34.0))
+                        .h(px(34.0))
+                        .px_0()
+                        .child(lucide_icon(
+                            include_bytes!("../../assets/icons/log-out.svg"),
+                            17.0,
+                            COLOR_TEXT_SECONDARY,
+                        ))
+                        .on_click(cx.listener(|_, _, window, _| window.remove_window())),
+                    ),
+            );
+
+        header
     }
 
-    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn navigation_panel(&self, in_drawer: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let active_module_id =
             navigation_module_for_page(&self.selected_page).map(|module| module.id.as_str());
         let nav = navigation_modules()
             .iter()
             .map(|module| {
                 let page_id = self.module_landing_page(module);
+                let key_page_id = page_id.clone();
                 let selected = active_module_id == Some(module.id.as_str());
                 let icon = navigation_icon(module.id.as_str(), 19.0, COLOR_MUTED);
                 nav_tab(
@@ -3513,15 +4041,42 @@ impl GpuiShell {
                     Some(icon),
                     selected,
                 )
-                .on_click(cx.listener(move |shell, _, _, cx| {
+                .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, _, cx| {
+                    if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                        return;
+                    }
                     shell.selected_page = page_id.clone();
                     shell.pending_confirmation = None;
+                    shell.expanded_actions.clear();
                     shell.error = None;
                     shell.notice = None;
                     shell.language_menu_open = false;
                     shell.network_menu_open = false;
+                    shell.action_menu_open = false;
+                    shell.navigation_drawer_open = false;
+                    shell.clear_action_menu_search(cx);
+                    cx.stop_propagation();
                     cx.notify();
                 }))
+                .on_key_down(
+                    cx.listener(move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                        if !is_unmodified_activation_key(event) {
+                            return;
+                        }
+                        shell.selected_page = key_page_id.clone();
+                        shell.pending_confirmation = None;
+                        shell.expanded_actions.clear();
+                        shell.error = None;
+                        shell.notice = None;
+                        shell.language_menu_open = false;
+                        shell.network_menu_open = false;
+                        shell.action_menu_open = false;
+                        shell.navigation_drawer_open = false;
+                        shell.clear_action_menu_search(cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                )
                 .into_any_element()
             })
             .collect::<Vec<_>>();
@@ -3538,14 +4093,18 @@ impl GpuiShell {
             DARK_THEME.colors.success.rgba_hex()
         };
 
-        div()
+        let panel = div()
             .id(app_region_id(AppRegion::Sidebar))
             .debug_selector(|| "visual-sidebar".into())
             .role(A11Y_NAVIGATION_ROLE)
             .aria_label(t(self.locale, "common.main_navigation").to_string())
             .flex()
             .flex_col()
-            .w(px(DIMENSIONS.sidebar_px as f32))
+            .w(px(if in_drawer {
+                280.0
+            } else {
+                DIMENSIONS.sidebar_px as f32
+            }))
             .flex_shrink_0()
             .h_full()
             .bg(rgba(COLOR_SIDEBAR))
@@ -3585,11 +4144,37 @@ impl GpuiShell {
                             .child(
                                 div()
                                     .overflow_hidden()
-                                    .text_size(px(10.0))
+                                    .text_size(px(10.0)).line_height(px(14.0))
                                     .text_color(rgba(COLOR_MUTED))
                                     .child(t(self.locale, "common.node_contract").to_string()),
                             ),
-                    ),
+                    )
+                    .when(in_drawer, |brand| {
+                        brand.child(div().flex_1()).child(
+                            button(
+                                SharedString::from("close-navigation-drawer"),
+                                "",
+                                ButtonVariant::Ghost,
+                                false,
+                            )
+                            .debug_selector(|| "visual-navigation-drawer-close".into())
+                            .aria_label(t(self.locale, "common.close_drawer").to_string())
+                            .w(px(34.0))
+                            .h(px(34.0))
+                            .px_0()
+                            .child(lucide_icon(
+                                include_bytes!("../../assets/icons/x.svg"),
+                                17.0,
+                                COLOR_TEXT_SECONDARY,
+                            ))
+                            .on_click(cx.listener(
+                                |shell, _, _, cx| {
+                                    shell.navigation_drawer_open = false;
+                                    cx.notify();
+                                },
+                            )),
+                        )
+                    }),
             )
             .child(
                 tabs("primary-navigation")
@@ -3606,7 +4191,7 @@ impl GpuiShell {
                     .gap_2()
                     .px_4()
                     .py_3()
-                    .text_size(px(10.0))
+                    .text_size(px(10.0)).line_height(px(14.0))
                     .text_color(rgba(DARK_THEME.colors.text_faint.rgba_hex()))
                     .child(format!(
                         "{} #{}",
@@ -3627,7 +4212,260 @@ impl GpuiShell {
                             )
                             .child(sync_label.to_string()),
                     ),
+            );
+
+        panel
+    }
+
+    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active_module_id =
+            navigation_module_for_page(&self.selected_page).map(|module| module.id.as_str());
+        div()
+            .id(app_region_id(AppRegion::Sidebar))
+            .debug_selector(|| "visual-sidebar-icon-rail".into())
+            .role(A11Y_NAVIGATION_ROLE)
+            .aria_label(t(self.locale, "common.main_navigation").to_string())
+            .w(px(DIMENSIONS.sidebar_px as f32))
+            .h_full()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            .border_r_1()
+            .border_color(rgba(COLOR_DIVIDER))
+            .bg(rgba(COLOR_SIDEBAR))
+            .child(
+                div()
+                    .w_full()
+                    .h(px(DIMENSIONS.topbar_px as f32))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(42.0))
+                            .h(px(42.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(13.0))
+                            .border_1()
+                            .border_color(rgba(COLOR_DIVIDER))
+                            .bg(rgba(DARK_THEME.colors.accent_soft.rgba_hex()))
+                            
+                            .child(lucide_icon(
+                                include_bytes!("../../assets/icons/wifi.svg"),
+                                23.0,
+                                COLOR_ACCENT,
+                            )),
+                    ),
             )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .py_4()
+                    .children(navigation_modules().iter().map(|module| {
+                        let page_id = self.module_landing_page(module);
+                        let key_page_id = page_id.clone();
+                        let selected = active_module_id == Some(module.id.as_str());
+                        let label = t(self.locale, &module.label_key).to_string();
+                        div()
+                            .id(SharedString::from(format!("nav-module-{}", module.id)))
+                            .debug_selector({
+                                let module_id = module.id.clone();
+                                move || format!("visual-navigation-{module_id}")
+                            })
+                            .role(Role::Button)
+                            .aria_label(label)
+                            .aria_selected(selected)
+                            .focusable()
+                            .tab_stop(true)
+                            .w(px(50.0))
+                            .h(px(50.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(13.0))
+                            .when(selected, |item| {
+                                item.bg(rgba(DARK_THEME.colors.surface_hover.rgba_hex()))
+                            })
+                            .when(!selected, |item| {
+                                item.hover(|style| {
+                                    style.bg(rgba(DARK_THEME.colors.surface_hover.rgba_hex()))
+                                })
+                            })
+                            .child(navigation_icon(
+                                module.id.as_str(),
+                                21.0,
+                                if selected { COLOR_ACCENT } else { COLOR_MUTED },
+                            ))
+                            .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, _, cx| {
+                                if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                                    return;
+                                }
+                                shell.selected_page = page_id.clone();
+                                shell.pending_confirmation = None;
+                                shell.expanded_actions.clear();
+                                shell.error = None;
+                                shell.notice = None;
+                                shell.language_menu_open = false;
+                                shell.network_menu_open = false;
+                                shell.action_menu_open = false;
+                                shell.navigation_drawer_open = false;
+                                shell.clear_action_menu_search(cx);
+                                cx.stop_propagation();
+                                cx.notify();
+                            }))
+                            .on_key_down(cx.listener(
+                                move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                                    if !is_unmodified_activation_key(event) {
+                                        return;
+                                    }
+                                    shell.selected_page = key_page_id.clone();
+                                    shell.pending_confirmation = None;
+                                    shell.expanded_actions.clear();
+                                    shell.error = None;
+                                    shell.notice = None;
+                                    shell.language_menu_open = false;
+                                    shell.network_menu_open = false;
+                                    shell.action_menu_open = false;
+                                    shell.navigation_drawer_open = false;
+                                    shell.clear_action_menu_search(cx);
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                },
+                            ))
+                            .into_any_element()
+                    })),
+            )
+    }
+
+    fn navigation_drawer(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .id("navigation-drawer-overlay")
+            .debug_selector(|| "visual-navigation-drawer".into())
+            .absolute()
+            .top(px(0.0))
+            .right(px(0.0))
+            .bottom(px(0.0))
+            .left(px(0.0))
+            .flex()
+            .child(
+                div()
+                    .id("navigation-drawer-panel")
+                    .h_full()
+                    
+                    .child(self.navigation_panel(true, cx)),
+            )
+            .child(
+                div()
+                    .id("navigation-drawer-scrim")
+                    .flex_1()
+                    .h_full()
+                    .bg(rgba(COLOR_PANEL_SOLID))
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.navigation_drawer_open = false;
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn bottom_navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active_module_id =
+            navigation_module_for_page(&self.selected_page).map(|module| module.id.as_str());
+        div()
+            .id(app_region_id(AppRegion::Sidebar))
+            .debug_selector(|| "visual-bottom-navigation".into())
+            .role(A11Y_NAVIGATION_ROLE)
+            .aria_label(t(self.locale, "common.main_navigation").to_string())
+            .h(px(64.0))
+            .flex_shrink_0()
+            .flex()
+            .items_stretch()
+            .border_t_1()
+            .border_color(rgba(COLOR_DIVIDER))
+            .bg(rgba(COLOR_SIDEBAR))
+            .children(navigation_modules().iter().map(|module| {
+                let page_id = self.module_landing_page(module);
+                let key_page_id = page_id.clone();
+                let selected = active_module_id == Some(module.id.as_str());
+                let color = if selected { COLOR_ACCENT } else { COLOR_MUTED };
+                div()
+                    .id(SharedString::from(format!("bottom-nav-{}", module.id)))
+                    .debug_selector({
+                        let module_id = module.id.clone();
+                        move || format!("visual-bottom-navigation-{module_id}")
+                    })
+                    .role(Role::Button)
+                    .aria_label(t(self.locale, &module.label_key).to_string())
+                    .aria_selected(selected)
+                    .focusable()
+                    .tab_stop(true)
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .text_size(px(9.0)).line_height(px(13.0))
+                    .font_weight(gpui::FontWeight(if selected { 600.0 } else { 400.0 }))
+                    .text_color(rgba(color))
+                    .when(selected, |tab| {
+                        tab.child(
+                            div()
+                                .absolute()
+                                .top(px(0.0))
+                                .w(px(28.0))
+                                .h(px(2.0))
+                                .rounded_full()
+                                .bg(rgba(COLOR_ACCENT)),
+                        )
+                    })
+                    .child(navigation_icon(module.id.as_str(), 20.0, color))
+                    .child(t(self.locale, &module.label_key).to_string())
+                    .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, _, cx| {
+                        if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                            return;
+                        }
+                        shell.selected_page = key_page_id.clone();
+                        shell.pending_confirmation = None;
+                        shell.expanded_actions.clear();
+                        shell.error = None;
+                        shell.notice = None;
+                        shell.language_menu_open = false;
+                        shell.network_menu_open = false;
+                        shell.action_menu_open = false;
+                        shell.navigation_drawer_open = false;
+                        shell.clear_action_menu_search(cx);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }))
+                    .on_key_down(
+                        cx.listener(move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                            if !is_unmodified_activation_key(event) {
+                                return;
+                            }
+                            shell.selected_page = page_id.clone();
+                            shell.pending_confirmation = None;
+                            shell.expanded_actions.clear();
+                            shell.error = None;
+                            shell.notice = None;
+                            shell.language_menu_open = false;
+                            shell.network_menu_open = false;
+                            shell.action_menu_open = false;
+                            shell.navigation_drawer_open = false;
+                            shell.clear_action_menu_search(cx);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element()
+            }))
     }
 
     fn error_banner(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3641,117 +4479,6 @@ impl GpuiShell {
             shell.error = None;
             cx.notify();
         }))
-    }
-
-    fn local_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let page_tabs = self
-            .manifest
-            .as_ref()
-            .and_then(|manifest| {
-                navigation_module_for_page(&self.selected_page).map(|module| {
-                    module
-                        .page_ids
-                        .iter()
-                        .filter_map(|page_id| {
-                            manifest.pages.iter().find(|page| &page.id == page_id)
-                        })
-                        .map(|page| {
-                            let page_id = page.id.clone();
-                            let selected = page.id == self.selected_page;
-                            page_tab_control(
-                                SharedString::from(format!("local-page-{}", page.id)),
-                                t(self.locale, &page.nav_label_key).to_string(),
-                                selected,
-                            )
-                            .on_click(cx.listener(move |shell, _, _, cx| {
-                                shell.selected_page = page_id.clone();
-                                shell.pending_confirmation = None;
-                                cx.notify();
-                            }))
-                            .into_any_element()
-                        })
-                        .collect::<Vec<_>>()
-                })
-            })
-            .unwrap_or_default();
-        let search_input = self
-            .search_input
-            .as_ref()
-            .map(|input| input.clone().into_any_element());
-        let clear_search = (!self.search_query.trim().is_empty()).then(|| {
-            button(
-                SharedString::from("clear-global-search"),
-                "",
-                ButtonVariant::Ghost,
-                false,
-            )
-            .absolute()
-            .right(px(4.0))
-            .top(px(3.0))
-            .w(px(28.0))
-            .h(px(28.0))
-            .px_0()
-            .aria_label(t(self.locale, "common.search_clear").to_string())
-            .child(lucide_icon(
-                include_bytes!("../../assets/icons/x.svg"),
-                14.0,
-                COLOR_MUTED,
-            ))
-            .on_click(cx.listener(|shell, _, _, cx| shell.clear_search(cx)))
-        });
-        let search_control = div()
-            .id("global-search")
-            .relative()
-            .flex()
-            .items_center()
-            .w(px(320.0))
-            .h(px(34.0))
-            .child(
-                div()
-                    .absolute()
-                    .left(px(11.0))
-                    .top(px(9.0))
-                    .child(lucide_icon(
-                        include_bytes!("../../assets/icons/search.svg"),
-                        15.0,
-                        COLOR_FAINT,
-                    )),
-            )
-            .children(search_input)
-            .children(clear_search);
-
-        div()
-            .id("local-toolbar")
-            .debug_selector(|| "visual-toolbar".into())
-            .h(px(48.0))
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_4()
-            .px_5()
-            .child(
-                div()
-                    .id("module-page-tabs")
-                    .role(A11Y_TAB_LIST_ROLE)
-                    .aria_label(t(self.locale, "common.page_sections").to_string())
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .children(page_tabs),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .child(search_control)
-                    .children((self.pending_commands > 0).then(|| {
-                        sync_badge(
-                            "snapshot-syncing",
-                            t(self.locale, "common.syncing").to_string(),
-                        )
-                    })),
-            )
     }
 
     fn search_results_panel(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
@@ -3783,6 +4510,7 @@ impl GpuiShell {
                     let kind_label = t(self.locale, result.kind.label_key()).to_string();
                     let aria_label = format!("{kind_label} · {} · {}", result.title, result.detail);
                     let result_for_click = result.clone();
+                    let result_for_key = result.clone();
                     div()
                         .id(result_id)
                         .role(Role::ListItem)
@@ -3801,13 +4529,32 @@ impl GpuiShell {
                                 .w_full()
                                 .px_4()
                                 .py_2()
-                                .on_click(cx.listener(move |shell, _, window, cx| {
-                                    shell.navigate_to_search_result(
-                                        result_for_click.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                }))
+                                .on_click(cx.listener(
+                                    move |shell, event: &gpui::ClickEvent, window, cx| {
+                                        if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                                            return;
+                                        }
+                                        shell.navigate_to_search_result(
+                                            result_for_click.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                        cx.stop_propagation();
+                                    },
+                                ))
+                                .on_key_down(cx.listener(
+                                    move |shell, event: &gpui::KeyDownEvent, window, cx| {
+                                        if !is_unmodified_activation_key(event) {
+                                            return;
+                                        }
+                                        shell.navigate_to_search_result(
+                                            result_for_key.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                        cx.stop_propagation();
+                                    },
+                                ))
                                 .child(
                                     div()
                                         .flex()
@@ -3829,7 +4576,7 @@ impl GpuiShell {
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(10.0))
+                                        .text_size(px(10.0)).line_height(px(14.0))
                                         .text_color(rgba(COLOR_ACCENT))
                                         .child(kind_label.clone()),
                                 ),
@@ -3864,8 +4611,106 @@ impl GpuiShell {
         self.selected_page = page_id.to_string();
         self.pending_confirmation = None;
         self.network_actions_open = None;
+        self.action_menu_open = false;
+        self.clear_action_menu_search(cx);
         self.expanded_actions.clear();
         self.expanded_actions.insert(action_id.to_string(), true);
+        cx.notify();
+    }
+
+    fn activate_action_card(&mut self, action_id: &str, direct_read: bool, cx: &mut Context<Self>) {
+        if direct_read {
+            self.submit_manifest_action(action_id, cx);
+            return;
+        }
+        let currently_expanded = self
+            .expanded_actions
+            .get(action_id)
+            .copied()
+            .unwrap_or(false);
+        if currently_expanded && self.pending_confirmation.as_deref() == Some(action_id) {
+            self.pending_confirmation = None;
+        }
+        if currently_expanded {
+            self.expanded_actions.remove(action_id);
+        } else {
+            self.expanded_actions.clear();
+            self.expanded_actions.insert(action_id.to_string(), true);
+        }
+        if currently_expanded && action_id == "list_network_members" {
+            self.recent_network_members = None;
+            self.selected_member_node_id = None;
+        }
+        cx.notify();
+    }
+
+    fn open_topology_command_workspace(&mut self, cx: &mut Context<Self>) {
+        self.pending_confirmation = None;
+        self.network_actions_open = None;
+        self.action_menu_open = false;
+        self.clear_action_menu_search(cx);
+        self.expanded_actions.clear();
+        self.expanded_actions
+            .insert(TOPOLOGY_COMMAND_ID.to_string(), true);
+        cx.notify();
+    }
+
+    fn toggle_command_menu(&mut self, cx: &mut Context<Self>) {
+        self.action_menu_dismissed_pointer = None;
+        self.action_menu_open = !self.action_menu_open;
+        if !self.action_menu_open {
+            self.clear_action_menu_search(cx);
+        }
+        cx.notify();
+    }
+
+    fn clear_action_menu_search(&mut self, cx: &mut Context<Self>) {
+        self.action_panel_query.clear();
+        if let Some(input) = &self.action_panel_search_input {
+            input.update(cx, |input, cx| input.set_value("", cx));
+        }
+    }
+
+    fn close_action_workspace(&mut self, cx: &mut Context<Self>) {
+        if self.expanded_actions.contains_key("list_network_members") {
+            self.recent_network_members = None;
+            self.selected_member_node_id = None;
+        }
+        if self.expanded_actions.contains_key(TOPOLOGY_COMMAND_ID) {
+            self.pending_topology_lifecycle = None;
+        }
+        self.expanded_actions.clear();
+        self.pending_confirmation = None;
+        self.action_menu_open = false;
+        self.clear_action_menu_search(cx);
+        cx.notify();
+    }
+
+    fn dismiss_transient_surfaces(&mut self, cx: &mut Context<Self>) {
+        if !self.expanded_actions.is_empty() {
+            self.close_action_workspace(cx);
+            return;
+        }
+
+        let had_open_surface = self.action_menu_open
+            || self.navigation_drawer_open
+            || self.language_menu_open
+            || self.network_menu_open
+            || self.page_switcher_open
+            || self.topology_menu_node_id.is_some()
+            || self.selected_topology_node_id.is_some();
+        if !had_open_surface {
+            return;
+        }
+
+        self.action_menu_open = false;
+        self.navigation_drawer_open = false;
+        self.language_menu_open = false;
+        self.network_menu_open = false;
+        self.page_switcher_open = false;
+        self.topology_menu_node_id = None;
+        self.selected_topology_node_id = None;
+        self.clear_action_menu_search(cx);
         cx.notify();
     }
 
@@ -4059,6 +4904,7 @@ impl GpuiShell {
     fn overview_content(
         &self,
         overview: &OverviewModel,
+        layout: LayoutClass,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let colors = DARK_THEME.colors;
@@ -4085,7 +4931,7 @@ impl GpuiShell {
         let mut primary_card = surface_card()
             .id("overview-primary-status")
             .debug_selector(|| "visual-hero".into())
-            .bg(rgba(colors.surface.rgba_hex()))
+            .bg(rgba(colors.panel_solid.rgba_hex()))
             .role(Role::Status)
             .aria_label(format!(
                 "{} · {}",
@@ -4094,9 +4940,9 @@ impl GpuiShell {
             ))
             .flex()
             .items_center()
-            .gap_4()
-            .p_5()
-            .child(lucide_icon(hero_icon, 30.0, hero_tone.rgba_hex()))
+            .gap_3()
+            .p_4()
+            .child(lucide_icon(hero_icon, 24.0, hero_tone.rgba_hex()))
             .child(
                 div()
                     .debug_selector(|| "visual-hero-copy".into())
@@ -4106,7 +4952,7 @@ impl GpuiShell {
                     .min_w(px(0.0))
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(px(11.0)).line_height(px(16.0))
                             .font_weight(gpui::FontWeight(600.0))
                             .text_color(rgba(COLOR_MUTED))
                             .child(
@@ -4117,18 +4963,45 @@ impl GpuiShell {
                     )
                     .child(
                         div()
-                            .mt(px(3.0))
-                            .text_size(px(20.0))
+                            .text_size(px(18.0)).line_height(px(25.0))
                             .font_weight(gpui::FontWeight(600.0))
                             .text_color(rgba(COLOR_TEXT))
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
                             .child(overview.node_name.clone()),
                     )
+                    .when_some(overview.node_id.as_ref(), |copy, node_id| {
+                        copy.child(
+                            div()
+                                .id("overview-node-identity")
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_size(px(10.5))
+                                .line_height(px(15.0))
+                                .text_color(rgba(COLOR_MUTED))
+                                .aria_label(format!(
+                                    "{}: {node_id}",
+                                    t(self.locale, "overview.node_id")
+                                ))
+                                .child(t(self.locale, "overview.node_id").to_string())
+                                .child(
+                                    div()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .font_family("monospace")
+                                        .child(abbreviated_node_id(node_id)),
+                                ),
+                        )
+                    })
                     .child(
                         div()
                             .flex()
                             .items_baseline()
                             .gap_1()
-                            .text_size(px(13.0))
+                            .text_size(px(13.0)).line_height(px(20.0))
                             .child(
                                 div()
                                     .font_weight(gpui::FontWeight(600.0))
@@ -4200,12 +5073,14 @@ impl GpuiShell {
                 .flex()
                 .flex_col()
                 .gap(px(3.0))
-                .w(px(230.0))
+                .min_w(px(120.0))
+                .flex_1()
                 .p_2()
                 .border_1()
                 .border_color(rgba(COLOR_DIVIDER))
                 .rounded(px(8.0))
                 .text_xs()
+                .line_height(px(16.5))
                 .text_color(rgba(COLOR_MUTED))
                 .child(label.to_string())
                 .child(
@@ -4229,6 +5104,7 @@ impl GpuiShell {
             .p_4()
             .child(
                 div()
+                    .debug_selector(|| "visual-traffic-heading".into())
                     .flex()
                     .items_start()
                     .justify_between()
@@ -4242,8 +5118,8 @@ impl GpuiShell {
                             .min_w(px(0.0))
                             .child(
                                 div()
-                                    .text_size(px(14.0))
-                                    .line_height(px(21.7))
+                                    .text_size(px(14.0)).line_height(px(22.0))
+                                    .line_height(px(19.6875))
                                     .font_weight(gpui::FontWeight(600.0))
                                     .text_color(rgba(COLOR_TEXT))
                                     .child(t(self.locale, "traffic.session.title").to_string()),
@@ -4251,6 +5127,7 @@ impl GpuiShell {
                             .child(
                                 div()
                                     .text_xs()
+                                    .line_height(px(17.046875))
                                     .text_color(rgba(COLOR_MUTED))
                                     .child(traffic_changed_at),
                             ),
@@ -4263,6 +5140,7 @@ impl GpuiShell {
             )
             .child(
                 div()
+                    .debug_selector(|| "visual-traffic-summary".into())
                     .flex()
                     .flex_wrap()
                     .items_center()
@@ -4273,7 +5151,7 @@ impl GpuiShell {
                             .py(px(2.0))
                             .rounded_full()
                             .bg(rgba(traffic_palette.background.rgba_hex()))
-                            .text_size(px(10.0))
+                            .text_size(px(10.0)).line_height(px(14.0))
                             .line_height(px(14.0))
                             .font_weight(gpui::FontWeight(600.0))
                             .text_color(rgba(traffic_palette.foreground.rgba_hex()))
@@ -4289,6 +5167,7 @@ impl GpuiShell {
             )
             .child(
                 div()
+                    .debug_selector(|| "visual-traffic-meta".into())
                     .mt_3()
                     .flex()
                     .flex_wrap()
@@ -4307,103 +5186,113 @@ impl GpuiShell {
                         t(self.locale, "traffic.session.failure"),
                         traffic_failure,
                     )),
-            )
-            .child(
-                div()
-                    .mt_4()
-                    .mb_2()
-                    .text_xs()
-                    .font_weight(gpui::FontWeight(600.0))
-                    .text_color(rgba(COLOR_TEXT_SECONDARY))
-                    .child(t(self.locale, "traffic.session.validation.title").to_string()),
             );
-        if let Some(observed_at) = overview.traffic_session.validation_observed_at_unix_ms {
-            if observed_at > 0 {
-                traffic_card =
-                    traffic_card.child(div().mb_2().text_xs().text_color(rgba(COLOR_MUTED)).child(
-                        tr(
-                            self.locale,
-                            "traffic.session.validation.observed_at",
-                            &[(
-                                "time",
-                                &format_diagnostic_timestamp(self.locale, observed_at),
-                            )],
-                        ),
-                    ));
-            }
-        }
         if overview.traffic_session.validation.is_empty() {
             traffic_card = traffic_card.child(
                 div()
-                    .mb_2()
+                    .debug_selector(|| "visual-traffic-validation".into())
+                    .mt_3()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(6.0))
+                    .bg(rgba(COLOR_PANEL_RAISED))
                     .text_xs()
+                    .line_height(px(17.046875))
                     .text_color(rgba(COLOR_MUTED))
                     .child(t(self.locale, "traffic.session.validation.none").to_string()),
             );
         } else {
             traffic_card = traffic_card.child(
-                div().mb_2().flex().flex_wrap().gap_2().children(
-                    overview
-                        .traffic_session
-                        .validation
-                        .iter()
-                        .map(|validation| {
-                            let validation_palette = semantic_palette(if validation.passed {
-                                SemanticState::Success
-                            } else {
-                                SemanticState::Danger
-                            });
-                            div()
-                                .px_2()
-                                .py(px(2.0))
-                                .rounded_full()
-                                .bg(rgba(validation_palette.background.rgba_hex()))
-                                .text_size(px(10.0))
-                                .line_height(px(14.0))
-                                .font_weight(gpui::FontWeight(600.0))
-                                .text_color(rgba(validation_palette.foreground.rgba_hex()))
-                                .child(format!(
-                                    "{}: {}",
-                                    validation.label,
-                                    t(
-                                        self.locale,
-                                        if validation.passed {
-                                            "traffic.session.validation.passed"
-                                        } else {
-                                            "traffic.session.validation.failed"
-                                        },
-                                    )
-                                ))
-                        }),
-                ),
-            );
-        }
-        traffic_card = traffic_card.child(
-            div()
-                .mt_2()
-                .mb_2()
-                .text_xs()
-                .font_weight(gpui::FontWeight(600.0))
-                .text_color(rgba(COLOR_TEXT_SECONDARY))
-                .child(t(self.locale, "traffic.session.events.title").to_string()),
-        );
-        if overview.traffic_session.events.is_empty() {
-            traffic_card = traffic_card.child(
                 div()
+                    .debug_selector(|| "visual-traffic-validation-title".into())
+                    .mt_4()
                     .mb_2()
                     .text_xs()
-                    .text_color(rgba(COLOR_MUTED))
-                    .child(t(self.locale, "traffic.session.events.empty").to_string()),
+                    .line_height(px(18.59375))
+                    .font_weight(gpui::FontWeight(600.0))
+                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                    .child(t(self.locale, "traffic.session.validation.title").to_string()),
             );
-        } else {
+            if let Some(observed_at) = overview.traffic_session.validation_observed_at_unix_ms {
+                if observed_at > 0 {
+                    traffic_card = traffic_card.child(
+                        div()
+                            .mb_2()
+                            .text_xs()
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(tr(
+                                self.locale,
+                                "traffic.session.validation.observed_at",
+                                &[(
+                                    "time",
+                                    &format_diagnostic_timestamp(self.locale, observed_at),
+                                )],
+                            )),
+                    );
+                }
+            }
             traffic_card = traffic_card.child(
-                div().flex().flex_col().children(
-                    overview
-                        .traffic_session
-                        .events
-                        .iter()
-                        .enumerate()
-                        .map(|(index, event)| {
+                div()
+                    .debug_selector(|| "visual-traffic-validation".into())
+                    .mb_2()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .children(
+                        overview
+                            .traffic_session
+                            .validation
+                            .iter()
+                            .map(|validation| {
+                                let validation_palette = semantic_palette(if validation.passed {
+                                    SemanticState::Success
+                                } else {
+                                    SemanticState::Danger
+                                });
+                                div()
+                                    .px_2()
+                                    .py(px(2.0))
+                                    .rounded_full()
+                                    .bg(rgba(validation_palette.background.rgba_hex()))
+                                    .text_size(px(10.0)).line_height(px(14.0))
+                                    .line_height(px(14.0))
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(validation_palette.foreground.rgba_hex()))
+                                    .child(format!(
+                                        "{}: {}",
+                                        validation.label,
+                                        t(
+                                            self.locale,
+                                            if validation.passed {
+                                                "traffic.session.validation.passed"
+                                            } else {
+                                                "traffic.session.validation.failed"
+                                            },
+                                        )
+                                    ))
+                            }),
+                    ),
+            );
+        }
+        if !overview.traffic_session.events.is_empty() {
+            traffic_card = traffic_card.child(
+                div()
+                    .debug_selector(|| "visual-traffic-events-title".into())
+                    .mt_2()
+                    .mb_2()
+                    .text_xs()
+                    .line_height(px(18.59375))
+                    .font_weight(gpui::FontWeight(600.0))
+                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                    .child(t(self.locale, "traffic.session.events.title").to_string()),
+            );
+            traffic_card = traffic_card.child(
+                div()
+                    .debug_selector(|| "visual-traffic-events".into())
+                    .flex()
+                    .flex_col()
+                    .children(overview.traffic_session.events.iter().enumerate().map(
+                        |(index, event)| {
                             let event_palette =
                                 semantic_palette(traffic_protection_semantic(event.state));
                             let mut event_row = div()
@@ -4467,22 +5356,22 @@ impl GpuiShell {
                                         .text_color(rgba(event_palette.foreground.rgba_hex())),
                                 )
                                 .child(event_details)
-                        }),
-                ),
+                        },
+                    )),
             );
         }
 
-        let mut stack = div()
-            .id("overview-stack")
+        let mut primary_column = div().flex().flex_col().gap_4().flex_1().min_w(px(0.0));
+        let mut secondary_column = div()
             .flex()
             .flex_col()
             .gap_4()
-            .max_w(px(980.0))
-            .child(primary_card)
+            .flex_1()
+            .min_w(px(0.0))
             .child(traffic_card);
 
         if !overview.issues.is_empty() {
-            stack = stack.child(
+            primary_column = primary_column.child(
                 surface_card()
                     .id("overview-issues")
                     .flex()
@@ -4502,7 +5391,7 @@ impl GpuiShell {
                             .items_start()
                             .gap_2()
                             .py_2()
-                            .text_size(px(12.0))
+                            .text_size(px(12.0)).line_height(px(18.0))
                             .child(lucide_icon(
                                 include_bytes!("../../assets/icons/alert-triangle.svg"),
                                 15.0,
@@ -4557,6 +5446,8 @@ impl GpuiShell {
                         })
                         .when(index > 0, |row| {
                             row.debug_selector(|| "visual-network-second".into())
+                                .border_t_1()
+                                .border_color(rgba(COLOR_DIVIDER))
                         })
                         .child(lucide_icon(
                             include_bytes!("../../assets/icons/circle-dot.svg"),
@@ -4572,7 +5463,7 @@ impl GpuiShell {
                                 .gap(px(2.0))
                                 .child(
                                     div()
-                                        .text_size(px(12.0))
+                                        .text_size(px(12.0)).line_height(px(18.0))
                                         .line_height(px(18.0))
                                         .font_weight(gpui::FontWeight(600.0))
                                         .text_color(rgba(COLOR_TEXT))
@@ -4580,7 +5471,7 @@ impl GpuiShell {
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(px(11.0)).line_height(px(16.0))
                                         .line_height(px(16.57))
                                         .text_color(rgba(COLOR_MUTED))
                                         .child(tr(
@@ -4594,7 +5485,7 @@ impl GpuiShell {
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(px(11.0)).line_height(px(16.0))
                                         .line_height(px(16.57))
                                         .text_color(rgba(COLOR_MUTED))
                                         .child(tr(
@@ -4615,7 +5506,7 @@ impl GpuiShell {
                                 .rounded_full()
                                 .px(px(7.0))
                                 .py(px(2.0))
-                                .text_size(px(10.0))
+                                .text_size(px(10.0)).line_height(px(14.0))
                                 .font_weight(gpui::FontWeight(600.0))
                                 .text_color(rgba(network_palette.foreground.rgba_hex()))
                                 .bg(rgba(network_palette.background.rgba_hex()))
@@ -4634,7 +5525,7 @@ impl GpuiShell {
                 })
                 .collect::<Vec<_>>()
         };
-        stack = stack.child(
+        primary_column = primary_column.child(
             surface_card()
                 .id("overview-networks")
                 .debug_selector(|| "visual-networks".into())
@@ -4651,15 +5542,15 @@ impl GpuiShell {
                         .mb_3()
                         .child(
                             div()
-                                .text_size(px(14.0))
-                                .line_height(px(21.7))
+                                .text_size(px(14.0)).line_height(px(22.0))
+                                .line_height(px(21.6875))
                                 .font_weight(gpui::FontWeight(600.0))
                                 .text_color(rgba(COLOR_TEXT))
                                 .child(t(self.locale, "overview.networks_title").to_string()),
                         )
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_size(px(12.0)).line_height(px(18.0))
                                 .line_height(px(18.0))
                                 .text_color(rgba(COLOR_MUTED))
                                 .child(overview.networks.len().to_string()),
@@ -4697,7 +5588,7 @@ impl GpuiShell {
                                 .gap(px(2.0))
                                 .child(
                                     div()
-                                        .text_size(px(12.0))
+                                        .text_size(px(12.0)).line_height(px(18.0))
                                         .line_height(px(18.0))
                                         .font_weight(gpui::FontWeight(600.0))
                                         .text_color(rgba(COLOR_TEXT))
@@ -4705,7 +5596,7 @@ impl GpuiShell {
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(px(11.0)).line_height(px(16.0))
                                         .line_height(px(16.0))
                                         .text_color(rgba(COLOR_MUTED))
                                         .child(activity.detail.clone()),
@@ -4719,7 +5610,7 @@ impl GpuiShell {
                                         .px(px(6.0))
                                         .py(px(2.0))
                                         .bg(rgba(COLOR_PANEL_RAISED))
-                                        .text_size(px(10.0))
+                                        .text_size(px(10.0)).line_height(px(14.0))
                                         .line_height(px(14.5))
                                         .text_color(rgba(COLOR_TEXT_SECONDARY))
                                         .child(command.clone())
@@ -4729,7 +5620,7 @@ impl GpuiShell {
                 })
                 .collect::<Vec<_>>()
         };
-        stack = stack.child(
+        secondary_column = secondary_column.child(
             surface_card()
                 .id("overview-activity")
                 .debug_selector(|| "visual-activity".into())
@@ -4771,7 +5662,7 @@ impl GpuiShell {
                     .px_3()
                     .py_2()
                     .rounded(px(9.0))
-                    .bg(rgba(colors.surface.rgba_hex()))
+                    .bg(rgba(colors.panel_solid.rgba_hex()))
                     .text_size(px(12.0))
                     .line_height(px(18.0))
                     .font_weight(gpui::FontWeight(600.0))
@@ -4784,7 +5675,7 @@ impl GpuiShell {
                 if let Some(reason) = &shortcut.unavailable_reason {
                     card = card.child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(px(10.0)).line_height(px(14.0))
                             .line_height(px(12.5))
                             .font_weight(gpui::FontWeight(400.0))
                             .text_color(rgba(COLOR_FAINT))
@@ -4799,34 +5690,56 @@ impl GpuiShell {
                 card.into_any_element()
             })
             .collect::<Vec<_>>();
-        stack = stack.child(
-            surface_card()
-                .id("overview-shortcuts")
-                .debug_selector(|| "visual-shortcuts".into())
-                .flex()
-                .flex_col()
-                .p_4()
-                .child(
-                    card_heading(
-                        t(self.locale, "overview.shortcuts").to_string(),
-                        lucide_icon(
-                            include_bytes!("../../assets/icons/waypoints.svg"),
-                            17.0,
-                            COLOR_MUTED,
-                        ),
-                    )
-                    .debug_selector(|| "visual-shortcuts-heading".into()),
+        let shortcuts_card = surface_card()
+            .id("overview-shortcuts")
+            .debug_selector(|| "visual-shortcuts".into())
+            .flex()
+            .flex_col()
+            .p_4()
+            .child(
+                card_heading(
+                    t(self.locale, "overview.shortcuts").to_string(),
+                    lucide_icon(
+                        include_bytes!("../../assets/icons/waypoints.svg"),
+                        17.0,
+                        COLOR_MUTED,
+                    ),
                 )
-                .child(
-                    div()
-                        .debug_selector(|| "visual-shortcuts-grid".into())
-                        .flex()
-                        .gap_2()
-                        .children(shortcut_cards),
-                ),
-        );
+                .debug_selector(|| "visual-shortcuts-heading".into()),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "visual-shortcuts-grid".into())
+                    .flex()
+                    .gap_2()
+                    .children(shortcut_cards),
+            );
 
-        stack.into_any_element()
+        let mut details_grid = div().flex().items_start().gap_4().w_full().min_w(px(0.0));
+        details_grid = if matches!(layout, LayoutClass::Desktop | LayoutClass::Wide) {
+            details_grid
+                .flex_row()
+                .child(primary_column)
+                .child(secondary_column)
+        } else {
+            details_grid
+                .flex_col()
+                .child(primary_column)
+                .child(secondary_column)
+        };
+
+        div()
+            .id("overview-stack")
+            .debug_selector(|| "visual-overview-stack".into())
+            .flex()
+            .flex_col()
+            .gap_4()
+            .w_full()
+            .min_w(px(0.0))
+            .child(primary_card)
+            .child(details_grid)
+            .child(shortcuts_card)
+            .into_any_element()
     }
 
     fn configuration_workspace(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -4911,7 +5824,7 @@ impl GpuiShell {
                     .gap_1()
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(px(10.0)).line_height(px(14.0))
                             .font_weight(gpui::FontWeight(600.0))
                             .text_color(rgba(COLOR_MUTED))
                             .child(
@@ -4922,7 +5835,7 @@ impl GpuiShell {
                     )
                     .child(
                         div()
-                            .text_size(px(20.0))
+                            .text_size(px(20.0)).line_height(px(26.0))
                             .font_weight(gpui::FontWeight(600.0))
                             .text_color(rgba(COLOR_TEXT))
                             .child(t(self.locale, "configuration.title").to_string()),
@@ -4985,7 +5898,7 @@ impl GpuiShell {
                                 .gap_1()
                                 .child(
                                     div()
-                                        .text_size(px(10.0))
+                                        .text_size(px(10.0)).line_height(px(14.0))
                                         .font_weight(gpui::FontWeight(600.0))
                                         .text_color(rgba(COLOR_MUTED))
                                         .child(
@@ -5106,7 +6019,7 @@ impl GpuiShell {
                                 .gap_1()
                                 .child(
                                     div()
-                                        .text_size(px(10.0))
+                                        .text_size(px(10.0)).line_height(px(14.0))
                                         .font_weight(gpui::FontWeight(600.0))
                                         .text_color(rgba(COLOR_MUTED))
                                         .child(
@@ -5174,6 +6087,7 @@ impl GpuiShell {
                     .enumerate()
                     .map(|(index, issue)| {
                         let path = issue.path.clone();
+                        let key_path = path.clone();
                         let active = active_issue_path.as_deref() == Some(issue.path.as_str());
                         div()
                             .id(SharedString::from(format!("configuration-issue-{index}")))
@@ -5191,9 +6105,24 @@ impl GpuiShell {
                             } else {
                                 COLOR_PANEL_RAISED
                             }))
-                            .on_click(cx.listener(move |shell, _, window, cx| {
-                                shell.focus_configuration_issue(path.clone(), window, cx)
-                            }))
+                            .on_click(cx.listener(
+                                move |shell, event: &gpui::ClickEvent, window, cx| {
+                                    if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                                        return;
+                                    }
+                                    shell.focus_configuration_issue(path.clone(), window, cx);
+                                    cx.stop_propagation();
+                                },
+                            ))
+                            .on_key_down(cx.listener(
+                                move |shell, event: &gpui::KeyDownEvent, window, cx| {
+                                    if !is_unmodified_activation_key(event) {
+                                        return;
+                                    }
+                                    shell.focus_configuration_issue(key_path.clone(), window, cx);
+                                    cx.stop_propagation();
+                                },
+                            ))
                             .child(
                                 div()
                                     .font_family("monospace")
@@ -5282,7 +6211,7 @@ impl GpuiShell {
                                                 DARK_THEME.colors.warning_soft.rgba_hex()
                                             },
                                         ))
-                                        .text_size(px(10.0))
+                                        .text_size(px(10.0)).line_height(px(14.0))
                                         .text_color(rgba(
                                             if diff.impact == ConfigurationImpact::Immediate {
                                                 DARK_THEME.colors.success.rgba_hex()
@@ -5307,7 +6236,7 @@ impl GpuiShell {
                                         .gap_1()
                                         .child(
                                             div()
-                                                .text_size(px(10.0))
+                                                .text_size(px(10.0)).line_height(px(14.0))
                                                 .text_color(rgba(COLOR_MUTED))
                                                 .child(
                                                     t(self.locale, "configuration.before")
@@ -5331,7 +6260,7 @@ impl GpuiShell {
                                         .gap_1()
                                         .child(
                                             div()
-                                                .text_size(px(10.0))
+                                                .text_size(px(10.0)).line_height(px(14.0))
                                                 .text_color(rgba(COLOR_MUTED))
                                                 .child(
                                                     t(self.locale, "configuration.after")
@@ -5582,7 +6511,7 @@ impl GpuiShell {
                                 .gap_1()
                                 .child(
                                     div()
-                                        .text_size(px(10.0))
+                                        .text_size(px(10.0)).line_height(px(14.0))
                                         .text_color(rgba(COLOR_MUTED))
                                         .child(
                                             t(self.locale, "configuration.audit.eyebrow")
@@ -5702,7 +6631,7 @@ impl GpuiShell {
                     )
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(px(10.0)).line_height(px(14.0))
                             .font_family("monospace")
                             .text_color(rgba(COLOR_MUTED))
                             .child(entry.occurred_at.clone()),
@@ -5842,7 +6771,7 @@ impl GpuiShell {
                                 .gap_1()
                                 .child(
                                     div()
-                                        .text_size(px(10.0))
+                                        .text_size(px(10.0)).line_height(px(14.0))
                                         .text_color(rgba(COLOR_MUTED))
                                         .child(
                                             t(self.locale, "configuration.history.eyebrow")
@@ -5922,20 +6851,7 @@ impl GpuiShell {
     }
 
     fn diagnostics_card(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let busy = self.pending_commands > 0;
         let copy_notice = self.diagnostic_copy_notice.clone();
-        let run_button = |busy| {
-            button(
-                SharedString::from("run-node-diagnostics"),
-                t(self.locale, "diagnostic.run"),
-                ButtonVariant::Secondary,
-                busy,
-            )
-            .on_click(cx.listener(|shell, _, _, cx| {
-                shell.diagnostic_copy_notice = None;
-                shell.submit_raw(NodeCommand::GetDiagnostics, cx);
-            }))
-        };
 
         let Some(diagnostics) = self.recent_diagnostics.clone() else {
             return div()
@@ -5962,8 +6878,7 @@ impl GpuiShell {
                                 .font_weight(gpui::FontWeight(600.0))
                                 .text_color(rgba(COLOR_TEXT))
                                 .child(t(self.locale, "diagnostic.title").to_string()),
-                        )
-                        .child(run_button(busy)),
+                        ),
                 )
                 .child(
                     div()
@@ -6967,7 +7882,6 @@ impl GpuiShell {
                             .flex()
                             .flex_wrap()
                             .gap_2()
-                            .child(run_button(busy))
                             .child(copy_id_button)
                             .child(copy_report_button),
                     ),
@@ -7374,7 +8288,7 @@ impl GpuiShell {
                                 div()
                                     .px_2()
                                     .py_1()
-                                    .text_size(px(10.0))
+                                    .text_size(px(10.0)).line_height(px(14.0))
                                     .font_weight(gpui::FontWeight(600.0))
                                     .text_color(rgba(COLOR_FAINT))
                                     .child(t(self.locale, "common.navigation").to_string()),
@@ -8019,6 +8933,7 @@ impl GpuiShell {
             .copied()
             .unwrap_or(false);
         let toggle_id = network_id.clone();
+        let key_toggle_id = network_id.clone();
         let cta_label = match result.join_mode {
             NetworkJoinMode::Open => "discovery.result.open_join",
             NetworkJoinMode::ApprovalRequired => "discovery.result.request_join",
@@ -8061,14 +8976,32 @@ impl GpuiShell {
                     .gap_2()
                     .p_4()
                     .cursor_pointer()
-                    .on_click(cx.listener(move |shell, _, _, cx| {
+                    .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, _, cx| {
+                        if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                            return;
+                        }
                         let expanded = shell
                             .expanded_discovery
                             .entry(toggle_id.clone())
                             .or_insert(false);
                         *expanded = !*expanded;
+                        cx.stop_propagation();
                         cx.notify();
                     }))
+                    .on_key_down(
+                        cx.listener(move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                            if !is_unmodified_activation_key(event) {
+                                return;
+                            }
+                            let expanded = shell
+                                .expanded_discovery
+                                .entry(key_toggle_id.clone())
+                                .or_insert(false);
+                            *expanded = !*expanded;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
                     .child(
                         div()
                             .flex()
@@ -8262,11 +9195,142 @@ impl GpuiShell {
         self.request_topology_directory(network_id, topology_revision, cx);
     }
 
-    fn topology_state_card(
+    fn topology_hero(
+        &mut self,
+        page_title: String,
+        eyebrow: String,
+        summary: String,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let sync_disabled = self.pending_commands > 0;
+        div()
+            .id("topology-hero")
+            .debug_selector(|| "visual-topology-hero".into())
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .w_full()
+            .h(px(68.0))
+            .min_h(px(68.0))
+            .mb(px(8.0))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .min_w(px(0.0))
+                    .child(
+                        div()
+                            .w(px(40.0))
+                            .h(px(40.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(10.0))
+                            .border_1()
+                            .border_color(rgba(COLOR_DIVIDER))
+                            .bg(rgba(DARK_THEME.colors.accent_soft.rgba_hex()))
+                            .child(lucide_icon(
+                                page_icon_data("topology"),
+                                20.0,
+                                COLOR_ACCENT,
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .text_size(px(10.0)).line_height(px(14.0))
+                                    .line_height(px(12.0))
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(eyebrow),
+                            )
+                            .child(
+                                div()
+                                    .id("page-heading-title")
+                                    .debug_selector(|| "visual-page-heading".into())
+                                    .role(A11Y_HEADING_ROLE)
+                                    .aria_level(1)
+                                    .aria_label(page_title.clone())
+                                    .w(px(132.0))
+                                    .h(px(32.0))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(26.0))
+                                    .line_height(px(32.0))
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(page_title),
+                            )
+                            .child(
+                                div()
+                                    .min_w(px(0.0))
+                                    .max_w(px(560.0))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(11.0)).line_height(px(16.0))
+                                    .line_height(px(15.0))
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(summary),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_shrink_0()
+                    .child(self.page_command_surface(cx))
+                    .child(
+                        button(
+                            SharedString::from("topology-sync-directory"),
+                            "",
+                            ButtonVariant::Secondary,
+                            sync_disabled,
+                        )
+                        .debug_selector(|| "visual-topology-hero-sync".into())
+                        .aria_label(t(self.locale, "topology.hero.sync").to_string())
+                        .w(px(32.0))
+                        .h(px(32.0))
+                        .px_0()
+                        .child(lucide_icon(
+                            include_bytes!("../../assets/icons/refresh-cw.svg"),
+                            16.0,
+                            COLOR_ACCENT,
+                        ))
+                        .on_click(cx.listener(|shell, _, _, cx| {
+                            shell.refresh_topology_directory(cx);
+                        })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn topology_state_band(
         &self,
         presentation: &super::view_model::TopologyPresentation,
+        stats: Option<&TopologyWorkspaceStats>,
     ) -> gpui::AnyElement {
-        let palette = semantic_palette(match presentation.kind {
+        let kind = presentation.kind;
+        // The first band cell reports the path verdict. Data-freshness
+        // conditions (stale directory, refreshing) are shown as a chip so a
+        // governance-side staleness never masquerades as a broken path.
+        let verdict_kind = match stats {
+            Some(stats) if stats.path_ready => TopologyPresentationCondition::Ready,
+            Some(_) => TopologyPresentationCondition::Empty,
+            None => kind,
+        };
+        let palette = semantic_palette(match verdict_kind {
             TopologyPresentationCondition::Ready => SemanticState::Success,
             TopologyPresentationCondition::Error => SemanticState::Danger,
             TopologyPresentationCondition::PermissionDenied => SemanticState::PermissionDenied,
@@ -8279,50 +9343,188 @@ impl GpuiShell {
                 SemanticState::Neutral
             }
         });
-        let kind = presentation.kind;
         let title = t(self.locale, kind.title_key()).to_string();
         let detail = t(self.locale, kind.detail_key()).to_string();
-        let conditions = presentation
-            .conditions
-            .iter()
-            .map(|condition| condition.key())
-            .collect::<Vec<_>>()
-            .join(", ");
-        div()
+        // Blend the verdict colour into the panel so the band reads as one
+        // surface with a tinted edge instead of a flat grey strip.
+        let band_start = COLOR_PANEL_SOLID;
+        let state_icon: &'static [u8] = match verdict_kind {
+            TopologyPresentationCondition::Ready => {
+                include_bytes!("../../assets/icons/check-circle-2.svg")
+            }
+            TopologyPresentationCondition::PermissionDenied => {
+                include_bytes!("../../assets/icons/ban.svg")
+            }
+            TopologyPresentationCondition::Error
+            | TopologyPresentationCondition::Offline
+            | TopologyPresentationCondition::Stale
+            | TopologyPresentationCondition::Refreshing
+            | TopologyPresentationCondition::Partial => {
+                include_bytes!("../../assets/icons/alert-triangle.svg")
+            }
+            TopologyPresentationCondition::InitialLoading
+            | TopologyPresentationCondition::Unavailable
+            | TopologyPresentationCondition::Empty => {
+                include_bytes!("../../assets/icons/waypoints.svg")
+            }
+        };
+        let stat = |label: String, value: String, hint: String| {
+            div()
+                .flex()
+                .flex_col()
+                .justify_center()
+                .gap(px(1.0))
+                .min_w(px(0.0))
+                .w(px(192.0))
+                .flex_shrink_0()
+                .h_full()
+                .pl_3()
+                .border_l_1()
+                .border_color(rgba(COLOR_DIVIDER))
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .line_height(px(12.0))
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(16.0))
+                        .line_height(px(19.0))
+                        .font_weight(gpui::FontWeight(650.0))
+                        .text_color(rgba(COLOR_TEXT))
+                        .child(value),
+                )
+                .child(
+                    div()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(10.0))
+                        .line_height(px(12.0))
+                        .text_color(rgba(COLOR_MUTED))
+                        .child(hint),
+                )
+        };
+        let mut band = div()
             .id("visual-topology-state")
             .debug_selector(|| "visual-topology-state".into())
             .role(Role::Status)
             .aria_label(format!("{title}: {detail}"))
             .flex()
-            .flex_col()
-            .gap_2()
-            .rounded_lg()
-            .bg(rgba(palette.background.rgba_hex()))
-            .px_4()
-            .py_3()
+            .items_center()
+            .w_full()
+            .h(px(56.0))
+            .min_h(px(56.0))
+            .overflow_hidden()
+            .rounded(px(0.0))
+            .bg(rgba(band_start))
             .child(
                 div()
-                    .id(format!("topology-state-{}", kind.key()))
-                    .debug_selector(move || format!("visual-topology-state-{}", kind.key()))
-                    .text_sm()
-                    .font_weight(gpui::FontWeight(600.0))
-                    .text_color(rgba(palette.foreground.rgba_hex()))
-                    .child(title),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .line_height(px(18.0))
-                    .text_color(rgba(palette.foreground.rgba_hex()))
-                    .child(detail),
-            )
-            .child(
-                div()
-                    .text_size(px(10.0))
-                    .text_color(rgba(COLOR_MUTED))
-                    .child(conditions),
-            )
-            .into_any_element()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .h_full()
+                    .pl_4()
+                    .pr_4()
+                    .child(
+                        div()
+                            .w(px(30.0))
+                            .h(px(30.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(11.0))
+                            .border_1()
+                            .border_color(rgba(palette.foreground.rgba_hex()))
+                            .bg(rgba(palette.background.rgba_hex()))
+                            .child(lucide_icon(
+                                state_icon,
+                                16.0,
+                                palette.foreground.rgba_hex(),
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .id(format!("topology-state-{}", kind.key()))
+                                    .debug_selector(move || {
+                                        format!("visual-topology-state-{}", kind.key())
+                                    })
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(13.0)).line_height(px(20.0))
+                                    .line_height(px(16.0))
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(palette.foreground.rgba_hex()))
+                                    .child(stats
+                                        .map(|stats| stats.path_label.clone())
+                                        .unwrap_or(title)),
+                            )
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(11.0)).line_height(px(16.0))
+                                    .line_height(px(14.0))
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(stats
+                                        .map(|stats| stats.path_detail.clone())
+                                        .unwrap_or(detail)),
+                            ),
+                    )
+                    .when(
+                        stats.is_some() && kind != TopologyPresentationCondition::Ready,
+                        |cell| {
+                            cell.child(
+                                div()
+                                    .debug_selector(|| "visual-topology-state-condition".into())
+                                    .flex_shrink_0()
+                                    .rounded_full()
+                                    .border_1()
+                                    .border_color(rgba(COLOR_WARNING))
+                                    .px_2()
+                                    .py(px(1.0))
+                                    .text_size(px(9.0)).line_height(px(13.0))
+                                    .text_color(rgba(COLOR_WARNING))
+                                    .child(t(self.locale, kind.title_key()).to_string()),
+                            )
+                        },
+                    ),
+            );
+        if let Some(stats) = stats {
+            band = band
+                .child(stat(
+                    t(self.locale, "topology.metric.connections").to_string(),
+                    stats.connections.clone(),
+                    t(self.locale, "topology.connection.active").to_string(),
+                ))
+                .child(stat(
+                    t(self.locale, "topology.metric.nodes").to_string(),
+                    stats.nodes.clone(),
+                    stats.nodes_hint.clone(),
+                ))
+                .child(stat(
+                    t(self.locale, "topology.metric.network").to_string(),
+                    stats.networks.clone(),
+                    stats.networks_hint.clone(),
+                ));
+        }
+        band.into_any_element()
     }
 
     fn topology_detail_card(
@@ -8330,32 +9532,10 @@ impl GpuiShell {
         topology: &TopologySnapshot,
         network_id: &NetworkId,
         directory: Option<&NetworkMemberDirectory>,
+        cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let Some(node_id) = self.selected_topology_node_id.as_deref() else {
-            return div()
-                .id("visual-topology-detail")
-                .debug_selector(|| "visual-topology-detail".into())
-                .flex()
-                .flex_col()
-                .gap_1()
-                .p_4()
-                .rounded_lg()
-                .bg(rgba(COLOR_PANEL))
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight(600.0))
-                        .text_color(rgba(COLOR_TEXT))
-                        .child(t(self.locale, "topology.detail.empty_title").to_string()),
-                )
-                .child(
-                    div()
-                        .debug_selector(|| "visual-topology-detail-empty".into())
-                        .text_xs()
-                        .text_color(rgba(COLOR_MUTED))
-                        .child(t(self.locale, "topology.detail.empty_hint").to_string()),
-                )
-                .into_any_element();
+            return div().into_any_element();
         };
         let Some(node) = topology
             .nodes
@@ -8399,7 +9579,7 @@ impl GpuiShell {
                 .min_w(px(160.0))
                 .child(
                     div()
-                        .text_size(px(10.0))
+                        .text_size(px(10.0)).line_height(px(14.0))
                         .text_color(rgba(COLOR_MUTED))
                         .child(t(self.locale, label_key).to_string()),
                 )
@@ -8413,7 +9593,9 @@ impl GpuiShell {
             .gap_3()
             .p_4()
             .rounded_lg()
-            .bg(rgba(COLOR_PANEL))
+            .border_1()
+            .border_color(rgba(COLOR_DIVIDER))
+            .bg(rgba(COLOR_PANEL_SOLID))
             .child(
                 div()
                     .flex()
@@ -8427,7 +9609,7 @@ impl GpuiShell {
                             .gap_1()
                             .child(
                                 div()
-                                    .text_size(px(10.0))
+                                    .text_size(px(10.0)).line_height(px(14.0))
                                     .text_color(rgba(COLOR_MUTED))
                                     .child(t(self.locale, "topology.detail.title").to_string()),
                             )
@@ -8448,12 +9630,42 @@ impl GpuiShell {
                     )
                     .child(
                         div()
-                            .rounded_full()
-                            .px_2()
-                            .py_1()
-                            .text_xs()
-                            .text_color(rgba(COLOR_TEXT_SECONDARY))
-                            .child(detail.health.clone()),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .rounded_full()
+                                    .px_2()
+                                    .py_1()
+                                    .text_xs()
+                                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                    .child(detail.health.clone()),
+                            )
+                            .child(
+                                button(
+                                    SharedString::from("close-topology-detail"),
+                                    "",
+                                    ButtonVariant::Ghost,
+                                    false,
+                                )
+                                .debug_selector(|| "visual-topology-detail-close".into())
+                                .aria_label(t(self.locale, "common.close").to_string())
+                                .w(px(28.0))
+                                .h(px(28.0))
+                                .px_0()
+                                .child(lucide_icon(
+                                    include_bytes!("../../assets/icons/x.svg"),
+                                    14.0,
+                                    COLOR_MUTED,
+                                ))
+                                .on_click(cx.listener(
+                                    |shell, _, _, cx| {
+                                        shell.selected_topology_node_id = None;
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
                     ),
             )
             .child(div().flex().flex_wrap().gap_4().children([
@@ -8600,7 +9812,7 @@ impl GpuiShell {
                     .child(t(self.locale, "topology.batch.directory_failed").to_string())
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(px(10.0)).line_height(px(14.0))
                             .text_color(rgba(COLOR_MUTED))
                             .child(error.to_string()),
                     ),
@@ -8706,110 +9918,583 @@ impl GpuiShell {
         .into_any_element()
     }
 
-    fn topology_content(
-        &mut self,
-        layout: LayoutClass,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let signals = self.topology_presentation_for_current_network();
-        let presentation = topology_presentation(self.snapshot.topology.as_ref(), signals);
-        let state_card = self.topology_state_card(&presentation);
-        let Some(topology) = self.snapshot.topology.clone() else {
-            return div()
-                .id("topology-unavailable")
-                .flex()
-                .flex_col()
-                .gap_4()
-                .child(state_card)
-                .into_any_element();
-        };
-        if !presentation.can_render {
-            return div()
-                .id("topology-presentation-blocked")
-                .flex()
-                .flex_col()
-                .gap_4()
-                .child(state_card)
-                .into_any_element();
-        }
-        let Some(network_id) = self.topology_network_id() else {
-            return div()
-                .id("topology-no-network")
-                .flex()
-                .flex_col()
-                .gap_4()
-                .child(state_card)
-                .into_any_element();
-        };
-        let directory = self.topology_directory_for_network(&network_id).cloned();
-        let boundary_buttons = topology
-            .boundaries
-            .iter()
-            .enumerate()
-            .map(|(index, boundary)| {
-                let selected = boundary.network_id == network_id;
-                let boundary_id = boundary.network_id.clone();
-                let label = format!("{} · {}", boundary.name, boundary.member_count);
-                button(
-                    SharedString::from(format!("topology-network-{index}")),
-                    label,
-                    if selected {
-                        ButtonVariant::Secondary
-                    } else {
-                        ButtonVariant::Ghost
-                    },
-                    false,
-                )
-                .debug_selector(move || format!("visual-topology-boundary-{index}"))
-                .on_click(cx.listener(move |shell, _, _, cx| {
-                    shell.select_topology_network(boundary_id.clone(), cx);
-                }))
-            })
-            .collect::<Vec<_>>();
 
-        let connections = topology
-            .connections
-            .iter()
-            .filter(|connection| connection.networks.contains(&network_id))
-            .enumerate()
-            .map(|(index, connection)| {
-                let state_key = match connection.state {
-                    TopologyConnectionState::Active => "topology.connection.active",
-                    TopologyConnectionState::Idle => "topology.connection.idle",
-                    TopologyConnectionState::Stale => "topology.connection.stale",
-                };
+    fn topology_path_card(&self, path_names: &[String]) -> gpui::AnyElement {
+        let mut chips: Vec<gpui::AnyElement> = Vec::new();
+        if path_names.is_empty() {
+            chips.push(
                 div()
-                    .id(format!("topology-connection-{index}"))
-                    .debug_selector(move || format!("visual-topology-connection-{index}"))
+                    .debug_selector(|| "visual-topology-path-empty".into())
+                    .text_size(px(11.0)).line_height(px(16.0))
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "topology.path.empty").to_string())
+                    .into_any_element(),
+            );
+        } else {
+            for (index, name) in path_names.iter().enumerate() {
+                if index > 0 {
+                    chips.push(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(11.0)).line_height(px(16.0))
+                            .text_color(rgba(COLOR_FAINT))
+                            .child("→")
+                            .into_any_element(),
+                    );
+                }
+                chips.push(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .flex_shrink_0()
+                        .text_size(px(11.0)).line_height(px(16.0))
+                        .text_color(rgba(COLOR_TEXT_SECONDARY))
+                        .child(lucide_icon(
+                            include_bytes!("../../assets/icons/network.svg"),
+                            13.0,
+                            COLOR_ACCENT,
+                        ))
+                        .child(name.clone())
+                        .into_any_element(),
+                );
+            }
+        }
+        div()
+            .id("topology-path-card")
+            .debug_selector(|| "visual-topology-path-card".into())
+            .flex()
+            .flex_col()
+            .gap_2()
+            .flex_1()
+            .min_w(px(0.0))
+            .child(
+                div()
                     .flex()
                     .items_center()
                     .justify_between()
                     .gap_3()
-                    .rounded_md()
-                    .px_3()
-                    .py_2()
-                    .text_xs()
-                    .text_color(rgba(COLOR_TEXT_SECONDARY))
-                    .child(format!("{} ↔ {}", connection.from, connection.to))
                     .child(
                         div()
-                            .text_color(rgba(COLOR_MUTED))
-                            .child(t(self.locale, state_key).to_string()),
+                            .flex()
+                            .items_baseline()
+                            .gap_2()
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .text_size(px(13.0)).line_height(px(20.0))
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(t(self.locale, "topology.path.title").to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0)).line_height(px(14.0))
+                                    .text_color(rgba(COLOR_FAINT))
+                                    .child(t(self.locale, "topology.path.auto").to_string()),
+                            ),
                     )
-            })
-            .collect::<Vec<_>>();
+                    .child(lucide_icon(
+                        include_bytes!("../../assets/icons/workflow.svg"),
+                        16.0,
+                        COLOR_MUTED,
+                    )),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .flex_wrap()
+                    .gap_2()
+                    .min_h(px(48.0))
+                    .px_3()
+                    .py_2()
+                    .rounded(px(9.0))
+                    .border_1()
+                    .border_color(rgba(COLOR_DIVIDER))
+                    .bg(rgba(COLOR_PANEL_SOLID))
+                    .children(chips),
+            )
+            .into_any_element()
+    }
 
-        let visible_nodes = topology
-            .nodes
-            .iter()
-            .filter(|node| node.belongs_to(&network_id))
-            .cloned()
-            .collect::<Vec<_>>();
+    fn topology_events_card(&self, events: &[(String, String, String)]) -> gpui::AnyElement {
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        if events.is_empty() {
+            rows.push(
+                div()
+                    .debug_selector(|| "visual-topology-events-empty".into())
+                    .p_3()
+                    .rounded(px(9.0))
+                    .border_1()
+                    .border_color(rgba(COLOR_DIVIDER))
+                    .text_size(px(11.0)).line_height(px(16.0))
+                    .text_color(rgba(COLOR_MUTED))
+                    .child(t(self.locale, "topology.events.empty").to_string())
+                    .into_any_element(),
+            );
+        } else {
+            for (index, (text, when, state)) in events.iter().enumerate() {
+                let dot = match state.as_str() {
+                    "active" => DARK_THEME.colors.success.rgba_hex(),
+                    "stale" => DARK_THEME.colors.warning.rgba_hex(),
+                    _ => COLOR_TEXT_MUTED,
+                };
+                rows.push(
+                    div()
+                        .debug_selector({
+                            let index = index;
+                            move || format!("visual-topology-event-{index}")
+                        })
+                        .flex()
+                        .items_start()
+                        .justify_between()
+                        .gap_3()
+                        .py_2()
+                        .border_b_1()
+                        .border_color(rgba(COLOR_DIVIDER))
+                        .child(
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap_2()
+                                .min_w(px(0.0))
+                                .child(
+                                    div()
+                                        .mt(px(5.0))
+                                        .w(px(7.0))
+                                        .h(px(7.0))
+                                        .flex_shrink_0()
+                                        .rounded_full()
+                                        .bg(rgba(dot)),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap(px(1.0))
+                                        .min_w(px(0.0))
+                                        .child(
+                                            div()
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .text_size(px(11.0)).line_height(px(16.0))
+                                                .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                                .child(text.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(9.0)).line_height(px(13.0))
+                                                .text_color(rgba(COLOR_FAINT))
+                                                .child(when.clone()),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(9.0)).line_height(px(13.0))
+                                .text_color(rgba(COLOR_FAINT))
+                                .child(format!("{}", index + 1)),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
+        div()
+            .id("topology-events-card")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w(px(392.0))
+            .flex_shrink_0()
+            .pl_7()
+            .border_l_1()
+            .border_color(rgba(COLOR_DIVIDER))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap_2()
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .text_size(px(13.0)).line_height(px(20.0))
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(t(self.locale, "topology.events.title").to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0)).line_height(px(14.0))
+                                    .text_color(rgba(COLOR_FAINT))
+                                    .child(t(self.locale, "topology.events.window").to_string()),
+                            ),
+                    )
+                    .child(lucide_icon(
+                        include_bytes!("../../assets/icons/activity.svg"),
+                        16.0,
+                        COLOR_MUTED,
+                    )),
+            )
+            .children(rows)
+            .into_any_element()
+    }
+
+    fn topology_workspace(
+        &mut self,
+        layout: LayoutClass,
+        viewport_height: f32,
+        page_title: String,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let signals = self.topology_presentation_for_current_network();
+        let presentation = topology_presentation(self.snapshot.topology.as_ref(), signals);
+        let compact = matches!(layout, LayoutClass::Mobile | LayoutClass::Compact);
+        // The canvas is the workspace: it absorbs the window's spare height
+        // instead of leaving a dead band under the insights row. The browser
+        // surface uses the identical clamp so both geometries stay equal.
+        let stage_height = if compact {
+            320.0
+        } else {
+            (viewport_height - 410.0).clamp(380.0, 880.0)
+        };
+        let network_id = self.topology_network_id();
+        let topology = self.snapshot.topology.clone();
+        let directory = network_id
+            .as_ref()
+            .and_then(|network_id| self.topology_directory_for_network(network_id))
+            .cloned();
         let generated_at_unix_ms = directory
             .as_ref()
             .map(|directory| directory.generated_at_unix_ms)
-            .unwrap_or(topology.generated_at_unix_ms);
-        let mut node_cards = Vec::new();
+            .unwrap_or_else(|| {
+                topology
+                    .as_ref()
+                    .map(|topology| topology.generated_at_unix_ms)
+                    .unwrap_or_default()
+            });
+        let visible_nodes = topology
+            .as_ref()
+            .filter(|_| presentation.can_render)
+            .and_then(|topology| {
+                network_id.as_ref().map(|network_id| {
+                    topology
+                        .nodes
+                        .iter()
+                        .filter(|node| node.belongs_to(network_id))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+            })
+            .unwrap_or_default();
+        let visible_connections = topology
+            .as_ref()
+            .filter(|_| presentation.can_render)
+            .and_then(|topology| {
+                network_id.as_ref().map(|network_id| {
+                    topology
+                        .connections
+                        .iter()
+                        .filter(|connection| connection.networks.contains(network_id))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+            })
+            .unwrap_or_default();
+        let boundaries = topology
+            .as_ref()
+            .map(|topology| topology.boundaries.clone())
+            .unwrap_or_default();
+        let current_network_name = network_id
+            .as_ref()
+            .and_then(|network_id| topology.as_ref()?.boundary(network_id).cloned())
+            .map(|boundary| boundary.name);
+
+        // Shared path identity: this node, an authorized relay hop, then the exit.
+        let self_node = visible_nodes.iter().find(|node| node.is_self);
+        let exit_node = visible_nodes.iter().find(|node| {
+            node.capabilities
+                .contains(&CapabilityKind::Exit)
+                && !node.is_self
+        });
+        let relay_node = visible_nodes.iter().find(|node| {
+            !node.is_self
+                && Some(node.node_id.as_str()) != exit_node.map(|node| node.node_id.as_str())
+                && node.capabilities.contains(&CapabilityKind::Relay)
+        });
+        let mut path_ids: Vec<String> = Vec::new();
+        for node in [self_node, relay_node, exit_node].into_iter().flatten() {
+            let node_id = node.node_id.as_str().to_string();
+            if !path_ids.contains(&node_id) {
+                path_ids.push(node_id);
+            }
+        }
+        let display_name = |node: &fuckipv6_common::domain::TopologyNode| {
+            node.display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(node.node_id.as_str())
+                .to_string()
+        };
+        let path_names = visible_nodes
+            .iter()
+            .filter(|node| path_ids.contains(&node.node_id.as_str().to_string()))
+            .map(&display_name)
+            .collect::<Vec<_>>();
+        let path_summary = if path_names.is_empty() {
+            t(self.locale, "topology.path.empty").to_string()
+        } else {
+            tr(
+                self.locale,
+                "topology.hero.path",
+                &[("path", &path_names.join(" → "))],
+            )
+        };
+        let active_connections = visible_connections
+            .iter()
+            .filter(|connection| connection.state == TopologyConnectionState::Active)
+            .count();
+        let healthy_nodes = visible_nodes
+            .iter()
+            .filter(|node| node.health == fuckipv6_common::domain::TopologyNodeHealth::Healthy)
+            .count();
+        let stats = TopologyWorkspaceStats {
+            path_ready: !path_names.is_empty(),
+            path_label: if !presentation.can_render {
+                t(self.locale, presentation.kind.title_key()).to_string()
+            } else if path_names.is_empty() {
+                t(self.locale, "topology.path.empty").to_string()
+            } else {
+                t(self.locale, "topology.hero.verified").to_string()
+            },
+            path_detail: path_summary.clone(),
+            connections: active_connections.to_string(),
+            nodes: visible_nodes.len().to_string(),
+            nodes_hint: tr(
+                self.locale,
+                "topology.metric.healthy",
+                &[("count", &healthy_nodes.to_string())],
+            ),
+            networks: boundaries.len().to_string(),
+            networks_hint: current_network_name
+                .clone()
+                .unwrap_or_else(|| t(self.locale, "common.none").to_string()),
+        };
+        let hero_summary = tr(
+            self.locale,
+            "topology.hero.summary",
+            &[
+                ("networks", &boundaries.len().to_string()),
+                ("nodes", &visible_nodes.len().to_string()),
+                (
+                    "exit",
+                    &exit_node
+                        .map(&display_name)
+                        .unwrap_or_else(|| t(self.locale, "common.none").to_string()),
+                ),
+            ],
+        );
+        let hero = self.topology_hero(
+            page_title,
+            t(self.locale, "topology.hero.eyebrow").to_string(),
+            if presentation.can_render {
+                hero_summary
+            } else {
+                t(self.locale, presentation.kind.detail_key()).to_string()
+            },
+            cx,
+        );
+        let state_band = self.topology_state_band(
+            &presentation,
+            (presentation.can_render
+                && topology.is_some()
+                && !visible_nodes.is_empty())
+            .then_some(&stats),
+        );
+
+        // Deterministic graph placement, identical to the browser surface: a
+        // fixed 1200x400 virtual canvas, one anchor per network, nodes on
+        // rings around their first (sorted) network anchor.
+        let mut node_points: HashMap<String, (f32, f32)> = HashMap::new();
+        if !visible_nodes.is_empty() {
+            const VIRTUAL_WIDTH: f32 = 1200.0;
+            const VIRTUAL_HEIGHT: f32 = 400.0;
+            let mut group_size: HashMap<String, usize> = HashMap::new();
+            for node in &visible_nodes {
+                if let Some(first) = node.networks.first() {
+                    *group_size
+                        .entry(first.network_id.as_str().to_string())
+                        .or_default() += 1;
+                }
+            }
+            let anchor_for = |slot: usize| -> (f32, f32) {
+                match boundaries.len() {
+                    1 => (VIRTUAL_WIDTH / 2.0, VIRTUAL_HEIGHT / 2.0),
+                    2 => {
+                        if slot == 0 {
+                            (VIRTUAL_WIDTH * 0.36, VIRTUAL_HEIGHT * 0.52)
+                        } else {
+                            (VIRTUAL_WIDTH * 0.68, VIRTUAL_HEIGHT * 0.46)
+                        }
+                    }
+                    _ => (VIRTUAL_WIDTH / 2.0, VIRTUAL_HEIGHT / 2.0),
+                }
+            };
+            let anchor_of = |network_id: &str| -> (f32, f32) {
+                let slot = boundaries
+                    .iter()
+                    .position(|boundary| boundary.network_id.as_str() == network_id)
+                    .unwrap_or(0);
+                anchor_for(slot)
+            };
+            let mut used_slots: HashMap<String, usize> = HashMap::new();
+            for node in &visible_nodes {
+                let Some(first) = node.networks.first() else {
+                    continue;
+                };
+                let network_key = first.network_id.as_str().to_string();
+                let slot = used_slots.entry(network_key.clone()).or_insert(0);
+                let index = *slot;
+                *slot += 1;
+                let (anchor_x, anchor_y) = anchor_of(&network_key);
+                let group = group_size.get(&network_key).copied().unwrap_or(1);
+                let (x, y) = if group <= 1 {
+                    (anchor_x, anchor_y)
+                } else {
+                    let radius = match group {
+                        2 => 96.0_f32,
+                        3 => 118.0,
+                        4 => 138.0,
+                        _ => 158.0,
+                    };
+                    let angle = std::f32::consts::TAU * index as f32 / group as f32
+                        - std::f32::consts::FRAC_PI_2;
+                    (
+                        anchor_x + radius * angle.cos(),
+                        anchor_y + radius * angle.sin(),
+                    )
+                };
+                node_points.insert(
+                    node.node_id.as_str().to_string(),
+                    (x / VIRTUAL_WIDTH, y / VIRTUAL_HEIGHT),
+                );
+            }
+        }
+        let zoom = self.topology_zoom;
+        let zoom_point = |point: (f32, f32)| -> (f32, f32) {
+            (
+                0.5 + (point.0 - 0.5) * zoom,
+                0.5 + (point.1 - 0.5) * zoom,
+            )
+        };
+        let mut edges: Vec<(f32, f32, f32, f32, u32, bool)> = Vec::new();
+        for connection in &visible_connections {
+            let Some(from) = node_points.get(connection.from.as_str()).copied() else {
+                continue;
+            };
+            let Some(to) = node_points.get(connection.to.as_str()).copied() else {
+                continue;
+            };
+            let on_path = path_ids.contains(&connection.from.as_str().to_string())
+                && path_ids.contains(&connection.to.as_str().to_string());
+            let color = if on_path && connection.state == TopologyConnectionState::Active {
+                COLOR_TEXT
+            } else {
+                match connection.state {
+                    TopologyConnectionState::Active => COLOR_TEXT,
+                    TopologyConnectionState::Idle => COLOR_TEXT_SECONDARY,
+                    TopologyConnectionState::Stale => DARK_THEME.colors.warning.rgba_hex(),
+                }
+            };
+            let from = zoom_point(from);
+            let to = zoom_point(to);
+            edges.push((from.0, from.1, to.0, to.1, color, on_path));
+        }
+        let edges_for_paint = edges.clone();
+        let canvas = div()
+            .debug_selector(|| "visual-topology-canvas".into())
+            .absolute()
+            .top(px(1.0))
+            .left(px(1.0))
+            .right(px(0.0))
+            .bottom(px(0.0))
+            .overflow_hidden()
+            .child(
+                gpui::canvas(
+                    move |bounds, _, _| {
+                        let width = f32::from(bounds.size.width).max(1.0);
+                        let height = f32::from(bounds.size.height).max(1.0);
+                        let left = f32::from(bounds.origin.x);
+                        let top = f32::from(bounds.origin.y);
+                        let grid: Vec<(f32, f32, f32, f32)> = Vec::new();
+                        let links = edges_for_paint
+                            .iter()
+                            .map(|(from_x, from_y, to_x, to_y, color, on_path)| {
+                                (
+                                    left + from_x * width,
+                                    top + from_y * height,
+                                    left + to_x * width,
+                                    top + to_y * height,
+                                    *color,
+                                    *on_path,
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        (grid, links)
+                    },
+                    |_, (grid, links), window, _| {
+                        let _ = &grid;
+                        for (x1, y1, x2, y2, color, on_path) in links {
+                            let mut path =
+                                gpui::PathBuilder::stroke(px(if on_path { 1.8 } else { 1.3 }));
+                            path.move_to(gpui::point(px(x1), px(y1)));
+                            path.line_to(gpui::point(px(x2), px(y2)));
+                            if let Ok(path) = path.build() {
+                                window.paint_path(path, rgba(color));
+                            }
+                        }
+                    },
+                )
+                .size_full(),
+            );
+
+        let mut stage_children: Vec<gpui::AnyElement> = vec![canvas.into_any_element()];
+        // Authoritative connection objects stay addressable even though the
+        // edge itself is painted on the canvas.
+        for (index, connection) in visible_connections.iter().enumerate() {
+            let Some(from) = node_points.get(connection.from.as_str()).copied() else {
+                continue;
+            };
+            let Some(to) = node_points.get(connection.to.as_str()).copied() else {
+                continue;
+            };
+            let from = zoom_point(from);
+            let to = zoom_point(to);
+            let midpoint = ((from.0 + to.0) / 2.0, (from.1 + to.1) / 2.0);
+            stage_children.push(
+                div()
+                    .id(format!("topology-connection-{index}"))
+                    .debug_selector(move || format!("visual-topology-connection-{index}"))
+                    .absolute()
+                    .left(relative(midpoint.0))
+                    .top(relative(midpoint.1))
+                    .ml(px(-4.0))
+                    .mt(px(-4.0))
+                    .w(px(8.0))
+                    .h(px(8.0))
+                    .into_any_element(),
+            );
+        }
+
         for (index, node) in visible_nodes.iter().enumerate() {
             let member = directory.as_ref().and_then(|directory| {
                 directory
@@ -8819,17 +10504,40 @@ impl GpuiShell {
             });
             let detail = topology_node_detail(
                 node,
-                Some(network_id.as_str()),
+                network_id.as_ref().map(|network_id| network_id.as_str()),
                 member,
                 self.locale,
                 generated_at_unix_ms,
             );
             let selected = self.selected_topology_node_id.as_deref() == Some(node.node_id.as_str());
             let menu_open = self.topology_menu_node_id.as_deref() == Some(node.node_id.as_str());
+            let hovered = self.hovered_topology_node_id.as_deref() == Some(node.node_id.as_str());
             let node_id = node.node_id.as_str().to_string();
             let open_node_id = node_id.clone();
             let menu_node_id = node_id.clone();
             let hover_node_id = node_id.clone();
+            let selected_for_menu = self.topology_selection.contains(node.node_id.as_str());
+            let health_color = match node.health {
+                fuckipv6_common::domain::TopologyNodeHealth::Healthy => DARK_THEME.colors.success.rgba_hex(),
+                fuckipv6_common::domain::TopologyNodeHealth::Unknown => COLOR_TEXT_MUTED,
+                fuckipv6_common::domain::TopologyNodeHealth::Degraded => DARK_THEME.colors.warning.rgba_hex(),
+                fuckipv6_common::domain::TopologyNodeHealth::Unreachable => DARK_THEME.colors.danger.rgba_hex(),
+            };
+            let on_path = path_ids.contains(&node_id);
+            let (raw_x, raw_y) = node_points
+                .get(node.node_id.as_str())
+                .copied()
+                .map(zoom_point)
+                .unwrap_or((0.5, 0.5));
+            let border_color = if selected || node.is_self {
+                COLOR_TEXT
+            } else if on_path {
+                COLOR_DIVIDER
+            } else {
+                COLOR_DIVIDER
+            };
+            let background = COLOR_PANEL_SOLID;
+
             let menu_actions = if command_coordinator_governance_freeze_reason(
                 NodeCommandKind::ChangeMemberLifecycle,
                 &self.snapshot,
@@ -8841,73 +10549,36 @@ impl GpuiShell {
             } else {
                 topology_member_actions(
                     directory.as_ref(),
-                    Some(network_id.as_str()),
+                    network_id.as_ref().map(|network_id| network_id.as_str()),
                     node.node_id.as_str(),
                 )
             };
-            let selected_for_menu = self.topology_selection.contains(node.node_id.as_str());
 
             let mut card = div()
                 .id(format!("topology-node-card-{index}"))
                 .debug_selector(move || format!("visual-topology-node-{index}"))
+                .absolute()
+                .left(relative(raw_x))
+                .top(relative(raw_y))
+                .ml(px(-82.0))
+                .mt(px(-29.0))
+                .w(px(164.0))
+                .min_h(px(58.0))
                 .flex()
                 .flex_col()
-                .gap_2()
-                .rounded_lg()
-                .bg(rgba(if selected {
-                    DARK_THEME.colors.panel_raised.rgba_hex()
-                } else {
-                    COLOR_PANEL
+                .gap(px(2.0))
+                .rounded(px(13.0))
+                .border_1()
+                .border_color(rgba(border_color))
+                .bg(rgba(background))
+                .px_3()
+                .py_2()
+                
+                .cursor_pointer()
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.open_topology_node(open_node_id.clone(), cx);
+                    cx.stop_propagation();
                 }))
-                .p_3()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(
-                            button(
-                                SharedString::from(format!("topology-open-{index}")),
-                                format!("{} · {}", detail.display_name, detail.role),
-                                ButtonVariant::Ghost,
-                                false,
-                            )
-                            .debug_selector(move || format!("visual-topology-open-{index}"))
-                            .flex_1()
-                            .justify_start()
-                            .on_click(cx.listener(
-                                move |shell, _, _, cx| {
-                                    shell.open_topology_node(open_node_id.clone(), cx);
-                                },
-                            )),
-                        )
-                        .child(
-                            button(
-                                SharedString::from(format!("topology-menu-{index}")),
-                                "•••",
-                                ButtonVariant::Ghost,
-                                false,
-                            )
-                            .debug_selector(move || format!("visual-topology-menu-trigger-{index}"))
-                            .aria_label(tr(
-                                self.locale,
-                                "topology.menu.label",
-                                &[("name", &detail.display_name)],
-                            ))
-                            .on_click(cx.listener(
-                                move |shell, _, _, cx| {
-                                    shell.toggle_topology_menu(menu_node_id.clone(), cx);
-                                },
-                            )),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgba(COLOR_MUTED))
-                        .child(format!("{} · {}", detail.node_id, detail.health)),
-                )
                 .on_hover(cx.listener(move |shell, is_hovered: &bool, _, cx| {
                     if shell.topology_menu_node_id.is_some() {
                         return;
@@ -8917,102 +10588,143 @@ impl GpuiShell {
                         shell.hovered_topology_node_id = next;
                         cx.notify();
                     }
-                }));
-
-            let hovered = self.hovered_topology_node_id.as_deref() == Some(node.node_id.as_str())
-                && !menu_open;
-            if hovered {
-                let hover_field =
-                    |label_key: &'static str, value: String, selector: &'static str| {
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .w(px(88.0))
-                                    .flex_shrink_0()
-                                    .text_size(px(10.0))
-                                    .text_color(rgba(COLOR_MUTED))
-                                    .child(t(self.locale, label_key).to_string()),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w(px(0.0))
-                                    .debug_selector(move || selector.into())
-                                    .text_xs()
-                                    .text_color(rgba(COLOR_TEXT_SECONDARY))
-                                    .child(value),
-                            )
-                    };
-                card = card.child(
+                }))
+                .child(
                     div()
-                        .id("visual-topology-hover")
-                        .debug_selector(|| "visual-topology-hover".into())
-                        .role(Role::Article)
-                        .aria_label(format!(
-                            "{} · {} · {}: {} · {}: {}",
-                            detail.display_name,
-                            detail.health,
-                            t(self.locale, "topology.hover.role"),
-                            detail.role,
-                            t(self.locale, "topology.hover.capabilities"),
-                            detail.capabilities
-                        ))
                         .flex()
-                        .flex_col()
+                        .items_center()
+                        .justify_between()
                         .gap_2()
-                        .rounded_md()
-                        .bg(rgba(COLOR_PANEL_RAISED))
-                        .w_full()
-                        .max_w(px(340.0))
-                        .min_w(px(0.0))
-                        .p_3()
                         .child(
                             div()
                                 .flex()
                                 .items_center()
-                                .justify_between()
                                 .gap_2()
+                                .min_w(px(0.0))
                                 .child(
                                     div()
-                                        .min_w(px(0.0))
-                                        .debug_selector(|| "visual-topology-hover-name".into())
-                                        .text_sm()
-                                        .font_weight(gpui::FontWeight(600.0))
-                                        .text_color(rgba(COLOR_TEXT))
-                                        .child(detail.display_name.clone()),
+                                        .w(px(8.0))
+                                        .h(px(8.0))
+                                        .flex_shrink_0()
+                                        .rounded_full()
+                                        .bg(rgba(health_color)),
                                 )
                                 .child(
                                     div()
-                                        .debug_selector(|| {
-                                            "visual-topology-hover-health-badge".into()
-                                        })
-                                        .text_xs()
-                                        .text_color(rgba(COLOR_TEXT_SECONDARY))
-                                        .child(detail.health.clone()),
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_size(px(12.0)).line_height(px(18.0))
+                                        .font_weight(gpui::FontWeight(600.0))
+                                        .text_color(rgba(COLOR_TEXT))
+                                        .child(detail.display_name.clone()),
                                 ),
                         )
-                        .child(hover_field(
-                            "topology.hover.role",
-                            detail.role.clone(),
-                            "visual-topology-hover-role",
-                        ))
-                        .child(hover_field(
-                            "topology.hover.capabilities",
-                            detail.capabilities.clone(),
-                            "visual-topology-hover-capabilities",
-                        ))
-                        .child(hover_field(
-                            "topology.hover.health",
-                            format!("{} · {}", detail.health, detail.presence),
-                            "visual-topology-hover-health",
-                        ))
+                        .child(
+                            button(
+                                SharedString::from(format!("topology-menu-{index}")),
+                                "",
+                                ButtonVariant::Ghost,
+                                false,
+                            )
+                            .debug_selector(move || format!("visual-topology-menu-trigger-{index}"))
+                            .aria_label(tr(
+                                self.locale,
+                                "topology.menu.label",
+                                &[("name", &detail.display_name)],
+                            ))
+                            .w(px(24.0))
+                            .h(px(24.0))
+                            .px_0()
+                            .child(lucide_icon(
+                                include_bytes!("../../assets/icons/more-horizontal.svg"),
+                                14.0,
+                                COLOR_MUTED,
+                            ))
+                            .on_click(cx.listener(
+                                move |shell, _, _, cx| {
+                                    shell.toggle_topology_menu(menu_node_id.clone(), cx);
+                                    cx.stop_propagation();
+                                },
+                            )),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_1()
+                        .child(
+                            div()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_size(px(10.0)).line_height(px(14.0))
+                                .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                .child(format!("{} · {}", detail.role, detail.health)),
+                        )
+                        .when(node.is_self, |row| {
+                            row.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(8.0))
+                                    .font_weight(gpui::FontWeight(700.0))
+                                    .text_color(rgba(DARK_THEME.colors.success.rgba_hex()))
+                                    .child(t(self.locale, "topology.list.self").to_string()),
+                            )
+                        }),
+                );
+
+            if hovered {
+                card = card;
+            }
+            if hovered && !menu_open {
+                card = card.child(
+                    div()
+                        .id("visual-topology-hover")
+                        .debug_selector(|| "visual-topology-hover".into())
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .mt_1()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(rgba(COLOR_DIVIDER))
+                        .child(
+                            div()
+                                .debug_selector(|| "visual-topology-hover-name".into())
+                                .text_xs()
+                                .font_weight(gpui::FontWeight(600.0))
+                                .text_color(rgba(COLOR_TEXT))
+                                .child(detail.display_name.clone()),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(|| "visual-topology-hover-role".into())
+                                .text_size(px(10.0)).line_height(px(14.0))
+                                .text_color(rgba(COLOR_MUTED))
+                                .child(detail.role.clone()),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(|| "visual-topology-hover-capabilities".into())
+                                .text_size(px(10.0)).line_height(px(14.0))
+                                .text_color(rgba(COLOR_MUTED))
+                                .child(detail.capabilities.clone()),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(|| "visual-topology-hover-health".into())
+                                .text_size(px(10.0)).line_height(px(14.0))
+                                .text_color(rgba(COLOR_MUTED))
+                                .child(format!("{} · {}", detail.health, detail.presence)),
+                        )
                         .child(
                             div()
                                 .debug_selector(|| "visual-topology-hover-hint".into())
-                                .text_size(px(10.0))
-                                .text_color(rgba(COLOR_MUTED))
+                                .text_size(px(9.0)).line_height(px(13.0))
+                                .text_color(rgba(COLOR_FAINT))
                                 .child(t(self.locale, "topology.hover.hint").to_string()),
                         ),
                 );
@@ -9024,10 +10736,13 @@ impl GpuiShell {
                     .debug_selector(|| "visual-topology-menu".into())
                     .flex()
                     .flex_col()
-                    .gap_1()
-                    .rounded_md()
+                    .gap(px(2.0))
+                    .mt_1()
+                    .rounded(px(8.0))
+                    .border_1()
+                    .border_color(rgba(COLOR_DIVIDER))
                     .bg(rgba(COLOR_PANEL_RAISED))
-                    .p_2();
+                    .p_1();
                 let open_detail_node = node_id.clone();
                 menu = menu.child(
                     button(
@@ -9041,6 +10756,7 @@ impl GpuiShell {
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         shell.open_topology_node(open_detail_node.clone(), cx);
                         shell.topology_menu_node_id = None;
+                        cx.stop_propagation();
                         cx.notify();
                     })),
                 );
@@ -9070,6 +10786,7 @@ impl GpuiShell {
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         shell.toggle_topology_selection(select_node.clone(), cx);
                         shell.topology_menu_node_id = None;
+                        cx.stop_propagation();
                         cx.notify();
                     })),
                 );
@@ -9079,7 +10796,7 @@ impl GpuiShell {
                             .debug_selector(|| "visual-topology-menu-no-actions".into())
                             .px_2()
                             .py_1()
-                            .text_xs()
+                            .text_size(px(10.0)).line_height(px(14.0))
                             .text_color(rgba(COLOR_MUTED))
                             .child(t(self.locale, "topology.menu.no_actions").to_string()),
                     );
@@ -9111,6 +10828,7 @@ impl GpuiShell {
                                         cx,
                                     );
                                     shell.topology_menu_node_id = None;
+                                    cx.stop_propagation();
                                     cx.notify();
                                 },
                             )),
@@ -9119,57 +10837,429 @@ impl GpuiShell {
                 }
                 card = card.child(menu);
             }
-            node_cards.push(card);
+            stage_children.push(card.into_any_element());
         }
 
-        let detail_card = self.topology_detail_card(&topology, &network_id, directory.as_ref());
-        let compact = matches!(layout, LayoutClass::Mobile | LayoutClass::Compact);
-        let mut content = div()
-            .id("topology-content")
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(state_card)
-            .child(div().flex().flex_wrap().gap_2().children(boundary_buttons))
-            .child(
+        if visible_nodes.is_empty() {
+            let empty_title = t(self.locale, presentation.kind.title_key()).to_string();
+            let empty_detail = t(self.locale, presentation.kind.detail_key()).to_string();
+            stage_children.push(
                 div()
+                    .absolute()
+                    .top(px(1.0))
+                    .left(px(1.0))
+                    .right(px(1.0))
+                    .bottom(px(46.0))
                     .flex()
-                    .flex_col()
-                    .gap_2()
+                    .items_center()
+                    .justify_center()
                     .child(
                         div()
-                            .text_sm()
-                            .font_weight(gpui::FontWeight(600.0))
-                            .text_color(rgba(COLOR_TEXT))
-                            .child(t(self.locale, "topology.legend.connections").to_string()),
+                            .debug_selector(|| "visual-topology-empty-node".into())
+                            .w(px(310.0))
+                            .max_w(relative(0.78))
+                            .rounded(px(13.0))
+                            .border_1()
+                            .border_color(rgba(COLOR_DIVIDER))
+                            .bg(rgba(COLOR_PANEL_SOLID))
+                            .p_4()
+                            
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .w(px(38.0))
+                                            .h(px(38.0))
+                                            .flex_shrink_0()
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded_full()
+                                            .border_1()
+                                            .border_color(rgba(COLOR_DIVIDER))
+                                            .bg(rgba(COLOR_PANEL_RAISED))
+                                            .child(lucide_icon(
+                                                include_bytes!("../../assets/icons/waypoints.svg"),
+                                                18.0,
+                                                COLOR_ACCENT,
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .min_w(px(0.0))
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(gpui::FontWeight(600.0))
+                                                    .text_color(rgba(COLOR_TEXT))
+                                                    .child(
+                                                        t(self.locale, "topology.list.self")
+                                                            .to_string(),
+                                                    ),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgba(COLOR_MUTED))
+                                                    .child(empty_title),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .mt_3()
+                                    .pt_3()
+                                    .border_t_1()
+                                    .border_color(rgba(COLOR_DIVIDER))
+                                    .text_size(px(10.0)).line_height(px(14.0))
+                                    .line_height(px(16.0))
+                                    .text_color(rgba(COLOR_TEXT_SECONDARY))
+                                    .child(empty_detail),
+                            ),
                     )
-                    .children(connections),
-            );
-        if compact {
-            content = content
-                .child(div().flex().flex_col().gap_2().children(node_cards))
-                .child(detail_card);
-        } else {
-            content = content.child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap_4()
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .children(node_cards),
-                    )
-                    .child(div().w(px(360.0)).flex_shrink_0().child(detail_card)),
+                    .into_any_element(),
             );
         }
-        content.into_any_element()
+
+        // Zoom / viewport toolbar, top-left of the canvas.
+        stage_children.push(
+            div()
+                .debug_selector(|| "visual-topology-floating-toolbar".into())
+                .absolute()
+                .top(px(14.0))
+                .left(px(14.0))
+                .w(px(148.0))
+                .h(px(38.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(2.0))
+                .rounded(px(0.0))
+                .bg(rgba(COLOR_PANEL_SOLID))
+                .p_1()
+                .child(
+                    button(
+                        SharedString::from("topology-zoom-out"),
+                        "−",
+                        ButtonVariant::Ghost,
+                        self.topology_zoom <= 0.75,
+                    )
+                    .aria_label(t(self.locale, "topology.zoom.out").to_string())
+                    .w(px(30.0))
+                    .h(px(30.0))
+                    .px_0()
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.topology_zoom = (shell.topology_zoom - 0.1).max(0.75);
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "visual-topology-zoom-status".into())
+                        .w(px(34.0))
+                        .text_center()
+                        .text_size(px(9.0)).line_height(px(13.0))
+                        .text_color(rgba(COLOR_FAINT))
+                        .child(format!("{:.0}%", zoom * 100.0)),
+                )
+                .child(
+                    button(
+                        SharedString::from("topology-zoom-in"),
+                        "+",
+                        ButtonVariant::Ghost,
+                        self.topology_zoom >= 1.25,
+                    )
+                    .aria_label(t(self.locale, "topology.zoom.in").to_string())
+                    .w(px(30.0))
+                    .h(px(30.0))
+                    .px_0()
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.topology_zoom = (shell.topology_zoom + 0.1).min(1.25);
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    button(
+                        SharedString::from("topology-zoom-reset"),
+                        "",
+                        ButtonVariant::Ghost,
+                        self.topology_zoom == 1.0,
+                    )
+                    .aria_label(t(self.locale, "topology.zoom.reset").to_string())
+                    .w(px(30.0))
+                    .h(px(30.0))
+                    .px_0()
+                    .child(lucide_icon(
+                        include_bytes!("../../assets/icons/circle-dot.svg"),
+                        14.0,
+                        COLOR_TEXT_SECONDARY,
+                    ))
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.topology_zoom = 1.0;
+                        cx.notify();
+                    })),
+                )
+                .into_any_element(),
+        );
+        // Stage-level actions, top-right of the canvas.
+        stage_children.push(
+            button(
+                SharedString::from("topology-more-actions"),
+                "",
+                ButtonVariant::Secondary,
+                false,
+            )
+            .debug_selector(|| "visual-topology-more-actions".into())
+            .aria_label(t(self.locale, "common.actions").to_string())
+            .absolute()
+            .top(px(14.0))
+            .right(px(14.0))
+            .w(px(34.0))
+            .h(px(34.0))
+            .px_0()
+            .child(lucide_icon(
+                include_bytes!("../../assets/icons/more-horizontal.svg"),
+                17.0,
+                COLOR_TEXT_SECONDARY,
+            ))
+            .on_click(cx.listener(|shell, _, _, cx| {
+                shell.open_topology_command_workspace(cx);
+            }))
+            .into_any_element(),
+        );
+
+        // Network switch and legend live inside the canvas footer.
+        let boundary_chips = boundaries
+            .iter()
+            .enumerate()
+            .map(|(index, boundary)| {
+                let active = Some(&boundary.network_id) == network_id.as_ref();
+                let boundary_id = boundary.network_id.clone();
+                div()
+                    .id(SharedString::from(format!("topology-network-{index}")))
+                    .debug_selector(move || format!("visual-topology-boundary-{index}"))
+                    .role(Role::Button)
+                    .aria_selected(active)
+                    .aria_label(boundary.name.clone())
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_shrink_0()
+                    .h(px(27.0))
+                    .px_2()
+                    .rounded(px(7.0))
+                    .when(active, |chip| {
+                        chip.bg(rgba(COLOR_DIVIDER))
+                            .border_1()
+                            .border_color(rgba(COLOR_DIVIDER))
+                    })
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.select_topology_network(boundary_id.clone(), cx);
+                        cx.stop_propagation();
+                    }))
+                    .child(
+                        div()
+                            .w(px(6.0))
+                            .h(px(6.0))
+                            .rounded_full()
+                            .bg(rgba(if active { COLOR_TEXT } else { COLOR_TEXT_MUTED })),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0)).line_height(px(14.0))
+                            .text_color(rgba(if active {
+                                COLOR_TEXT
+                            } else {
+                                COLOR_MUTED
+                            }))
+                            .child(boundary.name.clone()),
+                    )
+                    .into_any_element()
+            })
+            .collect::<Vec<_>>();
+        let legend = [
+            (t(self.locale, "topology.legend.online").to_string(), DARK_THEME.colors.success.rgba_hex()),
+            (
+                t(self.locale, "topology.legend.current_path").to_string(),
+                COLOR_TEXT,
+            ),
+            (
+                t(self.locale, "topology.legend.other_links").to_string(),
+                COLOR_TEXT_MUTED,
+            ),
+        ];
+        stage_children.push(
+            div()
+                .debug_selector(|| "visual-topology-canvas-footer".into())
+                .absolute()
+                .left(px(1.0))
+                .right(px(0.0))
+                .bottom(px(1.0))
+                .h(px(45.0))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_4()
+                .bg(rgba(COLOR_PANEL_SOLID))
+                .px_3()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .children(boundary_chips),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .flex_shrink_0()
+                        .children(legend.into_iter().map(|(label, color)| {
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .text_size(px(9.0)).line_height(px(13.0))
+                                .text_color(rgba(COLOR_MUTED))
+                                .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(rgba(color)))
+                                .child(label)
+                        })),
+                )
+                .into_any_element(),
+        );
+
+        if self.selected_topology_node_id.is_some() {
+            if let Some(topology) = topology.as_ref() {
+                if let Some(network_id) = network_id.as_ref() {
+                    stage_children.push(
+                        div()
+                            .debug_selector(|| "visual-topology-detail-overlay".into())
+                            .absolute()
+                            .top(px(58.0))
+                            .right(px(14.0))
+                            .w(px(360.0))
+                            .max_h(px(300.0))
+                            .overflow_hidden()
+                            
+                            .child(self.topology_detail_card(
+                                topology,
+                                network_id,
+                                directory.as_ref(),
+                                cx,
+                            ))
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+
+        let stage = div()
+            .id("topology-canvas-stage")
+            .debug_selector(|| "visual-topology-canvas-stage".into())
+            .relative()
+            .w_full()
+            .h(px(stage_height))
+            .min_h(px(stage_height))
+            .overflow_hidden()
+            .rounded(px(0.0))
+            .bg(rgba(COLOR_PANEL_SOLID))
+            
+            .children(stage_children);
+
+        let mut sorted_connections = visible_connections.clone();
+        sorted_connections.sort_by(|left, right| {
+            right
+                .observed_at_unix_ms
+                .unwrap_or_default()
+                .cmp(&left.observed_at_unix_ms.unwrap_or_default())
+        });
+        let events = sorted_connections
+            .iter()
+            .take(3)
+            .map(|connection| {
+                let state_key = match connection.state {
+                    TopologyConnectionState::Active => "topology.connection.active",
+                    TopologyConnectionState::Idle => "topology.connection.idle",
+                    TopologyConnectionState::Stale => "topology.connection.stale",
+                };
+                let from_name = visible_nodes
+                    .iter()
+                    .find(|node| node.node_id == connection.from)
+                    .map(&display_name)
+                    .unwrap_or_else(|| connection.from.as_str().to_string());
+                let to_name = visible_nodes
+                    .iter()
+                    .find(|node| node.node_id == connection.to)
+                    .map(&display_name)
+                    .unwrap_or_else(|| connection.to.as_str().to_string());
+                (
+                    tr(
+                        self.locale,
+                        "topology.events.connection",
+                        &[
+                            ("from", &from_name),
+                            ("to", &to_name),
+                            ("state", t(self.locale, state_key)),
+                        ],
+                    ),
+                    connection
+                        .observed_at_unix_ms
+                        .map(|observed| format_diagnostic_timestamp(self.locale, observed))
+                        .unwrap_or_else(|| t(self.locale, "common.unknown").to_string()),
+                    match connection.state {
+                        TopologyConnectionState::Active => "active",
+                        TopologyConnectionState::Idle => "idle",
+                        TopologyConnectionState::Stale => "stale",
+                    }
+                    .to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let path_card = self.topology_path_card(&path_names);
+        let events_card = self.topology_events_card(&events);
+        let insights = div()
+            .debug_selector(|| "visual-topology-insights".into())
+            .flex()
+            .items_start()
+            .w_full()
+            .pt_3()
+            .border_t_1()
+            .border_color(rgba(COLOR_DIVIDER))
+            .child(path_card)
+            .child(events_card);
+
+        div()
+            .id("topology-content")
+            .debug_selector(|| "visual-topology-content".into())
+            .flex()
+            .flex_1()
+            .w_full()
+            .min_h(px(0.0))
+            .flex_col()
+            .gap_3()
+            .child(hero)
+            .child(state_band)
+            .child(stage)
+            .child(insights)
+            .into_any_element()
     }
 
-    fn page_content(&mut self, layout: LayoutClass, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn page_content(
+        &mut self,
+        layout: LayoutClass,
+        viewport_height: f32,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let Some(manifest) = self.manifest.as_ref() else {
             return div()
                 .id(app_region_id(AppRegion::Content))
@@ -9215,6 +11305,30 @@ impl GpuiShell {
                 .any(|action| is_configuration_action(&action.id))
         });
         let page_icon = lucide_icon(page_icon_data(&self.selected_page), 20.0, COLOR_ACCENT);
+        let topology_visual = self.selected_page == "topology";
+
+        // Topology owns its workspace: the canvas is the page, so it must not
+        // inherit the generic hero/status stack used by ordinary pages.
+        if topology_visual {
+            let mut workspace = div()
+                .id(app_region_id(AppRegion::Content))
+                .debug_selector(|| "visual-content".into())
+                .track_focus(&self.content_focus_handle)
+                .role(Role::Article)
+                .aria_label(page_title.clone())
+                .flex()
+                .flex_col()
+                .gap_0()
+                .min_w(px(0.0))
+                .flex_1()
+                .self_stretch()
+                .overflow_y_scroll()
+                .child(self.topology_workspace(layout, viewport_height, page_title.clone(), cx));
+            if self.operation.is_some() {
+                workspace = workspace.child(self.operation_status_card(cx));
+            }
+            return workspace.into_any_element();
+        }
 
         let mut content = div()
             .id(app_region_id(AppRegion::Content))
@@ -9232,47 +11346,68 @@ impl GpuiShell {
             .child(
                 div()
                     .id("page-heading")
-                    .debug_selector(|| "visual-page-heading".into())
-                    .role(A11Y_HEADING_ROLE)
-                    .aria_level(1)
-                    .aria_label(page_title.clone())
+                    .debug_selector(move || {
+                        if topology_visual {
+                            "visual-topology-hero".into()
+                        } else {
+                            "visual-page-heading".into()
+                        }
+                    })
+                    .relative()
                     .flex()
                     .items_center()
-                    .gap_3()
-                    .h(px(44.0))
+                    .justify_between()
+                    .gap_4()
+                    .min_h(px(44.0))
                     .child(
                         div()
-                            .w(px(40.0))
-                            .h(px(40.0))
+                            .id("page-heading-title")
+                            .role(A11Y_HEADING_ROLE)
+                            .aria_level(1)
+                            .aria_label(page_title.clone())
                             .flex()
+                            .flex_1()
                             .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .bg(rgba(DARK_THEME.colors.surface.rgba_hex()))
-                            .text_color(rgba(COLOR_ACCENT))
-                            .child(page_icon),
+                            .gap_3()
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .w(px(40.0))
+                                    .h(px(40.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .bg(rgba(DARK_THEME.colors.surface.rgba_hex()))
+                                    .text_color(rgba(COLOR_ACCENT))
+                                    .child(page_icon),
+                            )
+                            .child(
+                                div()
+                                    .debug_selector(move || {
+                                        if topology_visual {
+                                            "visual-page-heading".into()
+                                        } else {
+                                            "visual-page-heading-title".into()
+                                        }
+                                    })
+                                    .text_size(px(20.0)).line_height(px(26.0))
+                                    .line_height(px(24.0))
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(page_title),
+                            ),
                     )
-                    .child(
-                        div().flex().flex_1().flex_col().min_w(px(0.0)).child(
-                            div()
-                                .text_size(px(20.0))
-                                .line_height(px(24.0))
-                                .font_weight(gpui::FontWeight(600.0))
-                                .text_color(rgba(COLOR_TEXT))
-                                .child(page_title),
-                        ),
-                    ),
+                    .child(self.page_command_surface(cx)),
             );
+
+        if self.operation.is_some() {
+            content = content.child(self.operation_status_card(cx));
+        }
 
         if let Some(overview) = model.overview.as_ref() {
             return content
-                .child(self.overview_content(overview, cx))
-                .into_any_element();
-        }
-
-        if self.selected_page == "topology" {
-            return content
-                .child(self.topology_content(layout, cx))
+                .child(self.overview_content(overview, layout, cx))
                 .into_any_element();
         }
 
@@ -9283,7 +11418,6 @@ impl GpuiShell {
         }
 
         if self.selected_page == "node_runtime" || self.selected_page == "exit_node" {
-            content = content.child(self.operation_status_card(cx));
             content = content.child(self.diagnostics_card(cx));
         }
 
@@ -9815,7 +11949,215 @@ impl GpuiShell {
             .into_any_element()
     }
 
-    fn action_card(&self, action: NodeUiAction, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn admin_recovery_status_card(
+        &self,
+        status: &AdminRecoveryStatusView,
+        refreshed_at_unix_ms: Option<u64>,
+    ) -> gpui::AnyElement {
+        let node_ids = |values: &[fuckipv6_common::domain::NodeId]| {
+            if values.is_empty() {
+                t(self.locale, "common.none").to_string()
+            } else {
+                values
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            }
+        };
+        let localized_flag = |value: bool| {
+            t(self.locale, if value { "common.yes" } else { "common.no" }).to_string()
+        };
+        let state_label = t(self.locale, admin_recovery_state_key(status.state)).to_string();
+        let signatures = tr(
+            self.locale,
+            "admin_recovery.signature_count",
+            &[
+                ("count", &status.signature_count.to_string()),
+                ("required", &status.required_signatures.to_string()),
+            ],
+        );
+        let denial_key = status
+            .denial_key
+            .as_deref()
+            .unwrap_or("admin_recovery.error.threshold_not_met");
+        let denial = t(self.locale, denial_key).to_string();
+        let mut card = div()
+            .id(SharedString::from(format!(
+                "admin-recovery-status-{}",
+                status.request_id
+            )))
+            .debug_selector(|| "visual-admin-recovery-status".into())
+            .role(Role::Article)
+            .aria_label(t(self.locale, "admin_recovery.status_title").to_string())
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_4()
+            .rounded_md()
+            .bg(rgba(COLOR_PANEL_RAISED))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "admin_recovery.status_title").to_string()),
+                    )
+                    .child(profile_status_chip(state_label)),
+            )
+            .child(diagnostic_metadata_row(
+                t(self.locale, "field.admin_recovery_request_id"),
+                status.request_id.as_str(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "admin_recovery.network_id"),
+                status.network_id.as_str(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "admin_recovery.initiator"),
+                status.initiator.to_string(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "admin_recovery.impact.owner_before"),
+                status.impact.owner_before.to_string(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "admin_recovery.impact.owner_after"),
+                status.impact.owner_after.to_string(),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "admin_recovery.impact.administrators_added"),
+                node_ids(&status.impact.administrators_added),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "admin_recovery.impact.administrators_removed"),
+                node_ids(&status.impact.administrators_removed),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "admin_recovery.impact.members_added"),
+                node_ids(&status.impact.members_added),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "admin_recovery.impact.members_removed"),
+                node_ids(&status.impact.members_removed),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "admin_recovery.participants"),
+                node_ids(&status.participants),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "admin_recovery.signatures"),
+                signatures,
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "admin_recovery.issued_at"),
+                format_diagnostic_timestamp(self.locale, status.issued_at_unix_ms),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "admin_recovery.expires_at"),
+                format_diagnostic_timestamp(self.locale, status.expires_at_unix_ms),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "admin_recovery.revocation.old_sessions"),
+                localized_flag(status.revocation.old_sessions),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "admin_recovery.revocation.pending_invitations"),
+                localized_flag(status.revocation.pending_invitations),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "admin_recovery.revocation.unconfirmed_writes"),
+                localized_flag(status.revocation.unconfirmed_writes),
+            ))
+            .child(diagnostic_metadata_row(
+                t(self.locale, "admin_recovery.can_execute"),
+                localized_flag(status.can_execute),
+            ));
+        if status.denial_key.is_some() {
+            card = card.child(diagnostic_metadata_row(
+                t(self.locale, "admin_recovery.denial"),
+                denial,
+            ));
+        }
+        if let Some(refreshed_at_unix_ms) = refreshed_at_unix_ms {
+            card = card.child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(tr(
+                self.locale,
+                "admin_recovery.refreshed_at",
+                &[(
+                    "time",
+                    &format_diagnostic_timestamp(self.locale, refreshed_at_unix_ms),
+                )],
+            )));
+        }
+        card.into_any_element()
+    }
+
+    fn admin_recovery_list_card(&self, recoveries: &[AdminRecoveryStatusView]) -> gpui::AnyElement {
+        let rows = recoveries
+            .iter()
+            .map(|status| self.admin_recovery_status_card(status, None))
+            .collect::<Vec<_>>();
+        let mut card = div()
+            .id("visual-admin-recovery-list")
+            .debug_selector(|| "visual-admin-recovery-list".into())
+            .role(Role::Article)
+            .aria_label(t(self.locale, "admin_recovery.list_title").to_string())
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
+            .rounded_md()
+            .bg(rgba(COLOR_PANEL_RAISED))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_TEXT))
+                            .child(t(self.locale, "admin_recovery.list_title").to_string()),
+                    )
+                    .child(profile_status_chip(tr(
+                        self.locale,
+                        "admin_recovery.list_count",
+                        &[("count", &recoveries.len().to_string())],
+                    ))),
+            );
+        if let Some(loaded_at) = self.recent_admin_recoveries_at_unix_ms {
+            card = card.child(div().text_xs().text_color(rgba(COLOR_MUTED)).child(tr(
+                self.locale,
+                "admin_recovery.loaded_at",
+                &[("time", &format_diagnostic_timestamp(self.locale, loaded_at))],
+            )));
+        }
+        if rows.is_empty() {
+            card = card.child(
+                empty_state(t(self.locale, "admin_recovery.empty"))
+                    .debug_selector(|| "visual-admin-recovery-empty".into()),
+            );
+        } else {
+            card = card.child(div().flex().flex_col().gap_2().children(rows));
+        }
+        card.into_any_element()
+    }
+
+    fn action_card(
+        &self,
+        action: NodeUiAction,
+        show_header: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let guided_join_request_review = self.recent_join_requests.is_some()
             && matches!(
                 action.id.as_str(),
@@ -9835,12 +12177,13 @@ impl GpuiShell {
             && action.confirmation.is_none()
             && !unavailable
             && !blocked;
-        let expanded = !direct_read
-            && self
-                .expanded_actions
-                .get(&action.id)
-                .copied()
-                .unwrap_or(false);
+        let expanded = !show_header
+            || (!direct_read
+                && self
+                    .expanded_actions
+                    .get(&action.id)
+                    .copied()
+                    .unwrap_or(false));
         let disabled = manifest_action_submit_disabled(&action, self.pending_commands, blocked);
         let button_variant = if destructive || confirmation_pending {
             ButtonVariant::Danger
@@ -9903,6 +12246,19 @@ impl GpuiShell {
             .then_some(self.recent_invitation_preview.as_ref())
             .flatten()
             .map(|preview| self.invitation_preview_card(preview, cx));
+        let admin_recovery_status_card = matches!(
+            action.id.as_str(),
+            "get_admin_recovery_status" | "revoke_admin_recovery" | "execute_admin_recovery"
+        )
+        .then_some(self.recent_admin_recovery_status.as_ref())
+        .flatten()
+        .map(|status| {
+            self.admin_recovery_status_card(status, self.recent_admin_recovery_status_at_unix_ms)
+        });
+        let admin_recoveries_card = (action.id == "list_admin_recoveries")
+            .then_some(self.recent_admin_recoveries.as_deref())
+            .flatten()
+            .map(|recoveries| self.admin_recovery_list_card(recoveries));
         let has_custom_body = invitation_preview_card.is_some()
             || join_preview_card.is_some()
             || join_requests_card.is_some()
@@ -9910,7 +12266,13 @@ impl GpuiShell {
             || join_request_review_summary.is_some()
             || issued_invitation_card.is_some()
             || invitations_card.is_some()
-            || invitation_status_card.is_some();
+            || invitation_status_card.is_some()
+            || admin_recovery_status_card.is_some()
+            || admin_recoveries_card.is_some();
+        let recovery_form_action = matches!(
+            action.id.as_str(),
+            "revoke_admin_recovery" | "execute_admin_recovery"
+        );
 
         let confirmation_notice = action.confirmation.as_ref().map(|confirmation| {
             let title = t(self.locale, &confirmation.title_key).to_string();
@@ -9981,9 +12343,6 @@ impl GpuiShell {
                 .into_any_element()
         });
 
-        let direct_action_id = action.id.clone();
-        let toggle_action_id = action.id.clone();
-        let head_selector = format!("visual-action-head-{}", action.id);
         let mut card = div()
             .id(SharedString::from(format!("action-card-{}", action.id)))
             .flex()
@@ -9992,16 +12351,17 @@ impl GpuiShell {
             .overflow_hidden()
             .rounded_lg()
             .bg(rgba(COLOR_PANEL_RAISED))
-            .when(unavailable, |card| card.opacity(0.72))
-            .child(
+            .when(unavailable, |card| card.opacity(0.72));
+        if show_header {
+            let direct_action_id = action.id.clone();
+            let toggle_action_id = action.id.clone();
+            let head_selector = format!("visual-action-head-{}", action.id);
+            card = card.child(
                 div()
                     .id(SharedString::from(format!(
                         "action-card-head-{}",
                         action.id
                     )))
-                    .when(action.id == "refresh_snapshot", |head| {
-                        head.debug_selector(|| "visual-action-first".into())
-                    })
                     .debug_selector(move || head_selector)
                     .role(Role::Button)
                     .aria_label(action_label.clone())
@@ -10017,37 +12377,23 @@ impl GpuiShell {
                     .py_2()
                     .text_sm()
                     .text_color(rgba(COLOR_TEXT))
-                    .on_click(cx.listener(move |shell, _, _, cx| {
-                        if direct_read {
-                            shell.submit_manifest_action(&direct_action_id, cx);
+                    .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, _, cx| {
+                        if matches!(event, gpui::ClickEvent::Keyboard(_)) {
                             return;
                         }
-                        let currently_expanded = shell
-                            .expanded_actions
-                            .get(&toggle_action_id)
-                            .copied()
-                            .unwrap_or(false);
-                        if currently_expanded
-                            && shell.pending_confirmation.as_deref()
-                                == Some(toggle_action_id.as_str())
-                        {
-                            shell.pending_confirmation = None;
-                        }
-                        if currently_expanded {
-                            shell.expanded_actions.remove(&toggle_action_id);
-                        } else {
-                            shell.expanded_actions.clear();
-                            shell
-                                .expanded_actions
-                                .insert(toggle_action_id.clone(), true);
-                        }
-                        if currently_expanded && toggle_action_id == "list_network_members" {
-                            shell.recent_network_members = None;
-                            shell.selected_member_node_id = None;
-                        }
-                        cx.notify();
+                        shell.activate_action_card(&direct_action_id, direct_read, cx);
+                        cx.stop_propagation();
                     }))
-                    .child(action_label)
+                    .on_key_down(
+                        cx.listener(move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                            if !is_unmodified_activation_key(event) {
+                                return;
+                            }
+                            shell.activate_action_card(&toggle_action_id, direct_read, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(action_label.clone())
                     .child(
                         div()
                             .flex()
@@ -10059,7 +12405,7 @@ impl GpuiShell {
                                         .rounded_md()
                                         .px_2()
                                         .py_1()
-                                        .text_size(px(10.0))
+                                        .text_size(px(10.0)).line_height(px(14.0))
                                         .font_weight(gpui::FontWeight(600.0))
                                         .text_color(rgba(COLOR_WARNING))
                                         .bg(rgba(DARK_THEME.colors.warning_soft.rgba_hex()))
@@ -10075,7 +12421,7 @@ impl GpuiShell {
                                         .rounded_md()
                                         .px_2()
                                         .py_1()
-                                        .text_size(px(10.0))
+                                        .text_size(px(10.0)).line_height(px(14.0))
                                         .text_color(rgba(if destructive {
                                             DARK_THEME.colors.danger_text.rgba_hex()
                                         } else {
@@ -10097,10 +12443,72 @@ impl GpuiShell {
                             }),
                     ),
             );
+        }
 
         if expanded {
-            let mut body = div().flex().flex_col().gap_3().px_4().pb_4();
-            if has_custom_body {
+            let mut body = div()
+                .flex()
+                .flex_col()
+                .gap_3()
+                .when(show_header, |body| body.px_4().pb_4());
+            if recovery_form_action {
+                body = body.children(admin_recovery_status_card);
+                if let Some(notice) = unavailable_notice {
+                    body = body.child(notice);
+                } else if let Some(reason) = block_reason {
+                    let action_label = manifest_action_label(self.locale, &action);
+                    body = body.children(confirmation_notice).children(fields).child(
+                        div()
+                            .text_xs()
+                            .line_height(px(18.0))
+                            .text_color(rgba(COLOR_WARNING))
+                            .child(tr(
+                                self.locale,
+                                "gpui.action_blocked",
+                                &[
+                                    ("action", &action_label),
+                                    ("reason", t(self.locale, reason.message_key())),
+                                ],
+                            )),
+                    );
+                } else {
+                    let form_content = div()
+                        .id(SharedString::from(format!("action-form-{}", action.id)))
+                        .debug_selector({
+                            let selector = format!("visual-action-form-scroll-{}", action.id);
+                            move || selector
+                        })
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .max_h(px(340.0))
+                        .overflow_y_scroll()
+                        .children(confirmation_notice)
+                        .children(fields);
+                    body = body.child(form_content).child(
+                        button(
+                            SharedString::from(format!("action-{}", action.id)),
+                            button_label,
+                            button_variant,
+                            disabled,
+                        )
+                        .debug_selector({
+                            let selector = format!("visual-action-cta-{}", action.id);
+                            move || selector
+                        })
+                        .w_full()
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            shell.submit_manifest_action(&action.id, cx);
+                        })),
+                    );
+                }
+            } else if has_custom_body {
+                if let Some(status_card) = admin_recovery_status_card {
+                    body = body.child(status_card);
+                }
+                if let Some(recoveries_card) = admin_recoveries_card {
+                    body = body.child(recoveries_card);
+                }
                 if let Some(requests_card) = join_requests_card {
                     body = body.child(requests_card);
                 }
@@ -10208,6 +12616,28 @@ impl GpuiShell {
         let label = field_label(self.locale, &field.label_key);
         let required = if field.required { " *" } else { "" };
         let control = match field.input {
+            NodeUiInputKind::AdminRecoveryRequestJson => self
+                .admin_recovery_request_editor
+                .as_ref()
+                .map(|editor| {
+                    div()
+                        .w_full()
+                        .h(px(220.0))
+                        .overflow_hidden()
+                        .rounded_md()
+                        .bg(rgba(DARK_THEME.colors.input_background.rgba_hex()))
+                        .flex()
+                        .child(Textarea::new(editor))
+                        .into_any_element()
+                })
+                .unwrap_or_else(|| {
+                    component_error_state(
+                        SharedString::from("missing-admin-recovery-request-editor"),
+                        t(self.locale, "field.admin_recovery_request_json"),
+                        t(self.locale, "common.waiting_manifest"),
+                    )
+                    .into_any_element()
+                }),
             NodeUiInputKind::Boolean => self.choice_field(
                 action,
                 field,
@@ -10365,6 +12795,35 @@ impl GpuiShell {
                     .text_xs()
                     .text_color(rgba(COLOR_FAINT))
                     .child(hint),
+            );
+        }
+        if field.input == NodeUiInputKind::AdminRecoveryRequestJson {
+            editor = editor.child(
+                div()
+                    .text_xs()
+                    .text_color(rgba(COLOR_FAINT))
+                    .child(t(self.locale, "admin_recovery.request_json_help")),
+            );
+        }
+        if field.input == NodeUiInputKind::AdminRecoveryReason {
+            editor = editor.child(
+                div()
+                    .debug_selector(|| {
+                        format!(
+                            "visual-admin-recovery-reason-counter-{}-{}",
+                            action.id, field.id
+                        )
+                    })
+                    .text_xs()
+                    .text_color(rgba(COLOR_FAINT))
+                    .child(tr(
+                        self.locale,
+                        "admin_recovery.reason_counter",
+                        &[
+                            ("count", &value.chars().count().to_string()),
+                            ("max", "512"),
+                        ],
+                    )),
             );
         }
         editor.into_any_element()
@@ -11049,7 +13508,10 @@ impl GpuiShell {
             !can_accept || pending,
         )
         .debug_selector(|| "visual-invitation-terms".into())
-        .on_click(cx.listener(|shell, _, _, cx| {
+        .on_click(cx.listener(|shell, event: &gpui::ClickEvent, _, cx| {
+            if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                return;
+            }
             if shell.pending_commands > 0 {
                 return;
             }
@@ -11059,6 +13521,21 @@ impl GpuiShell {
                 .is_some_and(|preview| preview.can_accept);
             if can_accept {
                 shell.invitation_terms_confirmed = !shell.invitation_terms_confirmed;
+                cx.stop_propagation();
+                cx.notify();
+            }
+        }))
+        .on_key_down(cx.listener(|shell, event: &gpui::KeyDownEvent, _, cx| {
+            if !is_unmodified_activation_key(event) || shell.pending_commands > 0 {
+                return;
+            }
+            let can_accept = shell
+                .recent_invitation_preview
+                .as_ref()
+                .is_some_and(|preview| preview.can_accept);
+            if can_accept {
+                shell.invitation_terms_confirmed = !shell.invitation_terms_confirmed;
+                cx.stop_propagation();
                 cx.notify();
             }
         }));
@@ -11069,7 +13546,10 @@ impl GpuiShell {
             !can_accept || pending,
         )
         .debug_selector(|| "visual-invitation-exit-contribution".into())
-        .on_click(cx.listener(|shell, _, _, cx| {
+        .on_click(cx.listener(|shell, event: &gpui::ClickEvent, _, cx| {
+            if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                return;
+            }
             if shell.pending_commands == 0
                 && shell
                     .recent_invitation_preview
@@ -11078,6 +13558,22 @@ impl GpuiShell {
             {
                 shell.invitation_exit_contribution_confirmed =
                     !shell.invitation_exit_contribution_confirmed;
+                cx.stop_propagation();
+                cx.notify();
+            }
+        }))
+        .on_key_down(cx.listener(|shell, event: &gpui::KeyDownEvent, _, cx| {
+            if !is_unmodified_activation_key(event) || shell.pending_commands > 0 {
+                return;
+            }
+            let can_accept = shell
+                .recent_invitation_preview
+                .as_ref()
+                .is_some_and(|preview| preview.can_accept);
+            if can_accept {
+                shell.invitation_exit_contribution_confirmed =
+                    !shell.invitation_exit_contribution_confirmed;
+                cx.stop_propagation();
                 cx.notify();
             }
         }));
@@ -11305,6 +13801,7 @@ impl GpuiShell {
             .map(|(index, request)| {
                 let network_id = result.network_id.clone();
                 let request_id = request.request_id.as_str().to_string();
+                let key_request_id = request_id.clone();
                 let request_revision = request.revision;
                 let reviewable = !request.state.is_terminal();
                 let selected = self.join_request_selection.contains(&request_id);
@@ -11469,7 +13966,7 @@ impl GpuiShell {
                                         .gap_1()
                                         .child(
                                             div()
-                                                .text_size(px(10.0))
+                                                .text_size(px(10.0)).line_height(px(14.0))
                                                 .text_color(rgba(COLOR_MUTED))
                                                 .child(
                                                     t(self.locale, "join_requests.applicant")
@@ -11619,7 +14116,10 @@ impl GpuiShell {
                                         format!("visual-join-request-select-{index}")
                                     })
                                     .on_click(cx.listener(
-                                        move |shell, _, _, cx| {
+                                        move |shell, event: &gpui::ClickEvent, _, cx| {
+                                            if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                                                return;
+                                            }
                                             if shell.join_request_action_available(
                                                 "review_join_request",
                                             ) {
@@ -11627,6 +14127,23 @@ impl GpuiShell {
                                                     request_id.clone(),
                                                     cx,
                                                 );
+                                                cx.stop_propagation();
+                                            }
+                                        },
+                                    ))
+                                    .on_key_down(cx.listener(
+                                        move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                                            if !is_unmodified_activation_key(event) {
+                                                return;
+                                            }
+                                            if shell.join_request_action_available(
+                                                "review_join_request",
+                                            ) {
+                                                shell.toggle_join_request_selection(
+                                                    key_request_id.clone(),
+                                                    cx,
+                                                );
+                                                cx.stop_propagation();
                                             }
                                         },
                                     )),
@@ -11661,7 +14178,7 @@ impl GpuiShell {
                             .gap_1()
                             .child(
                                 div()
-                                    .text_size(px(10.0))
+                                    .text_size(px(10.0)).line_height(px(14.0))
                                     .font_weight(gpui::FontWeight(600.0))
                                     .text_color(rgba(COLOR_MUTED))
                                     .child(t(self.locale, "join_requests.title").to_string()),
@@ -11676,7 +14193,7 @@ impl GpuiShell {
                     )
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(px(10.0)).line_height(px(14.0))
                             .text_color(rgba(COLOR_FAINT))
                             .child(result.network_id.clone()),
                     ),
@@ -11693,6 +14210,7 @@ impl GpuiShell {
 
         if !reviewable_ids.is_empty() {
             let select_all_ids = reviewable_ids.clone();
+            let key_select_all_ids = select_all_ids.clone();
             let selected_count_label = tr(
                 self.locale,
                 "join_requests.selected_count",
@@ -11776,7 +14294,10 @@ impl GpuiShell {
                                 )
                                 .debug_selector(|| "visual-join-request-select-all".into())
                                 .on_click(cx.listener(
-                                    move |shell, _, _, cx| {
+                                    move |shell, event: &gpui::ClickEvent, _, cx| {
+                                        if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                                            return;
+                                        }
                                         if shell
                                             .join_request_action_available("review_join_request")
                                         {
@@ -11784,6 +14305,23 @@ impl GpuiShell {
                                                 &select_all_ids,
                                                 cx,
                                             );
+                                            cx.stop_propagation();
+                                        }
+                                    },
+                                ))
+                                .on_key_down(cx.listener(
+                                    move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                                        if !is_unmodified_activation_key(event) {
+                                            return;
+                                        }
+                                        if shell
+                                            .join_request_action_available("review_join_request")
+                                        {
+                                            shell.toggle_all_join_request_selection(
+                                                &key_select_all_ids,
+                                                cx,
+                                            );
+                                            cx.stop_propagation();
                                         }
                                     },
                                 )),
@@ -12083,6 +14621,7 @@ impl GpuiShell {
                                     || shell.selected_member_node_id.as_deref()
                                         == Some(node_id.as_str());
                                 let click_node_id = node_id.clone();
+                                let key_node_id = node_id.clone();
                                 div()
                                     .id(SharedString::from(format!("network-member-row-{index}")))
                                     .debug_selector(move || format!("visual-member-row-{index}"))
@@ -12108,10 +14647,28 @@ impl GpuiShell {
                                         row.bg(rgba(DARK_THEME.colors.accent_soft.rgba_hex()))
                                     })
                                     .cursor_pointer()
-                                    .on_click(cx.listener(move |shell, _, _, cx| {
-                                        shell.selected_member_node_id = Some(click_node_id.clone());
-                                        cx.notify();
-                                    }))
+                                    .on_click(cx.listener(
+                                        move |shell, event: &gpui::ClickEvent, _, cx| {
+                                            if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                                                return;
+                                            }
+                                            shell.selected_member_node_id =
+                                                Some(click_node_id.clone());
+                                            cx.stop_propagation();
+                                            cx.notify();
+                                        },
+                                    ))
+                                    .on_key_down(cx.listener(
+                                        move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                                            if !is_unmodified_activation_key(event) {
+                                                return;
+                                            }
+                                            shell.selected_member_node_id =
+                                                Some(key_node_id.clone());
+                                            cx.stop_propagation();
+                                            cx.notify();
+                                        },
+                                    ))
                                     .child(
                                         div()
                                             .min_w_0()
@@ -12588,7 +15145,10 @@ impl GpuiShell {
             !can_join || pending,
         )
         .debug_selector(|| "visual-join-network-terms".into())
-        .on_click(cx.listener(|shell, _, _, cx| {
+        .on_click(cx.listener(|shell, event: &gpui::ClickEvent, _, cx| {
+            if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                return;
+            }
             if shell.pending_commands > 0 {
                 return;
             }
@@ -12598,6 +15158,21 @@ impl GpuiShell {
                 .is_some_and(|preview| preview.can_join && !preview.already_member);
             if can_join {
                 shell.network_join_terms_confirmed = !shell.network_join_terms_confirmed;
+                cx.stop_propagation();
+                cx.notify();
+            }
+        }))
+        .on_key_down(cx.listener(|shell, event: &gpui::KeyDownEvent, _, cx| {
+            if !is_unmodified_activation_key(event) || shell.pending_commands > 0 {
+                return;
+            }
+            let can_join = shell
+                .recent_network_join_preview
+                .as_ref()
+                .is_some_and(|preview| preview.can_join && !preview.already_member);
+            if can_join {
+                shell.network_join_terms_confirmed = !shell.network_join_terms_confirmed;
+                cx.stop_propagation();
                 cx.notify();
             }
         }));
@@ -12608,7 +15183,10 @@ impl GpuiShell {
             !can_join || pending,
         )
         .debug_selector(|| "visual-join-network-exit-contribution".into())
-        .on_click(cx.listener(|shell, _, _, cx| {
+        .on_click(cx.listener(|shell, event: &gpui::ClickEvent, _, cx| {
+            if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                return;
+            }
             if shell.pending_commands > 0 {
                 return;
             }
@@ -12623,6 +15201,26 @@ impl GpuiShell {
             if can_join {
                 shell.network_join_exit_contribution_confirmed =
                     !shell.network_join_exit_contribution_confirmed;
+                cx.stop_propagation();
+                cx.notify();
+            }
+        }))
+        .on_key_down(cx.listener(|shell, event: &gpui::KeyDownEvent, _, cx| {
+            if !is_unmodified_activation_key(event) || shell.pending_commands > 0 {
+                return;
+            }
+            let can_join = shell
+                .recent_network_join_preview
+                .as_ref()
+                .is_some_and(|preview| {
+                    preview.can_join
+                        && !preview.already_member
+                        && preview.join_requires_exit_consent
+                });
+            if can_join {
+                shell.network_join_exit_contribution_confirmed =
+                    !shell.network_join_exit_contribution_confirmed;
+                cx.stop_propagation();
                 cx.notify();
             }
         }));
@@ -12677,7 +15275,7 @@ impl GpuiShell {
                     .gap_1()
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(px(10.0)).line_height(px(14.0))
                             .font_weight(gpui::FontWeight(600.0))
                             .text_color(rgba(COLOR_MUTED))
                             .child(t(self.locale, "join.preview_title").to_string()),
@@ -13140,7 +15738,7 @@ impl GpuiShell {
                     .gap_1()
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(px(10.0)).line_height(px(14.0))
                             .font_weight(gpui::FontWeight(600.0))
                             .text_color(rgba(COLOR_MUTED))
                             .child(title.to_uppercase()),
@@ -13468,20 +16066,258 @@ impl GpuiShell {
         )
     }
 
-    fn action_panel(&self, layout: LayoutClass, cx: &mut Context<Self>) -> impl IntoElement {
-        let presentation = ActionPanelPresentation::for_layout(layout);
-        let actions = self
-            .page()
-            .cloned()
-            .map(|page| page.actions)
-            .unwrap_or_default()
+    fn page_command_surface(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(page) = self.page().cloned() else {
+            return div().into_any_element();
+        };
+        let page_id = page.id.clone();
+        let actions = page
+            .actions
             .into_iter()
             .filter(|action| !is_configuration_action(&action.id))
             .collect::<Vec<_>>();
-        let action_count = actions.len();
+        let topology_commands = page_id == "topology" && self.topology_network_id().is_some();
+        if actions.is_empty() && !topology_commands {
+            return div().into_any_element();
+        }
+
+        let primary_candidate_id = command_primary_action_id(&page_id, &actions, &self.snapshot);
+        let primary_action = primary_candidate_id
+            .as_ref()
+            .and_then(|id| actions.iter().find(|action| action.id == *id))
+            .filter(|action| {
+                action.backend_status != NodeUiBackendStatus::Unavailable
+                    && complete_action_block_reason(
+                        action,
+                        &self.snapshot,
+                        self.selected_network.as_deref(),
+                    )
+                    .is_none()
+            })
+            .cloned();
+        let primary_id = primary_action.as_ref().map(|action| action.id.clone());
+        let quick_actions = command_quick_action_ids(&page_id)
+            .iter()
+            .filter(|id| primary_id.as_deref() != Some(**id))
+            .filter_map(|id| actions.iter().find(|action| action.id == *id))
+            .filter(|action| {
+                action.backend_status != NodeUiBackendStatus::Unavailable
+                    && complete_action_block_reason(
+                        action,
+                        &self.snapshot,
+                        self.selected_network.as_deref(),
+                    )
+                    .is_none()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let visible_quick_ids = quick_actions
+            .iter()
+            .map(|action| action.id.as_str())
+            .collect::<Vec<_>>();
+        let menu_actions = actions
+            .into_iter()
+            .filter(|action| primary_id.as_deref() != Some(action.id.as_str()))
+            .filter(|action| !visible_quick_ids.contains(&action.id.as_str()))
+            .collect::<Vec<_>>();
+        let show_menu = topology_commands || !menu_actions.is_empty();
+
+        let mut controls = div().flex().items_center().gap_2();
+        if let Some(action) = primary_action {
+            let action_id = action.id.clone();
+            let key_action_id = action.id.clone();
+            let page_id_for_click = page_id.clone();
+            let key_page_id = page_id.clone();
+            let label = manifest_action_label(self.locale, &action);
+            let icon = lucide_icon(command_action_icon_data(&action.id), 16.0, COLOR_TEXT);
+            let unavailable = action.backend_status == NodeUiBackendStatus::Unavailable;
+            let primary = button(
+                SharedString::from("page-command-primary"),
+                "",
+                ButtonVariant::Primary,
+                unavailable,
+            )
+            .debug_selector(|| "visual-command-primary".into())
+            .aria_label(label.clone())
+            .gap_2()
+            .h(px(36.0))
+            .child(icon)
+            .child(label);
+            controls = controls.child(if unavailable {
+                primary
+            } else {
+                primary
+                    .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, _, cx| {
+                        if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                            return;
+                        }
+                        shell.open_action(&page_id_for_click, &action_id, cx);
+                        cx.stop_propagation();
+                    }))
+                    .on_key_down(
+                        cx.listener(move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                            if !is_unmodified_activation_key(event) {
+                                return;
+                            }
+                            shell.open_action(&key_page_id, &key_action_id, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+            });
+        }
+
+        for action in quick_actions {
+            let action_id = action.id.clone();
+            let key_action_id = action.id.clone();
+            let page_id_for_click = page_id.clone();
+            let key_page_id = page_id.clone();
+            let label = manifest_action_label(self.locale, &action);
+            let selector = format!("visual-command-quick-{}", action.id);
+            let unavailable = action.backend_status == NodeUiBackendStatus::Unavailable;
+            let icon = lucide_icon(
+                command_action_icon_data(&action.id),
+                17.0,
+                COLOR_TEXT_SECONDARY,
+            );
+            let quick = button(
+                SharedString::from(format!("page-command-quick-{}", action.id)),
+                "",
+                ButtonVariant::Secondary,
+                unavailable,
+            )
+            .debug_selector(move || selector)
+            .aria_label(label)
+            .w(px(36.0))
+            .h(px(36.0))
+            .px_0()
+            .child(icon);
+            controls = controls.child(if unavailable {
+                quick
+            } else {
+                quick
+                    .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, _, cx| {
+                        if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                            return;
+                        }
+                        shell.open_action(&page_id_for_click, &action_id, cx);
+                        cx.stop_propagation();
+                    }))
+                    .on_key_down(
+                        cx.listener(move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                            if !is_unmodified_activation_key(event) {
+                                return;
+                            }
+                            shell.open_action(&key_page_id, &key_action_id, cx);
+                            cx.stop_propagation();
+                        }),
+                    )
+            });
+        }
+
+        if show_menu {
+            let open = self.action_menu_open;
+            let more_label = t(self.locale, "common.more_actions").to_string();
+            controls = controls.child(
+                button(
+                    SharedString::from("page-command-more"),
+                    "",
+                    ButtonVariant::Secondary,
+                    false,
+                )
+                .debug_selector(|| "visual-command-more".into())
+                .aria_label(more_label)
+                .aria_expanded(open)
+                .w(px(36.0))
+                .h(px(36.0))
+                .px_0()
+                .child(lucide_icon(
+                    include_bytes!("../../assets/icons/more-horizontal.svg"),
+                    18.0,
+                    COLOR_TEXT_SECONDARY,
+                ))
+                .on_click(cx.listener(|shell, event: &gpui::ClickEvent, _, cx| {
+                    // Div click events synthesize keyboard activation in some
+                    // GPUI hosts. Keyboard activation is handled explicitly by
+                    // key_down so Enter/Space always toggles exactly once.
+                    if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                        return;
+                    }
+                    let dismissed_by_same_pointer_down =
+                        event.mouse_position().is_some_and(|position| {
+                            shell.action_menu_dismissed_pointer.is_some_and(
+                                |(dismissed_x, dismissed_y)| {
+                                    (dismissed_x - f32::from(position.x)).abs() < 0.5
+                                        && (dismissed_y - f32::from(position.y)).abs() < 0.5
+                                },
+                            )
+                        });
+                    shell.action_menu_dismissed_pointer = None;
+                    if !dismissed_by_same_pointer_down {
+                        shell.toggle_command_menu(cx);
+                    }
+                }))
+                .on_key_down(cx.listener(
+                    |shell, event: &gpui::KeyDownEvent, _, cx| {
+                        if is_unmodified_activation_key(event) {
+                            shell.toggle_command_menu(cx);
+                            cx.stop_propagation();
+                        }
+                    },
+                )),
+            );
+            if open {
+                controls = controls.child(self.command_menu(menu_actions, topology_commands, cx));
+            }
+        }
+
+        div()
+            .id("page-command-surface")
+            .debug_selector(|| "visual-page-command-surface".into())
+            .relative()
+            .flex()
+            .items_center()
+            .gap_2()
+            .flex_shrink_0()
+            .when(self.action_menu_open, |surface| {
+                surface.child(
+                    div()
+                        .id("command-menu-backdrop")
+                        .debug_selector(|| "visual-command-menu-backdrop".into())
+                        .absolute()
+                        .top(px(-2000.0))
+                        .right(px(-2000.0))
+                        .bottom(px(-2000.0))
+                        .left(px(-2000.0))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|shell, event: &gpui::MouseDownEvent, _, cx| {
+                                if shell.action_menu_open {
+                                    shell.action_menu_open = false;
+                                    shell.action_menu_dismissed_pointer = Some((
+                                        f32::from(event.position.x),
+                                        f32::from(event.position.y),
+                                    ));
+                                    shell.clear_action_menu_search(cx);
+                                    cx.notify();
+                                    cx.stop_propagation();
+                                }
+                            }),
+                        ),
+                )
+            })
+            .child(controls)
+            .into_any_element()
+    }
+
+    fn command_menu(
+        &self,
+        actions: Vec<NodeUiAction>,
+        topology_commands: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let normalized_query = self.action_panel_query.trim().to_lowercase();
         let matching_actions = actions
-            .iter()
+            .into_iter()
             .filter(|action| {
                 if normalized_query.is_empty() {
                     return true;
@@ -13490,22 +16326,14 @@ impl GpuiShell {
                 let group_label = t(self.locale, &action.group_label_key).to_lowercase();
                 action_label.contains(&normalized_query) || group_label.contains(&normalized_query)
             })
-            .cloned()
             .collect::<Vec<_>>();
-        let available_actions = matching_actions
-            .iter()
-            .filter(|action| action.backend_status != NodeUiBackendStatus::Unavailable)
-            .cloned()
-            .collect::<Vec<_>>();
-        let unavailable_actions = matching_actions
-            .iter()
-            .filter(|action| action.backend_status == NodeUiBackendStatus::Unavailable)
-            .cloned()
-            .collect::<Vec<_>>();
+        let topology_label = t(self.locale, "topology.batch.title").to_lowercase();
+        let topology_match = topology_commands
+            && (normalized_query.is_empty() || topology_label.contains(&normalized_query));
 
-        let mut group_sections = Vec::new();
+        let mut groups = Vec::new();
         for group in NODE_UI_ACTION_GROUPS {
-            let group_actions = available_actions
+            let group_actions = matching_actions
                 .iter()
                 .filter(|action| action.group == group)
                 .cloned()
@@ -13514,152 +16342,57 @@ impl GpuiShell {
                 continue;
             };
             let group_label = t(self.locale, &first_action.group_label_key).to_string();
-            let group_key = group.label_key().to_string();
-            let collapsed =
-                normalized_query.is_empty() && self.collapsed_action_groups.contains(&group_key);
-            let selector_key = group_key.replace('.', "-");
-            let group_cards = group_actions
+            let items = group_actions
                 .into_iter()
-                .map(|action| self.action_card(action, cx))
+                .map(|action| self.command_menu_item(action, cx))
                 .collect::<Vec<_>>();
-            let toggle_key = group_key.clone();
-            let group_head_label = group_label.clone();
-            let mut section = div()
-                .id(SharedString::from(format!("action-group-{selector_key}")))
-                .debug_selector({
-                    let selector = format!("visual-action-group-{selector_key}");
-                    move || selector
-                })
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "action-group-head-{selector_key}"
-                        )))
-                        .debug_selector({
-                            let selector = format!("visual-action-group-toggle-{selector_key}");
-                            move || selector
-                        })
-                        .role(Role::Button)
-                        .aria_label(group_label.clone())
-                        .aria_expanded(!collapsed)
-                        .focusable()
-                        .tab_stop(true)
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .h(px(30.0))
-                        .px_1()
-                        .text_size(px(11.0))
-                        .font_weight(gpui::FontWeight(600.0))
-                        .text_color(rgba(COLOR_TEXT_SECONDARY))
-                        .on_click(cx.listener(move |shell, _, _, cx| {
-                            if !shell.collapsed_action_groups.remove(&toggle_key) {
-                                shell.collapsed_action_groups.insert(toggle_key.clone());
-                            }
-                            cx.notify();
-                        }))
-                        .child(group_head_label)
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .rounded_md()
-                                        .px_2()
-                                        .py_1()
-                                        .text_size(px(10.0))
-                                        .text_color(rgba(COLOR_MUTED))
-                                        .bg(rgba(COLOR_PANEL_RAISED))
-                                        .child(group_cards.len().to_string()),
-                                )
-                                .child(if collapsed { "›" } else { "⌄" }),
-                        ),
-                );
-            if !collapsed {
-                section = section.child(div().flex().flex_col().gap_2().children(group_cards));
-            }
-            group_sections.push(section.into_any_element());
+            groups.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_size(px(10.0)).line_height(px(14.0))
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(group_label),
+                    )
+                    .children(items)
+                    .into_any_element(),
+            );
+        }
+        if topology_match {
+            groups.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_size(px(10.0)).line_height(px(14.0))
+                            .font_weight(gpui::FontWeight(600.0))
+                            .text_color(rgba(COLOR_MUTED))
+                            .child(
+                                t(self.locale, "action_group.members_and_invitations").to_string(),
+                            ),
+                    )
+                    .child(self.topology_command_menu_item(cx))
+                    .into_any_element(),
+            );
         }
 
-        if !unavailable_actions.is_empty() {
-            let unavailable_key = "common.actions_unavailable_heading";
-            let unavailable_label = t(self.locale, unavailable_key).to_string();
-            let collapsed = normalized_query.is_empty()
-                && self.collapsed_action_groups.contains(unavailable_key);
-            let cards = unavailable_actions
-                .into_iter()
-                .map(|action| self.action_card(action, cx))
-                .collect::<Vec<_>>();
-            let toggle_key = unavailable_key.to_string();
-            let mut section = div()
-                .id("action-group-unavailable")
-                .debug_selector(|| "visual-action-group-unavailable".into())
-                .flex()
-                .flex_col()
-                .gap_2()
-                .mt_2()
-                .child(
-                    div()
-                        .id("action-group-head-unavailable")
-                        .debug_selector(|| "visual-action-group-toggle-unavailable".into())
-                        .role(Role::Button)
-                        .aria_label(unavailable_label.clone())
-                        .aria_expanded(!collapsed)
-                        .focusable()
-                        .tab_stop(true)
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .h(px(30.0))
-                        .px_1()
-                        .text_size(px(11.0))
-                        .font_weight(gpui::FontWeight(600.0))
-                        .text_color(rgba(COLOR_WARNING))
-                        .on_click(cx.listener(move |shell, _, _, cx| {
-                            if !shell.collapsed_action_groups.remove(&toggle_key) {
-                                shell.collapsed_action_groups.insert(toggle_key.clone());
-                            }
-                            cx.notify();
-                        }))
-                        .child(unavailable_label)
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .rounded_md()
-                                        .px_2()
-                                        .py_1()
-                                        .text_size(px(10.0))
-                                        .text_color(rgba(COLOR_MUTED))
-                                        .bg(rgba(COLOR_PANEL_RAISED))
-                                        .child(cards.len().to_string()),
-                                )
-                                .child(if collapsed { "›" } else { "⌄" }),
-                        ),
-                );
-            if !collapsed {
-                section = section.child(div().flex().flex_col().gap_2().children(cards));
-            }
-            group_sections.push(section.into_any_element());
-        }
-
-        let action_search_input = self
+        let search_input = self
             .action_panel_search_input
             .as_ref()
             .map(|input| input.clone().into_any_element());
-        let clear_action_search = (!self.action_panel_query.trim().is_empty()).then(|| {
+        let clear_search = (!self.action_panel_query.trim().is_empty()).then(|| {
             button(
-                SharedString::from("clear-action-panel-search"),
+                SharedString::from("clear-command-menu-search"),
                 "",
                 ButtonVariant::Ghost,
                 false,
@@ -13677,16 +16410,13 @@ impl GpuiShell {
                 COLOR_MUTED,
             ))
             .on_click(cx.listener(|shell, _, _, cx| {
-                shell.action_panel_query.clear();
-                if let Some(input) = &shell.action_panel_search_input {
-                    input.update(cx, |input, cx| input.set_value("", cx));
-                }
+                shell.clear_action_menu_search(cx);
                 cx.notify();
             }))
         });
-        let action_search = div()
-            .id("action-panel-search")
-            .debug_selector(|| "visual-action-search".into())
+        let search = div()
+            .id("command-menu-search")
+            .debug_selector(|| "visual-command-menu-search".into())
             .relative()
             .flex()
             .items_center()
@@ -13702,126 +16432,340 @@ impl GpuiShell {
                         COLOR_FAINT,
                     )),
             )
-            .children(action_search_input)
-            .children(clear_action_search);
+            .children(search_input)
+            .children(clear_search);
 
-        let body = if self.selected_page == "topology" {
-            div()
-                .id("topology-action-panel-scroll")
-                .overflow_y_scroll()
-                .child(self.topology_action_panel_body(cx))
+        let menu = div()
+            .id("page-command-menu")
+            .debug_selector(|| "visual-command-menu".into())
+            .role(Role::Menu)
+            .aria_label(t(self.locale, "common.actions_panel_title").to_string())
+            .occlude()
+            .absolute()
+            .top(px(44.0))
+            .right(px(0.0))
+            .w(px(360.0))
+            .max_h(px(460.0))
+            .overflow_hidden()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgba(COLOR_DIVIDER))
+            .bg(rgba(DARK_THEME.colors.surface.rgba_hex()))
+            
+            .child(div().p_2().child(search))
+            .child(
+                div()
+                    .id("page-command-menu-scroll")
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_2()
+                    .overflow_y_scroll()
+                    .when(groups.is_empty(), |body| {
+                        body.child(
+                            div()
+                                .id("page-command-menu-empty")
+                                .debug_selector(|| "visual-command-menu-empty".into())
+                                .py_5()
+                                .text_center()
+                                .text_sm()
+                                .text_color(rgba(COLOR_MUTED))
+                                .child(t(self.locale, "common.actions_no_results").to_string()),
+                        )
+                    })
+                    .children(groups),
+            );
+        menu.into_any_element()
+    }
+
+    fn command_menu_item(&self, action: NodeUiAction, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let unavailable = action.backend_status == NodeUiBackendStatus::Unavailable;
+        let block_reason =
+            complete_action_block_reason(&action, &self.snapshot, self.selected_network.as_deref());
+        let disabled_reason = block_reason
+            .map(|reason| t(self.locale, reason.message_key()).to_string())
+            .or_else(|| {
+                unavailable.then(|| t(self.locale, "status.backend.unavailable").to_string())
+            });
+        let disabled = disabled_reason.is_some();
+        let label = manifest_action_label(self.locale, &action);
+        let selector = format!("visual-command-menu-item-{}", action.id);
+        let reason_selector = format!("visual-command-menu-reason-{}", action.id);
+        let action_id = action.id.clone();
+        let key_action_id = action.id.clone();
+        let page_id = self.selected_page.clone();
+        let key_page_id = self.selected_page.clone();
+        let icon = lucide_icon(
+            command_action_icon_data(&action.id),
+            16.0,
+            if disabled {
+                COLOR_FAINT
+            } else {
+                COLOR_TEXT_SECONDARY
+            },
+        );
+        let item = div()
+            .id(SharedString::from(format!(
+                "command-menu-item-{}",
+                action.id
+            )))
+            .debug_selector(move || selector)
+            .role(Role::Button)
+            .aria_label(label.clone())
+            .focusable()
+            .tab_stop(!disabled)
+            .flex()
+            .items_center()
+            .gap_3()
+            .w_full()
+            .min_h(px(40.0))
+            .px_2()
+            .py_2()
+            .rounded_md()
+            .text_sm()
+            .text_color(rgba(if disabled { COLOR_FAINT } else { COLOR_TEXT }))
+            .when(disabled, |item| item.opacity(0.72))
+            .child(div().w(px(20.0)).flex().justify_center().child(icon))
+            .child(div().flex_1().min_w(px(0.0)).child(label));
+        let item = if let Some(reason) = disabled_reason {
+            item.child(
+                div()
+                    .debug_selector(move || reason_selector)
+                    .text_size(px(10.0)).line_height(px(14.0))
+                    .text_color(rgba(COLOR_WARNING))
+                    .child(reason),
+            )
         } else {
-            let governance_notice = actions
-                .iter()
-                .any(|action| {
-                    action_coordinator_governance_freeze_reason(
-                        action,
-                        &self.snapshot,
-                        self.selected_network.as_deref(),
-                    )
-                    .is_some()
-                })
-                .then(|| self.coordinator_governance_notice())
-                .flatten();
+            item
+        };
+        if disabled {
+            item.into_any_element()
+        } else {
+            item.on_click(cx.listener(move |shell, event: &gpui::ClickEvent, _, cx| {
+                if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                    return;
+                }
+                shell.open_action(&page_id, &action_id, cx);
+                cx.stop_propagation();
+            }))
+            .on_key_down(
+                cx.listener(move |shell, event: &gpui::KeyDownEvent, _, cx| {
+                    if !is_unmodified_activation_key(event) {
+                        return;
+                    }
+                    shell.open_action(&key_page_id, &key_action_id, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .into_any_element()
+        }
+    }
+
+    fn topology_command_menu_item(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .id("command-menu-item-topology-batch")
+            .debug_selector(|| "visual-command-menu-item-topology".into())
+            .role(Role::Button)
+            .aria_label(t(self.locale, "topology.batch.title").to_string())
+            .focusable()
+            .tab_stop(true)
+            .flex()
+            .items_center()
+            .gap_3()
+            .w_full()
+            .min_h(px(40.0))
+            .px_2()
+            .py_2()
+            .rounded_md()
+            .text_sm()
+            .text_color(rgba(COLOR_TEXT))
+            .child(div().w(px(20.0)).flex().justify_center().child(lucide_icon(
+                include_bytes!("../../assets/icons/users.svg"),
+                16.0,
+                COLOR_TEXT_SECONDARY,
+            )))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .child(t(self.locale, "topology.batch.title").to_string()),
+            )
+            .on_click(cx.listener(|shell, event: &gpui::ClickEvent, _, cx| {
+                if matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                    return;
+                }
+                shell.open_topology_command_workspace(cx);
+                cx.stop_propagation();
+            }))
+            .on_key_down(cx.listener(|shell, event: &gpui::KeyDownEvent, _, cx| {
+                if is_unmodified_activation_key(event) {
+                    shell.open_topology_command_workspace(cx);
+                    cx.stop_propagation();
+                }
+            }))
+            .into_any_element()
+    }
+
+    fn action_workspace(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.expanded_actions.len() != 1 {
+            return None;
+        }
+        let action_id = self.expanded_actions.keys().next()?.clone();
+        let topology_workspace = action_id == TOPOLOGY_COMMAND_ID;
+        let action = if topology_workspace {
+            None
+        } else {
+            Some(
+                self.page()?
+                    .actions
+                    .iter()
+                    .find(|action| action.id == action_id)?
+                    .clone(),
+            )
+        };
+        let title = action
+            .as_ref()
+            .map(|action| manifest_action_label(self.locale, action))
+            .unwrap_or_else(|| t(self.locale, "topology.batch.title").to_string());
+        let group_label = action
+            .as_ref()
+            .map(|action| t(self.locale, &action.group_label_key).to_string())
+            .unwrap_or_else(|| t(self.locale, "action_group.members_and_invitations").to_string());
+        let icon_data = action
+            .as_ref()
+            .map(|action| command_action_icon_data(&action.id))
+            .unwrap_or(include_bytes!("../../assets/icons/users.svg"));
+        let body = if let Some(action) = action {
+            let action_card = self.action_card(action, false, cx);
             div()
-                .id("action-panel-body")
                 .flex()
                 .flex_col()
                 .gap_4()
-                .px_3()
-                .pb_3()
-                .overflow_y_scroll()
-                .children(governance_notice)
-                .when(actions.is_empty(), |body| {
-                    body.child(
-                        div()
-                            .id("no-shared-actions")
-                            .debug_selector(|| "visual-action-empty".into())
-                            .pt_3()
-                            .px_4()
-                            .text_size(px(11.0))
-                            .line_height(px(16.0))
-                            .text_color(rgba(COLOR_MUTED))
-                            .child(t(self.locale, "common.page_actions_empty").to_string()),
-                    )
-                })
-                .when(!actions.is_empty() && matching_actions.is_empty(), |body| {
-                    body.child(
-                        div()
-                            .id("no-matching-actions")
-                            .debug_selector(|| "visual-action-search-empty".into())
-                            .py_5()
-                            .text_center()
-                            .text_size(px(11.0))
-                            .text_color(rgba(COLOR_MUTED))
-                            .child(t(self.locale, "common.actions_no_results").to_string()),
-                    )
-                })
-                .children(group_sections)
+                .child(action_card)
                 .when_some(self.network_profile_result_card(), |body, result| {
-                    body.child(div().pb_3().child(result))
+                    body.child(result)
                 })
+                .into_any_element()
+        } else {
+            self.topology_action_panel_body(cx)
         };
 
-        let header = div()
-            .debug_selector(|| "visual-action-title".into())
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .h(px(40.5))
-            .px_4()
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .font_weight(gpui::FontWeight(600.0))
-                    .text_color(rgba(COLOR_TEXT))
-                    .child(t(self.locale, "common.actions_panel_title").to_string()),
-            )
-            .child(
-                div()
-                    .text_size(px(10.0))
-                    .text_color(rgba(COLOR_MUTED))
-                    .child(tr(
-                        self.locale,
-                        "common.actions_panel_count",
-                        &[("count", &action_count.to_string())],
-                    )),
-            );
-
-        let mut panel = div()
-            .id(app_region_id(AppRegion::ActionPanel))
-            .debug_selector(|| "visual-actions".into())
-            .role(Role::Complementary)
-            .aria_label(t(self.locale, "common.actions_panel_title").to_string())
+        let dialog = div()
+            .id("action-workspace-dialog")
+            .debug_selector(|| "visual-action-workspace".into())
+            .role(Role::Dialog)
+            .aria_label(tr(
+                self.locale,
+                "common.action_workspace",
+                &[("action", &title)],
+            ))
             .flex()
             .flex_col()
-            .min_w(px(0.0))
+            .w_full()
+            .max_w(px(720.0))
+            .max_h(px(860.0))
             .overflow_hidden()
+            .rounded_lg()
             .border_1()
             .border_color(rgba(COLOR_DIVIDER))
-            .rounded_lg()
             .bg(rgba(DARK_THEME.colors.surface.rgba_hex()))
-            .shadow(vec![gpui::BoxShadow::new(
-                px(0.0),
-                px(1.0),
-                rgba(0x00000066).into(),
+            
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_5()
+                    .py_4()
+                    .border_b_1()
+                    .border_color(rgba(COLOR_DIVIDER))
+                    .child(
+                        div()
+                            .w(px(36.0))
+                            .h(px(36.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .bg(rgba(DARK_THEME.colors.panel_raised.rgba_hex()))
+                            .child(lucide_icon(icon_data, 18.0, COLOR_ACCENT)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .flex_col()
+                            .min_w(px(0.0))
+                            .child(
+                                div()
+                                    .text_size(px(10.0)).line_height(px(14.0))
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_MUTED))
+                                    .child(group_label),
+                            )
+                            .child(
+                                div()
+                                    .debug_selector(|| "visual-action-workspace-title".into())
+                                    .text_size(px(18.0)).line_height(px(25.0))
+                                    .line_height(px(24.0))
+                                    .font_weight(gpui::FontWeight(600.0))
+                                    .text_color(rgba(COLOR_TEXT))
+                                    .child(title),
+                            ),
+                    )
+                    .child(
+                        button(
+                            SharedString::from("close-action-workspace"),
+                            "",
+                            ButtonVariant::Ghost,
+                            false,
+                        )
+                        .debug_selector(|| "visual-action-workspace-close".into())
+                        .aria_label(t(self.locale, "common.close").to_string())
+                        .w(px(36.0))
+                        .h(px(36.0))
+                        .px_0()
+                        .child(lucide_icon(
+                            include_bytes!("../../assets/icons/x.svg"),
+                            17.0,
+                            COLOR_TEXT_SECONDARY,
+                        ))
+                        .on_click(cx.listener(|shell, _, _, cx| {
+                            shell.close_action_workspace(cx);
+                        })),
+                    ),
             )
-            .blur_radius(px(3.0))])
-            .child(header);
-        if !actions.is_empty() && self.selected_page != "topology" {
-            panel = panel.child(div().px_3().pb_2().child(action_search));
-        }
-        panel = panel.child(body);
+            .child(
+                div()
+                    .id("action-workspace-body")
+                    .flex()
+                    .flex_col()
+                    .p_5()
+                    .overflow_y_scroll()
+                    .child(body),
+            );
 
-        panel = match presentation {
-            ActionPanelPresentation::Stacked => panel.w_full().max_h(px(360.0)),
-            ActionPanelPresentation::Compact | ActionPanelPresentation::Full => panel
-                .max_h_full()
-                .w(px(presentation.width_px().unwrap_or_default() as f32))
-                .flex_shrink_0(),
-        };
-        panel
+        Some(
+            div()
+                .id("action-workspace-overlay")
+                .debug_selector(|| "visual-action-workspace-overlay".into())
+                .absolute()
+                .top(px(0.0))
+                .right(px(0.0))
+                .bottom(px(0.0))
+                .left(px(0.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_5()
+                .bg(rgba(COLOR_PANEL_SOLID))
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    shell.close_action_workspace(cx);
+                }))
+                .child(dialog)
+                .into_any_element(),
+        )
     }
 }
 
@@ -13829,46 +16773,34 @@ impl Render for GpuiShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         debug_assert_eq!(APP_REGION_ORDER, AppRegion::ALL);
         let layout = layout_for_window_width(f32::from(window.viewport_size().width));
-        let presentation = ActionPanelPresentation::for_layout(layout);
+        let navigation_mode = NavigationMode::for_layout(layout);
+        self.clamp_selected_page_to_manifest();
         self.sync_configuration_editor(window, cx);
+        self.sync_admin_recovery_request_editor(window, cx);
         if self.selected_page == "topology" {
             cx.on_next_frame(window, |shell, _, cx| shell.ensure_topology_directory(cx));
         }
-        let content = self.page_content(layout, cx);
-        let action_panel = self.action_panel(layout, cx);
-        let workspace = if presentation == ActionPanelPresentation::Stacked {
-            div()
-                .id("page-workspace")
-                .debug_selector(|| "visual-workspace".into())
-                .role(A11Y_TAB_PANEL_ROLE)
-                .aria_label(t(self.locale, "common.module_pages").to_string())
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h(px(0.0))
-                .gap_5()
-                .p_5()
-                .overflow_hidden()
-                .child(content)
-                .child(action_panel)
-        } else {
-            div()
-                .id("page-workspace")
-                .debug_selector(|| "visual-workspace".into())
-                .role(A11Y_TAB_PANEL_ROLE)
-                .aria_label(t(self.locale, "common.module_pages").to_string())
-                .flex()
-                .flex_row()
-                .flex_1()
-                .min_h(px(0.0))
-                .min_w(px(0.0))
-                .items_start()
-                .gap_5()
-                .p_5()
-                .overflow_hidden()
-                .child(content)
-                .child(action_panel)
-        };
+        let content = self.page_content(layout, f32::from(window.viewport_size().height), cx);
+        let action_workspace = self.action_workspace(cx);
+        let workspace = div()
+            .id("page-workspace")
+            .debug_selector(|| "visual-workspace".into())
+            .role(A11Y_TAB_PANEL_ROLE)
+            .aria_label(t(self.locale, "common.module_pages").to_string())
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .min_w(px(0.0))
+            .items_start()
+            .gap_5()
+            .p_5()
+            .overflow_hidden()
+            .child(content)
+            .when_some(action_workspace, |workspace, overlay| {
+                workspace.child(overlay)
+            });
         let mut main = div()
             .id("main-content")
             .role(A11Y_MAIN_ROLE)
@@ -13879,9 +16811,7 @@ impl Render for GpuiShell {
             .min_w(px(0.0))
             .h_full()
             .bg(rgba(COLOR_BG))
-            .child(self.header(cx));
-
-        main = main.child(self.local_tabs(cx));
+            .child(self.header(layout, cx));
 
         if let Some(search_panel) = self.search_results_panel(cx) {
             main = main.child(search_panel);
@@ -13893,24 +16823,88 @@ impl Render for GpuiShell {
 
         main = main.child(workspace);
 
-        div()
+        let mut root = div()
             .id("gpui-root")
             .role(A11Y_ROOT_ROLE)
             .aria_label("fuckipv6")
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::refresh_snapshot))
             .on_action(cx.listener(Self::focus_search))
+            .capture_key_down(cx.listener(|shell, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" {
+                    shell.dismiss_transient_surfaces(cx);
+                }
+            }))
+            .font_family("Inter")
+            .relative()
             .flex()
             .w_full()
             .h_full()
-            .bg(rgba(COLOR_BG))
-            .child(self.sidebar(cx))
-            .child(main)
+            .bg(rgba(COLOR_BG));
+
+        match navigation_mode {
+            NavigationMode::Sidebar => {
+                root = root.flex_row().child(self.sidebar(cx)).child(main);
+            }
+            NavigationMode::MenuDrawer => {
+                root = root.flex_row().child(main);
+                if self.navigation_drawer_open {
+                    root = root.child(self.navigation_drawer(cx));
+                }
+            }
+            NavigationMode::BottomNavigation => {
+                root = root
+                    .flex_col()
+                    .child(main)
+                    .child(self.bottom_navigation(cx));
+            }
+        }
+
+        root
     }
+}
+
+/// Page the shell opens on. `FUCKIPV6_GPUI_START_PAGE` is an automation hook
+/// for screenshot and smoke runs; it accepts either a page id or a navigation
+/// module id (a module resolves to its configured landing page, which for
+/// Networks is the topology workspace).
+fn start_page_from_env() -> String {
+    let requested = std::env::var("FUCKIPV6_GPUI_START_PAGE").unwrap_or_default();
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return "overview".to_string();
+    }
+    if let Some(module) = navigation_modules()
+        .iter()
+        .find(|module| module.id == requested)
+    {
+        return module.default_page_id.clone();
+    }
+    requested.to_string()
+}
+
+fn is_unmodified_activation_key(event: &gpui::KeyDownEvent) -> bool {
+    !event.is_held
+        && !event.keystroke.modifiers.modified()
+        && matches!(event.keystroke.key.as_str(), "enter" | "space")
 }
 
 fn layout_for_window_width(width_px: f32) -> LayoutClass {
     LayoutClass::for_width(width_px.clamp(0.0, u16::MAX as f32) as u16)
+}
+
+fn abbreviated_node_id(node_id: &str) -> String {
+    let characters = node_id.chars().collect::<Vec<_>>();
+    if characters.len() <= 20 {
+        return node_id.to_string();
+    }
+    format!(
+        "{}…{}",
+        characters[..12].iter().collect::<String>(),
+        characters[characters.len() - 6..]
+            .iter()
+            .collect::<String>()
+    )
 }
 
 fn window_min_size() -> gpui::Size<gpui::Pixels> {
@@ -13948,49 +16942,6 @@ fn loading_skeleton() -> Div {
         .child(block(140.0))
 }
 
-fn page_tab_control(
-    id: SharedString,
-    label: impl Into<SharedString>,
-    selected: bool,
-) -> gpui::Stateful<Div> {
-    let label = label.into();
-    let mut tab = div()
-        .id(id)
-        .role(Role::Tab)
-        .aria_label(label.clone())
-        .aria_selected(selected)
-        .focusable()
-        .tab_stop(true)
-        .relative()
-        .flex()
-        .items_center()
-        .h(px(34.0))
-        .px_3()
-        .rounded_sm()
-        .bg(rgba(if selected {
-            DARK_THEME.colors.surface_hover.rgba_hex()
-        } else {
-            0x00000000
-        }))
-        .text_size(px(12.0))
-        .font_weight(gpui::FontWeight(if selected { 600.0 } else { 400.0 }))
-        .text_color(rgba(if selected { COLOR_TEXT } else { COLOR_MUTED }))
-        .child(label);
-    if selected {
-        tab = tab.child(
-            div()
-                .absolute()
-                .left(px(10.0))
-                .right(px(10.0))
-                .bottom(px(-7.0))
-                .h(px(2.0))
-                .rounded_full()
-                .bg(rgba(COLOR_ACCENT)),
-        );
-    }
-    tab
-}
-
 fn sync_badge(id: impl Into<gpui::ElementId>, label: String) -> gpui::Stateful<Div> {
     div()
         .id(id)
@@ -14001,7 +16952,7 @@ fn sync_badge(id: impl Into<gpui::ElementId>, label: String) -> gpui::Stateful<D
         .bg(rgba(DARK_THEME.colors.warning_soft.rgba_hex()))
         .px_2()
         .py_1()
-        .text_size(px(10.0))
+        .text_size(px(10.0)).line_height(px(14.0))
         .font_weight(gpui::FontWeight(600.0))
         .text_color(rgba(COLOR_WARNING))
         .child(label)
@@ -14027,7 +16978,7 @@ fn configuration_audit_details(
             .bg(rgba(COLOR_BG))
             .child(
                 div()
-                    .text_size(px(10.0))
+                    .text_size(px(10.0)).line_height(px(14.0))
                     .text_color(rgba(COLOR_MUTED))
                     .child(label),
             )
@@ -14092,7 +17043,7 @@ fn configuration_audit_details(
                 .bg(rgba(COLOR_BG))
                 .child(
                     div()
-                        .text_size(px(10.0))
+                        .text_size(px(10.0)).line_height(px(14.0))
                         .text_color(rgba(COLOR_MUTED))
                         .child(t(locale, "configuration.history.changed_paths").to_string()),
                 )
@@ -15300,6 +18251,11 @@ fn action_label(locale: Locale, id: &str) -> String {
         "publish_coordinator_candidate_declaration" => {
             "action.publish_coordinator_candidate_declaration"
         }
+        "submit_admin_recovery" => "action.submit_admin_recovery",
+        "get_admin_recovery_status" => "action.get_admin_recovery_status",
+        "list_admin_recoveries" => "action.list_admin_recoveries",
+        "revoke_admin_recovery" => "action.revoke_admin_recovery",
+        "execute_admin_recovery" => "action.execute_admin_recovery",
         "shutdown_node" => "action.shutdown_node",
         _ => "common.unknown_action",
     };
@@ -15344,6 +18300,15 @@ fn placeholder_for(
         NodeUiInputKind::JoinRequestReason => t(locale, "placeholder.join_request_reason").into(),
         NodeUiInputKind::JoinRequestNote => t(locale, "placeholder.join_request_note").into(),
         NodeUiInputKind::JoinRequestReviews => t(locale, "placeholder.join_request_reviews").into(),
+        NodeUiInputKind::AdminRecoveryRequestJson => {
+            t(locale, "placeholder.admin_recovery_request_json").into()
+        }
+        NodeUiInputKind::AdminRecoveryRequestId => {
+            t(locale, "placeholder.admin_recovery_request_id").into()
+        }
+        NodeUiInputKind::AdminRecoveryReason => {
+            t(locale, "placeholder.admin_recovery_reason").into()
+        }
         _ if matches!(
             action_id,
             "stop_networks" | "restart_networks" | "cleanup_node_residuals"
@@ -15352,6 +18317,15 @@ fn placeholder_for(
             t(locale, "placeholder.network_names").into()
         }
         _ => t(locale, "common.input_value").into(),
+    }
+}
+
+fn admin_recovery_state_key(state: AdminRecoveryState) -> &'static str {
+    match state {
+        AdminRecoveryState::Pending => "admin_recovery.state.pending",
+        AdminRecoveryState::Executed => "admin_recovery.state.executed",
+        AdminRecoveryState::Revoked => "admin_recovery.state.revoked",
+        AdminRecoveryState::Expired => "admin_recovery.state.expired",
     }
 }
 
@@ -15434,17 +18408,7 @@ fn format_operation_error(locale: Locale, error: &OperationError) -> String {
 }
 
 fn format_operation_problem(locale: Locale, problem: &NodeProblem) -> String {
-    let params = problem
-        .params
-        .iter()
-        .map(|(key, value)| (key.as_str(), value.as_str()))
-        .collect::<Vec<_>>();
-    let mut message = tr(locale, &problem.message_key, &params);
-    if let Some(recovery) = &problem.recovery {
-        message.push_str(" · ");
-        message.push_str(t(locale, &recovery.hint_key));
-    }
-    message
+    problem_message_with_recovery(locale, problem)
 }
 
 fn set_shell_menus(cx: &mut App, locale: Locale) {
@@ -15578,6 +18542,7 @@ mod tests {
         TrafficRoutingHardConstraints, TrafficRoutingPageModel, TrafficRoutingTarget,
         TrafficRoutingWorkflowState, TrafficRule,
     };
+    use fuckipv6_common::ui_layout::ActionWorkspacePresentation;
     use gpui::{Modifiers, OwnedMenuItem, TestAppContext, VisualTestContext};
     use serde_json::{json, Map, Value};
 
@@ -15603,15 +18568,48 @@ mod tests {
 
     const PRODUCT_VISUAL_SNAPSHOT_FIXTURE: &str =
         include_str!("../../../../contracts/typescript/fixtures/product-visual-snapshot.json");
-    const VISUAL_GEOMETRY_SELECTORS: [&str; 22] = [
-        "visual-sidebar",
+    const TOPOLOGY_VISUAL_GEOMETRY_SELECTORS: [&str; 13] = [
+        "visual-sidebar-icon-rail",
+        "visual-topbar",
+        "visual-page-switcher",
+        "visual-topbar-search",
+        "visual-workspace",
+        "visual-page-heading",
+        "visual-topology-hero",
+        "visual-topology-state",
+        "visual-topology-canvas-stage",
+        "visual-topology-canvas",
+        "visual-topology-floating-toolbar",
+        "visual-topology-canvas-footer",
+        "visual-topology-detail",
+    ];
+
+    const VISUAL_GEOMETRY_SELECTORS: [&str; 36] = [
+        "visual-sidebar-icon-rail",
         "visual-topbar",
         "visual-toolbar",
         "visual-workspace",
-        "visual-content",
+        "visual-overview-stack",
         "visual-page-heading",
         "visual-hero",
         "visual-hero-copy",
+        "visual-global-context",
+        "visual-top-status-group",
+        "visual-primary-status",
+        "visual-traffic-session-status",
+        "visual-network-picker",
+        "visual-network-picker-label",
+        "visual-network-picker-trigger",
+        "visual-language-control",
+        "visual-global-actions",
+        "visual-traffic-session",
+        "visual-traffic-heading",
+        "visual-traffic-summary",
+        "visual-traffic-meta",
+        "visual-traffic-validation-title",
+        "visual-traffic-validation",
+        "visual-traffic-events-title",
+        "visual-traffic-events",
         "visual-networks",
         "visual-networks-heading",
         "visual-network-first",
@@ -15622,15 +18620,24 @@ mod tests {
         "visual-shortcuts-heading",
         "visual-shortcuts-grid",
         "visual-shortcut-first",
-        "visual-actions",
-        "visual-action-title",
-        "visual-action-first",
         "visual-network-second",
     ];
 
     #[derive(serde::Deserialize)]
     struct ProductVisualFixture {
         snapshot: NodeSnapshot,
+    }
+
+    fn product_visual_snapshot(selected_page: &str, mut snapshot: NodeSnapshot) -> NodeSnapshot {
+        if selected_page == "topology" {
+            let scenarios = topology_scenario_document();
+            snapshot.topology = scenarios
+                .scenarios
+                .iter()
+                .find(|scenario| scenario.id == "multi-network")
+                .map(|scenario| scenario.topology.to_snapshot());
+        }
+        snapshot
     }
 
     const TOPOLOGY_SCENARIO_FIXTURE: &str = include_str!(
@@ -16324,6 +19331,75 @@ mod tests {
     }
 
     #[gpui::test]
+    fn networks_sidebar_opens_topology_canvas(cx: &mut TestAppContext) {
+        let fixture = topology_widget_fixture();
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                install_topology_widget_fixture(shell, &fixture, cx);
+                shell.selected_page = "overview".into();
+                cx.notify();
+            })
+            .expect("install topology fixture away from topology page");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        let networks = visible
+            .debug_bounds("visual-navigation-networks")
+            .expect("networks sidebar destination");
+        visible.simulate_click(networks.center(), Modifiers::default());
+        visible.run_until_parked();
+
+        window
+            .update(cx, |shell, _, _| {
+                assert_eq!(shell.selected_page, "topology");
+            })
+            .expect("verify networks sidebar destination");
+        assert!(
+            visible
+                .debug_bounds("visual-topology-canvas-stage")
+                .is_some(),
+            "clicking Networks must render the topology canvas"
+        );
+    }
+
+    #[gpui::test]
+    fn topology_page_keeps_the_canvas_visible_without_snapshot_data(cx: &mut TestAppContext) {
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.locale = Locale::En;
+                shell.selected_page = "topology".into();
+                shell.snapshot = NodeSnapshot::default();
+                shell.error = None;
+                shell.notice = None;
+                cx.notify();
+            })
+            .expect("install empty topology state");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+
+        for selector in [
+            "visual-topology-state",
+            "visual-topology-canvas-stage",
+            "visual-topology-canvas",
+            "visual-topology-empty-node",
+            "visual-topology-canvas-footer",
+        ] {
+            assert!(
+                visible.debug_bounds(selector).is_some(),
+                "empty topology state must still render {selector}"
+            );
+        }
+        assert!(
+            visible.debug_bounds("visual-topology-detail").is_none(),
+            "empty topology state must not open a permanent detail panel"
+        );
+    }
+
+    #[gpui::test]
     fn routing_navigation_opens_the_exact_authoritative_topology_node(cx: &mut TestAppContext) {
         let fixture = topology_widget_fixture();
         let relay_id = fixture.relay_id.as_str().to_string();
@@ -16445,18 +19521,6 @@ mod tests {
         }
     }
 
-    fn topology_open_selector(index: usize) -> &'static str {
-        match index {
-            0 => "visual-topology-open-0",
-            1 => "visual-topology-open-1",
-            2 => "visual-topology-open-2",
-            3 => "visual-topology-open-3",
-            4 => "visual-topology-open-4",
-            5 => "visual-topology-open-5",
-            _ => panic!("unexpected topology node index {index}"),
-        }
-    }
-
     fn topology_connection_selector(index: usize) -> &'static str {
         match index {
             0 => "visual-topology-connection-0",
@@ -16483,18 +19547,17 @@ mod tests {
         let mut visible = VisualTestContext::from_window(window.into(), cx);
         visible.run_until_parked();
         assert!(visible
-            .debug_bounds("visual-topology-detail-empty")
+            .debug_bounds("visual-topology-canvas-stage")
             .is_some());
+        assert!(visible.debug_bounds("visual-topology-detail").is_none());
         assert!(visible.debug_bounds("visual-topology-menu").is_none());
 
-        let open = visible
-            .debug_bounds("visual-topology-open-0")
-            .expect("first topology node detail action");
-        visible.simulate_click(open.center(), Modifiers::default());
+        let node = visible
+            .debug_bounds(topology_node_selector(0))
+            .expect("first topology node");
+        visible.simulate_click(node.center(), Modifiers::default());
         visible.run_until_parked();
-        assert!(visible
-            .debug_bounds("visual-topology-detail-empty")
-            .is_none());
+        assert!(visible.debug_bounds("visual-topology-detail").is_some());
         assert!(visible
             .debug_bounds("visual-topology-exit-availability")
             .is_some());
@@ -16575,9 +19638,7 @@ mod tests {
                 "hover summary must expose {selector}"
             );
         }
-        assert!(visible
-            .debug_bounds("visual-topology-detail-empty")
-            .is_some());
+        assert!(visible.debug_bounds("visual-topology-detail").is_none());
         window
             .update(cx, |shell, _, _| {
                 assert_eq!(
@@ -16833,18 +19894,14 @@ mod tests {
                 scenario.id
             );
 
-            assert!(visible
-                .debug_bounds("visual-topology-detail-empty")
-                .is_some());
-            let detail_action = visible
-                .debug_bounds(topology_open_selector(detail_index))
-                .expect("detail action for authoritative node");
-            visible.simulate_click(detail_action.center(), Modifiers::default());
+            assert!(visible.debug_bounds("visual-topology-detail").is_none());
+            let detail_node = visible
+                .debug_bounds(topology_node_selector(detail_index))
+                .expect("authoritative node for detail");
+            visible.simulate_click(detail_node.center(), Modifiers::default());
             visible.run_until_parked();
             assert!(
-                visible
-                    .debug_bounds("visual-topology-detail-empty")
-                    .is_none(),
+                visible.debug_bounds("visual-topology-detail").is_some(),
                 "{} must render the selected authoritative node detail",
                 scenario.id
             );
@@ -17496,9 +20553,8 @@ mod tests {
             .update(cx, |shell, _, cx| {
                 shell.manifest = Some(crate::node::node_ui_manifest());
                 shell.locale = Locale::En;
-                shell.selected_page = "networks".into();
                 shell.recent_network_profile_preview = Some(preview);
-                cx.notify();
+                shell.open_action("networks", "preview_network_profile", cx);
             })
             .expect("install profile preview fixture");
 
@@ -17924,9 +20980,8 @@ mod tests {
             .update(cx, |shell, _, cx| {
                 shell.manifest = Some(crate::node::node_ui_manifest());
                 shell.locale = Locale::En;
-                shell.selected_page = "networks".into();
                 shell.recent_network_profile_preview = Some(empty_preview);
-                cx.notify();
+                shell.open_action("networks", "preview_network_profile", cx);
             })
             .expect("install empty profile preview fixture");
 
@@ -17953,9 +21008,8 @@ mod tests {
             .update(cx, |shell, _, cx| {
                 shell.manifest = Some(crate::node::node_ui_manifest());
                 shell.locale = Locale::En;
-                shell.selected_page = "networks".into();
                 shell.recent_network_profile_updated = Some(updated);
-                cx.notify();
+                shell.open_action("networks", "preview_network_profile", cx);
             })
             .expect("install applied profile fixture");
 
@@ -18390,6 +21444,17 @@ mod tests {
             );
         }
 
+        let dialog = visible
+            .debug_bounds("visual-action-workspace")
+            .expect("join action workspace");
+        for _ in 0..6 {
+            visible.simulate_event(gpui::ScrollWheelEvent {
+                position: dialog.center(),
+                delta: gpui::ScrollDelta::Lines(gpui::point(0.0, -12.0)),
+                modifiers: Modifiers::default(),
+                touch_phase: gpui::TouchPhase::Moved,
+            });
+        }
         let exit_control = visible
             .debug_bounds("visual-join-network-exit-contribution")
             .expect("join Exit consent control");
@@ -18877,9 +21942,12 @@ mod tests {
         }
     }
 
-    fn visual_geometry(visible: &mut VisualTestContext) -> Value {
+    fn visual_geometry(
+        visible: &mut VisualTestContext,
+        selectors: &'static [&'static str],
+    ) -> Value {
         let mut geometry = Map::new();
-        for selector in VISUAL_GEOMETRY_SELECTORS {
+        for &selector in selectors {
             let key = selector.trim_start_matches("visual-").replace('-', "_");
             let bounds = visible
                 .debug_bounds(selector)
@@ -19028,6 +22096,47 @@ mod tests {
         window
     }
 
+    #[gpui::test]
+    fn topbar_removes_network_picker_and_keeps_navigation_inside_bar(cx: &mut TestAppContext) {
+        let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
+            .expect("parse shared product visual fixture");
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = fixture.snapshot;
+                shell.locale = Locale::En;
+                shell.selected_page = "overview".into();
+                shell.selected_network = Some("home".into());
+                cx.notify();
+            })
+            .expect("install topbar fixture");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        let topbar = visible
+            .debug_bounds("visual-topbar")
+            .expect("topbar bounds");
+        let page_switcher = visible
+            .debug_bounds("visual-page-switcher")
+            .expect("page switcher bounds");
+        let search = visible
+            .debug_bounds("visual-topbar-search")
+            .expect("topbar search bounds");
+        assert!(
+            visible.debug_bounds("visual-network-picker").is_none(),
+            "the network selector must not remain in the topbar"
+        );
+        let topbar_bottom = f32::from(topbar.origin.y + topbar.size.height);
+        for bounds in [page_switcher, search] {
+            let bottom = f32::from(bounds.origin.y + bounds.size.height);
+            assert!(
+                bottom <= topbar_bottom,
+                "topbar controls must stay within the single 58px row"
+            );
+        }
+    }
+
     fn bound_keystrokes(
         cx: &mut TestAppContext,
         action: &dyn gpui::Action,
@@ -19146,7 +22255,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn manifest_action_cards_render_labeled_cta_confirmation_and_unavailable_states(
+    fn manifest_actions_render_in_workspace_with_labeled_cta_and_unavailable_states(
         cx: &mut TestAppContext,
     ) {
         let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
@@ -19160,19 +22269,13 @@ mod tests {
                     shell.manifest = Some(crate::node::node_ui_manifest());
                     shell.snapshot = snapshot;
                     shell.locale = Locale::En;
-                    shell.selected_page = "networks".into();
                     shell.selected_network = Some("home".into());
-                    shell
-                        .expanded_actions
-                        .insert("preview_network_profile".into(), true);
-                    cx.notify();
+                    shell.open_action("networks", "preview_network_profile", cx);
                 })
                 .expect("install profile preview action");
             let mut visible = VisualTestContext::from_window(window.into(), cx);
             visible.run_until_parked();
-            assert!(visible
-                .debug_bounds("visual-action-head-preview_network_profile")
-                .is_some());
+            assert!(visible.debug_bounds("visual-action-workspace").is_some());
             assert!(visible
                 .debug_bounds("visual-action-cta-preview_network_profile")
                 .is_some());
@@ -19186,10 +22289,8 @@ mod tests {
                     shell.manifest = Some(crate::node::node_ui_manifest());
                     shell.snapshot = snapshot;
                     shell.locale = Locale::En;
-                    shell.selected_page = "node_runtime".into();
                     shell.selected_network = Some("home".into());
-                    shell.expanded_actions.insert("restart_node".into(), true);
-                    cx.notify();
+                    shell.open_action("node_runtime", "restart_node", cx);
                 })
                 .expect("install restart confirmation action");
             let mut visible = VisualTestContext::from_window(window.into(), cx);
@@ -19210,12 +22311,8 @@ mod tests {
                     shell.manifest = Some(crate::node::node_ui_manifest());
                     shell.snapshot = snapshot;
                     shell.locale = Locale::En;
-                    shell.selected_page = "routing".into();
                     shell.selected_network = Some("home".into());
-                    shell
-                        .expanded_actions
-                        .insert("get_traffic_policy".into(), true);
-                    cx.notify();
+                    shell.open_action("routing", "get_traffic_policy", cx);
                 })
                 .expect("install unavailable action");
             let mut visible = VisualTestContext::from_window(window.into(), cx);
@@ -19230,7 +22327,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn empty_action_panel_hides_search_and_unrelated_governance_notice(cx: &mut TestAppContext) {
+    fn overview_without_page_commands_has_no_persistent_action_surface(cx: &mut TestAppContext) {
         let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
             .expect("parse shared product visual fixture");
         let window = open_shell_window(cx, 1200.0, 900.0);
@@ -19247,17 +22344,16 @@ mod tests {
 
         let mut visible = VisualTestContext::from_window(window.into(), cx);
         visible.run_until_parked();
-        assert!(visible.debug_bounds("visual-action-empty").is_some());
-        assert!(visible.debug_bounds("visual-action-search").is_none());
+        assert!(visible.debug_bounds("visual-actions").is_none());
+        assert!(visible.debug_bounds("visual-command-primary").is_none());
+        assert!(visible.debug_bounds("visual-command-more").is_none());
         assert!(visible
             .debug_bounds("visual-coordinator-governance-frozen")
             .is_none());
     }
 
     #[gpui::test]
-    fn action_panel_groups_actions_filters_by_action_or_group_and_collapses(
-        cx: &mut TestAppContext,
-    ) {
+    fn page_commands_expose_one_primary_icon_actions_and_grouped_menu(cx: &mut TestAppContext) {
         let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
             .expect("parse shared product visual fixture");
         let window = open_shell_window(cx, 1200.0, 900.0);
@@ -19267,59 +22363,70 @@ mod tests {
                 shell.snapshot = fixture.snapshot;
                 shell.locale = Locale::En;
                 shell.selected_page = "node_runtime".into();
+                shell.selected_network = Some("home".into());
                 cx.notify();
             })
-            .expect("install grouped runtime actions");
+            .expect("install runtime page commands");
 
         let mut visible = VisualTestContext::from_window(window.into(), cx);
         visible.run_until_parked();
-        let inspect_group = visible
-            .debug_bounds("visual-action-group-action_group-inspect")
-            .expect("inspect action group");
-        let runtime_group = visible
-            .debug_bounds("visual-action-group-action_group-runtime")
-            .expect("runtime action group");
-        assert!(
-            runtime_group.origin.y < inspect_group.origin.y,
-            "action groups must follow manifest order"
-        );
-        assert!(visible.debug_bounds("visual-action-search").is_some());
+        assert!(visible.debug_bounds("visual-actions").is_none());
+        assert!(visible
+            .debug_bounds("visual-page-command-surface")
+            .is_some());
+        assert!(visible.debug_bounds("visual-command-primary").is_some());
+        assert!(visible
+            .debug_bounds("visual-command-quick-refresh_snapshot")
+            .is_some());
+        assert!(visible
+            .debug_bounds("visual-command-quick-get_node_diagnostics")
+            .is_some());
+        assert!(visible
+            .debug_bounds("visual-command-quick-start_node")
+            .is_none());
+        assert!(visible
+            .debug_bounds("visual-command-quick-stop_node")
+            .is_none());
+        assert!(visible.debug_bounds("visual-command-more").is_some());
+        assert!(visible.debug_bounds("visual-command-menu").is_none());
+
+        let more = visible
+            .debug_bounds("visual-command-more")
+            .expect("command menu trigger");
+        visible.simulate_click(more.center(), Modifiers::default());
+        visible.run_until_parked();
+        assert!(visible.debug_bounds("visual-command-menu").is_some());
+        assert!(visible.debug_bounds("visual-command-menu-search").is_some());
+        assert!(visible
+            .debug_bounds("visual-command-menu-reason-start_node")
+            .is_some());
 
         window
             .update(cx, |shell, _, cx| {
-                shell.action_panel_query = "Run and control".into();
+                shell.action_panel_query = "start node".into();
                 cx.notify();
             })
-            .expect("filter actions by group label");
+            .expect("filter blocked Start node command");
         visible.run_until_parked();
-        assert!(visible
-            .debug_bounds("visual-action-group-action_group-runtime")
-            .is_some());
-        assert!(visible
-            .debug_bounds("visual-action-group-action_group-inspect")
-            .is_none());
-        assert!(visible
-            .debug_bounds("visual-action-head-start_node")
-            .is_some());
-        assert!(visible
-            .debug_bounds("visual-action-head-restart_node")
-            .is_some());
-        assert!(visible
-            .debug_bounds("visual-action-head-refresh_snapshot")
-            .is_none());
+        let start = visible
+            .debug_bounds("visual-command-menu-item-start_node")
+            .expect("blocked Start node command");
+        visible.simulate_click(start.center(), Modifiers::default());
+        visible.run_until_parked();
+        assert!(visible.debug_bounds("visual-action-workspace").is_none());
 
         window
             .update(cx, |shell, _, cx| {
-                shell.action_panel_query = "restart node".into();
+                shell.action_panel_query = "runtime residue".into();
                 cx.notify();
             })
-            .expect("filter actions by action label");
+            .expect("filter command menu");
         visible.run_until_parked();
         assert!(visible
-            .debug_bounds("visual-action-head-restart_node")
+            .debug_bounds("visual-command-menu-item-cleanup_node_residuals")
             .is_some());
         assert!(visible
-            .debug_bounds("visual-action-head-start_node")
+            .debug_bounds("visual-command-menu-item-start_node")
             .is_none());
 
         window
@@ -19327,132 +22434,53 @@ mod tests {
                 shell.action_panel_query = "no such action".into();
                 cx.notify();
             })
-            .expect("install empty action search");
+            .expect("install empty command search");
         visible.run_until_parked();
-        assert!(visible.debug_bounds("visual-action-search-empty").is_some());
-        assert!(visible
-            .debug_bounds("visual-action-group-action_group-runtime")
-            .is_none());
+        assert!(visible.debug_bounds("visual-command-menu-empty").is_some());
+        assert!(visible.debug_bounds("visual-command-menu").is_some());
 
         window
             .update(cx, |shell, _, cx| {
                 shell.action_panel_query.clear();
                 cx.notify();
             })
-            .expect("clear action search");
+            .expect("clear command search");
         visible.run_until_parked();
-        let inspect_toggle = visible
-            .debug_bounds("visual-action-group-toggle-action_group-inspect")
-            .expect("inspect group toggle");
-        visible.simulate_click(inspect_toggle.center(), Modifiers::default());
+        let stop = visible
+            .debug_bounds("visual-command-menu-item-stop_node")
+            .expect("grouped stop command");
+        visible.simulate_click(stop.center(), Modifiers::default());
         visible.run_until_parked();
+        assert!(visible.debug_bounds("visual-action-workspace").is_some());
+        assert!(visible
+            .debug_bounds("visual-action-workspace-title")
+            .is_some());
+        assert!(visible
+            .debug_bounds("visual-action-cta-stop_node")
+            .is_some());
+        assert!(visible.debug_bounds("visual-command-menu").is_none());
         window
             .update(cx, |shell, _, _| {
-                assert!(shell
-                    .collapsed_action_groups
-                    .contains("action_group.inspect"));
+                assert_eq!(shell.expanded_actions.len(), 1);
+                assert!(shell.expanded_actions.contains_key("stop_node"));
             })
-            .expect("verify collapsed action group");
-        assert!(visible
-            .debug_bounds("visual-action-head-refresh_snapshot")
-            .is_none());
-        assert!(visible
-            .debug_bounds("visual-action-head-start_node")
-            .is_some());
+            .expect("verify exactly one action workspace");
+
+        let close = visible
+            .debug_bounds("visual-action-workspace-close")
+            .expect("action workspace close control");
+        visible.simulate_click(close.center(), Modifiers::default());
+        visible.run_until_parked();
+        assert!(visible.debug_bounds("visual-action-workspace").is_none());
+        window
+            .update(cx, |shell, _, _| {
+                assert!(shell.expanded_actions.is_empty());
+            })
+            .expect("verify action workspace cleanup");
     }
 
     #[gpui::test]
-    fn action_panel_keeps_one_card_expanded_and_long_form_cta_visible(cx: &mut TestAppContext) {
-        let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
-            .expect("parse shared product visual fixture");
-
-        {
-            let window = open_shell_window(cx, 1200.0, 900.0);
-            let snapshot = fixture.snapshot.clone();
-            window
-                .update(cx, |shell, _, cx| {
-                    shell.manifest = Some(crate::node::node_ui_manifest());
-                    shell.snapshot = snapshot;
-                    shell.locale = Locale::En;
-                    shell.selected_page = "node_runtime".into();
-                    cx.notify();
-                })
-                .expect("install runtime actions for expansion test");
-            let mut visible = VisualTestContext::from_window(window.into(), cx);
-            visible.run_until_parked();
-            let start = visible
-                .debug_bounds("visual-action-head-start_node")
-                .expect("start action header");
-            visible.simulate_click(start.center(), Modifiers::default());
-            visible.run_until_parked();
-            window
-                .update(cx, |shell, _, _| {
-                    assert!(shell.expanded_actions.contains_key("start_node"));
-                })
-                .expect("verify first action expanded");
-
-            let stop = visible
-                .debug_bounds("visual-action-head-stop_node")
-                .expect("stop action remains visible");
-            visible.simulate_click(stop.center(), Modifiers::default());
-            visible.run_until_parked();
-            window
-                .update(cx, |shell, _, _| {
-                    assert_eq!(shell.expanded_actions.len(), 1);
-                    assert!(!shell.expanded_actions.contains_key("start_node"));
-                    assert!(shell.expanded_actions.contains_key("stop_node"));
-                })
-                .expect("verify only second action expanded");
-        }
-
-        {
-            let window = open_shell_window(cx, 1200.0, 900.0);
-            let snapshot = fixture.snapshot;
-            window
-                .update(cx, |shell, _, cx| {
-                    shell.manifest = Some(crate::node::node_ui_manifest());
-                    shell.snapshot = snapshot;
-                    shell.locale = Locale::En;
-                    shell.selected_page = "networks".into();
-                    shell.expanded_actions.insert("create_network".into(), true);
-                    cx.notify();
-                })
-                .expect("install long action form");
-            let mut visible = VisualTestContext::from_window(window.into(), cx);
-            visible.run_until_parked();
-            let form = visible
-                .debug_bounds("visual-action-form-scroll-create_network")
-                .expect("scrollable long action form");
-            let cta = visible
-                .debug_bounds("visual-action-cta-create_network")
-                .expect("long form call to action");
-            let panel = visible
-                .debug_bounds("visual-actions")
-                .expect("action panel bounds");
-            let form_height = f32::from(form.size.height);
-            let form_bottom = f32::from(form.origin.y + form.size.height);
-            let cta_top = f32::from(cta.origin.y);
-            let cta_bottom = f32::from(cta.origin.y + cta.size.height);
-            let panel_bottom = f32::from(panel.origin.y + panel.size.height);
-            assert!(
-                form_height <= 340.0,
-                "long form should scroll inside its bounded region"
-            );
-            assert!(
-                cta_top >= form_bottom,
-                "primary CTA must remain outside the scrolling form"
-            );
-            assert!(
-                cta_bottom <= panel_bottom,
-                "primary CTA must remain visible in the action panel"
-            );
-        }
-    }
-
-    #[gpui::test]
-    fn action_panel_partitions_unavailable_actions_into_a_collapsible_group(
-        cx: &mut TestAppContext,
-    ) {
+    fn command_menu_trigger_supports_pointer_and_keyboard_toggling(cx: &mut TestAppContext) {
         let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
             .expect("parse shared product visual fixture");
         let window = open_shell_window(cx, 1200.0, 900.0);
@@ -19461,40 +22489,182 @@ mod tests {
                 shell.manifest = Some(crate::node::node_ui_manifest());
                 shell.snapshot = fixture.snapshot;
                 shell.locale = Locale::En;
-                shell.selected_page = "routing".into();
+                shell.selected_page = "node_runtime".into();
+                shell.selected_network = Some("home".into());
                 cx.notify();
             })
-            .expect("install routing actions with unavailable operations");
+            .expect("install runtime page commands");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        let more = visible
+            .debug_bounds("visual-command-more")
+            .expect("command menu trigger");
+
+        visible.simulate_click(more.center(), Modifiers::default());
+        visible.run_until_parked();
+        assert!(visible.debug_bounds("visual-command-menu").is_some());
+        visible.simulate_click(more.center(), Modifiers::default());
+        visible.run_until_parked();
+        assert!(visible.debug_bounds("visual-command-menu").is_none());
+
+        visible.simulate_click(more.center(), Modifiers::default());
+        visible.run_until_parked();
+        assert!(visible.debug_bounds("visual-command-menu").is_some());
+        visible.simulate_keystrokes("space");
+        visible.run_until_parked();
+        assert!(visible.debug_bounds("visual-command-menu").is_none());
+
+        visible.simulate_keystrokes("enter");
+        visible.run_until_parked();
+        assert!(visible.debug_bounds("visual-command-menu").is_some());
+    }
+
+    #[gpui::test]
+    fn action_workspace_keeps_long_form_cta_visible(cx: &mut TestAppContext) {
+        let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
+            .expect("parse shared product visual fixture");
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = fixture.snapshot;
+                shell.locale = Locale::En;
+                shell.selected_page = "networks".into();
+                shell.selected_network = Some("home".into());
+                // This test isolates long-form layout; coordinator governance
+                // blocking is covered separately. A network without an embedded
+                // Coordinator service is intentionally unaffected by that gate.
+                shell.snapshot.embedded_services.clear();
+                cx.notify();
+            })
+            .expect("install long action form");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        let primary = visible
+            .debug_bounds("visual-command-primary")
+            .expect("create network primary command");
+        visible.simulate_click(primary.center(), Modifiers::default());
+        visible.run_until_parked();
+
+        let workspace = visible
+            .debug_bounds("visual-action-workspace")
+            .expect("action workspace bounds");
+        let form = visible
+            .debug_bounds("visual-action-form-scroll-create_network")
+            .expect("scrollable long action form");
+        let cta = visible
+            .debug_bounds("visual-action-cta-create_network")
+            .expect("long form call to action");
+        assert!(visible.debug_bounds("visual-actions").is_none());
+        assert!(visible
+            .debug_bounds("visual-action-workspace-title")
+            .is_some());
+        let form_height = f32::from(form.size.height);
+        let form_bottom = f32::from(form.origin.y + form.size.height);
+        let cta_top = f32::from(cta.origin.y);
+        let cta_bottom = f32::from(cta.origin.y + cta.size.height);
+        let workspace_bottom = f32::from(workspace.origin.y + workspace.size.height);
+        assert!(
+            form_height <= 340.0,
+            "long form should scroll inside its bounded region"
+        );
+        assert!(
+            cta_top >= form_bottom,
+            "primary CTA must remain outside the scrolling form"
+        );
+        assert!(
+            cta_bottom <= workspace_bottom,
+            "primary CTA must remain visible in the action workspace"
+        );
+    }
+
+    #[gpui::test]
+    fn topology_batch_governance_opens_from_the_command_menu(cx: &mut TestAppContext) {
+        let fixture = topology_widget_fixture();
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                install_topology_widget_fixture(shell, &fixture, cx);
+            })
+            .expect("install topology page");
+
         let mut visible = VisualTestContext::from_window(window.into(), cx);
         visible.run_until_parked();
         assert!(visible
-            .debug_bounds("visual-action-group-unavailable")
+            .debug_bounds("visual-page-command-surface")
             .is_some());
-        assert!(visible
-            .debug_bounds("visual-action-head-get_traffic_policy")
-            .is_some());
-        let toggle = visible
-            .debug_bounds("visual-action-group-toggle-unavailable")
-            .expect("unavailable group toggle");
-        visible.simulate_click(toggle.center(), Modifiers::default());
+        assert!(visible.debug_bounds("visual-command-primary").is_none());
+        let more = visible
+            .debug_bounds("visual-command-more")
+            .expect("topology command menu trigger");
+        visible.simulate_click(more.center(), Modifiers::default());
         visible.run_until_parked();
-        assert!(visible
-            .debug_bounds("visual-action-head-get_traffic_policy")
-            .is_none());
+        let batch = visible
+            .debug_bounds("visual-command-menu-item-topology")
+            .expect("topology batch command");
+        visible.simulate_click(batch.center(), Modifiers::default());
+        visible.run_until_parked();
+
+        assert!(visible.debug_bounds("visual-action-workspace").is_some());
+        assert!(visible.debug_bounds("visual-actions").is_none());
         window
             .update(cx, |shell, _, _| {
-                assert!(shell
-                    .collapsed_action_groups
-                    .contains("common.actions_unavailable_heading"));
+                assert_eq!(shell.expanded_actions.len(), 1);
+                assert!(shell.expanded_actions.contains_key(TOPOLOGY_COMMAND_ID));
             })
-            .expect("verify unavailable actions collapsed");
+            .expect("verify topology batch workspace");
+
+        let close = visible
+            .debug_bounds("visual-action-workspace-close")
+            .expect("topology workspace close control");
+        visible.simulate_click(close.center(), Modifiers::default());
+        visible.run_until_parked();
+        assert!(visible.debug_bounds("visual-action-workspace").is_none());
+    }
+
+    #[gpui::test]
+    fn operation_status_remains_in_content_without_an_action_sidebar(cx: &mut TestAppContext) {
+        let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
+            .expect("parse shared product visual fixture");
+        let operation = operation_fixture(OperationState::Running, true);
+        let window = open_shell_window(cx, 1200.0, 900.0);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.manifest = Some(crate::node::node_ui_manifest());
+                shell.snapshot = fixture.snapshot;
+                shell.locale = Locale::En;
+                shell.selected_page = "node_runtime".into();
+                shell.selected_network = Some("home".into());
+                shell.operation = Some(operation);
+                cx.notify();
+            })
+            .expect("install running operation");
+
+        let mut visible = VisualTestContext::from_window(window.into(), cx);
+        visible.run_until_parked();
+        let content = visible
+            .debug_bounds("visual-content")
+            .expect("content region");
+        let status = visible
+            .debug_bounds("visual-node-operation")
+            .expect("operation status");
+        let content_top = f32::from(content.origin.y);
+        let content_bottom = f32::from(content.origin.y + content.size.height);
+        let status_top = f32::from(status.origin.y);
+        let status_bottom = f32::from(status.origin.y + status.size.height);
+        assert!(status_top >= content_top);
+        assert!(status_bottom <= content_bottom);
+        assert!(visible.debug_bounds("visual-actions").is_none());
+        assert!(visible.debug_bounds("visual-action-workspace").is_none());
     }
 
     #[test]
     fn shell_regions_follow_the_shared_contract_order() {
         assert_eq!(
             APP_REGION_ORDER.map(AppRegion::name),
-            ["sidebar", "topbar", "content", "action-panel"]
+            ["sidebar", "topbar", "content"]
         );
         for region in APP_REGION_ORDER {
             assert_eq!(
@@ -19516,23 +22686,13 @@ mod tests {
     }
 
     #[test]
-    fn action_panel_follows_the_shared_desktop_width_contract() {
-        assert_eq!(
-            ActionPanelPresentation::for_layout(layout_for_window_width(899.0)),
-            ActionPanelPresentation::Stacked
-        );
-        assert_eq!(
-            ActionPanelPresentation::for_layout(layout_for_window_width(900.0)),
-            ActionPanelPresentation::Compact
-        );
-        assert_eq!(
-            ActionPanelPresentation::for_layout(layout_for_window_width(1279.0)),
-            ActionPanelPresentation::Compact
-        );
-        assert_eq!(
-            ActionPanelPresentation::for_layout(layout_for_window_width(1280.0)),
-            ActionPanelPresentation::Full
-        );
+    fn action_workspace_is_a_dialog_at_every_breakpoint() {
+        for width in [899.0, 900.0, 1279.0, 1280.0] {
+            assert_eq!(
+                ActionWorkspacePresentation::for_layout(layout_for_window_width(width)),
+                ActionWorkspacePresentation::Dialog
+            );
+        }
     }
 
     #[test]
@@ -19548,6 +22708,10 @@ mod tests {
         );
         assert_eq!(
             layout_for_window_width(f32::from(minimum.width)),
+            LayoutClass::Compact
+        );
+        assert_eq!(
+            layout_for_window_width(f32::from(minimum.width) + 64.0),
             LayoutClass::Desktop
         );
     }
@@ -19577,6 +22741,7 @@ mod tests {
     fn action_block_reason_messages_are_user_visible() {
         for reason in [
             ActionBlockReason::NodeNotRunning,
+            ActionBlockReason::NodeNotStopped,
             ActionBlockReason::NoOnlineNetwork,
             ActionBlockReason::NoNetworkSelected,
             ActionBlockReason::PermissionDenied,
@@ -19783,18 +22948,10 @@ mod tests {
                 A11Y_NAVIGATION_ROLE,
                 A11Y_MAIN_ROLE,
                 A11Y_HEADING_ROLE,
-                A11Y_TAB_LIST_ROLE,
                 A11Y_TAB_PANEL_ROLE,
             ]
             .map(|role| format!("{role:?}")),
-            [
-                "Application",
-                "Navigation",
-                "Main",
-                "Heading",
-                "TabList",
-                "TabPanel",
-            ]
+            ["Application", "Navigation", "Main", "Heading", "TabPanel",]
         );
     }
 
@@ -19816,7 +22973,8 @@ mod tests {
             .enable_all()
             .build()
             .expect("visual-test Tokio runtime");
-        runtime.block_on(state.replace_authoritative(fixture.snapshot));
+        let product_snapshot = product_visual_snapshot(&selected_page, fixture.snapshot);
+        runtime.block_on(state.replace_authoritative(product_snapshot));
         let _runtime_guard = runtime.enter();
         let config_dir =
             std::env::temp_dir().join(format!("fuckipv6-gpui-visual-{}", std::process::id()));
@@ -19906,7 +23064,7 @@ mod tests {
             )
             .expect("project GPUI screenshot page model");
             let overview = model.overview.as_ref();
-            let page_tabs = navigation_module_for_page(&shell.selected_page)
+            let page_switcher_pages = navigation_module_for_page(&shell.selected_page)
                 .map(|module| {
                     module
                         .page_ids
@@ -19918,6 +23076,23 @@ mod tests {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            let topology_semantics = shell.snapshot.topology.as_ref().map(|topology| {
+                let visible_nodes = shell
+                    .topology_network_id()
+                    .map(|network_id| {
+                        topology
+                            .nodes
+                            .iter()
+                            .filter(|node| node.belongs_to(&network_id))
+                            .count()
+                    })
+                    .unwrap_or(topology.nodes.len());
+                json!({
+                    "boundaries": topology.boundaries.len(),
+                    "nodes": visible_nodes,
+                    "detail_open": shell.selected_topology_node_id.is_some(),
+                })
+            });
             json!({
                 "title": "fuckipv6",
                 "locale": "en",
@@ -19931,7 +23106,21 @@ mod tests {
                     .iter()
                     .map(|module| t(shell.locale, &module.label_key).to_string())
                     .collect::<Vec<_>>(),
-                "page_tabs": page_tabs,
+                "page_switcher": {
+                    "current": page_switcher_pages
+                        .get(page_switcher_pages.iter().position(|label| label == &t(shell.locale, &page.nav_label_key).to_string()).unwrap_or(0))
+                        .cloned()
+                        .unwrap_or_default(),
+                    "options": page_switcher_pages,
+                },
+                "topbar_search": {
+                    "placeholder": t(shell.locale, "common.search_placeholder").to_string(),
+                },
+                "network_picker": Value::Null,
+                "shell_regions": APP_REGION_ORDER
+                    .iter()
+                    .map(|region| region.name())
+                    .collect::<Vec<_>>(),
                 "primary_status": overview.map(|overview| json!({
                     "label": t(shell.locale, overview.primary_status.label_key()).to_string(),
                     "detail": t(shell.locale, overview.primary_status.detail_key()).to_string(),
@@ -19939,7 +23128,7 @@ mod tests {
                 "selected_page": shell.selected_page,
                 "expanded_action": expanded_action,
                 "page_heading": t(shell.locale, &page.title_key).to_string(),
-                "action_panel": t(shell.locale, "common.actions_panel_title").to_string(),
+                "topology": topology_semantics,
                 "actions": page.actions
                     .iter()
                     .filter(|action| !is_configuration_action(&action.id))
@@ -20005,13 +23194,15 @@ mod tests {
 
         let fixture: ProductVisualFixture = serde_json::from_str(PRODUCT_VISUAL_SNAPSHOT_FIXTURE)
             .expect("parse shared product visual fixture");
+        let selected_page = std::env::var("GPUI_VISUAL_PAGE").unwrap_or_else(|_| "overview".into());
         let window = open_shell_window(cx, 1440.0, 900.0);
+        let page_for_shell = selected_page.clone();
         window
             .update(cx, |shell, _, cx| {
                 shell.manifest = Some(crate::node::node_ui_manifest());
-                shell.snapshot = fixture.snapshot;
+                shell.snapshot = product_visual_snapshot(&page_for_shell, fixture.snapshot);
                 shell.locale = Locale::En;
-                shell.selected_page = "overview".into();
+                shell.selected_page = page_for_shell;
                 shell.selected_network = Some("home".into());
                 shell.notice = None;
                 shell.error = None;
@@ -20022,7 +23213,12 @@ mod tests {
 
         let mut visible = VisualTestContext::from_window(window.into(), cx);
         visible.run_until_parked();
-        for selector in VISUAL_GEOMETRY_SELECTORS {
+        let selectors: &'static [&'static str] = if selected_page == "topology" {
+            &TOPOLOGY_VISUAL_GEOMETRY_SELECTORS
+        } else {
+            &VISUAL_GEOMETRY_SELECTORS
+        };
+        for selector in selectors {
             println!("{selector}: {:?}", visible.debug_bounds(selector));
         }
         if let Some(output) = std::env::var_os("GPUI_VISUAL_GEOMETRY_JSON") {
@@ -20030,7 +23226,7 @@ mod tests {
             if let Some(parent) = output.parent() {
                 std::fs::create_dir_all(parent).expect("geometry directory");
             }
-            let geometry = visual_geometry(&mut visible);
+            let geometry = visual_geometry(&mut visible, selectors);
             std::fs::write(
                 output,
                 format!(
@@ -20056,11 +23252,12 @@ mod tests {
         assert_eq!(f32::from(after.width), 900.0);
         assert_eq!(
             layout_for_window_width(f32::from(after.width)),
-            LayoutClass::Desktop
+            LayoutClass::Compact
         );
+        assert_eq!(layout_for_window_width(1024.0), LayoutClass::Desktop);
         assert_eq!(
-            ActionPanelPresentation::for_layout(layout_for_window_width(1280.0)),
-            ActionPanelPresentation::Full
+            ActionWorkspacePresentation::for_layout(layout_for_window_width(1280.0)),
+            ActionWorkspacePresentation::Dialog
         );
     }
 }

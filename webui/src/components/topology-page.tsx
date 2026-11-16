@@ -524,18 +524,24 @@ export function TopologyPage({
   }, [topology]);
   const detailNode =
     topology?.nodes.find((node) => node.node_id === detailNodeId) ?? null;
-  const currentNode =
-    topology?.nodes.find((node) => node.is_self) ?? topology?.nodes[0] ?? null;
-  const exitNode =
-    topology?.nodes.find(
+  const networkNodes =
+    topology?.nodes.filter(
       (node) =>
-        node.capabilities?.includes("exit") &&
+        !networkId ||
         node.networks.some((network) => network.network_id === networkId),
-    ) ??
-    topology?.nodes.find((node) => node.capabilities?.includes("exit")) ??
+    ) ?? [];
+  const networkConnections =
+    topology?.connections.filter(
+      (connection) =>
+        !networkId || connection.networks?.includes(networkId),
+    ) ?? [];
+  const currentNode =
+    networkNodes.find((node) => node.is_self) ?? networkNodes[0] ?? null;
+  const exitNode =
+    networkNodes.find((node) => node.capabilities?.includes("exit")) ??
     null;
   const relayNode =
-    topology?.nodes.find(
+    networkNodes.find(
       (node) =>
         node.node_id !== currentNode?.node_id &&
         node.node_id !== exitNode?.node_id &&
@@ -548,14 +554,14 @@ export function TopologyPage({
       Boolean(node) && nodes.findIndex((item) => item?.node_id === node?.node_id) === index,
   );
   const activeConnections =
-    topology?.connections.filter((connection) => connection.state === "active")
-      .length ?? 0;
+    networkConnections.filter((connection) => connection.state === "active")
+      .length;
   const healthyNodes =
-    topology?.nodes.filter((node) => node.health === "healthy").length ?? 0;
+    networkNodes.filter((node) => node.health === "healthy").length;
   const currentNetwork = topology?.boundaries.find(
     (boundary) => boundary.network_id === networkId,
   );
-  const recentConnections = [...(topology?.connections ?? [])]
+  const recentConnections = [...networkConnections]
     .sort(
       (left, right) =>
         (right.observed_at_unix_ms ?? 0) - (left.observed_at_unix_ms ?? 0),
@@ -647,19 +653,24 @@ export function TopologyPage({
     <div className="topology-page">
       <header className="topology-hero">
         <div className="topology-hero-copy">
-          <span className="topology-eyebrow">
-            {label(locale, "topology.hero.eyebrow")}
+          <span className="topology-hero-icon" aria-hidden="true">
+            <Network size={20} />
           </span>
-          <h1 id="page-title">{label(locale, "page.topology")}</h1>
-          <p>
-            {tr(locale, "topology.hero.summary", {
-              networks: String(topology.boundaries.length),
-              nodes: String(topology.nodes.length),
-              exit: exitNode
-                ? (exitNode.display_name?.trim() || exitNode.node_id)
-                : label(locale, "common.none"),
-            })}
-          </p>
+          <div className="topology-hero-title">
+            <span className="topology-eyebrow">
+              {label(locale, "topology.hero.eyebrow")}
+            </span>
+            <h1 id="page-title">{label(locale, "page.topology")}</h1>
+            <p>
+              {tr(locale, "topology.hero.summary", {
+                networks: String(topology.boundaries.length),
+                nodes: String(networkNodes.length),
+                exit: exitNode
+                  ? (exitNode.display_name?.trim() || exitNode.node_id)
+                  : label(locale, "common.none"),
+              })}
+            </p>
+          </div>
         </div>
         <div className="topology-hero-actions">
           {headingActions}
@@ -708,7 +719,7 @@ export function TopologyPage({
         </div>
         <div className="topology-stat">
           <span>{label(locale, "topology.metric.nodes")}</span>
-          <strong>{topology.nodes.length}</strong>
+          <strong>{networkNodes.length}</strong>
           <small>
             {tr(locale, "topology.metric.healthy", {
               count: String(healthyNodes),

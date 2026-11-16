@@ -15,6 +15,7 @@ import {
   KeyRound,
   LoaderCircle,
   LogOut,
+  Menu,
   Network as NetworkIcon,
   RefreshCw,
   RotateCcw,
@@ -79,7 +80,11 @@ import {
   navigationModuleForPage,
   type NavigationModuleContract,
 } from "./navigation";
-import { ActionPanel, type ActionSubmission } from "./components/action-panel";
+import {
+  ActionPanel,
+  OperationStatusCard,
+  type ActionSubmission,
+} from "./components/action-panel";
 import {
   CONFIGURATION_ACTION_IDS,
   ConfigurationWorkflow,
@@ -208,6 +213,34 @@ type ReauthenticationAttempt = {
   resolve(value: unknown): void;
   reject(error: unknown): void;
 };
+
+type NavigationLayout = "mobile" | "compact" | "desktop";
+
+function navigationLayoutForWidth(width: number): NavigationLayout {
+  if (width < 600) return "mobile";
+  if (width < 1024) return "compact";
+  return "desktop";
+}
+
+function currentNavigationLayout(): NavigationLayout {
+  const width =
+    document.documentElement.clientWidth || window.innerWidth || 1024;
+  return navigationLayoutForWidth(width);
+}
+
+function useNavigationLayout(): NavigationLayout {
+  const [layout, setLayout] = useState(currentNavigationLayout);
+  useEffect(() => {
+    const update = () => setLayout(currentNavigationLayout());
+    window.addEventListener("resize", update);
+    window.visualViewport?.addEventListener("resize", update);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.visualViewport?.removeEventListener("resize", update);
+    };
+  }, []);
+  return layout;
+}
 
 function useNodeEvents(
   authenticated: boolean,
@@ -357,66 +390,276 @@ function LoadingScreen({ locale }: { locale: Locale }): JSX.Element {
   );
 }
 
+function NavigationPanel({
+  locale,
+  activeModuleId,
+  disabled = false,
+  drawer = false,
+  footer,
+  onSelect,
+  onClose,
+}: {
+  locale: Locale;
+  activeModuleId?: string;
+  disabled?: boolean;
+  drawer?: boolean;
+  footer?: JSX.Element;
+  onSelect?(module: ModuleDefinition): void;
+  onClose?(): void;
+}): JSX.Element {
+  return (
+    <aside
+      className={drawer ? "primary-nav drawer" : "primary-nav"}
+      data-ui-region="sidebar"
+      data-open={drawer ? "true" : undefined}
+      aria-label={label(locale, "common.main_navigation")}
+      role={drawer ? "dialog" : undefined}
+      aria-modal={drawer ? "true" : undefined}
+    >
+      <div className="brand-lockup">
+        <div className="brand-mark">
+          <Wifi size={22} />
+        </div>
+        <div>
+          <span>fuckipv6</span>
+          <strong>{label(locale, "common.node_contract")}</strong>
+        </div>
+        {drawer ? (
+          <button
+            className="icon-button nav-close-button"
+            type="button"
+            autoFocus
+            aria-label={label(locale, "common.close_drawer")}
+            onClick={onClose}
+          >
+            <X size={17} />
+          </button>
+        ) : null}
+      </div>
+      <nav
+        className="module-list"
+        aria-label={label(locale, "common.main_navigation")}
+      >
+        {MODULES.map((module) => {
+          const Icon = module.icon;
+          const selected = module.id === activeModuleId;
+          return (
+            <button
+              key={module.id}
+              type="button"
+              className={selected ? "module-button selected" : "module-button"}
+              aria-current={selected ? "page" : undefined}
+              disabled={disabled}
+              onClick={() => onSelect?.(module)}
+            >
+              <Icon size={19} />
+              <span>{label(locale, module.labelKey)}</span>
+            </button>
+          );
+        })}
+      </nav>
+      {footer ? <div className="nav-footer">{footer}</div> : null}
+    </aside>
+  );
+}
+
+function NavigationDrawer({
+  open,
+  locale,
+  activeModuleId,
+  disabled = false,
+  footer,
+  onSelect,
+  onClose,
+}: {
+  open: boolean;
+  locale: Locale;
+  activeModuleId?: string;
+  disabled?: boolean;
+  footer?: JSX.Element;
+  onSelect(module: ModuleDefinition): void;
+  onClose(): void;
+}): JSX.Element | null {
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onClose, open]);
+
+  if (!open) return null;
+  return (
+    <>
+      <button
+        className="navigation-backdrop"
+        type="button"
+        tabIndex={-1}
+        aria-hidden="true"
+        onClick={onClose}
+      />
+      <NavigationPanel
+        locale={locale}
+        activeModuleId={activeModuleId}
+        disabled={disabled}
+        drawer
+        footer={footer}
+        onSelect={onSelect}
+        onClose={onClose}
+      />
+    </>
+  );
+}
+
+function PageSwitcher({
+  locale,
+  pages,
+  activePageId,
+  onSelect,
+}: {
+  locale: Locale;
+  pages: NodeUiPage[];
+  activePageId?: string;
+  onSelect(pageId: string): void;
+}): JSX.Element | null {
+  const current = pages.find((page) => page.id === activePageId) ?? pages[0];
+  if (!current) return null;
+  return (
+    <details className="page-switcher">
+      <summary className="page-switcher-trigger">
+        <span>{label(locale, current.nav_label_key)}</span>
+        <ChevronDown size={13} aria-hidden="true" />
+      </summary>
+      <div className="page-switcher-menu" role="menu">
+        {pages.map((page) => (
+          <button
+            key={page.id}
+            type="button"
+            role="menuitemradio"
+            aria-checked={page.id === current.id}
+            onClick={(event) => {
+              event.currentTarget.closest("details")?.removeAttribute("open");
+              onSelect(page.id);
+            }}
+          >
+            {label(locale, page.nav_label_key)}
+          </button>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function BottomNavigation({
+  locale,
+  activeModuleId,
+  disabled = false,
+  onSelect,
+}: {
+  locale: Locale;
+  activeModuleId?: string;
+  disabled?: boolean;
+  onSelect?(module: ModuleDefinition): void;
+}): JSX.Element {
+  return (
+    <nav
+      className="bottom-navigation"
+      data-ui-region="sidebar"
+      aria-label={label(locale, "common.main_navigation")}
+    >
+      {MODULES.map((module) => {
+        const Icon = module.icon;
+        const selected = module.id === activeModuleId;
+        return (
+          <button
+            key={module.id}
+            type="button"
+            className="bottom-navigation-item"
+            aria-current={selected ? "page" : undefined}
+            aria-label={label(locale, module.labelKey)}
+            disabled={disabled}
+            onClick={() => onSelect?.(module)}
+          >
+            <Icon size={20} />
+            <span>{label(locale, module.labelKey)}</span>
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
 function AuthenticatedLoadingShell({
   locale,
 }: {
   locale: Locale;
 }): JSX.Element {
+  const navigationLayout = useNavigationLayout();
+  const [navigationDrawerOpen, setNavigationDrawerOpen] = useState(false);
+  const closeNavigationDrawer = useCallback(
+    () => setNavigationDrawerOpen(false),
+    [],
+  );
+  const navigationFooter = (
+    <>
+      <span>{label(locale, "state.initial_loading.title")}</span>
+      <span className="stale-indicator active">
+        <span aria-hidden="true" /> {label(locale, "state.refreshing.title")}
+      </span>
+    </>
+  );
+
   return (
-    <div className="app-shell" aria-busy="true">
+    <div
+      className="app-shell"
+      data-navigation-mode={navigationLayout}
+      aria-busy="true"
+    >
       <a className="skip-link" href="#page-content">
         {label(locale, "common.skip_content")}
       </a>
-      <aside
-        className="primary-nav"
-        data-ui-region="sidebar"
-        aria-label={label(locale, "common.main_navigation")}
-      >
-        <div className="brand-lockup">
-          <div className="brand-mark">
-            <Wifi size={22} />
-          </div>
-          <div>
-            <span>fuckipv6</span>
-            <strong>{label(locale, "common.node_contract")}</strong>
-          </div>
-        </div>
-        <nav
-          className="module-list"
-          aria-label={label(locale, "common.main_navigation")}
-        >
-          {MODULES.map((module) => {
-            const Icon = module.icon;
-            return (
-              <button
-                key={module.id}
-                type="button"
-                className="module-button"
-                disabled
-              >
-                <Icon size={19} />
-                <span>{label(locale, module.labelKey)}</span>
-              </button>
-            );
-          })}
-        </nav>
-        <div className="nav-footer">
-          <span>{label(locale, "state.initial_loading.title")}</span>
-          <span className="stale-indicator active">
-            <span aria-hidden="true" />{" "}
-            {label(locale, "state.refreshing.title")}
-          </span>
-        </div>
-      </aside>
+      {navigationLayout === "mobile" ? (
+        <BottomNavigation locale={locale} disabled />
+      ) : null}
+      {navigationLayout === "desktop" ? (
+        <NavigationPanel
+          locale={locale}
+          disabled
+          footer={navigationFooter}
+        />
+      ) : null}
+      <NavigationDrawer
+        open={navigationLayout === "compact" && navigationDrawerOpen}
+        locale={locale}
+        disabled
+        footer={navigationFooter}
+        onSelect={() => undefined}
+        onClose={closeNavigationDrawer}
+      />
 
       <div className="app-main">
         <header className="global-bar" data-ui-region="topbar">
+          {navigationLayout === "compact" ? (
+            <button
+              className="icon-button navigation-drawer-trigger"
+              type="button"
+              aria-label={label(locale, "common.open_navigation")}
+              aria-expanded={navigationDrawerOpen}
+              onClick={() => setNavigationDrawerOpen(true)}
+            >
+              <Menu size={18} />
+            </button>
+          ) : null}
           <div className="global-context">
             <div className="top-status warn" role="status">
               <LoaderCircle className="spin" size={17} />
               <div>
                 <strong>{label(locale, "state.initial_loading.title")}</strong>
-                <span>{label(locale, "state.initial_loading.detail")}</span>
+
               </div>
             </div>
           </div>
@@ -496,7 +739,6 @@ function AuthenticatedLoadingShell({
               </div>
               <div>
                 <h1>{label(locale, "state.initial_loading.title")}</h1>
-                <p>{label(locale, "state.initial_loading.detail")}</p>
               </div>
             </header>
             <div className="page-content-stack">
@@ -506,7 +748,7 @@ function AuthenticatedLoadingShell({
                   <strong>
                     {label(locale, "state.initial_loading.title")}
                   </strong>
-                  <p>{label(locale, "state.initial_loading.detail")}</p>
+
                 </div>
               </div>
               <div className="loading-skeleton" aria-hidden="true">
@@ -520,21 +762,6 @@ function AuthenticatedLoadingShell({
               </div>
             </div>
           </section>
-          <aside
-            className="actions-panel"
-            data-ui-region="action-panel"
-            aria-label={label(locale, "common.actions_panel_title")}
-          >
-            <div className="panel-heading">
-              <div className="panel-title">
-                {label(locale, "common.actions_panel_title")}
-              </div>
-            </div>
-            <div className="loading-skeleton" aria-hidden="true">
-              <div className="loading-skeleton-block compact" />
-              <div className="loading-skeleton-block compact" />
-            </div>
-          </aside>
         </main>
       </div>
     </div>
@@ -579,14 +806,10 @@ function LoginScreen({ locale }: { locale: Locale }): JSX.Element {
   const [failure, setFailure] = useState("");
 
   return (
-    <main className="auth-shell">
+    <main className="auth-shell paper">
       <section className="auth-card" aria-labelledby="auth-title">
-        <div className="auth-emblem">
-          <ShieldAlert size={32} />
-        </div>
         <span className="eyebrow">fuckipv6</span>
         <h1 id="auth-title">{label(locale, "owner_auth.login.title")}</h1>
-        <p>{label(locale, "owner_auth.login.description")}</p>
         {issue ? (
           <div className="inline-notice warning" role="alert">
             <AlertCircle size={16} />
@@ -609,16 +832,10 @@ function LoginScreen({ locale }: { locale: Locale }): JSX.Element {
             });
           }}
         >
-          {login.isPending ? (
-            <LoaderCircle className="spin" size={18} />
-          ) : (
-            <KeyRound size={18} />
-          )}
           {login.isPending
             ? label(locale, "owner_auth.passkey.waiting")
             : label(locale, "owner_auth.passkey.login_button")}
         </button>
-        <p className="auth-help">{label(locale, "owner_auth.login.help")}</p>
       </section>
     </main>
   );
@@ -770,6 +987,13 @@ function AppShell({
     useState<NodeDiagnosticsSnapshot | null>(null);
   const [refreshFailure, setRefreshFailure] = useState<unknown>(null);
   const [manualRefreshPending, setManualRefreshPending] = useState(false);
+  const navigationLayout = useNavigationLayout();
+  const [navigationDrawerOpen, setNavigationDrawerOpen] = useState(false);
+  const navigationTriggerRef = useRef<HTMLButtonElement>(null);
+  const closeNavigationDrawer = useCallback(() => {
+    setNavigationDrawerOpen(false);
+    requestAnimationFrame(() => navigationTriggerRef.current?.focus());
+  }, []);
   const idempotencyKeys = useRef(new Map<string, string>());
   const lastOperationSubmission = useRef<{
     action: NodeUiAction;
@@ -848,6 +1072,26 @@ function AppShell({
     : controlRefreshing
       ? "refreshing"
       : "live";
+
+  useEffect(() => {
+    const closeDrawerOutsideCompact = () => {
+      if (currentNavigationLayout() !== "compact") {
+        setNavigationDrawerOpen(false);
+      }
+    };
+    window.addEventListener("resize", closeDrawerOutsideCompact);
+    window.visualViewport?.addEventListener(
+      "resize",
+      closeDrawerOutsideCompact,
+    );
+    return () => {
+      window.removeEventListener("resize", closeDrawerOutsideCompact);
+      window.visualViewport?.removeEventListener(
+        "resize",
+        closeDrawerOutsideCompact,
+      );
+    };
+  }, []);
 
   useEffect(() => {
     const focusSearch = (event: KeyboardEvent): void => {
@@ -1179,6 +1423,7 @@ function AppShell({
       setPageId(next);
       setSearchQuery("");
     }
+    setNavigationDrawerOpen(false);
   }
 
   const subpages = activeModule.pages
@@ -1189,88 +1434,118 @@ function AppShell({
     refreshing ||
     languageMutation.isPending ||
     logoutMutation.isPending;
+  const navigationFooter = (
+    <>
+      <span>
+        {label(locale, "common.snapshot")} #{snapshot.revision}
+      </span>
+      <span
+        className={
+          syncMode === "live" ? "stale-indicator" : "stale-indicator active"
+        }
+      >
+        <span aria-hidden="true" />{" "}
+        {syncMode === "stale"
+          ? label(locale, "state.stale.title")
+          : syncMode === "refreshing"
+            ? label(locale, "state.refreshing.title")
+            : label(locale, "common.live")}
+      </span>
+    </>
+  );
 
   return (
-    <div className="app-shell">
+    <div
+      className="app-shell"
+      data-navigation-mode={navigationLayout}
+    >
       <a className="skip-link" href="#page-content">
         {label(locale, "common.skip_content")}
       </a>
-      <aside
-        className="primary-nav"
-        data-ui-region="sidebar"
-        aria-label={label(locale, "common.main_navigation")}
-      >
-        <div className="brand-lockup">
-          <div className="brand-mark">
-            <Wifi size={22} />
-          </div>
-          <div>
-            <span>fuckipv6</span>
-            <strong>{label(locale, "common.node_contract")}</strong>
-          </div>
-        </div>
-        <nav className="module-list">
-          {MODULES.map((module) => {
-            const Icon = module.icon;
-            const selected = module.id === activeModule.id;
-            return (
-              <button
-                key={module.id}
-                type="button"
-                className={
-                  selected ? "module-button selected" : "module-button"
-                }
-                aria-current={selected ? "page" : undefined}
-                onClick={() => selectModule(module)}
-              >
-                <Icon size={19} />
-                <span>{label(locale, module.labelKey)}</span>
-              </button>
-            );
-          })}
-        </nav>
-        <div className="nav-footer">
-          <span>
-            {label(locale, "common.snapshot")} #{snapshot.revision}
-          </span>
-          <span
-            className={
-              syncMode === "live" ? "stale-indicator" : "stale-indicator active"
-            }
-          >
-            <span aria-hidden="true" />{" "}
-            {syncMode === "stale"
-              ? label(locale, "state.stale.title")
-              : syncMode === "refreshing"
-                ? label(locale, "state.refreshing.title")
-                : label(locale, "common.live")}
-          </span>
-        </div>
-      </aside>
+      {navigationLayout === "mobile" ? (
+        <BottomNavigation
+          locale={locale}
+          activeModuleId={activeModule.id}
+          onSelect={selectModule}
+        />
+      ) : null}
+      {navigationLayout === "desktop" ? (
+        <NavigationPanel
+          locale={locale}
+          activeModuleId={activeModule.id}
+          footer={navigationFooter}
+          onSelect={selectModule}
+        />
+      ) : null}
+      <NavigationDrawer
+        open={navigationLayout === "compact" && navigationDrawerOpen}
+        locale={locale}
+        activeModuleId={activeModule.id}
+        footer={navigationFooter}
+        onSelect={selectModule}
+        onClose={closeNavigationDrawer}
+      />
 
-      <div className="app-main">
+      <div className="app-main" data-page={activePage?.id}>
         <header className="global-bar" data-ui-region="topbar">
+          {navigationLayout === "compact" ? (
+            <button
+              ref={navigationTriggerRef}
+              className="icon-button navigation-drawer-trigger"
+              type="button"
+              aria-label={label(locale, "common.open_navigation")}
+              aria-expanded={navigationDrawerOpen}
+              onClick={() =>
+                navigationDrawerOpen
+                  ? closeNavigationDrawer()
+                  : setNavigationDrawerOpen(true)
+              }
+            >
+              <Menu size={18} />
+            </button>
+          ) : null}
+          <PageSwitcher
+            locale={locale}
+            pages={subpages}
+            activePageId={activePage?.id}
+            onSelect={navigate}
+          />
+          <div className="global-search global-search-topbar">
+            <SearchIcon
+              className="global-search-icon"
+              size={15}
+              aria-hidden="true"
+            />
+            <input
+              ref={searchInputRef}
+              id="global-search-input"
+              type="text"
+              value={searchQuery}
+              aria-label={label(locale, "common.search")}
+              aria-controls={searchOpen ? "global-search-results" : undefined}
+              aria-expanded={searchOpen}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder={label(locale, "common.search_placeholder")}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") clearSearch(true);
+              }}
+            />
+            {searchOpen ? (
+              <button
+                className="global-search-clear"
+                type="button"
+                aria-label={label(locale, "common.search_clear")}
+                onClick={() => clearSearch(true)}
+              >
+                <X size={14} />
+              </button>
+            ) : null}
+          </div>
           <div className="global-context">
             <TopStatus snapshot={snapshot} locale={locale} />
           </div>
-          <label className="network-picker">
-            <span>{label(locale, "common.current_network")}</span>
-            <select
-              value={selectedNetwork}
-              onChange={(event) => setSelectedNetworkState(event.target.value)}
-            >
-              {snapshot.networks.length === 0 ? (
-                <option value="">
-                  {label(locale, "common.no_running_networks")}
-                </option>
-              ) : null}
-              {snapshot.networks.map((network) => (
-                <option value={network.name} key={network.name}>
-                  {network.name}
-                </option>
-              ))}
-            </select>
-          </label>
           <div className="global-actions">
             <LanguageMenu
               locale={locale}
@@ -1305,88 +1580,11 @@ function AppShell({
                 <LogOut size={17} />
               )}
             </button>
-            {controlPending ? (
-              <small className="global-action-reason" role="status">
-                {label(locale, "common.control_pending")}
-              </small>
-            ) : null}
+
           </div>
         </header>
 
         <div className="secondary-shell">
-          <div className="local-toolbar">
-            <div
-              className="page-tabs"
-              role="tablist"
-              aria-label={label(locale, "common.page_sections")}
-            >
-              {subpages.map((page) => (
-                <button
-                  key={page.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={page.id === activePage?.id}
-                  className={
-                    page.id === activePage?.id
-                      ? "page-tab selected"
-                      : "page-tab"
-                  }
-                  onClick={() => navigate(page.id)}
-                >
-                  {label(locale, page.nav_label_key)}
-                </button>
-              ))}
-            </div>
-            <div className="local-toolbar-actions">
-              <div className="global-search">
-                <SearchIcon
-                  className="global-search-icon"
-                  size={15}
-                  aria-hidden="true"
-                />
-                <input
-                  ref={searchInputRef}
-                  id="global-search-input"
-                  type="text"
-                  value={searchQuery}
-                  aria-label={label(locale, "common.search")}
-                  aria-controls={
-                    searchOpen ? "global-search-results" : undefined
-                  }
-                  aria-expanded={searchOpen}
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder={label(locale, "common.search_placeholder")}
-                  onChange={(event) => setSearchQuery(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Escape") clearSearch(true);
-                  }}
-                />
-                {searchOpen ? (
-                  <button
-                    className="global-search-clear"
-                    type="button"
-                    aria-label={label(locale, "common.search_clear")}
-                    onClick={() => clearSearch(true)}
-                  >
-                    <X size={14} />
-                  </button>
-                ) : null}
-              </div>
-              {syncMode !== "live" ? (
-                <span
-                  className="sync-badge"
-                  data-sync-mode={syncMode}
-                  role="status"
-                >
-                  {syncMode === "stale"
-                    ? label(locale, "state.stale.title")
-                    : label(locale, "state.refreshing.title")}
-                </span>
-              ) : null}
-            </div>
-          </div>
-
           {searchOpen ? (
             <div className="global-search-panel" id="global-search-results">
               {searchResults.length === 0 ? (
@@ -1445,6 +1643,41 @@ function AppShell({
                   locale={locale}
                   selectedNetwork={selectedNetwork}
                   recentDiagnostics={recentDiagnostics}
+                  headingActions={
+                    <ActionPanel
+                      pageId={activePage.id}
+                      actions={activePage.actions.filter(
+                        (action) =>
+                          !CONFIGURATION_ACTION_IDS.has(action.id) &&
+                          !POLICY_ACTION_IDS.has(action.id) &&
+                          !TRAFFIC_POLICY_ACTION_IDS.has(action.id),
+                      )}
+                      actionGroups={manifest.action_groups}
+                      snapshot={snapshot}
+                      selectedNetwork={selectedNetwork}
+                      locale={locale}
+                      pendingAction={pendingAction}
+                      interactionBlocked={interactionBlocked}
+                      requestedAction={requestedAction}
+                      operation={null}
+                      onRequestedActionOpened={() => setRequestedAction(null)}
+                      onCancel={cancelActiveOperation}
+                      onRetryOperation={retryActiveOperation}
+                      onSubmit={submitAction}
+                    />
+                  }
+                  pageStatus={
+                    activeOperation ? (
+                      <div className="page-operation-status">
+                        <OperationStatusCard
+                          operation={activeOperation}
+                          locale={locale}
+                          onCancel={cancelActiveOperation}
+                          onRetry={retryActiveOperation}
+                        />
+                      </div>
+                    ) : null
+                  }
                   manifestActions={manifestActions}
                   onSubmitAction={submitAction}
                   onExportRelayAudit={exportRelayAudit}
@@ -1526,26 +1759,6 @@ function AppShell({
                   onRunAction={runDirectAction}
                 />
               </div>
-              <ActionPanel
-                actions={activePage.actions.filter(
-                  (action) =>
-                    !CONFIGURATION_ACTION_IDS.has(action.id) &&
-                    !POLICY_ACTION_IDS.has(action.id) &&
-                    !TRAFFIC_POLICY_ACTION_IDS.has(action.id),
-                )}
-                actionGroups={manifest.action_groups}
-                snapshot={snapshot}
-                selectedNetwork={selectedNetwork}
-                locale={locale}
-                pendingAction={pendingAction}
-                interactionBlocked={interactionBlocked}
-                requestedAction={requestedAction}
-                operation={activeOperation}
-                onRequestedActionOpened={() => setRequestedAction(null)}
-                onCancel={cancelActiveOperation}
-                onRetryOperation={retryActiveOperation}
-                onSubmit={submitAction}
-              />
             </>
           ) : (
             <div className="empty-state">

@@ -740,7 +740,9 @@ async function expectModulePages(
     screen.getByRole("button", { name: `translated:nav.${module}` }),
   );
   if (pages.length === 1) {
-    expect(document.querySelector(".page-switcher")).not.toBeInTheDocument();
+    expect(
+      document.querySelector(".page-switcher > summary"),
+    ).toHaveTextContent(`translated:nav.${pages[0]}`);
     return;
   }
   const switcher = document.querySelector<HTMLDetailsElement>(".page-switcher");

@@ -572,6 +572,42 @@ function actionSubmitButton(action: NodeUiAction): HTMLElement {
     .find((button) => !button.hasAttribute("aria-expanded"))!;
 }
 
+async function openCommandMenu(
+  user: ReturnType<typeof userEvent.setup>,
+): Promise<HTMLElement> {
+  const menuButton = screen.getByRole("button", {
+    name: "translated:common.more_actions",
+  });
+  if (menuButton.getAttribute("aria-expanded") !== "true") {
+    await user.click(menuButton);
+  }
+  return screen.getByRole("menu");
+}
+
+async function commandMenuItem(
+  user: ReturnType<typeof userEvent.setup>,
+  action: NodeUiAction,
+): Promise<HTMLElement> {
+  const menu = await openCommandMenu(user);
+  return waitFor(() => {
+    const item = within(menu)
+      .getAllByRole("menuitem")
+      .find((candidate) =>
+        candidate.textContent?.includes(actionButtonName(action)),
+      );
+    if (!item) throw new Error(`action menu item not found: ${action.id}`);
+    return item;
+  });
+}
+
+async function openAction(
+  user: ReturnType<typeof userEvent.setup>,
+  action: NodeUiAction,
+): Promise<HTMLElement> {
+  await user.click(await commandMenuItem(user, action));
+  return screen.findByTestId(`action-card-${action.id}`);
+}
+
 const confirmationButtonName = "translated:common.confirm_action";
 
 function renderPanel(
@@ -606,6 +642,50 @@ afterEach(() => {
   cleanup();
 });
 
+describe("action panel command lifecycle gates", () => {
+  it("disables Start node while running and explains the state gate", async () => {
+    const user = userEvent.setup();
+    const runtimeActions = manifest.pages.find(
+      (page) => page.id === "node_runtime",
+    )!.actions;
+    render(
+      <ActionPanel
+        actions={runtimeActions}
+        actionGroups={actionGroups}
+        pageId="node_runtime"
+        snapshot={snapshot}
+        selectedNetwork="home"
+        locale="zh-CN"
+        pendingAction={null}
+        interactionBlocked={null}
+        requestedAction={null}
+        operation={null}
+        onRequestedActionOpened={() => {}}
+        onCancel={vi.fn(async () => {})}
+        onSubmit={vi.fn(async (): Promise<ActionSubmission> => ({
+          outcome: { status: "completed", data: {} } as NodeCommandOutcome,
+        }))}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "translated:common.more_actions",
+      }),
+    );
+    const startLabel = screen.getByText("translated:action.start_node");
+    const startItem = startLabel.closest("button");
+    expect(startItem).toBeDisabled();
+    expect(startItem).toHaveTextContent("translated:blocked.node_not_stopped");
+
+    await user.click(startItem!);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("action-card-start_node"),
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe("action panel Exit confirmations", () => {
   it("requires confirmation before changing the local Exit capability", async () => {
     const user = userEvent.setup();
@@ -632,11 +712,7 @@ describe("action panel Exit confirmations", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", {
-        name: "translated:action.set_local_exit_capability",
-      }),
-    );
+    await openAction(user, manifestAction("set_local_exit_capability"));
     const enabled = screen.getByRole("checkbox", {
       name: "translated:field.enabled",
     });
@@ -645,7 +721,7 @@ describe("action panel Exit confirmations", () => {
     await user.click(actionSubmitButton(setLocalExitCapability));
 
     expect(onSubmit).not.toHaveBeenCalled();
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await screen.findByTestId("action-confirmation");
     expect(dialog).toHaveTextContent(
       "translated:confirm.set_local_exit_capability.title",
     );
@@ -691,11 +767,7 @@ describe("action panel Exit confirmations", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", {
-        name: "translated:action.set_exit_node_role",
-      }),
-    );
+    await openAction(user, manifestAction("set_exit_node_role"));
     expect(screen.getByLabelText("translated:field.network_name")).toHaveValue(
       "home",
     );
@@ -710,7 +782,7 @@ describe("action panel Exit confirmations", () => {
     await user.click(actionSubmitButton(setExitNodeRole));
 
     expect(onSubmit).not.toHaveBeenCalled();
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await screen.findByTestId("action-confirmation");
     expect(dialog).toHaveTextContent(
       "translated:confirm.set_exit_node_role.title",
     );
@@ -737,12 +809,10 @@ describe("action panel interaction gate", () => {
     const user = userEvent.setup();
     const view = renderPanel(null);
 
-    await user.click(
-      screen.getByRole("button", { name: "translated:action.restart_node" }),
-    );
+    await openAction(user, manifestAction("restart_node"));
     await user.click(actionSubmitButton(restart));
 
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await screen.findByTestId("action-confirmation");
     const confirm = within(dialog).getByRole("button", {
       name: confirmationButtonName,
     });
@@ -806,9 +876,9 @@ describe("action panel Coordinator governance gate", () => {
       />,
     );
 
-    expect(
-      screen.getByText("translated:common.page_actions_empty"),
-    ).toBeInTheDocument();
+    const surface = screen.getByTestId("page-command-surface");
+    expect(surface).toBeEmptyDOMElement();
+    expect(within(surface).queryByRole("button")).not.toBeInTheDocument();
     expect(
       screen.queryByTestId("coordinator-governance-frozen"),
     ).not.toBeInTheDocument();
@@ -851,18 +921,17 @@ describe("action panel Coordinator governance gate", () => {
       `translated:coordinator_governance.reason.${status}`,
     );
     for (const action of governanceWriteActions) {
-      await user.click(
-        screen.getByRole("button", { name: actionButtonName(action) }),
+      const item = await commandMenuItem(user, action);
+      expect(item).toBeDisabled();
+      expect(item).toHaveTextContent(
+        `translated:coordinator_governance.reason.${status}`,
       );
-      expect(actionSubmitButton(action)).toBeDisabled();
     }
     for (const action of [
       getCoordinatorCandidates,
       publishCoordinatorDeclaration,
     ]) {
-      await user.click(
-        screen.getByRole("button", { name: actionButtonName(action) }),
-      );
+      await openAction(user, action);
       expect(actionSubmitButton(action)).toBeEnabled();
     }
   });
@@ -888,10 +957,11 @@ describe("action panel Coordinator governance gate", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", { name: actionButtonName(createInvitation) }),
+    const frozenItem = await commandMenuItem(user, createInvitation);
+    expect(frozenItem).toBeDisabled();
+    expect(frozenItem).toHaveTextContent(
+      "translated:coordinator_governance.reason.configuration_pending",
     );
-    expect(actionSubmitButton(createInvitation)).toBeDisabled();
 
     view.rerender(
       <ActionPanel
@@ -912,6 +982,8 @@ describe("action panel Coordinator governance gate", () => {
       />,
     );
 
+    await waitFor(() => expect(frozenItem).toBeEnabled());
+    await user.click(frozenItem);
     await waitFor(() =>
       expect(actionSubmitButton(createInvitation)).toBeEnabled(),
     );
@@ -1031,7 +1103,7 @@ describe("action panel Coordinator governance gate", () => {
     );
 
     await user.click(actionSubmitButton(previewInvitation));
-    const confirmation = await screen.findByRole("dialog");
+    const confirmation = await screen.findByTestId("action-confirmation");
     await user.click(
       within(confirmation).getByRole("button", {
         name: confirmationButtonName,
@@ -1076,11 +1148,7 @@ describe("action panel field synchronization", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", {
-        name: "translated:action.rotate_node_identity",
-      }),
-    );
+    await openAction(user, manifestAction("rotate_node_identity"));
     const input = screen.getByRole("textbox", {
       name: "translated:field.expected_fingerprint",
     });
@@ -1159,9 +1227,7 @@ describe("action panel selected network synchronization", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", { name: "translated:action.leave_network" }),
-    );
+    await openAction(user, manifestAction("leave_network"));
     const input = screen.getByLabelText("translated:field.network_name");
     expect(input).toHaveValue("home");
 
@@ -1393,11 +1459,7 @@ describe("action panel operation status", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", {
-        name: "translated:action.preview_network_profile",
-      }),
-    );
+    await openAction(user, manifestAction("preview_network_profile"));
     await user.click(actionSubmitButton(previewProfile));
 
     const result = await screen.findByTestId("network-profile-result");
@@ -1652,13 +1714,9 @@ describe("action panel operation status", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", {
-        name: "translated:action.update_network_profile",
-      }),
-    );
+    await openAction(user, manifestAction("update_network_profile"));
     await user.click(actionSubmitButton(updateProfile));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await screen.findByTestId("action-confirmation");
     await user.click(
       within(dialog).getByRole("button", { name: confirmationButtonName }),
     );
@@ -1718,11 +1776,7 @@ describe("action panel private invitation workflows", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", {
-        name: "translated:action.create_invitation",
-      }),
-    );
+    await openAction(user, manifestAction("create_invitation"));
     const role = screen.getByRole("combobox", {
       name: "translated:field.invitation_role",
     });
@@ -1761,7 +1815,7 @@ describe("action panel private invitation workflows", () => {
       "3600000",
     );
     await user.click(actionSubmitButton(createInvitation));
-    const confirmation = await screen.findByRole("dialog");
+    const confirmation = await screen.findByTestId("action-confirmation");
     expect(confirmation).toHaveTextContent(
       "translated:confirm.reauthentication_required",
     );
@@ -1905,7 +1959,7 @@ describe("action panel private invitation workflows", () => {
         name: "translated:invitations.revoke",
       }),
     );
-    const confirmation = await screen.findByRole("dialog");
+    const confirmation = await screen.findByTestId("action-confirmation");
     expect(confirmation).toHaveTextContent(
       "translated:confirm.revoke_invitation.consequence",
     );
@@ -1992,7 +2046,7 @@ describe("action panel private invitation workflows", () => {
     );
 
     await user.click(actionSubmitButton(previewInvitation));
-    const previewConfirmation = await screen.findByRole("dialog");
+    const previewConfirmation = await screen.findByTestId("action-confirmation");
     await user.click(
       within(previewConfirmation).getByRole("button", {
         name: confirmationButtonName,
@@ -2118,7 +2172,7 @@ describe("action panel private invitation workflows", () => {
       );
       const user = userEvent.setup();
       await user.click(actionSubmitButton(previewInvitation));
-      const confirmation = await screen.findByRole("dialog");
+      const confirmation = await screen.findByTestId("action-confirmation");
       await user.click(
         within(confirmation).getByRole("button", {
           name: confirmationButtonName,
@@ -2290,7 +2344,7 @@ describe("action panel private invitation workflows", () => {
       );
 
       await user.click(actionSubmitButton(previewInvitation));
-      const confirmation = await screen.findByRole("dialog");
+      const confirmation = await screen.findByTestId("action-confirmation");
       await user.click(
         within(confirmation).getByRole("button", {
           name: confirmationButtonName,
@@ -2360,11 +2414,7 @@ describe("action panel join request review list", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", {
-        name: "translated:action.submit_join_request",
-      }),
-    );
+    await openAction(user, manifestAction("submit_join_request"));
     const reason = screen.getByPlaceholderText(
       "translated:placeholder.join_request_reason",
     ) as HTMLInputElement;
@@ -2404,11 +2454,7 @@ describe("action panel join request review list", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", {
-        name: "translated:action.list_join_requests",
-      }),
-    );
+    await openAction(user, manifestAction("list_join_requests"));
     const network = screen.getByLabelText("translated:field.network_id");
     await user.clear(network);
     await user.type(network, "net_stable_home");
@@ -2483,11 +2529,7 @@ describe("action panel join request review list", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", {
-        name: "translated:action.list_join_requests",
-      }),
-    );
+    await openAction(user, manifestAction("list_join_requests"));
     const network = screen.getByLabelText("translated:field.network_id");
     await user.clear(network);
     await user.type(network, "net_stable_home");
@@ -2543,11 +2585,7 @@ describe("action panel join request review list", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", {
-        name: "translated:action.list_join_requests",
-      }),
-    );
+    await openAction(user, manifestAction("list_join_requests"));
     const network = screen.getByLabelText("translated:field.network_id");
     await user.clear(network);
     await user.type(network, "net_stable_home");
@@ -2569,7 +2607,7 @@ describe("action panel join request review list", () => {
         name: "translated:choice.join_request_review.approve",
       }),
     );
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await screen.findByTestId("join-request-review-dialog");
     expect(dialog).toHaveTextContent(
       "translated:join_requests.review_dialog_title",
     );
@@ -2667,11 +2705,7 @@ describe("action panel join request review list", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", {
-        name: "translated:action.list_join_requests",
-      }),
-    );
+    await openAction(user, manifestAction("list_join_requests"));
     const network = screen.getByLabelText("translated:field.network_id");
     await user.clear(network);
     await user.type(network, "net_stable_home");
@@ -2682,7 +2716,7 @@ describe("action panel join request review list", () => {
         name: "translated:choice.join_request_review.request_information",
       }),
     );
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await screen.findByTestId("join-request-review-dialog");
     await user.click(
       within(dialog).getByRole("button", {
         name: "translated:join_requests.confirm_review",
@@ -2779,11 +2813,7 @@ describe("action panel join request review list", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", {
-        name: "translated:action.list_join_requests",
-      }),
-    );
+    await openAction(user, manifestAction("list_join_requests"));
     const network = screen.getByLabelText("translated:field.network_id");
     await user.clear(network);
     await user.type(network, "net_stable_home");
@@ -2802,7 +2832,7 @@ describe("action panel join request review list", () => {
         name: "translated:join_requests.batch.approve",
       }),
     );
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await screen.findByTestId("join-request-review-dialog");
     expect(dialog).toHaveTextContent(
       "translated:join_requests.batch_dialog_title",
     );
@@ -2867,10 +2897,7 @@ describe("action panel network member directory", () => {
       />,
     );
 
-    const actionHead = screen.getByRole("button", {
-      name: "translated:action.list_network_members",
-    });
-    await user.click(actionHead);
+    await openAction(user, manifestAction("list_network_members"));
     await user.type(
       screen.getByLabelText("translated:field.network_id"),
       "net_stable_home",
@@ -2880,7 +2907,7 @@ describe("action panel network member directory", () => {
     expect(
       await screen.findByText("translated:member_directory.title"),
     ).toBeInTheDocument();
-    expect(actionHead).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("action-card-list_network_members")).toBeInTheDocument();
     expect(
       screen.getAllByText("translated:member_directory.privacy_boundary"),
     ).toHaveLength(2);
@@ -2916,11 +2943,7 @@ describe("action panel network member directory", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", {
-        name: "translated:action.list_network_members",
-      }),
-    );
+    await openAction(user, manifestAction("list_network_members"));
     await user.type(
       screen.getByLabelText("translated:field.network_id"),
       "net_stable_home",
@@ -2961,11 +2984,7 @@ describe("action panel network member directory", () => {
       />,
     );
 
-    await user.click(
-      screen.getByRole("button", {
-        name: "translated:action.list_network_members",
-      }),
-    );
+    await openAction(user, manifestAction("list_network_members"));
     await user.type(
       screen.getByLabelText("translated:field.network_id"),
       "net_stable_home",
@@ -3188,10 +3207,7 @@ describe("action panel member governance", () => {
       />,
     );
 
-    const actionHead = screen.getByRole("button", {
-      name: "translated:action.list_network_members",
-    });
-    await user.click(actionHead);
+    await openAction(user, manifestAction("list_network_members"));
     await user.type(
       screen.getByLabelText("translated:field.network_id"),
       "net_stable_home",
@@ -3229,7 +3245,7 @@ describe("action panel member governance", () => {
     expect(
       screen.getByText("translated:outcome.network_members_loaded"),
     ).toBeVisible();
-    expect(actionHead).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("action-card-list_network_members")).toBeInTheDocument();
   });
 
   it("disables embedded member governance while the Coordinator is frozen", async () => {
@@ -3326,10 +3342,7 @@ describe("action panel member governance", () => {
       />,
     );
 
-    const actionHead = screen.getByRole("button", {
-      name: "translated:action.preview_member_removal",
-    });
-    await user.click(actionHead);
+    await openAction(user, manifestAction("preview_member_removal"));
     await user.type(
       screen.getByLabelText("translated:field.network_id"),
       "net_stable_home",
@@ -3343,7 +3356,7 @@ describe("action panel member governance", () => {
     expect(
       await screen.findByText("translated:outcome.member_removal_previewed"),
     ).toBeInTheDocument();
-    expect(actionHead).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("action-card-preview_member_removal")).toBeInTheDocument();
     expect(onSubmit.mock.calls[0][1]).toEqual({
       network_id: "net_stable_home",
       target_node_id: governedNodeId,
@@ -3388,10 +3401,7 @@ describe("action panel member governance", () => {
       />,
     );
 
-    const actionHead = screen.getByRole("button", {
-      name: "translated:action.change_member_lifecycle",
-    });
-    await user.click(actionHead);
+    await openAction(user, manifestAction("change_member_lifecycle"));
     await user.type(
       screen.getByLabelText("translated:field.network_id"),
       "net_stable_home",
@@ -3413,7 +3423,7 @@ describe("action panel member governance", () => {
       "3",
     );
     await user.click(actionSubmitButton(changeMemberLifecycle));
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await screen.findByTestId("action-confirmation");
     await user.click(
       within(dialog).getByRole("button", {
         name: confirmationButtonName,
@@ -3423,7 +3433,7 @@ describe("action panel member governance", () => {
     expect(
       await screen.findByText("translated:outcome.member_lifecycle_changed"),
     ).toBeInTheDocument();
-    expect(actionHead).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("action-card-change_member_lifecycle")).toBeInTheDocument();
     expect(onSubmit).toHaveBeenCalledTimes(1);
     expect(onSubmit.mock.calls[0][1]).toMatchObject({
       action: "suspend",

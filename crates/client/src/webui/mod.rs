@@ -215,8 +215,139 @@ fn create_app_web_router_with_mutation_limiter(
         ))
 }
 
-fn ensure_webui_start_allowed(capabilities: UiCapabilities) -> Result<()> {
-    let resolution = resolve_ui_mode(UiModeRequest::WebUi, capabilities)
+/// One-time bootstrap token that lets the explicitly requested desktop shell
+/// (`--webview-shell`) claim the local owner session without a passkey
+/// ceremony. It lives in the node runtime directory, is single use, and only
+/// loopback requests may redeem it.
+#[derive(Clone)]
+struct LocalShellBootstrap {
+    token: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+const LOCAL_SHELL_TOKEN_ENV_DIR: &str = "FUCKIPV6_RUNTIME_DIR";
+/// Lifetime of a shell-issued session; it mirrors the browser cookie's Max-Age.
+const LOCAL_SHELL_SESSION_MAX_AGE_SECS: u64 = 43_200;
+const LOCAL_SHELL_TOKEN_FILE: &str = "webview-shell.token";
+
+fn issue_local_shell_token() -> Result<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).context("无法生成桌面外壳引导令牌")?;
+    Ok(BASE64_STANDARD.encode(bytes))
+}
+
+/// Writes the bootstrap token so the desktop shell (a same-user process) can
+/// read it while no other user can. When the backend runs under `sudo`, the
+/// token lands in the invoking user's runtime directory with that user's
+/// ownership; otherwise it stays in the node runtime directory.
+fn write_local_shell_token(token: &str) -> Result<()> {
+    let invoked_user = std::env::var("SUDO_UID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let mut directory = std::env::var(LOCAL_SHELL_TOKEN_ENV_DIR)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/run/fuckipv6"));
+    if let Some(uid) = invoked_user.as_deref() {
+        directory = std::path::PathBuf::from(format!("/run/user/{uid}"));
+    }
+    std::fs::create_dir_all(&directory).context("无法创建桌面外壳令牌目录")?;
+    let path = directory.join(LOCAL_SHELL_TOKEN_FILE);
+    std::fs::write(&path, token.as_bytes()).context("无法写入桌面外壳引导令牌")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .context("无法收紧桌面外壳引导令牌权限")?;
+        if let Some(uid) = invoked_user.as_deref().and_then(|value| value.parse::<u32>().ok()) {
+            let gid = std::env::var("SUDO_GID")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .unwrap_or(uid);
+            let _ = std::os::unix::fs::chown(&path, Some(uid), Some(gid));
+        }
+    }
+    Ok(())
+}
+
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut difference = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        difference |= a ^ b;
+    }
+    difference == 0
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalShellSessionBody {
+    token: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LocalShellSessionResponse {
+    authenticated: bool,
+    expires_in: u64,
+}
+
+async fn handle_local_shell_session(
+    State(owner): State<Arc<OwnerSecurityService>>,
+    Extension(bootstrap): Extension<LocalShellBootstrap>,
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<LocalShellSessionBody>,
+) -> Response {
+    if !remote_addr.ip().is_loopback() || headers_have_forwarding(&headers) {
+        return owner_api_error(
+            StatusCode::FORBIDDEN,
+            "桌面外壳会话只允许本机回环请求",
+        );
+    }
+    // The token is scoped to this backend process and readable only by the
+    // invoking user, so every shell restart may present it again; a wrong
+    // token is still rejected in constant time.
+    let expected = bootstrap
+        .token
+        .lock()
+        .ok()
+        .map(|slot| slot.clone())
+        .flatten();
+    let Some(expected) = expected else {
+        return owner_api_error(StatusCode::UNAUTHORIZED, "桌面外壳引导令牌不可用");
+    };
+    if !constant_time_eq(&expected, body.token.trim()) {
+        return owner_api_error(StatusCode::UNAUTHORIZED, "桌面外壳引导令牌无效");
+    }
+    match owner.issue_local_shell_session() {
+        Ok(issued) => {
+            let mut response = (
+                StatusCode::OK,
+                Json(LocalShellSessionResponse {
+                    authenticated: true,
+                    expires_in: LOCAL_SHELL_SESSION_MAX_AGE_SECS,
+                }),
+            )
+                .into_response();
+            response.headers_mut().insert(
+                header::SET_COOKIE,
+                owner_session_cookie_header(issued.token.as_str(), OwnerBootstrapChannel::Local),
+            );
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            tracing::info!("桌面外壳已通过本地引导令牌建立所有者会话");
+            response
+        }
+        Err(error) => owner_service_error(error),
+    }
+}
+
+fn ensure_webui_start_allowed(request: UiModeRequest, capabilities: UiCapabilities) -> Result<()> {
+    let resolution = resolve_ui_mode(request, capabilities)
         .context("当前主机存在桌面会话，拒绝启动 WebUI")?;
     debug_assert!(resolution.effective.is_web_ui());
     Ok(())
@@ -229,10 +360,14 @@ pub(crate) async fn start_app_webui_with_node(
     controller: Arc<AppController>,
     node_adapter: NodeHttpAdapter,
     surface_lease: SurfaceLease,
+    request: UiModeRequest,
 ) -> Result<tokio::task::JoinHandle<()>> {
     // Keep this gate at the actual listener boundary, not only in CLI option
     // parsing, so every future caller is subject to the same desktop policy.
-    ensure_webui_start_allowed(UiCapabilities::detect())?;
+    // Only an explicit embedded desktop shell (`--webview-shell`) may ask for a
+    // loopback listener while a desktop session is active; the plain headless
+    // `WebUi` request is still refused on desktop hosts.
+    ensure_webui_start_allowed(request, UiCapabilities::detect())?;
     let tls_config = WebUiTlsConfig::from_process_env()?;
     let direct_tls = tls_config.is_some();
     let config = WebUiConfig::from_process_env_with_direct_tls(port, direct_tls)?;
@@ -286,15 +421,37 @@ pub(crate) async fn start_app_webui_with_node(
             public_claim.as_deref(),
         )?;
     }
+    let owner_service = Arc::new(owner_security);
     let app = create_app_web_router_with_mutation_limiter(
         controller.clone(),
         config.auth().clone(),
         Some(node_adapter),
-        Some(Arc::new(owner_security)),
+        Some(owner_service.clone()),
         public_claim.clone(),
         Arc::new(MutationRateLimiter::default()),
         Some(owner_config),
     );
+
+    // The desktop shell cannot run a WebAuthn ceremony inside WebKitGTK, so an
+    // explicitly requested `--webview-shell` backend mints a single-use token
+    // in the node runtime directory. Only a loopback request that presents that
+    // token may claim the local owner session; the plain browser surface never
+    // gets this route.
+    let app = if matches!(request, UiModeRequest::WebViewShell) {
+        let token = issue_local_shell_token()?;
+        write_local_shell_token(&token)?;
+        tracing::info!("桌面外壳引导令牌已就绪（仅本机回环可使用一次）");
+        app.merge(
+            Router::new()
+                .route("/api/auth/local-session", post(handle_local_shell_session))
+                .with_state(owner_service.clone())
+                .layer(Extension(LocalShellBootstrap {
+                    token: Arc::new(std::sync::Mutex::new(Some(token))),
+                })),
+        )
+    } else {
+        app
+    };
 
     let displayed_url = public_claim
         .as_ref()
@@ -1268,6 +1425,10 @@ fn owner_audit_outcome(status: StatusCode) -> &'static str {
 }
 
 fn request_has_forwarding_headers(request: &axum::extract::Request) -> bool {
+    headers_have_forwarding(request.headers())
+}
+
+fn headers_have_forwarding(headers: &HeaderMap) -> bool {
     [
         "forwarded",
         "x-forwarded-for",
@@ -1276,7 +1437,7 @@ fn request_has_forwarding_headers(request: &axum::extract::Request) -> bool {
         "x-real-ip",
     ]
     .iter()
-    .any(|name| request.headers().contains_key(*name))
+    .any(|name| headers.contains_key(*name))
 }
 
 async fn owner_no_store(request: axum::extract::Request, next: Next) -> Response {
@@ -4568,7 +4729,7 @@ mod tests {
             display: crate::ui::DisplayEnvironment::LinuxWayland,
             gpui_available: true,
         };
-        let error = ensure_webui_start_allowed(desktop)
+        let error = ensure_webui_start_allowed(UiModeRequest::WebUi, desktop)
             .expect_err("a desktop host must never expose a second WebUI surface");
         assert!(error.to_string().contains("桌面会话"));
 
@@ -4576,7 +4737,10 @@ mod tests {
             display: crate::ui::DisplayEnvironment::Headless,
             gpui_available: false,
         };
-        ensure_webui_start_allowed(headless).expect("headless WebUI should be allowed");
+        ensure_webui_start_allowed(UiModeRequest::WebUi, headless)
+            .expect("headless WebUI should be allowed");
+        ensure_webui_start_allowed(UiModeRequest::WebViewShell, desktop)
+            .expect("an explicit desktop web-view shell may serve loopback");
     }
 
     #[tokio::test]

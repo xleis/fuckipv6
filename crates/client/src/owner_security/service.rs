@@ -608,6 +608,51 @@ impl OwnerSecurityService {
         Ok(challenge)
     }
 
+    /// Issues an owner session for the explicitly trusted local desktop shell.
+    ///
+    /// The caller must already have proven control of the node runtime
+    /// directory (the single-use token the node writes there for
+    /// `--webview-shell`). No WebAuthn assertion is verified here, so the
+    /// session is bound to the local channel and inherits the owner's active
+    /// credential identity; every other surface still requires a passkey.
+    pub(crate) fn issue_local_shell_session(&self) -> ServiceResult<IssuedOwnerSession> {
+        let channel = OwnerBootstrapChannel::Local;
+        let webauthn = self.webauthn_for(channel)?;
+        let store = self.load_complete()?;
+        let credential_id = store
+            .active_credential_id()
+            .ok_or(OwnerSecurityError::NotInitialized)?;
+        let now = unix_time_ms()?;
+        let expires_at_unix_ms = now
+            .checked_add(duration_millis(OWNER_SESSION_TTL)?)
+            .context("所有者会话过期时间溢出")?;
+        let (token, reference) = generate_session_token()?;
+        let stored = StoredSession {
+            reference: reference.clone(),
+            credential_id: credential_id.clone(),
+            channel: session_channel(channel),
+            rp_id: webauthn.rp_id().to_string(),
+            origin: webauthn.origin().to_string(),
+            created_at_unix_ms: now,
+            expires_at_unix_ms,
+            last_authenticated_at_unix_ms: now,
+        };
+        self.persistence.update(|store| {
+            store.insert_session(stored)?;
+            Ok(())
+        })?;
+        Ok(IssuedOwnerSession {
+            token,
+            session: AuthenticatedOwnerSession {
+                reference,
+                credential_id,
+                channel: session_channel(channel),
+                expires_at_unix_ms,
+                last_authenticated_at_unix_ms: now,
+            },
+        })
+    }
+
     pub(crate) fn start_reauthentication(
         &self,
         channel: OwnerBootstrapChannel,

@@ -210,6 +210,15 @@ impl OwnerStore {
             .collect()
     }
 
+    /// Credential that anchors a session minted without a WebAuthn ceremony
+    /// (the local desktop shell). Returns the first active credential.
+    pub(crate) fn active_credential_id(&self) -> Option<PasskeyCredentialId> {
+        self.passkeys
+            .iter()
+            .find(|passkey| passkey.reference.is_active())
+            .map(|passkey| passkey.reference.credential_id.clone())
+    }
+
     pub(crate) fn active_credential(&self, credential_id: &PasskeyCredentialId) -> Option<Passkey> {
         self.passkeys
             .iter()

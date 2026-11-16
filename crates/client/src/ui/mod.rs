@@ -11,6 +11,22 @@ pub use mode::{
 
 /// WebUI 无头控制服务入口。它只报告服务地址，不打开浏览器或第二套桌面 UI。
 /// 有桌面会话的进程必须由 GPUI 入口启动。
+/// Bootstrap hook for the desktop web-view shell (Tauri). The node and its
+/// browser surface are already serving on loopback; the shell process owns the
+/// native window, so this process only reports the local endpoint. Servers are
+/// bound to 127.0.0.1 by the WebUI adapter, never to a LAN address.
+pub async fn run_webview_shell_bootstrap(webui_port: u16) -> anyhow::Result<()> {
+    let url = format!("http://127.0.0.1:{webui_port}");
+    println!("========================================================================");
+    println!("🪟 fuckipv6 WebView 桌面外壳后端已启动");
+    println!("------------------------------------------------------------------------");
+    println!("外壳地址: {url}");
+    println!("说明: 该模式只服务本机 WebView 窗口，不打开浏览器。");
+    println!("========================================================================");
+    tracing::info!("🪟 WebView 外壳后端就绪（仅回环地址）: {url}");
+    Ok(())
+}
+
 pub async fn run_webui_window(webui_port: u16) -> anyhow::Result<()> {
     let url = format!("http://127.0.0.1:{webui_port}");
 

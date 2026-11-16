@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "fuckipv6",
+  "version": "0.3.0",
+  "identifier": "cc.xlei.fuckipv6.desktop",
+  "build": {
+    "frontendDist": "../crates/client/src/webui/dist"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["icons/icon.png"]
+  }
+}

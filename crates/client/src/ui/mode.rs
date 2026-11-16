@@ -14,6 +14,10 @@ use std::path::Path;
 pub enum UiMode {
     Gpui,
     WebUi,
+    /// Desktop window rendered by an embedded web view. The process still
+    /// serves the browser surface, but only on loopback and only because an
+    /// explicit desktop shell asked for it — it is never a headless fallback.
+    WebViewShell,
     Headless,
 }
 
@@ -27,12 +31,16 @@ impl UiMode {
     }
 
     pub fn is_web_ui(self) -> bool {
-        matches!(self, Self::WebUi)
+        matches!(self, Self::WebUi | Self::WebViewShell)
+    }
+
+    pub fn is_webview_shell(self) -> bool {
+        matches!(self, Self::WebViewShell)
     }
 
     /// Whether this mode owns a native desktop window.
     pub fn is_desktop_surface(self) -> bool {
-        matches!(self, Self::Gpui)
+        matches!(self, Self::Gpui | Self::WebViewShell)
     }
 
     /// Compatibility name retained for existing adapters. Callers should use
@@ -49,6 +57,8 @@ pub enum UiModeRequest {
     Auto,
     Gpui,
     WebUi,
+    /// Explicit desktop shell request that embeds a web view (Tauri).
+    WebViewShell,
     Headless,
 }
 
@@ -314,6 +324,9 @@ pub fn resolve_ui_mode(
         UiModeRequest::Headless if capabilities.display.has_desktop() => {
             return Err(UiModeError::HeadlessRequiresNoDesktop);
         }
+        // An explicitly requested embedded desktop shell is a desktop surface,
+        // so it is allowed on a desktop host and still ignores `display`.
+        UiModeRequest::WebViewShell => UiMode::WebViewShell,
         UiModeRequest::Auto | UiModeRequest::Gpui if capabilities.display.has_desktop() => {
             if !capabilities.gpui_available {
                 return Err(UiModeError::GpuiUnavailable);

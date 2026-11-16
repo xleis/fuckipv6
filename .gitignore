@@ -54,3 +54,10 @@ __pycache__/
 /android/.kotlin/
 /android/local.properties
 /android/**/build/
+
+# Xcode local state
+/ios/DerivedData/
+/ios/build/
+/ios/**/xcuserdata/
+/ios/**/*.xcuserstate
+*.ipa

@@ -7330,11 +7330,8 @@ impl NetworkRuntimeActor {
             .await;
         self.state
             .update(|snapshot| {
-                snapshot.last_error = Some(
-                    NodeProblem::new(NodeProblemCode::Unavailable, error.to_string())
-                        .for_network(network_name)
-                        .retryable(true),
-                );
+                snapshot.last_error =
+                    Some(runtime_control_problem(error).for_network(network_name));
             })
             .await;
         self.record_routing_problem(
@@ -11788,6 +11785,28 @@ mod tests {
         );
 
         harness.shutdown().await;
+    }
+
+    #[test]
+    fn host_permission_failures_keep_network_specific_recovery() {
+        let problem = runtime_control_problem(&RuntimeControlError::NetworkSetup {
+            stage: NetworkSetupStage::PermissionDenied,
+            message: NetworkSetupStage::PermissionDenied
+                .fallback_message()
+                .into(),
+        });
+
+        assert_eq!(problem.code, NodeProblemCode::PermissionDenied);
+        assert_eq!(problem.category, NodeErrorCategory::Authorization);
+        assert_eq!(problem.message_key, "error.network.permission_denied");
+        assert!(!problem.retryable);
+        assert_eq!(
+            problem
+                .recovery
+                .as_deref()
+                .map(|recovery| recovery.hint_key.as_str()),
+            Some("recovery.request_access")
+        );
     }
 
     #[test]

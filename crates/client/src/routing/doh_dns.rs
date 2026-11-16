@@ -143,6 +143,7 @@ impl DohDnsGuard {
             Path::new(BACKUP_PATH),
             Path::new(RESOLV_CONF_PATH),
         )
+        .map_err(|error| ensure_stage(error, NetworkSetupStage::DnsSetup))
     }
 
     async fn install_inner() -> Result<Option<Self>> {

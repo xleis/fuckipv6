@@ -127,12 +127,30 @@ pub(crate) fn command_failure(
 }
 
 /// Add a stage marker unless a lower layer already classified the failure.
+///
+/// Generic DNS and route setup errors occasionally originate from file or
+/// process permissions before the lower layer gets a chance to classify them.
+/// Promote those failures to the permission stage so the UI can show an
+/// actionable recovery path instead of the generic "try again" guidance.
 pub(crate) fn ensure_stage(error: Error, fallback: NetworkSetupStage) -> Error {
     if stage_from_error(&error).is_some() {
-        error
-    } else {
-        error.context(NetworkSetupError::new(fallback, String::new()))
+        return error;
     }
+    let lower = format!("{error:#}").to_ascii_lowercase();
+    let stage = if [
+        "operation not permitted",
+        "permission denied",
+        "not permitted",
+        "access denied",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        NetworkSetupStage::PermissionDenied
+    } else {
+        fallback
+    };
+    error.context(NetworkSetupError::new(stage, String::new()))
 }
 
 pub(crate) fn stage_from_error(error: &Error) -> Option<NetworkSetupStage> {
@@ -184,5 +202,17 @@ mod tests {
         let error = ensure_stage(anyhow::anyhow!("bind failed"), NetworkSetupStage::DnsSetup);
         assert_eq!(stage_from_error(&error), Some(NetworkSetupStage::DnsSetup));
         assert!(format!("{error:#}").contains("bind failed"));
+    }
+
+    #[test]
+    fn promotes_unclassified_permission_failures() {
+        let error = ensure_stage(
+            anyhow::anyhow!("open /run/fuckipv6-dns.lock: Permission denied"),
+            NetworkSetupStage::DnsSetup,
+        );
+        assert_eq!(
+            stage_from_error(&error),
+            Some(NetworkSetupStage::PermissionDenied)
+        );
     }
 }

@@ -12,7 +12,7 @@ P3 = iOS 端接入（Rust staticlib + C ABI + Packet Tunnel Extension + Swift �
 | P2 内嵌运行时回归 13 个用例 | 通过 | §2 |
 | 客户端库回归 1197 passed / 42 failed | 与 P2 基线完全一致 | §2、§6 |
 | iOS 单元测试 34 个用例（模拟器） | 通过 | §4 |
-| 真机签名构建（含 Extension 嵌入 + entitlements） | 通过 | §5 |
+| 真机签名构建 + 安装启动（含 Extension 嵌入 + entitlements） | 通过 | §5 |
 | 真机 VPN 起隧道 + 真实 Mesh 流量 | **未做** | 需真机 + 协调服务器，留 P3.3 |
 
 一句话：**编译、签名、数据面与生命周期逻辑已在模拟器和 C ABI 层面验证；真实网络连通性（设备上起 VPN、跨设备 Mesh）尚未验证。**
@@ -67,7 +67,9 @@ C ABI 生命周期（`tests`，8）：`ffi_create_and_destroy_is_clean`、`ffi_c
 
 - 签名身份：`Apple Development: Zhihan Zhu (9DCPP78554)`（Team R9UJHHAZQ4）
 - 配置描述文件：`iOS Team Provisioning Profile: com.lingxifox.fuckipv6` 与 `...fuckipv6.tunnel`
-- 签名后 entitlements 实测：Extension 含 `com.apple.developer.networking.networkextension = [packet-tunnel-provider]`、App Group `group.com.lingxifox.fuckipv6`、keychain group `R9UJHHAZQ4.com.lingxifox.fuckipv6`；宿主 App 含同一 App Group 与 keychain group、不含 networkextension（Provider 侧声明即可）。
+宿主 App 含同一 App Group 与 keychain group、不含 networkextension（Provider 侧声明即可）。
+
+安装与启动：`xcrun devicectl device install app` 成功（`bundleID: com.lingxifox.fuckipv6`），`xcrun devicectl device process launch` 后在设备进程列表里看到 `FuckIpv6.app/FuckIpv6` 持续运行，未出现启动崩溃。
 
 ## 6. 已知问题（非本轮引入）
 
@@ -80,7 +82,8 @@ C ABI 生命周期（`tests`，8）：`ffi_create_and_destroy_is_clean`、`ffi_c
 
 | 项目 | 原因 |
 | --- | --- |
-| 真机安装 + 起 VPN 隧道 | 需真机连接与交互（首次信任、VPN 配置授权弹窗），留 P3.3 |
+| 真机起 VPN 隧道 | 安装与启动已在真机验证；首次启用需人工点「允许 VPN 配置」与连接开关（系统弹窗无法脚本化），留 P3.3 |
+| 真机单测（XCTest 跑在设备上） | `TEST_HOST` 改成宿主 App 后构建通过，但 xcodegen 生成的工程没有把 `XCTest.framework` / `libXCTestSwiftSupport.dylib` 嵌入 App 的 `Frameworks`，设备上 dyld 解析失败，runner 以 code 74 退出（`The test runner exited with code 74 before establishing connection.`）。模拟器同一套用例已全绿，设备侧逻辑验证改用安装启动 + 后续真机联调覆盖 |
 | 真机跨设备 Mesh 连通性 / 吞吐 | 需两台设备或一台真机 + 一台桌面节点，且需可达的协调服务器，留 P3.3 |
 | Linux / Windows 构建 | 仅改了 `cfg(not(any(linux, macos, windows)))` 的新分支，桌面平台代码路径未变；跨平台门禁在 P3 收尾统一跑 |
 | 长时间稳定性 / 内存增长观察 | 未做，留 P3.3 |

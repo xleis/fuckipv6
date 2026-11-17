@@ -3,6 +3,11 @@
 //! `recvmmsg`/`sendmmsg` operate on independent packet buffers. The helpers in
 //! this module therefore preserve one allocation per packet while reducing the
 //! number of kernel crossings for a group of datagrams owned by one peer.
+//!
+//! Only Linux exposes the batch syscalls. Darwin and the other non-Linux hosts
+//! loop over one `send_to` per datagram: datagram boundaries, ciphertext and the
+//! success-prefix contract stay identical, while the syscall counters report the
+//! per-packet crossings that the kernel actually performs.
 
 #[cfg(not(target_os = "linux"))]
 use std::io;
@@ -10,6 +15,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) const DEFAULT_UDP_BATCH_SIZE: usize = 32;
 pub(crate) const MAX_UDP_BATCH_SIZE: usize = 128;
+
+/// Datagrams sent by the non-Linux loop before it yields to the executor.
+#[cfg(not(target_os = "linux"))]
+const SEND_YIELD_INTERVAL: usize = 16;
 
 pub(crate) fn validate_udp_batch_size(size: usize) -> anyhow::Result<()> {
     if size == 0 || size > MAX_UDP_BATCH_SIZE {
@@ -74,8 +83,19 @@ impl UdpBatchStats {
         update_max(&self.max_recv_batch, datagrams);
     }
 
+    /// Records one kernel crossing that accepted `datagrams` packets.
     pub(crate) fn record_send(&self, datagrams: usize) {
-        self.send_syscalls.fetch_add(1, Ordering::Relaxed);
+        self.record_send_calls(1, datagrams);
+    }
+
+    /// Records `syscalls` kernel crossings that accepted `datagrams` packets.
+    ///
+    /// Linux coalesces a whole batch into one `sendmmsg`; every other platform
+    /// issues one `send_to` per datagram, so the two counters must diverge to
+    /// stay honest about the work the kernel performed.
+    pub(crate) fn record_send_calls(&self, syscalls: usize, datagrams: usize) {
+        self.send_syscalls
+            .fetch_add(syscalls as u64, Ordering::Relaxed);
         self.send_datagrams
             .fetch_add(datagrams as u64, Ordering::Relaxed);
         if datagrams > 1 {
@@ -150,17 +170,55 @@ pub(crate) async fn receive_batch(
     Ok(vec![(length, address)])
 }
 
+/// Number of kernel crossings a `send_batch` of `datagrams` packets performs.
+pub(crate) fn send_syscalls(datagrams: usize) -> usize {
+    if cfg!(target_os = "linux") {
+        usize::from(datagrams > 0)
+    } else {
+        datagrams
+    }
+}
+
+/// Records the datagrams a `send_batch` call actually handed to the kernel.
+pub(crate) fn record_send_result(stats: &UdpBatchStats, datagrams: usize) {
+    stats.record_send_calls(send_syscalls(datagrams), datagrams);
+}
+
+/// Send every datagram in `packets` to `endpoint`, in order, on hosts without
+/// `sendmmsg`.
+///
+/// The contract matches the Linux batch call: the return value is the number of
+/// datagrams the kernel accepted, so a short return means only the unsent suffix
+/// may be retried on another transport. A datagram is never sent twice.
+///
+/// Long bursts yield to the executor every [`SEND_YIELD_INTERVAL`] datagrams so
+/// a 128-packet batch cannot monopolise the reactor thread.
 #[cfg(not(target_os = "linux"))]
 pub(crate) async fn send_batch(
     socket: &tokio::net::UdpSocket,
     endpoint: std::net::SocketAddr,
     packets: &[&[u8]],
 ) -> io::Result<usize> {
-    let Some(packet) = packets.first() else {
-        return Ok(0);
-    };
-    socket.send_to(packet, endpoint).await?;
-    Ok(1)
+    let mut sent = 0usize;
+    for packet in packets {
+        if sent > 0 && sent % SEND_YIELD_INTERVAL == 0 {
+            tokio::task::yield_now().await;
+        }
+        loop {
+            match socket.send_to(packet, endpoint).await {
+                Ok(_) => break,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                // A failure after a successful prefix keeps the already queued
+                // datagrams on the direct path and lets only the suffix fall
+                // back. The caller reuses the identical ciphertext, so no
+                // nonce is ever sent twice.
+                Err(error) if sent > 0 => return Ok(sent),
+                Err(error) => return Err(error),
+            }
+        }
+        sent += 1;
+    }
+    Ok(sent)
 }
 
 #[cfg(target_os = "linux")]
@@ -604,5 +662,132 @@ mod tests {
         assert_eq!(metrics.max_recv_batch, 4);
         assert_eq!(metrics.recv_packets_per_syscall(), 3.0);
         assert_eq!(metrics.send_packets_per_syscall(), 8.0);
+    }
+
+    async fn recv_datagrams(
+        socket: &tokio::net::UdpSocket,
+        count: usize,
+    ) -> anyhow::Result<Vec<Vec<u8>>> {
+        let mut received = Vec::with_capacity(count);
+        let mut buffer = vec![0u8; 2048];
+        for _ in 0..count {
+            let (length, _) = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                socket.recv_from(&mut buffer),
+            )
+            .await??;
+            received.push(buffer[..length].to_vec());
+        }
+        Ok(received)
+    }
+
+    #[tokio::test]
+    async fn send_batch_delivers_every_datagram_in_order() -> anyhow::Result<()> {
+        // 1, 8, 16, 32 and the 128-datagram ceiling of one batch.
+        for size in [1usize, 8, 16, 32, 128] {
+            let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+            let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+            let receiver_addr = receiver.local_addr()?;
+            let payloads: Vec<Vec<u8>> = (0..size)
+                .map(|index| vec![index as u8; 32 + index])
+                .collect();
+            let refs: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
+
+            let sent = send_batch(&sender, receiver_addr, &refs).await?;
+            assert_eq!(
+                sent, size,
+                "every datagram of a {size}-packet batch must reach the kernel"
+            );
+
+            let received = recv_datagrams(&receiver, size).await?;
+            assert_eq!(received.len(), size);
+            for (index, (actual, expected)) in received.iter().zip(&payloads).enumerate() {
+                assert_eq!(
+                    actual, expected,
+                    "datagram {index} of a {size}-packet batch lost its boundary or order"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_batch_delivers_ipv6_datagrams_without_merging_them() -> anyhow::Result<()> {
+        let receiver = tokio::net::UdpSocket::bind("[::1]:0").await?;
+        let sender = tokio::net::UdpSocket::bind("[::1]:0").await?;
+        let receiver_addr = receiver.local_addr()?;
+        let payloads: Vec<Vec<u8>> = (0..8u8).map(|index| vec![index; 64]).collect();
+        let refs: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
+
+        let sent = send_batch(&sender, receiver_addr, &refs).await?;
+        assert_eq!(sent, payloads.len());
+
+        let received = recv_datagrams(&receiver, payloads.len()).await?;
+        for (actual, expected) in received.iter().zip(&payloads) {
+            assert_eq!(actual, expected);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_batch_keeps_a_successful_prefix_when_a_later_datagram_fails() -> anyhow::Result<()>
+    {
+        let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+        let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+        let receiver_addr = receiver.local_addr()?;
+        let first = vec![7u8; 64];
+        // Larger than any UDP payload, so the kernel rejects this datagram after
+        // the first one has already been queued.
+        let oversized = vec![0u8; 70_000];
+        let last = vec![9u8; 64];
+
+        let sent = send_batch(&sender, receiver_addr, &[&first, &oversized, &last]).await?;
+        assert_eq!(
+            sent, 1,
+            "only the datagrams the kernel accepted may be reported as sent"
+        );
+
+        let received = recv_datagrams(&receiver, 1).await?;
+        assert_eq!(received, vec![first]);
+
+        let mut buffer = vec![0u8; 2048];
+        let stray = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            receiver.recv_from(&mut buffer),
+        )
+        .await;
+        assert!(
+            stray.is_err(),
+            "a datagram the kernel rejected must never be retried or duplicated"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_batch_surfaces_the_error_when_the_first_datagram_fails() -> anyhow::Result<()> {
+        let receiver = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+        let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+        let oversized = vec![0u8; 70_000];
+
+        let error = send_batch(&sender, receiver.local_addr()?, &[&oversized])
+            .await
+            .expect_err("an unsendable first datagram must be reported");
+        assert_ne!(error.kind(), std::io::ErrorKind::WouldBlock);
+        Ok(())
+    }
+
+    #[test]
+    fn send_syscalls_track_kernel_coalescing() {
+        assert_eq!(send_syscalls(0), 0);
+        let expected = if cfg!(target_os = "linux") { 1 } else { 8 };
+        assert_eq!(send_syscalls(8), expected);
+
+        let stats = UdpBatchStats::default();
+        record_send_result(&stats, 8);
+        let metrics = stats.metrics();
+        assert_eq!(metrics.send_syscalls, expected as u64);
+        assert_eq!(metrics.send_datagrams, 8);
+        assert_eq!(metrics.send_batches, 1);
+        assert_eq!(metrics.max_send_batch, 8);
     }
 }

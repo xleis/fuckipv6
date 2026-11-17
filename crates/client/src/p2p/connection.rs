@@ -2145,7 +2145,7 @@ impl P2pEngine {
             };
             match send_result {
                 Ok(sent) => {
-                    self.udp_batch_stats.record_send(sent);
+                    udp_batch::record_send_result(&self.udp_batch_stats, sent);
                     for (index, item) in sealed.iter().enumerate().take(prefix_len) {
                         let encoded_len = item.as_ref().expect("prefix packets are sealed").0;
                         if index < sent {
@@ -4592,7 +4592,13 @@ mod tests {
             ));
         }
         let after_batch = engine_a.udp_batch_metrics();
-        assert_eq!(after_batch.send_syscalls, before_batch.send_syscalls + 1);
+        // The injected 2-of-4 short return costs one kernel crossing on Linux
+        // and two on hosts that send each datagram separately.
+        let expected_syscalls = if cfg!(target_os = "linux") { 1 } else { 2 };
+        assert_eq!(
+            after_batch.send_syscalls,
+            before_batch.send_syscalls + expected_syscalls
+        );
         assert_eq!(after_batch.send_datagrams, before_batch.send_datagrams + 2);
         assert_eq!(
             after_batch.fallback_packets,

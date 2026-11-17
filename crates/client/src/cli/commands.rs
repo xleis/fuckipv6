@@ -11375,10 +11375,13 @@ mod tests {
             .await;
 
         let after = engine_a.udp_batch_metrics();
+        // Linux coalesces a same-peer batch into one sendmmsg; every other host
+        // needs one send_to per datagram, so only the datagram count is portable.
+        let expected_syscalls = if cfg!(target_os = "linux") { 1 } else { 8 };
         assert_eq!(
             after.send_syscalls - before.send_syscalls,
-            1,
-            "one same-peer sendmmsg must cover all 8 {payload_len}-byte packets"
+            expected_syscalls,
+            "one same-peer batch must cover all 8 {payload_len}-byte packets"
         );
         assert_eq!(after.send_datagrams - before.send_datagrams, 8);
         assert_eq!(after.max_send_batch, 8);
@@ -11412,14 +11415,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn udp_batch_64_byte_payloads_use_one_send_syscall() -> Result<()> {
+    async fn udp_batch_64_byte_payloads_share_one_batch() -> Result<()> {
         // 8 x 64 B is below the 4 KiB parallel-AEAD threshold. This case proves
-        // only that small packets sharing a peer are coalesced by sendmmsg.
+        // only that small packets sharing a peer travel as one batch.
         assert_production_udp_batch(64, false).await
     }
 
     #[tokio::test]
-    async fn udp_batch_1420_byte_payloads_use_one_send_syscall() -> Result<()> {
+    async fn udp_batch_1420_byte_payloads_share_one_batch() -> Result<()> {
         assert_production_udp_batch(1420, true).await
     }
 

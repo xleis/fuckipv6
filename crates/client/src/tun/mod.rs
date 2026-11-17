@@ -22,6 +22,7 @@ use std::net::Ipv6Addr;
 /// TUN设备抽象
 #[derive(Clone)]
 pub struct TunDevice {
+    mtu: u16,
     #[cfg(target_os = "linux")]
     inner: linux::LinuxTun,
 
@@ -44,6 +45,7 @@ impl TunDevice {
         #[cfg(target_os = "linux")]
         {
             Ok(Self {
+                mtu,
                 inner: linux::LinuxTun::create_dual_stack(
                     name,
                     virtual_ips,
@@ -61,6 +63,7 @@ impl TunDevice {
         #[cfg(target_os = "macos")]
         {
             Ok(Self {
+                mtu,
                 inner: macos::MacosTun::create_dual_stack(
                     name,
                     virtual_ips,
@@ -78,6 +81,7 @@ impl TunDevice {
         #[cfg(target_os = "windows")]
         {
             Ok(Self {
+                mtu,
                 inner: windows::WindowsTun::create_dual_stack(
                     name,
                     virtual_ips,
@@ -154,5 +158,48 @@ impl TunDevice {
     /// 删除TUN设备
     pub async fn delete(&mut self) -> Result<()> {
         self.inner.delete().await
+    }
+}
+
+impl crate::packet_io::PacketDevice for TunDevice {
+    fn name(&self) -> &str {
+        TunDevice::name(self)
+    }
+
+    fn mtu(&self) -> u16 {
+        self.mtu
+    }
+
+    fn clone_box(&self) -> Box<dyn crate::packet_io::PacketDevice> {
+        Box::new(self.clone())
+    }
+
+    fn read<'a>(
+        &'a mut self,
+        buffer: &'a mut [u8],
+    ) -> futures::future::BoxFuture<'a, Result<usize>> {
+        Box::pin(TunDevice::read(self, buffer))
+    }
+
+    fn read_batch<'a>(
+        &'a mut self,
+        buffers: &'a mut [&mut [u8]],
+    ) -> futures::future::BoxFuture<'a, Result<Vec<usize>>> {
+        Box::pin(TunDevice::read_batch(self, buffers))
+    }
+
+    fn write<'a>(&'a mut self, packet: &'a [u8]) -> futures::future::BoxFuture<'a, Result<()>> {
+        Box::pin(TunDevice::write(self, packet))
+    }
+
+    fn write_batch<'a>(
+        &'a mut self,
+        packets: &'a [&[u8]],
+    ) -> futures::future::BoxFuture<'a, Vec<Result<()>>> {
+        Box::pin(TunDevice::write_batch(self, packets))
+    }
+
+    fn close(&mut self) -> futures::future::BoxFuture<'_, Result<()>> {
+        Box::pin(TunDevice::delete(self))
     }
 }

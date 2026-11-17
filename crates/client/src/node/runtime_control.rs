@@ -935,6 +935,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
                 request.local_exit_enabled,
                 false,
                 commands::RuntimeExtensions {
+                    packet_device: None,
                     file_runtime: Some(file_runtime),
                     observability: commands::RuntimeObservability {
                         state: Some(state.clone()),

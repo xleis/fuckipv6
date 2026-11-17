@@ -57,6 +57,7 @@ use crate::p2p::connection::{
 use crate::p2p::punching;
 use crate::p2p::quic;
 use crate::p2p::relay::QuicRelayClient;
+use crate::packet_io::PacketDevice;
 use crate::remote_node::RemoteNodeSession;
 #[cfg(target_os = "linux")]
 use crate::routing::exit_readiness::encode_exit_readiness_frame;
@@ -201,18 +202,19 @@ pub struct RuntimeOptions {
     pub ui_mode: Option<crate::ui::UiModeResolution>,
 }
 
-/// Owns every handle required to stop and recreate one TUN data path.
+/// Owns every handle required to stop and replace one packet data path.
 ///
 /// `TunDevice` clones share one Linux link lifetime, so replacing only the
 /// runtime-held handle leaves the reader task pinning the old link. Keeping the
 /// device, reader task and buffer-pool channels together makes quiesce-before-
 /// delete an invariant instead of a shutdown-only convention.
 pub(crate) struct RuntimeTunIo {
-    tun: Option<TunDevice>,
+    tun: Option<Box<dyn PacketDevice>>,
     packet_rx: mpsc::UnboundedReceiver<Vec<TunPacket>>,
     buffer_tx: mpsc::UnboundedSender<TunPacket>,
     reader_task: Option<JoinHandle<()>>,
-    descriptor: TunIoDescriptor,
+    name: String,
+    descriptor: Option<TunIoDescriptor>,
     stats: StatsCollector,
 }
 
@@ -227,27 +229,34 @@ impl RuntimeTunIo {
     fn new(
         config: &ClientConfig,
         assigned_ips: &VirtualIps,
-        tun: TunDevice,
+        tun: Box<dyn PacketDevice>,
         stats: &StatsCollector,
+        native: bool,
     ) -> Self {
         let descriptor = TunIoDescriptor {
             name: config.tun.name.clone(),
             assigned_ips: assigned_ips.clone(),
             mtu: config.tun.mtu,
         };
-        let (packet_rx, buffer_tx, reader_task) = spawn_tun_reader_pool(&tun, stats);
+        let name = if native {
+            descriptor.name.clone()
+        } else {
+            tun.name().to_owned()
+        };
+        let (packet_rx, buffer_tx, reader_task) = spawn_tun_reader_pool(tun.as_ref(), stats);
         Self {
             tun: Some(tun),
             packet_rx,
             buffer_tx,
             reader_task: Some(reader_task),
-            descriptor,
+            name,
+            descriptor: native.then_some(descriptor),
             stats: stats.clone(),
         }
     }
 
     fn name(&self) -> &str {
-        &self.descriptor.name
+        &self.name
     }
 
     fn packet_rx(&mut self) -> &mut mpsc::UnboundedReceiver<Vec<TunPacket>> {
@@ -258,20 +267,22 @@ impl RuntimeTunIo {
         self.buffer_tx.clone()
     }
 
-    fn tun_mut(&mut self) -> Option<&mut TunDevice> {
-        self.tun.as_mut()
+    fn tun_mut(&mut self) -> Option<&mut (dyn PacketDevice + 'static)> {
+        self.tun.as_deref_mut()
     }
 
     async fn stop_reader(&mut self) -> Result<()> {
-        let Some(task) = self.reader_task.take() else {
+        let Some(task) = self.reader_task.as_mut() else {
             return Ok(());
         };
         task.abort();
-        match task.await {
+        let result = match task.await {
             Ok(()) => Ok(()),
             Err(error) if error.is_cancelled() => Ok(()),
             Err(error) => Err(anyhow::anyhow!("TUN reader task failed: {error}")),
-        }
+        };
+        self.reader_task.take();
+        result
     }
 
     async fn stop_reader_within(&mut self, deadline: Instant) -> CleanupStatus {
@@ -286,36 +297,64 @@ impl RuntimeTunIo {
     /// The old handle is dropped even when deletion reports a missing link, but
     /// creation still must succeed before the runtime reports recovery.
     async fn recreate(&mut self, stats: &StatsCollector) -> Result<()> {
+        let descriptor = self.descriptor.clone().context(
+            "External packet devices require a fresh host session and explicit replacement",
+        )?;
         self.stop_reader().await?;
-        if let Some(mut old_tun) = self.tun.take() {
-            if let Err(error) = old_tun.delete().await {
-                tracing::warn!("恢复时删除旧 TUN 未完成，将尝试重建同名设备: {error:#}");
-            }
+        if let Err(error) = self.delete().await {
+            tracing::warn!("恢复时删除旧 TUN 未完成，将尝试重建同名设备: {error:#}");
         }
 
         let tun = TunDevice::create_dual_stack(
-            &self.descriptor.name,
-            &self.descriptor.assigned_ips,
+            &descriptor.name,
+            &descriptor.assigned_ips,
             24,
             64,
-            self.descriptor.mtu,
+            descriptor.mtu,
         )
         .await
         .context("恢复时重建 TUN 设备失败")?;
-        let (packet_rx, buffer_tx, reader_task) = spawn_tun_reader_pool(&tun, stats);
-        self.tun = Some(tun);
+        self.install_device(Box::new(tun), stats);
+        Ok(())
+    }
+
+    fn install_device(&mut self, device: Box<dyn PacketDevice>, stats: &StatsCollector) {
+        let (packet_rx, buffer_tx, reader_task) = spawn_tun_reader_pool(device.as_ref(), stats);
+        self.tun = Some(device);
         self.packet_rx = packet_rx;
         self.buffer_tx = buffer_tx;
         self.reader_task = Some(reader_task);
+    }
+
+    /// The host restores its VPN session and supplies a new device. Old queued
+    /// packets are discarded, so they cannot cross a session boundary. Cancelling
+    /// replacement may leave I/O stopped; retry replacement before resuming.
+    pub(crate) async fn replace_device(&mut self, device: Box<dyn PacketDevice>) -> Result<()> {
+        anyhow::ensure!(
+            self.descriptor.is_none(),
+            "Native TUN devices must use native recovery"
+        );
+        self.delete().await?;
+        self.name = device.name().to_owned();
+        self.descriptor = None;
+        self.install_device(device, &self.stats.clone());
         Ok(())
     }
 
     async fn delete(&mut self) -> Result<()> {
         self.stop_reader().await?;
+        self.packet_rx.close();
+        while self.packet_rx.try_recv().is_ok() {}
         if let Some(mut tun) = self.tun.take() {
-            tun.delete().await?;
+            tun.close().await?;
         }
         Ok(())
+    }
+}
+
+impl Drop for RuntimeTunIo {
+    fn drop(&mut self) {
+        self.abort_reader();
     }
 }
 
@@ -1535,6 +1574,8 @@ pub(crate) struct RuntimeObservability {
 pub(crate) struct RuntimeExtensions {
     pub(crate) file_runtime: Option<crate::file_share::FileRuntime>,
     pub(crate) observability: RuntimeObservability,
+    /// None retains native TUN creation; mobile hosts inject an external device.
+    pub(crate) packet_device: Option<Box<dyn PacketDevice>>,
 }
 
 pub(crate) async fn prepare_client_runtime_ext(
@@ -1549,7 +1590,15 @@ pub(crate) async fn prepare_client_runtime_ext(
     let RuntimeExtensions {
         file_runtime,
         observability,
+        packet_device,
     } = extensions;
+    // Linux's full runtime also owns host routes/firewall state. P1 exposes
+    // packet I/O there but does not treat an external device name as a host link.
+    #[cfg(target_os = "linux")]
+    anyhow::ensure!(
+        packet_device.is_none(),
+        "External packet device injection into Linux host route management is not supported"
+    );
     let RuntimeObservability {
         state: node_state,
         failover_audit,
@@ -1592,7 +1641,8 @@ pub(crate) async fn prepare_client_runtime_ext(
         relay_selection.as_ref(),
     )
     .await;
-    let tun = create_tun_device(&config, &assigned_ips).await?;
+    let native_packet_device = packet_device.is_none();
+    let tun = create_packet_device(&config, &assigned_ips, packet_device).await?;
     #[cfg(target_os = "linux")]
     let mut tun = tun;
     let acl = fuckipv6_common::AclEngine::new(&config.acl);
@@ -1659,7 +1709,7 @@ pub(crate) async fn prepare_client_runtime_ext(
                 if let Some(relay) = relay.as_ref() {
                     relay.client.close().await;
                 }
-                let _ = tun.delete().await;
+                let _ = tun.close().await;
                 return Err(error).context("安装 Linux 代理路由失败");
             }
         };
@@ -1674,7 +1724,7 @@ pub(crate) async fn prepare_client_runtime_ext(
                 if let Some(relay) = relay.as_ref() {
                     relay.client.close().await;
                 }
-                let _ = tun.delete().await;
+                let _ = tun.close().await;
                 return Err(error).context("安装节点物理网络旁路失败");
             }
         }
@@ -1693,7 +1743,7 @@ pub(crate) async fn prepare_client_runtime_ext(
                 if let Some(relay) = relay.as_ref() {
                     relay.client.close().await;
                 }
-                let _ = tun.delete().await;
+                let _ = tun.close().await;
                 return Err(error).context("准备 Exit Node 内核转发失败");
             }
         };
@@ -1715,7 +1765,7 @@ pub(crate) async fn prepare_client_runtime_ext(
                 if let Some(relay) = relay.as_ref() {
                     relay.client.close().await;
                 }
-                let _ = tun.delete().await;
+                let _ = tun.close().await;
                 return Err(error).with_context(|| {
                     format!("安装节点 {} 的虚拟地址精确定向路由失败", peer.client_id)
                 });
@@ -1788,7 +1838,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         config.tun.name
     );
 
-    let tun_io = RuntimeTunIo::new(&config, &assigned_ips, tun, &stats);
+    let tun_io = RuntimeTunIo::new(&config, &assigned_ips, tun, &stats, native_packet_device);
     #[cfg(target_os = "linux")]
     let relay_recovery_path = if outbound.relay_handle().await.is_some() {
         PathRecoveryState::Connected
@@ -2076,6 +2126,21 @@ async fn create_tun_device(config: &ClientConfig, assigned_ips: &VirtualIps) -> 
 
     tracing::info!("TUN 设备已创建: {}", config.tun.name);
     Ok(tun)
+}
+
+async fn create_packet_device(
+    config: &ClientConfig,
+    assigned_ips: &VirtualIps,
+    injected: Option<Box<dyn PacketDevice>>,
+) -> Result<Box<dyn PacketDevice>> {
+    if let Some(device) = injected {
+        anyhow::ensure!(
+            device.mtu() == config.tun.mtu,
+            "Injected packet device MTU differs from runtime configuration"
+        );
+        return Ok(device);
+    }
+    Ok(Box::new(create_tun_device(config, assigned_ips).await?))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -6500,7 +6565,7 @@ async fn sync_linux_relay_bypasses(runtime: &mut ClientRuntime) {
 }
 
 async fn write_payload_to_tun(
-    tun: &mut TunDevice,
+    tun: &mut dyn PacketDevice,
     stats: &StatsCollector,
     payload: &[u8],
     source: &str,
@@ -6517,7 +6582,7 @@ async fn write_payload_to_tun(
 }
 
 async fn write_payloads_to_tun(
-    tun: &mut TunDevice,
+    tun: &mut dyn PacketDevice,
     stats: &StatsCollector,
     payloads: &[InboundPayload],
     source: &str,
@@ -6711,7 +6776,7 @@ async fn shutdown_runtime(runtime: &mut ClientRuntime) -> RuntimeCleanupOutcome 
 }
 
 fn spawn_tun_reader_pool(
-    tun: &TunDevice,
+    tun: &dyn PacketDevice,
     stats: &StatsCollector,
 ) -> (
     mpsc::UnboundedReceiver<Vec<TunPacket>>,
@@ -6724,7 +6789,7 @@ fn spawn_tun_reader_pool(
         let _ = tun_buffer_tx.send(TunPacket::empty(vec![0u8; TUN_BUFFER_ALLOCATION_SIZE]));
     }
     let reader_task = spawn_tun_reader(
-        tun.clone(),
+        tun.clone_box(),
         tun_packet_tx,
         tun_buffer_rx,
         tun_buffer_tx.clone(),
@@ -6734,7 +6799,7 @@ fn spawn_tun_reader_pool(
 }
 
 fn spawn_tun_reader(
-    mut tun: TunDevice,
+    mut tun: Box<dyn PacketDevice>,
     packet_tx: mpsc::UnboundedSender<Vec<TunPacket>>,
     mut buffer_rx: mpsc::UnboundedReceiver<TunPacket>,
     buffer_tx: mpsc::UnboundedSender<TunPacket>,
@@ -10332,10 +10397,253 @@ fn normalize_service_name(service: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packet_io::ExternalPacketDevice;
     use fuckipv6_common::domain::RelayAuthorizationDenial;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::sync::Notify;
+
+    fn packet_io_fixtures() -> (Vec<u8>, Vec<u8>) {
+        let mut ipv4 = vec![0; 20];
+        ipv4[0] = 0x45;
+        ipv4[2..4].copy_from_slice(&20u16.to_be_bytes());
+        ipv4[12..16].copy_from_slice(&[10, 0, 0, 1]);
+        ipv4[16..20].copy_from_slice(&[10, 0, 0, 2]);
+        let mut ipv6 = vec![0; 40];
+        ipv6[0] = 0x60;
+        ipv6[8..24].copy_from_slice(&"fd00::1".parse::<Ipv6Addr>().unwrap().octets());
+        ipv6[24..40].copy_from_slice(&"fd00::2".parse::<Ipv6Addr>().unwrap().octets());
+        (ipv4, ipv6)
+    }
+
+    #[tokio::test]
+    async fn packet_io_external_uses_real_runtime_reader_and_write_paths_without_tun() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut config = test_config();
+            config.tun.mtu = 1280;
+            // Also fail validation before any host action if native creation
+            // is accidentally reached by a future regression.
+            config.tun.name.clear();
+            let ips = VirtualIps::from_ipv6("fd00::1".parse().unwrap());
+            let stats = StatsCollector::new();
+            let (device, host) = ExternalPacketDevice::new("external-test", 1280, 4).unwrap();
+            let (ipv4, ipv6) = packet_io_fixtures();
+            host.try_send(&ipv4).unwrap();
+            host.try_send(&ipv6).unwrap();
+            let device = create_packet_device(&config, &ips, Some(Box::new(device)))
+                .await
+                .unwrap();
+            let mut runtime = RuntimeTunIo::new(&config, &ips, device, &stats, false);
+            assert_eq!(runtime.name(), "external-test");
+            let packets = runtime.packet_rx().recv().await.unwrap();
+            assert_eq!(packets.len(), 2);
+            assert_eq!(packets[0].payload(), ipv4);
+            assert_eq!(packets[1].payload(), ipv6);
+            assert_eq!(
+                tun_packet_destination(packets[0].payload()),
+                Some("10.0.0.2".parse().unwrap())
+            );
+            assert_eq!(
+                tun_packet_destination(packets[1].payload()),
+                Some("fd00::2".parse().unwrap())
+            );
+            for packet in packets {
+                runtime.buffer_tx().send(packet.recycle()).unwrap();
+            }
+            write_payload_to_tun(runtime.tun_mut().unwrap(), &stats, &ipv4, "packet-io-test").await;
+            assert_eq!(host.recv().await.unwrap(), ipv4);
+            let payloads = vec![ipv6.clone().into(), ipv4.clone().into()];
+            write_payloads_to_tun(
+                runtime.tun_mut().unwrap(),
+                &stats,
+                &payloads,
+                "packet-io-test",
+            )
+            .await;
+            assert_eq!(host.recv().await.unwrap(), ipv6);
+            assert_eq!(host.recv().await.unwrap(), ipv4);
+            let counters = stats.get_global_stats().await;
+            assert_eq!(counters.tun_tx_packets, 3);
+            assert_eq!(counters.tun_tx_bytes, 80);
+            assert_eq!(counters.tun_write_errors, 0);
+
+            // Native recovery is refused before closing or recreating anything.
+            assert!(runtime.recreate(&stats).await.is_err());
+            host.try_send(&ipv4).unwrap();
+            let packets = runtime.packet_rx().recv().await.unwrap();
+            assert_eq!(packets[0].payload(), ipv4);
+            let (replacement, next_host) =
+                ExternalPacketDevice::new("replacement", 1280, 2).unwrap();
+            runtime.replace_device(Box::new(replacement)).await.unwrap();
+            assert_eq!(
+                host.try_recv().unwrap_err().kind(),
+                std::io::ErrorKind::BrokenPipe
+            );
+            assert_eq!(runtime.name(), "replacement");
+            next_host.try_send(&ipv6).unwrap();
+            let next_packets = runtime.packet_rx().recv().await.unwrap();
+            assert_eq!(next_packets.len(), 1);
+            assert_eq!(next_packets[0].payload(), ipv6);
+            runtime.delete().await.unwrap();
+            runtime.delete().await.unwrap();
+            assert!(runtime.reader_task.is_none());
+            assert!(runtime.tun_mut().is_none());
+            assert!(runtime.packet_rx().recv().await.is_none());
+            assert_eq!(
+                next_host.try_send(&ipv4).unwrap_err().kind(),
+                std::io::ErrorKind::BrokenPipe
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn packet_io_injection_rejects_mismatched_mtu_without_native_creation() {
+        let mut config = test_config();
+        config.tun.name.clear();
+        config.tun.mtu = 1400;
+        let (device, host) = ExternalPacketDevice::new("mock", 1280, 1).unwrap();
+        let ips = VirtualIps::from_ipv6(Ipv6Addr::LOCALHOST);
+        assert!(create_packet_device(&config, &ips, Some(Box::new(device)))
+            .await
+            .is_err());
+        assert_eq!(
+            host.try_recv().unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[tokio::test]
+    async fn packet_io_runtime_drop_aborts_idle_reader_and_closes_external_peer() {
+        let mut config = test_config();
+        config.tun.mtu = 1280;
+        let (device, host) = ExternalPacketDevice::new("mock", 1280, 1).unwrap();
+        let runtime = RuntimeTunIo::new(
+            &config,
+            &VirtualIps::from_ipv6(Ipv6Addr::LOCALHOST),
+            Box::new(device),
+            &StatsCollector::new(),
+            false,
+        );
+        let reader = runtime.reader_task.as_ref().unwrap().abort_handle();
+        tokio::task::yield_now().await;
+        drop(runtime);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !reader.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            host.try_recv().unwrap_err().kind(),
+            std::io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[tokio::test]
+    async fn packet_io_mock_device_checks_default_batches_and_runtime_resource_release() {
+        #[derive(Default)]
+        struct MockState {
+            input: std::collections::VecDeque<Vec<u8>>,
+            output: Vec<Vec<u8>>,
+            drops: usize,
+            closes: usize,
+        }
+
+        #[derive(Clone)]
+        struct MockPacketDevice(Arc<Mutex<MockState>>);
+
+        impl Drop for MockPacketDevice {
+            fn drop(&mut self) {
+                self.0.lock().unwrap().drops += 1;
+            }
+        }
+
+        impl PacketDevice for MockPacketDevice {
+            fn name(&self) -> &str {
+                "mock"
+            }
+            fn mtu(&self) -> u16 {
+                1280
+            }
+            fn clone_box(&self) -> Box<dyn PacketDevice> {
+                Box::new(self.clone())
+            }
+            fn read<'a>(
+                &'a mut self,
+                buffer: &'a mut [u8],
+            ) -> futures::future::BoxFuture<'a, Result<usize>> {
+                Box::pin(async move {
+                    let mut state = self.0.lock().unwrap();
+                    let Some(packet) = state.input.front() else {
+                        return Ok(0);
+                    };
+                    anyhow::ensure!(buffer.len() >= packet.len(), "mock buffer too small");
+                    let len = packet.len();
+                    buffer[..len].copy_from_slice(&state.input.pop_front().unwrap());
+                    Ok(len)
+                })
+            }
+            fn write<'a>(
+                &'a mut self,
+                packet: &'a [u8],
+            ) -> futures::future::BoxFuture<'a, Result<()>> {
+                Box::pin(async move {
+                    anyhow::ensure!(!packet.is_empty(), "empty mock packet");
+                    self.0.lock().unwrap().output.push(packet.to_vec());
+                    Ok(())
+                })
+            }
+            fn close(&mut self) -> futures::future::BoxFuture<'_, Result<()>> {
+                Box::pin(async move {
+                    self.0.lock().unwrap().closes += 1;
+                    Ok(())
+                })
+            }
+        }
+
+        let (ipv4, ipv6) = packet_io_fixtures();
+        let state = Arc::new(Mutex::new(MockState::default()));
+        state
+            .lock()
+            .unwrap()
+            .input
+            .extend([ipv4.clone(), ipv6.clone()]);
+        let config = test_config();
+        let ips = VirtualIps::from_ipv6(Ipv6Addr::LOCALHOST);
+        let stats = StatsCollector::new();
+        let mut runtime = RuntimeTunIo::new(
+            &config,
+            &ips,
+            Box::new(MockPacketDevice(state.clone())),
+            &stats,
+            false,
+        );
+        for expected in [&ipv4, &ipv6] {
+            let packets = tokio::time::timeout(Duration::from_secs(2), runtime.packet_rx().recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(packets.len(), 1);
+            assert_eq!(packets[0].payload(), expected);
+        }
+        let results = runtime
+            .tun_mut()
+            .unwrap()
+            .write_batch(&[&ipv4, &[], &ipv6])
+            .await;
+        assert!(results[0].is_ok());
+        assert!(results[1].is_err());
+        assert!(results[2].is_ok());
+        runtime.delete().await.unwrap();
+        runtime.delete().await.unwrap();
+        let state = state.lock().unwrap();
+        assert_eq!(state.output, [ipv4, ipv6]);
+        assert_eq!(state.closes, 1);
+        assert_eq!(state.drops, 2);
+    }
 
     #[test]
     fn relay_grant_renews_only_inside_the_ahead_window() {

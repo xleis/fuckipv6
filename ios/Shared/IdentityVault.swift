@@ -102,6 +102,11 @@ final class KeychainSecretStore: SecretStore {
 struct IdentityVault {
     static let fileName = "node_identity.pem"
 
+    /// Keychain account for the PEM. The identity file lives at the storage
+    /// root, not inside a network directory, so one account covers every network
+    /// this node joins; keying it by network name would strand the key as soon
+    /// as the node rejoins under a different name.
+    static let account = "node-identity"
     private let store: any SecretStore
     private let fileManager: FileManager
 
@@ -113,12 +118,12 @@ struct IdentityVault {
     /// Restores the identity before the node starts. Returns true when a stored
     /// key was written back to disk.
     @discardableResult
-    func restore(networkName: String, into storageRoot: URL) throws -> Bool {
+    func restore(into storageRoot: URL) throws -> Bool {
         let file = Self.identityURL(storageRoot: storageRoot)
         if fileManager.fileExists(atPath: file.path) {
             return false
         }
-        guard let secret = try store.load(account: networkName), !secret.isEmpty else {
+        guard let secret = try store.load(account: Self.account), !secret.isEmpty else {
             return false
         }
         try write(secret, to: file)
@@ -128,12 +133,12 @@ struct IdentityVault {
     /// Captures the identity after the node stopped and removes the plaintext
     /// copy. Returns true when a key was stored.
     @discardableResult
-    func capture(networkName: String, from storageRoot: URL) throws -> Bool {
+    func capture(from storageRoot: URL) throws -> Bool {
         let file = Self.identityURL(storageRoot: storageRoot)
         guard let secret = try? Data(contentsOf: file), !secret.isEmpty else {
             return false
         }
-        try store.save(secret, account: networkName)
+        try store.save(secret, account: Self.account)
         try fileManager.removeItem(at: file)
         return true
     }

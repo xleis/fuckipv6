@@ -4,14 +4,16 @@ import Foundation
 ///
 /// The P3 build has no console channel back to the development host, so
 /// on-device failures are recorded in `Library/Logs/fuckipv6/app.log` and
-/// `xcrun devicectl device copy from`. Writes are best effort: a failure here
-/// must never mask the error being reported.
+/// `xcrun devicectl device copy from`. Writes are best effort but
+/// synchronous: `stopTunnel` returns and the process may exit immediately, so
+/// an asynchronous append would be lost exactly when teardown is being
+/// recorded. A failure here must never mask the error being reported.
 enum Diagnostics {
     private static let queue = DispatchQueue(label: "com.lingxifox.fuckipv6.diagnostics")
 
     static func record(_ message: String) {
         let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
-        queue.async {
+        queue.sync {
             guard let base = try? AppGroup.container() else { return }
             // Library/Logs is also reachable from the development host with
             // `xcrun devicectl device copy from`; the group container root is not.

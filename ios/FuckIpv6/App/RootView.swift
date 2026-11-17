@@ -51,6 +51,9 @@ struct RootView: View {
                     if let error = controller.errorMessage {
                         Text(error).font(.footnote).foregroundStyle(.red)
                     }
+                    if let note = controller.preflightNote {
+                        Text(note).font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
 
                 Section("节点快照") {

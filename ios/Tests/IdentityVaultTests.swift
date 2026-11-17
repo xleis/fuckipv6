@@ -52,23 +52,23 @@ final class IdentityVaultTests: XCTestCase {
 
     func testRestoreWritesTheStoredIdentity() throws {
         let secret = Data("stored-pem".utf8)
-        try store.save(secret, account: "mesh")
+        try store.save(secret, account: IdentityVault.account)
 
-        XCTAssertTrue(try vault.restore(networkName: "mesh", into: root))
+        XCTAssertTrue(try vault.restore(into: root))
         XCTAssertEqual(try Data(contentsOf: identityFile), secret)
     }
 
     func testRestoreWithoutAStoredIdentityCreatesNothing() throws {
-        XCTAssertFalse(try vault.restore(networkName: "mesh", into: root))
+        XCTAssertFalse(try vault.restore(into: root))
         XCTAssertFalse(FileManager.default.fileExists(atPath: identityFile.path))
     }
 
     func testRestoreNeverOverwritesAnExistingFile() throws {
         let onDisk = Data("on-disk-pem".utf8)
         try onDisk.write(to: identityFile)
-        try store.save(Data("keychain-pem".utf8), account: "mesh")
+        try store.save(Data("keychain-pem".utf8), account: IdentityVault.account)
 
-        XCTAssertFalse(try vault.restore(networkName: "mesh", into: root))
+        XCTAssertFalse(try vault.restore(into: root))
         XCTAssertEqual(try Data(contentsOf: identityFile), onDisk)
     }
 
@@ -76,14 +76,14 @@ final class IdentityVaultTests: XCTestCase {
         let secret = Data("runtime-pem".utf8)
         try secret.write(to: identityFile)
 
-        XCTAssertTrue(try vault.capture(networkName: "mesh", from: root))
-        XCTAssertEqual(try store.load(account: "mesh"), secret)
+        XCTAssertTrue(try vault.capture(from: root))
+        XCTAssertEqual(try store.load(account: IdentityVault.account), secret)
         XCTAssertFalse(FileManager.default.fileExists(atPath: identityFile.path))
     }
 
     func testCaptureWithoutAFileIsANoOp() throws {
-        XCTAssertFalse(try vault.capture(networkName: "mesh", from: root))
-        XCTAssertNil(try store.load(account: "mesh"))
+        XCTAssertFalse(try vault.capture(from: root))
+        XCTAssertNil(try store.load(account: IdentityVault.account))
         XCTAssertEqual(store.saveCount, 0)
     }
 
@@ -91,17 +91,27 @@ final class IdentityVaultTests: XCTestCase {
         let secret = Data("identity-bytes".utf8)
         try secret.write(to: identityFile)
 
-        XCTAssertTrue(try vault.capture(networkName: "mesh", from: root))
+        XCTAssertTrue(try vault.capture(from: root))
         XCTAssertFalse(FileManager.default.fileExists(atPath: identityFile.path))
-        XCTAssertTrue(try vault.restore(networkName: "mesh", into: root))
+        XCTAssertTrue(try vault.restore(into: root))
         XCTAssertEqual(try Data(contentsOf: identityFile), secret)
     }
 
-    func testIdentitiesAreScopedPerNetwork() throws {
-        try store.save(Data("mesh-pem".utf8), account: "mesh")
-        try store.save(Data("lab-pem".utf8), account: "lab")
+    func testTheIdentityIsNotScopedToANetworkName() throws {
+        // The PEM sits at the storage root and the Rust runtime keeps one node
+        // identity per storage root, so the account must not follow the network
+        // name: rejoining under a different name has to reuse the same key.
+        try store.save(Data("root-pem".utf8), account: IdentityVault.account)
 
-        XCTAssertTrue(try vault.restore(networkName: "lab", into: root))
-        XCTAssertEqual(try Data(contentsOf: identityFile), Data("lab-pem".utf8))
+        XCTAssertTrue(try vault.restore(into: root))
+        XCTAssertEqual(try Data(contentsOf: identityFile), Data("root-pem".utf8))
+    }
+
+    func testPerNetworkAccountsAreIgnored() throws {
+        // Legacy layout: the identity used to be stored under the network name.
+        try store.save(Data("legacy-mesh-pem".utf8), account: "mesh")
+
+        XCTAssertFalse(try vault.restore(into: root))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: identityFile.path))
     }
 }

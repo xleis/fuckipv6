@@ -12,6 +12,10 @@ final class VPNController: ObservableObject {
     @Published private(set) var vpnStatus: NEVPNStatus = .invalid
     @Published private(set) var tunnelStatus: TunnelStatus?
     @Published private(set) var errorMessage: String?
+    /// Result of the pre-start coordinator probe. Informational only: the probe
+    /// can fail transiently while the system VPN is reasserting, so it must not
+    /// outlive a tunnel that actually came up.
+    @Published private(set) var preflightNote: String?
     @Published var configuration: TunnelConfiguration = .empty
 
     private var manager: NETunnelProviderManager?
@@ -120,11 +124,10 @@ final class VPNController: ObservableObject {
             refreshStatus()
             return
         }
-        if let diagnostic {
-            errorMessage = "Coordinator is unreachable: \(diagnostic)"
-        } else {
-            errorMessage = nil
+        preflightNote = diagnostic.map {
+            "preflight probe failed: \($0). The tunnel state below is authoritative; a stale probe rarely means anything."
         }
+        errorMessage = nil
         refreshStatus()
     }
 
@@ -135,6 +138,9 @@ final class VPNController: ObservableObject {
 
     func reloadTunnelStatus() {
         tunnelStatus = try? TunnelStatus.load()
+        if tunnelStatus?.phase == .running {
+            preflightNote = nil
+        }
     }
 
     private func loadManager() async throws {
@@ -167,6 +173,9 @@ final class VPNController: ObservableObject {
             Diagnostics.record("vpn status -> \(status.rawValue)")
         }
         vpnStatus = status
+        if status == .connected {
+            preflightNote = nil
+        }
         reloadTunnelStatus()
     }
 

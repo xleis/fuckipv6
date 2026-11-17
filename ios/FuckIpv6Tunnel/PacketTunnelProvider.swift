@@ -123,7 +123,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
         // The identity must be back on disk before anything can create a new
         // one, otherwise a fresh key would replace the stored identity.
         do {
-            if try IdentityVault().restore(networkName: configuration.networkName, into: storageRoot) {
+            if try IdentityVault().restore(into: storageRoot) {
                 publish(.starting, message: "restored node identity from keychain")
             }
         } catch {
@@ -182,7 +182,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
     }
 
     /// What a teardown actually achieved. A tunnel is only reported as cleanly
-    /// stopped when every field below is true.
+    /// stopped when every resource we own has been released. Network settings
+    /// are excluded on purpose: when iOS stops the provider it tears the
+    /// packet tunnel down itself, so `setTunnelNetworkSettings(nil)` reports an
+    /// error even though the settings are already gone. A failed start never
+    /// applies settings, so `settingsCleared` can only be false in a stop, where
+    /// it is informational rather than a leak.
     struct TeardownReport {
         var pumpDrained = true
         var nodeStopped = true
@@ -191,7 +196,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
         var pendingUsers = 0
 
         var isClean: Bool {
-            pumpDrained && nodeStopped && endpointFreed && settingsCleared
+            pumpDrained && nodeStopped && endpointFreed
         }
 
         var summary: String {
@@ -319,17 +324,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
     }
 
     private func captureIdentity() {
-        guard let configuration = try? TunnelConfiguration.load(),
-              let storageRoot = try? AppGroup.storageRoot()
-        else {
+        guard let storageRoot = try? AppGroup.storageRoot() else {
+            Diagnostics.record("identity capture skipped: no storage root")
             return
         }
         do {
-            if try IdentityVault().capture(networkName: configuration.networkName, from: storageRoot) {
-                NSLog("fuckipv6: node identity moved to the keychain")
-            }
+            let captured = try IdentityVault().capture(from: storageRoot)
+            Diagnostics.record(captured ? "identity captured into the keychain" : "identity capture found no plaintext key")
         } catch {
-            NSLog("fuckipv6: capturing the node identity failed: \(error.localizedDescription)")
+            Diagnostics.record("identity capture failed: \(error.localizedDescription)")
         }
     }
 
@@ -341,7 +344,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
             result.complete(error)
         }
         if let error = result.wait(seconds: 10) {
-            NSLog("fuckipv6: clearing network settings failed: \(error.localizedDescription)")
+            Diagnostics.record("network settings were not cleared: \(error.localizedDescription)")
             return false
         }
         return true

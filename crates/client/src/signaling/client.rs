@@ -67,6 +67,7 @@ pub struct SignalingClient {
     relay_endpoints_rx: watch::Receiver<Vec<RelayEndpoint>>,
     known_peers_rx: watch::Receiver<Vec<PeerInfo>>,
     shutdown_tx: watch::Sender<bool>,
+    reconnect: Arc<tokio::sync::Notify>,
     task: StdMutex<Option<JoinHandle<()>>>,
     join_requests: Arc<JoinRequestResponseHub>,
     join_request_gate: Arc<Mutex<()>>,
@@ -1329,6 +1330,7 @@ struct RegistrationIdentity {
 }
 
 struct ConnectionConfig {
+    reconnect: Arc<tokio::sync::Notify>,
     url: String,
     registration: RegistrationIdentity,
     p2p_port: u16,
@@ -1417,6 +1419,7 @@ impl SignalingClient {
         };
 
         let connection_config = ConnectionConfig {
+            reconnect: Arc::new(tokio::sync::Notify::new()),
             url: normalize_ws_url(url),
             registration,
             p2p_port,
@@ -1426,6 +1429,7 @@ impl SignalingClient {
             max_reconnect_delay: MAX_RECONNECT_DELAY,
         };
 
+        let reconnect = connection_config.reconnect.clone();
         let task = tokio::spawn(connection_manager(
             connection_config,
             outbound_rx,
@@ -1452,6 +1456,7 @@ impl SignalingClient {
             relay_endpoints_rx,
             known_peers_rx,
             shutdown_tx,
+            reconnect,
             task: StdMutex::new(Some(task)),
             join_requests,
             join_request_gate: Arc::new(Mutex::new(())),
@@ -1493,6 +1498,7 @@ impl SignalingClient {
                 relay_endpoints_rx,
                 known_peers_rx,
                 shutdown_tx,
+                reconnect: Arc::new(tokio::sync::Notify::new()),
                 task: StdMutex::new(None),
                 join_requests: Arc::new(JoinRequestResponseHub::default()),
                 join_request_gate: Arc::new(Mutex::new(())),
@@ -2355,6 +2361,12 @@ impl SignalingClient {
         }
     }
 
+    /// Host path notification, scoped to this existing transport session. It
+    /// bypasses reconnect backoff without replacing identity or packet I/O.
+    pub(crate) fn request_reconnect(&self) {
+        self.reconnect.notify_one();
+    }
+
     /// 接收事件
     pub async fn recv_event(&self) -> Option<SignalingEvent> {
         self.event_rx.write().await.recv().await
@@ -2427,10 +2439,21 @@ async fn connection_manager(
         }
 
         tracing::info!("正在连接协调服务器: {}", config.url);
-        match connect_async_with_config(&config.url, Some(signaling_websocket_config()), true).await
-        {
+        let connection = tokio::select! {
+            result = connect_async_with_config(&config.url, Some(signaling_websocket_config()), true) => result,
+            changed = shutdown_rx.changed() => {
+                if changed.is_err() || *shutdown_rx.borrow() {
+                    break;
+                }
+                continue;
+            }
+            _ = config.reconnect.notified() => continue,
+        };
+        let mut immediate_reconnect = false;
+        match connection {
             Ok((ws_stream, _)) => {
-                handle_connected_signaling(
+                tokio::select! {
+                    _ = handle_connected_signaling(
                     ws_stream,
                     &config,
                     &mut state,
@@ -2438,8 +2461,12 @@ async fn connection_manager(
                     &mut pending_outbound,
                     channels,
                     &mut shutdown_rx,
-                )
-                .await;
+                    ) => {},
+                    _ = config.reconnect.notified() => {
+                        notify_disconnected(channels, "network path changed".into());
+                        immediate_reconnect = true;
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!("连接协调服务器失败: {:?}", e);
@@ -2451,7 +2478,12 @@ async fn connection_manager(
             break;
         }
 
+        if immediate_reconnect {
+            continue;
+        }
+
         tokio::select! {
+            _ = config.reconnect.notified() => {}
             _ = sleep(state.reconnect_delay) => {}
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
@@ -3295,6 +3327,7 @@ mod tests {
             }
         });
         let client = SignalingClient {
+            reconnect: Arc::new(tokio::sync::Notify::new()),
             tx,
             event_rx: Arc::new(RwLock::new(event_rx)),
             assigned_ip_rx,
@@ -4130,6 +4163,7 @@ mod tests {
         });
 
         let connection_config = ConnectionConfig {
+            reconnect: Arc::new(tokio::sync::Notify::new()),
             url,
             registration,
             p2p_port: 51820,

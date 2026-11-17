@@ -116,8 +116,10 @@ pub struct ExternalPacketDevice {
 
 /// Host-facing adapter for both NEPacketTunnelFlow and VpnService. `send`
 /// feeds Rust; `recv` takes packets Rust wrote back toward the operating system.
-/// The host must keep draining output while active, and close this endpoint
-/// before awaiting runtime shutdown or when its OS VPN session is invalidated.
+/// The host must keep draining output while active. Without runtime-owned I/O
+/// cancellation, close this endpoint before awaiting shutdown. EmbeddedNodeRuntime
+/// cancels blocked I/O and closes the device itself. An invalid OS VPN session
+/// must always close its endpoint.
 #[derive(Clone)]
 pub struct ExternalPacketEndpoint {
     lifetime: Arc<SideLifetime>,

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use fuckipv6_common::domain::NodeId;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -73,6 +74,8 @@ pub struct MultiNetworkSupervisor {
     services: EmbeddedServiceManager,
     runtimes: NetworkRuntimeManager,
     file_owner: FileOwnerService,
+    shutdown_complete: AtomicBool,
+    embedded: bool,
 }
 
 impl MultiNetworkSupervisor {
@@ -83,6 +86,22 @@ impl MultiNetworkSupervisor {
     pub(crate) fn new_with_config_manager(
         options: RuntimeOptions,
         configs: ConfigManager,
+    ) -> Result<Self> {
+        Self::new_with_platform(options, configs, None)
+    }
+
+    pub(crate) fn new_embedded(
+        options: RuntimeOptions,
+        configs: ConfigManager,
+        embedded: crate::embedded::EmbeddedContext,
+    ) -> Result<Self> {
+        Self::new_with_platform(options, configs, Some(embedded))
+    }
+
+    fn new_with_platform(
+        options: RuntimeOptions,
+        configs: ConfigManager,
+        embedded: Option<crate::embedded::EmbeddedContext>,
     ) -> Result<Self> {
         // UI policy belongs to the foreground entrypoint. The detached node may
         // run inside the same desktop session as a GPUI client and must never
@@ -103,7 +122,7 @@ impl MultiNetworkSupervisor {
         let owner_audit = Arc::new(OwnerSecurityAudit::new(configs.config_dir(), owner)?);
         let services = EmbeddedServiceManager::spawn_with_config(8, configs.clone());
         let lifecycle = NodeLifecycle::new();
-        let runtimes = NetworkRuntimeManager::spawn_with_failover_audit(
+        let runtimes = NetworkRuntimeManager::spawn_with_platform(
             configs.clone(),
             options.clone(),
             state.clone(),
@@ -113,16 +132,29 @@ impl MultiNetworkSupervisor {
             services.clone(),
             file_owner.network_runtime(),
             Some(owner_audit.clone()),
+            embedded.clone(),
         );
-        let commands = spawn_command_bus_with_runtime_and_audit(
-            state.clone(),
-            registry.clone(),
-            events.clone(),
-            services.clone(),
-            runtimes.clone(),
-            configs,
-            owner_audit,
-        );
+        let commands = if embedded.is_some() {
+            crate::node::spawn_embedded_command_bus(
+                state.clone(),
+                registry.clone(),
+                events.clone(),
+                services.clone(),
+                runtimes.clone(),
+                configs,
+                owner_audit,
+            )
+        } else {
+            spawn_command_bus_with_runtime_and_audit(
+                state.clone(),
+                registry.clone(),
+                events.clone(),
+                services.clone(),
+                runtimes.clone(),
+                configs,
+                owner_audit,
+            )
+        };
         Ok(Self {
             registry,
             lifecycle,
@@ -132,6 +164,8 @@ impl MultiNetworkSupervisor {
             services,
             runtimes,
             file_owner,
+            shutdown_complete: AtomicBool::new(false),
+            embedded: embedded.is_some(),
         })
     }
 
@@ -159,6 +193,28 @@ impl MultiNetworkSupervisor {
         self.commands.clone()
     }
 
+    pub(crate) async fn notify_network_path_changed(&self) -> Result<(), crate::node::NodeProblem> {
+        self.runtimes
+            .network_path_changed()
+            .await
+            .map_err(|error| crate::embedded::storage_problem(error))
+    }
+
+    pub(crate) async fn join_embedded_tasks(&self) -> Result<()> {
+        self.runtimes.join_actor().await?;
+        self.services.join_actor().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn retry_embedded_cleanup(&self) -> Result<()> {
+        if self.shutdown_complete.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let summary = self.runtimes.cleanup_residuals(Vec::new(), true).await?;
+        anyhow::ensure!(summary.is_success(), "{}", summary.message());
+        Ok(())
+    }
+
     /// Owner-only File capability coordinator.
     pub(crate) fn file_owner(&self) -> FileOwnerService {
         self.file_owner.clone()
@@ -173,17 +229,30 @@ impl MultiNetworkSupervisor {
     /// The standalone node process uses this after its IPC listener exits; the
     /// long-running CLI supervisor reaches the same actor through `run_plan`.
     pub(crate) async fn shutdown(&self) -> Result<()> {
+        if self.shutdown_complete.load(Ordering::Acquire) {
+            return Ok(());
+        }
         self.mark_network_status(None, NodeNetworkStatus::Stopping)
             .await;
         let lifecycle = self.lifecycle.begin_stop().await;
         self.sync_lifecycle(lifecycle).await;
 
         self.file_owner.shutdown().await;
-        let result = self.runtimes.shutdown().await;
+        let result = self.runtimes.shutdown().await.and_then(|summary| {
+            if summary.is_success() || !self.embedded {
+                Ok(summary)
+            } else {
+                Err(crate::node::RuntimeControlError::Unavailable(
+                    summary.message(),
+                ))
+            }
+        });
         // `NetworkRuntimeManager::shutdown` closes the shared service actor. A
         // second shutdown is tolerant and still releases services if the actor
         // failed before its command was dispatched.
-        let _ = self.services.shutdown().await;
+        if result.is_ok() {
+            let _ = self.services.shutdown().await;
+        }
 
         let lifecycle = if result.is_ok() {
             self.lifecycle.stopped().await
@@ -191,6 +260,9 @@ impl MultiNetworkSupervisor {
             self.lifecycle.failed().await
         };
         self.sync_lifecycle(lifecycle).await;
+        if result.is_ok() {
+            self.shutdown_complete.store(true, Ordering::Release);
+        }
         result
             .map(|_| ())
             .map_err(|error| anyhow::anyhow!("关闭节点数据面失败: {error}"))

@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{
     accept_async_with_config,
     tungstenite::{protocol::WebSocketConfig, Message},
@@ -419,6 +419,12 @@ impl SignalingServer {
 
     /// 启动服务器
     pub async fn run(self) -> Result<()> {
+        let (_shutdown, receiver) = watch::channel(false);
+        self.run_with_shutdown(receiver).await
+    }
+
+    /// In-process owners stop admission and join every accepted connection.
+    pub async fn run_with_shutdown(self, mut shutdown: watch::Receiver<bool>) -> Result<()> {
         let listener = match self.listener {
             Some(listener) => listener,
             None => TcpListener::bind(&self.bind_addr)
@@ -428,8 +434,21 @@ impl SignalingServer {
         let local_addr = listener.local_addr().context("无法读取信令服务监听地址")?;
         tracing::info!("信令服务器正在监听: {local_addr}");
 
+        let mut connections = tokio::task::JoinSet::new();
+        let mut failures = Vec::new();
         loop {
-            match listener.accept().await {
+            if *shutdown.borrow() {
+                break;
+            }
+            let accepted = tokio::select! {
+                accepted = listener.accept() => accepted,
+                _ = shutdown.changed() => break,
+                Some(result) = connections.join_next(), if !connections.is_empty() => {
+                    if let Err(error) = result { failures.push(error.to_string()); }
+                    continue;
+                }
+            };
+            match accepted {
                 Ok((stream, addr)) => {
                     tracing::info!("新连接来自: {}", addr);
                     let session_manager = self.session_manager.clone();
@@ -445,7 +464,8 @@ impl SignalingServer {
                     let network_record_path = self.network_record_path.clone();
                     let node_identity = self.node_identity.clone();
 
-                    tokio::spawn(async move {
+                    let connection_shutdown = shutdown.clone();
+                    connections.spawn(async move {
                         if let Err(e) = handle_connection(
                             stream,
                             addr,
@@ -461,6 +481,7 @@ impl SignalingServer {
                             exit_availability,
                             network_record_path,
                             node_identity,
+                            connection_shutdown,
                         )
                         .await
                         {
@@ -473,14 +494,33 @@ impl SignalingServer {
                 }
             }
         }
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                failures.push(error.to_string());
+            }
+        }
+        anyhow::ensure!(
+            failures.is_empty(),
+            "Signaling connection tasks failed: {}",
+            failures.join("; ")
+        );
+        Ok(())
     }
 
     pub fn spawn_timeout_cleanup(&self, timeout_secs: u64) {
+        self.spawn_managed_timeout_cleanup(timeout_secs);
+    }
+
+    pub fn spawn_managed_timeout_cleanup(
+        &self,
+        timeout_secs: u64,
+    ) -> Vec<tokio::task::JoinHandle<()>> {
+        let mut tasks = Vec::new();
         let session_manager = self.session_manager.clone();
         let timeout = Duration::from_secs(timeout_secs.max(1));
         let tick = Duration::from_secs((timeout_secs / 2).clamp(1, 30));
 
-        tokio::spawn(async move {
+        tasks.push(tokio::spawn(async move {
             let mut interval = tokio::time::interval(tick);
             loop {
                 interval.tick().await;
@@ -489,11 +529,11 @@ impl SignalingServer {
                     tracing::info!("已清理 {} 个心跳超时客户端", stale.len());
                 }
             }
-        });
+        }));
 
         if let Some(store) = self.coordinator_candidate_store.clone() {
             let session_manager = self.session_manager.clone();
-            tokio::spawn(async move {
+            tasks.push(tokio::spawn(async move {
                 let mut interval = tokio::time::interval(COORDINATOR_EMERGENCY_RECONCILE_INTERVAL);
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
@@ -504,8 +544,9 @@ impl SignalingServer {
                         tracing::warn!(%error, "协调紧急 Coordinator Leader 在线状态失败");
                     }
                 }
-            });
+            }));
         }
+        tasks
     }
 }
 
@@ -532,64 +573,66 @@ async fn handle_connection(
     exit_availability: Arc<ExitAvailabilityObservationRegistry>,
     network_record_path: Option<PathBuf>,
     node_identity: Option<Arc<Identity>>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let local_addr = stream.local_addr().ok();
-    let ws_stream = accept_async_with_config(stream, Some(signaling_websocket_config()))
-        .await
-        .with_context(|| format!("WebSocket 握手失败: {addr}"))?;
+    let ws_stream = tokio::select! {
+        stream = accept_async_with_config(stream, Some(signaling_websocket_config())) => stream,
+        _ = shutdown.wait_for(|stopped| *stopped) => return Ok(()),
+    }
+    .with_context(|| format!("WebSocket 握手失败: {addr}"))?;
     tracing::info!("WebSocket 连接已建立: {}", addr);
 
     let (tx, rx) = mpsc::unbounded_channel::<Message>();
     let mut client_id: Option<String> = None;
     let (ws_sender, mut ws_receiver) = ws_stream.split();
-    let send_task = spawn_signaling_sender(ws_sender, rx);
-
-    while let Some(msg) = ws_receiver.next().await {
-        if !handle_connection_message(
-            msg,
-            addr,
-            &session_manager,
-            &tx,
-            &mut client_id,
-            local_addr,
-            &relay_directory,
-            join_request_store.as_deref(),
-            invitation_store.as_deref(),
-            admin_recovery_store.as_deref(),
-            admin_recovery_service.as_deref(),
-            member_lifecycle_store.as_deref(),
-            exit_contribution_store.as_deref(),
-            coordinator_candidate_store.as_deref(),
-            exit_availability.as_ref(),
-            network_record_path.as_deref(),
-            node_identity.as_deref(),
-        )
-        .await
-        {
-            break;
+    let receiving = async {
+        while let Some(msg) = ws_receiver.next().await {
+            if !handle_connection_message(
+                msg,
+                addr,
+                &session_manager,
+                &tx,
+                &mut client_id,
+                local_addr,
+                &relay_directory,
+                join_request_store.as_deref(),
+                invitation_store.as_deref(),
+                admin_recovery_store.as_deref(),
+                admin_recovery_service.as_deref(),
+                member_lifecycle_store.as_deref(),
+                exit_contribution_store.as_deref(),
+                coordinator_candidate_store.as_deref(),
+                exit_availability.as_ref(),
+                network_record_path.as_deref(),
+                node_identity.as_deref(),
+            )
+            .await
+            {
+                break;
+            }
         }
+    };
+    tokio::select! {
+        _ = receiving => {},
+        _ = run_signaling_sender(ws_sender, rx) => {},
+        _ = shutdown.wait_for(|stopped| *stopped) => {},
     }
 
     unregister_signaling_client(client_id, &session_manager, &tx).await;
-    send_task.abort();
     Ok(())
 }
 
-fn spawn_signaling_sender<S>(
-    mut ws_sender: S,
-    mut rx: mpsc::UnboundedReceiver<Message>,
-) -> tokio::task::JoinHandle<()>
+async fn run_signaling_sender<S>(mut ws_sender: S, mut rx: mpsc::UnboundedReceiver<Message>)
 where
     S: futures::Sink<Message> + Unpin + Send + 'static,
     S::Error: std::fmt::Debug,
 {
-    tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if ws_sender.send(msg).await.is_err() {
-                break;
-            }
+    while let Some(msg) = rx.recv().await {
+        if ws_sender.send(msg).await.is_err() {
+            break;
         }
-    })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

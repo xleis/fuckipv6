@@ -2725,6 +2725,28 @@ impl P2pEngine {
             .map_err(anyhow::Error::from)
     }
 
+    /// Cancellation fallback for an owner that cannot await yet. Handles stay
+    /// registered so a later shutdown still joins every task and releases sockets.
+    pub(crate) fn request_shutdown(&self) {
+        self.shutdown.send_replace(true);
+        if let Some(task) = self
+            .receiver_task
+            .lock()
+            .expect("P2P receiver task slot poisoned")
+            .as_ref()
+        {
+            task.abort();
+        }
+        for task in self
+            .child_tasks
+            .lock()
+            .expect("P2P child task registry poisoned")
+            .iter()
+        {
+            task.abort();
+        }
+    }
+
     pub(crate) async fn shutdown_bounded(
         &self,
         total_timeout: Duration,

@@ -86,6 +86,7 @@ pub(crate) use runtime_control::{
 #[cfg(test)]
 pub(crate) use runtime_handler::spawn_command_bus_with_runtime;
 pub(crate) use runtime_handler::spawn_command_bus_with_runtime_and_audit;
+pub(crate) use runtime_handler::spawn_embedded_command_bus;
 pub use runtime_handler::{spawn_command_bus, spawn_command_bus_with_services, NodeRuntimeHandler};
 pub use state::{
     LocalExitCapabilitySnapshot, LocalExitCapabilityStage, NodeAccessModel,

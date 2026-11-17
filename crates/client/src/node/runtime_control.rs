@@ -123,6 +123,8 @@ enum RuntimeRoutingRequestError {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum RuntimeControlError {
+    #[error("{}", .0.message)]
+    Platform(NodeProblem),
     #[error("节点运行时管理器已关闭")]
     ActorClosed,
     #[error("{0}")]
@@ -193,6 +195,7 @@ pub(crate) enum RuntimeControlError {
 impl RuntimeControlError {
     pub(crate) fn problem_code(&self) -> NodeProblemCode {
         match self {
+            Self::Platform(problem) => problem.code,
             Self::Invalid(_) => NodeProblemCode::InvalidRequest,
             Self::Conflict(_) | Self::CreationConflict { .. } => NodeProblemCode::Conflict,
             Self::PermissionDenied(_) => NodeProblemCode::PermissionDenied,
@@ -233,6 +236,9 @@ impl RuntimeControlError {
     }
 
     pub(crate) fn retryable(&self) -> bool {
+        if let Self::Platform(problem) = self {
+            return problem.retryable;
+        }
         if let Self::RelayLifecycleFailed { reason_code, .. } = self {
             return !matches!(
                 *reason_code,
@@ -298,6 +304,13 @@ impl RuntimeControlError {
                     ..
                 }
         )
+    }
+
+    fn platform_problem(&self) -> Option<NodeProblem> {
+        match self {
+            Self::Platform(problem) => Some(problem.clone()),
+            _ => None,
+        }
     }
 
     pub(crate) fn network_setup_stage(&self) -> Option<NetworkSetupStage> {
@@ -473,6 +486,7 @@ pub(crate) struct StartFailure {
     pub network_name: String,
     pub message: String,
     pub stage: Option<NetworkSetupStage>,
+    pub problem: Option<NodeProblem>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -600,6 +614,7 @@ pub(crate) struct RestartFailure {
     pub phase: RestartPhase,
     pub message: String,
     pub stage: Option<NetworkSetupStage>,
+    pub problem: Option<NodeProblem>,
 }
 
 /// Registry/state/service checks performed after an explicit stop. These counts
@@ -906,6 +921,9 @@ impl ResidualRuntimeOwner for LiveResidualRuntimeOwner {
 
 trait NetworkRuntimeLauncher: Send + Sync + 'static {
     fn launch(&self, request: NetworkLaunchRequest) -> RuntimeFuture<StartedNetworkRuntime>;
+    fn is_embedded(&self) -> bool {
+        false
+    }
 }
 
 struct LiveNetworkRuntimeLauncher {
@@ -915,9 +933,13 @@ struct LiveNetworkRuntimeLauncher {
     file_runtime: FileRuntime,
     failover_audit: Option<Arc<OwnerSecurityAudit>>,
     coordinator_takeover_wakeup: mpsc::UnboundedSender<()>,
+    embedded: Option<crate::embedded::EmbeddedContext>,
 }
 
 impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
+    fn is_embedded(&self) -> bool {
+        self.embedded.is_some()
+    }
     fn launch(&self, request: NetworkLaunchRequest) -> RuntimeFuture<StartedNetworkRuntime> {
         let state = self.state.clone();
         let events = self.events.clone();
@@ -925,9 +947,10 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
         let file_runtime = self.file_runtime.clone();
         let failover_audit = self.failover_audit.clone();
         let coordinator_takeover_wakeup = self.coordinator_takeover_wakeup.clone();
+        let embedded = self.embedded.clone();
 
         Box::pin(async move {
-            let mut runtime = commands::prepare_client_runtime_ext(
+            let prepare = commands::prepare_client_runtime_ext(
                 &request.config_path,
                 request.config,
                 request.network_id.clone(),
@@ -936,16 +959,26 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
                 false,
                 commands::RuntimeExtensions {
                     packet_device: None,
+                    embedded: embedded.clone(),
                     file_runtime: Some(file_runtime),
                     observability: commands::RuntimeObservability {
                         state: Some(state.clone()),
                         failover_audit,
                     },
                 },
-            )
-            .await
-            .map_err(|error| {
-                if let Some(stage) = network_setup::stage_from_error(&error) {
+            );
+            let mut runtime = tokio::select! {
+                result = prepare => result,
+                _ = async {
+                    match &embedded {
+                        Some(context) => context.cancelled().await,
+                        None => std::future::pending().await,
+                    }
+                } => return Err(RuntimeControlError::Cancelled("Embedded startup cancelled".into())),
+            }.map_err(|error| {
+                if let Some(error) = error.downcast_ref::<crate::embedded::PlatformError>() {
+                    RuntimeControlError::Platform(error.0.clone())
+                } else if let Some(stage) = network_setup::stage_from_error(&error) {
                     tracing::warn!(
                         network = %request.network_name,
                         ?stage,
@@ -999,14 +1032,25 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
             let network_name = request.network_name.clone();
             let handle = tokio::spawn(async move {
                 tracing::info!("网络 [{network_name}] 正在启动事件循环");
-                let (disconnect_reply, event_error) =
-                    match runtime.run_with_shutdown(&mut shutdown_rx).await {
-                        Ok(reply) => (reply, None),
-                        Err(error) => {
-                            tracing::error!("网络 [{network_name}] 事件循环异常退出: {error:#}");
-                            (None, Some(format!("{error:#}")))
-                        }
-                    };
+                let (disconnect_reply, event_error) = match async {
+                    tokio::select! {
+                        result = runtime.run_with_shutdown(&mut shutdown_rx) => result,
+                        _ = async {
+                            match &embedded {
+                                Some(context) => context.cancelled().await,
+                                None => std::future::pending().await,
+                            }
+                        } => Ok(None),
+                    }
+                }
+                .await
+                {
+                    Ok(reply) => (reply, None),
+                    Err(error) => {
+                        tracing::error!("网络 [{network_name}] 事件循环异常退出: {error:#}");
+                        (None, Some(format!("{error:#}")))
+                    }
+                };
                 tracing::info!("网络 [{network_name}] 正在清理资源");
                 let cleanup = runtime.shutdown().await;
                 let cleanup_clean = cleanup.is_clean();
@@ -2002,6 +2046,9 @@ impl Drop for OperationGuard {
 }
 
 enum RuntimeControlCommand {
+    NetworkPathChanged {
+        reply: oneshot::Sender<()>,
+    },
     Diagnostics {
         cancel: watch::Receiver<bool>,
         reply: oneshot::Sender<Result<NodeDiagnosticsSnapshot, RuntimeControlError>>,
@@ -2397,6 +2444,7 @@ fn replace_routing_summary(snapshot: &mut NodeSnapshot, summary: NodeRoutingSumm
 pub(crate) struct NetworkRuntimeManager {
     sender: mpsc::Sender<RuntimeControlCommand>,
     operation_gate: Arc<OperationGate>,
+    task: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl NetworkRuntimeManager {
@@ -2412,6 +2460,33 @@ impl NetworkRuntimeManager {
         file_runtime: FileRuntime,
         failover_audit: Option<Arc<OwnerSecurityAudit>>,
     ) -> Self {
+        Self::spawn_with_platform(
+            configs,
+            options,
+            state,
+            events,
+            lifecycle,
+            registry,
+            services,
+            file_runtime,
+            failover_audit,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn spawn_with_platform(
+        configs: ConfigManager,
+        options: RuntimeOptions,
+        state: NodeStateStore,
+        events: NodeEventBus,
+        lifecycle: NodeLifecycle,
+        registry: MultiNetworkRegistry,
+        services: EmbeddedServiceManager,
+        file_runtime: FileRuntime,
+        failover_audit: Option<Arc<OwnerSecurityAudit>>,
+        embedded: Option<crate::embedded::EmbeddedContext>,
+    ) -> Self {
         let (coordinator_takeover_wakeup, coordinator_takeover_wakeups) = mpsc::unbounded_channel();
         let launcher = Arc::new(LiveNetworkRuntimeLauncher {
             state: state.clone(),
@@ -2420,6 +2495,7 @@ impl NetworkRuntimeManager {
             file_runtime,
             failover_audit,
             coordinator_takeover_wakeup,
+            embedded,
         });
         Self::spawn_with_launcher_and_timeouts_inner(
             configs,
@@ -2468,7 +2544,7 @@ impl NetworkRuntimeManager {
         coordinator_takeover_wakeups: Option<mpsc::UnboundedReceiver<()>>,
     ) -> Self {
         let (sender, receiver) = mpsc::channel(16);
-        tokio::spawn(run_actor(
+        let task = tokio::spawn(run_actor(
             receiver,
             NetworkRuntimeActor {
                 configs,
@@ -2490,7 +2566,27 @@ impl NetworkRuntimeManager {
         Self {
             sender,
             operation_gate: OperationGate::new(),
+            task: Arc::new(tokio::sync::Mutex::new(Some(task))),
         }
+    }
+
+    pub(crate) async fn join_actor(&self) -> Result<(), RuntimeControlError> {
+        let mut task = self.task.lock().await;
+        if let Some(handle) = task.as_mut() {
+            let result = handle.await;
+            task.take();
+            result.map_err(|error| {
+                RuntimeControlError::Unavailable(format!("Runtime actor failed: {error}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn network_path_changed(&self) -> Result<(), RuntimeControlError> {
+        let (reply, response) = oneshot::channel();
+        self.send(RuntimeControlCommand::NetworkPathChanged { reply })
+            .await?;
+        response.await.map_err(|_| RuntimeControlError::ActorClosed)
     }
 
     pub async fn start_plan(
@@ -3273,6 +3369,13 @@ async fn run_actor(
                     break;
                 };
                 match command {
+                    RuntimeControlCommand::NetworkPathChanged { reply } => {
+                        actor.reconcile_finished_sessions().await;
+                        for signaling in actor.sessions.values().filter_map(|session| session.signaling.as_ref()) {
+                            signaling.request_reconnect();
+                        }
+                        let _ = reply.send(());
+                    }
                     RuntimeControlCommand::Diagnostics { cancel, reply } => {
                         let result = actor.diagnostics_cancellable(cancel).await;
                         let _ = reply.send(result);
@@ -3402,8 +3505,9 @@ async fn run_actor(
                     }
                     RuntimeControlCommand::Shutdown { _operation, reply } => {
                         let result = actor.shutdown().await;
+                        let clean = result.as_ref().is_ok_and(StopSummary::is_success);
                         let _ = reply.send(result);
-                        break;
+                        if clean || !actor.launcher.is_embedded() { break; }
                     }
                 }
             }
@@ -4914,6 +5018,7 @@ impl NetworkRuntimeActor {
                     network_name: spec.name,
                     message: error.to_string(),
                     stage: error.network_setup_stage(),
+                    problem: error.platform_problem(),
                 });
                 continue;
             }
@@ -4924,6 +5029,7 @@ impl NetworkRuntimeActor {
                     network_name,
                     message: error.to_string(),
                     stage: error.network_setup_stage(),
+                    problem: error.platform_problem(),
                 }),
             }
         }
@@ -5156,6 +5262,7 @@ impl NetworkRuntimeActor {
                 phase: RestartPhase::Stop,
                 message: failure.message,
                 stage: None,
+                problem: None,
             });
         }
 
@@ -5178,6 +5285,7 @@ impl NetworkRuntimeActor {
                     phase: RestartPhase::Cleanup,
                     message: cleanup_block_message(&summary.cleanup, name),
                     stage: None,
+                    problem: None,
                 });
                 blocked.insert(name.clone());
             }
@@ -5199,6 +5307,7 @@ impl NetworkRuntimeActor {
                 phase: RestartPhase::Start,
                 message: failure.message,
                 stage: failure.stage,
+                problem: failure.problem,
             });
         }
         summary.cleanup = match self.inspect_cleanup(&names).await {
@@ -5266,6 +5375,7 @@ impl NetworkRuntimeActor {
                     network_name: spec.name,
                     message: error.to_string(),
                     stage: error.network_setup_stage(),
+                    problem: error.platform_problem(),
                 });
                 continue;
             }
@@ -5278,6 +5388,7 @@ impl NetworkRuntimeActor {
                         network_name,
                         message: error.to_string(),
                         stage: error.network_setup_stage(),
+                        problem: error.platform_problem(),
                     });
                 }
             }
@@ -6770,6 +6881,7 @@ impl NetworkRuntimeActor {
                 phase: RestartPhase::Stop,
                 message: failure.message,
                 stage: None,
+                problem: None,
             });
         }
 
@@ -6788,6 +6900,7 @@ impl NetworkRuntimeActor {
                 phase: RestartPhase::Cleanup,
                 message: cleanup_block_message(&summary.cleanup, name),
                 stage: None,
+                problem: None,
             });
         }
 
@@ -6803,6 +6916,7 @@ impl NetworkRuntimeActor {
                     phase: RestartPhase::Start,
                     message: error.to_string(),
                     stage: error.network_setup_stage(),
+                    problem: error.platform_problem(),
                 }),
             }
         }
@@ -7203,6 +7317,9 @@ impl NetworkRuntimeActor {
 
     async fn shutdown(&mut self) -> Result<StopSummary, RuntimeControlError> {
         let summary = self.stop(Vec::new(), true).await?;
+        if !summary.is_success() && self.launcher.is_embedded() {
+            return Ok(summary);
+        }
         match self.services.shutdown().await {
             Ok(_) | Err(EmbeddedServiceError::ActorClosed) => Ok(summary),
             Err(error) => Err(map_service_error(error)),
@@ -8242,6 +8359,9 @@ pub(crate) fn local_exit_unsupported_error(
 }
 
 pub(crate) fn runtime_control_problem(error: &RuntimeControlError) -> NodeProblem {
+    if let RuntimeControlError::Platform(problem) = error {
+        return problem.clone();
+    }
     NodeProblem::new(error.problem_code(), error.to_string())
         .with_message_key(error.message_key())
         .retryable(error.retryable())
@@ -8277,6 +8397,9 @@ fn local_exit_error_with_network(
 ) -> RuntimeControlError {
     let context = format!("网络 [{network_name}] 的本机 Exit 启停");
     match error {
+        RuntimeControlError::Platform(problem) => {
+            RuntimeControlError::Platform(problem.for_network(network_name))
+        }
         RuntimeControlError::ActorClosed => {
             RuntimeControlError::Unavailable(format!("{context}：节点运行时已关闭"))
         }

@@ -82,8 +82,10 @@ static INITIALIZATION_FAILED: AtomicBool = AtomicBool::new(false);
 ///
 /// `0` selects `min(available_parallelism - 1, 8)`. A non-zero value is bounded
 /// to `1..=256`. Configuration is process-global and first-call-wins because
-/// all peers share one persistent pool. Invalid or late configuration is
-/// reported to the caller but never changes established worker state.
+/// all peers share one persistent pool. Repeating the same request after the
+/// pool has started is an accepted no-op so a host can restart its data plane
+/// inside one process; a different value is still reported to the caller and
+/// never changes established worker state.
 pub fn configure_crypto_workers(requested_workers: usize) -> Result<(), String> {
     if requested_workers > MAX_CONFIGURED_WORKERS {
         return Err(format!(
@@ -94,7 +96,14 @@ pub fn configure_crypto_workers(requested_workers: usize) -> Result<(), String> 
         .lock()
         .map_err(|_| "crypto worker configuration lock is poisoned".to_string())?;
     if WORKER_INITIALIZED.load(Ordering::Acquire) {
-        return Err("crypto worker pool was initialized before configuration".to_string());
+        // The pool already runs with the configured size. A host that restarts
+        // its data plane in the same process repeats the same request, which is
+        // a no-op instead of a late reconfiguration.
+        return if CONFIGURED_WORKERS.load(Ordering::Acquire) == requested_workers {
+            Ok(())
+        } else {
+            Err("crypto worker pool was initialized before configuration".to_string())
+        };
     }
     if CONFIGURED.load(Ordering::Acquire) {
         return if CONFIGURED_WORKERS.load(Ordering::Acquire) == requested_workers {

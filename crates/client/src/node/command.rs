@@ -3816,6 +3816,8 @@ pub struct NodeCommandBus {
     events: NodeEventBus,
     audit: Arc<CommandAuditTrail>,
     activity_state: Option<NodeStateStore>,
+    shutdown: watch::Sender<bool>,
+    task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl NodeCommandBus {
@@ -3885,11 +3887,17 @@ impl NodeCommandBus {
         H: NodeCommandHandler,
     {
         let (sender, mut receiver) = mpsc::channel::<CommandEnvelope>(capacity.max(1));
+        let (shutdown, mut shutdown_rx) = watch::channel(false);
         let bus_events = events.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut in_flight = tokio::task::JoinSet::new();
+            let mut stopping = false;
             loop {
                 tokio::select! {
+                    _ = shutdown_rx.changed(), if !stopping => {
+                        stopping = true;
+                        receiver.close();
+                    }
                     envelope = receiver.recv() => {
                         let Some(envelope) = envelope else {
                             break;
@@ -3923,7 +3931,22 @@ impl NodeCommandBus {
             events: bus_events,
             audit: Arc::new(CommandAuditTrail::new(durable_audit)),
             activity_state,
+            shutdown,
+            task: Arc::new(tokio::sync::Mutex::new(Some(task))),
         }
+    }
+
+    /// Close admission and join already admitted commands. This is explicit so
+    /// desktop handles retain their existing clone/drop behavior.
+    pub(crate) async fn shutdown(&self) -> Result<(), NodeCommandBusError> {
+        self.shutdown.send_replace(true);
+        let mut task = self.task.lock().await;
+        if let Some(handle) = task.as_mut() {
+            let result = handle.await;
+            task.take();
+            result.map_err(|_| NodeCommandBusError::Closed)?;
+        }
+        Ok(())
     }
 
     /// Execute one command after server-side authorization. The context must be

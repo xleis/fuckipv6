@@ -127,6 +127,8 @@ pub struct EmbeddedCoordinator {
     coordinator_candidate_store: Option<Arc<CoordinatorCandidateStore>>,
     network_id: Option<NetworkId>,
     signaling_task: Option<JoinHandle<Result<()>>>,
+    signaling_shutdown: tokio::sync::watch::Sender<bool>,
+    maintenance_tasks: Vec<JoinHandle<()>>,
     relay_directory: RelayEndpointDirectory,
     relay_server: Option<RelayServer>,
     relay_task: Option<JoinHandle<Result<()>>>,
@@ -370,7 +372,6 @@ impl EmbeddedCoordinator {
             .context("无法绑定内嵌信令服务")?;
         let actual_signaling_addr = signaling_server.local_addr()?;
         let relay_directory = signaling_server.relay_endpoint_directory();
-        signaling_server.spawn_timeout_cleanup(120);
 
         // Runtime-owned services supply the node-wide persisted public key so
         // recreating a service keeps the invitation identity stable. Direct
@@ -401,7 +402,10 @@ impl EmbeddedCoordinator {
             ticket = ticket.with_ipv6(persisted_allocation.effective_ipv6_pool());
         }
 
-        let signaling_task = tokio::spawn(async move { signaling_server.run().await });
+        let maintenance_tasks = signaling_server.spawn_managed_timeout_cleanup(120);
+        let (signaling_shutdown, shutdown) = tokio::sync::watch::channel(false);
+        let signaling_task =
+            tokio::spawn(async move { signaling_server.run_with_shutdown(shutdown).await });
 
         let signaling_addr = actual_signaling_addr;
         let relay_policy_authority = Arc::new(DurableRelayPolicyAuthority::new(
@@ -418,6 +422,8 @@ impl EmbeddedCoordinator {
             coordinator_candidate_store,
             network_id,
             signaling_task: Some(signaling_task),
+            signaling_shutdown,
+            maintenance_tasks,
             relay_directory,
             relay_server: None,
             relay_task: None,
@@ -725,12 +731,22 @@ impl EmbeddedCoordinator {
 
     pub async fn shutdown(&mut self) -> Result<()> {
         let mut failures = Vec::new();
+        self.signaling_shutdown.send_replace(true);
+        for task in &self.maintenance_tasks {
+            task.abort();
+        }
+        for task in self.maintenance_tasks.drain(..) {
+            if let Err(error) = task.await {
+                if !error.is_cancelled() {
+                    failures.push(error.to_string());
+                }
+            }
+        }
         if let Err(error) = self.disable_relay().await {
             failures.push(format!("QUIC 中继服务关闭失败: {error:#}"));
         }
 
         if let Some(task) = self.signaling_task.take() {
-            task.abort();
             match task.await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => failures.push(format!("信令服务异常退出: {error:#}")),
@@ -788,6 +804,10 @@ async fn resolve_relay_advertisement(
 
 impl Drop for EmbeddedCoordinator {
     fn drop(&mut self) {
+        self.signaling_shutdown.send_replace(true);
+        for task in &self.maintenance_tasks {
+            task.abort();
+        }
         if let Some(task) = self.signaling_task.take() {
             task.abort();
         }

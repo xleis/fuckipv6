@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use fuckipv6_common::domain::{
     CoordinatorCandidate, CoordinatorCandidateResources, CoordinatorCandidateStatus,
@@ -264,6 +265,7 @@ enum EmbeddedServiceCommand {
 #[derive(Clone)]
 pub struct EmbeddedServiceManager {
     sender: mpsc::Sender<EmbeddedServiceCommand>,
+    task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl EmbeddedServiceManager {
@@ -281,7 +283,7 @@ impl EmbeddedServiceManager {
     fn spawn_inner(capacity: usize, configs: Result<ConfigManager, anyhow::Error>) -> Self {
         let (sender, mut receiver) = mpsc::channel::<EmbeddedServiceCommand>(capacity.max(1));
 
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut services = HashMap::<String, EmbeddedCoordinator>::new();
             let configs = configs.map_err(|error| format!("无法确定节点配置目录: {error:#}"));
 
@@ -607,7 +609,20 @@ impl EmbeddedServiceManager {
             }
         });
 
-        Self { sender }
+        Self {
+            sender,
+            task: Arc::new(tokio::sync::Mutex::new(Some(task))),
+        }
+    }
+
+    pub(crate) async fn join_actor(&self) -> anyhow::Result<()> {
+        let mut task = self.task.lock().await;
+        if let Some(handle) = task.as_mut() {
+            let result = handle.await;
+            task.take();
+            result?;
+        }
+        Ok(())
     }
 
     pub async fn start(

@@ -66,6 +66,7 @@ pub struct NodeRuntimeHandler {
     discovery: Option<DiscoveryIndexManager>,
     join_gate: Arc<Mutex<()>>,
     policy_gate: Arc<Mutex<()>>,
+    embedded: bool,
 }
 
 impl NodeRuntimeHandler {
@@ -88,6 +89,7 @@ impl NodeRuntimeHandler {
             discovery: None,
             join_gate: Arc::new(Mutex::new(())),
             policy_gate: Arc::new(Mutex::new(())),
+            embedded: false,
         }
     }
 
@@ -110,6 +112,7 @@ impl NodeRuntimeHandler {
             discovery: Some(discovery),
             join_gate: Arc::new(Mutex::new(())),
             policy_gate: Arc::new(Mutex::new(())),
+            embedded: false,
         }
     }
 
@@ -128,11 +131,26 @@ impl NodeRuntimeHandler {
         let discovery = self.discovery.clone();
         let join_gate = self.join_gate.clone();
         let policy_gate = self.policy_gate.clone();
+        let embedded = self.embedded;
 
         Box::pin(async move {
             let request_id = request.request_id;
             if let Err(problem) = request.validate() {
                 return NodeCommandResult::rejected(request_id, problem);
+            }
+
+            if embedded
+                && matches!(
+                    request.command,
+                    super::NodeCommand::GetDiagnostics
+                        | super::NodeCommand::ApplyTrafficPolicy(_)
+                        | super::NodeCommand::RollbackTrafficPolicy(_)
+                )
+            {
+                return NodeCommandResult::rejected(request_id, NodeProblem::new(
+                    NodeProblemCode::Unsupported,
+                    "Host diagnostics and host traffic-policy installation require an embedded platform adapter",
+                ));
             }
 
             match request.command {
@@ -172,8 +190,11 @@ impl NodeRuntimeHandler {
                         None => (None, None),
                     };
                     let product_names = live_tun_names.clone().unwrap_or_default();
-                    let mut capture =
-                        super::network_interfaces::collect_interfaces(product_names).await;
+                    let mut capture = if embedded {
+                        super::network_interfaces::InterfaceCapture::default()
+                    } else {
+                        super::network_interfaces::collect_interfaces(product_names).await
+                    };
                     if let Some(problem) = runtime_problem {
                         capture.problems.push(problem);
                     }
@@ -4311,9 +4332,7 @@ fn runtime_rejection_scoped(
     error: RuntimeControlError,
     network_name: Option<String>,
 ) -> NodeCommandResult {
-    let mut problem = NodeProblem::new(error.problem_code(), error.to_string())
-        .with_message_key(error.message_key())
-        .retryable(error.retryable());
+    let mut problem = runtime_control_problem(&error);
     if let Some(reason) = error.conflict_reason() {
         problem = problem.with_param("reason", reason);
     }
@@ -4348,6 +4367,17 @@ fn start_failure_problem(summary: &StartSummary, action: &str) -> NodeProblem {
     if let Some(failure) = summary
         .failed
         .iter()
+        .find(|failure| failure.problem.is_some())
+    {
+        return failure
+            .problem
+            .clone()
+            .expect("checked above")
+            .for_network(failure.network_name.clone());
+    }
+    if let Some(failure) = summary
+        .failed
+        .iter()
         .find(|failure| failure.stage.is_some())
     {
         return network_setup_problem(
@@ -4361,6 +4391,17 @@ fn start_failure_problem(summary: &StartSummary, action: &str) -> NodeProblem {
 }
 
 fn restart_failure_problem(summary: &RestartSummary) -> NodeProblem {
+    if let Some(failure) = summary
+        .failed
+        .iter()
+        .find(|failure| failure.problem.is_some())
+    {
+        return failure
+            .problem
+            .clone()
+            .expect("checked above")
+            .for_network(failure.network_name.clone());
+    }
     if let Some(failure) = summary
         .failed
         .iter()
@@ -4564,6 +4605,27 @@ pub(crate) fn spawn_command_bus_with_runtime_and_audit(
 ) -> super::NodeCommandBus {
     let handler =
         NodeRuntimeHandler::with_runtime(state.clone(), registry, services, runtime, configs);
+    super::NodeCommandBus::spawn_with_state_and_durable_audit(
+        Arc::new(handler),
+        events,
+        32,
+        state,
+        audit,
+    )
+}
+
+pub(crate) fn spawn_embedded_command_bus(
+    state: NodeStateStore,
+    registry: MultiNetworkRegistry,
+    events: super::NodeEventBus,
+    services: EmbeddedServiceManager,
+    runtime: NetworkRuntimeManager,
+    configs: ConfigManager,
+    audit: Arc<crate::owner_security::audit::OwnerSecurityAudit>,
+) -> super::NodeCommandBus {
+    let mut handler =
+        NodeRuntimeHandler::with_runtime(state.clone(), registry, services, runtime, configs);
+    handler.embedded = true;
     super::NodeCommandBus::spawn_with_state_and_durable_audit(
         Arc::new(handler),
         events,

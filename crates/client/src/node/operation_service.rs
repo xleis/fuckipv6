@@ -116,6 +116,13 @@ pub struct OperationService {
     registry: Arc<Mutex<OperationRegistry>>,
     cancel_senders: Arc<Mutex<BTreeMap<String, watch::Sender<bool>>>>,
     store_path: Option<PathBuf>,
+    tasks: Arc<tokio::sync::Mutex<OperationTasks>>,
+}
+
+#[derive(Default)]
+struct OperationTasks {
+    closed: bool,
+    handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -145,6 +152,7 @@ impl OperationService {
             registry: Arc::new(Mutex::new(OperationRegistry::default())),
             cancel_senders: Arc::new(Mutex::new(BTreeMap::new())),
             store_path: None,
+            tasks: Default::default(),
         }
     }
 
@@ -178,7 +186,7 @@ impl OperationService {
         }
     }
 
-    fn with_store_path(
+    pub(crate) fn with_store_path(
         commands: NodeCommandBus,
         state: NodeStateStore,
         events: NodeEventBus,
@@ -197,6 +205,7 @@ impl OperationService {
             registry: Arc::new(Mutex::new(registry)),
             cancel_senders: Arc::new(Mutex::new(BTreeMap::new())),
             store_path: Some(store_path),
+            tasks: Default::default(),
         })
     }
 
@@ -212,6 +221,13 @@ impl OperationService {
         request: NodeCommandRequest,
         idempotency_key: IdempotencyKey,
     ) -> Result<(NodeOperationSnapshot, bool), OperationSubmitError> {
+        let mut tasks = self.tasks.lock().await;
+        if tasks.closed {
+            return Err(OperationSubmitError::Invalid(NodeProblem::new(
+                NodeProblemCode::Unavailable,
+                "Operation service is stopped",
+            )));
+        }
         request.validate().map_err(OperationSubmitError::Invalid)?;
         if request.request_id == 0 {
             return Err(OperationSubmitError::Invalid(NodeProblem::new(
@@ -322,11 +338,36 @@ impl OperationService {
             }
             let service = self.clone();
             let context = context.with_audit_operation_id(operation_id.clone());
-            tokio::spawn(async move {
+            tasks.handles.push(tokio::spawn(async move {
                 service.run(operation_id, context, request).await;
-            });
+            }));
         }
         Ok((snapshot, created))
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<()> {
+        let mut tasks = self.tasks.lock().await;
+        tasks.closed = true;
+        for cancel in self
+            .cancel_senders
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .values()
+        {
+            cancel.send_replace(true);
+        }
+        let mut failures = Vec::new();
+        while let Some(handle) = tasks.handles.last_mut() {
+            let result = handle.await;
+            tasks.handles.pop();
+            if let Err(error) = result {
+                failures.push(error.to_string());
+            }
+        }
+        if !failures.is_empty() {
+            bail!("Operation tasks failed: {}", failures.join("; "));
+        }
+        Ok(())
     }
 
     /// Request cooperative cancellation. The operation remains running until

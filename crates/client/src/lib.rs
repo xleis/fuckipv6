@@ -3,6 +3,7 @@ pub mod config_manager;
 pub mod config_reload;
 pub mod config_transaction;
 pub mod discovery_index;
+pub mod embedded;
 pub mod file_share;
 #[cfg(all(
     feature = "gpui-shell",

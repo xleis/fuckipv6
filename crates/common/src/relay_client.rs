@@ -27,6 +27,33 @@ pub struct QuicRelayClient {
     connection: quinn::Connection,
     incoming_rx: Arc<Mutex<mpsc::Receiver<RelayPacket>>>,
     member_grant: Arc<RwLock<RelayMemberGrant>>,
+    incoming_task: Arc<IncomingTask>,
+}
+
+struct IncomingTask(Mutex<Option<tokio::task::JoinHandle<()>>>);
+
+impl IncomingTask {
+    async fn stop(&self) {
+        let mut slot = self.0.lock().await;
+        if let Some(task) = slot.as_mut() {
+            task.abort();
+            let result = task.await;
+            slot.take();
+            if let Err(error) = result {
+                if !error.is_cancelled() {
+                    tracing::error!(%error, "Relay receive task failed");
+                }
+            }
+        }
+    }
+}
+
+impl Drop for IncomingTask {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.get_mut().take() {
+            task.abort();
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,13 +130,14 @@ impl QuicRelayClient {
         )
         .await?;
         let (incoming_tx, incoming_rx) = mpsc::channel(RELAY_INCOMING_QUEUE_CAPACITY);
-        spawn_incoming_task(connection.clone(), incoming_tx);
+        let incoming_task = spawn_incoming_task(connection.clone(), incoming_tx);
 
         Ok(Self {
             endpoint,
             connection,
             incoming_rx: Arc::new(Mutex::new(incoming_rx)),
             member_grant: Arc::new(RwLock::new(member_grant.clone())),
+            incoming_task: Arc::new(IncomingTask(Mutex::new(Some(incoming_task)))),
         })
     }
 
@@ -314,6 +342,10 @@ impl QuicRelayClient {
     pub async fn close(&self) {
         self.connection.close(0u32.into(), b"done");
         self.endpoint.close(0u32.into(), b"done");
+        self.incoming_task.stop().await;
+        let mut incoming = self.incoming_rx.lock().await;
+        incoming.close();
+        while incoming.try_recv().is_ok() {}
     }
 }
 
@@ -372,7 +404,10 @@ async fn register_relay_connection(
     }
 }
 
-fn spawn_incoming_task(connection: quinn::Connection, incoming_tx: mpsc::Sender<RelayPacket>) {
+fn spawn_incoming_task(
+    connection: quinn::Connection,
+    incoming_tx: mpsc::Sender<RelayPacket>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let (mut send, mut recv) = match connection.accept_bi().await {
@@ -419,7 +454,28 @@ fn spawn_incoming_task(connection: quinn::Connection, incoming_tx: mpsc::Sender<
                 tracing::warn!("QUIC relay 接收流处理失败: {err:#}");
             }
         }
-    });
+    })
+}
+
+#[cfg(test)]
+mod incoming_task_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn relay_incoming_task_stop_joins_and_releases_owned_resources() {
+        let resource = Arc::new(());
+        let weak = Arc::downgrade(&resource);
+        let task = tokio::spawn(async move {
+            let _resource = resource;
+            std::future::pending::<()>().await;
+        });
+        let owner = Arc::new(IncomingTask(Mutex::new(Some(task))));
+        let clone = owner.clone();
+        owner.stop().await;
+        clone.stop().await;
+        assert!(weak.upgrade().is_none());
+        assert!(owner.0.lock().await.is_none());
+    }
 }
 
 fn now_secs() -> u64 {

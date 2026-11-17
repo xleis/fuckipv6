@@ -558,8 +558,7 @@ impl RuntimeRecoveryEvents {
         )
     }
 
-    #[cfg(test)]
-    fn without_os_watcher_for_test() -> (Self, RuntimeRecoveryTriggerSender) {
+    fn without_os_watcher() -> (Self, RuntimeRecoveryTriggerSender) {
         let (trigger_tx, trigger_rx) = mpsc::channel(RECOVERY_TRIGGER_QUEUE_CAPACITY);
         (
             Self {
@@ -569,6 +568,11 @@ impl RuntimeRecoveryEvents {
             },
             RuntimeRecoveryTriggerSender { sender: trigger_tx },
         )
+    }
+
+    #[cfg(test)]
+    fn without_os_watcher_for_test() -> (Self, RuntimeRecoveryTriggerSender) {
+        Self::without_os_watcher()
     }
 
     fn shutdown(&self) {
@@ -611,6 +615,7 @@ impl RuntimeRecoveryEvents {
 }
 
 pub(crate) struct ClientRuntime {
+    embedded_network: Option<crate::embedded::NetworkLease>,
     pub(crate) signaling: Arc<SignalingClient>,
     pub(crate) p2p: P2pEngine,
     fallback: Arc<dyn FallbackTransport>,
@@ -1462,6 +1467,9 @@ impl Drop for ClientRuntime {
         abort_task(&self.relay_grant_renewal_task);
         abort_task(&self.exit_contribution_member_refresh_task);
         self.recovery_events.shutdown();
+        if self.embedded_network.is_some() {
+            self.p2p.request_shutdown();
+        }
     }
 }
 
@@ -1576,6 +1584,30 @@ pub(crate) struct RuntimeExtensions {
     pub(crate) observability: RuntimeObservability,
     /// None retains native TUN creation; mobile hosts inject an external device.
     pub(crate) packet_device: Option<Box<dyn PacketDevice>>,
+    pub(crate) embedded: Option<crate::embedded::EmbeddedContext>,
+}
+
+struct InitializingP2p {
+    engine: Option<P2pEngine>,
+    embedded: Option<crate::embedded::EmbeddedContext>,
+}
+
+impl Drop for InitializingP2p {
+    fn drop(&mut self) {
+        if let Some(engine) = self.engine.take() {
+            engine.request_shutdown();
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let task = runtime.spawn(async move { engine.shutdown().await });
+                if let Some(context) = &self.embedded {
+                    context
+                        .initialization_cleanup
+                        .lock()
+                        .expect("initialization cleanup poisoned")
+                        .push(task);
+                }
+            }
+        }
+    }
 }
 
 pub(crate) async fn prepare_client_runtime_ext(
@@ -1591,9 +1623,18 @@ pub(crate) async fn prepare_client_runtime_ext(
         file_runtime,
         observability,
         packet_device,
+        embedded,
     } = extensions;
     // Linux's full runtime also owns host routes/firewall state. P1 exposes
     // packet I/O there but does not treat an external device name as a host link.
+    #[cfg(target_os = "linux")]
+    if embedded.is_some() {
+        return Err(crate::embedded::PlatformError(NodeProblem::new(
+            NodeProblemCode::Unsupported,
+            "Embedded packet I/O requires an external Linux route adapter",
+        ))
+        .into());
+    }
     #[cfg(target_os = "linux")]
     anyhow::ensure!(
         packet_device.is_none(),
@@ -1604,6 +1645,10 @@ pub(crate) async fn prepare_client_runtime_ext(
         failover_audit,
     } = observability;
     config.tun.name = crate::multi_network::derive_tun_name(network_name, &config.tun.name);
+    let file_store_root = match &embedded {
+        Some(context) => context.storage_root.clone(),
+        None => ConfigManager::new()?.config_dir().to_path_buf(),
+    };
 
     #[cfg(target_os = "linux")]
     crate::routing::doh_dns::DohDnsGuard::restore_stale_host_configuration()
@@ -1621,6 +1666,10 @@ pub(crate) async fn prepare_client_runtime_ext(
     let relay_identity = identity.clone();
 
     let (p2p, nat_report) = create_p2p_engine(&config).await?;
+    let mut initializing_p2p = InitializingP2p {
+        engine: Some(p2p.clone()),
+        embedded: embedded.clone(),
+    };
     p2p.set_identity(identity.clone()).await;
     let signaling = Arc::new(connect_signaling(&config, identity, &p2p, &nat_report).await?);
     p2p.set_control_signaling(signaling.clone()).await;
@@ -1641,8 +1690,28 @@ pub(crate) async fn prepare_client_runtime_ext(
         relay_selection.as_ref(),
     )
     .await;
-    let native_packet_device = packet_device.is_none();
-    let tun = create_packet_device(&config, &assigned_ips, packet_device).await?;
+    let native_packet_device = packet_device.is_none() && embedded.is_none();
+    let (tun, embedded_network) = match &embedded {
+        Some(context) => {
+            let network = context
+                .platform
+                .open_network(crate::embedded::EmbeddedNetworkRequest {
+                    network_name: network_name.unwrap_or("default").to_owned(),
+                    assigned_ips: assigned_ips.clone(),
+                    config: config.clone(),
+                    transport_addr: p2p.local_addr(),
+                    dns_servers: context.dns_servers.clone(),
+                })
+                .await
+                .map_err(crate::embedded::PlatformError)?;
+            let tun = create_packet_device(&config, &assigned_ips, Some(network.device)).await?;
+            (tun, Some(network.lease))
+        }
+        None => (
+            create_packet_device(&config, &assigned_ips, packet_device).await?,
+            None,
+        ),
+    };
     #[cfg(target_os = "linux")]
     let mut tun = tun;
     let acl = fuckipv6_common::AclEngine::new(&config.acl);
@@ -1776,7 +1845,11 @@ pub(crate) async fn prepare_client_runtime_ext(
 
     // 创建性能统计收集器
     let stats = StatsCollector::new();
-    let (recovery_events, recovery_trigger_tx) = RuntimeRecoveryEvents::spawn();
+    let (recovery_events, recovery_trigger_tx) = if embedded.is_some() {
+        RuntimeRecoveryEvents::without_os_watcher()
+    } else {
+        RuntimeRecoveryEvents::spawn()
+    };
     let relay_state = match failover_audit {
         Some(audit) => {
             let actor = NodeId::from_public_key(&relay_identity.public_key());
@@ -1817,15 +1890,22 @@ pub(crate) async fn prepare_client_runtime_ext(
 
     tracing::info!("性能监控已启用");
 
-    let tasks = spawn_runtime_tasks_ext(
-        config_path,
-        &config,
-        &p2p,
-        &stats,
-        assigned_ip,
-        enable_ipc,
-        Some(control_tx),
-    );
+    let tasks = if embedded.is_some() {
+        RuntimeTasks {
+            ipc_task: None,
+            config_reload_task: None,
+        }
+    } else {
+        spawn_runtime_tasks_ext(
+            config_path,
+            &config,
+            &p2p,
+            &stats,
+            assigned_ip,
+            enable_ipc,
+            Some(control_tx),
+        )
+    };
 
     // 主事件循环
     let mut heartbeat_interval =
@@ -1850,7 +1930,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         .map(|runtime| FileNetworkDataPlane::new(runtime.clone()));
     let local_node_id = NodeId::from_public_key(&relay_identity.public_key_bytes());
     let file_origin_store = FileOriginStore::at(
-        ConfigManager::new()?.config_dir(),
+        &file_store_root,
         network_id
             .as_ref()
             .map(NetworkId::as_str)
@@ -1860,7 +1940,8 @@ pub(crate) async fn prepare_client_runtime_ext(
     if let Err(error) = file_origin.restore_paused(unix_time_ms()) {
         tracing::warn!(error = %error, "恢复暂停的 File 续传失败，已忽略本地续传日志");
     }
-    Ok(ClientRuntime {
+    let runtime = ClientRuntime {
+        embedded_network,
         signaling,
         p2p,
         fallback,
@@ -1925,12 +2006,14 @@ pub(crate) async fn prepare_client_runtime_ext(
         },
         exit_contribution_member_refresh_task: None,
         exit_contribution_directory_updates: None,
-        ipc_task: Some(tasks.ipc_task),
-        config_reload_task: Some(tasks.config_reload_task),
+        ipc_task: tasks.ipc_task,
+        config_reload_task: tasks.config_reload_task,
         relay_reconnect_task: None,
         relay_grant_renewal_task: None,
         coordinator_takeover_wakeup: None,
-    })
+    };
+    initializing_p2p.engine.take();
+    Ok(runtime)
 }
 
 #[cfg(target_os = "linux")]
@@ -1997,8 +2080,8 @@ fn websocket_host_port(url: &str) -> Result<(String, u16)> {
 }
 
 struct RuntimeTasks {
-    ipc_task: JoinHandle<()>,
-    config_reload_task: JoinHandle<()>,
+    ipc_task: Option<JoinHandle<()>>,
+    config_reload_task: Option<JoinHandle<()>>,
 }
 
 fn load_identity(config: &ClientConfig) -> Result<Identity> {
@@ -2154,14 +2237,14 @@ fn spawn_runtime_tasks_ext(
     control_tx: Option<mpsc::UnboundedSender<ipc::RuntimeCommand>>,
 ) -> RuntimeTasks {
     let ipc_task = if enable_ipc {
-        match control_tx {
+        Some(match control_tx {
             Some(control_tx) => {
                 ipc::spawn_server_with_control(stats.clone(), p2p.clone(), assigned_ip, control_tx)
             }
             None => ipc::spawn_server(stats.clone(), p2p.clone(), assigned_ip),
-        }
+        })
     } else {
-        tokio::spawn(async {})
+        None
     };
     let config_reload_task = crate::config_reload::spawn_config_watcher(
         config_path.to_string(),
@@ -2170,7 +2253,7 @@ fn spawn_runtime_tasks_ext(
     );
     RuntimeTasks {
         ipc_task,
-        config_reload_task,
+        config_reload_task: Some(config_reload_task),
     }
 }
 
@@ -3280,6 +3363,7 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
     file_origin_expiry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut exit_connection_watchdog = tokio::time::interval(EXIT_CONNECTION_WATCHDOG_INTERVAL);
     exit_connection_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut packet_reader_open = true;
     loop {
         let exit_drain_deadline = local_exit_drain_deadline(runtime);
         let exit_drain = wait_for_local_exit_drain(exit_drain_deadline);
@@ -3294,9 +3378,13 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
         let file_download_retry = wait_for_file_retry(file_download_retry_deadline);
         tokio::select! {
             // 从TUN设备读取数据包
-            Some(packets) = runtime.tun_io.packet_rx().recv() => {
-                for packet in packets {
-                    handle_tun_reader_packet(runtime, packet).await;
+            packets = runtime.tun_io.packet_rx().recv(), if packet_reader_open => {
+                match packets {
+                    Some(packets) => for packet in packets {
+                        handle_tun_reader_packet(runtime, packet).await;
+                    },
+                    None if runtime.embedded_network.is_some() => anyhow::bail!("External packet reader stopped"),
+                    None => packet_reader_open = false,
                 }
             }
 
@@ -6771,6 +6859,18 @@ async fn shutdown_runtime(runtime: &mut ClientRuntime) -> RuntimeCleanupOutcome 
         None => cleanup_deadline_exhausted(),
     };
     outcome.record("TUN 设备", tun);
+
+    if let Some(lease) = runtime.embedded_network.as_mut() {
+        let status = match phase_timeout(deadline, TASK_STOP_TIMEOUT) {
+            Some(wait) => match tokio::time::timeout(wait, lease.close()).await {
+                Ok(Ok(())) => CleanupStatus::Removed,
+                Ok(Err(problem)) => CleanupStatus::Failed(problem.message),
+                Err(_) => CleanupStatus::Deferred("Embedded network cleanup timed out".into()),
+            },
+            None => cleanup_deadline_exhausted(),
+        };
+        outcome.record("Embedded network lease", status);
+    }
 
     outcome
 }

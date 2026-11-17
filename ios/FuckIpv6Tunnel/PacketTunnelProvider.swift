@@ -60,6 +60,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
     }
 
     override func startTunnel(options: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
+        Diagnostics.record("startTunnel called")
         let box = CompletionBox(completionHandler)
         Thread.detachNewThread { [self] in
             do {
@@ -96,10 +97,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
         guard let configuration = try TunnelConfiguration.load() else {
             throw Fv6Failure(status: .invalidArgument, message: "no tunnel configuration; save one from the app first")
         }
-        let networkConfig = storageRoot
-            .appendingPathComponent(configuration.networkName, isDirectory: true)
-            .appendingPathComponent("config.toml")
-
         // The identity must be back on disk before anything can create a new
         // one, otherwise a fresh key would replace the stored identity.
         do {
@@ -110,14 +107,28 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
             NSLog("fuckipv6: restoring the node identity failed: \(error.localizedDescription)")
         }
 
-        if !FileManager.default.fileExists(atPath: networkConfig.path) {
-            publish(.starting, message: "creating network configuration")
+        let rootListing = (try? FileManager.default.contentsOfDirectory(atPath: storageRoot.path))?
+            .sorted().joined(separator: ",") ?? "unreadable"
+        Diagnostics.record("storage root files: \(rootListing)")
+        let networkDirectory = storageRoot.appendingPathComponent(configuration.networkName, isDirectory: true)
+        let networkListing = (try? FileManager.default.contentsOfDirectory(atPath: networkDirectory.path))?
+            .sorted().joined(separator: ",") ?? "missing"
+        Diagnostics.record("network dir files: \(networkListing)")
+        // The network record lives in the configuration generation store, so a
+        // missing <root>/<network>/config.toml says nothing about registration.
+        // Creating is therefore attempted unconditionally and the duplicate
+        // rejection is treated as success: the node then starts from the record.
+        publish(.starting, message: "creating network configuration")
+        do {
             try Fv6Node.prepareNetwork(
                 storageRoot: storageRoot,
                 networkName: configuration.networkName,
                 coordinatorURL: configuration.coordinatorURL,
                 makeDefault: true
             )
+        } catch let failure as Fv6Failure where failure.message.contains("已存在")
+            || failure.message.contains("already exists") {
+            Diagnostics.record("network already registered; continuing")
         }
 
         publish(.starting, message: "starting node")
@@ -150,6 +161,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
     /// Stops every resource in dependency order: pump, node, endpoint, settings,
     /// then the plaintext identity. Safe to call repeatedly and from any thread.
     private func teardownNode() {
+        Diagnostics.record("teardownNode")
         state.lock()
         let node = self.node
         let endpoint = self.endpoint
@@ -209,6 +221,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
     func openNetwork(settingsJSON: Data, endpoint pointer: OpaquePointer) -> Int32 {
         do {
             let settings = try JSONDecoder().decode(TunnelSettings.self, from: settingsJSON)
+            Diagnostics.record("openNetwork: network=\(settings.network) mtu=\(settings.mtu) transport=\(settings.transport) routes=\(settings.routes.count)")
             let networkSettings = try settings.makeNetworkSettings()
 
             state.lock()
@@ -221,6 +234,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
                 result.complete(error)
             }
             if let error = result.wait(seconds: 20) {
+                Diagnostics.record("applying tunnel settings failed: \(error.localizedDescription)")
                 NSLog("fuckipv6: applying tunnel settings failed: \(error.localizedDescription)")
                 return (error as? Fv6Failure)?.code ?? Fv6Status.io.rawValue
             }
@@ -253,6 +267,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
             }
             previous?.release()
             pump.start()
+            Diagnostics.record("packet pump started")
 
             NSLog("fuckipv6: tunnel configured network=\(settings.network) mtu=\(settings.mtu) transport=\(settings.transport)")
             return Fv6Status.ok.rawValue
@@ -264,6 +279,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
     }
 
     func closeNetwork() -> Int32 {
+        Diagnostics.record("closeNetwork")
         state.lock()
         let endpoint = self.endpoint
         let pump = self.pump
@@ -298,6 +314,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
             updatedAt: Date(),
             snapshotJSON: snapshotJSON
         )
+        Diagnostics.record("tunnel phase -> \(phase.rawValue) \(message ?? "")")
         do {
             try status.save()
         } catch {

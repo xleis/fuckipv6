@@ -6,6 +6,10 @@
     <array>
         <string>group.com.lingxifox.fuckipv6</string>
     </array>
+    <key>com.apple.developer.networking.networkextension</key>
+    <array>
+        <string>packet-tunnel-provider</string>
+    </array>
     <key>keychain-access-groups</key>
     <array>
         <string>$(AppIdentifierPrefix)com.lingxifox.fuckipv6</string>

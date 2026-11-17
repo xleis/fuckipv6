@@ -20,6 +20,8 @@
     <string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key>
     <string>$(CURRENT_PROJECT_VERSION)</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Connects to the fuckipv6 coordinator on your local network.</string>
     <key>NSExtension</key>
     <dict>
         <key>NSExtensionPointIdentifier</key>

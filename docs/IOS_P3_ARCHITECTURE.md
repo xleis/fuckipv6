@@ -86,6 +86,14 @@ App: VPNController.connect()
 非空、不超过 MTU、版本为 4/6、IPv4 的 IHL/total_len、IPv6 的 payload_len 必须与缓冲区一致，
 不合法返回 `InvalidPacket`，不会进入数据面。
 
+**发送路径的平台差异（实测）**：Rust 数据面按批发送——一次设备读取的多个包一起 seal 后交给传输层。
+`crates/client/src/p2p/udp_batch.rs` 的 Linux 分支用 `sendmmsg` 一次发一批；非 Linux 分支
+（macOS 与 iOS 都走这里）只发第一个数据报并返回 `Ok(1)`，于是
+`send_batch_to_or_fallback_in_place`（`crates/client/src/p2p/connection.rs:2170`）把同批其余数据报
+按设计转成 sealed relay 回退。正确性不受影响：密文是同一份、链路加密不降级、数据全部到达；
+但直连 P2P 只承载每批的第一个包，批量吞吐实际由中继承担。要提升直连吞吐需要在 Darwin 上补一个
+按序循环的 `send_batch` 实现，属性能优化，P3 未改动（实测数据见 `docs/IOS_P3_TEST_REPORT.md` §5.4）。
+
 **结束顺序**：`stop()` 先把 `running` 置 false 并推进 generation，等在途发送计数归零，
 再等 node→host 线程退出，返回“是否排空”。只有返回 true 才允许释放 endpoint；
 未排空时保留句柄并记录日志，避免悬挂回调访问已释放内存。
@@ -178,3 +186,7 @@ iOS 侧只实现 P2 定义的平台接口，不改动 `crates/client`：
   （`$(AppIdentifierPrefix)` 只在签名时展开），当前未硬编码前缀。
 - 未实现 Exit Node、全局代理与分流 UI；默认路由刻意不捕获。
 - 网络切换只做 TUN 侧重建，不主动触发 Mesh 重选（交给 Rust 的路径变更逻辑）。
+- 数据面成员资格由协调端的 network record（`members`）决定：不在其中的节点能注册、拿到虚拟 IP，
+  但会 `peers=0` 且拿不到 relay 端点。iOS 侧没有提交通行名单的入口，开发联调时由协调端配置决定。
+- 极端注入速率（200 µs 间隔、512 × 1200 B 连发）下节点控制请求会等待超时，未定位；
+  正常速率（≥1 ms 间隔）无此现象。

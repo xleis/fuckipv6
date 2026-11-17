@@ -25,6 +25,18 @@ enum AppGroup {
         return url
     }
 
+    /// Diagnostics only: reports the resolved container and its writability so a
+    /// failure to persist configuration is distinguishable from a VPN error.
+    static func describe() -> String {
+        do {
+            let url = try container()
+            let writable = FileManager.default.isWritableFile(atPath: url.path)
+            return "\(url.path) writable=\(writable)"
+        } catch {
+            return "unavailable: \(error.localizedDescription)"
+        }
+    }
+
     /// Storage root handed to the Rust node. Kept absolute: the node rejects
     /// relative paths and every file under it uses the existing desktop layout
     /// (networks.json, node_identity.pem, <network>/config.toml).

@@ -65,3 +65,6 @@ __pycache__/
 # Generated Rust static libraries and headers for iOS
 /ios/Rust/lib/
 /ios/Rust/include/
+
+# Local development state (dev coordinator, probe storage)
+/.tmp/

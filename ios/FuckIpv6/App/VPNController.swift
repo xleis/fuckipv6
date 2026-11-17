@@ -32,6 +32,15 @@ final class VPNController: ObservableObject {
                 self?.refreshStatus()
             }
         }
+        Diagnostics.record("app launched; app group \(AppGroup.describe())")
+        // Probe the shared storage root once: a write failure here explains every
+        // later "permission denied" during configuration save.
+        do {
+            let root = try AppGroup.storageRoot()
+            Diagnostics.record("storage root ok: \(root.path)")
+        } catch {
+            Diagnostics.record("storage root failed: \(error.localizedDescription)")
+        }
         if let stored = try? TunnelConfiguration.load() {
             configuration = stored
         }
@@ -51,6 +60,12 @@ final class VPNController: ObservableObject {
         vpnStatus == .connecting || vpnStatus == .disconnecting || vpnStatus == .reasserting
     }
 
+    private func report(_ step: String, _ error: Error) {
+        let message = "\(step) failed: \(error.localizedDescription)"
+        errorMessage = message
+        Diagnostics.record(message)
+    }
+
     func refresh() async {
         do {
             try await loadManager()
@@ -64,22 +79,51 @@ final class VPNController: ObservableObject {
     func saveConfiguration() async {
         do {
             try configuration.save()
+        } catch {
+            report("save configuration", error)
+            return
+        }
+        do {
             try await loadManager()
+            Diagnostics.record("configuration saved")
             errorMessage = nil
         } catch {
-            errorMessage = error.localizedDescription
+            report("load vpn profile", error)
         }
     }
 
     func connect() async {
+        Diagnostics.record("connect tapped: \(configuration.networkName) @ \(configuration.coordinatorURL)")
         do {
             try configuration.save()
-            try await loadManager()
-            guard let manager else { return }
-            try manager.connection.startVPNTunnel()
-            errorMessage = nil
+            Diagnostics.record("configuration saved")
         } catch {
-            errorMessage = error.localizedDescription
+            report("save configuration", error)
+            refreshStatus()
+            return
+        }
+        let diagnostic = await Reachability.check(urlString: configuration.coordinatorURL)
+        Diagnostics.record("coordinator probe: \(diagnostic ?? "reachable")")
+        do {
+            try await loadManager()
+            Diagnostics.record("vpn profile saved")
+        } catch {
+            report("save vpn profile", error)
+            refreshStatus()
+            return
+        }
+        guard let manager else { return }
+        do {
+            try manager.connection.startVPNTunnel()
+        } catch {
+            report("start tunnel", error)
+            refreshStatus()
+            return
+        }
+        if let diagnostic {
+            errorMessage = "Coordinator is unreachable: \(diagnostic)"
+        } else {
+            errorMessage = nil
         }
         refreshStatus()
     }
@@ -118,7 +162,11 @@ final class VPNController: ObservableObject {
     }
 
     private func refreshStatus() {
-        vpnStatus = manager?.connection.status ?? .invalid
+        let status = manager?.connection.status ?? .invalid
+        if status != vpnStatus {
+            Diagnostics.record("vpn status -> \(status.rawValue)")
+        }
+        vpnStatus = status
         reloadTunnelStatus()
     }
 

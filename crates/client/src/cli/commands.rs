@@ -2799,6 +2799,7 @@ fn linux_recovery_expectations(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn linux_recovery_request(
     mode: fuckipv6_common::RoutingMode,
     global_proxy_active: bool,
@@ -2865,7 +2866,6 @@ fn log_linux_recovery_report(report: &RecoveryReport) {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn recovery_started_reason_code(trigger: RecoveryTrigger) -> &'static str {
     match trigger {
         RecoveryTrigger::SleepWake => "recovery.sleep_wake.started",
@@ -10210,6 +10210,7 @@ mod tests {
         assert!(!local_exit_effective(false, true));
         assert!(!local_exit_effective(true, false));
         assert!(!local_exit_effective(false, false));
+        #[cfg(target_os = "linux")]
         assert_eq!(
             exit_forwarding_action(local_exit_effective(false, true), false, false),
             ExitForwardingAction::Keep
@@ -10641,13 +10642,13 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
         assert_eq!(relay_path, PathRecoveryState::Connected);
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn exit_connection_timeout_has_stable_recovery_reason_codes() {
         assert_eq!(
             recovery_started_reason_code(RecoveryTrigger::ExitConnectionTimeout),
             "recovery.connection_timeout.started"
         );
+        #[cfg(target_os = "linux")]
         assert_eq!(
             recovery_failure_reason_code(RecoveryTrigger::ExitConnectionTimeout),
             "recovery.connection_timeout.failed_closed"

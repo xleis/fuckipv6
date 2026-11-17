@@ -29,10 +29,23 @@ final class FakePacketFlow: PacketFlow, @unchecked Sendable {
 
     /// Delivers one batch to the currently armed read.
     func push(_ packets: [PacketPumpPacket]) {
+        currentHandler()?(packets)
+    }
+
+    /// Delivers one batch from a fresh thread. The real system flow owns its own
+    /// queue, so a delivery that blocks inside the pump must not block the caller
+    /// that is about to observe it.
+    func pushAsync(_ packets: [PacketPumpPacket]) {
+        let handler = currentHandler()
+        Thread.detachNewThread {
+            handler?(packets)
+        }
+    }
+
+    private func currentHandler() -> (@Sendable ([PacketPumpPacket]) -> Void)? {
         lock.lock()
-        let handler = self.handler
-        lock.unlock()
-        handler?(packets)
+        defer { lock.unlock() }
+        return handler
     }
 }
 
@@ -258,3 +271,297 @@ final class PacketPumpTests: XCTestCase {
         XCTAssertNil(PacketPumpPacket(data: Data()))
     }
 }
+
+/// Channel whose send and receive paths can be parked at an exact point, so the
+/// lifecycle tests exercise real interleavings instead of sleeping and hoping.
+final class BlockingPacketChannel: PacketChannel, @unchecked Sendable {
+    let mtu: Int
+    private let lock = NSCondition()
+    private var sentPackets: [Data] = []
+    private var queue: [Data] = []
+    private var sendCalls = 0
+    private var receiveCalls = 0
+    private var holdSend = false
+    private var holdReceive = false
+    var receiveError: Fv6Failure?
+    var sendStatus = Fv6Status.ok.rawValue
+
+    init(mtu: Int = 1280) {
+        self.mtu = mtu
+    }
+
+    var sent: [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        return sentPackets
+    }
+
+    func pauseSends() {
+        lock.lock()
+        holdSend = true
+        lock.unlock()
+    }
+
+    func resumeSends() {
+        lock.lock()
+        holdSend = false
+        lock.broadcast()
+        lock.unlock()
+    }
+
+    func pauseReceives() {
+        lock.lock()
+        holdReceive = true
+        lock.unlock()
+    }
+
+    func resumeReceives() {
+        lock.lock()
+        holdReceive = false
+        lock.broadcast()
+        lock.unlock()
+    }
+
+    func waitForSendCall(_ count: Int = 1, timeout: TimeInterval = 2) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        lock.lock()
+        defer { lock.unlock() }
+        while sendCalls < count {
+            if !lock.wait(until: deadline), sendCalls < count {
+                return false
+            }
+        }
+        return true
+    }
+
+    func waitForReceiveCall(_ count: Int = 1, timeout: TimeInterval = 2) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        lock.lock()
+        defer { lock.unlock() }
+        while receiveCalls < count {
+            if !lock.wait(until: deadline), receiveCalls < count {
+                return false
+            }
+        }
+        return true
+    }
+
+    func enqueue(_ packet: Data) {
+        lock.lock()
+        queue.append(packet)
+        lock.unlock()
+    }
+
+    func send(_ packet: Data) -> Int32 {
+        lock.lock()
+        sendCalls += 1
+        lock.broadcast()
+        while holdSend {
+            lock.wait(until: Date().addingTimeInterval(0.01))
+        }
+        sentPackets.append(packet)
+        let status = sendStatus
+        lock.unlock()
+        return status
+    }
+
+    func receive(into buffer: inout [UInt8], timeout: TimeInterval) throws -> Int {
+        lock.lock()
+        receiveCalls += 1
+        lock.broadcast()
+        while holdReceive {
+            lock.wait(until: Date().addingTimeInterval(0.01))
+        }
+        if let error = receiveError {
+            lock.unlock()
+            throw error
+        }
+        let next = queue.isEmpty ? nil : queue.removeFirst()
+        lock.unlock()
+
+        guard let next else {
+            Thread.sleep(forTimeInterval: 0.05)
+            throw Fv6Failure(status: .timeout, message: "queue is empty")
+        }
+        let count = min(next.count, buffer.count)
+        buffer.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            next.copyBytes(to: base.assumingMemoryBound(to: UInt8.self), count: count)
+        }
+        return count
+    }
+}
+
+/// Lifecycle and race coverage for the pump/handle pair: the pump must never
+/// report a drained stop while a thread or send callback can still touch the
+/// endpoint, and a timed-out stop must stay retryable.
+final class PacketPumpLifecycleTests: XCTestCase {
+    private var flow: FakePacketFlow!
+    private var channel: BlockingPacketChannel!
+    private var pump: PacketPump!
+
+    override func setUp() {
+        super.setUp()
+        flow = FakePacketFlow()
+        channel = BlockingPacketChannel()
+        pump = PacketPump(flow: flow, channel: channel)
+    }
+
+    override func tearDown() {
+        channel?.resumeSends()
+        channel?.resumeReceives()
+        _ = pump?.stop(timeout: 2)
+        super.tearDown()
+    }
+
+    private func packet(_ bytes: Data) -> PacketPumpPacket {
+        guard let packet = PacketPumpPacket(data: bytes) else {
+            fatalError("test packet must be a valid IP datagram")
+        }
+        return packet
+    }
+
+    func testStopDrainsBothDirections() {
+        channel.enqueue(ipv6Packet())
+        pump.start()
+        XCTAssertTrue(waitUntil { self.flow.writtenPackets.count == 1 })
+        XCTAssertTrue(pump.stop(timeout: 2))
+        XCTAssertTrue(pump.isDrained)
+        XCTAssertFalse(pump.isRunning)
+    }
+
+    func testRepeatedStopIsIdempotent() {
+        pump.start()
+        XCTAssertTrue(pump.stop(timeout: 2))
+        XCTAssertTrue(pump.stop(timeout: 2))
+        XCTAssertTrue(pump.stop(timeout: 0))
+        XCTAssertTrue(pump.isDrained)
+    }
+
+    func testStopWaitsForAReceiveThatIsStillBlocked() {
+        channel.pauseReceives()
+        pump.start()
+        XCTAssertTrue(channel.waitForReceiveCall(1))
+
+        // The receive thread is parked inside the endpoint: stop must not claim
+        // success before that thread returns.
+        let started = Date()
+        XCTAssertFalse(pump.stop(timeout: 0.2))
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(started), 0.15)
+        XCTAssertFalse(pump.isDrained)
+
+        channel.resumeReceives()
+        XCTAssertTrue(pump.stop(timeout: 2))
+        XCTAssertTrue(pump.isDrained)
+    }
+
+    func testStopAfterACallbackAlreadyFlippedRunningStillWaitsForTheThread() {
+        channel.pauseReceives()
+        pump.start()
+        XCTAssertTrue(channel.waitForReceiveCall(1))
+        // The system flow closing is reported as an empty batch, which flips
+        // running to false while the receive thread is still parked.
+        flow.push([])
+        XCTAssertTrue(waitUntil { !self.pump.isRunning })
+
+        XCTAssertFalse(pump.stop(timeout: 0.2))
+        XCTAssertFalse(pump.isDrained)
+
+        channel.resumeReceives()
+        XCTAssertTrue(pump.stop(timeout: 2))
+    }
+
+    func testStopTimeoutKeepsTheHandleAliveUntilRetry() {
+        channel.pauseReceives()
+        pump.start()
+        XCTAssertTrue(channel.waitForReceiveCall(1))
+        XCTAssertFalse(pump.stop(timeout: 0.1))
+        XCTAssertFalse(pump.isDrained)
+        // A second stop still owns the same pump and keeps waiting.
+        XCTAssertFalse(pump.stop(timeout: 0.1))
+        channel.resumeReceives()
+        XCTAssertTrue(pump.stop(timeout: 2))
+    }
+
+    func testStopWaitsForAnInFlightSend() {
+        channel.pauseSends()
+        pump.start()
+        flow.pushAsync([packet(ipv6Packet())])
+        XCTAssertTrue(channel.waitForSendCall(1))
+
+        XCTAssertFalse(pump.stop(timeout: 0.2))
+        XCTAssertFalse(pump.isDrained)
+        XCTAssertEqual(channel.sent.count, 0)
+
+        channel.resumeSends()
+        XCTAssertTrue(pump.stop(timeout: 2))
+        XCTAssertEqual(channel.sent.count, 1)
+        XCTAssertTrue(pump.isDrained)
+    }
+
+    func testRestartAfterTimeoutUsesAFreshSession() {
+        channel.pauseReceives()
+        pump.start()
+        XCTAssertTrue(channel.waitForReceiveCall(1))
+        XCTAssertFalse(pump.stop(timeout: 0.1))
+
+        channel.resumeReceives()
+        XCTAssertTrue(pump.stop(timeout: 2))
+
+        pump.start()
+        XCTAssertTrue(pump.isRunning)
+        flow.push([packet(ipv6Packet())])
+        XCTAssertTrue(waitUntil { self.channel.sent.count == 1 })
+        XCTAssertTrue(pump.stop(timeout: 2))
+    }
+
+    func testLateCallbackFromAnOldSessionIsIgnored() {
+        pump.start()
+        XCTAssertTrue(pump.stop(timeout: 2))
+        // Replay the callback that was armed before the stop.
+        flow.push([packet(ipv6Packet()), packet(ipv4Packet())])
+        Thread.sleep(forTimeInterval: 0.05)
+        XCTAssertEqual(channel.sent.count, 0)
+        XCTAssertEqual(pump.statistics.hostToNode, 0)
+    }
+
+    func testConcurrentStopsDrainOnce() {
+        channel.pauseReceives()
+        pump.start()
+        XCTAssertTrue(channel.waitForReceiveCall(1))
+
+        let group = DispatchGroup()
+        let results = Box<[Bool]>([])
+        let lock = NSLock()
+        for _ in 0 ..< 4 {
+            group.enter()
+            Thread.detachNewThread {
+                let result = self.pump.stop(timeout: 0.3)
+                lock.lock()
+                var current = results.value
+                current.append(result)
+                results.value = current
+                lock.unlock()
+                group.leave()
+            }
+        }
+        XCTAssertEqual(group.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(results.value.count, 4)
+        XCTAssertTrue(results.value.allSatisfy { !$0 })
+
+        channel.resumeReceives()
+        XCTAssertTrue(pump.stop(timeout: 2))
+        XCTAssertTrue(pump.isDrained)
+    }
+
+    func testClosedChannelWakesTheBlockedStop() {
+        channel.pauseReceives()
+        pump.start()
+        XCTAssertTrue(channel.waitForReceiveCall(1))
+        channel.receiveError = Fv6Failure(status: .closed, message: "endpoint closed")
+        channel.resumeReceives()
+        XCTAssertTrue(pump.stop(timeout: 2))
+        XCTAssertEqual(pump.statistics.failures, 1)
+    }
+}
+

@@ -41,8 +41,11 @@ final class PacketPump: @unchecked Sendable {
     private let channel: any PacketChannel
     /// Guards running/generation/inFlight/stats and wakes stop() waiters.
     private let lock = NSCondition()
-    private let drained = DispatchGroup()
     private var running = false
+    /// Threads launched by start() that have not returned yet. stop() waits on
+    /// this even after a callback flipped running to false: a loop that is
+    /// still unwinding must not outlive the endpoint it reads from.
+    private var activeThreads = 0
     /// Bumped on every start and stop: a stale callback from an older session
     /// must not forward packets or re-arm the flow.
     private var generation: UInt64 = 0
@@ -78,32 +81,41 @@ final class PacketPump: @unchecked Sendable {
         running = true
         generation &+= 1
         let session = generation
+        activeThreads += 1
         lock.unlock()
 
-        drained.enter()
         startThread(named: "fv6.pump.nodeToHost") { [self] in
-            defer { drained.leave() }
+            defer { threadExited() }
             nodeToHostLoop(session)
         }
         issueRead(session)
     }
-
     /// Stops both directions and reports whether everything finished inside the
-    /// deadline. The endpoint must not be released while this returns false.
+    /// deadline. A false result means the caller must not assume the endpoint is
+    /// quiescent: release may still be issued, but the handle guard defers the
+    /// actual free until the last in-flight call returns.
     @discardableResult
     func stop(timeout: TimeInterval = 5) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         lock.lock()
-        let wasRunning = running
         running = false
         generation &+= 1
         while inFlight > 0, lock.wait(until: deadline) {}
         let callbacksDrained = inFlight == 0
         lock.unlock()
 
-        guard wasRunning else { return callbacksDrained }
-        let threadDrained = drained.wait(timeout: .now() + max(0, deadline.timeIntervalSinceNow)) == .success
-        return callbacksDrained && threadDrained
+        // Wait even when running was already false: a callback may have flipped
+        // it while the receive thread is still unwinding inside the endpoint.
+        let threadsDrained = waitForThreads(until: deadline)
+        return callbacksDrained && threadsDrained
+    }
+
+    /// True only when both directions are logically stopped, no send is in
+    /// flight and every pump thread has returned.
+    var isDrained: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !running && inFlight == 0 && activeThreads == 0
     }
 
     // MARK: - Host to node
@@ -200,6 +212,27 @@ final class PacketPump: @unchecked Sendable {
 
     // MARK: - Session state
 
+    private func threadExited() {
+        lock.lock()
+        if activeThreads > 0 {
+            activeThreads -= 1
+        }
+        lock.broadcast()
+        lock.unlock()
+    }
+
+    /// Waits until every launched pump thread has returned. Bounded by the
+    /// caller's deadline so a wedged thread can never hang the provider.
+    private func waitForThreads(until deadline: Date) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        while activeThreads > 0 {
+            if !lock.wait(until: deadline), activeThreads > 0 {
+                return false
+            }
+        }
+        return true
+    }
     private func startThread(named name: String, _ body: @escaping @Sendable () -> Void) {
         let thread = Thread(block: body)
         thread.name = name

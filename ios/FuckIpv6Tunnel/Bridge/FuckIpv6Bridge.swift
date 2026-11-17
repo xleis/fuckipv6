@@ -117,9 +117,9 @@ final class Fv6Node: @unchecked Sendable {
         }
     }
 
-    private let lock = NSLock()
-    private var handle: OpaquePointer?
-    /// Keeps the callback context alive for the whole runtime lifetime.
+    private let pointer: OpaquePointer
+    /// Defers the runtime free until every in-flight FFI call has returned.
+    private let guardrail: HandleGuard
     private let host: any PacketTunnelHost
 
     init(configuration: Configuration, host: any PacketTunnelHost) throws {
@@ -147,7 +147,8 @@ final class Fv6Node: @unchecked Sendable {
         guard status == Fv6Status.ok.rawValue, let runtime else {
             throw Fv6Failure(code: status, message: Self.decodeError(errorBuffer, length: errorLength))
         }
-        handle = runtime
+        pointer = runtime
+        guardrail = HandleGuard { fv6_runtime_destroy(runtime) }
     }
 
     deinit {
@@ -195,12 +196,9 @@ final class Fv6Node: @unchecked Sendable {
     }
 
     var phase: NodePhase? {
-        lock.lock()
-        let runtime = handle
-        lock.unlock()
-        guard let runtime else { return nil }
-        let raw = fv6_runtime_phase(runtime)
-        return NodePhase(rawValue: raw)
+        guard guardrail.acquire() else { return nil }
+        defer { guardrail.release() }
+        return NodePhase(rawValue: fv6_runtime_phase(pointer))
     }
 
     func snapshotJSON(timeout: TimeInterval = 10) throws -> Data {
@@ -232,10 +230,9 @@ final class Fv6Node: @unchecked Sendable {
     }
 
     func lastError() -> String {
-        lock.lock()
-        let runtime = handle
-        lock.unlock()
-        guard let runtime else { return "runtime released" }
+        guard guardrail.acquire() else { return "runtime released" }
+        defer { guardrail.release() }
+        let runtime = pointer
         // Two-pass read: Rust diagnostics list every valid enum variant and
         // routinely exceed a fixed buffer.
         var required = 0
@@ -256,25 +253,18 @@ final class Fv6Node: @unchecked Sendable {
         return String(decoding: buffer[0 ..< written], as: UTF8.self)
     }
 
-    /// Releases the runtime exactly once. Safe to call repeatedly.
+    /// Releases the runtime once the last in-flight call has returned. Safe to
+    /// call repeatedly and from any thread.
     func destroy() {
-        lock.lock()
-        let runtime = handle
-        handle = nil
-        lock.unlock()
-        if let runtime {
-            fv6_runtime_destroy(runtime)
-        }
+        _ = guardrail.close()
     }
 
     private func withHandle<T>(_ body: (OpaquePointer) throws -> T) throws -> T {
-        lock.lock()
-        let runtime = handle
-        lock.unlock()
-        guard let runtime else {
+        guard guardrail.acquire() else {
             throw Fv6Failure(status: .invalidHandle, message: "runtime released")
         }
-        return try body(runtime)
+        defer { guardrail.release() }
+        return try body(pointer)
     }
 
     private func lastErrorStatus() -> String {
@@ -323,9 +313,13 @@ final class Fv6Node: @unchecked Sendable {
 
 /// Owns one Fv6Endpoint handle. The endpoint is handed to the host through
 /// Fv6OpenNetworkCallback; the host must release it exactly once.
+///
+/// Every FFI call is bracketed by HandleGuard, so a release that races with an
+/// in-flight send or receive defers the actual free instead of pulling the
+/// handle out from under the worker thread.
 final class PacketEndpoint: @unchecked Sendable {
-    private let lock = NSLock()
-    private var pointer: OpaquePointer?
+    private let pointer: OpaquePointer
+    private let guardrail: HandleGuard
     let mtu: Int
 
     init(pointer: OpaquePointer) throws {
@@ -337,6 +331,7 @@ final class PacketEndpoint: @unchecked Sendable {
         }
         self.pointer = pointer
         self.mtu = Int(mtu)
+        self.guardrail = HandleGuard { fv6_endpoint_release(pointer) }
     }
 
     deinit {
@@ -345,28 +340,26 @@ final class PacketEndpoint: @unchecked Sendable {
 
     /// Queues one complete IP packet. Non-blocking; .queueFull means back off.
     func send(_ packet: Data) -> Int32 {
-        lock.lock()
-        let endpoint = pointer
-        lock.unlock()
-        guard let endpoint else { return Fv6Status.closed.rawValue }
+        guard guardrail.acquire() else { return Fv6Status.closed.rawValue }
+        defer { guardrail.release() }
         return packet.withUnsafeBytes { raw in
-            fv6_endpoint_send(endpoint, raw.bindMemory(to: UInt8.self).baseAddress, packet.count)
+            fv6_endpoint_send(pointer, raw.bindMemory(to: UInt8.self).baseAddress, packet.count)
         }
     }
 
     /// Dequeues one complete IP packet into a caller buffer of at least mtu
     /// bytes. Returns the number of bytes written, or throws on timeout.
     func receive(into buffer: inout [UInt8], timeout: TimeInterval) throws -> Int {
-        lock.lock()
-        let endpoint = pointer
-        lock.unlock()
-        guard let endpoint else { throw Fv6Failure(status: .closed, message: "endpoint released") }
+        guard guardrail.acquire() else {
+            throw Fv6Failure(status: .closed, message: "endpoint released")
+        }
+        defer { guardrail.release() }
         guard buffer.count >= mtu else {
             throw Fv6Failure(status: .bufferTooSmall, message: "buffer holds \(buffer.count) bytes, MTU is \(mtu)")
         }
         var length = 0
         let status = buffer.withUnsafeMutableBufferPointer { pointer in
-            fv6_endpoint_recv(endpoint, pointer.baseAddress, pointer.count, &length, Fv6Node.milliseconds(timeout))
+            fv6_endpoint_recv(self.pointer, pointer.baseAddress, pointer.count, &length, Fv6Node.milliseconds(timeout))
         }
         guard status == Fv6Status.ok.rawValue else {
             throw Fv6Failure(code: status, message: "packet receive failed")
@@ -374,13 +367,20 @@ final class PacketEndpoint: @unchecked Sendable {
         return length
     }
 
-    func release() {
-        lock.lock()
-        let endpoint = pointer
-        pointer = nil
-        lock.unlock()
-        if let endpoint {
-            fv6_endpoint_release(endpoint)
-        }
+    /// Releases the handle. Safe to call from any thread and any number of
+    /// times; a close that races with an in-flight call is deferred to the
+    /// last user instead of freeing memory still in use.
+    @discardableResult
+    func release() -> HandleGuard.CloseOutcome {
+        guardrail.close()
+    }
+
+    var isReleased: Bool {
+        guardrail.isClosed
+    }
+
+    var inFlightUsers: Int {
+        guardrail.userCount
     }
 }
+

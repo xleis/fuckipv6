@@ -52,8 +52,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
     private var pump: PacketPump?
     private var appliedSettings: TunnelSettings?
     /// Bumped for every open-network request so a late callback from an older
-    /// session can never overwrite the endpoint of a newer one.
+    /// Bumped for every open-network request and every teardown so a late
+    /// callback from an older session can never overwrite a newer one, and so a
+    /// connection opened while the node is shutting down is rejected.
     private var session: UInt64 = 0
+    /// Handles whose drain timed out. They stay owned by the provider so a later
+    /// teardown retries the drain instead of leaking the pump or freeing an
+    /// endpoint that a live thread still reads.
+    private var pendingPump: PacketPump?
+    private var pendingEndpoint: PacketEndpoint?
 
     private lazy var router = MessageRouter { [weak self] in
         self?.currentNode()
@@ -68,7 +75,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
                 box.call(nil)
             } catch {
                 publish(.failed, message: error.localizedDescription)
-                teardownNode()
+                let report = teardownNode()
+                if !report.isClean {
+                    Diagnostics.record("teardown after failed start: \(report.summary)")
+                }
+            
                 box.call(error)
             }
         }
@@ -78,8 +89,20 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
         let box = CompletionBox(completionHandler)
         Thread.detachNewThread { [self] in
             publish(.stopping, message: "stop reason \(reason.rawValue)")
-            teardownNode()
-            publish(.stopped, message: nil)
+            var report = teardownNode()
+            if !report.isClean {
+                // Second chance: stopping the node usually unblocks a receive
+                // that outlived the first wait.
+                report = retryPendingCleanup(report, timeout: 2)
+            }
+            if report.isClean {
+                publish(.stopped, message: nil)
+            } else {
+                // The system still requires this callback, but a tunnel whose
+                // handles are not drained must not be reported as a clean stop.
+                Diagnostics.record("stopTunnel finished with pending cleanup: \(report.summary)")
+                publish(.failed, message: "cleanup incomplete: \(report.summary)")
+            }
             box.call(())
         }
     }
@@ -158,9 +181,87 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
         publish(.running, message: nil, snapshotJSON: snapshotJSON)
     }
 
+    /// What a teardown actually achieved. A tunnel is only reported as cleanly
+    /// stopped when every field below is true.
+    struct TeardownReport {
+        var pumpDrained = true
+        var nodeStopped = true
+        var endpointFreed = true
+        var settingsCleared = true
+        var pendingUsers = 0
+
+        var isClean: Bool {
+            pumpDrained && nodeStopped && endpointFreed && settingsCleared
+        }
+
+        var summary: String {
+            var parts: [String] = []
+            if !pumpDrained { parts.append("packet pump did not drain") }
+            if !nodeStopped { parts.append("node stop failed") }
+            if !endpointFreed { parts.append("endpoint release deferred to \(pendingUsers) in-flight call(s)") }
+            if !settingsCleared { parts.append("network settings not cleared") }
+            return parts.isEmpty ? "clean" : parts.joined(separator: "; ")
+        }
+    }
+
+    /// Stops a pump and reports whether both directions drained. Repeatable: a
+    /// second call keeps waiting for threads the first call could not join.
+    @discardableResult
+    private func stopPump(_ pump: PacketPump?, timeout: TimeInterval, reason: String) -> Bool {
+        guard let pump else { return true }
+        if pump.stop(timeout: timeout) {
+            return true
+        }
+        Diagnostics.record("packet pump still running after \(timeout)s (\(reason))")
+        return false
+    }
+
+    /// Releases an endpoint handle at most once. When a pump thread is still
+    /// inside the FFI call the handle guard defers the free to that thread's
+    /// exit, so a timed-out drain can never leave a dangling pointer.
+    private func releaseEndpoint(_ endpoint: PacketEndpoint?, reason: String) -> (freed: Bool, users: Int) {
+        guard let endpoint else { return (true, 0) }
+        switch endpoint.release() {
+        case .freed:
+            return (true, 0)
+        case let .deferred(users):
+            Diagnostics.record("endpoint release deferred to \(users) in-flight call(s) (\(reason))")
+            return (false, users)
+        case .alreadyClosed:
+            return (true, 0)
+        }
+    }
+
+    /// Retries handles parked by an earlier timeout and merges the outcome into
+    /// the report of that teardown.
+    private func retryPendingCleanup(_ report: TeardownReport, timeout: TimeInterval) -> TeardownReport {
+        var merged = report
+        state.lock()
+        let pump = self.pendingPump
+        let endpoint = self.pendingEndpoint
+        state.unlock()
+        guard pump != nil || endpoint != nil else { return merged }
+
+        let drained = stopPump(pump, timeout: timeout, reason: "retry")
+        merged.pumpDrained = report.pumpDrained || drained
+        if drained {
+            let release = releaseEndpoint(endpoint, reason: "retry")
+            merged.endpointFreed = merged.endpointFreed || release.freed
+            merged.pendingUsers = release.users
+            state.lock()
+            self.pendingPump = nil
+            self.pendingEndpoint = nil
+            state.unlock()
+        }
+        return merged
+    }
+
     /// Stops every resource in dependency order: pump, node, endpoint, settings,
     /// then the plaintext identity. Safe to call repeatedly and from any thread.
-    private func teardownNode() {
+    /// Endpoint release always runs through the handle guard, so a thread that
+    /// outlived the drain keeps the memory alive until it returns.
+    @discardableResult
+    private func teardownNode() -> TeardownReport {
         Diagnostics.record("teardownNode")
         state.lock()
         let node = self.node
@@ -171,24 +272,50 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
         self.endpoint = nil
         self.pump = nil
         self.appliedSettings = nil
+        // A callback still in flight now belongs to a dead session and must not
+        // install an endpoint after the node is gone.
+        session &+= 1
         state.unlock()
 
-        if let pump, !pump.stop(timeout: 5) {
-            NSLog("fuckipv6: packet pump did not drain in 5s")
-        }
+        var report = TeardownReport()
+        report.pumpDrained = stopPump(pump, timeout: 5, reason: "teardown")
+
         if let node {
             do {
                 try node.stop()
             } catch {
+                report.nodeStopped = false
                 NSLog("fuckipv6: node stop failed: \(error.localizedDescription)")
             }
             node.destroy()
         }
-        endpoint?.release()
+
+        if !report.pumpDrained {
+            // The node is down, so a receive blocked on it has no reason to
+            // stay: give the thread one bounded retry before parking it.
+            report.pumpDrained = stopPump(pump, timeout: 2, reason: "teardown retry")
+        }
+        let release = releaseEndpoint(endpoint, reason: "teardown")
+        report.endpointFreed = release.freed
+        report.pendingUsers = release.users
+
+        if !report.pumpDrained {
+            state.lock()
+            self.pendingPump = pump
+            if !report.endpointFreed {
+                self.pendingEndpoint = endpoint
+            }
+            state.unlock()
+        }
+
         if settings != nil {
-            clearNetworkSettings()
+            report.settingsCleared = clearNetworkSettings()
         }
         captureIdentity()
+        if !report.isClean {
+            Diagnostics.record("teardown pending: \(report.summary)")
+        }
+        return report
     }
 
     private func captureIdentity() {
@@ -206,14 +333,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
         }
     }
 
-    private func clearNetworkSettings() {
+    /// Clears the system network settings and reports whether that succeeded.
+    @discardableResult
+    private func clearNetworkSettings() -> Bool {
         let result = ApplyResult()
         setTunnelNetworkSettings(nil) { error in
             result.complete(error)
         }
         if let error = result.wait(seconds: 10) {
             NSLog("fuckipv6: clearing network settings failed: \(error.localizedDescription)")
+            return false
         }
+        return true
     }
 
     // MARK: - PacketTunnelHost
@@ -257,15 +388,26 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
 
             guard isCurrent else {
                 // A newer session already owns the tunnel: this endpoint is
-                // stale, so drop it instead of leaking the handle.
-                endpoint.release()
+                // stale, so drop it instead of leaking the handle. The guard
+                // defers the free if anything already entered it.
+                _ = releaseEndpoint(endpoint, reason: "stale open")
                 return Fv6Status.state.rawValue
             }
 
-            if let previousPump, !previousPump.stop(timeout: 5) {
-                NSLog("fuckipv6: previous packet pump did not drain in 5s")
+            let drained = stopPump(previousPump, timeout: 5, reason: "device replacement")
+            let released = releaseEndpoint(previous, reason: "device replacement")
+            if !drained || !released.freed {
+                // Keep ownership of anything that is still unwinding so a later
+                // teardown can retry the drain.
+                state.lock()
+                if !drained {
+                    self.pendingPump = previousPump
+                }
+                if !released.freed {
+                    self.pendingEndpoint = previous
+                }
+                state.unlock()
             }
-            previous?.release()
             pump.start()
             Diagnostics.record("packet pump started")
 
@@ -287,12 +429,23 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, PacketTunnelHost, @unc
         self.endpoint = nil
         self.pump = nil
         self.appliedSettings = nil
+        // Invalidate an openNetwork that is still applying its settings: its
+        // endpoint belongs to a tunnel this close already tore down.
+        session &+= 1
         state.unlock()
 
-        if let pump, !pump.stop(timeout: 5) {
-            NSLog("fuckipv6: packet pump did not drain in 5s")
+        let drained = stopPump(pump, timeout: 5, reason: "closeNetwork")
+        let released = releaseEndpoint(endpoint, reason: "closeNetwork")
+        if !drained || !released.freed {
+            state.lock()
+            if !drained {
+                self.pendingPump = pump
+            }
+            if !released.freed {
+                self.pendingEndpoint = endpoint
+            }
+            state.unlock()
         }
-        endpoint?.release()
         if hadSettings {
             clearNetworkSettings()
         }

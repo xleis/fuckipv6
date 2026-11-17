@@ -109,7 +109,7 @@ packet pump started → tunnel phase -> running → vpn status -> 3 (connected)
 | 直连吞吐（每批 1 包，1 ms 间隔） | 256 × 1200 B 两轮 4.31 / 4.40 Mbit/s，错误计数 +0（全部走直连 UDP） |
 | 批量吞吐（16 包/批） | 四轮 6.35 / 5.72 / 6.01 / 7.18 Mbit/s（mean 6.32），但每轮 256 包中有 221–223 包走 sealed relay 回退 |
 
-批量吞吐的差异不是抖动，而是当前 Apple 平台的发送批量实现决定的，见 §6 第 5 条。
+上表是 P3.3（P1a 修复前）的实测：批量吞吐的差异不是抖动，而是当时 Apple 平台的发送批量实现决定的（§6 第 5 条）。P3.4 已在 Darwin 上补齐按序 `send_batch`，macOS 单测证明同 peer 8 包批量全部走直连，但真机吞吐尚未复测，因此不把旧数字当作当前上限。
 
 ### 5.5 调试通道（复现用）
 
@@ -120,12 +120,12 @@ packet pump started → tunnel phase -> running → vpn status -> 3 (connected)
 
 ## 6. 已知问题（非本轮引入）
 
-1. **既有 42 个 macOS 主机测试失败**：`node::runtime_control` 17、`local_service::tests` 17、`cli::commands` 3、`local_ipc::tests` 3、`symmetric::actor` 2。P2 基线同为 42 个，本轮改动（`tun/mod.rs` 增加非桌面后端、`client/Cargo.toml` 扩 libc 目标、新增 ios-bridge crate）没有改变该集合，也未新增失败。
+1. **既有 40 个 macOS 主机测试失败**：`node::runtime_control` 17、`local_service::tests` 17、`local_ipc::tests` 3、`symmetric::actor` 2、`cli::commands` 1，均为宿主机环境限制（macOS 不支持 Exit Node、UDS 路径超出 `sun_path` 容量等）。P2 基线为 42 个；P3.4 的 P1a（Darwin 批量发送）与 P1b（入站回写移出事件循环）修好了其中 2 个 `cli::commands` 批量计数用例，其余集合未变、未新增失败，全量结果为 `1205 passed / 40 failed`。
 2. **`RustRuntimeTests` 只验证失败路径**：模拟器测试使用的仓库配置指向 `ws://127.0.0.1:9`，没有协调服务器，`fv6_runtime_start` 必然返回 `nodeProblem`（消息含"无法连接到协调服务器…等待虚拟 IP 分配超时"）。这正是真实行为：start 以真实初始化结果决定成败，不做假成功。running 路径由 P2 的进程内嵌入式测试（13 passed）与 P3.3 真机联调覆盖。
 3. **模拟器不验证 `NEPacketTunnelProvider` 本身**：模拟器不允许装载 Network Extension，`startTunnel`/`setTunnelNetworkSettings` 的完整链路只能在真机验证。数据面用一个 `PacketFlow` 协议抽象来测，泵逻辑与真实 `NEPacketTunnelFlow` 共用同一份代码。
 4. **命令请求必须用相邻标记（adjacently tagged）JSON**：`{"request_id":1,"command":{"command":"get_snapshot"}}`；写成 `{"request_id":1,"command":"get_snapshot"}` 会被 Rust 侧拒绝并回 `invalidArgument`，诊断透传到 Swift 的 `message`。
-5. **Apple 平台（macOS / iOS）批量发送走中继回退**：`crates/client/src/p2p/udp_batch.rs:153-166` 的 `#[cfg(not(target_os = "linux"))]` 版本每次只发一个数据报并返回 `Ok(1)`，批量路径于是把同批其余数据报按"未发送后缀"转成 sealed relay 回退（`crates/client/src/p2p/connection.rs:2170-2185`，错误文案 `sendmmsg accepted only 1 of N datagrams`）。功能正确（数据全部到达，链路加密不降级），但直连 P2P 只承载每批首包，批量吞吐因此受中继限制——这正是 §5.4 里两行吞吐差异的来源。若要提升 iOS 侧直连吞吐，需要在 Darwin 上补一个按序循环的 `send_batch` 实现，属性能优化，未在本轮改动。
-6. **极端注入速率下控制面无响应（待定位）**：以 200 µs 间隔连发 512 × 1200 B 时，探针卡在发送侧，节点日志持续输出 `刷新本机 Exit 客户端计数失败… error="等待运行时响应超时（1 秒）"`，直到进程被外部终止都未恢复。同参数下 1 ms 间隔完全正常（4.36 Mbit/s、错误 +0），因此不是基础功能问题，更可能是设备队列（capacity 64）背压与运行时段内控制请求互相等待。未定位，记录待查。
+5. **Apple 平台批量发送（P3.4 已修复）**：原实现（`crates/client/src/p2p/udp_batch.rs` 的非 Linux 分支）每次只发一个数据报并返回 `Ok(1)`，同批其余数据报按「未发送后缀」转成 sealed relay 回退（`crates/client/src/p2p/connection.rs:2170-2185`，旧文案 `sendmmsg accepted only 1 of N datagrams`）。现在非 Linux 分支按序循环 `send_to`、首个包失败才返回 `Err`、后续失败保留成功前缀、每 16 包 `yield_now`；新增 `send_syscalls()` 按平台报告真实 syscall 数（Linux 1，其他 N），`UdpBatchStats` 改为 `record_send_calls(syscalls, datagrams)` 记账。验证：`p2p::udp_batch` 9 passed（含 1/8/16/32/128 包顺序与边界、IPv6 不合并、短写保留前缀、首包失败透错、syscall 计数），`short_sendmmsg_falls_back_only_unsent_suffix_without_resealing` 与 `assert_production_udp_batch` 按平台期望值断言（Linux 1 / 其他 2 与 8）。剩余：真机吞吐复测（§5.4 表格仍是修复前数字）。
+6. **极端注入速率下控制面无响应（已定位并修复）**：200 µs 间隔连发 512 × 1200 B 时，接收侧事件循环在「入站包写回宿主」处等待设备出队队列容量，`control_rx` 拿不到轮询机会，日志持续输出 `刷新本机 Exit 客户端计数失败… error="等待运行时响应超时（1 秒）"`。P3.4 把入站回写改成「有界队列（128）+ 专用写任务」，事件循环只 `try_send`、队列满即丢包并计 `tun_write_error`；负载矩阵下接收侧 snapshot p50 从 980–1983 ms 降到 0.4–0.6 ms，告警降为 0 条，详见 `docs/DATAPLANE_PERFORMANCE_TODO.md` 的「P1b 收口」一节。
 
 ## 7. 未运行项
 

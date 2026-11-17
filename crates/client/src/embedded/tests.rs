@@ -1007,3 +1007,187 @@ async fn embedded_restart_after_traffic_reuses_process_crypto_pool() {
     platform_b.assert_sockets_released();
     fixture.coordinator.shutdown().await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Instrumented load harness (P1b). Not part of the standing suite: run it with
+//   cargo test -p fuckipv6-client --no-default-features --lib \
+//     embedded::tests::embedded_control_plane_latency_matrix -- --nocapture --ignored
+// It floods the real data plane of node A and measures how long node A's (host)
+// and node B's (receiver) authoritative snapshots take while the flood runs.
+// ---------------------------------------------------------------------------
+async fn p2p_rx_packets(host: &EmbeddedNodeRuntime) -> u64 {
+    match host
+        .supervisor
+        .registry()
+        .get_all()
+        .await
+        .into_iter()
+        .find(|session| session.network_name == "mesh")
+    {
+        Some(session) => session.stats.get_global_stats().await.p2p_rx_packets,
+        None => 0,
+    }
+}
+
+struct ProbeReport {
+    probes: usize,
+    errors: usize,
+    samples_ms: Vec<f64>,
+}
+
+impl ProbeReport {
+    fn quantile(&mut self, fraction: f64) -> f64 {
+        if self.samples_ms.is_empty() {
+            return 0.0;
+        }
+        self.samples_ms.sort_by(|left, right| left.total_cmp(right));
+        let index = ((self.samples_ms.len() - 1) as f64 * fraction).round() as usize;
+        self.samples_ms[index]
+    }
+}
+
+async fn probe_snapshot(
+    runtime: &EmbeddedNodeRuntime,
+    report: &mut ProbeReport,
+    budget: Duration,
+) -> bool {
+    let started = std::time::Instant::now();
+    report.probes += 1;
+    match tokio::time::timeout(budget, runtime.snapshot()).await {
+        Ok(Ok(_)) => {
+            report
+                .samples_ms
+                .push(started.elapsed().as_secs_f64() * 1_000.0);
+            true
+        }
+        Ok(Err(problem)) => {
+            report.errors += 1;
+            println!("    probe error: {:?}: {}", problem.code, problem.message);
+            false
+        }
+        Err(_) => {
+            report.errors += 1;
+            false
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "instrumented load harness, run explicitly with --ignored"]
+async fn embedded_control_plane_latency_matrix() {
+    let mut fixture = Fixture::new(2).await;
+    let platform_a = Arc::new(TestPlatform::default());
+    let platform_b = Arc::new(TestPlatform::default());
+    let mut a = start(fixture.nodes[0].clone(), platform_a.clone()).await;
+    let mut b = start(fixture.nodes[1].clone(), platform_b.clone()).await;
+    let (request_a, endpoint_a) = platform_a.take_session().await;
+    let (request_b, endpoint_b) = platform_b.take_session().await;
+    let peer_a = IpAddr::V6(request_a.assigned_ips.ipv6.unwrap());
+    let peer_b = IpAddr::V6(request_b.assigned_ips.ipv6.unwrap());
+    wait_for_secure_session(&a, "mesh", peer_b).await;
+    wait_for_secure_session(&b, "mesh", peer_a).await;
+    let _ = &endpoint_b;
+
+    let packet = large_ip_packet(peer_a, peer_b, 1_200);
+    println!(
+        "interval_us count inject_ms max_block_ms a_probes a_err a_p50 a_p90 a_max b_probes b_err b_p50 b_p90 b_max delivered drain_ms"
+    );
+
+    let scenarios: [(usize, Duration); 5] = [
+        (128, Duration::from_millis(1)),
+        (256, Duration::from_micros(500)),
+        (512, Duration::from_micros(200)),
+        (1_024, Duration::from_millis(1)),
+        (1_024, Duration::from_micros(200)),
+    ];
+
+    for (count, interval) in scenarios {
+        let baseline = p2p_rx_packets(&b).await;
+        let endpoint = endpoint_a.clone();
+        let payload = packet.clone();
+        let injector = tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let mut max_block = Duration::ZERO;
+            for _ in 0..count {
+                let send_started = std::time::Instant::now();
+                endpoint.send(&payload).await.unwrap();
+                max_block = max_block.max(send_started.elapsed());
+                if !interval.is_zero() {
+                    tokio::time::sleep(interval).await;
+                }
+            }
+            (started.elapsed(), max_block)
+        });
+
+        let mut report_a = ProbeReport {
+            probes: 0,
+            errors: 0,
+            samples_ms: Vec::new(),
+        };
+        let mut report_b = ProbeReport {
+            probes: 0,
+            errors: 0,
+            samples_ms: Vec::new(),
+        };
+        while !injector.is_finished() {
+            probe_snapshot(&a, &mut report_a, Duration::from_secs(5)).await;
+            probe_snapshot(&b, &mut report_b, Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let (inject_elapsed, max_block) = injector.await.unwrap();
+        probe_snapshot(&a, &mut report_a, Duration::from_secs(5)).await;
+        probe_snapshot(&b, &mut report_b, Duration::from_secs(5)).await;
+
+        let drain_started = std::time::Instant::now();
+        let delivered = loop {
+            let received = p2p_rx_packets(&b).await.saturating_sub(baseline);
+            if received >= count as u64 || drain_started.elapsed() > Duration::from_secs(20) {
+                break received;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let drain = drain_started.elapsed();
+
+        let a50 = report_a.quantile(0.5);
+        let a90 = report_a.quantile(0.9);
+        let amax = report_a.quantile(1.0);
+        let b50 = report_b.quantile(0.5);
+        let b90 = report_b.quantile(0.9);
+        let bmax = report_b.quantile(1.0);
+        println!(
+            "{:>11} {:>5} {:>9.1} {:>12.1} {:>8} {:>5} {:>6.1} {:>6.1} {:>6.1} {:>8} {:>5} {:>6.1} {:>6.1} {:>6.1} {:>9} {:>8.1}",
+            interval.as_micros(),
+            count,
+            inject_elapsed.as_secs_f64() * 1_000.0,
+            max_block.as_secs_f64() * 1_000.0,
+            report_a.probes,
+            report_a.errors,
+            a50,
+            a90,
+            amax,
+            report_b.probes,
+            report_b.errors,
+            b50,
+            b90,
+            bmax,
+            delivered,
+            drain.as_secs_f64() * 1_000.0,
+        );
+    }
+
+    let stop_started = std::time::Instant::now();
+    a.stop().await.unwrap();
+    println!(
+        "node A stop took {:.1} ms",
+        stop_started.elapsed().as_secs_f64() * 1_000.0
+    );
+    let stop_started = std::time::Instant::now();
+    b.stop().await.unwrap();
+    println!(
+        "node B stop took {:.1} ms",
+        stop_started.elapsed().as_secs_f64() * 1_000.0
+    );
+    platform_a.assert_sockets_released();
+    platform_b.assert_sockets_released();
+    fixture.coordinator.shutdown().await.unwrap();
+}

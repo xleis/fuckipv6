@@ -106,6 +106,10 @@ const OUTBOUND_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const TASK_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 const RUNTIME_CLEANUP_TIMEOUT: Duration = Duration::from_secs(12);
 const OUTBOUND_QUEUE_CAPACITY: usize = 256;
+/// Host-bound packets the data plane accepts before it must drop. The event
+/// loop never waits for host-side backpressure: mobile hosts drain one packet
+/// per call, so a burst would otherwise stall control, shutdown and TUN reads.
+const TUN_WRITE_QUEUE_CAPACITY: usize = 128;
 const RECOVERY_TRIGGER_QUEUE_CAPACITY: usize = 8;
 const EXIT_CONTRIBUTION_MEMBER_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const EXIT_CONTRIBUTION_DIRECTORY_QUEUE_CAPACITY: usize = 4;
@@ -206,13 +210,16 @@ pub struct RuntimeOptions {
 ///
 /// `TunDevice` clones share one Linux link lifetime, so replacing only the
 /// runtime-held handle leaves the reader task pinning the old link. Keeping the
-/// device, reader task and buffer-pool channels together makes quiesce-before-
-/// delete an invariant instead of a shutdown-only convention.
+/// device, reader and writer tasks, and buffer-pool channels together makes
+/// quiesce-before-delete an invariant instead of a shutdown-only convention.
 pub(crate) struct RuntimeTunIo {
     tun: Option<Box<dyn PacketDevice>>,
     packet_rx: mpsc::UnboundedReceiver<Vec<TunPacket>>,
     buffer_tx: mpsc::UnboundedSender<TunPacket>,
     reader_task: Option<JoinHandle<()>>,
+    /// Bounded queue to the host writer; `None` once the device is gone.
+    kernel_tx: Option<mpsc::Sender<InboundPayload>>,
+    kernel_task: Option<JoinHandle<()>>,
     name: String,
     descriptor: Option<TunIoDescriptor>,
     stats: StatsCollector,
@@ -244,11 +251,14 @@ impl RuntimeTunIo {
             tun.name().to_owned()
         };
         let (packet_rx, buffer_tx, reader_task) = spawn_tun_reader_pool(tun.as_ref(), stats);
+        let (kernel_tx, kernel_task) = spawn_tun_writer(tun.as_ref(), stats);
         Self {
             tun: Some(tun),
             packet_rx,
             buffer_tx,
             reader_task: Some(reader_task),
+            kernel_tx: Some(kernel_tx),
+            kernel_task: Some(kernel_task),
             name,
             descriptor: native.then_some(descriptor),
             stats: stats.clone(),
@@ -293,6 +303,30 @@ impl RuntimeTunIo {
         abort_task(&self.reader_task);
     }
 
+    /// Hands one admitted packet to the host writer. Returns false when the host
+    /// has not kept up, in which case the caller counts the loss instead of
+    /// waiting: a stalled host must never own an event-loop turn.
+    fn submit_kernel_payload(&self, payload: InboundPayload) -> bool {
+        let Some(sender) = self.kernel_tx.as_ref() else {
+            return false;
+        };
+        sender.try_send(payload).is_ok()
+    }
+
+    fn abort_kernel_writer(&mut self) {
+        self.kernel_tx.take();
+        abort_task(&self.kernel_task);
+        self.kernel_task = None;
+    }
+
+    /// Drops the queue and joins the writer so no clone of the device outlives
+    /// `close()`. Cancellation is safe: a partially written batch is documented
+    /// to leave only its successful prefix.
+    async fn stop_kernel_writer_within(&mut self, deadline: Instant) -> CleanupStatus {
+        self.kernel_tx.take();
+        stop_runtime_task(&mut self.kernel_task, deadline).await
+    }
+
     /// Recreate the TUN link after the reader has fully released its clone.
     /// The old handle is dropped even when deletion reports a missing link, but
     /// creation still must succeed before the runtime reports recovery.
@@ -319,11 +353,15 @@ impl RuntimeTunIo {
     }
 
     fn install_device(&mut self, device: Box<dyn PacketDevice>, stats: &StatsCollector) {
+        self.abort_kernel_writer();
         let (packet_rx, buffer_tx, reader_task) = spawn_tun_reader_pool(device.as_ref(), stats);
+        let (kernel_tx, kernel_task) = spawn_tun_writer(device.as_ref(), stats);
         self.tun = Some(device);
         self.packet_rx = packet_rx;
         self.buffer_tx = buffer_tx;
         self.reader_task = Some(reader_task);
+        self.kernel_tx = Some(kernel_tx);
+        self.kernel_task = Some(kernel_task);
     }
 
     /// The host restores its VPN session and supplies a new device. Old queued
@@ -342,6 +380,12 @@ impl RuntimeTunIo {
     }
 
     async fn delete(&mut self) -> Result<()> {
+        let writer = self
+            .stop_kernel_writer_within(Instant::now() + TASK_STOP_TIMEOUT)
+            .await;
+        if !writer.is_clean() {
+            tracing::warn!("TUN 写入任务未能干净退出，仍将关闭设备: {writer:?}");
+        }
         self.stop_reader().await?;
         self.packet_rx.close();
         while self.packet_rx.try_recv().is_ok() {}
@@ -355,6 +399,7 @@ impl RuntimeTunIo {
 impl Drop for RuntimeTunIo {
     fn drop(&mut self) {
         self.abort_reader();
+        self.abort_kernel_writer();
     }
 }
 
@@ -6219,8 +6264,9 @@ fn chunk_authorization_failure_reply(
 async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacket, source: &str) {
     match admit_inbound_packet(runtime, packet).await {
         Some(InboundAdmission::Payload(payload)) => {
-            if let Some(tun) = runtime.tun_io.tun_mut() {
-                write_payload_to_tun(tun, &runtime.stats, &payload, source).await;
+            if !runtime.tun_io.submit_kernel_payload(payload) {
+                runtime.stats.record_tun_write_error().await;
+                tracing::debug!("主机侧取包不足，丢弃入站数据包 (来源: {source})");
             }
         }
         Some(InboundAdmission::ExitReadiness {
@@ -6269,8 +6315,17 @@ async fn handle_inbound_packet_batch(
             None => {}
         }
     }
-    if let Some(tun) = runtime.tun_io.tun_mut() {
-        write_payloads_to_tun(tun, &runtime.stats, &payloads, source).await;
+    let mut dropped = 0usize;
+    for payload in payloads {
+        if !runtime.tun_io.submit_kernel_payload(payload) {
+            dropped += 1;
+        }
+    }
+    for _ in 0..dropped {
+        runtime.stats.record_tun_write_error().await;
+    }
+    if dropped > 0 {
+        tracing::debug!(dropped, "主机侧取包不足，丢弃入站数据包 (来源: {source})");
     }
 }
 
@@ -6652,23 +6707,6 @@ async fn sync_linux_relay_bypasses(runtime: &mut ClientRuntime) {
     }
 }
 
-async fn write_payload_to_tun(
-    tun: &mut dyn PacketDevice,
-    stats: &StatsCollector,
-    payload: &[u8],
-    source: &str,
-) {
-    match tun.write(payload).await {
-        Ok(_) => {
-            stats.record_tun_tx(payload.len()).await;
-        }
-        Err(e) => {
-            stats.record_tun_write_error().await;
-            tracing::error!("TUN 写入数据失败 (来源: {}): {:?}", source, e);
-        }
-    }
-}
-
 async fn write_payloads_to_tun(
     tun: &mut dyn PacketDevice,
     stats: &StatsCollector,
@@ -6896,6 +6934,43 @@ fn spawn_tun_reader_pool(
         stats.clone(),
     );
     (tun_packet_rx, tun_buffer_tx, reader_task)
+}
+
+fn spawn_tun_writer(
+    tun: &dyn PacketDevice,
+    stats: &StatsCollector,
+) -> (mpsc::Sender<InboundPayload>, JoinHandle<()>) {
+    let (kernel_tx, kernel_rx) = mpsc::channel(TUN_WRITE_QUEUE_CAPACITY);
+    let writer_task = tokio::spawn(write_kernel_packets(
+        tun.clone_box(),
+        kernel_rx,
+        stats.clone(),
+    ));
+    (kernel_tx, writer_task)
+}
+
+/// Copies host-bound packets out of the data plane on its own task. The event
+/// loop must hand packets off and move on: a host that drains one packet per
+/// call would otherwise hold a select turn for as long as its queue stays full,
+/// starving control requests, shutdown and TUN reads alike.
+async fn write_kernel_packets(
+    mut tun: Box<dyn PacketDevice>,
+    mut kernel_rx: mpsc::Receiver<InboundPayload>,
+    stats: StatsCollector,
+) {
+    let mut batch: Vec<InboundPayload> = Vec::with_capacity(DATA_PLANE_BATCH_SIZE);
+    while let Some(packet) = kernel_rx.recv().await {
+        batch.push(packet);
+        while batch.len() < DATA_PLANE_BATCH_SIZE {
+            match kernel_rx.try_recv() {
+                Ok(packet) => batch.push(packet),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        write_payloads_to_tun(tun.as_mut(), &stats, &batch, "P2P packet").await;
+        batch.clear();
+    }
 }
 
 fn spawn_tun_reader(
@@ -10550,8 +10625,15 @@ mod tests {
             for packet in packets {
                 runtime.buffer_tx().send(packet.recycle()).unwrap();
             }
-            write_payload_to_tun(runtime.tun_mut().unwrap(), &stats, &ipv4, "packet-io-test").await;
+            write_payloads_to_tun(
+                runtime.tun_mut().unwrap(),
+                &stats,
+                &[InboundPayload::from_vec(ipv4.clone())],
+                "packet-io-test",
+            )
+            .await;
             assert_eq!(host.recv().await.unwrap(), ipv4);
+            assert!(runtime.submit_kernel_payload(InboundPayload::from_vec(ipv4.clone())));
             let payloads = vec![ipv6.clone().into(), ipv4.clone().into()];
             write_payloads_to_tun(
                 runtime.tun_mut().unwrap(),
@@ -10587,6 +10669,7 @@ mod tests {
             runtime.delete().await.unwrap();
             runtime.delete().await.unwrap();
             assert!(runtime.reader_task.is_none());
+            assert!(runtime.kernel_task.is_none());
             assert!(runtime.tun_mut().is_none());
             assert!(runtime.packet_rx().recv().await.is_none());
             assert_eq!(
@@ -10596,6 +10679,32 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn kernel_write_queue_drops_the_surplus_instead_of_blocking() {
+        let mut config = test_config();
+        config.tun.mtu = 1280;
+        config.tun.name.clear();
+        let ips = VirtualIps::from_ipv6("fd00::1".parse().unwrap());
+        let stats = StatsCollector::new();
+        let (device, host) = ExternalPacketDevice::new("kernel-queue-test", 1280, 1).unwrap();
+        let device = create_packet_device(&config, &ips, Some(Box::new(device)))
+            .await
+            .unwrap();
+        let mut runtime = RuntimeTunIo::new(&config, &ips, device, &stats, false);
+        // No await between submissions, so the writer task cannot drain yet: the
+        // queue fills to capacity and the surplus is dropped rather than awaited.
+        let mut accepted = 0usize;
+        for _ in 0..TUN_WRITE_QUEUE_CAPACITY + 8 {
+            if runtime.submit_kernel_payload(InboundPayload::from_vec(vec![0u8; 64])) {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, TUN_WRITE_QUEUE_CAPACITY);
+        assert!(host.try_recv().is_err());
+        runtime.delete().await.unwrap();
+        assert!(runtime.kernel_task.is_none());
     }
 
     #[tokio::test]
@@ -10742,7 +10851,8 @@ mod tests {
         let state = state.lock().unwrap();
         assert_eq!(state.output, [ipv4, ipv6]);
         assert_eq!(state.closes, 1);
-        assert_eq!(state.drops, 2);
+        // Runtime, TUN reader and kernel writer each hold one device handle.
+        assert_eq!(state.drops, 3);
     }
 
     #[test]

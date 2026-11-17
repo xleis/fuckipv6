@@ -578,6 +578,29 @@ strace 的手工调用数高于内建“成功 batch syscall”数，因为 `asy
 - UDP GSO/GRO 和 TUN offload 尚未实现；buffer pool 只覆盖 UDP receive。
 - 尚缺真实 `P2pEngine` + 密码认证组合压力测试、正式多 run/perf 归因，以及与最终独立提交绑定的前后对比。
 
+## P1b 收口：入站回写主机移出事件循环（2026-11-17）
+
+**问题**：`RuntimeTunIo` 把从数据面退回主机的每个包直接交给事件循环，事件循环对每条入站包 `await` 设备写入（`write_payloads_to_tun` → `tun.write_batch(...)`）。当宿主机取包速度低于到达速度时，设备出队队列（默认 capacity 64）塞满，事件循环就停在等待队列容量的 `await` 上，`control_rx`（`RuntimeCommand`）与 TUN 读取同时得不到轮询机会，表现为 `等待运行时响应超时（1 秒）` 并持续刷 `刷新本机 Exit 客户端计数失败`；iPhone 侧每包一次 FFI receive，出队偏慢，因此最容易触发。
+
+**修复**：入站回写改为「有界队列 + 专用写任务」。
+
+- `RuntimeTunIo` 新增 `kernel_tx: Option<mpsc::Sender<InboundPayload>>` 与 `kernel_task`；容量常量为 `TUN_WRITE_QUEUE_CAPACITY = 128`。
+- 事件循环只做 `try_send`：`submit_kernel_payload` 返回 false（队列满或已关闭）即丢包并 `record_tun_write_error`，与出站方向 `OutboundDispatcher` 的 QueueFull 语义一致，不阻塞控制面。
+- `spawn_tun_writer` 起的 `write_kernel_packets` 任务按 `DATA_PLANE_BATCH_SIZE = 32` 聚合后批量写设备，每批一次 `write_batch`。
+- 生命周期与已有 invariant 对齐：`install_device` 先 `abort_kernel_writer` 再重建，`delete()` 先 `stop_kernel_writer_within`（`TASK_STOP_TIMEOUT`）再关设备，`Drop` 里 abort；运行时、reader、writer 三处设备句柄都会在关闭前释放。
+
+**复现与验证**（`crates/client/src/embedded/tests.rs::embedded_control_plane_latency_matrix`，`#[ignore]`，两节点 + 接收侧主机刻意不 drain）：
+
+| 场景（间隔/包数） | 修复前 B 侧 snapshot p50 | 修复后 B 侧 snapshot p50 | 修复前 delivered | 修复后 delivered |
+| --- | --- | --- | --- | --- |
+| 1000 µs / 128 | 0.5 ms | 0.6 ms | 5 | 128 |
+| 500 µs / 256 | 1648.5 ms | 0.4 ms | 0 | 256 |
+| 200 µs / 512 | 976.9 ms | 0.4 ms | 0 | 512 |
+| 1000 µs / 1024 | 1032.6 ms | 0.5 ms | 0 | 1024 |
+| 200 µs / 1024 | 980.7 ms | 0.4 ms | 0 | 1024 |
+
+修复前 A 侧（发送侧）控制面始终 ≤5 ms，只有接收侧被数据面按住；修复后两侧 p50 均 <1 ms、p90 ≤0.7 ms、max ≤1.5 ms，`等待运行时响应超时` 告警从「每秒一条持续数分钟」降为 0 条，stop 耗时 0.7 ms / 0.4 ms。新增单测 `cli::commands::tests::kernel_write_queue_drops_the_surplus_instead_of_blocking` 固定「队列满即丢包、不阻塞」的语义，`packet_io_external_uses_real_runtime_reader_and_write_paths_without_tun` 覆盖 writer 任务关闭。
+
 ## 本轮验证记录
 
 日期：2026-10-31

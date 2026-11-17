@@ -9,6 +9,13 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
+/// Mobile hosts (iOS) have no system TUN: the Network Extension packet flow is
+/// injected through `crate::packet_io` instead. The backend below only exists so
+/// the platform-neutral `TunDevice` type keeps compiling and fails loudly when
+/// something tries to open a real device.
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+mod unsupported;
+
 use anyhow::Result;
 use fuckipv6_common::VirtualIps;
 
@@ -31,6 +38,9 @@ pub struct TunDevice {
 
     #[cfg(target_os = "windows")]
     inner: windows::WindowsTun,
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    inner: unsupported::UnsupportedTun,
 }
 
 impl TunDevice {
@@ -83,6 +93,26 @@ impl TunDevice {
             Ok(Self {
                 mtu,
                 inner: windows::WindowsTun::create_dual_stack(
+                    name,
+                    virtual_ips,
+                    ipv4_prefix,
+                    ipv6_prefix,
+                    mtu,
+                )
+                .await
+                .map_err(|error| {
+                    network_setup::ensure_stage(error, NetworkSetupStage::TunCreate)
+                })?,
+            })
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        {
+            // Keep the signature identical for callers while refusing to fake a
+            // device: mobile hosts must use the injected packet I/O path.
+            let _ = (name, virtual_ips, ipv4_prefix, ipv6_prefix, mtu);
+            Ok(Self {
+                mtu,
+                inner: unsupported::UnsupportedTun::create_dual_stack(
                     name,
                     virtual_ips,
                     ipv4_prefix,

@@ -7,16 +7,90 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		033C624125676B5B2BE52665 /* FuckIpv6Tunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 92212A5D0B627A6F478F444B /* FuckIpv6Tunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		069649E983BC2A1B73BD413E /* IdentityVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3C89A1856B36AB167F7AAAC /* IdentityVault.swift */; };
 		0FF54F6AFF87795C7D39FC96 /* FuckIpv6App.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5B4863A1C3972F5E149535C /* FuckIpv6App.swift */; };
+		1B1C3FEED66D56C9E382BE1F /* VPNController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82C58855D8088C62FAA289FE /* VPNController.swift */; };
+		1BF300D991C0C06E90B1F159 /* TunnelConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76084B29AFF3AA3AF13DD3C1 /* TunnelConfiguration.swift */; };
+		2543E6887DA15EC52217C804 /* TunnelSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A19180CF1A12C85B6D9AC812 /* TunnelSettings.swift */; };
+		273F37A57E33D6AAEA236242 /* TunnelConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76084B29AFF3AA3AF13DD3C1 /* TunnelConfiguration.swift */; };
+		33A4DE6A5280BDD36077DB5F /* FuckIpv6Bridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFF1780AB47822A1C1EFD67E /* FuckIpv6Bridge.swift */; };
+		39FCF797E1DE8628D0505C84 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C7DE61B106AC7C12A79C819 /* PacketTunnelProvider.swift */; };
+		3E0C5B81BA084BB92D9BFD39 /* AppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DB0601E85B659C13FEBA3B6 /* AppGroup.swift */; };
+		4033AC5F48859EBB7767EB2A /* MessageRouterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA0D185854084CB06B2E4F6A /* MessageRouterTests.swift */; };
+		41381D8007FCE112CD3BFFCD /* MessageRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08E490F6757AECB7B079B96 /* MessageRouter.swift */; };
+		4198B4138CD59F552DB64C03 /* AppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DB0601E85B659C13FEBA3B6 /* AppGroup.swift */; };
+		4463AAC444D7CBE2CD4882B5 /* MessageRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = C08E490F6757AECB7B079B96 /* MessageRouter.swift */; };
+		4C20421185CEDD46DAF55BAF /* IdentityVaultTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0F1B99FAEC05C26D0D08B20 /* IdentityVaultTests.swift */; };
+		4FB738AECD853C156BDBA922 /* AppGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DB0601E85B659C13FEBA3B6 /* AppGroup.swift */; };
+		50E0E14C0EDCF27832DD89DD /* PacketFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56154799C94FBF0DC6F1A1B5 /* PacketFlow.swift */; };
+		52A5D2C087E7AAD7F58A5879 /* PacketPump.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7114C082407B4AFEAAEB2779 /* PacketPump.swift */; };
+		53ED7ED76BD0C3FA59CB9FA2 /* IdentityVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3C89A1856B36AB167F7AAAC /* IdentityVault.swift */; };
+		5E7791E4085EBD02D9927C6F /* TunnelSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A19180CF1A12C85B6D9AC812 /* TunnelSettings.swift */; };
 		698E706A4258F22C5A82CADA /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 7067531C085D68D4DFAC0B8C /* Assets.xcassets */; };
+		7AF7205F88EBBF8C01847D1D /* FuckIpv6Bridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFF1780AB47822A1C1EFD67E /* FuckIpv6Bridge.swift */; };
 		80E5705B7D5A336F357CA6F4 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07ECFF597A9E26BD9D3A0D42 /* RootView.swift */; };
+		90C32ADC0D8C9C59327092BD /* TunnelStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CDF817BE06C5C5A10D15B03 /* TunnelStatus.swift */; };
+		91E2770EE90F097C9963D3A0 /* PacketFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 56154799C94FBF0DC6F1A1B5 /* PacketFlow.swift */; };
+		AE5BC2166FAEC91EF9FF7D79 /* PacketPump.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7114C082407B4AFEAAEB2779 /* PacketPump.swift */; };
+		B36E0B6313C8056E92DC3C60 /* TunnelConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 76084B29AFF3AA3AF13DD3C1 /* TunnelConfiguration.swift */; };
+		B86B1AA2FEA252C5C16ABDBA /* TunnelStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CDF817BE06C5C5A10D15B03 /* TunnelStatus.swift */; };
+		CC2680E14755D2DFCFF9E414 /* TunnelStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CDF817BE06C5C5A10D15B03 /* TunnelStatus.swift */; };
+		D202A879FA42EC19E6585F6C /* RustRuntimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 572F1958BE78D02D25E3C3ED /* RustRuntimeTests.swift */; };
+		D825D75974F0370BBF8BC622 /* IdentityVault.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3C89A1856B36AB167F7AAAC /* IdentityVault.swift */; };
+		E1DC56F5B4870DCF51627051 /* PacketPumpTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9EF530250730927612FF664A /* PacketPumpTests.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		373D6C28C8D631590A0C8763 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = D4C1C20AAD379F802E42F598 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1CC3DDF3D713B3D9639D663E;
+			remoteInfo = FuckIpv6Tunnel;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		63E33E2D7C7D85518244B290 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				033C624125676B5B2BE52665 /* FuckIpv6Tunnel.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		07ECFF597A9E26BD9D3A0D42 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
+		142DD2230766E00EBEFF5D2B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		3968CD7E819C584DE2F049F0 /* FuckIpv6Tunnel-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "FuckIpv6Tunnel-Bridging-Header.h"; sourceTree = "<group>"; };
+		3CDF817BE06C5C5A10D15B03 /* TunnelStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelStatus.swift; sourceTree = "<group>"; };
+		3DB0601E85B659C13FEBA3B6 /* AppGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppGroup.swift; sourceTree = "<group>"; };
+		56154799C94FBF0DC6F1A1B5 /* PacketFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketFlow.swift; sourceTree = "<group>"; };
+		572F1958BE78D02D25E3C3ED /* RustRuntimeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RustRuntimeTests.swift; sourceTree = "<group>"; };
+		5880E7938F11430684DC1E9D /* FuckIpv6.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = FuckIpv6.entitlements; sourceTree = "<group>"; };
 		7067531C085D68D4DFAC0B8C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		7114C082407B4AFEAAEB2779 /* PacketPump.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketPump.swift; sourceTree = "<group>"; };
+		76084B29AFF3AA3AF13DD3C1 /* TunnelConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelConfiguration.swift; sourceTree = "<group>"; };
+		82C58855D8088C62FAA289FE /* VPNController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VPNController.swift; sourceTree = "<group>"; };
+		8C7DE61B106AC7C12A79C819 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
+		92212A5D0B627A6F478F444B /* FuckIpv6Tunnel.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = FuckIpv6Tunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		9EF530250730927612FF664A /* PacketPumpTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketPumpTests.swift; sourceTree = "<group>"; };
+		A19180CF1A12C85B6D9AC812 /* TunnelSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelSettings.swift; sourceTree = "<group>"; };
 		A28FB8936878240A7759E545 /* FuckIpv6.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = FuckIpv6.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		BFF1780AB47822A1C1EFD67E /* FuckIpv6Bridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FuckIpv6Bridge.swift; sourceTree = "<group>"; };
+		C08E490F6757AECB7B079B96 /* MessageRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageRouter.swift; sourceTree = "<group>"; };
+		C0F1B99FAEC05C26D0D08B20 /* IdentityVaultTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityVaultTests.swift; sourceTree = "<group>"; };
+		CA0D185854084CB06B2E4F6A /* MessageRouterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageRouterTests.swift; sourceTree = "<group>"; };
 		E5B4863A1C3972F5E149535C /* FuckIpv6App.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FuckIpv6App.swift; sourceTree = "<group>"; };
+		F3C89A1856B36AB167F7AAAC /* IdentityVault.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IdentityVault.swift; sourceTree = "<group>"; };
+		F54BDBD9C34FD3FFDE838C57 /* FuckIpv6Tunnel.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = FuckIpv6Tunnel.entitlements; sourceTree = "<group>"; };
+		F5FD74BEC918885910A37AC6 /* FuckIpv6Tests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = FuckIpv6Tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -25,8 +99,18 @@
 			children = (
 				E5B4863A1C3972F5E149535C /* FuckIpv6App.swift */,
 				07ECFF597A9E26BD9D3A0D42 /* RootView.swift */,
+				82C58855D8088C62FAA289FE /* VPNController.swift */,
 			);
 			path = App;
+			sourceTree = "<group>";
+		};
+		4BBDD4CCA5E147CDDB8CA238 /* Bridge */ = {
+			isa = PBXGroup;
+			children = (
+				BFF1780AB47822A1C1EFD67E /* FuckIpv6Bridge.swift */,
+				A19180CF1A12C85B6D9AC812 /* TunnelSettings.swift */,
+			);
+			path = Bridge;
 			sourceTree = "<group>";
 		};
 		5A462DFD3630379D805835E9 /* Resources */ = {
@@ -40,6 +124,7 @@
 		5E70AEFBAFFB32F2D52D32BE /* FuckIpv6 */ = {
 			isa = PBXGroup;
 			children = (
+				5880E7938F11430684DC1E9D /* FuckIpv6.entitlements */,
 				48ABC2CE6CE535EBF8E94B8B /* App */,
 				5A462DFD3630379D805835E9 /* Resources */,
 			);
@@ -50,16 +135,66 @@
 			isa = PBXGroup;
 			children = (
 				A28FB8936878240A7759E545 /* FuckIpv6.app */,
+				F5FD74BEC918885910A37AC6 /* FuckIpv6Tests.xctest */,
+				92212A5D0B627A6F478F444B /* FuckIpv6Tunnel.appex */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		7D6596042087D5B75ABD1330 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				3DB0601E85B659C13FEBA3B6 /* AppGroup.swift */,
+				F3C89A1856B36AB167F7AAAC /* IdentityVault.swift */,
+				76084B29AFF3AA3AF13DD3C1 /* TunnelConfiguration.swift */,
+				3CDF817BE06C5C5A10D15B03 /* TunnelStatus.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		C68824FA9D994CD3B1CF0DAC /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				C0F1B99FAEC05C26D0D08B20 /* IdentityVaultTests.swift */,
+				CA0D185854084CB06B2E4F6A /* MessageRouterTests.swift */,
+				9EF530250730927612FF664A /* PacketPumpTests.swift */,
+				572F1958BE78D02D25E3C3ED /* RustRuntimeTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		C7DE656D5ED20CFEF224C9DA /* FuckIpv6Tunnel */ = {
+			isa = PBXGroup;
+			children = (
+				3968CD7E819C584DE2F049F0 /* FuckIpv6Tunnel-Bridging-Header.h */,
+				F54BDBD9C34FD3FFDE838C57 /* FuckIpv6Tunnel.entitlements */,
+				142DD2230766E00EBEFF5D2B /* Info.plist */,
+				8C7DE61B106AC7C12A79C819 /* PacketTunnelProvider.swift */,
+				4BBDD4CCA5E147CDDB8CA238 /* Bridge */,
+				EA8CA58A413D0BE86CF060DC /* Data */,
+			);
+			path = FuckIpv6Tunnel;
 			sourceTree = "<group>";
 		};
 		DFF4E981758D9167B3776B23 = {
 			isa = PBXGroup;
 			children = (
 				5E70AEFBAFFB32F2D52D32BE /* FuckIpv6 */,
+				C7DE656D5ED20CFEF224C9DA /* FuckIpv6Tunnel */,
+				7D6596042087D5B75ABD1330 /* Shared */,
+				C68824FA9D994CD3B1CF0DAC /* Tests */,
 				73B6D9B657A1B6535D80B53B /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		EA8CA58A413D0BE86CF060DC /* Data */ = {
+			isa = PBXGroup;
+			children = (
+				C08E490F6757AECB7B079B96 /* MessageRouter.swift */,
+				56154799C94FBF0DC6F1A1B5 /* PacketFlow.swift */,
+				7114C082407B4AFEAAEB2779 /* PacketPump.swift */,
+			);
+			path = Data;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -71,10 +206,12 @@
 			buildPhases = (
 				B29427F61B79E2AB6DB3AAC3 /* Sources */,
 				2733F42ED0EAE90966539903 /* Resources */,
+				63E33E2D7C7D85518244B290 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				7255C758D4FF52F52B81B631 /* PBXTargetDependency */,
 			);
 			name = FuckIpv6;
 			packageProductDependencies = (
@@ -82,6 +219,42 @@
 			productName = FuckIpv6;
 			productReference = A28FB8936878240A7759E545 /* FuckIpv6.app */;
 			productType = "com.apple.product-type.application";
+		};
+		1CC3DDF3D713B3D9639D663E /* FuckIpv6Tunnel */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D3CB3F63F60D39BECD7B4F1F /* Build configuration list for PBXNativeTarget "FuckIpv6Tunnel" */;
+			buildPhases = (
+				02254BAF6209379A02F948F3 /* Build Rust bridge */,
+				E5B9DBD53714EF016FFF15FB /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = FuckIpv6Tunnel;
+			packageProductDependencies = (
+			);
+			productName = FuckIpv6Tunnel;
+			productReference = 92212A5D0B627A6F478F444B /* FuckIpv6Tunnel.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		8408C728E6C28A889998E97A /* FuckIpv6Tests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9E159D8F7829374F25EE9EA8 /* Build configuration list for PBXNativeTarget "FuckIpv6Tests" */;
+			buildPhases = (
+				3258B5C92C30BFFD16D675D7 /* Build Rust bridge */,
+				69859A67482C993BE3D5F888 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = FuckIpv6Tests;
+			packageProductDependencies = (
+			);
+			productName = FuckIpv6Tests;
+			productReference = F5FD74BEC918885910A37AC6 /* FuckIpv6Tests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -93,6 +266,15 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					014CC52D1D25BF92A8824F70 = {
+						DevelopmentTeam = R9UJHHAZQ4;
+						ProvisioningStyle = Automatic;
+					};
+					1CC3DDF3D713B3D9639D663E = {
+						DevelopmentTeam = R9UJHHAZQ4;
+						ProvisioningStyle = Automatic;
+					};
+					8408C728E6C28A889998E97A = {
+						DevelopmentTeam = R9UJHHAZQ4;
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -112,6 +294,8 @@
 			projectRoot = "";
 			targets = (
 				014CC52D1D25BF92A8824F70 /* FuckIpv6 */,
+				1CC3DDF3D713B3D9639D663E /* FuckIpv6Tunnel */,
+				8408C728E6C28A889998E97A /* FuckIpv6Tests */,
 			);
 		};
 /* End PBXProject section */
@@ -127,17 +311,108 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		02254BAF6209379A02F948F3 /* Build Rust bridge */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build Rust bridge";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$SRCROOT/scripts/build-rust.sh\"\n";
+		};
+		3258B5C92C30BFFD16D675D7 /* Build Rust bridge */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build Rust bridge";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$SRCROOT/scripts/build-rust.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
+		69859A67482C993BE3D5F888 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4198B4138CD59F552DB64C03 /* AppGroup.swift in Sources */,
+				33A4DE6A5280BDD36077DB5F /* FuckIpv6Bridge.swift in Sources */,
+				069649E983BC2A1B73BD413E /* IdentityVault.swift in Sources */,
+				4C20421185CEDD46DAF55BAF /* IdentityVaultTests.swift in Sources */,
+				4463AAC444D7CBE2CD4882B5 /* MessageRouter.swift in Sources */,
+				4033AC5F48859EBB7767EB2A /* MessageRouterTests.swift in Sources */,
+				91E2770EE90F097C9963D3A0 /* PacketFlow.swift in Sources */,
+				AE5BC2166FAEC91EF9FF7D79 /* PacketPump.swift in Sources */,
+				E1DC56F5B4870DCF51627051 /* PacketPumpTests.swift in Sources */,
+				D202A879FA42EC19E6585F6C /* RustRuntimeTests.swift in Sources */,
+				1BF300D991C0C06E90B1F159 /* TunnelConfiguration.swift in Sources */,
+				2543E6887DA15EC52217C804 /* TunnelSettings.swift in Sources */,
+				CC2680E14755D2DFCFF9E414 /* TunnelStatus.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		B29427F61B79E2AB6DB3AAC3 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				3E0C5B81BA084BB92D9BFD39 /* AppGroup.swift in Sources */,
 				0FF54F6AFF87795C7D39FC96 /* FuckIpv6App.swift in Sources */,
+				53ED7ED76BD0C3FA59CB9FA2 /* IdentityVault.swift in Sources */,
 				80E5705B7D5A336F357CA6F4 /* RootView.swift in Sources */,
+				273F37A57E33D6AAEA236242 /* TunnelConfiguration.swift in Sources */,
+				B86B1AA2FEA252C5C16ABDBA /* TunnelStatus.swift in Sources */,
+				1B1C3FEED66D56C9E382BE1F /* VPNController.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E5B9DBD53714EF016FFF15FB /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4FB738AECD853C156BDBA922 /* AppGroup.swift in Sources */,
+				7AF7205F88EBBF8C01847D1D /* FuckIpv6Bridge.swift in Sources */,
+				D825D75974F0370BBF8BC622 /* IdentityVault.swift in Sources */,
+				41381D8007FCE112CD3BFFCD /* MessageRouter.swift in Sources */,
+				50E0E14C0EDCF27832DD89DD /* PacketFlow.swift in Sources */,
+				52A5D2C087E7AAD7F58A5879 /* PacketPump.swift in Sources */,
+				39FCF797E1DE8628D0505C84 /* PacketTunnelProvider.swift in Sources */,
+				B36E0B6313C8056E92DC3C60 /* TunnelConfiguration.swift in Sources */,
+				5E7791E4085EBD02D9927C6F /* TunnelSettings.swift in Sources */,
+				90C32ADC0D8C9C59327092BD /* TunnelStatus.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		7255C758D4FF52F52B81B631 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1CC3DDF3D713B3D9639D663E /* FuckIpv6Tunnel */;
+			targetProxy = 373D6C28C8D631590A0C8763 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		04B3C50372FEFE258073CFB4 /* Release */ = {
@@ -145,6 +420,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = FuckIpv6/FuckIpv6.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
@@ -158,7 +434,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = cc.xlei.fuckipv6.ios;
+				PRODUCT_BUNDLE_IDENTIFIER = com.lingxifox.fuckipv6;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -200,9 +476,11 @@
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = R9UJHHAZQ4;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				GCC_NO_COMMON_BLOCKS = YES;
 				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
@@ -218,7 +496,30 @@
 				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		6FFB2E0B0A987802A056EEB8 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/../crates/ios-bridge/include";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Rust/lib/$(PLATFORM_NAME)";
+				MARKETING_VERSION = 0.1.0;
+				OTHER_LDFLAGS = "-lfuckipv6_ios";
+				PRODUCT_BUNDLE_IDENTIFIER = com.lingxifox.fuckipv6.tests;
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = "FuckIpv6Tunnel/FuckIpv6Tunnel-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
 		};
@@ -227,6 +528,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = FuckIpv6/FuckIpv6.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
@@ -240,7 +542,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = cc.xlei.fuckipv6.ios;
+				PRODUCT_BUNDLE_IDENTIFIER = com.lingxifox.fuckipv6;
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -282,9 +584,11 @@
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = R9UJHHAZQ4;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
-				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
 				GCC_DYNAMIC_NO_PIC = NO;
 				GCC_NO_COMMON_BLOCKS = YES;
@@ -307,9 +611,82 @@
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_VERSION = 6.0;
 			};
 			name = Debug;
+		};
+		A27D75ECD3205AD3A310C459 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = FuckIpv6Tunnel/FuckIpv6Tunnel.entitlements;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/../crates/ios-bridge/include";
+				INFOPLIST_FILE = FuckIpv6Tunnel/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Rust/lib/$(PLATFORM_NAME)";
+				MARKETING_VERSION = 0.1.0;
+				OTHER_LDFLAGS = "-lfuckipv6_ios";
+				PRODUCT_BUNDLE_IDENTIFIER = com.lingxifox.fuckipv6.tunnel;
+				PRODUCT_NAME = FuckIpv6Tunnel;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "FuckIpv6Tunnel/FuckIpv6Tunnel-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		CF358668AEE4B99E2E105F31 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/../crates/ios-bridge/include";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Rust/lib/$(PLATFORM_NAME)";
+				MARKETING_VERSION = 0.1.0;
+				OTHER_LDFLAGS = "-lfuckipv6_ios";
+				PRODUCT_BUNDLE_IDENTIFIER = com.lingxifox.fuckipv6.tests;
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = "FuckIpv6Tunnel/FuckIpv6Tunnel-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		EBAD6D451C1630EEFDE7944B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = FuckIpv6Tunnel/FuckIpv6Tunnel.entitlements;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/../crates/ios-bridge/include";
+				INFOPLIST_FILE = FuckIpv6Tunnel/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/Rust/lib/$(PLATFORM_NAME)";
+				MARKETING_VERSION = 0.1.0;
+				OTHER_LDFLAGS = "-lfuckipv6_ios";
+				PRODUCT_BUNDLE_IDENTIFIER = com.lingxifox.fuckipv6.tunnel;
+				PRODUCT_NAME = FuckIpv6Tunnel;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "FuckIpv6Tunnel/FuckIpv6Tunnel-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
 		};
 /* End XCBuildConfiguration section */
 
@@ -319,6 +696,24 @@
 			buildConfigurations = (
 				8BEF95B248588DD2CFF4AD47 /* Debug */,
 				0EE349FAD5D724066BEE5EE1 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		9E159D8F7829374F25EE9EA8 /* Build configuration list for PBXNativeTarget "FuckIpv6Tests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CF358668AEE4B99E2E105F31 /* Debug */,
+				6FFB2E0B0A987802A056EEB8 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		D3CB3F63F60D39BECD7B4F1F /* Build configuration list for PBXNativeTarget "FuckIpv6Tunnel" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A27D75ECD3205AD3A310C459 /* Debug */,
+				EBAD6D451C1630EEFDE7944B /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

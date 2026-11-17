@@ -2893,6 +2893,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuckipv6-ios-bridge"
+version = "0.3.0"
+dependencies = [
+ "fuckipv6-client",
+ "fuckipv6-common",
+ "futures",
+ "ipnet",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fuckipv6-secure-session"
 version = "0.3.0"
 dependencies = [

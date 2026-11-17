@@ -39,6 +39,17 @@
          </BuildableReference>
       </MacroExpansion>
       <Testables>
+         <TestableReference
+            skipped = "NO"
+            parallelizable = "NO">
+            <BuildableReference
+               BuildableIdentifier = "primary"
+               BlueprintIdentifier = "8408C728E6C28A889998E97A"
+               BuildableName = "FuckIpv6Tests.xctest"
+               BlueprintName = "FuckIpv6Tests"
+               ReferencedContainer = "container:FuckIpv6.xcodeproj">
+            </BuildableReference>
+         </TestableReference>
       </Testables>
       <CommandLineArguments>
       </CommandLineArguments>

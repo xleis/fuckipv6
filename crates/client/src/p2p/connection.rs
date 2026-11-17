@@ -2328,6 +2328,26 @@ impl P2pEngine {
             })
     }
 
+    /// Resolve a registered peer by stable NodeId without materializing all
+    /// peer records. Used by authenticated data-plane operations that start
+    /// from a member identity rather than a virtual address.
+    pub(crate) async fn peer_route_by_node_id(&self, node_id: &NodeId) -> Option<PeerRouteInfo> {
+        let client_id = self.node_index.read().await.get(node_id).cloned()?;
+        self.connections
+            .read()
+            .await
+            .get(client_id.as_ref())
+            .filter(|connection| {
+                NodeId::from_public_key(&connection.peer_info.public_key) == *node_id
+            })
+            .map(|connection| PeerRouteInfo {
+                client_id: client_id.clone(),
+                node_id: node_id.clone(),
+                virtual_ip: connection.peer_info.virtual_ip,
+                virtual_ips: connection.peer_info.virtual_ips.clone(),
+            })
+    }
+
     /// Resolve the configured Exit Node without materializing every `PeerInfo`.
     /// IP-form targets use the existing O(1) virtual-IP index; Client ID targets
     /// use the connection map directly.

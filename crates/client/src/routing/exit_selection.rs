@@ -430,6 +430,8 @@ mod tests {
             can_manage_members: false,
             exit_selection_policy: policy(),
             exit_selection_policy_revision: revision,
+            network_revision: 1,
+            capability_declarations: Vec::new(),
             members: vec![
                 member(
                     subject(),

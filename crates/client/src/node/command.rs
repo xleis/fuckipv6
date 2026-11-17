@@ -28,7 +28,7 @@ use fuckipv6_common::domain::{DEFAULT_NETWORK_ICON, DEFAULT_NETWORK_LANGUAGE};
 use fuckipv6_common::{validate_ipv4_cidr, validate_ipv6_cidr, NetworkAllocation, NetworkMode};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,6 +37,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use super::authorization::{authorize_command, CommandDenial};
+use super::state::RECENT_ACTIVITY_RETENTION_LIMIT;
 use super::ui_manifest::audit_for_command;
 use super::{
     NodeCommandContext, NodeEventBus, NodeEventKind, NodeLifecycleSnapshot, NodeNetworkRole,
@@ -3066,10 +3067,10 @@ struct CommandEnvelope {
     response: oneshot::Sender<NodeCommandResult>,
 }
 
-const ACTIVITY_RETENTION_LIMIT: usize = 256;
+const COMMAND_AUDIT_RETENTION_LIMIT: usize = 256;
 
 struct CommandAuditTrail {
-    entries: Arc<Mutex<Vec<AuditEntry>>>,
+    entries: Arc<Mutex<VecDeque<AuditEntry>>>,
     recent_activity: Arc<Mutex<Vec<ActivityEntry>>>,
     next_sequence: Arc<AtomicU64>,
     durable: Option<Arc<OwnerSecurityAudit>>,
@@ -3078,7 +3079,9 @@ struct CommandAuditTrail {
 impl CommandAuditTrail {
     fn new(durable: Option<Arc<OwnerSecurityAudit>>) -> Self {
         Self {
-            entries: Arc::new(Mutex::new(Vec::new())),
+            entries: Arc::new(Mutex::new(VecDeque::with_capacity(
+                COMMAND_AUDIT_RETENTION_LIMIT,
+            ))),
             recent_activity: Arc::new(Mutex::new(Vec::new())),
             next_sequence: Arc::new(AtomicU64::new(0)),
             durable,
@@ -3178,7 +3181,13 @@ impl CommandAuditTrail {
             }
         }
         if let Ok(mut entries) = self.entries.lock() {
-            entries.push(entry.clone());
+            // The durable owner ledger is the canonical audit source. Keep the
+            // in-memory command projection bounded so command traffic cannot
+            // grow process memory without limit.
+            entries.push_back(entry.clone());
+            while entries.len() > COMMAND_AUDIT_RETENTION_LIMIT {
+                entries.pop_front();
+            }
         }
         if !request.command.kind().is_write() && outcome != AuditOutcome::Denied {
             return Ok(None);
@@ -3202,7 +3211,7 @@ impl CommandAuditTrail {
                     .cmp(&left.occurred_at_unix_ms)
                     .then_with(|| right.audit_id.cmp(&left.audit_id))
             });
-            activity.truncate(ACTIVITY_RETENTION_LIMIT);
+            activity.truncate(RECENT_ACTIVITY_RETENTION_LIMIT);
         }
         Ok(Some(projected))
     }
@@ -3210,7 +3219,7 @@ impl CommandAuditTrail {
     fn entries(&self) -> Vec<AuditEntry> {
         self.entries
             .lock()
-            .map(|entries| entries.clone())
+            .map(|entries| entries.iter().cloned().collect())
             .unwrap_or_default()
     }
 
@@ -6880,7 +6889,7 @@ mod tests {
             .expect("snapshot query");
 
         let activity = state.snapshot().await.recent_activity;
-        assert_eq!(activity.len(), ACTIVITY_RETENTION_LIMIT);
+        assert_eq!(activity.len(), RECENT_ACTIVITY_RETENTION_LIMIT);
         assert!(activity
             .iter()
             .all(|entry| entry.details["command"] == "start_node"));
@@ -6894,10 +6903,36 @@ mod tests {
             .iter()
             .map(|entry| entry.audit_id.as_str())
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(audit_ids.len(), ACTIVITY_RETENTION_LIMIT);
+        assert_eq!(audit_ids.len(), RECENT_ACTIVITY_RETENTION_LIMIT);
         assert!(!activity
             .iter()
             .any(|entry| entry.details["command"] == "get_snapshot"));
+    }
+
+    #[tokio::test]
+    async fn command_audit_keeps_only_the_latest_bounded_entries() {
+        let bus = NodeCommandBus::spawn(Arc::new(EchoHandler), NodeEventBus::default(), 8);
+
+        for request_id in 0..COMMAND_AUDIT_RETENTION_LIMIT as u64 + 44 {
+            bus.execute_test(NodeCommandRequest::new(request_id, NodeCommand::StartNode))
+                .await
+                .expect("authorized command");
+        }
+
+        let audit = bus.audit_entries();
+        assert_eq!(audit.len(), COMMAND_AUDIT_RETENTION_LIMIT);
+        assert_eq!(
+            audit
+                .first()
+                .and_then(|entry| entry.details.get("request_id")),
+            Some(&"44".to_owned())
+        );
+        assert_eq!(
+            audit
+                .last()
+                .and_then(|entry| entry.details.get("request_id")),
+            Some(&(COMMAND_AUDIT_RETENTION_LIMIT as u64 + 43).to_string())
+        );
     }
 
     #[tokio::test]

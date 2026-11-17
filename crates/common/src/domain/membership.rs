@@ -790,6 +790,15 @@ pub struct NetworkMemberDirectory {
     /// must reject older revisions instead of replacing fresher governance.
     #[serde(default)]
     pub exit_selection_policy_revision: u64,
+    /// Monotonic revision of the authoritative network record represented by
+    /// this directory. Consumers use it to reject stale capability grants.
+    #[serde(default)]
+    pub network_revision: u64,
+    /// Owner-declared capabilities from the same authoritative network record.
+    /// This is an authorization input, not proof that any member enabled the
+    /// capability locally. Missing declarations fail closed.
+    #[serde(default)]
+    pub capability_declarations: Vec<super::CapabilityKind>,
     pub members: Vec<NetworkMember>,
 }
 

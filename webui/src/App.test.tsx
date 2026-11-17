@@ -813,7 +813,7 @@ describe("React WebUI shell", () => {
     expect(loadSnapshot).not.toHaveBeenCalled();
   });
 
-  it("renders five modules and all thirteen manifest-backed secondary pages", async () => {
+  it("renders five modules and all fourteen manifest-backed secondary pages", async () => {
     authenticate();
     const user = userEvent.setup();
     renderApp();
@@ -840,7 +840,7 @@ describe("React WebUI shell", () => {
       "exit_node",
       "relay",
     ]);
-    await expectModulePages(user, "activity", ["traffic", "activity", "logs"]);
+    await expectModulePages(user, "activity", ["traffic", "activity", "logs", "files"]);
     await expectModulePages(user, "settings", ["settings"]);
   });
 
@@ -1835,6 +1835,7 @@ describe("React WebUI shell", () => {
       "owner-security",
       "remote-access",
       "services-updates",
+      "file-share",
       "discovery-index",
       "data-recovery",
     ]);
@@ -1844,6 +1845,7 @@ describe("React WebUI shell", () => {
       "translated:settings.section.owner_security",
       "translated:settings.section.remote_access",
       "translated:settings.section.services_updates",
+      "translated:settings.section.file_share",
       "translated:settings.section.discovery_index",
       "translated:settings.section.data_recovery",
     ]);
@@ -1870,10 +1872,16 @@ describe("React WebUI shell", () => {
       "translated:settings.platform_limitations.none",
     );
     expect(groups[3]).toHaveTextContent(
+      "translated:status.capability.unsupported",
+    );
+    expect(groups[3]).toHaveTextContent(
+      "translated:settings.file.owner_only_detail",
+    );
+    expect(groups[4]).toHaveTextContent(
       "translated:settings.discovery_index.detail",
     );
-    expect(groups[4]).toHaveTextContent("translated:settings.value.read_only");
-    expect(groups[4]).toHaveTextContent("translated:settings.read_only.detail");
+    expect(groups[5]).toHaveTextContent("translated:settings.value.read_only");
+    expect(groups[5]).toHaveTextContent("translated:settings.read_only.detail");
     expect(grid?.querySelector("button, input, select, textarea")).toBeNull();
 
     const advanced = container.querySelector<HTMLElement>(".advanced-settings");

@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::cli::commands::{self, RuntimeOptions};
 use crate::config_manager::ConfigManager;
+use crate::file_share::FileOwnerService;
 use crate::ipc::{self, MultiNetworkRegistry};
 use crate::node::runtime_metadata;
 use crate::node::{
@@ -71,6 +72,7 @@ pub struct MultiNetworkSupervisor {
     commands: NodeCommandBus,
     services: EmbeddedServiceManager,
     runtimes: NetworkRuntimeManager,
+    file_owner: FileOwnerService,
 }
 
 impl MultiNetworkSupervisor {
@@ -96,10 +98,9 @@ impl MultiNetworkSupervisor {
         );
         let state =
             NodeStateStore::with_events_identity_and_ui(events.clone(), Some(identity), ui_mode);
-        let owner_audit = Arc::new(OwnerSecurityAudit::new(
-            configs.config_dir(),
-            NodeId::from_public_key(&node_identity.public_key_bytes()),
-        )?);
+        let owner = NodeId::from_public_key(&node_identity.public_key_bytes());
+        let file_owner = FileOwnerService::new(configs.config_dir(), owner.clone(), state.clone())?;
+        let owner_audit = Arc::new(OwnerSecurityAudit::new(configs.config_dir(), owner)?);
         let services = EmbeddedServiceManager::spawn_with_config(8, configs.clone());
         let lifecycle = NodeLifecycle::new();
         let runtimes = NetworkRuntimeManager::spawn_with_failover_audit(
@@ -110,6 +111,7 @@ impl MultiNetworkSupervisor {
             lifecycle.clone(),
             registry.clone(),
             services.clone(),
+            file_owner.network_runtime(),
             Some(owner_audit.clone()),
         );
         let commands = spawn_command_bus_with_runtime_and_audit(
@@ -129,6 +131,7 @@ impl MultiNetworkSupervisor {
             commands,
             services,
             runtimes,
+            file_owner,
         })
     }
 
@@ -156,6 +159,11 @@ impl MultiNetworkSupervisor {
         self.commands.clone()
     }
 
+    /// Owner-only File capability coordinator.
+    pub(crate) fn file_owner(&self) -> FileOwnerService {
+        self.file_owner.clone()
+    }
+
     /// Embedded signaling/relay services owned by this node runtime.
     pub fn services(&self) -> EmbeddedServiceManager {
         self.services.clone()
@@ -170,6 +178,7 @@ impl MultiNetworkSupervisor {
         let lifecycle = self.lifecycle.begin_stop().await;
         self.sync_lifecycle(lifecycle).await;
 
+        self.file_owner.shutdown().await;
         let result = self.runtimes.shutdown().await;
         // `NetworkRuntimeManager::shutdown` closes the shared service actor. A
         // second shutdown is tolerant and still releases services if the actor
@@ -213,6 +222,9 @@ impl MultiNetworkSupervisor {
     }
 
     pub(crate) async fn refresh_runtime_state(&self) {
+        if let Err(error) = self.file_owner.refresh().await {
+            tracing::warn!(code = error.code(), "刷新 File 能力状态失败");
+        }
         let runtime = ipc::multi_status_snapshot(&self.registry).await;
         let logs = runtime_metadata::recent_log_entries();
         self.state
@@ -366,6 +378,7 @@ impl MultiNetworkSupervisor {
         let lifecycle = self.lifecycle.begin_stop().await;
         self.sync_lifecycle(lifecycle).await;
 
+        self.file_owner.shutdown().await;
         if let Err(error) = self.runtimes.shutdown().await {
             tracing::warn!("关闭网络运行时失败: {error}");
         }

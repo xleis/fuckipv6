@@ -4408,6 +4408,14 @@
         "can_manage_members": {
           "type": "boolean"
         },
+        "capability_declarations": {
+          "default": [],
+          "description": "Owner-declared capabilities from the same authoritative network record.\nThis is an authorization input, not proof that any member enabled the\ncapability locally. Missing declarations fail closed.",
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
         "exit_selection_policy": {
           "$ref": "#/$defs/ExitSelectionPolicy",
           "default": {
@@ -4442,6 +4450,13 @@
         },
         "network_id": {
           "$ref": "#/$defs/NetworkId"
+        },
+        "network_revision": {
+          "default": 0,
+          "description": "Monotonic revision of the authoritative network record represented by\nthis directory. Consumers use it to reject stale capability grants.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "viewer_role": {
           "$ref": "#/$defs/MembershipRole",
@@ -6620,6 +6635,65 @@
       ],
       "type": "object"
     },
+    "NodeFileCapabilitySnapshot": {
+      "description": "Path-free File capability state safe for snapshots, events and UI manifests.",
+      "properties": {
+        "access_epoch": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "active_transfers": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "available_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "network_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NetworkId"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The network this owner-local share is bound to. This is safe to expose\nto authorized snapshot viewers and lets the UI place File state on the\nmatching network instead of inventing a global File page."
+        },
+        "root_error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "share_revision": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/CapabilityState"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
     "NodeId": {
       "type": "string"
     },
@@ -8407,19 +8481,6 @@
         },
         "exit_node_capabilities": {
           "$ref": "#/$defs/ExitNodeCapabilities",
-          "default": {
-            "cleanup": false,
-            "ipv4_forwarding": false,
-            "ipv6_forwarding": false,
-            "nat": false,
-            "platform": "linux",
-            "schema_version": 1,
-            "supported": false,
-            "unsupported_reasons": [
-              "privileges_required",
-              "ipv4_forwarding_unavailable"
-            ]
-          },
           "description": "Runtime capability truth for this host. Adapters must disable Exit Node\nactions when `supported` is false and render the typed reasons instead\nof inferring success from configuration alone."
         },
         "exit_selections": {
@@ -8429,6 +8490,14 @@
             "$ref": "#/$defs/NodeExitSelectionSnapshot"
           },
           "type": "array"
+        },
+        "file_capability": {
+          "$ref": "#/$defs/NodeFileCapabilitySnapshot",
+          "default": {
+            "active_transfers": 0,
+            "state": "disabled"
+          },
+          "description": "Local File-share health. This DTO deliberately contains no root path or\nraw filesystem message; owner-only local IPC provides the selected path."
         },
         "identity": {
           "anyOf": [
@@ -8577,15 +8646,6 @@
         },
         "tun_capabilities": {
           "$ref": "#/$defs/TunCapabilities",
-          "default": {
-            "can_rebuild": false,
-            "platform": "linux",
-            "reasons": [
-              "unknown"
-            ],
-            "schema_version": 1,
-            "supported": true
-          },
           "description": "Redacted TUN readiness for this node process. Missing or malformed\ncapability data must disable host-network mutations in every adapter."
         },
         "ui_mode": {

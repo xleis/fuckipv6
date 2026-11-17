@@ -1,4 +1,5 @@
 pub mod controller;
+mod file_api;
 mod node_surface;
 mod owner_bootstrap;
 mod public_claim;
@@ -29,9 +30,10 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 pub use controller::{
     AppController, AppControllerError, AppUiState, BanRequest, ConnectRequest, CoordinatorPeerDto,
-    CoordinatorTrafficDto, HostRequest, LogsResponse, PeerUiInfo, RuntimeTrafficDto,
-    UnifiedSnapshotResponse, UpdateRoutingRequest,
+    CoordinatorTrafficDto, FilePeerTarget, HostRequest, LogsResponse, PeerUiInfo,
+    RuntimeTrafficDto, UnifiedSnapshotResponse, UpdateRoutingRequest,
 };
+use file_api::FileWebState;
 use fuckipv6_common::domain::{AuditExportFilter, PasskeyCredentialId};
 use fuckipv6_common::i18n::{LanguagePreference, Locale};
 use fuckipv6_coordinator::signaling::session::PeerSnapshot;
@@ -154,10 +156,35 @@ fn create_app_web_router_with_mutation_limiter(
         .route("/api/host", post(handle_host))
         .route("/api/stop_host", post(handle_stop_host))
         .route("/api/routing", post(handle_routing))
+        .route("/api/v1/file/targets", get(file_api::handle_targets))
+        .route("/api/v1/file/directory", get(file_api::handle_directory))
+        .route("/api/v1/file/transfers", get(file_api::handle_transfers))
+        .route("/api/v1/file/uploads", post(file_api::handle_upload))
+        .route(
+            "/api/v1/file/downloads",
+            post(file_api::handle_start_download),
+        )
+        .route(
+            "/api/v1/file/downloads/{token}",
+            get(file_api::handle_download),
+        )
+        .route(
+            "/api/v1/file/transfers/{transfer_id}/{operation_id}/pause",
+            post(file_api::handle_pause),
+        )
+        .route(
+            "/api/v1/file/transfers/{transfer_id}/{operation_id}/resume",
+            post(file_api::handle_resume),
+        )
+        .route(
+            "/api/v1/file/transfers/{transfer_id}/{operation_id}",
+            delete(file_api::handle_cancel),
+        )
         // 兼容接口
         .route("/api/coordinator/ban", post(handle_coordinator_ban))
         .route("/api/coordinator/unban", post(handle_coordinator_unban))
-        .with_state(controller);
+        .with_state(controller)
+        .layer(Extension(FileWebState::default()));
     let node_state = node_adapter.as_ref().map(NodeHttpAdapter::state_store);
     let protected = match node_adapter {
         Some(adapter) => protected.merge(adapter.router()),
@@ -259,7 +286,10 @@ fn write_local_shell_token(token: &str) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .context("无法收紧桌面外壳引导令牌权限")?;
-        if let Some(uid) = invoked_user.as_deref().and_then(|value| value.parse::<u32>().ok()) {
+        if let Some(uid) = invoked_user
+            .as_deref()
+            .and_then(|value| value.parse::<u32>().ok())
+        {
             let gid = std::env::var("SUDO_GID")
                 .ok()
                 .and_then(|value| value.parse::<u32>().ok())
@@ -302,10 +332,7 @@ async fn handle_local_shell_session(
     Json(body): Json<LocalShellSessionBody>,
 ) -> Response {
     if !remote_addr.ip().is_loopback() || headers_have_forwarding(&headers) {
-        return owner_api_error(
-            StatusCode::FORBIDDEN,
-            "桌面外壳会话只允许本机回环请求",
-        );
+        return owner_api_error(StatusCode::FORBIDDEN, "桌面外壳会话只允许本机回环请求");
     }
     // The token is scoped to this backend process and readable only by the
     // invoking user, so every shell restart may present it again; a wrong
@@ -347,8 +374,8 @@ async fn handle_local_shell_session(
 }
 
 fn ensure_webui_start_allowed(request: UiModeRequest, capabilities: UiCapabilities) -> Result<()> {
-    let resolution = resolve_ui_mode(request, capabilities)
-        .context("当前主机存在桌面会话，拒绝启动 WebUI")?;
+    let resolution =
+        resolve_ui_mode(request, capabilities).context("当前主机存在桌面会话，拒绝启动 WebUI")?;
     debug_assert!(resolution.effective.is_web_ui());
     Ok(())
 }

@@ -881,7 +881,10 @@ fn command_ui_intent(command: &Commands) -> Result<Option<CommandUiIntent>, UiMo
             gpui,
             webui_port,
             ..
-        } => (requested_ui_mode(*headless, *webui, *gpui, false)?, *webui_port),
+        } => (
+            requested_ui_mode(*headless, *webui, *gpui, false)?,
+            *webui_port,
+        ),
         _ => return Ok(None),
     };
     Ok(Some(CommandUiIntent {

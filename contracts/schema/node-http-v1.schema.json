@@ -4716,6 +4716,14 @@
         "can_manage_members": {
           "type": "boolean"
         },
+        "capability_declarations": {
+          "default": [],
+          "description": "Owner-declared capabilities from the same authoritative network record.\nThis is an authorization input, not proof that any member enabled the\ncapability locally. Missing declarations fail closed.",
+          "items": {
+            "$ref": "#/$defs/CapabilityKind"
+          },
+          "type": "array"
+        },
         "exit_selection_policy": {
           "$ref": "#/$defs/ExitSelectionPolicy",
           "default": {
@@ -4750,6 +4758,13 @@
         },
         "network_id": {
           "$ref": "#/$defs/NetworkId"
+        },
+        "network_revision": {
+          "default": 0,
+          "description": "Monotonic revision of the authoritative network record represented by\nthis directory. Consumers use it to reject stale capability grants.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
         },
         "viewer_role": {
           "$ref": "#/$defs/MembershipRole",
@@ -14463,20 +14478,7 @@
           "type": "array"
         },
         "exit_node_capabilities": {
-          "$ref": "#/$defs/ExitNodeCapabilities",
-          "default": {
-            "cleanup": false,
-            "ipv4_forwarding": false,
-            "ipv6_forwarding": false,
-            "nat": false,
-            "platform": "linux",
-            "schema_version": 1,
-            "supported": false,
-            "unsupported_reasons": [
-              "privileges_required",
-              "ipv4_forwarding_unavailable"
-            ]
-          }
+          "$ref": "#/$defs/ExitNodeCapabilities"
         },
         "exit_selections": {
           "items": {

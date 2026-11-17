@@ -22,13 +22,18 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::timeout;
 
+use crate::file_share::{
+    FileDirectoryListing, FileOwnerServiceError, FileShareConfiguration, FileSharePreview,
+    FileTransferCommand, FileTransferHandle, FileTransferStatus, ListFileDirectoryRequest,
+    StartFileTransferRequest,
+};
 use crate::node::{
-    NodeCommandRequest, NodeCommandResult, NodeEvent, NodeOperationSnapshot, NodeProblem,
-    NodeSnapshot, OperationSubmitError,
+    NodeCommandRequest, NodeCommandResult, NodeEvent, NodeFileCapabilitySnapshot,
+    NodeOperationSnapshot, NodeProblem, NodeSnapshot, OperationSubmitError,
 };
 use fuckipv6_common::domain::IdempotencyKey;
 
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 pub const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -38,6 +43,16 @@ pub const IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// transport does not report a timeout after the node has already committed
 /// the command.
 pub const COMMAND_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Owner File scans and durable writes have a larger server deadline. Keep the
+/// client alive past that boundary so the service can return its structured
+/// failure instead of the caller observing a transport timeout first.
+pub const FILE_OWNER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(150);
+/// Runtime File controls make bounded in-process round trips; keep the client
+/// alive longer than the actor's own operations so structured failures win.
+pub const FILE_TRANSFER_RESPONSE_TIMEOUT: Duration = Duration::from_secs(45);
+/// Directory browsing is a one-shot RPC with a 15-second runtime deadline.
+/// Leave enough transport time for the structured timeout to win.
+pub const FILE_DIRECTORY_RESPONSE_TIMEOUT: Duration = Duration::from_secs(20);
 const FRAME_MAGIC: [u8; 4] = *b"FKIP";
 const FRAME_HEADER_LEN: usize = 12;
 
@@ -100,6 +115,28 @@ pub struct LocalRequest {
     pub command: LocalCommand,
 }
 
+/// An owner-selected absolute directory reference. It is carried only over
+/// same-user local IPC and is redacted from all `Debug` output.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OwnerRootReference(String);
+
+impl OwnerRootReference {
+    pub fn new(reference: impl Into<String>) -> Self {
+        Self(reference.into())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for OwnerRootReference {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum LocalCommand {
@@ -120,6 +157,26 @@ pub enum LocalCommand {
         operation_id: String,
         source: String,
     },
+    /// Owner-only. Never exposed as a node command or network API.
+    PreviewFileShare {
+        root_reference: OwnerRootReference,
+        configuration: FileShareConfiguration,
+    },
+    /// Owner-only. Never exposed as a node command or network API.
+    ConfigureFileShare {
+        root_reference: OwnerRootReference,
+        configuration: FileShareConfiguration,
+    },
+    /// Owner-only. Never exposed as a node command or network API.
+    DisableFileShare,
+    /// Requester-side File controls. Local paths remain on this boundary.
+    FileTransfer(FileTransferCommand),
+    /// Requester-side logical directory browsing. No local owner root is
+    /// accepted or returned on this boundary.
+    ListFileDirectory(ListFileDirectoryRequest),
+    /// Requester-side latest transfer status. The runtime projection contains
+    /// no peer address, local filesystem path or wire frame.
+    ListFileTransfers,
     StopNode,
 }
 
@@ -139,6 +196,13 @@ pub enum LocalResponse {
     Accepted {
         message: String,
     },
+    FileSharePreview(Box<FileSharePreview>),
+    FileShareConfigured(Box<NodeFileCapabilitySnapshot>),
+    FileShareDisabled(Box<NodeFileCapabilitySnapshot>),
+    FileTransferStarted(FileTransferHandle),
+    FileTransferAccepted,
+    FileDirectoryListing(Box<FileDirectoryListing>),
+    FileTransfers(Vec<FileTransferStatus>),
     Pong,
 }
 
@@ -174,6 +238,24 @@ pub struct LocalError {
     pub operation_error: Option<OperationSubmitError>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<NodeProblem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_share_error: Option<FileShareErrorDetail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_transfer_error: Option<FileTransferErrorDetail>,
+}
+
+/// Stable, path-free File configuration failure returned over owner-only IPC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileShareErrorDetail {
+    pub code: String,
+    pub retryable: bool,
+}
+
+/// Stable, path-free requester-side File failure returned over local IPC.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileTransferErrorDetail {
+    pub code: String,
+    pub retryable: bool,
 }
 
 impl LocalError {
@@ -184,6 +266,8 @@ impl LocalError {
             retryable: false,
             operation_error: None,
             problem: None,
+            file_share_error: None,
+            file_transfer_error: None,
         }
     }
 
@@ -209,6 +293,8 @@ impl LocalError {
             retryable,
             operation_error: Some(error),
             problem: None,
+            file_share_error: None,
+            file_transfer_error: None,
         }
     }
 
@@ -232,6 +318,100 @@ impl LocalError {
             retryable,
             operation_error: None,
             problem: Some(problem),
+            file_share_error: None,
+            file_transfer_error: None,
+        }
+    }
+
+    pub fn file_share(error: FileOwnerServiceError) -> Self {
+        use FileOwnerServiceError::*;
+        let code = match error {
+            InvalidConfiguration | OwnerRequired => IpcErrorCode::MalformedRequest,
+            RootInvalid | RootSensitive | RootNotDirectory | RootSymlink => {
+                IpcErrorCode::MalformedRequest
+            }
+            RootUnavailable
+            | PersistenceUnavailable
+            | AuditUnavailable
+            | RuntimeUnavailable
+            | Unavailable => IpcErrorCode::BackendUnavailable,
+        };
+        let retryable = matches!(
+            error,
+            RootUnavailable
+                | PersistenceUnavailable
+                | AuditUnavailable
+                | RuntimeUnavailable
+                | Unavailable
+        );
+        Self {
+            code,
+            message: "File 共享配置未完成".into(),
+            retryable,
+            operation_error: None,
+            problem: None,
+            file_share_error: Some(FileShareErrorDetail {
+                code: error.code().into(),
+                retryable,
+            }),
+            file_transfer_error: None,
+        }
+    }
+
+    pub(crate) fn file_directory(error: crate::ipc::FileDirectoryControlError) -> Self {
+        let code = error.code().to_owned();
+        let (ipc_code, retryable) = match code.as_str() {
+            "file_browse_invalid_request" | "file_browse_invalid_response" => {
+                (IpcErrorCode::MalformedRequest, false)
+            }
+            "file_browse_peer_mismatch"
+            | "file_browse_access_revoked"
+            | "file_transfer_access_revoked"
+            | "file_transfer_permission_revoked" => (IpcErrorCode::Unauthorized, false),
+            "file_browse_timeout" | "file_browse_runtime_timeout" => (IpcErrorCode::Timeout, true),
+            "file_browse_limit" => (IpcErrorCode::BackendUnavailable, true),
+            _ => (IpcErrorCode::BackendUnavailable, true),
+        };
+        Self {
+            code: ipc_code,
+            message: "File 目录浏览未完成".into(),
+            retryable,
+            operation_error: None,
+            problem: None,
+            file_share_error: None,
+            file_transfer_error: Some(FileTransferErrorDetail { code, retryable }),
+        }
+    }
+
+    pub(crate) fn file_transfer(error: crate::ipc::FileTransferControlError) -> Self {
+        let code = error.code().to_owned();
+        let (ipc_code, retryable) = match code.as_str() {
+            "file_transfer_not_found" => (IpcErrorCode::NotFound, false),
+            "file_transfer_invalid_state" | "file_transfer_operation_active" => {
+                (IpcErrorCode::Conflict, false)
+            }
+            "file_transfer_peer_invalid"
+            | "file_transfer_share_invalid"
+            | "file_transfer_transfer_id_invalid"
+            | "file_transfer_operation_id_invalid"
+            | "file_transfer_path_invalid"
+            | "file_transfer_invalid_request"
+            | "file_transfer_source_invalid"
+            | "file_transfer_destination_invalid" => (IpcErrorCode::MalformedRequest, false),
+            "file_transfer_access_revoked"
+            | "file_transfer_authorization_lost"
+            | "file_transfer_permission_revoked" => (IpcErrorCode::Unauthorized, false),
+            "file_transfer_runtime_timeout" => (IpcErrorCode::Timeout, true),
+            _ => (IpcErrorCode::BackendUnavailable, true),
+        };
+        Self {
+            code: ipc_code,
+            message: "File 传输命令未完成".into(),
+            retryable,
+            operation_error: None,
+            problem: None,
+            file_share_error: None,
+            file_transfer_error: Some(FileTransferErrorDetail { code, retryable }),
         }
     }
 
@@ -650,6 +830,210 @@ async fn request_with_timeout(
     }
 }
 
+pub async fn preview_file_share(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    root_reference: &str,
+    configuration: FileShareConfiguration,
+) -> Result<FileSharePreview> {
+    let response = request_with_timeout(
+        endpoint,
+        role,
+        &LocalRequest {
+            request_id: 1,
+            command: LocalCommand::PreviewFileShare {
+                root_reference: OwnerRootReference::new(root_reference),
+                configuration,
+            },
+        },
+        FILE_OWNER_RESPONSE_TIMEOUT,
+    )
+    .await?;
+    match response {
+        LocalResponse::FileSharePreview(preview) => Ok(*preview),
+        other => bail!("本地 IPC 返回了意外 File 预览响应: {other:?}"),
+    }
+}
+
+pub async fn configure_file_share(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    root_reference: &str,
+    configuration: FileShareConfiguration,
+) -> Result<NodeFileCapabilitySnapshot> {
+    let response = request_with_timeout(
+        endpoint,
+        role,
+        &LocalRequest {
+            request_id: 1,
+            command: LocalCommand::ConfigureFileShare {
+                root_reference: OwnerRootReference::new(root_reference),
+                configuration,
+            },
+        },
+        FILE_OWNER_RESPONSE_TIMEOUT,
+    )
+    .await?;
+    match response {
+        LocalResponse::FileShareConfigured(snapshot) => Ok(*snapshot),
+        other => bail!("本地 IPC 返回了意外 File 配置响应: {other:?}"),
+    }
+}
+
+pub async fn disable_file_share(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+) -> Result<NodeFileCapabilitySnapshot> {
+    let response = request_with_timeout(
+        endpoint,
+        role,
+        &LocalRequest {
+            request_id: 1,
+            command: LocalCommand::DisableFileShare,
+        },
+        FILE_OWNER_RESPONSE_TIMEOUT,
+    )
+    .await?;
+    match response {
+        LocalResponse::FileShareDisabled(snapshot) => Ok(*snapshot),
+        other => bail!("本地 IPC 返回了意外 File 停用响应: {other:?}"),
+    }
+}
+
+pub async fn start_file_transfer(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    request: StartFileTransferRequest,
+) -> Result<FileTransferHandle> {
+    let response = request_with_timeout(
+        endpoint,
+        role,
+        &LocalRequest {
+            request_id: 1,
+            command: LocalCommand::FileTransfer(FileTransferCommand::Start(request)),
+        },
+        FILE_TRANSFER_RESPONSE_TIMEOUT,
+    )
+    .await?;
+    match response {
+        LocalResponse::FileTransferStarted(handle) => Ok(handle),
+        other => bail!("本地 IPC 返回了意外 File 传输启动响应: {other:?}"),
+    }
+}
+
+pub async fn list_file_directory(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    request: ListFileDirectoryRequest,
+) -> Result<FileDirectoryListing> {
+    let response = request_with_timeout(
+        endpoint,
+        role,
+        &LocalRequest {
+            request_id: 1,
+            command: LocalCommand::ListFileDirectory(request),
+        },
+        FILE_DIRECTORY_RESPONSE_TIMEOUT,
+    )
+    .await?;
+    match response {
+        LocalResponse::FileDirectoryListing(listing) => Ok(*listing),
+        other => bail!("本地 IPC 返回了意外 File 目录浏览响应: {other:?}"),
+    }
+}
+
+pub async fn list_file_transfers(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+) -> Result<Vec<FileTransferStatus>> {
+    let response = request_with_timeout(
+        endpoint,
+        role,
+        &LocalRequest {
+            request_id: 1,
+            command: LocalCommand::ListFileTransfers,
+        },
+        FILE_TRANSFER_RESPONSE_TIMEOUT,
+    )
+    .await?;
+    match response {
+        LocalResponse::FileTransfers(statuses) => Ok(statuses),
+        other => bail!("本地 IPC 返回了意外 File 传输状态响应: {other:?}"),
+    }
+}
+
+pub async fn cancel_file_transfer(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    transfer_id: String,
+    operation_id: String,
+) -> Result<()> {
+    file_transfer_control(
+        endpoint,
+        role,
+        FileTransferCommand::Cancel {
+            transfer_id,
+            operation_id,
+        },
+    )
+    .await
+}
+
+pub async fn pause_file_transfer(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    transfer_id: String,
+    operation_id: String,
+) -> Result<()> {
+    file_transfer_control(
+        endpoint,
+        role,
+        FileTransferCommand::Pause {
+            transfer_id,
+            operation_id,
+        },
+    )
+    .await
+}
+
+pub async fn resume_file_transfer(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    transfer_id: String,
+    operation_id: String,
+) -> Result<()> {
+    file_transfer_control(
+        endpoint,
+        role,
+        FileTransferCommand::Resume {
+            transfer_id,
+            operation_id,
+        },
+    )
+    .await
+}
+
+async fn file_transfer_control(
+    endpoint: &LocalEndpoint,
+    role: IpcRole,
+    command: FileTransferCommand,
+) -> Result<()> {
+    let response = request_with_timeout(
+        endpoint,
+        role,
+        &LocalRequest {
+            request_id: 1,
+            command: LocalCommand::FileTransfer(command),
+        },
+        FILE_TRANSFER_RESPONSE_TIMEOUT,
+    )
+    .await?;
+    match response {
+        LocalResponse::FileTransferAccepted => Ok(()),
+        other => bail!("本地 IPC 返回了意外 File 传输控制响应: {other:?}"),
+    }
+}
+
 pub async fn execute(
     endpoint: &LocalEndpoint,
     role: IpcRole,
@@ -1032,6 +1416,7 @@ mod tests {
     #[test]
     fn command_response_timeout_exceeds_lifecycle_deadline() {
         assert!(COMMAND_RESPONSE_TIMEOUT > crate::local_service::LIFECYCLE_COMMAND_TIMEOUT);
+        assert!(FILE_OWNER_RESPONSE_TIMEOUT > crate::local_service::FILE_OWNER_COMMAND_TIMEOUT);
     }
     use serde_json::json;
     use tokio::io::duplex;
@@ -1144,8 +1529,27 @@ mod tests {
 
     #[test]
     fn protocol_version_is_explicit() {
-        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(PROTOCOL_VERSION, 5);
         const { assert!(MAX_FRAME_BYTES <= 16 * 1024 * 1024) };
+    }
+
+    #[test]
+    fn owner_root_reference_is_redacted_from_debug() {
+        let reference = OwnerRootReference::new("/home/owner/private-files");
+        assert_eq!(format!("{reference:?}"), "[REDACTED]");
+        let request = LocalRequest {
+            request_id: 1,
+            command: LocalCommand::PreviewFileShare {
+                root_reference: reference,
+                configuration: FileShareConfiguration::readonly(
+                    fuckipv6_common::domain::NetworkId::from_public_key(b"debug-network"),
+                    "Debug share",
+                ),
+            },
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("/home/owner/private-files"));
+        assert!(debug.contains("[REDACTED]"));
     }
 
     #[test]

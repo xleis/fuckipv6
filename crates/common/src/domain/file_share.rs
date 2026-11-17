@@ -12,6 +12,8 @@ use std::fmt;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use unicode_casefold::UnicodeCaseFold;
+use unicode_normalization::UnicodeNormalization;
 
 use super::ids::{ContentHash, FileId, FileShareId, NetworkId, NodeId, OperationId, TransferId};
 use super::permissions::{AccessContext, SubjectSelector};
@@ -60,10 +62,10 @@ impl ShareRoot {
 /// A portable path relative to a share root.
 ///
 /// The empty string denotes the root. Paths use `/` on every platform.
-/// Backslashes, drive/UNC prefixes, control bytes, alternate data streams, empty
-/// components, `.`/`..`, trailing dots/spaces, and reserved DOS device names are
-/// rejected rather than normalized. This keeps every adapter on the same
-/// authorization decision.
+/// Backslashes, drive/UNC prefixes, control or invisible formatting characters,
+/// alternate data streams, empty components, `.`/`..`, trailing dots/spaces, and
+/// reserved DOS device names are rejected rather than normalized. This keeps
+/// every adapter on the same authorization decision.
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, JsonSchema, Serialize, Deserialize,
 )]
@@ -108,14 +110,31 @@ impl SharedPath {
         self.0.split('/').filter(|component| !component.is_empty())
     }
 
-    /// Component-aware containment check. It never compares raw prefixes, so
-    /// `docs` does not contain `docs-private`.
+    /// Component-aware containment check using portable path identity. It never
+    /// compares raw prefixes, so `docs` does not contain `docs-private`.
+    ///
+    /// Components are compared after canonical Unicode normalization and full
+    /// case folding. This intentionally makes ACL prefixes conservative on
+    /// case-sensitive filesystems: a deny for `private` also covers a Windows
+    /// case variant such as `PRIVATE`, and canonically equivalent Unicode
+    /// spellings resolve to the same authorization decision.
     pub fn is_same_or_descendant_of(&self, ancestor: &Self) -> bool {
-        if ancestor.is_root() || self == ancestor {
+        if ancestor.is_root() {
             return true;
         }
-        let prefix = format!("{}/", ancestor.0);
-        self.0.starts_with(&prefix)
+        let mut path_components = self.components();
+        let mut ancestor_components = ancestor.components();
+        loop {
+            match (path_components.next(), ancestor_components.next()) {
+                (Some(path), Some(ancestor)) => {
+                    if portable_component_key(path) != portable_component_key(ancestor) {
+                        return false;
+                    }
+                }
+                (_, None) => return true,
+                (None, Some(_)) => return false,
+            }
+        }
     }
 
     pub fn parent(&self) -> Option<Self> {
@@ -160,29 +179,60 @@ fn validate_component(component: &str) -> DomainResult<()> {
             "shared path components must not end with a dot or space",
         ));
     }
-    if component
-        .chars()
-        .any(|character| character.is_control() || matches!(character, ':' | '/' | '\\'))
-    {
+    if component.chars().any(|character| {
+        character.is_control()
+            || is_unsafe_format_character(character)
+            || matches!(character, ':' | '/' | '\\')
+    }) {
         return Err(DomainError::invalid_value(
-            "shared path contains a platform-ambiguous or control character",
+            "shared path contains a platform-ambiguous, control, or invisible formatting character",
         ));
     }
     let stem = component.split('.').next().unwrap_or(component);
     let stem = stem.trim_end_matches([' ', '.']).to_ascii_uppercase();
-    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || stem
-            .strip_prefix("COM")
-            .or_else(|| stem.strip_prefix("LPT"))
-            .is_some_and(|suffix| {
-                matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
-            });
+    let reserved = matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" | "CLOCK$"
+    ) || stem
+        .strip_prefix("COM")
+        .or_else(|| stem.strip_prefix("LPT"))
+        .is_some_and(|suffix| {
+            matches!(
+                suffix,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        });
     if reserved {
         return Err(DomainError::invalid_value(
             "shared path uses a reserved platform device name",
         ));
     }
     Ok(())
+}
+
+/// Canonical, case-insensitive identity for one portable path component. The
+/// original spelling remains intact for display, serialization and transfer
+/// binding; only authorization comparisons use this key.
+fn portable_component_key(component: &str) -> String {
+    component.nfc().case_fold().nfc().collect()
+}
+
+fn is_unsafe_format_character(character: char) -> bool {
+    matches!(
+        character,
+        '\u{00ad}'
+            | '\u{061c}'
+            | '\u{070f}'
+            | '\u{180e}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206f}'
+            | '\u{feff}'
+            | '\u{fff9}'..='\u{fffb}'
+            | '\u{e0001}'
+            | '\u{e0020}'..='\u{e007f}'
+    )
 }
 
 #[derive(
@@ -330,8 +380,16 @@ pub struct FileQuota {
     pub max_file_bytes: u64,
     pub max_entries: u64,
     pub reserve_bytes: u64,
+    /// Process-wide transfer admission limit for this File share.
     pub max_concurrent_transfers: u32,
-    /// Zero means unlimited.
+    /// Per-authenticated-member transfer admission limit.
+    #[serde(default = "default_per_member_concurrency")]
+    pub max_concurrent_transfers_per_member: u32,
+    /// Per-target-directory transfer admission limit.
+    #[serde(default = "default_per_directory_concurrency")]
+    pub max_concurrent_transfers_per_directory: u32,
+    /// Zero means unlimited. Enforcement is a shared token bucket whose burst
+    /// is bounded by the maximum supported transfer chunk.
     pub max_bandwidth_kbps: u32,
 }
 
@@ -344,9 +402,19 @@ impl Default for FileQuota {
             max_entries: 100_000,
             reserve_bytes: 256 * 1024 * 1024,
             max_concurrent_transfers: 4,
+            max_concurrent_transfers_per_member: 2,
+            max_concurrent_transfers_per_directory: 2,
             max_bandwidth_kbps: 0,
         }
     }
+}
+
+const fn default_per_member_concurrency() -> u32 {
+    1
+}
+
+const fn default_per_directory_concurrency() -> u32 {
+    1
 }
 
 impl FileQuota {
@@ -357,6 +425,10 @@ impl FileQuota {
             || self.reserve_bytes >= self.total_bytes
             || self.max_entries == 0
             || self.max_concurrent_transfers == 0
+            || self.max_concurrent_transfers_per_member == 0
+            || self.max_concurrent_transfers_per_member > self.max_concurrent_transfers
+            || self.max_concurrent_transfers_per_directory == 0
+            || self.max_concurrent_transfers_per_directory > self.max_concurrent_transfers
         {
             return Err(DomainError::invalid_value("file quota is invalid"));
         }
@@ -371,12 +443,20 @@ impl FileQuota {
         replaced_bytes: u64,
         usage: &FileQuotaUsage,
         concurrent_transfers: u32,
+        member_concurrent_transfers: u32,
+        directory_concurrent_transfers: u32,
     ) -> Result<(), FileQuotaError> {
         if upload_bytes > self.max_file_bytes {
             return Err(FileQuotaError::FileTooLarge);
         }
         if concurrent_transfers >= self.max_concurrent_transfers {
             return Err(FileQuotaError::ConcurrencyLimit);
+        }
+        if member_concurrent_transfers >= self.max_concurrent_transfers_per_member {
+            return Err(FileQuotaError::MemberConcurrencyLimit);
+        }
+        if directory_concurrent_transfers >= self.max_concurrent_transfers_per_directory {
+            return Err(FileQuotaError::DirectoryConcurrencyLimit);
         }
         if replaced_bytes == 0 && usage.entries >= self.max_entries {
             return Err(FileQuotaError::EntryLimit);
@@ -418,6 +498,9 @@ pub enum FileQuotaError {
     MemberQuotaExceeded,
     EntryLimit,
     ConcurrencyLimit,
+    MemberConcurrencyLimit,
+    DirectoryConcurrencyLimit,
+    DiskSpaceReserved,
 }
 
 impl FileQuotaError {
@@ -428,6 +511,9 @@ impl FileQuotaError {
             Self::MemberQuotaExceeded => "file_member_quota_exceeded",
             Self::EntryLimit => "file_entry_limit",
             Self::ConcurrencyLimit => "file_concurrency_limit",
+            Self::MemberConcurrencyLimit => "file_member_concurrency_limit",
+            Self::DirectoryConcurrencyLimit => "file_directory_concurrency_limit",
+            Self::DiskSpaceReserved => "file_disk_space_reserved",
         }
     }
 }
@@ -764,6 +850,17 @@ pub struct ResumeRequest {
     pub direction: TransferDirection,
     pub content_hash: ContentHash,
     pub share_revision: u64,
+    /// The first manifest chunk the requester still needs. It may equal the
+    /// manifest chunk count when the requester has every chunk but has not yet
+    /// completed publication.
+    pub resume_chunk_index: u32,
+    /// Absolute byte offset inside `resume_chunk_index` at which the sender
+    /// must resume. A completed transfer uses the manifest's total byte count.
+    pub resume_offset: u64,
+    /// Monotonic data-plane generation selected by the requester. Fragments
+    /// from an older generation may still be in flight after a pause and must
+    /// never be mixed with the resumed byte stream.
+    pub resume_generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -865,6 +962,10 @@ impl TransferSession {
         self.received_chunks.len()
     }
 
+    pub fn has_received_chunk(&self, index: u32) -> bool {
+        self.received_chunks.contains_key(&index)
+    }
+
     pub fn resume(
         &mut self,
         request: &ResumeRequest,
@@ -923,6 +1024,22 @@ impl TransferSession {
         Ok(())
     }
 
+    pub fn expire(&mut self, now_unix_ms: u64) -> Result<(), FileTransferError> {
+        if self.state.is_terminal() {
+            return Err(FileTransferError::InvalidState);
+        }
+        self.transition(TransferState::Expired, now_unix_ms);
+        Ok(())
+    }
+
+    pub fn fail(&mut self, now_unix_ms: u64) -> Result<(), FileTransferError> {
+        if self.state.is_terminal() {
+            return Err(FileTransferError::InvalidState);
+        }
+        self.transition(TransferState::Failed, now_unix_ms);
+        Ok(())
+    }
+
     /// Record a chunk after checking its manifest range and digest. Replaying
     /// the same chunk is idempotent; different bytes for a received index are
     /// rejected.
@@ -961,11 +1078,60 @@ impl TransferSession {
         Ok(())
     }
 
+    /// Rewind the sender-side bookkeeping to the first chunk the peer still
+    /// needs after a pause. No file data is discarded; callers must reopen and
+    /// rebuild their streaming digest from the committed chunk prefix.
+    pub fn rewind_received_chunks_from(
+        &mut self,
+        index: u32,
+        now_unix_ms: u64,
+    ) -> Result<(), FileTransferError> {
+        if self.state != TransferState::Active {
+            return Err(FileTransferError::InvalidState);
+        }
+        if index as usize > self.manifest.chunks.len() {
+            return Err(FileTransferError::ChunkOutOfRange);
+        }
+        let removed = self.received_chunks.split_off(&index);
+        if !removed.is_empty() {
+            self.revision = self.revision.saturating_add(1);
+            self.updated_at_unix_ms = now_unix_ms;
+        }
+        Ok(())
+    }
+
     /// Verify all chunks and the assembled object before the adapter atomically
     /// renames the temporary object into its final path.
     pub fn verify_and_complete(
         &mut self,
         assembled_bytes: &[u8],
+        now_unix_ms: u64,
+    ) -> Result<(), FileTransferError> {
+        let content_hash = ContentHash::from_bytes(assembled_bytes);
+        let assembled_bytes = u64::try_from(assembled_bytes.len()).unwrap_or(u64::MAX);
+        self.verify_and_complete_digest(assembled_bytes, &content_hash, now_unix_ms)
+    }
+
+    /// Verify completion from a streaming digest without requiring the adapter
+    /// to hold the entire object in memory. The same chunk, size and digest
+    /// checks as [`Self::verify_and_complete`] still apply.
+    pub fn verify_and_complete_digest(
+        &mut self,
+        assembled_bytes: u64,
+        content_hash: &ContentHash,
+        now_unix_ms: u64,
+    ) -> Result<(), FileTransferError> {
+        self.verify_digest(assembled_bytes, content_hash, now_unix_ms)?;
+        self.complete_verified(now_unix_ms)
+    }
+
+    /// Verify a complete staged object and leave the session in `Verifying`.
+    /// The adapter calls this before atomic publication, then promotes the
+    /// session to `Completed` only after publication succeeds.
+    pub fn verify_digest(
+        &mut self,
+        assembled_bytes: u64,
+        content_hash: &ContentHash,
         now_unix_ms: u64,
     ) -> Result<(), FileTransferError> {
         if self.state != TransferState::Active {
@@ -975,13 +1141,20 @@ impl TransferSession {
             return Err(FileTransferError::Incomplete);
         }
         self.state = TransferState::Verifying;
-        if u64::try_from(assembled_bytes.len()).unwrap_or(u64::MAX) != self.manifest.total_bytes
-            || ContentHash::from_bytes(assembled_bytes) != self.manifest.content_hash
+        if assembled_bytes != self.manifest.total_bytes
+            || content_hash != &self.manifest.content_hash
         {
-            self.state = TransferState::Failed;
-            self.revision = self.revision.saturating_add(1);
-            self.updated_at_unix_ms = now_unix_ms;
+            self.transition(TransferState::Failed, now_unix_ms);
             return Err(FileTransferError::IntegrityMismatch);
+        }
+        Ok(())
+    }
+
+    /// Promote a successfully verified transfer after its final destination is
+    /// durable. Calling this before `verify_digest` fails closed.
+    pub fn complete_verified(&mut self, now_unix_ms: u64) -> Result<(), FileTransferError> {
+        if self.state != TransferState::Verifying {
+            return Err(FileTransferError::InvalidState);
         }
         self.transition(TransferState::Completed, now_unix_ms);
         Ok(())
@@ -998,6 +1171,7 @@ impl TransferSession {
 mod tests {
     use super::*;
     use crate::domain::permissions::{AccessContext, NetworkRole};
+    use proptest::prelude::*;
 
     fn node(byte: u8) -> NodeId {
         NodeId::from_public_key(&[byte])
@@ -1063,6 +1237,14 @@ mod tests {
         }
     }
 
+    fn portable_component_strategy() -> impl Strategy<Value = String> {
+        proptest::collection::vec(any::<char>(), 1..16)
+            .prop_map(|characters| characters.into_iter().collect::<String>())
+            .prop_filter("valid portable path component", |component| {
+                !component.contains('/') && SharedPath::parse(component.clone()).is_ok()
+            })
+    }
+
     #[test]
     fn portable_paths_reject_traversal_and_platform_ambiguity() {
         assert_eq!(
@@ -1081,6 +1263,10 @@ mod tests {
             "docs/name ",
             "docs/CON.txt",
             "docs/COM1",
+            "docs/CONIN$",
+            "docs/CONOUT$.txt",
+            "docs/CLOCK$",
+            "docs/COM¹.txt",
             "docs/\u{0}name",
             "docs/file:stream",
         ] {
@@ -1090,6 +1276,91 @@ mod tests {
             .expect("path")
             .is_same_or_descendant_of(&SharedPath::parse("docs").expect("documents")));
         assert!(serde_json::from_str::<SharedPath>(r#""../escape""#).is_err());
+    }
+
+    #[test]
+    fn portable_paths_preserve_rendering_and_fold_authorization_identity() {
+        for value in ["资料/报告.txt", "café/文件.txt", "emoji-🚀.bin", "Σ/σ.txt"] {
+            let path = SharedPath::parse(value).expect("portable Unicode path");
+            assert_eq!(path.as_str(), value);
+            assert_eq!(
+                serde_json::from_str::<SharedPath>(&serde_json::to_string(&path).expect("json"))
+                    .expect("round trip"),
+                path
+            );
+        }
+
+        let upper = SharedPath::parse("Docs/Readme.txt").expect("upper path");
+        let lower = SharedPath::parse("docs/readme.txt").expect("lower path");
+        assert_ne!(upper, lower, "transfer bindings retain the exact spelling");
+        assert!(lower.is_same_or_descendant_of(&upper));
+        assert!(upper.is_same_or_descendant_of(&lower));
+        assert!(SharedPath::parse("DOCS/README.TXT")
+            .expect("case variant")
+            .is_same_or_descendant_of(&SharedPath::parse("docs").expect("ancestor")));
+        assert!(SharedPath::parse("ς/结果.txt")
+            .expect("final sigma")
+            .is_same_or_descendant_of(&SharedPath::parse("Σ").expect("capital sigma")));
+        assert!(SharedPath::parse("cafe\u{301}/文件.txt")
+            .expect("decomposed path")
+            .is_same_or_descendant_of(&SharedPath::parse("café").expect("composed path")));
+
+        for unsafe_path in ["docs/", "docs//readme", "docs/readme/", "docs/\u{202e}txt"] {
+            assert!(SharedPath::parse(unsafe_path).is_err(), "{unsafe_path:?}");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_inputs_never_create_an_ambiguous_shared_path(value in any::<String>()) {
+            let Ok(path) = SharedPath::parse(value.clone()) else {
+                return Ok(());
+            };
+
+            prop_assert_eq!(path.as_str(), value.as_str());
+            prop_assert!(path.as_str().len() <= MAX_PORTABLE_PATH_BYTES);
+            if !path.is_root() {
+                prop_assert!(!path.as_str().starts_with('/'));
+                prop_assert!(!path.as_str().contains('\\'));
+                prop_assert!(!path.as_str().ends_with('/'));
+                for component in path.components() {
+                    prop_assert!(!component.is_empty());
+                    prop_assert!(component.len() <= MAX_PORTABLE_COMPONENT_BYTES);
+                    prop_assert!(!component.ends_with('.') && !component.ends_with(' '));
+                    let contains_ambiguous_character = component.chars().any(|character| {
+                        character.is_control()
+                            || is_unsafe_format_character(character)
+                            || matches!(character, ':' | '/' | '\\')
+                    });
+                    prop_assert!(!contains_ambiguous_character);
+                }
+            }
+
+            let encoded = serde_json::to_string(&path).expect("serialize shared path");
+            let decoded = serde_json::from_str::<SharedPath>(&encoded).expect("deserialize shared path");
+            prop_assert_eq!(decoded, path);
+        }
+
+        #[test]
+        fn generated_portable_paths_obey_component_aware_containment(
+            components in proptest::collection::vec(portable_component_strategy(), 1..8)
+        ) {
+            let path = SharedPath::parse(components.join("/")).expect("generated path");
+            for ancestor_components in 0..=components.len() {
+                let ancestor = if ancestor_components == 0 {
+                    SharedPath::root()
+                } else {
+                    SharedPath::parse(
+                        components[..ancestor_components].join("/")
+                    ).expect("generated ancestor")
+                };
+                prop_assert!(path.is_same_or_descendant_of(&ancestor));
+            }
+
+            let lookalike = SharedPath::parse(format!("{}-lookalike", path.as_str()))
+                .expect("lookalike sibling");
+            prop_assert!(!lookalike.is_same_or_descendant_of(&path));
+        }
     }
 
     #[test]
@@ -1111,14 +1382,12 @@ mod tests {
             actions: BTreeSet::from([FileAction::Download]),
             effect: FileAclEffect::Deny,
         });
-        assert_eq!(
-            share.authorize(
-                &access("docs/private/key.txt", FileAction::Download),
-                &member_context,
-                true,
-            ),
-            Err(file_denial(FileAccessDenialCode::AclDenied, "network_acl"))
-        );
+        for path in ["docs/private/key.txt", "DOCS/PRIVATE/KEY.TXT"] {
+            assert_eq!(
+                share.authorize(&access(path, FileAction::Download), &member_context, true),
+                Err(file_denial(FileAccessDenialCode::AclDenied, "network_acl"))
+            );
+        }
         share.local_acl.rules.clear();
         assert_eq!(
             share.authorize(
@@ -1127,6 +1396,116 @@ mod tests {
                 true,
             ),
             Err(file_denial(FileAccessDenialCode::AclNoAllow, "local_acl"))
+        );
+    }
+
+    #[test]
+    fn administrator_role_does_not_bypass_file_acl_layers() {
+        let administrator = node(3);
+        let mut share = share();
+        let mut administrator_context = context(&share, administrator.clone());
+        administrator_context.role = NetworkRole::Administrator;
+        let member_only_allow = FileAclRule {
+            id: "members-only".into(),
+            subjects: BTreeSet::from([SubjectSelector::Role(NetworkRole::Member)]),
+            path_prefix: SharedPath::root(),
+            actions: BTreeSet::from([FileAction::ReadMetadata]),
+            effect: FileAclEffect::Allow,
+        };
+        share.network_acl.rules = vec![member_only_allow.clone()];
+        share.local_acl.rules = vec![member_only_allow];
+        assert_eq!(
+            share.authorize(
+                &access("private.txt", FileAction::ReadMetadata),
+                &administrator_context,
+                true,
+            ),
+            Err(file_denial(FileAccessDenialCode::AclNoAllow, "network_acl"))
+        );
+
+        share.network_acl.rules.push(FileAclRule {
+            id: "administrator-network-allow".into(),
+            subjects: BTreeSet::from([SubjectSelector::Node(administrator.clone())]),
+            path_prefix: SharedPath::root(),
+            actions: BTreeSet::from([FileAction::ReadMetadata]),
+            effect: FileAclEffect::Allow,
+        });
+        assert_eq!(
+            share.authorize(
+                &access("private.txt", FileAction::ReadMetadata),
+                &administrator_context,
+                true,
+            ),
+            Err(file_denial(FileAccessDenialCode::AclNoAllow, "local_acl"))
+        );
+
+        share.local_acl.rules.push(FileAclRule {
+            id: "administrator-local-deny".into(),
+            subjects: BTreeSet::from([SubjectSelector::Node(administrator)]),
+            path_prefix: SharedPath::root(),
+            actions: BTreeSet::from([FileAction::ReadMetadata]),
+            effect: FileAclEffect::Deny,
+        });
+        assert_eq!(
+            share.authorize(
+                &access("private.txt", FileAction::ReadMetadata),
+                &administrator_context,
+                true,
+            ),
+            Err(file_denial(FileAccessDenialCode::AclDenied, "local_acl"))
+        );
+    }
+
+    #[test]
+    fn directory_acl_prefixes_cover_descendants_without_matching_siblings() {
+        let member = node(2);
+        let mut share = share();
+        let member_context = context(&share, member.clone());
+        let public_directory = FileAclRule {
+            id: "allow-public-directory".into(),
+            subjects: BTreeSet::from([SubjectSelector::Node(member.clone())]),
+            path_prefix: SharedPath::parse("docs/public").expect("public directory"),
+            actions: BTreeSet::from([FileAction::List]),
+            effect: FileAclEffect::Allow,
+        };
+        let private_directory = FileAclRule {
+            id: "deny-private-directory".into(),
+            subjects: BTreeSet::from([SubjectSelector::Node(member)]),
+            path_prefix: SharedPath::parse("docs/private").expect("private directory"),
+            actions: BTreeSet::from([FileAction::List]),
+            effect: FileAclEffect::Deny,
+        };
+        for acl in [&mut share.network_acl, &mut share.local_acl] {
+            acl.rules = vec![public_directory.clone(), private_directory.clone()];
+        }
+
+        assert!(share
+            .authorize(
+                &access("docs/public", FileAction::List),
+                &member_context,
+                true,
+            )
+            .is_ok());
+        assert!(share
+            .authorize(
+                &access("docs/public/reports", FileAction::List),
+                &member_context,
+                true,
+            )
+            .is_ok());
+        for path in ["docs/private", "docs/private/keys"] {
+            assert_eq!(
+                share.authorize(&access(path, FileAction::List), &member_context, true),
+                Err(file_denial(FileAccessDenialCode::AclDenied, "network_acl"))
+            );
+        }
+        assert_eq!(
+            share.authorize(
+                &access("docs/publicity", FileAction::List),
+                &member_context,
+                true,
+            ),
+            Err(file_denial(FileAccessDenialCode::AclNoAllow, "network_acl"))
         );
     }
 
@@ -1184,6 +1563,8 @@ mod tests {
             max_entries: 2,
             reserve_bytes: 20,
             max_concurrent_transfers: 2,
+            max_concurrent_transfers_per_member: 2,
+            max_concurrent_transfers_per_directory: 2,
             max_bandwidth_kbps: 0,
         };
         let usage = FileQuotaUsage {
@@ -1192,18 +1573,26 @@ mod tests {
             entries: 1,
         };
         assert_eq!(
-            quota.check_upload(61, 0, &usage, 0),
+            quota.check_upload(61, 0, &usage, 0, 0, 0),
             Err(FileQuotaError::FileTooLarge)
         );
         assert_eq!(
-            quota.check_upload(51, 0, &usage, 0),
+            quota.check_upload(51, 0, &usage, 0, 0, 0),
             Err(FileQuotaError::MemberQuotaExceeded)
         );
         assert_eq!(
-            quota.check_upload(10, 0, &usage, 2),
+            quota.check_upload(10, 0, &usage, 2, 0, 0),
             Err(FileQuotaError::ConcurrencyLimit)
         );
-        assert_eq!(quota.check_upload(50, 30, &usage, 0), Ok(()));
+        assert_eq!(
+            quota.check_upload(10, 0, &usage, 0, 2, 0),
+            Err(FileQuotaError::MemberConcurrencyLimit)
+        );
+        assert_eq!(
+            quota.check_upload(10, 0, &usage, 0, 0, 2),
+            Err(FileQuotaError::DirectoryConcurrencyLimit)
+        );
+        assert_eq!(quota.check_upload(50, 30, &usage, 0, 0, 0), Ok(()));
     }
 
     #[test]
@@ -1336,6 +1725,34 @@ mod tests {
         assert_eq!(active.state, TransferState::Failed);
     }
 
+    #[test]
+    fn verification_can_be_confirmed_only_after_successful_publication() {
+        let content = b"abcdefgh";
+        let mut active = session(content, binding("upload.bin", node(2)));
+        active
+            .resume(&request(&active), None, 1, true, 1, 2)
+            .expect("start");
+        active.record_chunk(0, b"abcd", 3).expect("chunk");
+        active.record_chunk(1, b"efgh", 4).expect("chunk");
+
+        active
+            .verify_digest(
+                u64::try_from(content.len()).expect("length"),
+                &ContentHash::from_bytes(content),
+                5,
+            )
+            .expect("verify");
+        assert_eq!(active.state, TransferState::Verifying);
+        assert!(active.has_received_chunk(0));
+        assert!(!active.has_received_chunk(2));
+        active.complete_verified(6).expect("complete");
+        assert_eq!(active.state, TransferState::Completed);
+        assert_eq!(
+            active.complete_verified(7),
+            Err(FileTransferError::InvalidState)
+        );
+    }
+
     fn manifest(bytes: &[u8], chunk_size: u64) -> TransferManifest {
         let chunks = bytes
             .chunks(usize::try_from(chunk_size).expect("chunk size"))
@@ -1386,6 +1803,9 @@ mod tests {
             direction: session.binding.direction,
             content_hash: session.manifest.content_hash.clone(),
             share_revision: session.binding.share_revision,
+            resume_chunk_index: 0,
+            resume_offset: 0,
+            resume_generation: 0,
         }
     }
 }

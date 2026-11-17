@@ -23,7 +23,7 @@
       "id": "activity",
       "label_key": "nav.activity",
       "default_page_id": "activity",
-      "page_ids": ["traffic", "activity", "logs"]
+      "page_ids": ["traffic", "activity", "logs", "files"]
     },
     {
       "id": "settings",

@@ -342,6 +342,8 @@ async fn run_node(options: InternalOptions) -> Result<()> {
     .await
     .context("无法启动节点 IPC 服务")?;
     let commands = supervisor.commands();
+    let file_owner = supervisor.file_owner();
+    let registry = supervisor.registry().clone();
     let (shutdown_tx, _shutdown_rx) = watch::channel(false);
     let ready = Arc::new(AtomicBool::new(false));
     let mut service = tokio::spawn(serve_owned_node(
@@ -349,9 +351,29 @@ async fn run_node(options: InternalOptions) -> Result<()> {
         commands.clone(),
         supervisor.state().clone(),
         supervisor.event_bus(),
+        crate::local_service::OwnedNodeServices {
+            file_owner: file_owner.clone(),
+            registry,
+        },
         ready.clone(),
         shutdown_tx.clone(),
     ));
+
+    // Restore the owner's persisted File intent independently from Relay, Exit
+    // and Coordinator. A missing root becomes a projected Unavailable state and
+    // must not prevent the node IPC surface from becoming available.
+    match timeout(NODE_STARTUP_TIMEOUT, file_owner.restore_persisted()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(code = error.code(), "恢复 File 能力失败，IPC 保持可用");
+        }
+        Err(_) => {
+            tracing::warn!(
+                "恢复 File 能力超过 {} 秒，IPC 保持可用",
+                NODE_STARTUP_TIMEOUT.as_secs()
+            );
+        }
+    }
 
     // The IPC listener is live first so startup failures remain observable, but
     // `ready` is deliberately not reported until the persisted data plane has

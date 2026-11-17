@@ -21,6 +21,7 @@ import {
   Database,
   DoorOpen,
   Ellipsis,
+  FolderOpen,
   Gauge,
   Globe2,
   KeyRound,
@@ -132,6 +133,7 @@ import { projectSecurityState } from "../security-state";
 import { advancedSettingsGroups } from "../settings";
 import type { TopologyActionSubmit } from "../topology-actions";
 import type { TopologyPresentationSignals } from "../topology-presentation";
+import { FilesPage } from "./files-page";
 import { TopologyPage } from "./topology-page";
 
 const TOPOLOGY_ACTION_IDS = new Set([
@@ -4084,11 +4086,7 @@ function ExitConnectionSummary({
         <h3 id="exit-connection-summary-title">
           {label(locale, "exit_summary.title")}
         </h3>
-        <span
-          className={`status-pill ${traffic.tone}`}
-        >
-          {traffic.label}
-        </span>
+        <span className={`status-pill ${traffic.tone}`}>{traffic.label}</span>
       </div>
       <p className="muted-copy">{label(locale, "exit_summary.hint")}</p>
       <dl
@@ -4144,7 +4142,8 @@ function ExitConnectionSummary({
               config.network_name,
             );
             const resolution = selection?.resolution;
-            const selectedExit = resolution?.selected_default ?? config.exit_node;
+            const selectedExit =
+              resolution?.selected_default ?? config.exit_node;
             const selectedCandidate = resolution?.candidates.find(
               (candidate) => candidate.exit === selectedExit,
             );
@@ -4161,14 +4160,19 @@ function ExitConnectionSummary({
                   <div>
                     <dt>{label(locale, "exit_summary.configured_exit")}</dt>
                     <dd>
-                      <code>{selectedExit || label(locale, "common.none")}</code>
+                      <code>
+                        {selectedExit || label(locale, "common.none")}
+                      </code>
                     </dd>
                   </div>
                   <div>
                     <dt>{label(locale, "exit_governance.mode")}</dt>
                     <dd>
                       {resolution
-                        ? label(locale, `exit_governance.mode.${resolution.mode.mode}`)
+                        ? label(
+                            locale,
+                            `exit_governance.mode.${resolution.mode.mode}`,
+                          )
                         : label(locale, "common.not_available")}
                     </dd>
                   </div>
@@ -4176,7 +4180,8 @@ function ExitConnectionSummary({
                     <dt>{label(locale, "exit_governance.default_exit")}</dt>
                     <dd>
                       <code>
-                        {resolution?.default_exit ?? label(locale, "common.none")}
+                        {resolution?.default_exit ??
+                          label(locale, "common.none")}
                       </code>
                     </dd>
                   </div>
@@ -4192,7 +4197,10 @@ function ExitConnectionSummary({
                     <dt>{label(locale, "exit_summary.selection_source")}</dt>
                     <dd>
                       {selectedCandidate
-                        ? exitSelectionSourceLabel(locale, selectedCandidate.source)
+                        ? exitSelectionSourceLabel(
+                            locale,
+                            selectedCandidate.source,
+                          )
                         : label(locale, "common.not_available")}
                     </dd>
                   </div>
@@ -4234,8 +4242,7 @@ function ExitQualityCard({
     return candidates.flatMap((candidate) => {
       const peer = (snapshot.peers ?? []).find(
         (item) =>
-          item.network_name === networkName &&
-          item.peer_id === candidate.exit,
+          item.network_name === networkName && item.peer_id === candidate.exit,
       );
       return peer ? [{ candidate, peer }] : [];
     });
@@ -4383,7 +4390,9 @@ function ExitQualityCard({
             </div>
           ))
         )}
-        <p className="empty-copy">{label(locale, "exit_quality.throughput_unavailable")}</p>
+        <p className="empty-copy">
+          {label(locale, "exit_quality.throughput_unavailable")}
+        </p>
       </div>
     </section>
   );
@@ -4396,18 +4405,20 @@ function ExitActivityTimeline({
   snapshot: NodeSnapshot;
   locale: Locale;
 }) {
-  const sessionEvents = (snapshot.traffic_session?.events ?? []).map((event) => ({
-    id: `traffic-${event.occurred_at_unix_ms}-${event.kind}`,
-    occurredAt: event.occurred_at_unix_ms,
-    title: label(locale, `traffic.session.event.${event.kind}`),
-    detail: [
-      label(locale, `traffic.session.state.${event.state}`),
-      event.reason_code,
-      event.failure ? trafficFailureLabel(locale, event.failure) : null,
-    ]
-      .filter(Boolean)
-      .join(" · "),
-  }));
+  const sessionEvents = (snapshot.traffic_session?.events ?? []).map(
+    (event) => ({
+      id: `traffic-${event.occurred_at_unix_ms}-${event.kind}`,
+      occurredAt: event.occurred_at_unix_ms,
+      title: label(locale, `traffic.session.event.${event.kind}`),
+      detail: [
+        label(locale, `traffic.session.state.${event.state}`),
+        event.reason_code,
+        event.failure ? trafficFailureLabel(locale, event.failure) : null,
+      ]
+        .filter(Boolean)
+        .join(" · "),
+    }),
+  );
   const exitActivityActions = new Set([
     "network.role.set",
     "node.local_exit.set",
@@ -4845,7 +4856,9 @@ function RelayAuthorizationDecision({
       data-allowed={decision.allowed}
       data-consumer-allowed={decision.consumer?.allowed ?? "missing"}
       data-consumer-layer={decision.consumer?.layer ?? "none"}
-      data-consumer-reauth={decision.consumer?.reauthentication_satisfied ?? "missing"}
+      data-consumer-reauth={
+        decision.consumer?.reauthentication_satisfied ?? "missing"
+      }
       data-consumer-reason={decision.consumer?.reason ?? "missing"}
       data-node-id={decision.node_id}
       data-provider-allowed={decision.provider.allowed}
@@ -4922,7 +4935,10 @@ function RelayAuthorizationDetails({
         })}
       </p>
       {audit.truncated ? (
-        <p className="state-notice warn" data-testid="relay-authorization-truncated">
+        <p
+          className="state-notice warn"
+          data-testid="relay-authorization-truncated"
+        >
           {label(locale, "relay.authorization.truncated")}
         </p>
       ) : null}
@@ -5074,10 +5090,7 @@ function RelayGovernanceDetails({
         </p>
       ) : null}
       {visibleEvents.length === 0 ? (
-        <p
-          className="empty-copy"
-          data-testid="relay-governance-filter-empty"
-        >
+        <p className="empty-copy" data-testid="relay-governance-filter-empty">
           {normalizedNodeFilter
             ? tr(locale, "relay.governance.node_filter.empty", {
                 node_id: normalizedNodeFilter,
@@ -5096,8 +5109,12 @@ function RelayGovernanceDetails({
               key={`${event.occurred_at_unix_ms}-${event.action}-${index}`}
             >
               <div className="relay-governance-event-heading">
-                <strong>{relayGovernanceActionLabel(locale, event.action)}</strong>
-                <time>{formatTimestamp(locale, event.occurred_at_unix_ms)}</time>
+                <strong>
+                  {relayGovernanceActionLabel(locale, event.action)}
+                </strong>
+                <time>
+                  {formatTimestamp(locale, event.occurred_at_unix_ms)}
+                </time>
               </div>
               <p>{relayGovernanceEventDetail(locale, event)}</p>
             </li>
@@ -5152,19 +5169,11 @@ function RelayDurableAuditDetails({
     const fromUnixMs = optionalUnixMs(fromValue);
     const toUnixMs = optionalUnixMs(toValue);
     if ((fromValue && fromUnixMs == null) || (toValue && toUnixMs == null)) {
-      setValidationFailure(
-        label(locale, "relay.durable_audit.invalid_time"),
-      );
+      setValidationFailure(label(locale, "relay.durable_audit.invalid_time"));
       return;
     }
-    if (
-      fromUnixMs != null &&
-      toUnixMs != null &&
-      fromUnixMs > toUnixMs
-    ) {
-      setValidationFailure(
-        label(locale, "relay.durable_audit.invalid_range"),
-      );
+    if (fromUnixMs != null && toUnixMs != null && fromUnixMs > toUnixMs) {
+      setValidationFailure(label(locale, "relay.durable_audit.invalid_range"));
       return;
     }
 
@@ -5200,9 +5209,7 @@ function RelayDurableAuditDetails({
           {label(locale, "relay.durable_audit.persistent")}
         </span>
       </div>
-      <p className="muted-copy">
-        {label(locale, "relay.durable_audit.hint")}
-      </p>
+      <p className="muted-copy">{label(locale, "relay.durable_audit.hint")}</p>
       <p className="muted-copy" data-testid="relay-durable-audit-scope">
         {networkId
           ? tr(locale, "relay.durable_audit.scope", {
@@ -5275,7 +5282,10 @@ function RelayDurableAuditDetails({
             : label(locale, "relay.durable_audit.export")}
         </button>
         {!networkId || !onExport ? (
-          <p className="state-notice warn" data-testid="relay-durable-audit-unavailable">
+          <p
+            className="state-notice warn"
+            data-testid="relay-durable-audit-unavailable"
+          >
             {unavailableReason}
           </p>
         ) : null}
@@ -5753,6 +5763,11 @@ function Settings({
   );
   const capabilities = snapshot.capabilities?.capabilities ?? [];
   const embeddedServices = snapshot.embedded_services ?? [];
+  const fileCapability = snapshot.file_capability;
+  const fileState =
+    fileCapability?.state ??
+    capabilities.find((capability) => capability.kind === "file")?.state ??
+    "unknown";
   const unsupportedCapabilities = capabilities
     .filter((capability) => capability.state === "unsupported")
     .map((capability) => label(locale, `capability.${capability.kind}`));
@@ -5919,6 +5934,83 @@ function Settings({
         </SettingsSection>
 
         <SettingsSection
+          group="file-share"
+          title={label(locale, "settings.section.file_share")}
+          icon={Boxes}
+        >
+          <dl className="detail-list" data-testid="file-capability-status">
+            <div>
+              <dt>{label(locale, "settings.row.file_state")}</dt>
+              <dd data-file-state={fileState}>
+                {label(locale, `status.capability.${fileState}`)}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.file_network")}</dt>
+              <dd data-file-network={fileCapability?.network_id ?? ""}>
+                {fileCapability?.network_id ??
+                  label(locale, "settings.file.not_configured")}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.file_revision")}</dt>
+              <dd
+                data-file-share-revision={fileCapability?.share_revision ?? ""}
+                data-file-access-epoch={fileCapability?.access_epoch ?? ""}
+              >
+                {fileCapability?.share_revision !== null &&
+                fileCapability?.share_revision !== undefined
+                  ? tr(locale, "settings.file.revision_detail", {
+                      share: String(fileCapability.share_revision),
+                      epoch:
+                        fileCapability.access_epoch === null ||
+                        fileCapability.access_epoch === undefined
+                          ? label(locale, "common.not_available")
+                          : String(fileCapability.access_epoch),
+                    })
+                  : label(locale, "settings.file.not_configured")}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.file_available")}</dt>
+              <dd
+                data-file-available-bytes={
+                  fileCapability?.available_bytes ?? ""
+                }
+              >
+                {fileCapability?.available_bytes !== null &&
+                fileCapability?.available_bytes !== undefined
+                  ? formatBytes(locale, fileCapability.available_bytes)
+                  : label(locale, "common.not_available")}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.file_active_transfers")}</dt>
+              <dd
+                data-file-active-transfers={
+                  fileCapability?.active_transfers ?? ""
+                }
+              >
+                {fileCapability
+                  ? formatInteger(locale, fileCapability.active_transfers ?? 0)
+                  : label(locale, "common.unknown")}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.file_error")}</dt>
+              <dd data-file-root-error={fileCapability?.root_error ?? ""}>
+                {fileCapability?.root_error ??
+                  label(locale, "settings.file.no_root_error")}
+              </dd>
+            </div>
+            <div>
+              <dt>{label(locale, "settings.row.file_scope")}</dt>
+              <dd>{label(locale, "settings.file.owner_only_detail")}</dd>
+            </div>
+          </dl>
+        </SettingsSection>
+
+        <SettingsSection
           group="discovery-index"
           title={label(locale, "settings.section.discovery_index")}
           icon={Wifi}
@@ -6042,6 +6134,7 @@ const PAGE_ICONS: Record<string, LucideIcon> = {
   exit_node: DoorOpen,
   relay: RadioTower,
   logs: Boxes,
+  files: FolderOpen,
   identity: KeyRound,
   settings: Cpu,
 };
@@ -6114,6 +6207,15 @@ export function PageContent(props: PageContentProps) {
       break;
     case "logs":
       content = <Logs {...props} />;
+      break;
+    case "files":
+      content = (
+        <FilesPage
+          snapshot={snapshot}
+          locale={locale}
+          selectedNetwork={selectedNetwork}
+        />
+      );
       break;
     case "identity":
       content = <Identity {...props} />;

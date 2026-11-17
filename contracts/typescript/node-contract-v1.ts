@@ -1012,11 +1012,13 @@ export type NetworkMember = {
 
 export type NetworkMemberDirectory = {
   "can_manage_members": boolean;
+  "capability_declarations"?: Array<CapabilityKind>;
   "exit_selection_policy"?: ExitSelectionPolicy;
   "exit_selection_policy_revision"?: number;
   "generated_at_unix_ms": number;
   "members": Array<NetworkMember>;
   "network_id": NetworkId;
+  "network_revision"?: number;
   "viewer_role": MembershipRole;
 };
 
@@ -1992,6 +1994,16 @@ export type NodeExitSelectionSnapshot = {
   "resolution"?: ExitSelectionResolution | null;
 };
 
+export type NodeFileCapabilitySnapshot = {
+  "access_epoch"?: number | null;
+  "active_transfers"?: number;
+  "available_bytes"?: number | null;
+  "network_id"?: NetworkId | null;
+  "root_error"?: string | null;
+  "share_revision"?: number | null;
+  "state": CapabilityState;
+};
+
 export type NodeGetInvitationStatusCommand = {
   "invitation_id": InvitationId;
   "network_id": NetworkId;
@@ -2593,6 +2605,7 @@ export type NodeSnapshot = {
   "embedded_services"?: Array<NodeEmbeddedServiceSnapshot>;
   "exit_node_capabilities"?: ExitNodeCapabilities;
   "exit_selections"?: Array<NodeExitSelectionSnapshot>;
+  "file_capability"?: NodeFileCapabilitySnapshot;
   "identity"?: NodeIdentitySnapshot | null;
   "interface_problems"?: Array<NodeProblem>;
   "interfaces"?: Array<NodeInterfaceSnapshot>;

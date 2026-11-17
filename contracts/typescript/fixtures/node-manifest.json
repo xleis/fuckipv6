@@ -2492,6 +2492,12 @@
       "actions": []
     },
     {
+      "id": "files",
+      "nav_label_key": "nav.files",
+      "title_key": "page.files",
+      "actions": []
+    },
+    {
       "id": "identity",
       "nav_label_key": "nav.identity",
       "title_key": "page.identity",

@@ -5438,7 +5438,7 @@ mod tests {
                     manifest.schema_version,
                     crate::node::NODE_UI_MANIFEST_SCHEMA_VERSION
                 );
-                assert_eq!(manifest.pages.len(), 13);
+                assert_eq!(manifest.pages.len(), 14);
                 assert_eq!(*manifest, crate::node::node_ui_manifest());
             }
             outcome => panic!("unexpected outcome: {outcome:?}"),

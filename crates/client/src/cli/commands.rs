@@ -2,11 +2,12 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use fuckipv6_common::domain::{
     evaluate_effective_access, select_relay_candidate, AccessContext, AuditEntry, AuditId,
-    AuditOutcome, CapabilityKind, ExitSessionAction, InvitationCode, InvitationRedeemRequest,
-    MembershipRole, MembershipState, NetworkId, NetworkMemberDirectory, NetworkRole, NodeId,
-    PermissionIntent, PermissionRequest, PolicyAction, RelayCandidate, RelayGovernanceAction,
-    RelayHealthStatus, RelayLimitPolicy, RelayMemberGrant, RelaySelectionPolicy, ResourceKind,
-    ResourceRef, TrafficFailureKind, TrafficProtectionState, TrafficSessionSnapshot,
+    AuditOutcome, CapabilityKind, ExitSessionAction, FileShareId, InvitationCode,
+    InvitationRedeemRequest, MembershipRole, MembershipState, NetworkId, NetworkMemberDirectory,
+    NetworkRole, NodeId, OperationId, PermissionIntent, PermissionRequest, PolicyAction,
+    RelayCandidate, RelayGovernanceAction, RelayHealthStatus, RelayLimitPolicy, RelayMemberGrant,
+    RelaySelectionPolicy, ResourceKind, ResourceRef, SharedPath, TrafficFailureKind,
+    TrafficProtectionState, TrafficSessionSnapshot, TransferId, TransferState,
 };
 #[cfg(test)]
 use fuckipv6_common::is_encrypted_config_path;
@@ -23,6 +24,7 @@ use std::net::SocketAddr;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 #[cfg(target_os = "linux")]
 use std::path::Path;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -31,6 +33,13 @@ use tokio::sync::{mpsc, watch, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration, Instant};
 
+use crate::config_manager::ConfigManager;
+use crate::file_share::{
+    decode_file_network_frame, encode_file_network_frame, is_file_network_frame,
+    trusted_file_member, FileNetworkBrowser, FileNetworkDataPlane, FileNetworkFrame,
+    FileNetworkOrigin, FileNetworkOriginError, FileNetworkRequest, FileNetworkResponse,
+    FileOriginStore, FileTransferStatusCache, OriginPeer, OriginTransferEvent,
+};
 use crate::ipc::{self, IpcRequest, IpcResponse};
 use crate::local_ipc::IpcRole;
 use crate::node::{
@@ -42,7 +51,9 @@ use crate::node::{
 };
 use crate::owner_security::audit::OwnerSecurityAudit;
 use crate::p2p::buffer_pool::InboundPayload;
-use crate::p2p::connection::{InPlaceSendOutcome, InboundPacket, P2pEngine, PeerRouteInfo};
+use crate::p2p::connection::{
+    InPlaceSendOutcome, InboundPacket, P2pEngine, PeerRouteInfo, SendToOutcome,
+};
 use crate::p2p::punching;
 use crate::p2p::quic;
 use crate::p2p::relay::QuicRelayClient;
@@ -97,6 +108,7 @@ const OUTBOUND_QUEUE_CAPACITY: usize = 256;
 const RECOVERY_TRIGGER_QUEUE_CAPACITY: usize = 8;
 const EXIT_CONTRIBUTION_MEMBER_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const EXIT_CONTRIBUTION_DIRECTORY_QUEUE_CAPACITY: usize = 4;
+const FILE_MEMBER_DIRECTORY_REFRESH_DEBOUNCE: Duration = Duration::from_secs(1);
 const EXIT_AVAILABILITY_REPORT_INTERVAL: Duration = Duration::from_secs(30);
 const RELAY_MEMBER_GRANT_TTL: Duration = Duration::from_secs(15 * 60);
 const RELAY_MEMBER_GRANT_RENEW_AHEAD: Duration = Duration::from_secs(5 * 60);
@@ -562,6 +574,11 @@ impl RuntimeRecoveryEvents {
 pub(crate) struct ClientRuntime {
     pub(crate) signaling: Arc<SignalingClient>,
     pub(crate) p2p: P2pEngine,
+    fallback: Arc<dyn FallbackTransport>,
+    file_network: Option<FileNetworkDataPlane>,
+    file_origin: FileNetworkOrigin,
+    file_browser: FileNetworkBrowser,
+    file_transfer_status: FileTransferStatusCache,
     pub(crate) identity: Identity,
     pub(crate) network_id: Option<NetworkId>,
     pub(crate) outbound: OutboundDispatcher,
@@ -609,6 +626,7 @@ pub(crate) struct ClientRuntime {
     pub(crate) control_rx: mpsc::UnboundedReceiver<ipc::RuntimeCommand>,
     node_state: Option<NodeStateStore>,
     node_state_updates: Option<watch::Receiver<NodeSnapshot>>,
+    file_member_directory_refresh_attempt: Mutex<Option<Instant>>,
     traffic_session: TrafficSessionSnapshot,
     local_exit_snapshot: Option<LocalExitCapabilitySnapshot>,
     local_exit_availability_report_interval: tokio::time::Interval,
@@ -689,6 +707,18 @@ impl ExitConnectionWatchdog {
 }
 
 impl ClientRuntime {
+    async fn send_file_network_payload(&self, peer_ip: Ipv6Addr, payload: &[u8]) -> Result<()> {
+        send_payload_with_fallback(
+            &self.p2p,
+            self.fallback.as_ref(),
+            &self.stats,
+            IpAddr::V6(self.assigned_ip),
+            IpAddr::V6(peer_ip),
+            payload,
+        )
+        .await
+    }
+
     pub(crate) fn tun_name(&self) -> &str {
         self.tun_io.name()
     }
@@ -1502,6 +1532,11 @@ pub(crate) struct RuntimeObservability {
     pub(crate) failover_audit: Option<Arc<OwnerSecurityAudit>>,
 }
 
+pub(crate) struct RuntimeExtensions {
+    pub(crate) file_runtime: Option<crate::file_share::FileRuntime>,
+    pub(crate) observability: RuntimeObservability,
+}
+
 pub(crate) async fn prepare_client_runtime_ext(
     config_path: &str,
     mut config: ClientConfig,
@@ -1509,8 +1544,12 @@ pub(crate) async fn prepare_client_runtime_ext(
     network_name: Option<&str>,
     local_exit_enabled: bool,
     enable_ipc: bool,
-    observability: RuntimeObservability,
+    extensions: RuntimeExtensions,
 ) -> Result<ClientRuntime> {
+    let RuntimeExtensions {
+        file_runtime,
+        observability,
+    } = extensions;
     let RuntimeObservability {
         state: node_state,
         failover_audit,
@@ -1701,13 +1740,16 @@ pub(crate) async fn prepare_client_runtime_ext(
         }
         None => RelayState::with_recovery_trigger_sender(recovery_trigger_tx.clone()),
     };
+    let fallback: Arc<dyn FallbackTransport> = Arc::new(RuntimeFallbackTransport::new(
+        signaling.clone(),
+        relay_state.clone(),
+        relay_selection.clone(),
+    ));
     let outbound = OutboundDispatcher::new(
         Arc::new(P2pOutboundTransport::new(
             p2p.clone(),
-            signaling.clone(),
+            fallback.clone(),
             stats.clone(),
-            relay_state.clone(),
-            relay_selection.clone(),
         )),
         relay_state,
     );
@@ -1753,9 +1795,29 @@ pub(crate) async fn prepare_client_runtime_ext(
     } else {
         PathRecoveryState::Disconnected
     };
+    let file_network = file_runtime
+        .as_ref()
+        .map(|runtime| FileNetworkDataPlane::new(runtime.clone()));
+    let local_node_id = NodeId::from_public_key(&relay_identity.public_key_bytes());
+    let file_origin_store = FileOriginStore::at(
+        ConfigManager::new()?.config_dir(),
+        network_id
+            .as_ref()
+            .map(NetworkId::as_str)
+            .unwrap_or("default"),
+    );
+    let mut file_origin = FileNetworkOrigin::with_store(local_node_id, file_origin_store);
+    if let Err(error) = file_origin.restore_paused(unix_time_ms()) {
+        tracing::warn!(error = %error, "恢复暂停的 File 续传失败，已忽略本地续传日志");
+    }
     Ok(ClientRuntime {
         signaling,
         p2p,
+        fallback,
+        file_network,
+        file_origin,
+        file_browser: FileNetworkBrowser::new(),
+        file_transfer_status: FileTransferStatusCache::new(),
         identity: relay_identity,
         network_id,
         outbound,
@@ -1803,6 +1865,7 @@ pub(crate) async fn prepare_client_runtime_ext(
         control_rx,
         node_state,
         node_state_updates: None,
+        file_member_directory_refresh_attempt: Mutex::new(None),
         traffic_session: TrafficSessionSnapshot::default(),
         local_exit_snapshot: None,
         local_exit_availability_report_interval: {
@@ -3138,6 +3201,18 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
     let mut exit_data_path_probe_rx = runtime.exit_data_path_probe_rx.take();
     #[cfg(not(target_os = "linux"))]
     let mut exit_data_path_probe_rx: Option<mpsc::UnboundedReceiver<Result<()>>> = None;
+    let file_download_notify = runtime
+        .file_network
+        .as_ref()
+        .map(FileNetworkDataPlane::download_notify);
+    let mut file_capability_epoch = runtime
+        .file_network
+        .as_ref()
+        .map(FileNetworkDataPlane::subscribe_capability_epoch);
+    let file_origin_notify = runtime.file_origin.outbound_notify();
+    let file_browser_notify = runtime.file_browser.outbound_notify();
+    let mut file_origin_expiry = tokio::time::interval(Duration::from_secs(1));
+    file_origin_expiry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut exit_connection_watchdog = tokio::time::interval(EXIT_CONNECTION_WATCHDOG_INTERVAL);
     exit_connection_watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -3145,6 +3220,13 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
         let exit_drain = wait_for_local_exit_drain(exit_drain_deadline);
         let exit_readiness_deadline = pending_exit_readiness_deadline(runtime);
         let exit_readiness = wait_for_pending_exit_readiness(exit_readiness_deadline);
+        let file_origin_retry_deadline = runtime.file_origin.next_retry_at_unix_ms();
+        let file_origin_retry = wait_for_file_retry(file_origin_retry_deadline);
+        let file_download_retry_deadline = runtime
+            .file_network
+            .as_ref()
+            .and_then(FileNetworkDataPlane::next_download_retry_at_unix_ms);
+        let file_download_retry = wait_for_file_retry(file_download_retry_deadline);
         tokio::select! {
             // 从TUN设备读取数据包
             Some(packets) = runtime.tun_io.packet_rx().recv() => {
@@ -3156,6 +3238,77 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
             // 从P2P接收已认证明文；不会再次经过 replay window。
             Some(packets) = runtime.p2p.recv_batch(DATA_PLANE_BATCH_SIZE) => {
                 handle_inbound_packet_batch(runtime, packets, "P2P packet").await;
+            }
+
+            // Download chunks are produced only after the peer is checked
+            // against the freshest authoritative member directory. Each wake
+            // emits one bounded fragment so packet, control and shutdown
+            // processing retain their own scheduler turns.
+            _ = async {
+                match file_download_notify.as_ref() {
+                    Some(notify) => notify.notified().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                drive_pending_file_downloads(runtime).await;
+            }
+
+            // Owner enable/disable/reconfigure advances the local capability
+            // epoch. Cancel every admitted session before another peer frame
+            // can run, and publish one bounded cleanup activity per transfer.
+            changed = async {
+                match file_capability_epoch.as_mut() {
+                    Some(epoch) => epoch.changed().await.is_ok(),
+                    None => std::future::pending::<bool>().await,
+                }
+            } => {
+                if changed {
+                    let now_unix_ms = unix_time_ms();
+                    let cancelled = runtime.file_network.as_mut().map_or(0, |file_network| {
+                        file_network.cancel_all_for_authorization_loss(
+                            "file_capability_revoked",
+                            now_unix_ms,
+                        )
+                    });
+                    if cancelled > 0 {
+                        tracing::info!(
+                            cancelled,
+                            "File 能力变更已主动终止全部活动传输"
+                        );
+                    }
+                    publish_file_network_activity(runtime).await;
+                }
+            }
+
+            // Requester upload fragments, finish requests and cancellations
+            // wake the same event loop that owns runtime state. The state
+            // machine signals on every outbound transition; the pump drains
+            // the bounded queue after re-authorizing the destination.
+            _ = file_origin_notify.notified() => {
+                drive_pending_file_origin(runtime).await;
+            }
+
+            _ = file_browser_notify.notified() => {
+                drive_pending_file_browser(runtime).await;
+            }
+
+            _ = file_origin_retry => {
+                let now_unix_ms = unix_time_ms();
+                runtime.file_origin.expire(now_unix_ms);
+                runtime.file_origin.queue_due_retries(now_unix_ms);
+                drive_pending_file_origin(runtime).await;
+            }
+
+            _ = file_download_retry => {
+                drive_pending_file_downloads(runtime).await;
+            }
+
+            _ = file_origin_expiry.tick() => {
+                let now_unix_ms = unix_time_ms();
+                runtime.file_origin.expire(now_unix_ms);
+                runtime.file_origin.queue_due_retries(now_unix_ms);
+                runtime.file_browser.expire(now_unix_ms);
+                drive_pending_file_origin(runtime).await;
             }
 
             // 处理信令事件
@@ -3239,6 +3392,22 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                         directory: Some(directory),
                         received_at_unix_ms: Some(received_at_unix_ms),
                     }) => {
+                        let now_unix_ms = unix_time_ms();
+                        let cancelled = runtime.file_network.as_mut().map_or(0, |file_network| {
+                            file_network.cancel_sessions_without_member_access(
+                                &directory.network_id,
+                                Some(&directory),
+                                Some(received_at_unix_ms),
+                                now_unix_ms,
+                            )
+                        });
+                        if cancelled > 0 {
+                            tracing::info!(
+                                cancelled,
+                                "成员目录刷新已主动终止失去 File 授权的传输"
+                            );
+                            publish_file_network_activity(runtime).await;
+                        }
                         let selection_directory = directory.clone();
                         if let Err(denial) = runtime
                             .exit_contribution_gate
@@ -3258,6 +3427,24 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
                             .await;
                     }
                     Some(_) => {
+                        if let Some(network_id) = runtime.network_id.clone() {
+                            let cancelled =
+                                runtime.file_network.as_mut().map_or(0, |file_network| {
+                                    file_network.cancel_sessions_without_member_access(
+                                        &network_id,
+                                        None,
+                                        None,
+                                        unix_time_ms(),
+                                    )
+                                });
+                            if cancelled > 0 {
+                                tracing::info!(
+                                    cancelled,
+                                    "成员目录不可用，已主动终止 File 传输"
+                                );
+                                publish_file_network_activity(runtime).await;
+                            }
+                        }
                         runtime.exit_contribution_gate.clear_member_directory();
                         runtime
                             .handle_exit_selection_directory_unavailable(
@@ -3397,6 +3584,462 @@ pub(crate) async fn run_client_event_loop_with_shutdown(
     Ok(None)
 }
 
+async fn drive_pending_file_downloads(runtime: &mut ClientRuntime) {
+    let Some(pending) = runtime
+        .file_network
+        .as_ref()
+        .map(FileNetworkDataPlane::pending_downloads)
+    else {
+        return;
+    };
+    for download in pending {
+        let now_unix_ms = unix_time_ms();
+        // A rate-limited transfer remains admitted and keeps its source file
+        // open, but it must not consume CPU until either its retry deadline or
+        // the authenticated binding expiry is reached.
+        if now_unix_ms < download.expires_at_unix_ms
+            && download
+                .retry_at_unix_ms
+                .is_some_and(|retry_at| retry_at > now_unix_ms)
+        {
+            tracing::debug!(
+                transfer_id = %download.transfer_id,
+                operation_id = %download.operation_id,
+                retry_at_unix_ms = ?download.retry_at_unix_ms,
+                "File owner 下载驱动等待限速重试"
+            );
+            continue;
+        }
+        let authorized = trusted_file_request_member(runtime, &download.actor, now_unix_ms).await;
+        let frame = match authorized {
+            Ok((member, _)) if member.member_access_epoch == download.member_access_epoch => {
+                let Some(file_network) = runtime.file_network.as_mut() else {
+                    return;
+                };
+                match file_network.next_download_frame(
+                    &download.actor,
+                    member.member_access_epoch,
+                    &download.transfer_id,
+                    &download.operation_id,
+                    now_unix_ms,
+                ) {
+                    Ok(frame) => frame,
+                    Err(FileNetworkResponse::Error {
+                        code,
+                        retry_after_ms: Some(retry_after_ms),
+                    }) if code == "file_transfer_rate_limited" => {
+                        file_network.defer_download_retry(
+                            &download.transfer_id,
+                            &download.operation_id,
+                            now_unix_ms.saturating_add(retry_after_ms.max(1)),
+                        );
+                        continue;
+                    }
+                    Err(response) => {
+                        let reason_code = file_network_error_code(&response);
+                        tracing::debug!(
+                            transfer_id = %download.transfer_id,
+                            operation_id = %download.operation_id,
+                            reason_code,
+                            "File owner 下载驱动授权/适配器拒绝"
+                        );
+                        cancel_file_network_session(
+                            runtime,
+                            &download.transfer_id,
+                            &download.operation_id,
+                            reason_code,
+                            now_unix_ms,
+                        );
+                        continue;
+                    }
+                }
+            }
+            Ok(_) => {
+                tracing::debug!(
+                    transfer_id = %download.transfer_id,
+                    operation_id = %download.operation_id,
+                    expected_member_access_epoch = download.member_access_epoch,
+                    "File owner 下载驱动成员 epoch 已变化"
+                );
+                cancel_file_network_session(
+                    runtime,
+                    &download.transfer_id,
+                    &download.operation_id,
+                    "file_transfer_access_revoked",
+                    now_unix_ms,
+                );
+                continue;
+            }
+            Err(response) => {
+                let reason_code = file_network_error_code(&response);
+                tracing::debug!(
+                    transfer_id = %download.transfer_id,
+                    operation_id = %download.operation_id,
+                    reason_code,
+                    "File owner 下载驱动成员目录授权失败"
+                );
+                cancel_file_network_session(
+                    runtime,
+                    &download.transfer_id,
+                    &download.operation_id,
+                    reason_code,
+                    now_unix_ms,
+                );
+                continue;
+            }
+        };
+        let Some(frame) = frame else {
+            tracing::debug!(
+                transfer_id = %download.transfer_id,
+                operation_id = %download.operation_id,
+                "File owner 下载驱动没有待发送分片"
+            );
+            continue;
+        };
+        if let FileNetworkFrame::Chunk {
+            resume_generation,
+            chunk_index,
+            offset,
+            data,
+            ..
+        } = &frame
+        {
+            tracing::debug!(
+                peer = %download.actor,
+                transfer_id = %download.transfer_id,
+                operation_id = %download.operation_id,
+                resume_generation,
+                chunk_index,
+                offset,
+                data_len = data.len(),
+                "File owner 发送下载分片"
+            );
+        }
+        let Ok(encoded) = encode_file_network_frame(&frame) else {
+            cancel_file_network_session(
+                runtime,
+                &download.transfer_id,
+                &download.operation_id,
+                "file_transfer_encode_failed",
+                now_unix_ms,
+            );
+            continue;
+        };
+        if let Err(error) = runtime
+            .send_file_network_payload(download.peer_ip, &encoded)
+            .await
+        {
+            tracing::debug!(
+                peer = %download.actor,
+                transfer_id = %download.transfer_id,
+                operation_id = %download.operation_id,
+                "File 下载分片发送失败: {error:#}"
+            );
+            cancel_file_network_session(
+                runtime,
+                &download.transfer_id,
+                &download.operation_id,
+                "file_transfer_send_failed",
+                now_unix_ms,
+            );
+        }
+    }
+
+    let now_unix_ms = unix_time_ms();
+    let has_ready = runtime.file_network.as_ref().is_some_and(|file_network| {
+        file_network
+            .pending_downloads()
+            .into_iter()
+            .any(|download| {
+                now_unix_ms >= download.expires_at_unix_ms
+                    || download
+                        .retry_at_unix_ms
+                        .is_none_or(|retry_at| retry_at <= now_unix_ms)
+            })
+    });
+    if has_ready {
+        if let Some(file_network) = runtime.file_network.as_ref() {
+            file_network.download_notify().notify_one();
+        }
+    }
+    publish_file_network_activity(runtime).await;
+}
+
+async fn publish_file_network_activity(runtime: &mut ClientRuntime) {
+    let Some(activity) = runtime
+        .file_network
+        .as_mut()
+        .map(FileNetworkDataPlane::drain_activity)
+    else {
+        return;
+    };
+    if activity.is_empty() {
+        return;
+    }
+    if let Some(state) = &runtime.node_state {
+        state.merge_recent_activity(activity).await;
+    }
+}
+
+/// Send requester-side File frames after revalidating both sides against the
+/// current authoritative membership directory. The requester's local member
+/// epoch must still match the binding; the owner is checked independently as
+/// an active File-capable peer. The state machine keeps at most one outstanding
+/// request per operation, so this pump remains bounded.
+async fn drive_pending_file_browser(runtime: &mut ClientRuntime) {
+    while let Some(outbound) = runtime.file_browser.pop_outbound() {
+        let now_unix_ms = unix_time_ms();
+        let FileNetworkFrame::Request { request_id, .. } = &outbound.frame else {
+            runtime
+                .file_browser
+                .fail_request(&[0; 16], "file_browse_invalid_request");
+            continue;
+        };
+        let request_id = *request_id;
+        if let Err(code) = authorize_file_origin_send(
+            runtime,
+            &outbound.peer,
+            Some(outbound.actor_access_epoch),
+            now_unix_ms,
+        )
+        .await
+        {
+            tracing::warn!(
+                peer = %outbound.peer.node_id,
+                request_id = ?request_id,
+                error_code = %code,
+                "File 目录浏览发送前授权复核失败"
+            );
+            runtime.file_browser.fail_request(&request_id, &code);
+            continue;
+        }
+        let encoded = match encode_file_network_frame(&outbound.frame) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                tracing::warn!(
+                    peer = %outbound.peer.node_id,
+                    request_id = ?request_id,
+                    "File 目录浏览帧编码失败: {error}"
+                );
+                runtime
+                    .file_browser
+                    .fail_request(&request_id, "file_browse_send_failed");
+                continue;
+            }
+        };
+        tracing::debug!(
+            peer = %outbound.peer.node_id,
+            request_id = ?request_id,
+            "File requester 发送目录浏览请求"
+        );
+        if let Err(error) = runtime
+            .send_file_network_payload(outbound.peer.virtual_ip, &encoded)
+            .await
+        {
+            tracing::debug!(
+                peer = %outbound.peer.node_id,
+                request_id = ?request_id,
+                "File 目录浏览帧发送失败: {error:#}"
+            );
+            runtime
+                .file_browser
+                .fail_request(&request_id, "file_browse_send_failed");
+        }
+    }
+}
+
+async fn drive_pending_file_origin(runtime: &mut ClientRuntime) {
+    while let Some(outbound) = runtime.file_origin.pop_outbound() {
+        let now_unix_ms = unix_time_ms();
+        if let Err(code) = authorize_file_origin_send(
+            runtime,
+            &outbound.peer,
+            outbound.actor_access_epoch,
+            now_unix_ms,
+        )
+        .await
+        {
+            tracing::warn!(
+                peer = %outbound.peer.node_id,
+                transfer_id = %outbound.transfer_id,
+                operation_id = %outbound.operation_id,
+                error_code = %code,
+                "File requester 发送前授权复核失败，传输已失败关闭"
+            );
+            runtime.file_origin.fail_transfer(
+                &outbound.transfer_id,
+                &outbound.operation_id,
+                now_unix_ms,
+                &code,
+            );
+            continue;
+        }
+
+        let encoded = match encode_file_network_frame(&outbound.frame) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                tracing::warn!(
+                    peer = %outbound.peer.node_id,
+                    transfer_id = %outbound.transfer_id,
+                    operation_id = %outbound.operation_id,
+                    "File requester 帧编码失败: {error}"
+                );
+                runtime.file_origin.fail_transfer(
+                    &outbound.transfer_id,
+                    &outbound.operation_id,
+                    now_unix_ms,
+                    "file_transfer_send_failed",
+                );
+                continue;
+            }
+        };
+        if let FileNetworkFrame::Request {
+            request_id,
+            request,
+        } = &outbound.frame
+        {
+            tracing::debug!(
+                peer = %outbound.peer.node_id,
+                transfer_id = %outbound.transfer_id,
+                operation_id = %outbound.operation_id,
+                request = file_network_request_kind(request),
+                resume = ?file_network_resume_diagnostics(request),
+                request_id = ?request_id,
+                "File requester 发送网络请求"
+            );
+        }
+        if let Err(error) = runtime
+            .send_file_network_payload(outbound.peer.virtual_ip, &encoded)
+            .await
+        {
+            tracing::debug!(
+                peer = %outbound.peer.node_id,
+                transfer_id = %outbound.transfer_id,
+                operation_id = %outbound.operation_id,
+                "File requester 帧发送失败: {error:#}"
+            );
+            runtime.file_origin.fail_transfer(
+                &outbound.transfer_id,
+                &outbound.operation_id,
+                now_unix_ms,
+                "file_transfer_send_failed",
+            );
+        }
+    }
+
+    collect_file_origin_events(runtime);
+}
+
+fn collect_file_origin_events(runtime: &mut ClientRuntime) {
+    let now_unix_ms = unix_time_ms();
+    for event in runtime.file_origin.drain_events() {
+        runtime.file_transfer_status.ingest(&event, now_unix_ms);
+        log_file_origin_event(&event);
+    }
+}
+
+async fn authorize_file_origin_send(
+    runtime: &ClientRuntime,
+    peer: &OriginPeer,
+    expected_actor_access_epoch: Option<u64>,
+    now_unix_ms: u64,
+) -> Result<(), String> {
+    authorize_file_origin_actor(runtime, expected_actor_access_epoch, now_unix_ms).await?;
+    authorize_file_origin_peer(runtime, peer, now_unix_ms).await
+}
+
+async fn authorize_file_origin_actor(
+    runtime: &ClientRuntime,
+    expected_access_epoch: Option<u64>,
+    now_unix_ms: u64,
+) -> Result<(), String> {
+    let local_node_id = runtime.file_origin.local_node_id();
+    let (member, _) = trusted_file_request_member(runtime, local_node_id, now_unix_ms)
+        .await
+        .map_err(|response| file_network_error_code(&response).to_owned())?;
+    validate_file_origin_actor_epoch(expected_access_epoch, &member)
+}
+
+fn validate_file_origin_actor_epoch(
+    expected_access_epoch: Option<u64>,
+    member: &crate::file_share::TrustedFileMember,
+) -> Result<(), String> {
+    if expected_access_epoch.is_some_and(|epoch| epoch == 0 || member.member_access_epoch != epoch)
+    {
+        return Err("file_transfer_access_revoked".to_owned());
+    }
+    Ok(())
+}
+
+async fn authorize_file_origin_peer(
+    runtime: &ClientRuntime,
+    peer: &OriginPeer,
+    now_unix_ms: u64,
+) -> Result<(), String> {
+    if !runtime
+        .p2p
+        .has_established_session_by_ip(IpAddr::V6(peer.virtual_ip))
+        .await
+    {
+        return Err("file_transfer_session_unavailable".to_owned());
+    }
+    let Some(route) = runtime
+        .p2p
+        .peer_route_by_ip(IpAddr::V6(peer.virtual_ip))
+        .await
+    else {
+        return Err("file_transfer_peer_unavailable".to_owned());
+    };
+    if route.node_id != peer.node_id || route.virtual_ip != peer.virtual_ip {
+        return Err("file_transfer_peer_mismatch".to_owned());
+    }
+    trusted_file_request_member(runtime, &peer.node_id, now_unix_ms)
+        .await
+        .map(|_| ())
+        .map_err(|response| file_network_error_code(&response).to_owned())
+}
+
+fn log_file_origin_event(event: &OriginTransferEvent) {
+    match event.state {
+        TransferState::Failed | TransferState::Cancelled | TransferState::Expired => {
+            tracing::warn!(
+                transfer_id = %event.transfer_id,
+                operation_id = %event.operation_id,
+                direction = ?event.direction,
+                state = ?event.state,
+                transferred_bytes = event.transferred_bytes,
+                total_bytes = event.total_bytes,
+                failure_kind = event.failure_kind().map_or("none", |kind| kind.as_str()),
+                error_code = event.error_code.as_deref().unwrap_or("file_transfer_failed"),
+                "File requester 传输已终止"
+            );
+        }
+        TransferState::Completed => {
+            tracing::info!(
+                transfer_id = %event.transfer_id,
+                operation_id = %event.operation_id,
+                direction = ?event.direction,
+                transferred_bytes = event.transferred_bytes,
+                "File requester 传输已完成并校验"
+            );
+        }
+        TransferState::Queued
+        | TransferState::Active
+        | TransferState::Paused
+        | TransferState::Verifying => {
+            tracing::debug!(
+                transfer_id = %event.transfer_id,
+                operation_id = %event.operation_id,
+                direction = ?event.direction,
+                state = ?event.state,
+                transferred_bytes = event.transferred_bytes,
+                total_bytes = event.total_bytes,
+                "File requester 传输进度"
+            );
+        }
+    }
+}
+
 fn local_exit_drain_deadline(runtime: &ClientRuntime) -> Option<Instant> {
     #[cfg(target_os = "linux")]
     {
@@ -3441,6 +4084,16 @@ async fn wait_for_pending_exit_readiness(deadline: Option<Instant>) {
     }
 }
 
+async fn wait_for_file_retry(deadline_unix_ms: Option<u64>) {
+    match deadline_unix_ms {
+        Some(deadline_unix_ms) => {
+            let delay_ms = deadline_unix_ms.saturating_sub(unix_time_ms());
+            sleep(Duration::from_millis(delay_ms)).await;
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
 async fn complete_pending_exit_readiness_timeout(runtime: &mut ClientRuntime) {
     #[cfg(target_os = "linux")]
     {
@@ -3470,6 +4123,214 @@ async fn complete_local_exit_drain(runtime: &mut ClientRuntime) {
     }
 }
 
+async fn start_runtime_file_directory_listing(
+    runtime: &mut ClientRuntime,
+    request: Box<ipc::ListFileDirectoryRequest>,
+    reply: &mut Option<tokio::sync::oneshot::Sender<Result<ipc::FileDirectoryListing, String>>>,
+) -> Result<(), String> {
+    let request = *request;
+    let peer_node_id =
+        NodeId::parse(request.peer).map_err(|_| "file_browse_peer_invalid".to_owned())?;
+    let share_id =
+        FileShareId::parse(request.share_id).map_err(|_| "file_browse_share_invalid".to_owned())?;
+    let path = if request.path.is_empty() {
+        SharedPath::root()
+    } else {
+        SharedPath::parse(request.path).map_err(|_| "file_browse_path_invalid".to_owned())?
+    };
+    let now_unix_ms = unix_time_ms();
+
+    let local_node_id = runtime.file_origin.local_node_id().clone();
+    let (local_member, _) = trusted_file_request_member(runtime, &local_node_id, now_unix_ms)
+        .await
+        .map_err(|response| file_network_error_code(&response).to_owned())?;
+
+    let Some(peer) = runtime.p2p.peer_route_by_node_id(&peer_node_id).await else {
+        return Err("file_browse_peer_unavailable".to_owned());
+    };
+    if peer.node_id != peer_node_id
+        || !runtime
+            .p2p
+            .has_established_session_by_ip(IpAddr::V6(peer.virtual_ip))
+            .await
+    {
+        return Err("file_browse_peer_unavailable".to_owned());
+    }
+    trusted_file_request_member(runtime, &peer_node_id, now_unix_ms)
+        .await
+        .map_err(|response| file_network_error_code(&response).to_owned())?;
+
+    let origin_peer = OriginPeer {
+        node_id: peer_node_id,
+        virtual_ip: peer.virtual_ip,
+    };
+    runtime
+        .file_browser
+        .start_list(
+            origin_peer,
+            local_member.member_access_epoch,
+            share_id,
+            path,
+            request.limit,
+            request.cursor,
+            now_unix_ms,
+            reply,
+        )
+        .map_err(|error| error.code().to_owned())?;
+    Ok(())
+}
+
+async fn start_runtime_file_origin_transfer(
+    runtime: &mut ClientRuntime,
+    request: Box<ipc::StartFileTransferRequest>,
+) -> Result<ipc::FileTransferHandle, String> {
+    let request = *request;
+    let peer_node_id =
+        NodeId::parse(request.peer).map_err(|_| "file_transfer_peer_invalid".to_owned())?;
+    let share_id = FileShareId::parse(request.share_id)
+        .map_err(|_| "file_transfer_share_invalid".to_owned())?;
+    let transfer_id = TransferId::parse(request.transfer_id)
+        .map_err(|_| "file_transfer_transfer_id_invalid".to_owned())?;
+    let operation_id = OperationId::parse(request.operation_id)
+        .map_err(|_| "file_transfer_operation_id_invalid".to_owned())?;
+    let path =
+        SharedPath::parse(request.path).map_err(|_| "file_transfer_path_invalid".to_owned())?;
+    let local_path = PathBuf::from(request.local_path);
+    let now_unix_ms = unix_time_ms();
+
+    let local_node_id = runtime.file_origin.local_node_id().clone();
+    trusted_file_request_member(runtime, &local_node_id, now_unix_ms)
+        .await
+        .map_err(|response| file_network_error_code(&response).to_owned())?;
+
+    let Some(peer) = runtime.p2p.peer_route_by_node_id(&peer_node_id).await else {
+        return Err("file_transfer_peer_unavailable".to_owned());
+    };
+    if peer.node_id != peer_node_id {
+        return Err("file_transfer_peer_mismatch".to_owned());
+    }
+    if !runtime
+        .p2p
+        .has_established_session_by_ip(IpAddr::V6(peer.virtual_ip))
+        .await
+    {
+        return Err("file_transfer_session_unavailable".to_owned());
+    }
+    trusted_file_request_member(runtime, &peer_node_id, now_unix_ms)
+        .await
+        .map_err(|response| file_network_error_code(&response).to_owned())?;
+
+    let origin_peer = OriginPeer {
+        node_id: peer_node_id,
+        virtual_ip: peer.virtual_ip,
+    };
+    match request.direction {
+        ipc::FileTransferDirection::Upload => runtime
+            .file_origin
+            .start_upload(
+                origin_peer,
+                share_id,
+                transfer_id.clone(),
+                operation_id.clone(),
+                path,
+                &local_path,
+                request.chunk_size,
+                now_unix_ms,
+            )
+            .map_err(file_origin_error_code)?,
+        ipc::FileTransferDirection::Download => runtime
+            .file_origin
+            .start_download(
+                origin_peer,
+                share_id,
+                transfer_id.clone(),
+                operation_id.clone(),
+                path,
+                local_path,
+                now_unix_ms,
+            )
+            .map_err(file_origin_error_code)?,
+    }
+
+    Ok(ipc::FileTransferHandle {
+        transfer_id: transfer_id.as_str().to_owned(),
+        operation_id: operation_id.as_str().to_owned(),
+    })
+}
+
+fn file_origin_error_code(error: FileNetworkOriginError) -> String {
+    error.code().to_owned()
+}
+
+fn cancel_runtime_file_origin_transfer(
+    runtime: &mut ClientRuntime,
+    transfer_id: String,
+    operation_id: String,
+) -> Result<(), String> {
+    let transfer_id = TransferId::parse(transfer_id)
+        .map_err(|_| "file_transfer_transfer_id_invalid".to_owned())?;
+    let operation_id = OperationId::parse(operation_id)
+        .map_err(|_| "file_transfer_operation_id_invalid".to_owned())?;
+    if runtime
+        .file_origin
+        .cancel(&transfer_id, &operation_id, unix_time_ms())
+    {
+        Ok(())
+    } else {
+        Err("file_transfer_not_found".to_owned())
+    }
+}
+
+fn pause_runtime_file_origin_transfer(
+    runtime: &mut ClientRuntime,
+    transfer_id: String,
+    operation_id: String,
+) -> Result<(), String> {
+    let transfer_id = TransferId::parse(transfer_id)
+        .map_err(|_| "file_transfer_transfer_id_invalid".to_owned())?;
+    let operation_id = OperationId::parse(operation_id)
+        .map_err(|_| "file_transfer_operation_id_invalid".to_owned())?;
+    runtime
+        .file_origin
+        .pause(&transfer_id, &operation_id, unix_time_ms())
+        .map_err(file_origin_error_code)
+}
+
+async fn resume_runtime_file_origin_transfer(
+    runtime: &mut ClientRuntime,
+    transfer_id: String,
+    operation_id: String,
+) -> Result<(), String> {
+    let transfer_id = TransferId::parse(transfer_id)
+        .map_err(|_| "file_transfer_transfer_id_invalid".to_owned())?;
+    let operation_id = OperationId::parse(operation_id)
+        .map_err(|_| "file_transfer_operation_id_invalid".to_owned())?;
+    let now_unix_ms = unix_time_ms();
+    let (peer, expected_access_epoch) = runtime
+        .file_origin
+        .resume_scope(&transfer_id, &operation_id)
+        .map_err(file_origin_error_code)?;
+
+    if let Err(code) =
+        authorize_file_origin_send(runtime, &peer, Some(expected_access_epoch), now_unix_ms).await
+    {
+        runtime
+            .file_origin
+            .fail_transfer(&transfer_id, &operation_id, now_unix_ms, &code);
+        return Err(code);
+    }
+
+    runtime
+        .file_origin
+        .resume_authorized(
+            &transfer_id,
+            &operation_id,
+            expected_access_epoch,
+            now_unix_ms,
+        )
+        .map_err(file_origin_error_code)
+}
+
 async fn handle_runtime_command(
     runtime: &mut ClientRuntime,
     command: ipc::RuntimeCommand,
@@ -3496,6 +4357,60 @@ async fn handle_runtime_command(
             reply,
         } => {
             let result = apply_runtime_routing(runtime, &mode, exit_node, is_exit_node).await;
+            let _ = reply.send(result);
+            RuntimeCommandOutcome::Continue
+        }
+        ipc::RuntimeCommand::StartFileTransfer { request, reply } => {
+            let result = start_runtime_file_origin_transfer(runtime, request).await;
+            collect_file_origin_events(runtime);
+            let _ = reply.send(result);
+            RuntimeCommandOutcome::Continue
+        }
+        ipc::RuntimeCommand::ListFileDirectory { request, reply } => {
+            let mut reply = Some(reply);
+            if let Err(code) =
+                start_runtime_file_directory_listing(runtime, request, &mut reply).await
+            {
+                if let Some(reply) = reply {
+                    let _ = reply.send(Err(code));
+                }
+            }
+            RuntimeCommandOutcome::Continue
+        }
+        ipc::RuntimeCommand::ListFileTransfers { reply } => {
+            collect_file_origin_events(runtime);
+            let statuses = runtime.file_transfer_status.list(unix_time_ms());
+            let _ = reply.send(Ok(statuses));
+            RuntimeCommandOutcome::Continue
+        }
+        ipc::RuntimeCommand::CancelFileTransfer {
+            transfer_id,
+            operation_id,
+            reply,
+        } => {
+            let result = cancel_runtime_file_origin_transfer(runtime, transfer_id, operation_id);
+            collect_file_origin_events(runtime);
+            let _ = reply.send(result);
+            RuntimeCommandOutcome::Continue
+        }
+        ipc::RuntimeCommand::PauseFileTransfer {
+            transfer_id,
+            operation_id,
+            reply,
+        } => {
+            let result = pause_runtime_file_origin_transfer(runtime, transfer_id, operation_id);
+            collect_file_origin_events(runtime);
+            let _ = reply.send(result);
+            RuntimeCommandOutcome::Continue
+        }
+        ipc::RuntimeCommand::ResumeFileTransfer {
+            transfer_id,
+            operation_id,
+            reply,
+        } => {
+            let result =
+                resume_runtime_file_origin_transfer(runtime, transfer_id, operation_id).await;
+            collect_file_origin_events(runtime);
             let _ = reply.send(result);
             RuntimeCommandOutcome::Continue
         }
@@ -4677,6 +5592,477 @@ async fn handle_exit_readiness_frame(
     );
 }
 
+/// File frames are never treated as TUN packets. Every request and fragment
+/// re-reads the authoritative directory before it can reach the owner adapter.
+async fn handle_file_network_frame(
+    runtime: &mut ClientRuntime,
+    src_ip: IpAddr,
+    peer: PeerRouteInfo,
+    frame: Box<FileNetworkFrame>,
+) {
+    match *frame {
+        FileNetworkFrame::Request {
+            request_id,
+            request,
+        } => {
+            let request_kind = file_network_request_kind(&request);
+            let resume = file_network_resume_diagnostics(&request);
+            let request_ids = file_network_request_ids(&request);
+            let now_unix_ms = unix_time_ms();
+            let response =
+                match trusted_file_request_member(runtime, &peer.node_id, now_unix_ms).await {
+                    Ok((member, network_enabled)) => match runtime.file_network.as_mut() {
+                        Some(file_network) => file_network.handle_request(
+                            &peer.node_id,
+                            &member.context,
+                            network_enabled,
+                            member.member_access_epoch,
+                            peer.virtual_ip,
+                            request,
+                            now_unix_ms,
+                        ),
+                        None => file_network_error("file_runtime_unavailable"),
+                    },
+                    Err(response) => {
+                        let reason_code = file_network_error_code(&response);
+                        if let Some((transfer_id, operation_id)) = &request_ids {
+                            cancel_file_network_session(
+                                runtime,
+                                transfer_id,
+                                operation_id,
+                                reason_code,
+                                now_unix_ms,
+                            );
+                        }
+                        response
+                    }
+                };
+            let response_error_code = matches!(response, FileNetworkResponse::Error { .. })
+                .then(|| file_network_error_code(&response));
+            match &request_ids {
+                Some((transfer_id, operation_id)) => tracing::debug!(
+                    peer = %peer.node_id,
+                    %src_ip,
+                    %transfer_id,
+                    %operation_id,
+                    request = request_kind,
+                    resume = ?resume,
+                    request_id = ?request_id,
+                    response = file_network_response_kind(&response),
+                    error_code = ?response_error_code,
+                    "已处理认证 File 网络请求"
+                ),
+                None => tracing::debug!(
+                    peer = %peer.node_id,
+                    %src_ip,
+                    request = request_kind,
+                    resume = ?resume,
+                    request_id = ?request_id,
+                    response = file_network_response_kind(&response),
+                    error_code = ?response_error_code,
+                    "已处理认证 File 元数据请求"
+                ),
+            }
+            send_file_network_response(runtime, peer.virtual_ip, request_id, response).await;
+        }
+        FileNetworkFrame::Chunk {
+            request_id,
+            transfer_id,
+            operation_id,
+            resume_generation,
+            chunk_index,
+            offset,
+            data,
+        } => {
+            let now_unix_ms = unix_time_ms();
+            let owns_download =
+                runtime
+                    .file_origin
+                    .owns_download(&peer.node_id, &transfer_id, &operation_id);
+            let (member, _) = match trusted_file_request_member(runtime, &peer.node_id, now_unix_ms)
+                .await
+            {
+                Ok(authorized) => authorized,
+                Err(response) => {
+                    let reason_code = file_network_error_code(&response);
+                    cancel_file_network_session(
+                        runtime,
+                        &transfer_id,
+                        &operation_id,
+                        reason_code,
+                        now_unix_ms,
+                    );
+                    tracing::debug!(
+                        peer = %peer.node_id,
+                        %src_ip,
+                        %transfer_id,
+                        %operation_id,
+                        error_code = reason_code,
+                        owns_download,
+                        "File 分片授权复核失败，已取消对应传输"
+                    );
+                    // Upload fragments are acknowledged by the owner. A
+                    // terminal error must retain the fragment's correlation
+                    // id so the requester does not wait for the TTL after
+                    // authorization is revoked. Download fragments have no
+                    // per-fragment acknowledgement; their origin state is
+                    // failed locally above.
+                    if let Some(response) =
+                        chunk_authorization_failure_reply(owns_download, response)
+                    {
+                        send_file_network_response(runtime, peer.virtual_ip, request_id, response)
+                            .await;
+                    }
+                    return;
+                }
+            };
+
+            let origin_peer = OriginPeer {
+                node_id: peer.node_id.clone(),
+                virtual_ip: peer.virtual_ip,
+            };
+            if owns_download {
+                if let Err(error) = runtime.file_origin.handle_chunk(
+                    &origin_peer,
+                    request_id,
+                    &transfer_id,
+                    &operation_id,
+                    resume_generation,
+                    chunk_index,
+                    offset,
+                    &data,
+                    now_unix_ms,
+                ) {
+                    tracing::debug!(
+                        peer = %peer.node_id,
+                        %src_ip,
+                        %transfer_id,
+                        %operation_id,
+                        resume_generation,
+                        chunk_index,
+                        offset,
+                        data_len = data.len(),
+                        error_code = error.code(),
+                        "File requester 下载分片已失败关闭传输"
+                    );
+                }
+                // Download fragments are pushed by the owner and deliberately
+                // have no per-fragment acknowledgement in the wire protocol.
+                return;
+            }
+
+            let response = match runtime.file_network.as_mut() {
+                Some(file_network) => match file_network.handle_chunk(
+                    &peer.node_id,
+                    member.member_access_epoch,
+                    &transfer_id,
+                    &operation_id,
+                    resume_generation,
+                    chunk_index,
+                    offset,
+                    &data,
+                    now_unix_ms,
+                ) {
+                    Ok((chunk_complete, progress)) => FileNetworkResponse::ChunkAccepted {
+                        chunk_index,
+                        chunk_complete,
+                        progress,
+                    },
+                    Err(response) => response,
+                },
+                None => file_network_error("file_runtime_unavailable"),
+            };
+            tracing::debug!(
+                peer = %peer.node_id,
+                %src_ip,
+                %transfer_id,
+                %operation_id,
+                chunk_index,
+                response = file_network_response_kind(&response),
+                "已处理认证 File 网络分片"
+            );
+            send_file_network_response(runtime, peer.virtual_ip, request_id, response).await;
+        }
+        FileNetworkFrame::Response {
+            request_id,
+            response,
+        } => {
+            let now_unix_ms = unix_time_ms();
+            let peer = OriginPeer {
+                node_id: peer.node_id.clone(),
+                virtual_ip: peer.virtual_ip,
+            };
+            if let Err(response) =
+                trusted_file_request_member(runtime, &peer.node_id, now_unix_ms).await
+            {
+                let code = file_network_error_code(&response);
+                runtime
+                    .file_browser
+                    .fail_request(&request_id, "file_browse_authorization_lost");
+                runtime.file_origin.fail_pending_request(
+                    request_id,
+                    now_unix_ms,
+                    "file_transfer_authorization_lost",
+                );
+                tracing::debug!(
+                    peer = %peer.node_id,
+                    %src_ip,
+                    request_id = ?request_id,
+                    error_code = code,
+                    "File requester 响应授权复核失败，已失败关闭对应请求"
+                );
+                return;
+            }
+            if runtime.file_browser.owns_request(&request_id) {
+                if let Err(error) =
+                    runtime
+                        .file_browser
+                        .handle_response(&peer, request_id, response, now_unix_ms)
+                {
+                    tracing::debug!(
+                        peer = %peer.node_id,
+                        %src_ip,
+                        request_id = ?request_id,
+                        error_code = error.code(),
+                        "File 目录浏览响应关联失败"
+                    );
+                }
+                return;
+            }
+            if let Err(error) =
+                runtime
+                    .file_origin
+                    .handle_response(&peer, request_id, response, now_unix_ms)
+            {
+                tracing::debug!(
+                    peer = %peer.node_id,
+                    %src_ip,
+                    request_id = ?request_id,
+                    error_code = error.code(),
+                    "File requester 响应关联失败"
+                );
+                return;
+            }
+            tracing::debug!(
+                peer = %peer.node_id,
+                %src_ip,
+                request_id = ?request_id,
+                "已处理 requester File 网络响应"
+            );
+        }
+    }
+}
+
+fn file_network_request_ids(request: &FileNetworkRequest) -> Option<(TransferId, OperationId)> {
+    match request {
+        FileNetworkRequest::OpenUpload {
+            transfer_id,
+            operation_id,
+            ..
+        }
+        | FileNetworkRequest::OpenDownload {
+            transfer_id,
+            operation_id,
+            ..
+        }
+        | FileNetworkRequest::Pause {
+            transfer_id,
+            operation_id,
+        }
+        | FileNetworkRequest::Cancel {
+            transfer_id,
+            operation_id,
+        }
+        | FileNetworkRequest::Finish {
+            transfer_id,
+            operation_id,
+        } => Some((transfer_id.clone(), operation_id.clone())),
+        FileNetworkRequest::Resume { request } => {
+            Some((request.transfer_id.clone(), request.operation_id.clone()))
+        }
+        FileNetworkRequest::ReadMetadata { .. } | FileNetworkRequest::ListDirectory { .. } => None,
+    }
+}
+
+fn file_network_request_kind(request: &FileNetworkRequest) -> &'static str {
+    match request {
+        FileNetworkRequest::OpenUpload { .. } => "open_upload",
+        FileNetworkRequest::OpenDownload { .. } => "open_download",
+        FileNetworkRequest::ReadMetadata { .. } => "read_metadata",
+        FileNetworkRequest::ListDirectory { .. } => "list_directory",
+        FileNetworkRequest::Resume { .. } => "resume",
+        FileNetworkRequest::Pause { .. } => "pause",
+        FileNetworkRequest::Cancel { .. } => "cancel",
+        FileNetworkRequest::Finish { .. } => "finish",
+    }
+}
+
+fn file_network_resume_diagnostics(request: &FileNetworkRequest) -> Option<String> {
+    let FileNetworkRequest::Resume { request } = request else {
+        return None;
+    };
+    Some(format!(
+        "direction={:?} generation={} chunk_index={} offset={}",
+        request.direction,
+        request.resume_generation,
+        request.resume_chunk_index,
+        request.resume_offset
+    ))
+}
+
+async fn trusted_file_request_member(
+    runtime: &ClientRuntime,
+    actor: &NodeId,
+    now_unix_ms: u64,
+) -> Result<(crate::file_share::TrustedFileMember, bool), FileNetworkResponse> {
+    let Some(network_id) = runtime.network_id.as_ref() else {
+        return Err(file_network_error("file_member_directory_unavailable"));
+    };
+    let Some(state) = runtime.node_state.as_ref() else {
+        return Err(file_network_error("file_member_directory_unavailable"));
+    };
+    let directory = state.member_directory(network_id).await;
+    let received_at_unix_ms = state.member_directory_received_at(network_id).await;
+    match trusted_file_member(
+        network_id,
+        directory.as_ref(),
+        received_at_unix_ms,
+        actor,
+        now_unix_ms,
+    ) {
+        Ok(member) => Ok((member, true)),
+        Err(cached_error) => {
+            // Membership approval can advance the roster between the periodic
+            // refreshes. A File frame is allowed to repair a stale cached
+            // roster from the Coordinator, but only an actual authoritative
+            // directory response can unblock authorization. A failed refresh
+            // preserves the original fail-closed result.
+            let refresh_allowed = {
+                let mut attempt = runtime
+                    .file_member_directory_refresh_attempt
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let allowed = attempt.is_none_or(|attempt| {
+                    attempt.elapsed() >= FILE_MEMBER_DIRECTORY_REFRESH_DEBOUNCE
+                });
+                if allowed {
+                    *attempt = Some(Instant::now());
+                }
+                allowed
+            };
+            if !refresh_allowed {
+                return Err(cached_error);
+            }
+            match runtime
+                .signaling
+                .list_network_members(network_id.clone())
+                .await
+            {
+                Ok(directory) => {
+                    state.set_member_directory(directory).await;
+                    let directory = state.member_directory(network_id).await;
+                    let received_at_unix_ms = state.member_directory_received_at(network_id).await;
+                    // The cache timestamps the directory when the Coordinator
+                    // response is applied, which is necessarily after the time
+                    // captured when this frame entered the handler. Re-evaluate
+                    // freshness at the current instant so a just-fetched roster
+                    // is not rejected as originating in the future.
+                    let refreshed_now_unix_ms = unix_time_ms().max(now_unix_ms);
+                    trusted_file_member(
+                        network_id,
+                        directory.as_ref(),
+                        received_at_unix_ms,
+                        actor,
+                        refreshed_now_unix_ms,
+                    )
+                    .map(|member| (member, true))
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        network_id = %network_id,
+                        error = %error,
+                        "刷新 File 成员目录失败，保留原始权限拒绝"
+                    );
+                    Err(cached_error)
+                }
+            }
+        }
+    }
+}
+
+fn cancel_file_network_session(
+    runtime: &mut ClientRuntime,
+    transfer_id: &TransferId,
+    operation_id: &OperationId,
+    reason_code: &str,
+    now_unix_ms: u64,
+) {
+    if let Some(file_network) = runtime.file_network.as_mut() {
+        file_network.cancel_for_authorization_loss(
+            transfer_id,
+            operation_id,
+            reason_code,
+            now_unix_ms,
+        );
+    }
+    runtime
+        .file_origin
+        .fail_transfer(transfer_id, operation_id, now_unix_ms, reason_code);
+}
+
+async fn send_file_network_response(
+    runtime: &ClientRuntime,
+    peer_ip: Ipv6Addr,
+    request_id: [u8; 16],
+    response: FileNetworkResponse,
+) {
+    let Ok(response) = FileNetworkFrame::response(request_id, response) else {
+        return;
+    };
+    let Ok(encoded) = encode_file_network_frame(&response) else {
+        return;
+    };
+    if let Err(error) = runtime.send_file_network_payload(peer_ip, &encoded).await {
+        tracing::debug!("File 网络响应发送失败: {error:#}");
+    }
+}
+
+fn file_network_response_kind(response: &FileNetworkResponse) -> &'static str {
+    match response {
+        FileNetworkResponse::Opened { .. } => "opened",
+        FileNetworkResponse::Metadata { .. } => "metadata",
+        FileNetworkResponse::DirectoryEntries { .. } => "directory_entries",
+        FileNetworkResponse::Progress { .. } => "progress",
+        FileNetworkResponse::ChunkAccepted { .. } => "chunk_accepted",
+        FileNetworkResponse::Completed { .. } => "completed",
+        FileNetworkResponse::Error { .. } => "error",
+    }
+}
+
+fn file_network_error_code(response: &FileNetworkResponse) -> &str {
+    match response {
+        FileNetworkResponse::Error { code, .. } => code,
+        _ => "file_transfer_protocol_error",
+    }
+}
+
+fn file_network_error(code: &str) -> FileNetworkResponse {
+    FileNetworkResponse::Error {
+        code: code.to_owned(),
+        retry_after_ms: None,
+    }
+}
+
+/// Upload chunks are request/response messages, so an authorization failure
+/// must be returned to the requester with the original correlation id.
+/// Download chunks are unsolicited stream data and must only be failed locally.
+fn chunk_authorization_failure_reply(
+    owns_download: bool,
+    response: FileNetworkResponse,
+) -> Option<FileNetworkResponse> {
+    (!owns_download).then_some(response)
+}
+
 async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacket, source: &str) {
     match admit_inbound_packet(runtime, packet).await {
         Some(InboundAdmission::Payload(payload)) => {
@@ -4690,6 +6076,14 @@ async fn handle_inbound_packet(runtime: &mut ClientRuntime, packet: InboundPacke
             frame,
         }) => {
             handle_exit_readiness_frame(runtime, src_ip, peer, frame).await;
+        }
+        Some(InboundAdmission::FileNetwork {
+            src_ip,
+            peer,
+            frame,
+        }) => {
+            handle_file_network_frame(runtime, src_ip, peer, frame).await;
+            publish_file_network_activity(runtime).await;
         }
         None => {}
     }
@@ -4711,6 +6105,14 @@ async fn handle_inbound_packet_batch(
             }) => {
                 handle_exit_readiness_frame(runtime, src_ip, peer, frame).await;
             }
+            Some(InboundAdmission::FileNetwork {
+                src_ip,
+                peer,
+                frame,
+            }) => {
+                handle_file_network_frame(runtime, src_ip, peer, frame).await;
+                publish_file_network_activity(runtime).await;
+            }
             None => {}
         }
     }
@@ -4725,6 +6127,11 @@ enum InboundAdmission {
         src_ip: IpAddr,
         peer: PeerRouteInfo,
         frame: ExitReadinessFrame,
+    },
+    FileNetwork {
+        src_ip: IpAddr,
+        peer: PeerRouteInfo,
+        frame: Box<FileNetworkFrame>,
     },
 }
 
@@ -4769,6 +6176,21 @@ async fn admit_inbound_packet(
         tracing::debug!("丢弃未注册来源 {src_ip} 的入站数据包");
         return None;
     };
+    if is_file_network_frame(&plain_payload) {
+        let frame = match decode_file_network_frame(&plain_payload) {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::debug!("丢弃来自 {} 的无效 File 网络帧: {error}", src_ip);
+                return None;
+            }
+        };
+        record_p2p_rx_for_peer(&runtime.stats, &peer, plain_payload.len()).await;
+        return Some(InboundAdmission::FileNetwork {
+            src_ip,
+            peer,
+            frame: Box::new(frame),
+        });
+    }
     if is_exit_readiness_frame(&plain_payload) {
         let frame = match decode_exit_readiness_frame(&plain_payload) {
             Ok(frame) => frame,
@@ -4888,6 +6310,7 @@ async fn admit_inbound_packet(
         // Reaching this point means every Exit policy, contribution, and
         // kernel-forwarding check has succeeded. Only accepted bytes count
         // toward owner bandwidth and quota limits.
+        #[cfg(target_os = "linux")]
         runtime
             .exit_contribution_gate
             .record_forwarded(plain_payload.len(), now_unix_ms);
@@ -5868,6 +7291,90 @@ impl FallbackTransport for RuntimeFallbackTransport {
     }
 }
 
+/// Send one authenticated application payload through the same fail-closed
+/// transport chain used by TUN traffic. File control/resume frames cannot use
+/// bare `P2pEngine::send_to`: a relay-only session can still deliver the sealed
+/// packet even when its direct UDP endpoint is no longer usable.
+async fn send_payload_with_fallback(
+    p2p: &P2pEngine,
+    fallback: &dyn FallbackTransport,
+    stats: &StatsCollector,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    payload: &[u8],
+) -> Result<()> {
+    match p2p.send_to_or_fallback(dst_ip, src_ip, payload).await? {
+        SendToOutcome::Sent => {
+            stats.record_p2p_tx(dst_ip, payload.len()).await;
+            Ok(())
+        }
+        SendToOutcome::SealedForFallback { packet, error } => {
+            stats.record_p2p_send_error().await;
+            tracing::debug!(
+                %dst_ip,
+                "P2P 直连发送失败，使用同一份 sealed packet 走中继: {error:#}"
+            );
+            forward_sealed_payload(
+                fallback,
+                stats,
+                src_ip,
+                dst_ip,
+                dst_ip,
+                Bytes::from(packet),
+                payload.len(),
+            )
+            .await
+            .with_context(|| format!("direct P2P transport failed: {error:#}"))
+        }
+    }
+}
+
+/// Forward ciphertext produced by the direct P2P path. The exact same `Bytes`
+/// allocation is offered to QUIC relay and then signaling; neither fallback may
+/// seal the plaintext again or advance the Secure Session nonce.
+async fn forward_sealed_payload(
+    fallback: &dyn FallbackTransport,
+    stats: &StatsCollector,
+    src_ip: IpAddr,
+    dst_ip: IpAddr,
+    stats_peer_ip: IpAddr,
+    encrypted: Bytes,
+    plaintext_len: usize,
+) -> Result<()> {
+    let mut relay_error = None;
+    if let (IpAddr::V6(src_v6), IpAddr::V6(dst_v6)) = (src_ip, dst_ip) {
+        match fallback.relay(src_v6, dst_v6, encrypted.clone()).await {
+            RelayForwardOutcome::Sent => {
+                stats.record_p2p_tx(stats_peer_ip, plaintext_len).await;
+                return Ok(());
+            }
+            RelayForwardOutcome::Failed(error) => {
+                tracing::warn!("QUIC 中继转发 {} 失败，降级到信令中继: {error:#}", dst_ip);
+                relay_error = Some(error);
+            }
+            RelayForwardOutcome::NoRelay => {}
+        }
+    }
+
+    match fallback.signaling(src_ip, dst_ip, encrypted) {
+        Ok(()) => {
+            stats.record_signaling_sent().await;
+            stats.record_p2p_tx(stats_peer_ip, plaintext_len).await;
+            Ok(())
+        }
+        Err(error) => {
+            stats.record_p2p_send_error().await;
+            let error = match relay_error {
+                Some(relay_error) => {
+                    error.context(format!("QUIC relay also failed: {relay_error:#}"))
+                }
+                None => error,
+            };
+            Err(error.context("signaling relay failed"))
+        }
+    }
+}
+
 const RELAY_FAILOVER_AUDIT_QUEUE_CAPACITY: usize = 32;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RelayFailureReason {
@@ -6478,20 +7985,10 @@ struct P2pOutboundTransport {
 }
 
 impl P2pOutboundTransport {
-    fn new(
-        p2p: P2pEngine,
-        signaling: Arc<SignalingClient>,
-        stats: StatsCollector,
-        relay_state: RelayState,
-        relay_selection: Arc<RwLock<RelaySelectionTracker>>,
-    ) -> Self {
+    fn new(p2p: P2pEngine, fallback: Arc<dyn FallbackTransport>, stats: StatsCollector) -> Self {
         Self {
             p2p,
-            fallback: Arc::new(RuntimeFallbackTransport::new(
-                signaling,
-                relay_state,
-                relay_selection,
-            )),
+            fallback,
             stats,
         }
     }
@@ -6583,28 +8080,18 @@ impl P2pOutboundTransport {
         let src_ip = packet.src_ip;
         let dst_ip = packet.dst_ip;
         let encrypted = packet.into_encrypted_bytes(encoded_len);
-        if let (IpAddr::V6(src_v6), IpAddr::V6(dst_v6)) = (src_ip, dst_ip) {
-            match self.fallback.relay(src_v6, dst_v6, encrypted.clone()).await {
-                RelayForwardOutcome::Sent => {
-                    self.stats.record_p2p_tx(stats_peer_ip, plaintext_len).await;
-                    return;
-                }
-                RelayForwardOutcome::Failed(error) => {
-                    tracing::warn!("QUIC 中继转发 {} 失败，降级到信令中继: {error:#}", dst_ip);
-                }
-                RelayForwardOutcome::NoRelay => {}
-            }
-        }
-
-        match self.fallback.signaling(src_ip, dst_ip, encrypted) {
-            Ok(()) => {
-                self.stats.record_signaling_sent().await;
-                self.stats.record_p2p_tx(stats_peer_ip, plaintext_len).await;
-            }
-            Err(error) => {
-                self.stats.record_p2p_send_error().await;
-                tracing::warn!("通过信令通道向 {} 转发数据包失败: {:?}", dst_ip, error);
-            }
+        if let Err(error) = forward_sealed_payload(
+            self.fallback.as_ref(),
+            &self.stats,
+            src_ip,
+            dst_ip,
+            stats_peer_ip,
+            encrypted,
+            plaintext_len,
+        )
+        .await
+        {
+            tracing::warn!("通过中继通道向 {} 转发数据包失败: {error:#}", dst_ip);
         }
     }
 }
@@ -9277,6 +10764,7 @@ mod tests {
     enum RelayMode {
         Success,
         Failure,
+        NoRelay,
     }
 
     struct MatrixFallbackTransport {
@@ -9293,12 +10781,16 @@ mod tests {
             encrypted: Bytes,
         ) -> Pin<Box<dyn Future<Output = RelayForwardOutcome> + Send + 'a>> {
             Box::pin(async move {
-                let _ = self.relay_tx.send(encrypted);
                 match self.relay_mode {
-                    RelayMode::Success => RelayForwardOutcome::Sent,
+                    RelayMode::Success => {
+                        let _ = self.relay_tx.send(encrypted);
+                        RelayForwardOutcome::Sent
+                    }
                     RelayMode::Failure => {
+                        let _ = self.relay_tx.send(encrypted);
                         RelayForwardOutcome::Failed(anyhow::anyhow!("injected relay failure"))
                     }
+                    RelayMode::NoRelay => RelayForwardOutcome::NoRelay,
                 }
             })
         }
@@ -9306,6 +10798,23 @@ mod tests {
         fn signaling(&self, _src_ip: IpAddr, _dst_ip: IpAddr, encrypted: Bytes) -> Result<()> {
             let _ = self.signaling_tx.send(encrypted);
             Ok(())
+        }
+    }
+
+    struct RejectingSignalingFallback;
+
+    impl FallbackTransport for RejectingSignalingFallback {
+        fn relay<'a>(
+            &'a self,
+            _src_ip: Ipv6Addr,
+            _dst_ip: Ipv6Addr,
+            _encrypted: Bytes,
+        ) -> Pin<Box<dyn Future<Output = RelayForwardOutcome> + Send + 'a>> {
+            Box::pin(async { RelayForwardOutcome::NoRelay })
+        }
+
+        fn signaling(&self, _src_ip: IpAddr, _dst_ip: IpAddr, _encrypted: Bytes) -> Result<()> {
+            Err(anyhow::anyhow!("injected signaling failure"))
         }
     }
 
@@ -9591,6 +11100,97 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_resume_uses_signaling_when_direct_transport_and_quic_relay_are_unavailable(
+    ) -> Result<()> {
+        let (engine_a, engine_b, ip_a, ip_b) = connected_test_engines().await?;
+        let (relay_tx, mut relay_rx) = mpsc::unbounded_channel();
+        let (signaling_tx, mut signaling_rx) = mpsc::unbounded_channel();
+        let fallback = MatrixFallbackTransport {
+            relay_mode: RelayMode::NoRelay,
+            relay_tx,
+            signaling_tx,
+        };
+        let resume = FileNetworkFrame::request(
+            [0x42; 16],
+            FileNetworkRequest::Resume {
+                request: fuckipv6_common::domain::ResumeRequest {
+                    transfer_id: TransferId::from_public_key(b"resume-transfer"),
+                    operation_id: OperationId::from_public_key(b"resume-operation"),
+                    share_id: FileShareId::from_public_key(b"resume-share"),
+                    actor: NodeId::from_public_key(b"resume-actor"),
+                    access_epoch: 9,
+                    path: fuckipv6_common::domain::SharedPath::parse("docs/resume.bin")?,
+                    direction: fuckipv6_common::domain::TransferDirection::Download,
+                    content_hash: fuckipv6_common::domain::ContentHash::from_bytes(b"resume"),
+                    share_revision: 12,
+                    resume_chunk_index: 0,
+                    resume_offset: 0,
+                    resume_generation: 0,
+                },
+            },
+        )?;
+        let encoded = encode_file_network_frame(&resume)?;
+        let stats = StatsCollector::new();
+        engine_a.set_fail_direct_transport(true);
+        let seals_before = engine_a.direct_seal_count();
+        let result = send_payload_with_fallback(
+            &engine_a,
+            &fallback,
+            &stats,
+            IpAddr::V6(ip_a),
+            IpAddr::V6(ip_b),
+            &encoded,
+        )
+        .await;
+        engine_a.set_fail_direct_transport(false);
+        result?;
+
+        assert_eq!(engine_a.direct_seal_count(), seals_before + 1);
+        assert!(relay_rx.try_recv().is_err());
+        let ciphertext = signaling_rx
+            .try_recv()
+            .expect("relay-only File Resume must reach signaling fallback");
+        assert!(signaling_rx.try_recv().is_err());
+        let plaintext = engine_b.decrypt_from_peer(ip_a, &ciphertext).await?;
+        assert_eq!(decode_file_network_frame(&plaintext)?, resume);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_payload_send_fails_only_after_sealed_fallbacks_are_exhausted() -> Result<()> {
+        let (engine_a, _engine_b, ip_a, ip_b) = connected_test_engines().await?;
+        let stats = StatsCollector::new();
+        engine_a.set_fail_direct_transport(true);
+        let seals_before = engine_a.direct_seal_count();
+        let result = send_payload_with_fallback(
+            &engine_a,
+            &RejectingSignalingFallback,
+            &stats,
+            IpAddr::V6(ip_a),
+            IpAddr::V6(ip_b),
+            b"File frame fallback failure",
+        )
+        .await;
+        engine_a.set_fail_direct_transport(false);
+
+        let error = result.expect_err("direct and signaling failures must fail the File send");
+        assert!(
+            format!("{error:#}").contains("injected signaling failure"),
+            "fallback error must remain diagnosable: {error:#}"
+        );
+        assert_eq!(
+            engine_a.direct_seal_count(),
+            seals_before + 1,
+            "the fallback chain must not reseal the File payload"
+        );
+        assert!(
+            stats.get_global_stats().await.p2p_send_errors >= 2,
+            "the direct failure and exhausted fallback must both be observable"
+        );
         Ok(())
     }
 
@@ -11085,6 +12685,86 @@ utun4 1380  <Link#21>                       10     0      2048     8     0      
             "office"
         );
         assert!(select_probe_network(&NodeSnapshot::default(), "203.0.113.1").is_err());
+    }
+
+    #[test]
+    fn file_origin_requester_epoch_is_not_compared_with_owner_epoch() {
+        use fuckipv6_common::domain::{
+            MemberLifecycleStatus, NetworkMember, NetworkMemberPresence, NetworkMemberStatus,
+        };
+
+        let network_id = NetworkId::from_public_key(b"file-epoch-network");
+        let requester = NodeId::from_public_key(b"file-epoch-requester");
+        let owner = NodeId::from_public_key(b"file-epoch-owner");
+        let member = |node_id: NodeId, role: MembershipRole, access_epoch: u64| NetworkMember {
+            node_id,
+            display_name: None,
+            identity_fingerprint: None,
+            role,
+            groups: Vec::new(),
+            capabilities: Some(vec![CapabilityKind::File]),
+            status: NetworkMemberStatus::Active,
+            lifecycle_state: MemberLifecycleStatus::Active,
+            revision: 2,
+            access_epoch,
+            available_actions: Vec::new(),
+            presence: NetworkMemberPresence::unknown(),
+            exit_availability: Default::default(),
+            joined_at_unix_ms: Some(1_000),
+        };
+        let directory = NetworkMemberDirectory {
+            network_id: network_id.clone(),
+            generated_at_unix_ms: 1_000,
+            viewer_role: MembershipRole::Member,
+            can_manage_members: false,
+            exit_selection_policy: Default::default(),
+            exit_selection_policy_revision: 0,
+            network_revision: 1,
+            capability_declarations: vec![CapabilityKind::File],
+            members: vec![
+                member(requester.clone(), MembershipRole::Member, 8),
+                member(owner.clone(), MembershipRole::Owner, 9),
+            ],
+        };
+
+        let requester_member = trusted_file_member(
+            &network_id,
+            Some(&directory),
+            Some(1_000),
+            &requester,
+            2_000,
+        )
+        .expect("requester member");
+        let owner_member =
+            trusted_file_member(&network_id, Some(&directory), Some(1_000), &owner, 2_000)
+                .expect("owner member");
+        assert_eq!(requester_member.member_access_epoch, 8);
+        assert_eq!(owner_member.member_access_epoch, 9);
+        assert_eq!(
+            validate_file_origin_actor_epoch(Some(7), &requester_member),
+            Err("file_transfer_access_revoked".to_owned()),
+            "the requester binding epoch must be compared with its own current epoch"
+        );
+        assert_eq!(
+            validate_file_origin_actor_epoch(Some(8), &requester_member),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn chunk_authorization_failure_replies_only_to_upload_requester() {
+        let response = file_network_error("file_capability_unavailable");
+        assert_eq!(
+            chunk_authorization_failure_reply(false, response.clone()),
+            Some(response)
+        );
+        assert_eq!(
+            chunk_authorization_failure_reply(
+                true,
+                file_network_error("file_capability_unavailable")
+            ),
+            None
+        );
     }
 
     #[test]

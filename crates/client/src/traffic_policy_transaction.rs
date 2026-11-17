@@ -1569,10 +1569,10 @@ fn write_json_sync<T: Serialize>(
     Ok(())
 }
 
-fn sync_dir(path: &Path) -> Result<(), TrafficPolicyTransactionError> {
+fn sync_dir(_path: &Path) -> Result<(), TrafficPolicyTransactionError> {
     #[cfg(unix)]
     {
-        File::open(path)
+        File::open(_path)
             .and_then(|file| file.sync_all())
             .map_err(persistence)?;
     }

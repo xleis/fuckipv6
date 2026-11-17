@@ -40,6 +40,9 @@ const settingsPage = manifest.pages.find(
 const runtimePage = manifest.pages.find(
   (page) => page.id === "node_runtime",
 ) as NodeUiPage;
+const filesPage = manifest.pages.find(
+  (page) => page.id === "files",
+) as NodeUiPage;
 const exitNodePage = manifest.pages.find(
   (page) => page.id === "exit_node",
 ) as NodeUiPage;
@@ -467,6 +470,63 @@ afterEach(() => {
   cleanup();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe("File page wiring", () => {
+  it("routes the canonical files page to the File workspace", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      const payloads: Record<string, unknown> = {
+        "/api/v1/file/targets": [
+          {
+            peer: "node_file_peer",
+            network_id: "net_home",
+            network_name: "home",
+            share_id: "share_home",
+          },
+        ],
+        "/api/v1/file/directory": {
+          entries: [],
+          next_cursor: null,
+          truncated: false,
+        },
+        "/api/v1/file/transfers": [],
+      };
+      const payload = payloads[url.pathname];
+      if (payload === undefined) throw new Error(`unexpected request ${url}`);
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <PageContent
+        page={filesPage}
+        snapshot={baseSnapshot}
+        locale="zh-CN"
+        selectedNetwork="home"
+        recentDiagnostics={null}
+        onSelectNetwork={() => {}}
+        onNavigate={() => {}}
+        onRequestAction={() => {}}
+        onRunAction={async () => {}}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: translated("page.files") }),
+    ).toBeVisible();
+    expect(await screen.findByTestId("file-directory-empty")).toHaveTextContent(
+      translated("file.page.directory.empty"),
+    );
+    expect(await screen.findByTestId("file-transfers-empty")).toHaveTextContent(
+      translated("file.page.transfers.empty"),
+    );
+    expect(fetchMock).toHaveBeenCalled();
+  });
 });
 
 describe("administrator Exit governance", () => {
@@ -1034,6 +1094,62 @@ describe("security and privacy settings", () => {
         translated("settings.advanced.webui_session.detail"),
       ),
     ).not.toBeInTheDocument();
+  });
+
+  it("renders path-free File capability state without inventing content controls", () => {
+    const snapshot: NodeSnapshot = {
+      ...baseSnapshot,
+      file_capability: {
+        state: "degraded",
+        network_id: "net_file_home",
+        access_epoch: 12,
+        share_revision: 7,
+        available_bytes: 2_147_483_648,
+        root_error: "file_root_unavailable",
+        active_transfers: 3,
+      },
+    };
+    const { container } = renderSettings(snapshot);
+    const section = container.querySelector(
+      '[data-settings-group="file-share"]',
+    ) as HTMLElement | null;
+    const card = screen.getByTestId("file-capability-status");
+
+    expect(section).not.toBeNull();
+    expect(section).toHaveTextContent(translated("settings.section.file_share"));
+    expect(card).toHaveTextContent(translated("status.capability.degraded"));
+    expect(card).toHaveTextContent("net_file_home");
+    expect(card).toHaveTextContent("file_root_unavailable");
+    expect(card).toHaveTextContent(translated("settings.file.owner_only_detail"));
+    expect(card.querySelector("[data-file-state]")).toHaveAttribute(
+      "data-file-state",
+      "degraded",
+    );
+    expect(card.querySelector("[data-file-network]")).toHaveAttribute(
+      "data-file-network",
+      "net_file_home",
+    );
+    expect(card.querySelector("[data-file-share-revision]")).toHaveAttribute(
+      "data-file-share-revision",
+      "7",
+    );
+    expect(card.querySelector("[data-file-access-epoch]")).toHaveAttribute(
+      "data-file-access-epoch",
+      "12",
+    );
+    expect(card.querySelector("[data-file-available-bytes]")).toHaveAttribute(
+      "data-file-available-bytes",
+      "2147483648",
+    );
+    expect(card.querySelector("[data-file-active-transfers]")).toHaveAttribute(
+      "data-file-active-transfers",
+      "3",
+    );
+    expect(card.querySelector("[data-file-root-error]")).toHaveAttribute(
+      "data-file-root-error",
+      "file_root_unavailable",
+    );
+    expect(within(card).queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("shows the read-only policy reason, permission, request path, and command", () => {

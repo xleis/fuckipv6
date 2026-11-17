@@ -1312,6 +1312,8 @@ mod tests {
             can_manage_members: false,
             exit_selection_policy: Default::default(),
             exit_selection_policy_revision: 0,
+            network_revision: 1,
+            capability_declarations: Vec::new(),
             members: vec![NetworkMember {
                 node_id: NodeId::from_public_key(b"member"),
                 display_name: None,

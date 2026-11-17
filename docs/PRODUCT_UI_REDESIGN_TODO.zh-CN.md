@@ -61,7 +61,7 @@
 | W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05、W12-08 和 W12-10 已完成：本机启停、贡献治理、管理员选择、分层健康、故障切换/撤权及 Exit 页面权威分层均有自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收，并通过真实增量证明 IPv4 目标流量归入规范 IPv6 Peer 身份且两侧 Peer/网络级 P2P 计数一致；W12-07 的非浏览器完整文件下载与自动 DNS 清理、两侧 Exit 可达和 W12-09 的 24 小时稳定性仍待完成 |
 | W13 Relay | `[x]` | P1 | W10 | W13-01 至 W13-07 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；真实 Relay 子进程运营者导出只含最小 usage/health/governance 字段，不包含载荷、虚拟地址、密钥或显示名；生产数据面故障转移写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复、真实子进程连接风暴/慢连接/资源上限/吞吐/延迟/CPU/RSS、满载期间 Snapshot/Manifest 可用性及 Relay/Coordinator/Exit 同时故障恢复均有进程或 netns 证据。GPUI、WebUI 与 Android Compose Relay 页面现统一消费共享 Manifest、`NodeSnapshot`、健康/治理投影和 `SetNetworkRole` 命令；Android 在快照或真实命令回调缺失时失败关闭，不注入示例状态。Android 的 VpnService、节点 IPC 和真机 E2E 仍归 W16，不在本项冒充平台数据面完成 |
 | W14 Coordinator 接管 | `[ ]` | P1 | W10,W12,W13 | W14-01/02/04/05/06/07/08/09/10 已完成：候选组、任期与 fencing、严格多数接管、分区无多数保护、旧 Leader 恢复、紧急临时 Leader、临时权限冻结、管理员阈值恢复、数据面连续性及脑裂/断电测试均有自动化与真实进程证据；真实多节点离线 Trustee 恢复演练（`fuckipv6.w14.admin-recovery.drill.v1`）与 root netns 分区演练已完成。W14-03 仅剩“经过审计的自研设计”一项，需要独立第三方对自研选举/任期协议出具正式审计结论 |
-| W15 File | `[ ]` | P2 | W10 | ACL、配额、上传下载、续传 |
+| W15 File | `[~]` | P2 | W10 | 本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、GPUI/WebUI File 目录浏览/目标选择/上传下载/分页/暂停恢复/取消、并发/速率/磁盘/扫描/审计上界已落地；Linux 独立三节点真实网络传输、恢复与四槽满载控制面隔离验收已完成，Android File 表面/SAF、Windows/macOS 实机路径安全与传输竞态、跨平台验收及 OS/性能资源基线仍未完成 |
 | W16 Android | `[ ]` | P2 | W2,W4,W5,W7-W15 | Compose、VpnService、全能力 |
 | W17 跨平台硬化 | `[ ]` | P2 | W6-W16 | Linux/macOS/Windows 实机证据 |
 | W18 发布门禁 | `[ ]` | P0 | 全部 | 自动化、实测、安全和发布证据 |
@@ -3518,109 +3518,466 @@ root 专项 `w14_admin_recovery_netns_drill` 由 `scripts/test-w14-admin-recover
 
 目标：File 是受 ACL、配额和路径边界保护的共享能力，不扩张为同步盘、镜像或系统挂载。所有者选择共享目录，网络管理员只控制网络是否允许及授权范围。
 
-### W15-01 共享目录与能力启停 `[ ]`
+### W15-01 共享目录与能力启停 `[~]`
 
-- [ ] 节点 owner 通过原生目录选择器选择共享根目录；
-- [ ] 不把整个磁盘或敏感系统目录设为默认共享；
-- [ ] 启用前展示目录、容量、访问范围和最小权限；
-- [ ] File 能力独立于 Relay/Exit/Coordinator；
-- [ ] 关闭能力停止新传输并处理已有传输；
-- [ ] 目录不可读、权限变化、磁盘满有明确状态；
-- [ ] 不自动创建桌面/下载目录共享；
-- [ ] 所有配置变化有审计。
+- [x] 节点 owner 通过原生目录选择器选择共享根目录；
+- [x] 不把整个磁盘或敏感系统目录设为默认共享；
+- [x] 启用前展示目录、容量、访问范围和最小权限；
+- [x] File 能力独立于 Relay/Exit/Coordinator；
+- [x] 关闭能力停止新传输并处理已有传输；
+- [x] 目录不可读、权限变化、磁盘满有明确状态；
+- [x] 不自动创建桌面/下载目录共享；
+- [x] 所有配置变化有审计。
 
 **验收**：共享范围由本地 owner 明确授权，关闭后不继续暴露文件元数据或传输。
 
-### W15-02 ACL、配额与可见性 `[ ]`
+**证据（2026-11-13，GPUI owner 流程与本地能力）**：`select_file_share_root` 通过 GPUI 原生目录选择器单选共享根，
+取消不会作为错误；选择后必须先完成本地预览才能启用。预览包含容量、目录用量、条目数、访问模式、网络/本地 ACL
+规则数、符号链接策略、审计开关和 deny-by-default 状态。`LocalShareRoot::select` 拒绝文件系统根、Unix 系统目录和
+用户主目录，配置中没有默认共享根，也不会自动创建桌面或下载目录。File capability、owner service、持久化和 IPC 不依赖
+Relay/Exit/Coordinator。`owner_can_enable_and_disable_without_exposing_root`、`root_removal_is_reported_without_raw_paths`、
+`restore_marks_unavailable_when_root_disappears` 与 `audit_failure_prevents_enable_and_persistence` 覆盖根目录不可用、
+稳定错误码、配置持久化和审计失败时拒绝启用；`file.share.preview/enable/disable/restore` 均进入审计。上述为 GPUI 测试
+适配器与 Linux/portable 证据；macOS/Windows 原生选择器和实机权限变化仍需验收，因此 W15-01 保持 `[~]`。
 
-- [ ] 定义文件/目录级 ACL、组授权和拒绝优先；
-- [ ] 未授权成员看不到文件名称、大小、时间和目录结构；
-- [ ] 配置每成员/网络/全局配额；
-- [ ] 限制最大文件、最大目录、并发传输和速率；
-- [ ] 管理员可限制网络是否启用 File，但不能浏览 owner 文件；
-- [ ] 授权变化即时影响元数据和传输接口；
-- [ ] 配额和 ACL 错误结构化展示；
-- [ ] 完成字段级隐私与资源上限测试。
+### W15-02 ACL、配额与可见性 `[x]`
+
+- [x] 定义文件/目录级 ACL、组授权和拒绝优先；
+- [x] 未授权成员看不到文件名称、大小、时间和目录结构；
+- [x] 配置每成员/网络/全局配额；
+- [x] 限制最大文件、最大目录、并发传输和速率；
+- [x] 管理员可限制网络是否启用 File，但不能浏览 owner 文件；
+- [x] 授权变化即时影响元数据和传输接口；
+- [x] 配额和 ACL 错误结构化展示；
+- [x] 完成字段级隐私与资源上限测试。
 
 **验收**：File 权限是网络授权与本地目录控制的交集；管理员身份不自动等于文件内容权限。
 
-### W15-03 上传、下载与断点续传 `[ ]`
+**证据（2026-11-13，ACL、配额与字段隐私）**：网络 ACL 与本地 ACL 取交集，`deny_wins_and_both_network_and_local_layers_must_allow`
+验证任一层 Deny 优先且两层都必须显式 Allow；`administrator_role_does_not_bypass_file_acl_layers` 验证网络管理员角色不能
+替代网络或本地文件 ACL，并验证显式 Deny 仍是最终否决；`directory_acl_prefixes_cover_descendants_without_matching_siblings`
+验证目录 ACL 按路径组件覆盖后代、拒绝后代目录，同时不会误匹配 `docs/publicity` 一类相似前缀。元数据只接受精确路径的
+受认证请求，且需要显式 `read_metadata`；没有对成员开放的目录列举 RPC，因此未授权成员不会获得文件名称、大小、时间或
+目录结构。`metadata_requires_explicit_read_metadata_acl_action` 与 `acl_reconfiguration_revokes_live_transfer_and_rejects_new_metadata_and_requests`
+覆盖元数据拒绝和授权变更后的立即失效。`FileQuota` 同时限制总字节、每成员字节、单文件、条目数、磁盘预留、全局/成员/目录
+并发和聚合带宽，错误通过稳定的 `FileQuotaError::code()` / `FileAccessDenial` 返回。网络请求入口还要求当前有效的签名网络
+Profile 声明 `File` capability，管理员可通过该网络授权关闭 File；即使网络已启用，文件内容仍必须通过上述双层 ACL。字段级隐私由
+`file_metadata_projection_omits_hidden_acl_quota_paths_and_timestamps` 覆盖；资源上限见 W15-06。
 
-- [ ] 使用受认证、可取消的 operation 开始传输；
-- [ ] 上传/下载支持校验、进度、暂停/恢复和最终确认；
-- [ ] 断点续传绑定文件版本、分块和身份，防止拼接错误内容；
-- [ ] 文件更新后旧续传状态失效；
-- [ ] 支持取消并清理临时文件；
-- [ ] 区分网络中断、权限撤销、配额超限和磁盘错误；
-- [ ] 完成后校验内容哈希并原子落位；
-- [ ] 覆盖并发同名、重复完成和重放测试。
+### W15-03 上传、下载与断点续传 `[x]`
+
+- [x] 使用受认证、可取消的 operation 开始传输；
+- [x] 上传/下载支持校验、进度、暂停/恢复和最终确认；
+- [x] 断点续传绑定文件版本、分块和身份，防止拼接错误内容；
+- [x] 文件更新后旧续传状态失效；
+- [x] 支持取消并清理临时文件；
+- [x] 区分网络中断、权限撤销、配额超限和磁盘错误；
+- [x] 完成后校验内容哈希并原子落位；
+- [x] 覆盖并发同名、重复完成和重放测试。
 
 **验收**：传输中断可安全恢复，损坏/过期分块不会被合并成成功文件。
 
-### W15-04 canonicalize 与路径边界 `[ ]`
+**证据（2026-11-12，requester 状态机与本地 IPC）**：新增 `FileNetworkOrigin` requester 状态机，上传按 manifest 发送有界分片，
+下载写入同目录私有 staging 文件，逐块校验长度/offset/checksum，完成响应后校验整文件哈希并以 `persist_noclobber` 原子落位。
+所有响应、分片和完成确认严格绑定已认证 peer、request ID、transfer ID、operation ID；错 peer、错 request ID、乱序、
+重放、损坏分片和失效绑定只会失败关闭对应 operation，并清理其 staging，不影响其他传输。`StartFileTransfer` /
+`CancelFileTransfer` 仅通过本地 IPC 进入运行时的受认证 operation；取消、发送失败和过期都会唤醒事件循环并排空状态机队列。
+`outbound_notify_wakes_all_transfer_transitions`、`fail_pending_request_only_fails_the_correlated_operation_and_wakes_pump`、
+`misattributed_download_fragment_cleans_only_target_staging`、`wrong_download_request_id_cleans_only_target_staging` 和
+`download_reassembles_verifies_and_atomically_persists` 覆盖上述状态转换与失败关闭边界。requester Pause/Resume 已接入同一
+本地 IPC 和运行时命令：上传在途分片会等待 ACK 后暂停，暂停时回退未完成块并在恢复后重发；下载保留 staging 和部分 fragment，
+恢复后从相同 offset 续传；重复暂停/恢复、错误 peer/request ID、恢复绑定不匹配和暂停后过期均失败关闭或清理对应 operation。
+`upload_pause_waits_for_ack_and_resumes_at_the_next_chunk`、`upload_pause_rewinds_a_partially_sent_chunk`、
+`download_pause_resumes_the_same_partial_fragment`、`paused_transfer_expires_and_cleans_staging` 和
+`repeated_pause_and_resume_use_fresh_request_ids`、`resume_response_with_a_different_binding_fails_closed` 与
+`resume_response_with_a_different_download_manifest_fails_closed` 覆盖这些边界。IPC 成功、运行时错误和断链回复由
+`file_transfer_start_maps_runtime_replies`、`file_transfer_cancel_maps_runtime_replies`、`file_transfer_pause_maps_runtime_replies`
+与 `file_transfer_resume_maps_runtime_replies` 覆盖。requester 暂停态现已通过 owner-only `FileOriginStore` journal 跨进程重启恢复：
+启动时重新核对本地 NodeId、binding、deadline、manifest/session、请求序号和本地源/目标文件，只恢复已确认暂停的 operation；
+上传源内容变化、下载目标已存在、staging 被替换为符号链接/目录、staging 路径越界、分块或长度不一致均失败关闭。
+duplicate transfer key 或共享 staging 路径会保留首个已恢复文件，不删除其他活动 operation 的 staging。partial download assembly
+保存在同目录 staging 尾部，恢复时截断回完整分块边界并逐块复核 checksum，再以 no-clobber 原子落位。
+`journal_round_trips_with_owner_only_permissions`、`paused_upload_is_restored_and_resends_the_next_chunk`、
+`paused_download_restores_a_partial_fragment_from_staging`、`expired_restored_download_is_not_resumed_and_staging_is_removed`、
+`restored_upload_fails_closed_when_the_source_changes`、`restored_download_rejects_an_existing_destination_without_overwriting_it`、
+`restored_download_rejects_a_replaced_staging_symlink_without_touching_its_target`、`duplicate_restored_transfer_does_not_remove_the_restored_staging_file`
+与 `shared_restored_staging_path_does_not_remove_or_reuse_the_active_file` 覆盖这些恢复边界。网络协议另有固定 manifest 硬上限：
+总字节 1 GiB、分块 256 个、单块 4 MiB；requester 上传先读取源 metadata 并计算安全分块数，再分配 manifest 和逐块哈希，恢复入口在
+分配前复用同一校验。`upload_manifest_bounds_are_checked_before_allocation`、`oversized_sparse_upload_is_rejected_before_reading_the_source`、
+`tiny_chunks_cannot_amplify_the_upload_manifest` 与 `restored_upload_rejects_source_growth_before_manifest_allocation` 覆盖这些入口；
+`opened_responses_reject_manifests_outside_network_bounds`、`opened_response_frames_reject_unbounded_manifests`、
+`remote_manifests_must_fit_the_bounded_file_and_chunk_limits` 与 `owner_rejects_unbounded_upload_manifests_without_the_frame_decoder`
+覆盖 `Opened` 响应构造/解码、owner 准入和 requester 响应绑定均拒绝超限 manifest。该证据仍是进程内状态机、journal 与
+冻结文件系统测试，不代表真实双节点网络中断、真实节点杀进程重启、WebUI/Android File 传输表面或大文件性能验收已经完成。
+失败事件保留稳定的具体错误码，并额外投影 `network` / `authorization` / `quota` / `storage` 四类本地操作提示；
+`requester_failures_preserve_network_authorization_quota_and_storage_kinds` 覆盖发送失败、权限撤销、配额超限与磁盘预留拒绝。
+`concurrent_same_name_uploads_publish_only_one_file`、`replayed_ack_is_rejected_without_failing_active_transfer`、
+`replayed_download_fragment_fails_closed_and_cleans_staging` 与 `replayed_completion_response_does_not_publish_twice`
+覆盖并发同名、重复 ACK、下载分片重放和完成响应重放；重放不会二次发布或影响其他传输，分片重放会失败关闭并清理 staging。
 
-- [ ] 所有路径在服务端规范化并验证位于共享根目录；
-- [ ] 拒绝绝对路径逃逸、`..`、空字节和平台特殊路径；
-- [ ] 处理大小写、Unicode、尾随分隔符和 Windows 路径差异；
-- [ ] 在打开文件前后复核真实路径；
-- [ ] 对允许链接的策略明确默认禁止；
-- [ ] 建立跨平台路径 fuzz/property 测试；
-- [ ] 失败返回稳定安全错误，不泄漏根目录外信息；
-- [ ] 代码审查覆盖 TOCTOU 风险。
+**补充（2026-11-13，Linux 独立三节点网络验收）**：`scripts/test-w15-file-netns.sh` 在三个隔离 network namespace 中启动一个
+Coordinator owner 节点和两个真实成员节点，通过 veth 建立真实 P2P 路径，验证正式签名邀请、成员目录中的 File capability、双向上传/
+下载、BLAKE3 完整性、低带宽暂停、veth 断网后恢复续传、取消清理以及在线撤权。测试按持久化日志中的子进程 PID 对真实 node 子进程
+执行 `SIGKILL`，由 supervisor 启动新 PID，再验证网络/P2P 重连、owner 与 requester journal、私有 staging 和下一分块续传，最终文件
+哈希一致。网络级 File capability 撤销时，owner 取消会话并清理 staging，requester 通过原分块 `request_id` 收到
+`file_capability_unavailable`，不会等待 TTL；target 未发布且 journal 清空。验收命令为
+`sudo -n scripts/test-w15-file-netns.sh`，基于 commit `1523f6c` 的 release 二进制通过，证据目录保留在
+`/tmp/w15-file.<UTC时间>.<PID>`。该结果覆盖 Linux 真实网络链路、撤权中断和完整 node supervisor 重启，不替代 Windows/macOS
+GPUI/Android File 内容表面或跨平台性能验收。
+
+**补充（2026-11-13，恢复分片乱序 handoff 与最终合并验收）**：真实低带宽重启续传暴露出 Resume 响应应用后恢复块分片仍可能乱序到达。requester 现在从排队 Resume 请求开始到恢复块完整落地，只缓存同一 resume generation、同一 transfer chunk 的分片，并按从 resume offset 起的连续前缀 drain；缓存上限为一个 4 MiB transfer chunk 和 4,096 个分片。旧 generation 继续丢弃，重复、重叠、跳号和非恢复块仍失败关闭，避免放宽正常严格顺序校验。`resume_handoff_buffers_post_response_fragments_until_prefix_is_contiguous` 确定性覆盖“响应后第 3 片先到、第 1/2 片后到”。`cargo test -p fuckipv6-client --lib file_share::`（177 passed）、`cargo clippy -p fuckipv6-client --lib --tests -- -D warnings` 与 `cargo build --release` 均通过；为消除 ACL 用例误报，验收脚本固定撤销前带宽并把实际终止码纳入匹配（`9507a64`）。最终脚本在合并提交 `b33014965b872abd3da231434d6e8ea1f4278735` 上复跑 `sudo -n scripts/test-w15-file-netns.sh`，完整验收 PASS，证据目录为 `/tmp/w15-file.20261113T125822Z.515249`；对应 release 二进制 SHA256 为 `fb6347e5b484b877e66f6797af6df146d44291843fb4bbc5b81e7091e0d54cd0`。复跑同时通过 65 个 observability 文件的本地路径扫描、三个节点结束时的资源基线与命名空间/进程清理检查。
+
+**最终集成验证（2026-11-13，W15 File + W13 Relay）**：最终合并提交 `b33014965b872abd3da231434d6e8ea1f4278735` 保留 W13 的 Relay 故障切换、治理审计与恢复路径，同时保留 W15 File runtime、真实 P2P 传输和 `SIGKILL` 恢复。W13 另以 `sudo -n scripts/test-w13-relay-failure-netns.sh` 复跑，报告 `/tmp/fuckipv6-w13-failure-netns-report-20261113.json` 绑定该合并提交且 `worktree_dirty=false`；Relay/Coordinator/Exit 同时故障在 119 ms 内收敛，三次 fail-closed 探测最大 1003 ms，未发生直连回退，Exit 资源清理和新组件栈恢复均通过。全量验证包括 `cargo fmt --all -- --check`、`cargo check --workspace --all-targets`、`cargo test --workspace --all-targets`（client library 1,419 passed、3 ignored，全部集成测试通过）、`cargo clippy --workspace --all-targets -- -D warnings`、`scripts/generate-contracts.sh`、`scripts/check-contracts.sh`、WebUI lint/typecheck/Vitest（23 files、309 passed）/build 与 `cargo build --release`。因此 W15-02、W15-03、W15-07 保持 `[x]`；W15-01、W15-04、W15-05、W15-06、W15-08 和 W15 File 总体继续保持 `[~]`，不把 Linux 验收扩张为 Windows/macOS 实机、Android File 内容面、跨平台满载隔离或 GPUI/WebUI/Android 三端完全一致。
+
+### W15-04 canonicalize 与路径边界 `[~]`
+
+- [x] 所有路径在服务端规范化并验证位于共享根目录；
+- [x] 拒绝绝对路径逃逸、`..`、空字节和平台特殊路径；
+- [x] 处理大小写、Unicode、尾随分隔符和 Windows 路径差异；
+- [x] 在打开文件前后复核真实路径；
+- [x] 对允许链接的策略明确默认禁止；
+- [x] 建立跨平台路径 fuzz/property 测试；
+- [x] 失败返回稳定安全错误，不泄漏根目录外信息；
+- [x] 代码审查覆盖 TOCTOU 风险。
 
 **验收**：任何输入无法读写共享根目录之外的文件，路径测试覆盖目标平台。
 
-### W15-05 符号链接、竞态与临时文件 `[ ]`
+**证据（2026-11-12，portable 规则与 Linux 打开路径）**：`SharedPath` 对绝对路径、盘符/UNC、反斜杠、空组件、`.`/`..`、
+NUL/控制字符、不可见 Unicode 格式字符（包括双向覆盖字符）、ADS 冒号、尾随点/空格、DOS 设备名、超长路径和组件逐项
+失败关闭，不做可能产生歧义的隐式归一化。`arbitrary_inputs_never_create_an_ambiguous_shared_path` 与
+`generated_portable_paths_obey_component_aware_containment` 对任意 Unicode 字符串和生成路径检查解析后不变量、序列化往返及
+组件边界包含关系；`portable_paths_preserve_rendering_and_fold_authorization_identity` 覆盖中文、emoji、大小写、NFC/NFD、
+希腊字母 final sigma、尾随分隔符和格式控制字符。路径原始拼写继续用于序列化、显示和 transfer binding；ACL 授权比较则按组件先
+NFC、再 full case fold、再 NFC，因此大小写不敏感文件系统上的大小写变体、规范等价 Unicode 和 final sigma 不会绕过目录 Deny。
+DOS 设备名拒绝同时覆盖 `CONIN$`、`CONOUT$`、`CLOCK$` 与 `COM/LPT` 上标数字变体。Linux `Reject` 适配器以锚定 root fd 逐组件
+`openat` + `O_NOFOLLOW` 打开；`AllowWithinRoot` 使用同一 root fd 的 `openat2`，以
+`ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS` 原子解析并打开目标，不再使用 canonicalize 后再 open 的可竞态窗口。根外解析
+映射为 `OutsideRoot`，链接循环映射为 `SymlinkRejected`；`allow_within_root_follows_only_links_resolving_inside_the_root` 验证根内
+链接可读、根外链接失败关闭且错误文本不包含根外真实路径。非 Linux 平台在选择共享根时直接拒绝 `AllowWithinRoot`，避免退回不安全
+实现。跨平台 property 测试已在共享代码执行，Windows GNU client library 交叉编译通过，但 Windows/macOS 实机路径差异和重解析点
+仍未验收，因此 W15-04 继续保持 `[~]`。
+
+**补充（2026-11-14，Windows Win32/NT 路径边界自动化）**：Windows `LocalShareRoot` 现在以共享根 `HANDLE` 及 volume serial/file index 身份锚定边界，逐组件使用 `NtCreateFile`，并同时设置 `OBJ_CASE_INSENSITIVE`、`OBJ_DONT_REPARSE` 与 `FILE_OPEN_REPARSE_POINT`；每次打开后都通过 `GetFileInformationByHandle` 复核 reparse 属性及预期文件/目录类型，根探测也会重新打开并比较身份，目录替换不会静默继承旧授权。`AllowWithinRoot` 在非 Linux 平台仍失败关闭，不采用 canonicalize 后再打开的竞态路径。Windows GNU client library 交叉编译、Linux `file_share::` 195 项和 Wine 下 Windows target `file_share::` 186 项/0 失败通过；Wine 仅提供兼容性自动化证据，Windows/macOS 实机路径语义仍未验收，因此 W15-04 继续保持 `[~]`。
+
+### W15-05 符号链接、竞态与临时文件 `[~]`
 
 - [ ] 拒绝指向共享根外的符号链接/重解析点；
 - [ ] 对目录替换、链接交换和并发重命名进行防护；
-- [ ] 临时文件使用受控目录、随机名和权限；
-- [ ] 上传完成前不可出现在普通文件列表；
-- [ ] 失败/崩溃后清理过期临时文件；
-- [ ] 文件句柄、大小和磁盘使用有上限；
-- [ ] 覆盖 symlink race、硬链接和权限变化测试；
-- [ ] 不依赖仅字符串前缀判断路径安全。
+- [x] 临时文件使用受控目录、随机名和权限；
+- [x] 上传完成前不可出现在普通文件列表；
+- [x] 失败/崩溃后清理过期临时文件（启用时在锚定的私有 staging 目录中仅删除超过 30 分钟的 `up-*` 普通文件；不跟随符号链接，清理失败则拒绝启用）；
+- [x] 文件句柄、大小和磁盘使用有上限（网络会话句柄、单文件/成员/共享字节配额、磁盘预留及 Linux 资源基线见 W15-06；macOS/Windows 实机恢复仍待验收）；
+- [x] 覆盖 symlink race、硬链接和权限变化测试；
+- [x] 不依赖仅字符串前缀判断路径安全。
 
 **验收**：路径穿越与竞态攻击不能越界；临时文件不泄漏、不无限增长。
 
-### W15-06 并发、速率与资源限制 `[ ]`
+**证据（2026-11-12，Linux 与 portable 状态机）**：staging 目录固定为锚定共享根下的 `.fuckipv6-tmp`，目录权限 0700、随机
+`up-*` 文件权限 0600，普通共享路径无法访问该保留目录，完成前目标名不存在。发布使用目录 fd 上的 no-replace 硬链接，并在
+发布后同步目标目录；失败或 Drop 删除 staging。保留目录名按 ASCII 大小写无关比较，因此大小写不敏感文件系统上的
+`.FUCKIPV6-TMP` 等变体同样返回 `PathRejected`，`reserves_the_temporary_staging_directory` 覆盖三种拼写。
+`concurrent_directory_symlink_exchange_never_reads_outside_root` 覆盖目录与根外
+符号链接并发交换，`publication_rejects_a_target_parent_swapped_to_an_outside_symlink` 覆盖发布前父目录被根外链接替换且外部文件
+保持不变，`hard_link_inside_root_is_authorized_as_a_directory_entry` 明确根内硬链接策略，
+`permission_revocation_fails_closed_for_files_and_directories` 覆盖文件和父目录权限撤销后的失败关闭。
+`stale_cleanup_removes_only_expired_generated_regular_files` 验证过期清理不跟随链接、不删除用户文件。上述均为 Linux 和 portable
+代码证据。Linux 进程内另由 `download_session_limit_and_cancel_restore_capacity` 读取 `/proc/self/fd`，验证 16 个受全局上限约束的
+下载会话各占用一个临时目录文件句柄，逐个取消后回到同一基线；该结果只覆盖正常取消路径，不证明异常退出、满载隔离或
+macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态以及 macOS/Windows 并发重命名语义仍未验收。
 
-- [ ] 限制每成员、每目录和全局并发；
-- [ ] 实现读写速率和带宽配额；
-- [ ] 进行磁盘空间预留与低空间保护；
-- [ ] 限制目录扫描深度和条目数；
-- [ ] 限制事件队列和日志增长；
-- [ ] 满载时不影响 node/control 基本功能；
-- [ ] 压力测试后文件句柄、线程和内存回到基线；
-- [ ] 报告录明阈值与恢复结果。
+**补充（2026-11-14，Windows 链接拒绝、原子发布与 staging 清理自动化）**：Windows 适配器将最终文件和中间目录均按句柄相对方式打开，`NtCreateFile` 遇到 reparse point 或非目录组件时失败关闭；`NtQueryDirectoryFile(FileIdBothDirectoryInformation)` 枚举时跳过 reparse point/device，并对不可表示 UTF-16 名称仍计入枚举上限。上传发布先锚定临时目录和目标父目录，再以 `NtSetInformationFile(FileLinkInformation)` 执行 no-replace 硬链接；成功后通过 `FileDispositionInformation` 删除 staging，现有目标导致失败时也验证 staging 被删除。`rejects_final_symbolic_link`、`rejects_intermediate_symbolic_link`、`directory_listing_skips_reparse_points`、`probe_rejects_root_replaced_by_symbolic_link`、`publication_rejects_a_target_parent_swapped_to_an_outside_symlink` 和 staging 清理断言在 Wine 下通过。该证据不证明 Windows/macOS 实机竞态、真实 ACL/ETW 或并发重命名语义，W15-05 继续保持 `[~]`。
+
+**补充（2026-11-13，Linux 并发目录交换）**：`concurrent_directory_exchange_never_publishes_outside_root` 使用
+`renameat2(RENAME_EXCHANGE)` 持续原子交换共享根内的真实父目录与指向根外的符号链接，同时连续发布 256 个唯一目标文件。
+成功发布只能落在根内真实目录的锚定句柄中；命中根外链接或目录切换时失败关闭。测试还核对根外目录始终只有预置文件且内容不变；
+连续执行 5 次均通过。该证据只代表 Linux 进程内发布路径，不代表真实网络传输或 macOS/Windows 目录交换语义已验证。
+
+**补充（2026-11-13，`AllowWithinRoot` 并发交换）**：
+`allow_within_root_atomically_rejects_concurrent_exchange_outside_root` 在同样持续执行 `renameat2(RENAME_EXCHANGE)` 的条件下，
+通过 `AllowWithinRoot` 连续打开 `pivot/result.bin` 1,000 次。每次成功打开都必须读到根内 `inside`；命中根外符号链接时必须返回
+`file_path_outside_root`，且不得读取根外内容。该测试与 `concurrent_directory_symlink_exchange_never_reads_outside_root` 分别覆盖
+链接策略的允许根内和完全拒绝两条路径，两者各连续执行 20 次均通过，证明 Linux 根 fd 绑定解析在并发目录交换下不会回退到根外
+目标。Windows 重解析点、macOS 实机竞态以及 macOS/Windows 并发重命名语义仍未验收。
+
+### W15-06 并发、速率与资源限制 `[~]`
+
+- [x] 限制每成员、每目录和全局并发；
+- [x] 实现读写速率和带宽配额；
+- [x] 进行磁盘空间预留与低空间保护；
+- [x] 限制目录扫描深度和条目数；
+- [x] 限制事件队列和日志增长；
+- [x] 满载时不影响 node/control 基本功能（Linux 独立三节点四传输槽位满载验收通过）；
+- [ ] 压力测试后文件句柄、线程和内存回到基线（Linux 进程内、Windows/Wine 兼容性自动化、独立三节点满载及 SIGKILL 恢复已通过；Windows/macOS 实机待验收）；
+- [x] 报告录明阈值与恢复结果。
 
 **验收**：恶意或误用传输无法耗尽节点资源，File 故障不拖垮数据面。
 
-### W15-07 撤权与传输中断 `[ ]`
+**证据（2026-11-12，自动化边界）**：File runtime 在授权后、staging 前按已认证 actor 与目标父目录执行准入；上传和下载共享同一字节 token bucket，
+限速时返回 `RateLimited { retry_after_ms }` 而不会阻塞 async runtime。默认阈值如下：
 
-- [ ] 撤销 ACL 后立即停止新元数据访问和传输请求；
-- [ ] 已有传输在安全边界内终止或完成策略明确；
-- [ ] 成员退出/移除后会话和临时凭据失效；
-- [ ] 节点 owner 关闭共享后所有客户端看到不可用；
-- [ ] 不删除 owner 本地文件；
-- [ ] 活动记录撤权、中断和清理结果；
-- [ ] 覆盖并发上传中撤权、节点重启和网络断开；
-- [ ] 验证无未授权断点续传恢复。
+| 限制项 | 默认/上限 | 执行点 |
+|---|---:|---|
+| 全局活动传输 | 4 | `FileQuota::max_concurrent_transfers` + `FileRuntime::reserve` |
+| 每成员活动传输 | 2 | `FileQuota::max_concurrent_transfers_per_member` |
+| 每目录活动传输 | 2 | `FileQuota::max_concurrent_transfers_per_directory` |
+| 磁盘预留 | 256 MiB | `FileQuota::reserve_bytes` + `fs2::available_space`，上传准入前失败关闭 |
+| 共享总配额 | 10 GiB | `FileQuota::total_bytes` |
+| 每成员配额 | 2 GiB | `FileQuota::per_member_bytes` |
+| 单文件配额 | 1 GiB | `FileQuota::max_file_bytes` |
+| 目录条目审计 | 100,000 | `FileQuota::max_entries` |
+| 配额扫描深度/条目 | 64 / 100,000 | `QuotaScanLimits::default`，不跟随符号链接 |
+| 单块上限 | 16 MiB | `MAX_TRANSFER_CHUNK_BYTES` |
+| 网络传输总字节 | 1 GiB | `MAX_FILE_NETWORK_TRANSFER_BYTES`，网络 manifest 与 owner/requester 准入 |
+| 网络 manifest 分块 | 256 | `MAX_FILE_NETWORK_MANIFEST_CHUNKS`，`Vec` 分配前校验 |
+| 网络单块上限 | 4 MiB | `MAX_FILE_NETWORK_TRANSFER_CHUNK_BYTES`，同时限制 manifest 和 fragment offset |
+| 带宽 | 0 = 不限额 | `max_bandwidth_kbps`；启用时按聚合 File 流量计量，桶容量不超过单块上限 |
+| 节点活动/命令审计 | 256 / 256 | `RECENT_ACTIVITY_RETENTION_LIMIT` / `COMMAND_AUDIT_RETENTION_LIMIT` |
+| File 网络活动队列 | 256 | `FILE_NETWORK_ACTIVITY_RETENTION_LIMIT`，合并到节点活动时再次按同一上限截断 |
+| File capability 审计 | 256 | `CAPABILITY_AUDIT_RETENTION_LIMIT`；持久化 owner 安全台账不受内存淘汰影响 |
+
+**自动化恢复结果**：`repeated_transfer_lifecycles_return_admission_and_staging_to_baseline` 连续执行 512 次上传生命周期，
+每次 drop 后活动准入回到 0，最终 staging 目录为空；成员、目录与全局并发额度的独立/同时生效由
+`member_and_directory_limits_are_independent_within_global_limit` 与 `directory_limit_blocks_only_the_same_parent_directory` 覆盖；
+低空间在 staging 创建前返回 `file_disk_space_reserved`；上传/下载限速后保持可重试并最终完成；
+`command_audit_keeps_only_the_latest_bounded_entries` 验证命令审计只保留最新 256 条，
+`capability_audit_keeps_only_the_latest_bounded_events` 验证 File capability 审计只保留最新 256 条；
+`upload_manifest_bounds_are_checked_before_allocation`、`oversized_sparse_upload_is_rejected_before_reading_the_source` 与
+`tiny_chunks_cannot_amplify_the_upload_manifest` 验证 requester 在 manifest 分配和源文件读取前执行网络上限，
+`opened_response_frames_reject_unbounded_manifests`、`remote_manifests_must_fit_the_bounded_file_and_chunk_limits`、
+`owner_rejects_unbounded_upload_manifests_without_the_frame_decoder` 与
+`restored_upload_rejects_source_growth_before_manifest_allocation` 验证响应/owner/恢复入口复用同一边界。
+`download_session_limit_and_cancel_restore_capacity` 在 Linux 上以 `/proc/self/fd` 采样测试临时目录下的文件句柄：开启
+`MAX_ACTIVE_FILE_NETWORK_SESSIONS` 个下载后句柄数增加相同数量，逐个取消并排空会话后恢复测试前基线。
+`file_network_activity_queue_keeps_only_the_latest_256_entries` 连续完成 300 次打开/取消并校验网络活动队列只保留最新 256 条；
+`merge_activity_preserves_producers_deduplicates_and_retains_latest_256` 校验命令与 File 网络活动合并后按 `audit_id` 去重、
+最新优先并再次截断到 256 条。
+
+**补充（2026-11-13，并发配额扫描目录游标隔离）**：Linux 目录扫描不再以 `F_DUPFD_CLOEXEC` 复制锚定目录描述符，因为复制出的
+文件描述符共享目录 offset，并发配额扫描会互相吞掉目录项，实际可观察到 0 条或部分目录树。扫描现改为相对锚定 fd 以
+`openat(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)` 重新打开目录，每次扫描拥有独立的 open file description 和目录
+游标。`concurrent_quota_scans_keep_independent_directory_cursors` 让 8 个线程各执行 100 次扫描，每次都必须得到同一份包含
+520 个条目、2,560 字节的完整目录用量；修复前该测试稳定失败，修复后通过。该证据覆盖 Unix 目录扫描实现和并发配额正确性，
+不改变 macOS/Windows 实机、独立 node/control 满载隔离等仍未完成的验收边界。
+
+**补充（2026-11-13，Linux 满载进程资源基线）**：独立集成测试 `file_runtime_stress_restores_process_resources`
+启用共享根后先预热，再连续执行 1,024 批、每批 4 路上传（其中每 32 批完成并发布一组文件，其余路径直接丢弃），随后执行
+512 批、每批 4 路下载并读取完整源文件。每批满载时校验整个测试进程的 `/proc/self/fd` 仅比基线多 4、线程数不变；每批释放后
+校验活动准入为 0、staging 为空、句柄和线程数精确回到基线。测试同时采样 `/proc/self/status` 的 `VmRSS`，并要求后半程峰值
+不得比前半程峰值增长超过 4 MiB、最终 RSS 不得比预热后基线高超过 4 MiB。连续执行 5 次均通过：基线固定为 5 个句柄、2 个
+线程、约 5.0 MiB RSS；峰值约 5.1 MiB，最终稳定在峰值且较基线仅保留约 208 KiB allocator 驻留内存。
+
+**补充（2026-11-13，Linux SIGKILL 恢复）**：`file_process_sigkill_staging_is_removed_on_restart` 启动真实测试子进程，
+建立已准入上传并写入 staging 后向子进程发送 `SIGKILL`。父进程确认进程异常退出绕过了 `TemporaryUpload::drop`，未完成目标
+从未发布、owner 既有文件未变化；随后将遗留 staging 的 mtime 回拨到超过陈旧阈值，再以新的 `FileRuntime` 重启共享，验证
+staging 被清理、活动传输为 0 且 capability 恢复为 Ready。该测试确定性地模拟“崩溃发生在部分上传写入后，进程停机时间已超过
+staging 陈旧阈值”。
+
+**补充（2026-11-14，独立三节点 File 满载控制面隔离）**：`scripts/test-w15-file-netns.sh` 在真实邀请、签名 File capability、
+直接 P2P 和独立 supervisor/node 进程拓扑中启用 512 kbps 共享带宽，由 node1、node2 各发起两个维护在不同父目录的 4 MiB 上传，
+占满全局 4 个、每成员 2 个和每个唯一目录 1 个传输槽位。满载期间连续 8 轮分别通过 coordinator/owner、node1、node2 的本地 IPC
+执行 24 次 `get_snapshot`，coordinator/owner 的 `active_transfers` 始终为 4，全部快照均包含 identity 和 network 数组，最大响应
+延迟 45 ms（门禁 2,000 ms）。随后取消四个传输，验证活动数回到 0、owner staging 为空、四个未发布目标均不存在、两个成员
+journal 为空。资源核对结果为 coordinator/owner FD 26→26、线程 20→20、RSS 52,348→52,360 KiB；node1 FD 19→18、线程
+19→19、RSS 42,556→42,800 KiB；node2 FD 18→19、线程 19→19、RSS 42,336→42,748 KiB，全部处于任务阈值内。证据目录为
+`/tmp/w15-file.20261113T160011Z.1311277`，结构化报告 `node-control-isolation.json` 的 SHA256 为
+`b019ac564d2ca90f5d30de39c1360d974f854374df42b36a3f38b81c5ba2b55f`，对应 release 二进制 SHA256 为
+`9e4c708a46c6df6ca731d7c68ed2e4889cf5702d31cc31e797d6e6ca8b02db45`，绑定提交 `3ad41dc`。该证据补齐 Linux 独立
+node/control 基本功能在 File 满载下的隔离结论；仍不扩张为 macOS/Windows 实机、长时高压、跨平台内存或真实网络吞吐结论。
+
+**补充（2026-11-14，Windows 配额扫描根绑定）**：Windows quota scan 不复用共享目录游标，而是从新打开的根句柄重新核对 volume serial/file index 后遍历；`NtQueryDirectoryFile` 每次调用受固定 64 KiB 缓冲区和枚举上限约束，reparse point 计入跳过数且不会进入根外目录。Wine 下完整的 `file_share::` 186 项通过，包括并发配额扫描、目录链接跳过和根替换测试；macOS/Windows 实机线程、RSS、句柄及长时高压基线仍未验收。
+
+**补充（2026-11-15，Linux/Windows 进程资源基线自动化）**：原 Linux 专用文件改为跨平台集成测试
+`crates/client/tests/file_share_resources.rs`。Linux 使用 `/proc/self/fd`、`/proc/self/task` 和 `/proc/self/status`；Windows 使用
+`GetProcessHandleCount`、Toolhelp 线程快照和 `GetProcessMemoryInfo`。测试继续执行 16 批预热、1,024 批四路上传和 512 批四路
+下载，每批验证活动传输、staging、句柄、线程与 RSS 上界，并在释放后要求活动数和 staging 归零、句柄和线程精确回到基线。
+Linux 复跑通过：句柄 5→5、线程 2→2、RSS 基线 5,368 KiB、峰值/最终 5,576 KiB。Windows GNU target 交叉编译及 Wine 11.22
+兼容性复跑通过：句柄 64→64、线程 2→2、RSS 峰值仅比基线高 224 KiB；64 MiB 上传/下载与 4×8 MiB 交错下载的暂停恢复和哈希
+断言也通过。Wine 将 `GetProcessHandleCount` 实现为成功但返回 0 的桩，因此测试仅在计数为 0 时回退到
+`NtQuerySystemInformation(SystemProcessInformation)`，并把证据标记为 `system-table-fallback`；回退模式只校验活动句柄有界和结束后
+回到基线，不在真实 Windows 上放宽实际传输的精确 +4 断言。该结果补充 Wine 兼容性和自动化覆盖，不证明 Windows/macOS 实机、
+真实 ACL、大小写不敏感卷、杀软/过滤驱动或长时高压资源结论，W15-06 的该检查项继续保持未完成。
+
+**未测边界**：Linux 进程内已覆盖满载上传/下载的正常完成、丢弃、staging 清理、OS 资源恢复和测试进程 SIGKILL 后的重启
+清理；Wine 兼容性自动化已覆盖同一进程内负载，但原生句柄差值受 Wine 桩限制；独立三节点已覆盖四槽满载下的控制面响应和取消后的
+FD、线程、RSS 回退。Windows/macOS 实机与长时高压满载仍需采样，因此不扩张为跨平台资源验收结论。
+真实 veth 断网、续传和完整 node supervisor 重启已经由 W15-03 的三节点 netns 验收覆盖，但该测试不是满载隔离或跨平台性能结论。
+
+**补充（2026-11-13，完整 node supervisor 重启）**：三节点 netns 测试按 JSON readiness 日志提取真实 node 子进程 PID，而不是把
+supervisor 外壳作为被测进程。下载暂停并写入 staging 后对 node 子进程执行 `SIGKILL`，测试等待旧 PID 消失和 supervisor 发布新
+ready PID，再验证 socket、网络在线状态、P2P、journal、staging 与后续续传。最终检查宿主默认路由/策略规则不变，测试进程、三个
+node 子进程和端口全部清理；fd/线程基线在测试结束时仍处于允许的在线运行时波动范围内。该证据补齐完整 node 服务重启，但不把
+短时三节点验收扩张为满载下 node/control 隔离或 macOS/Windows 资源结论。
+
+### W15-07 撤权与传输中断 `[x]`
+
+- [x] 撤销 ACL 后立即停止新元数据访问和传输请求；
+- [x] 已有传输在安全边界内终止或完成策略明确；
+- [x] 成员退出/移除后会话和临时凭据失效；
+- [x] 节点 owner 关闭共享后所有客户端看到不可用；
+- [x] 不删除 owner 本地文件；
+- [x] 活动记录撤权、中断和清理结果；
+- [x] 覆盖并发上传中撤权、节点重启和网络断开；
+- [x] 验证无未授权断点续传恢复。
 
 **验收**：撤权快速生效，不留下可继续下载的会话、URL 或临时凭据。
 
-### W15-08 File 非目标与发布证据 `[ ]`
+**证据（2026-11-12，安全边界失败关闭）**：requester 在每次发送前重新核对稳定 NodeId、virtual IP、P2P established session、
+网络 File capability 和权威成员目录；收到响应或下载分片后也会复核成员授权。响应复核失败时按已认证 request ID 只失败对应
+operation，不信任帧内 transfer/operation ID；分片复核失败时取消对应传输。取消和撤权只删除 requester staging，
+owner 本地共享文件不在失败路径中；owner 下载/上传侧撤权取消及 staging 清理已有
+`disabling_capability_cancels_an_active_download`、`disabling_capability_cancels_an_active_upload_and_cleans_staging` 和
+`operation_cancellation_before_upload_finish_never_publishes` 覆盖。`dropping_the_data_plane_aborts_sessions_and_cleans_staging`
+同时打开上传和下载后直接丢弃网络数据面，验证活动准入降到 0、上传 staging 与未发布目标均被清理；Linux 上还验证上传 staging
+和下载源文件两个句柄都回到基线。该测试模拟运行中数据面突然消失，但仍非真实双节点网络断开。
+`file_process_sigkill_staging_is_removed_on_restart` 进一步让持有活动上传的真实测试进程收到 `SIGKILL`，验证崩溃遗留 staging
+不会发布，并可在 FileRuntime 重启后被清理。该测试覆盖独立测试进程异常退出，不是完整 node 服务重启；真实双节点撤权、断网和
+完整 node supervisor 重启由下方独立 netns 验证据补充。
 
-- [ ] 明确不做自动同步、双向镜像、系统挂载和远程目录替换；
-- [ ] UI 不展示这些非目标为可用功能；
-- [ ] 完成 ACL、路径、符号链接、竞态、配额、续传和撤权测试；
+**补充（2026-11-13，撤权/中断/清理活动）**：File 网络数据面新增有界活动队列，并在单帧/批量入站处理及下载 pump 结束后
+合并到节点活动。`sessions_are_bound_to_both_member_epoch_and_local_capability_epoch` 校验本地 capability 撤权和成员 epoch
+撤权都会结束会话、清空 staging 与未发布目标，并记录 `file.transfer.authorization_revoked` / `Denied`；
+`explicit_cancel_records_activity_and_cleans_unpublished_upload` 校验显式取消记录
+`file.transfer.cancelled` / `Succeeded` 且不发布上传；`download_fails_closed_on_capability_member_epoch_and_ttl_changes`
+依次覆盖 capability 撤权、成员 epoch 撤权和 TTL 到期，后者记录 `file.transfer.interrupted` / `Failed`。上述断言同时核对稳定
+`reason_code` 与 `cleanup_code`。活动详情只包含 transfer/operation/share ID、方向、稳定原因、actor/network 和结果，不包含
+路径、文件名、文件内容、原始 OS 错误或凭据；序列化断言确认分享根路径和文件名不会进入活动记录。该证据覆盖数据面状态机和
+自动化活动发布；真实双节点撤权和完整 node supervisor 重启已由下方独立 netns 验收补充。
+
+**补充（2026-11-13，无未授权断点续传恢复）**：resume IPC 不再直接使用 journal 中的旧 binding 排队续传，而是在恢复前把
+binding 中的 requester `access_epoch` 与 requester 本地当前成员目录 epoch 比对，并独立验证 owner 仍在线、仍是有效成员且具备
+File capability；requester 与 owner 的成员 epoch 不跨成员比较。每次续传帧及其他 requester 帧实际发送前，pump 还会重复这两项
+独立校验。若成员被移除、capability 不可用或 requester epoch 已变化，传输立即失败关闭，不产生 Resume 请求帧。
+`file_origin_requester_epoch_is_not_compared_with_owner_epoch` 使用 requester epoch 8、owner epoch 9 的目录验证绑定 epoch 7 只与
+requester 当前 epoch 比较，避免不同成员 epoch 偶然相同或不同造成误放行/误拒绝。
+`restored_upload_with_revoked_epoch_fails_closed_without_resume_frame` 验证暂停上传跨进程状态恢复后遇到撤权 epoch 时源文件不变、
+无 outbound 帧且 paused journal 清空；`restored_download_with_revoked_epoch_removes_staging_without_resume_frame` 验证暂停下载恢复后
+遇到撤权 epoch 时删除 staging、不发布目标文件、无 outbound 帧且 journal 清空。两者均确认最终事件为
+`file_transfer_access_revoked`。该自动化证据覆盖 journal 恢复和发送边界；真实双节点撤权演练已由下方独立 netns 验收补充。
+
+**补充（2026-11-13，owner 关闭与 ACL 重配置主动撤权）**：节点事件循环现在订阅本地 File capability epoch；owner 关闭能力或用新
+ACL 替换共享时，会在下一次 peer 帧之前主动调用 `cancel_all_for_authorization_loss`，取消上传和下载会话、释放并发 admission、
+关闭文件句柄并清理未发布 staging。`owner_disable_revokes_all_active_sessions_and_rejects_new_requests` 用两个不同成员的活动下载验证
+一次关闭会同时终止全部会话，两个成员随后发起的新下载都返回 `file_capability_disabled`，owner 源文件保持不变。
+`acl_reconfiguration_revokes_live_transfer_and_rejects_new_metadata_and_requests` 验证 ACL 替换推进 capability epoch 后，在途下载被记录为
+`file.transfer.authorization_revoked` / `Denied` 并完成清理；新下载和新元数据请求都返回 `file_acl_no_allow`，源文件保留。
+元数据请求只会在共享 ACL 明确授予 `read_metadata` 后读取锚定路径，并在文件系统查询前后各复核一次 capability epoch；成功响应只包含
+目录标志、大小和修改时间，不包含共享根、文件名、内容摘要或原始文件系统错误。`metadata_requires_explicit_read_metadata_acl_action`
+验证仅有下载授权不会隐式开放元数据；上述 ACL 测试在撤权前确认元数据成功、撤权后确认失败关闭，
+`owner_disable_revokes_concurrent_upload_and_download_without_publishing` 进一步在同一 owner 能力下同时打开上传和下载，关闭能力后
+两者均完成撤权清理：上传 staging 被删除且目标未发布，下载源文件保持原样，两个方向均生成
+`file.transfer.authorization_revoked` / `Denied` 活动。该证据覆盖进程内网络数据面、并发双向传输和多客户端请求路径。
+
+**补充（2026-11-13，成员目录刷新主动撤权）**：节点事件循环把成员目录刷新结果同时用于 File 会话复核，调用
+`cancel_sessions_without_member_access` 重新检查网络、目录新鲜度、成员存在性、生命周期、File capability 和 access epoch；
+成员被移除、退出、失去 File capability、epoch 推进或目录不可用时，会主动取消该 peer 的上传和下载，而不是等待下一帧。
+`member_removal_revokes_concurrent_upload_and_download_without_publishing` 先以仍有效的成员目录确认并发上传和下载不会被误取消，
+再从目录移除该成员，验证两个会话同时终止、上传 staging 删除且目标未发布、下载源文件不变，并分别为两个方向生成
+`file.transfer.authorization_revoked` / `Denied` 和 `file_transfer_cleanup_completed` 活动。因此“成员退出/移除后会话和临时凭据
+失效”已有自动化闭环；真实双节点网络断开、真实双节点成员退出/移除演练及完整 node 服务重启仍未验证。
+
+**补充（2026-11-13，Linux 真实双节点撤权与中断）**：独立 netns 验收在节点间真实 veth 路径上完成断网/恢复、在线 ACL 撤销和签名
+网络 File capability 撤销。撤销发生在 2 MiB 上传已写入 owner staging 之后：owner 立即取消会话并清理 staging，requester 收到相关
+错误并清空 journal，上传 target 未发布，requester 本地源文件保持不变。下载侧则在暂停、staging 持久化后由 supervisor 重启真实 node
+子进程，并从 journal/分块边界继续完成。该验收补齐 Linux 上的真实网络断开、撤权中断和完整 node 服务重启；Windows/macOS 实机、
+WebUI/Android 内容传输和跨平台竞态仍未验收。
+
+### W15-08 File 非目标与发布证据 `[~]`
+
+- [x] 明确不做自动同步、双向镜像、系统挂载和远程目录替换；
+- [x] UI 不展示这些非目标为可用功能；
+- [x] 完成 ACL、路径、符号链接、竞态、配额、续传和撤权测试；
 - [ ] GPUI/WebUI/Android 使用同一文件和权限语义；
-- [ ] 移动端 SAF 与桌面目录权限边界清楚；
-- [ ] 活动与审计可追溯；
-- [ ] 性能报告包含大文件、多文件和中断恢复；
-- [ ] 未通过路径安全测试不得发布。
+- [x] 移动端 SAF 与桌面目录权限边界清楚；
+- [x] 活动与审计可追溯；
+- [x] 性能报告包含大文件、多文件和中断恢复；
+- [x] 未通过路径安全测试不得发布。
 
 **验收**：File 第一版范围明确、边界安全、传输闭环，不以同步盘宣传超出实现。
+
+**补充（2026-11-13，测试矩阵审计）**：ACL 由 `deny_wins_and_both_network_and_local_layers_must_allow`、
+`administrator_role_does_not_bypass_file_acl_layers` 和 `directory_acl_prefixes_cover_descendants_without_matching_siblings`
+覆盖；portable 路径与穿越规则见 W15-04；Linux 锚定句柄、目录交换、符号链接和权限撤销见 W15-05；配额、并发、带宽、
+磁盘预留、句柄与 `SIGKILL` 恢复见 W15-06；校验、暂停/恢复、重放和原子落位见 W15-03；ACL/成员撤权与清理见 W15-07。
+这些证据完成 Linux/portable 自动化测试矩阵；真实双节点网络、撤权中断和完整 node supervisor 重启另由下方 netns 验收补充，
+但仍不替代 Windows/macOS 实机验收。
+并发配额扫描的最终证据还包括 `concurrent_quota_scans_keep_independent_directory_cursors`，验证每次扫描使用独立目录游标且
+不会返回部分目录树。GPUI owner 设置页继续使用该领域语义并提供能力状态投影；WebUI 已新增真实 File 页面，通过单一节点控制器
+浏览在线目标目录，执行流式上传、临时令牌下载以及暂停、恢复、取消，同时继续以 `snapshot.file_capability` 展示权威能力状态，
+且不展示共享根或文件内容路径。该段仅记录当时的 WebUI 证据；GPUI File 内容操作页的后续结果见 2026-11-14 补充。Android File 内容表面
+仍未实现，故三端一致性继续保留为未完成，W15-08 保持 `[~]`。
+
+**补充（2026-11-14，WebUI File 内容面）**：File 导航现进入真实内容页，可从权威节点快照选择在线目标，按目录浏览并提供
+面包屑和分页；上传使用 raw `application/octet-stream` 流式请求，下载通过 POST 获取短期令牌后触发浏览器下载，不把文件路径或
+凭据放入查询参数。页面轮询节点传输状态，支持暂停、恢复和取消，并覆盖 401/403/422/429/503/504 的稳定错误分类。目录响应只来自
+节点 File API，前端不自行拼接本地路径，也不展示共享根。新增 `files-page.test.tsx` 的 11 项测试以及页面接线、导航和 14 页契约
+断言；WebUI 完整 Vitest 为 321 项通过，ESLint、TypeScript 类型检查、Vite 生产构建和 i18n runtime 检查通过。Rust 侧新增
+`webui::file_api` 5 项测试和完整客户端库 1,445 项通过/3 项忽略，`file_share` 195 项、GPUI view model 68 项通过，Clippy
+`-D warnings`、契约生成/检查、Android 全量 debug 单测与 lint 通过；嵌入 WebUI bundle 已同步。该证据本身不覆盖 GPUI File
+内容操作页（另见 2026-11-14 补充）、Android SAF/File 内容表面、Windows/macOS 实机路径安全或真实公网性能验收。
+
+**补充（2026-11-14，GPUI File 内容工作区）**：GPUI File 导航现接入权威 `NodeSnapshot`，只从当前网络成员投影在线目标；目录浏览
+支持面包屑、刷新、上下级导航和分页，上传/下载通过本机选择器构造逻辑共享路径，传输列表按 750 ms 活动态 / 2 s 空闲态轮询，
+并按状态启用暂停、恢复和取消。目标或目录切换会递增请求代际，陈旧目录响应不得覆盖当前页面；界面只展示所选上传文件名，不展示
+本地完整路径，也不展示共享根。新增 8 项 File 工作区状态机测试和 4 项 headless GPUI 渲染/交互测试，覆盖目标同步、分页/陈旧响应、
+上传下载请求、控制矩阵、加载/错误/空状态、隐私和禁用控制。`cargo test -p fuckipv6-client --lib` 为 1,457 项通过/3 项忽略，
+`cargo fmt --all -- --check`、`cargo clippy -p fuckipv6-client --lib --tests -- -D warnings` 以及共享契约生成/检查均通过。
+该证据不替代 Android File/SAF、Windows/macOS 实机路径安全、跨平台传输竞态、跨平台验收或 OS/性能基线，故 W15-08 与 W15 总体
+继续保持 `[~]`。当前 GPUI 工作区在同一分支通过 `x86_64-pc-windows-gnu` client library 编译检查；同时修正了目录列表在非 Unix
+目标下的条件编译未使用值，Linux 断言行为不变。该交叉编译只证明类型与平台接线可构建，不构成 Windows 实机路径安全或传输验收。
+
+**补充（2026-11-14，集成收口）**：已将 `main` 合并到 `feat/w15-file`（`d4f41c9`），保留 W15
+`ConnectionServices` 重构并重建共享契约与嵌入 WebUI bundle。集成后 `cargo check --workspace --all-targets`、
+`cargo test --workspace --all-targets`、`cargo clippy --workspace --all-targets -- -D warnings`、
+`cargo fmt --all -- --check`、`scripts/check-contracts.sh`、WebUI 321 项 Vitest、ESLint/TypeScript 和文档检查全部通过；
+Linux 三节点 netns 验收通过，覆盖双向 P2P 上传/下载、暂停/veth 断网续传、`SIGKILL` supervisor 恢复、取消清理、
+在线 ACL/撤权与四槽满载隔离。本次还补齐 5 个英文 File 错误键，并将生成的 Android DTO 清单断言更新为 301。
+该记录只证明集成门禁与 Linux 实网路径，不替代 Android SAF、Windows/macOS 实机路径安全、跨平台竞态/验收或
+OS 性能基线，故 W15-08 与 W15 总体继续保持 `[~]`。
+
+**补充（2026-11-14，Windows 路径安全测试矩阵与 Wine 兼容性）**：Windows target 现已启用文件/目录 symlink、根替换、硬链接、目录枚举重解析点、发布父目录交换、配额扫描和 staging 清理测试；Win32/NT adapter 使用锚定根和逐组件句柄解析，`NtCreateFile`、`NtQueryDirectoryFile`、`NtSetInformationFile` 覆盖打开、枚举、原子发布与删除路径。Linux `cargo test -p fuckipv6-client --lib file_share::` 为 195 项通过，Wine 下 Windows target 同一过滤集为 186 项通过/0 失败，Windows GNU client library 交叉编译、`cargo test --workspace --all-targets`（client library 1,459 项通过/3 项忽略）、`cargo fmt --all -- --check`、workspace Clippy `-D warnings` 与 `git diff --check` 通过。Wine 不是 Windows/macOS 实机，仍不能证明真实 ACL、杀软/过滤驱动、大小写不敏感卷、重解析点行为或跨平台传输竞态；Android SAF/File 内容表面及跨平台性能验收也未完成，因此 W15-08 与 W15 总体继续保持 `[~]`。
+
+**补充（2026-11-13，portable ACL 身份与 Linux TOCTOU）**：
+`portable_paths_preserve_rendering_and_fold_authorization_identity` 与 ACL Deny 大小写变体断言补齐了 portable 路径授权身份，
+确认原始拼写不丢失且大小写、NFC/NFD、final sigma 等价拼写得到同一 ACL 决策。Linux `AllowWithinRoot` 改为锚定 root fd 的
+`openat2(BENEATH | NO_MAGICLINKS)` 原子解析，配合并发 `renameat2(RENAME_EXCHANGE)` 测试证明无法在 canonicalize/open 之间切换
+到根外链接。`cargo test -p fuckipv6-client --lib file_share::` 的 155 项测试、
+`cargo test -p fuckipv6-client --lib` 的 1,316 项通过/3 项忽略，以及
+`cargo clippy -p fuckipv6-client --lib --tests -- -D warnings` 均通过；Windows GNU client library 交叉编译通过但仍不构成
+Windows 实机路径安全证据。WebUI File 内容与传输表面已完成自动化闭环；GPUI File 内容操作页的后续证据见 2026-11-14
+补充。Android SAF/File 内容表面、Windows/macOS 实机路径安全及跨平台真实传输仍未完成，故 W15-08 保持 `[~]`。
+
+**交叉编译检查（2026-11-13，不代表实机验收）**：修复 File runtime 在非 Linux 目标下无条件使用 `PathBuf`，以及若干既有的
+条件编译缺口后，`RUSTC="$(rustup which rustc)" rustup run stable cargo check -p fuckipv6-client --lib --target
+x86_64-pc-windows-gnu` 通过。该结果只证明 client library（包含 File runtime 接线）可在 Windows GNU target 上编译；Windows
+大小写不敏感文件系统、重解析点、ACL 与真实传输行为仍未实机验证。macOS target 检查在宿主 Linux 的依赖 C 构建阶段被 Apple SDK
+头文件（`TargetConditionals.h`）阻断，尚未进入项目代码编译，因此不能作为 macOS 编译或运行证据。W15-04、W15-05 与 W15-08
+相关未完成项继续保持未勾选。
+
+**性能基线（2026-11-13，Linux 本地文件系统）**：新增
+`file_transfer_large_multifile_and_resume_report`。数据集包含一个 64 MiB 单文件上传、一个 64 MiB 单文件下载，两者均在
+第 6 个 4 MiB 分块后暂停并恢复，剩余 40 MiB 只能从下一分块继续；另以 4 个 8 MiB 文件、每文件 1 MiB 分块进行交错并发下载。
+测试逐块计算 BLAKE3，pause/resume 后最终内容哈希必须与数据集一致，同时检查活动传输归零、staging 清空，以及文件描述符和线程
+回到基线。当前环境为 AMD Ryzen 7 5800H、Linux 7.2.14-zen1-1-zen、rustc 1.99.1、16 个逻辑 CPU，基于 `1523f6c` 的
+debug 测试构建；命令为
+`cargo test -p fuckipv6-client --test file_share_resources file_transfer_large_multifile_and_resume_report -- --nocapture`。
+本次记录：64 MiB 上传 189.57 ms / 337.6 MiB/s，64 MiB 下载 210.19 ms / 304.5 MiB/s，4×8 MiB 交错下载 118.96 ms /
+269.0 MiB/s；文件描述符 5→5，线程 2→2。该数据仅代表本机临时目录和进程内 adapter 路径，不是 QUIC/P2P 实网吞吐、release
+构建基准或跨平台性能结论。
+
+**边界与发布结论（2026-11-14 更新）**：
+
+- W15 第一版不做自动同步、双向镜像、系统挂载或远程目录替换；GPUI 设置页明确提示这些能力不存在。
+- Android SAF 属于 W16，不是 W15 已交付能力；Android 端不得据此声称 File 目录选择或传输已经完成。
+- 当前已有 GPUI owner File 设置流程、本地 owner IPC、持久化、domain ACL、路径边界、临时文件、可恢复传输适配器、资源限制和
+  Linux 独立三节点真实网络验收。
+- Linux netns 已覆盖真实 P2P 上传/下载、低带宽暂停、veth 断网、撤权中断、取消清理、真实 node 子进程 `SIGKILL` 后的 supervisor
+  重启、journal/staging 续传，以及四槽满载时三个独立控制面的响应和取消后资源回退；这仍不是 Windows/macOS 实机、跨平台竞态
+  或跨平台满载隔离证据。
+- 当前 GPUI 与 WebUI 均已具备 File 目录浏览、目标选择、上传、下载、状态轮询和暂停/恢复/取消；GPUI 还提供在线成员目标投影、
+  目录分页与代际隔离。Android 仍仅同步导航契约且尚无 SAF/File 内容表面，不得宣称三端 File 语义已经一致。
+- 自动化测试仍缺 Windows GNU/macOS 实机重解析点、硬链接、目录交换、并发重命名和权限变化验收；已有的大文件/多文件性能基线
+  只覆盖 Linux 本地文件系统和 debug 测试构建。
+- 因此 W15 保持 `[~]`，第二版能力队列中的“W15 File 完成”继续保持 `[ ]`；真实路径安全、跨平台和三端门禁通过前不得发布为完成。
 
 ## 19. W16：Android
 

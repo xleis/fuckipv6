@@ -117,6 +117,7 @@ export const REQUIRED_PAGES = [
   "exit_node",
   "relay",
   "logs",
+  "files",
   "identity",
   "settings",
 ] as const;

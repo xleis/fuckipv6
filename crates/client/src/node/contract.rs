@@ -820,6 +820,28 @@ mod tests {
     }
 
     #[test]
+    fn host_capability_defaults_are_not_frozen_into_contracts() {
+        for schema in [
+            schemars::schema_for!(super::super::NodeSnapshot).to_value(),
+            schemars::schema_for!(super::super::privacy_projection::ProjectedNodeSnapshot)
+                .to_value(),
+        ] {
+            for field in ["exit_node_capabilities", "tun_capabilities"] {
+                let property = &schema["properties"][field];
+                assert!(!property.is_null(), "missing capability field: {field}");
+                assert!(property.get("default").is_none(), "host default: {field}");
+                assert!(
+                    !schema["required"]
+                        .as_array()
+                        .expect("required fields")
+                        .contains(&json!(field)),
+                    "capability field must remain optional: {field}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn checked_in_schema_artifacts_are_current() {
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../contracts/schema");
         if std::env::var_os("UPDATE_CONTRACT").is_some() {

@@ -24,6 +24,8 @@ use crate::discovery_index::NodeDiscoveryIndexSnapshot;
 use crate::tun::TunCapabilities;
 use crate::ui::UiModeResolution;
 
+pub(crate) const RECENT_ACTIVITY_RETENTION_LIMIT: usize = 256;
+
 /// Stable, transport-neutral state rendered by every node UI adapter.
 #[derive(Debug, Clone, Default, PartialEq, JsonSchema, Serialize, Deserialize)]
 pub struct NodeSnapshot {
@@ -41,12 +43,18 @@ pub struct NodeSnapshot {
     /// actions when `supported` is false and render the typed reasons instead
     /// of inferring success from configuration alone.
     #[serde(default)]
+    // Host-dependent runtime defaults must not be frozen into the wire schema.
+    #[schemars(transform = |schema: &mut schemars::Schema| { schema.remove("default"); })]
     pub exit_node_capabilities: ExitNodeCapabilities,
     /// Authoritative local Exit lifecycle. `owner_exit_enabled` is the durable
     /// local veto; network Exit roles only decide whether the data plane may
     /// serve after this intent is true.
     #[serde(default)]
     pub local_exit: LocalExitCapabilitySnapshot,
+    /// Local File-share health. This DTO deliberately contains no root path or
+    /// raw filesystem message; owner-only local IPC provides the selected path.
+    #[serde(default)]
+    pub file_capability: NodeFileCapabilitySnapshot,
     /// Unified four-capability projection shared by every UI adapter. Missing
     /// entries deserialize as `Unknown`; they are never inferred as enabled.
     #[serde(default)]
@@ -65,6 +73,7 @@ pub struct NodeSnapshot {
     /// Redacted TUN readiness for this node process. Missing or malformed
     /// capability data must disable host-network mutations in every adapter.
     #[serde(default)]
+    #[schemars(transform = |schema: &mut schemars::Schema| { schema.remove("default"); })]
     pub tun_capabilities: TunCapabilities,
     /// Authoritative host interface capture for the node page. This is filled
     /// by the node process from OS network state; UI adapters never probe the
@@ -830,6 +839,41 @@ pub struct NodeCapabilitySnapshot {
     pub state: CapabilityState,
 }
 
+/// Path-free File capability state safe for snapshots, events and UI manifests.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema, Serialize, Deserialize)]
+pub struct NodeFileCapabilitySnapshot {
+    pub state: CapabilityState,
+    /// The network this owner-local share is bound to. This is safe to expose
+    /// to authorized snapshot viewers and lets the UI place File state on the
+    /// matching network instead of inventing a global File page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_id: Option<NetworkId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_epoch: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_error: Option<String>,
+    #[serde(default)]
+    pub active_transfers: u32,
+}
+
+impl Default for NodeFileCapabilitySnapshot {
+    fn default() -> Self {
+        Self {
+            state: CapabilityState::Disabled,
+            network_id: None,
+            access_epoch: None,
+            share_revision: None,
+            available_bytes: None,
+            root_error: None,
+            active_transfers: 0,
+        }
+    }
+}
+
 impl NodeCapabilityRegistrySnapshot {
     pub fn state(&self, kind: CapabilityKind) -> CapabilityState {
         self.capabilities
@@ -856,11 +900,9 @@ impl NodeCapabilityRegistrySnapshot {
                     kind: CapabilityKind::Exit,
                     state: exit_state,
                 },
-                // File runtime is not wired in this build. Keeping the state
-                // explicit prevents an empty card from implying support.
                 NodeCapabilitySnapshot {
                     kind: CapabilityKind::File,
-                    state: CapabilityState::Unsupported,
+                    state: snapshot.file_capability.state,
                 },
             ],
         }
@@ -1859,11 +1901,13 @@ impl NodeStateStore {
         {
             let mut directories = self.directories.write().await;
             if let Some(current) = directories.get(&network_id) {
-                let incoming_is_older = directory.exit_selection_policy_revision
-                    < current.exit_selection_policy_revision
-                    || (directory.exit_selection_policy_revision
-                        == current.exit_selection_policy_revision
-                        && directory.generated_at_unix_ms < current.generated_at_unix_ms);
+                let incoming_is_older = directory.network_revision < current.network_revision
+                    || (directory.network_revision == current.network_revision
+                        && (directory.exit_selection_policy_revision
+                            < current.exit_selection_policy_revision
+                            || (directory.exit_selection_policy_revision
+                                == current.exit_selection_policy_revision
+                                && directory.generated_at_unix_ms < current.generated_at_unix_ms)));
                 if current == &directory || incoming_is_older {
                     return false;
                 }
@@ -2005,7 +2049,9 @@ impl NodeStateStore {
                     .cmp(&left.occurred_at_unix_ms)
                     .then_with(|| right.audit_id.cmp(&left.audit_id))
             });
-            snapshot.recent_activity.truncate(256);
+            snapshot
+                .recent_activity
+                .truncate(RECENT_ACTIVITY_RETENTION_LIMIT);
         })
         .await;
     }
@@ -2226,9 +2272,31 @@ impl Default for NodeStateStore {
 mod tests {
     use super::*;
     use fuckipv6_common::domain::{
-        RelayLifecycleState, RelayLimitPolicy, RelayReachabilityState, RelayUsageSnapshot,
+        AuditId, AuditOutcome, RelayLifecycleState, RelayLimitPolicy, RelayReachabilityState,
+        RelayUsageSnapshot,
     };
     use fuckipv6_common::i18n::{has_key, Locale};
+
+    fn activity(id: &str, occurred_at_unix_ms: u64, action: &str) -> ActivityEntry {
+        ActivityEntry {
+            audit_id: AuditId::from_public_key(id.as_bytes()),
+            operation_id: None,
+            actor: NodeId::from_public_key(b"activity-actor"),
+            network_id: None,
+            action: action.into(),
+            resource: "test:activity".into(),
+            outcome: AuditOutcome::Succeeded,
+            occurred_at_unix_ms,
+            summary: action.into(),
+            category: Default::default(),
+            severity: Default::default(),
+            actor_role: None,
+            object_kind: "test".into(),
+            object_id: Some(id.into()),
+            reason: None,
+            details: BTreeMap::from([("source".into(), id.into())]),
+        }
+    }
 
     fn network(name: &str, status: NodeNetworkStatus) -> NodeNetworkSnapshot {
         NodeNetworkSnapshot {
@@ -2856,6 +2924,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn merge_activity_preserves_producers_deduplicates_and_retains_latest_256() {
+        let state = NodeStateStore::new();
+        state
+            .merge_recent_activity([activity("command", 100, "node.start")])
+            .await;
+        state
+            .merge_recent_activity([
+                activity("file-old", 300, "file.transfer.authorization_revoked"),
+                activity("file-new", 200, "file.transfer.cancelled"),
+                activity("file-new", 400, "file.transfer.interrupted"),
+            ])
+            .await;
+
+        let snapshot = state.snapshot().await;
+        assert_eq!(snapshot.recent_activity.len(), 3);
+        assert!(snapshot
+            .recent_activity
+            .iter()
+            .any(|entry| entry.action == "node.start"));
+        assert_eq!(
+            snapshot
+                .recent_activity
+                .iter()
+                .filter(|entry| entry.object_id.as_deref() == Some("file-new"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            snapshot
+                .recent_activity
+                .iter()
+                .find(|entry| entry.object_id.as_deref() == Some("file-new"))
+                .expect("updated file activity")
+                .action,
+            "file.transfer.interrupted"
+        );
+        assert_eq!(snapshot.recent_activity[0].occurred_at_unix_ms, 400);
+
+        state
+            .merge_recent_activity(
+                (0..RECENT_ACTIVITY_RETENTION_LIMIT + 44).map(|index| {
+                    activity(&format!("burst-{index}"), index as u64 + 500, "node.start")
+                }),
+            )
+            .await;
+        let snapshot = state.snapshot().await;
+        assert_eq!(
+            snapshot.recent_activity.len(),
+            RECENT_ACTIVITY_RETENTION_LIMIT
+        );
+        assert!(snapshot
+            .recent_activity
+            .windows(2)
+            .all(|pair| pair[0].occurred_at_unix_ms >= pair[1].occurred_at_unix_ms));
+        assert!(snapshot
+            .recent_activity
+            .iter()
+            .all(|entry| entry.details["source"].starts_with("burst-")));
+        assert_eq!(snapshot.recent_activity[0].occurred_at_unix_ms, 799);
+    }
+
+    #[tokio::test]
     async fn revision_saturates_instead_of_wrapping() {
         let state = NodeStateStore::new();
         let updates = state.subscribe();
@@ -3024,7 +3154,7 @@ mod tests {
         );
         assert_eq!(
             snapshot.capabilities.state(CapabilityKind::File),
-            CapabilityState::Unsupported
+            CapabilityState::Disabled
         );
 
         let exit_network = network("home", NodeNetworkStatus::Online);
@@ -3357,6 +3487,8 @@ mod tests {
             can_manage_members: false,
             exit_selection_policy: Default::default(),
             exit_selection_policy_revision: 0,
+            network_revision: 1,
+            capability_declarations: Vec::new(),
             members: vec![
                 directory_member(&viewer, "me", MembershipRole::Member, Vec::new()),
                 directory_member(
@@ -3415,6 +3547,8 @@ mod tests {
             can_manage_members: false,
             exit_selection_policy: Default::default(),
             exit_selection_policy_revision: 0,
+            network_revision: 1,
+            capability_declarations: Vec::new(),
             members: vec![
                 directory_member(&viewer, "me", MembershipRole::Member, Vec::new()),
                 directory_member(&relay, "relay", MembershipRole::Member, Vec::new()),
@@ -3475,6 +3609,8 @@ mod tests {
                 can_manage_members: false,
                 exit_selection_policy: Default::default(),
                 exit_selection_policy_revision: 0,
+                network_revision: 1,
+                capability_declarations: Vec::new(),
                 members: vec![
                     directory_member(&viewer, "me", MembershipRole::Member, Vec::new()),
                     directory_member(&relay, "relay", MembershipRole::Member, Vec::new()),
@@ -3559,6 +3695,8 @@ mod tests {
             can_manage_members: false,
             exit_selection_policy: Default::default(),
             exit_selection_policy_revision: 7,
+            network_revision: 7,
+            capability_declarations: vec![CapabilityKind::File],
             members: vec![directory_member(
                 &viewer,
                 "current",
@@ -3573,6 +3711,21 @@ mod tests {
             .expect("receipt time is cached");
 
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let mut stale_network = current.clone();
+        stale_network.network_revision = 6;
+        stale_network.generated_at_unix_ms = 4_200;
+        stale_network.exit_selection_policy_revision = 99;
+        stale_network.members[0].display_name = Some("stale network".into());
+        assert!(!state.set_member_directory(stale_network).await);
+        assert_eq!(
+            state.member_directory(&network_id).await,
+            Some(current.clone())
+        );
+        assert_eq!(
+            state.member_directory_received_at(&network_id).await,
+            Some(received_at)
+        );
+
         let mut older_revision = current.clone();
         older_revision.generated_at_unix_ms = 4_100;
         older_revision.exit_selection_policy_revision = 6;
@@ -3591,10 +3744,31 @@ mod tests {
         older_generation.generated_at_unix_ms = 3_999;
         older_generation.members[0].display_name = Some("stale generation".into());
         assert!(!state.set_member_directory(older_generation).await);
-        assert_eq!(state.member_directory(&network_id).await, Some(current));
+        assert_eq!(
+            state.member_directory(&network_id).await,
+            Some(current.clone())
+        );
         assert_eq!(
             state.member_directory_received_at(&network_id).await,
             Some(received_at)
+        );
+
+        let mut newer_network = current.clone();
+        newer_network.network_revision = 8;
+        newer_network.generated_at_unix_ms = 4_001;
+        newer_network.capability_declarations.clear();
+        newer_network.members[0].display_name = Some("revoked network capability".into());
+        assert!(state.set_member_directory(newer_network.clone()).await);
+        assert_eq!(
+            state.member_directory(&network_id).await,
+            Some(newer_network)
+        );
+        assert!(
+            state
+                .member_directory_received_at(&network_id)
+                .await
+                .expect("newer directory refresh")
+                > received_at
         );
     }
 

@@ -59,6 +59,7 @@ use crate::cli::commands::{self, CleanupStatus, RuntimeCleanupOutcome, RuntimeOp
 use crate::config_manager::{
     ConfigManager, JoinedNetworkMembership, NetworkConfig, NetworkCreationError,
 };
+use crate::file_share::FileRuntime;
 use crate::ipc::{self, MultiNetworkRegistry, NetworkSessionHandle};
 use crate::network_setup::{self, NetworkSetupStage};
 use crate::node::runtime_metadata;
@@ -911,6 +912,7 @@ struct LiveNetworkRuntimeLauncher {
     state: NodeStateStore,
     events: NodeEventBus,
     registry: MultiNetworkRegistry,
+    file_runtime: FileRuntime,
     failover_audit: Option<Arc<OwnerSecurityAudit>>,
     coordinator_takeover_wakeup: mpsc::UnboundedSender<()>,
 }
@@ -920,6 +922,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
         let state = self.state.clone();
         let events = self.events.clone();
         let registry = self.registry.clone();
+        let file_runtime = self.file_runtime.clone();
         let failover_audit = self.failover_audit.clone();
         let coordinator_takeover_wakeup = self.coordinator_takeover_wakeup.clone();
 
@@ -931,9 +934,12 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
                 Some(&request.network_name),
                 request.local_exit_enabled,
                 false,
-                commands::RuntimeObservability {
-                    state: Some(state.clone()),
-                    failover_audit,
+                commands::RuntimeExtensions {
+                    file_runtime: Some(file_runtime),
+                    observability: commands::RuntimeObservability {
+                        state: Some(state.clone()),
+                        failover_audit,
+                    },
                 },
             )
             .await
@@ -966,6 +972,7 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
             let signaling = Some(runtime.signaling.clone());
             let p2p = runtime.p2p.clone();
             let stats = runtime.stats.clone();
+            let network_id = request.network_id.as_ref().map(ToString::to_string);
 
             // Multi-network nodes disable each runtime's private IPC listener.
             // Replace its unused control receiver with the actor-owned channel so
@@ -976,11 +983,13 @@ impl NetworkRuntimeLauncher for LiveNetworkRuntimeLauncher {
             registry
                 .register(NetworkSessionHandle {
                     network_name: request.network_name.clone(),
+                    network_id,
                     tun_name: tun_name.clone(),
                     assigned_ip: assigned_ipv6,
                     assigned_ipv4,
                     p2p,
                     stats,
+                    control_tx: Some(routing_control.clone()),
                 })
                 .await;
             runtime.attach_node_state(state.clone()).await;
@@ -2399,6 +2408,7 @@ impl NetworkRuntimeManager {
         lifecycle: NodeLifecycle,
         registry: MultiNetworkRegistry,
         services: EmbeddedServiceManager,
+        file_runtime: FileRuntime,
         failover_audit: Option<Arc<OwnerSecurityAudit>>,
     ) -> Self {
         let (coordinator_takeover_wakeup, coordinator_takeover_wakeups) = mpsc::unbounded_channel();
@@ -2406,6 +2416,7 @@ impl NetworkRuntimeManager {
             state: state.clone(),
             events: events.clone(),
             registry: registry.clone(),
+            file_runtime,
             failover_audit,
             coordinator_takeover_wakeup,
         });
@@ -8943,21 +8954,24 @@ mod tests {
                     .await
                     .expect("create loopback p2p engine");
                 let p2p_listen_addr = p2p.local_addr();
+                let network_id = request.network_id.as_ref().map(ToString::to_string);
+                let (routing_control, mut routing_control_rx) = mpsc::unbounded_channel();
                 if let Some(registry) = &registry {
                     registry
                         .register(NetworkSessionHandle {
                             network_name: network_name.clone(),
+                            network_id,
                             tun_name: tun_name.clone(),
                             assigned_ip: Ipv6Addr::LOCALHOST,
                             assigned_ipv4: Some(Ipv4Addr::LOCALHOST),
                             p2p: p2p.clone(),
                             stats: StatsCollector::new(),
+                            control_tx: Some(routing_control.clone()),
                         })
                         .await;
                 }
                 let cleanup_registry = registry.clone();
                 let cleanup_p2p = p2p.clone();
-                let (routing_control, mut routing_control_rx) = mpsc::unbounded_channel();
                 let (shutdown, mut shutdown_rx) = watch::channel(false);
                 let handle = tokio::spawn(async move {
                     loop {
@@ -9196,6 +9210,31 @@ mod tests {
                                     }
                                     ipc::RuntimeCommand::ProbePeer { reply, .. } => {
                                         let _ = reply.send(Err("测试运行时不支持探测".into()));
+                                    }
+                                    ipc::RuntimeCommand::ListFileDirectory { reply, .. } => {
+                                        let _ = reply.send(Err(
+                                            "测试运行时不支持 File 目录浏览".into(),
+                                        ));
+                                    }
+                                    ipc::RuntimeCommand::StartFileTransfer { reply, .. } => {
+                                        let _ =
+                                            reply.send(Err("测试运行时不支持 File 传输".into()));
+                                    }
+                                    ipc::RuntimeCommand::ListFileTransfers { reply } => {
+                                        let _ =
+                                            reply.send(Err("测试运行时不支持 File 传输状态".into()));
+                                    }
+                                    ipc::RuntimeCommand::CancelFileTransfer { reply, .. } => {
+                                        let _ =
+                                            reply.send(Err("测试运行时不支持 File 传输".into()));
+                                    }
+                                    ipc::RuntimeCommand::PauseFileTransfer { reply, .. } => {
+                                        let _ =
+                                            reply.send(Err("测试运行时不支持 File 传输".into()));
+                                    }
+                                    ipc::RuntimeCommand::ResumeFileTransfer { reply, .. } => {
+                                        let _ =
+                                            reply.send(Err("测试运行时不支持 File 传输".into()));
                                     }
                                     ipc::RuntimeCommand::Disconnect { reply } => {
                                         let _ = reply.send(Ok(()));
@@ -10767,6 +10806,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn launched_network_session_owns_its_control_channel_until_shutdown() {
+        let harness = TestHarness::new("session-control-channel").await;
+        start_fake_network(&harness, "session-control-channel").await;
+
+        let sessions = harness.registry.get_all().await;
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].network_name, "session-control-channel");
+        assert!(sessions[0].control_tx.is_some());
+
+        let _ = harness.runtime.shutdown().await;
+        assert!(harness.registry.get_all().await.is_empty());
+        harness.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn local_exit_enable_disable_is_idempotent_and_preserves_network_runtime() {
         let harness = TestHarness::new("local-exit-toggle").await;
         start_fake_network(&harness, "local-exit-toggle").await;
@@ -10930,7 +10984,7 @@ mod tests {
             after
                 .capabilities
                 .state(fuckipv6_common::domain::CapabilityKind::File),
-            fuckipv6_common::domain::CapabilityState::Unsupported
+            fuckipv6_common::domain::CapabilityState::Disabled
         );
         assert_eq!(after_network.roles, before_network.roles);
         assert_eq!(after_network.peer_count, before_network.peer_count);

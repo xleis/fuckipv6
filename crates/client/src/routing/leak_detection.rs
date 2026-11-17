@@ -17,6 +17,7 @@ use fuckipv6_common::domain::{
     LeakDetectionEvidenceState, LeakDetectionIsolationAction, LeakDetectionPlatform,
     LeakDetectionSnapshot, LeakDetectionSource, LeakDetectionTarget,
 };
+#[cfg(target_os = "linux")]
 use tokio::process::Command;
 use tokio::time::timeout;
 

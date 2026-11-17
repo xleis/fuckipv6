@@ -168,11 +168,9 @@ impl HostProbe {
     fn detect() -> Self {
         let platform = TunPlatform::current();
         match platform {
+            #[cfg(target_os = "linux")]
             TunPlatform::Linux => {
-                #[cfg(target_os = "linux")]
                 let privileged = process_has_network_admin_capability();
-                #[cfg(not(target_os = "linux"))]
-                let privileged = false;
                 let device_available = std::path::Path::new("/dev/net/tun").exists();
                 let routing_tool_available = executable_available("ip");
                 Self {
@@ -197,6 +195,14 @@ impl HostProbe {
                 device_available: true,
                 routing_tool_available: true,
                 preflight_known: true,
+            },
+            #[cfg(not(target_os = "linux"))]
+            TunPlatform::Linux => Self {
+                platform,
+                privileged: false,
+                device_available: false,
+                routing_tool_available: false,
+                preflight_known: false,
             },
             TunPlatform::Other => Self {
                 platform,

@@ -27,9 +27,10 @@ describe("shared navigation contract", () => {
       "traffic",
       "activity",
       "logs",
+      "files",
       "settings",
     ]);
-    expect(new Set(pages).size).toBe(13);
+    expect(new Set(pages).size).toBe(14);
     expect(navigationModuleForPage("identity").id).toBe("nodes");
     expect(navigationModuleForPage("missing").id).toBe("overview");
   });

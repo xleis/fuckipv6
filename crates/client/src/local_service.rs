@@ -15,6 +15,12 @@ use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, warn};
 
+use crate::file_share::FileOwnerService;
+use crate::file_share::FileTransferCommand;
+use crate::ipc::{
+    cancel_file_transfer, list_file_directory, list_file_transfers, pause_file_transfer,
+    resume_file_transfer, start_file_transfer, MultiNetworkRegistry,
+};
 use crate::local_ipc::{
     EndpointRole, FrameKind, IpcErrorCode, LocalConnection, LocalError, LocalEvent, LocalRequest,
     LocalResponse, LocalServer,
@@ -32,6 +38,8 @@ pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// the actor can report its own outcome instead of being reported as an IPC
 /// timeout while it is still completing cleanup.
 pub const LIFECYCLE_COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
+/// Owner-selected directory scans can outlive a normal control command.
+pub const FILE_OWNER_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CONNECTIONS: usize = 64;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
@@ -55,6 +63,8 @@ pub async fn serve_node(
         commands,
         state,
         events,
+        None,
+        None,
         Arc::new(AtomicBool::new(true)),
         shutdown,
         None,
@@ -66,20 +76,32 @@ pub async fn serve_node(
 /// [`serve_node`] entrypoint, this variant can honor `StopNode`: it acknowledges
 /// the request only after arming the same shutdown channel that tears down the
 /// listener and all active subscriptions.
-pub async fn serve_owned_node(
+pub(crate) struct OwnedNodeServices {
+    pub(crate) file_owner: FileOwnerService,
+    pub(crate) registry: MultiNetworkRegistry,
+}
+
+pub(crate) async fn serve_owned_node(
     server: LocalServer,
     commands: NodeCommandBus,
     state: NodeStateStore,
     events: NodeEventBus,
+    services: OwnedNodeServices,
     ready: Arc<AtomicBool>,
     shutdown: watch::Sender<bool>,
 ) -> Result<()> {
+    let OwnedNodeServices {
+        file_owner,
+        registry,
+    } = services;
     let shutdown_rx = shutdown.subscribe();
     serve_node_inner(
         server,
         commands,
         state,
         events,
+        Some(file_owner),
+        Some(registry),
         ready,
         shutdown_rx,
         Some(shutdown),
@@ -87,11 +109,14 @@ pub async fn serve_owned_node(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_node_inner(
     server: LocalServer,
     commands: NodeCommandBus,
     state: NodeStateStore,
     events: NodeEventBus,
+    file_owner: Option<FileOwnerService>,
+    registry: Option<MultiNetworkRegistry>,
     ready: Arc<AtomicBool>,
     mut shutdown: watch::Receiver<bool>,
     stop_controller: Option<watch::Sender<bool>>,
@@ -121,11 +146,15 @@ async fn serve_node_inner(
                 match accepted {
                     Ok(connection) => {
                         let task_server = Arc::clone(&server);
-                        let task_commands = commands.clone();
-                        let task_state = state.clone();
-                        let task_events = events.clone();
-                        let task_operations = operations.clone();
-                        let task_ready = Arc::clone(&ready);
+                        let task_services = ConnectionServices {
+                            commands: commands.clone(),
+                            state: state.clone(),
+                            events: events.clone(),
+                            operations: operations.clone(),
+                            file_owner: file_owner.clone(),
+                            registry: registry.clone(),
+                            ready: Arc::clone(&ready),
+                        };
                         let task_shutdown = shutdown.clone();
                         let task_stop_controller = stop_controller.clone();
                         connections.spawn(async move {
@@ -137,11 +166,7 @@ async fn serve_node_inner(
                             );
                             serve_connection(
                                 &mut connection,
-                                task_commands,
-                                task_state,
-                                task_events,
-                                task_operations,
-                                task_ready,
+                                task_services,
                                 task_shutdown,
                                 task_stop_controller,
                             )
@@ -200,17 +225,32 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn serve_connection(
-    connection: &mut LocalConnection,
+#[derive(Clone)]
+struct ConnectionServices {
     commands: NodeCommandBus,
     state: NodeStateStore,
     events: NodeEventBus,
     operations: OperationService,
+    file_owner: Option<FileOwnerService>,
+    registry: Option<MultiNetworkRegistry>,
     ready: Arc<AtomicBool>,
+}
+
+async fn serve_connection(
+    connection: &mut LocalConnection,
+    services: ConnectionServices,
     mut shutdown: watch::Receiver<bool>,
     stop_controller: Option<watch::Sender<bool>>,
 ) -> Result<()> {
+    let ConnectionServices {
+        commands,
+        state,
+        events,
+        operations,
+        file_owner,
+        registry,
+        ready,
+    } = services;
     loop {
         let (kind, payload) = tokio::select! {
             _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
@@ -484,6 +524,205 @@ async fn serve_connection(
                     }
                 }
             }
+            crate::local_ipc::LocalCommand::PreviewFileShare {
+                root_reference,
+                configuration,
+            } => {
+                let Some(file_owner) = file_owner.as_ref() else {
+                    send_local_error(
+                        connection,
+                        LocalError::new(
+                            IpcErrorCode::Unsupported,
+                            "当前节点服务未启用 File owner 协调器",
+                        ),
+                    )
+                    .await?;
+                    continue;
+                };
+                match timeout(
+                    FILE_OWNER_COMMAND_TIMEOUT,
+                    file_owner.preview(root_reference.as_str(), &configuration),
+                )
+                .await
+                {
+                    Ok(Ok(preview)) => {
+                        connection
+                            .send_response(&LocalResponse::FileSharePreview(Box::new(preview)))
+                            .await?;
+                    }
+                    Ok(Err(error)) => {
+                        send_local_error(connection, LocalError::file_share(error)).await?;
+                    }
+                    Err(_) => {
+                        send_local_error(
+                            connection,
+                            LocalError::new(IpcErrorCode::Timeout, "File 共享预览超时")
+                                .retryable(true),
+                        )
+                        .await?;
+                    }
+                }
+            }
+            crate::local_ipc::LocalCommand::ConfigureFileShare {
+                root_reference,
+                configuration,
+            } => {
+                let Some(file_owner) = file_owner.as_ref() else {
+                    send_local_error(
+                        connection,
+                        LocalError::new(
+                            IpcErrorCode::Unsupported,
+                            "当前节点服务未启用 File owner 协调器",
+                        ),
+                    )
+                    .await?;
+                    continue;
+                };
+                match timeout(
+                    FILE_OWNER_COMMAND_TIMEOUT,
+                    file_owner.enable_or_configure(root_reference.as_str(), configuration),
+                )
+                .await
+                {
+                    Ok(Ok(snapshot)) => {
+                        connection
+                            .send_response(&LocalResponse::FileShareConfigured(Box::new(snapshot)))
+                            .await?;
+                    }
+                    Ok(Err(error)) => {
+                        send_local_error(connection, LocalError::file_share(error)).await?;
+                    }
+                    Err(_) => {
+                        send_local_error(
+                            connection,
+                            LocalError::new(IpcErrorCode::Timeout, "File 共享配置超时")
+                                .retryable(true),
+                        )
+                        .await?;
+                    }
+                }
+            }
+            crate::local_ipc::LocalCommand::DisableFileShare => {
+                let Some(file_owner) = file_owner.as_ref() else {
+                    send_local_error(
+                        connection,
+                        LocalError::new(
+                            IpcErrorCode::Unsupported,
+                            "当前节点服务未启用 File owner 协调器",
+                        ),
+                    )
+                    .await?;
+                    continue;
+                };
+                match timeout(FILE_OWNER_COMMAND_TIMEOUT, file_owner.disable()).await {
+                    Ok(Ok(snapshot)) => {
+                        connection
+                            .send_response(&LocalResponse::FileShareDisabled(Box::new(snapshot)))
+                            .await?;
+                    }
+                    Ok(Err(error)) => {
+                        send_local_error(connection, LocalError::file_share(error)).await?;
+                    }
+                    Err(_) => {
+                        send_local_error(
+                            connection,
+                            LocalError::new(IpcErrorCode::Timeout, "File 共享停用超时")
+                                .retryable(true),
+                        )
+                        .await?;
+                    }
+                }
+            }
+            crate::local_ipc::LocalCommand::FileTransfer(command) => {
+                let Some(registry) = registry.as_ref() else {
+                    send_local_error(
+                        connection,
+                        LocalError::new(
+                            IpcErrorCode::Unsupported,
+                            "当前节点服务未启用 File 传输控制面",
+                        ),
+                    )
+                    .await?;
+                    continue;
+                };
+                let result = match command {
+                    FileTransferCommand::Start(request) => {
+                        start_file_transfer(registry, Box::new(request))
+                            .await
+                            .map(LocalResponse::FileTransferStarted)
+                    }
+                    FileTransferCommand::Cancel {
+                        transfer_id,
+                        operation_id,
+                    } => cancel_file_transfer(registry, transfer_id, operation_id)
+                        .await
+                        .map(|()| LocalResponse::FileTransferAccepted),
+                    FileTransferCommand::Pause {
+                        transfer_id,
+                        operation_id,
+                    } => pause_file_transfer(registry, transfer_id, operation_id)
+                        .await
+                        .map(|()| LocalResponse::FileTransferAccepted),
+                    FileTransferCommand::Resume {
+                        transfer_id,
+                        operation_id,
+                    } => resume_file_transfer(registry, transfer_id, operation_id)
+                        .await
+                        .map(|()| LocalResponse::FileTransferAccepted),
+                };
+                match result {
+                    Ok(response) => connection.send_response(&response).await?,
+                    Err(error) => {
+                        send_local_error(connection, LocalError::file_transfer(error)).await?;
+                    }
+                }
+            }
+            crate::local_ipc::LocalCommand::ListFileDirectory(request) => {
+                let Some(registry) = registry.as_ref() else {
+                    send_local_error(
+                        connection,
+                        LocalError::new(
+                            IpcErrorCode::Unsupported,
+                            "当前节点服务未启用 File 目录浏览控制面",
+                        ),
+                    )
+                    .await?;
+                    continue;
+                };
+                match list_file_directory(registry, Box::new(request)).await {
+                    Ok(listing) => {
+                        connection
+                            .send_response(&LocalResponse::FileDirectoryListing(Box::new(listing)))
+                            .await?;
+                    }
+                    Err(error) => {
+                        send_local_error(connection, LocalError::file_directory(error)).await?;
+                    }
+                }
+            }
+            crate::local_ipc::LocalCommand::ListFileTransfers => {
+                let Some(registry) = registry.as_ref() else {
+                    send_local_error(
+                        connection,
+                        LocalError::new(
+                            IpcErrorCode::Unsupported,
+                            "当前节点服务未启用 File 传输控制面",
+                        ),
+                    )
+                    .await?;
+                    continue;
+                };
+                match list_file_transfers(registry).await {
+                    Ok(statuses) => {
+                        connection
+                            .send_response(&LocalResponse::FileTransfers(statuses))
+                            .await?;
+                    }
+                    Err(error) => {
+                        send_local_error(connection, LocalError::file_transfer(error)).await?;
+                    }
+                }
+            }
             crate::local_ipc::LocalCommand::Subscribe { after_sequence } => {
                 stream_events(
                     connection,
@@ -725,17 +964,15 @@ fn command_bus_error(error: NodeCommandBusError) -> LocalError {
 /// no service fault and must not be reported as connection errors.
 fn is_clean_disconnect(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io| {
-                matches!(
-                    io.kind(),
-                    std::io::ErrorKind::UnexpectedEof
-                        | std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::ConnectionAborted
-                        | std::io::ErrorKind::BrokenPipe
-                )
-            })
+        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+            )
+        })
     })
 }
 
@@ -771,8 +1008,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use anyhow::Context;
-    use tokio::sync::watch;
+    use tokio::sync::{mpsc, watch};
 
+    use crate::file_share::FileOwnerService;
     use crate::local_ipc::{
         cancel_operation, connect, execute, lookup_operation, request, submit_operation,
         IpcErrorCode, IpcRole, LocalEndpoint, LocalError, LocalRequest,
@@ -898,6 +1136,56 @@ mod tests {
             let events = NodeEventBus::new(event_capacity);
             let state = NodeStateStore::with_events(events.clone());
             Self::with_state_and_handler(label, state, events, handler).await
+        }
+
+        async fn with_owned_file_service(label: &str, event_capacity: usize) -> Result<Self> {
+            let directory = std::env::temp_dir().join(format!(
+                "fuckipv6-local-service-file-{label}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock before Unix epoch")
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&directory)?;
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+
+            let events = NodeEventBus::new(event_capacity);
+            let state = NodeStateStore::with_events(events.clone());
+            let commands = NodeCommandBus::spawn(Arc::new(EchoHandler), events.clone(), 8);
+            let server = LocalServer::bind(
+                LocalEndpoint::Path(directory.join("node.sock")),
+                EndpointRole::Node,
+            )
+            .await?;
+            let (shutdown, _shutdown_rx) = watch::channel(false);
+            let file_owner = FileOwnerService::new(
+                &directory,
+                fuckipv6_common::domain::NodeId::from_public_key(
+                    format!("local-service-file-{label}").as_bytes(),
+                ),
+                state.clone(),
+            )?;
+            let service = tokio::spawn(serve_owned_node(
+                server,
+                commands,
+                state.clone(),
+                events.clone(),
+                OwnedNodeServices {
+                    file_owner,
+                    registry: MultiNetworkRegistry::new(),
+                },
+                Arc::new(AtomicBool::new(true)),
+                shutdown.clone(),
+            ));
+            Ok(Self {
+                endpoint: LocalEndpoint::Path(directory.join("node.sock")),
+                directory,
+                state,
+                events,
+                shutdown,
+                service,
+            })
         }
 
         async fn with_state_and_handler<H>(
@@ -1094,12 +1382,21 @@ mod tests {
         let commands = NodeCommandBus::spawn(Arc::new(EchoHandler), events.clone(), 8);
         let server = LocalServer::bind(endpoint.clone(), EndpointRole::Node).await?;
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let file_owner = FileOwnerService::new(
+            &directory,
+            fuckipv6_common::domain::NodeId::from_public_key(b"local-service-startup-ready-owner"),
+            state.clone(),
+        )?;
         let ready = Arc::new(AtomicBool::new(false));
         let service = tokio::spawn(serve_owned_node(
             server,
             commands,
             state,
             events,
+            OwnedNodeServices {
+                file_owner,
+                registry: MultiNetworkRegistry::new(),
+            },
             ready.clone(),
             shutdown_tx.clone(),
         ));
@@ -1507,6 +1804,263 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn file_owner_commands_require_the_owned_node_service() -> Result<()> {
+        use crate::file_share::FileShareConfiguration;
+        use crate::local_ipc::preview_file_share;
+        use fuckipv6_common::domain::NetworkId;
+
+        let fixture = Fixture::new("file-owner-unsupported", 8).await?;
+        let root = fixture.directory.join("share-root");
+        std::fs::create_dir(&root)?;
+        let configuration = FileShareConfiguration::readonly(
+            NetworkId::from_public_key(b"file-owner-unsupported-network"),
+            "Unsupported owner command",
+        );
+        let error = preview_file_share(
+            &fixture.endpoint,
+            IpcRole::Cli,
+            root.to_str().expect("utf8 root"),
+            configuration,
+        )
+        .await
+        .expect_err("generic node service must not expose owner File commands");
+        assert!(error.to_string().contains("File owner"));
+
+        fixture.finish().await
+    }
+
+    #[tokio::test]
+    async fn owner_file_commands_enable_project_and_disable_over_local_ipc() -> Result<()> {
+        use crate::file_share::FileShareConfiguration;
+        use crate::local_ipc::{configure_file_share, disable_file_share, preview_file_share};
+        use fuckipv6_common::domain::{CapabilityState, NetworkId};
+
+        let fixture = Fixture::with_owned_file_service("file-owner-e2e", 8).await?;
+        let root = fixture.directory.join("share-root");
+        std::fs::create_dir(&root)?;
+        let owner_file = root.join("owner.txt");
+        std::fs::write(&owner_file, b"owner-owned content")?;
+        let root_reference = root.to_str().expect("utf8 root");
+        let configuration = FileShareConfiguration::readonly(
+            NetworkId::from_public_key(b"file-owner-e2e-network"),
+            "Owner files",
+        );
+
+        let preview = preview_file_share(
+            &fixture.endpoint,
+            IpcRole::Cli,
+            root_reference,
+            configuration.clone(),
+        )
+        .await?;
+        assert_eq!(preview.display_name, "Owner files");
+        assert_eq!(preview.directory_entries, 1);
+        assert!(preview.deny_by_default);
+
+        let configured = configure_file_share(
+            &fixture.endpoint,
+            IpcRole::Cli,
+            root_reference,
+            configuration,
+        )
+        .await?;
+        assert_eq!(configured.state, CapabilityState::Enabled);
+        assert!(configured.access_epoch.is_some());
+        assert_eq!(fixture.state.snapshot().await.file_capability, configured);
+        let encoded = serde_json::to_string(&fixture.state.snapshot().await)?;
+        assert!(!encoded.contains(root_reference));
+
+        let disabled = disable_file_share(&fixture.endpoint, IpcRole::Cli).await?;
+        assert_eq!(disabled.state, CapabilityState::Disabled);
+        assert!(owner_file.exists(), "disable must preserve owner files");
+
+        fixture.finish().await
+    }
+
+    #[tokio::test]
+    async fn file_transfer_commands_round_trip_through_authenticated_ipc() -> Result<()> {
+        use crate::file_share::{
+            FileTransferDirection, FileTransferHandle, StartFileTransferRequest,
+            DEFAULT_FILE_TRANSFER_CHUNK_SIZE,
+        };
+        use crate::ipc::RuntimeCommand;
+        use crate::local_ipc::{
+            cancel_file_transfer, pause_file_transfer, resume_file_transfer, start_file_transfer,
+        };
+
+        let directory = std::env::temp_dir().join(format!(
+            "fuckipv6-file-transfer-ipc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&directory)?;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        let endpoint = LocalEndpoint::Path(directory.join("node.sock"));
+        let events = NodeEventBus::new(8);
+        let state = NodeStateStore::with_events(events.clone());
+        let commands = NodeCommandBus::spawn(Arc::new(EchoHandler), events.clone(), 8);
+        let server = LocalServer::bind(endpoint.clone(), EndpointRole::Node).await?;
+        let (shutdown, _shutdown_rx) = watch::channel(false);
+        let file_owner = FileOwnerService::new(
+            &directory,
+            fuckipv6_common::domain::NodeId::from_public_key(b"file-transfer-ipc-owner"),
+            state.clone(),
+        )?;
+        let registry = MultiNetworkRegistry::new();
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        registry.set_control_sender(control_tx);
+        let service = tokio::spawn(serve_owned_node(
+            server,
+            commands,
+            state,
+            events,
+            OwnedNodeServices {
+                file_owner,
+                registry,
+            },
+            Arc::new(AtomicBool::new(true)),
+            shutdown.clone(),
+        ));
+
+        let request = StartFileTransferRequest {
+            peer: "peer".into(),
+            network_id: None,
+            direction: FileTransferDirection::Upload,
+            share_id: "share".into(),
+            transfer_id: "transfer".into(),
+            operation_id: "operation".into(),
+            path: "docs/report.bin".into(),
+            local_path: "/home/owner/private/report.bin".into(),
+            chunk_size: DEFAULT_FILE_TRANSFER_CHUNK_SIZE,
+        };
+        let start_task = tokio::spawn({
+            let endpoint = endpoint.clone();
+            let request = request.clone();
+            async move { start_file_transfer(&endpoint, IpcRole::Cli, request).await }
+        });
+        let RuntimeCommand::StartFileTransfer {
+            request: forwarded,
+            reply,
+        } = control_rx.recv().await.expect("start control command")
+        else {
+            panic!("expected start file transfer control command");
+        };
+        assert_eq!(forwarded.peer, request.peer);
+        assert_eq!(forwarded.local_path, request.local_path);
+        assert!(!format!("{forwarded:?}").contains(request.local_path.as_str()));
+        let handle = FileTransferHandle {
+            transfer_id: "transfer".into(),
+            operation_id: "operation".into(),
+        };
+        reply
+            .send(Ok(handle.clone()))
+            .expect("reply to start transfer");
+        assert_eq!(start_task.await.expect("start transfer task")?, handle);
+
+        for (control, expected_action) in [(0_u8, "cancel"), (1_u8, "pause"), (2_u8, "resume")] {
+            let task = tokio::spawn({
+                let endpoint = endpoint.clone();
+                async move {
+                    match control {
+                        0 => {
+                            cancel_file_transfer(
+                                &endpoint,
+                                IpcRole::Cli,
+                                "transfer".into(),
+                                "operation".into(),
+                            )
+                            .await
+                        }
+                        1 => {
+                            pause_file_transfer(
+                                &endpoint,
+                                IpcRole::Cli,
+                                "transfer".into(),
+                                "operation".into(),
+                            )
+                            .await
+                        }
+                        _ => {
+                            resume_file_transfer(
+                                &endpoint,
+                                IpcRole::Cli,
+                                "transfer".into(),
+                                "operation".into(),
+                            )
+                            .await
+                        }
+                    }
+                }
+            });
+            let command = control_rx.recv().await.expect("transfer control command");
+            let reply = match (expected_action, command) {
+                ("cancel", RuntimeCommand::CancelFileTransfer { reply, .. }) => reply,
+                ("pause", RuntimeCommand::PauseFileTransfer { reply, .. }) => reply,
+                ("resume", RuntimeCommand::ResumeFileTransfer { reply, .. }) => reply,
+                (_, _) => panic!("unexpected File transfer command"),
+            };
+            reply.send(Ok(())).expect("reply to transfer control");
+            task.await.expect("transfer control task")?;
+        }
+
+        shutdown.send(true).context("service already stopped")?;
+        timeout(Duration::from_secs(5), service)
+            .await
+            .context("local service shutdown timed out")???;
+        assert!(!socket_path(&endpoint).exists());
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_transfer_runtime_failure_is_stable_and_path_free() -> Result<()> {
+        use crate::file_share::{
+            FileTransferDirection, StartFileTransferRequest, DEFAULT_FILE_TRANSFER_CHUNK_SIZE,
+        };
+        use crate::local_ipc::start_file_transfer;
+
+        let fixture = Fixture::with_owned_file_service("file-transfer-runtime", 8).await?;
+        let secret_path = "/home/owner/private/not-for-logs.bin";
+        let error = start_file_transfer(
+            &fixture.endpoint,
+            IpcRole::Cli,
+            StartFileTransferRequest {
+                peer: "peer".into(),
+                network_id: None,
+                direction: FileTransferDirection::Download,
+                share_id: "share".into(),
+                transfer_id: "transfer".into(),
+                operation_id: "operation".into(),
+                path: "docs/report.bin".into(),
+                local_path: secret_path.into(),
+                chunk_size: DEFAULT_FILE_TRANSFER_CHUNK_SIZE,
+            },
+        )
+        .await
+        .expect_err("missing runtime control channel must fail");
+        let local = error
+            .downcast_ref::<LocalError>()
+            .expect("runtime failure must preserve LocalError");
+        assert_eq!(local.code, IpcErrorCode::BackendUnavailable);
+        assert_eq!(
+            local
+                .file_transfer_error
+                .as_ref()
+                .map(|detail| detail.code.as_str()),
+            Some("file_transfer_runtime_unavailable")
+        );
+        assert!(local.retryable);
+        let encoded = serde_json::to_string(local)?;
+        assert!(!encoded.contains(secret_path));
+        assert!(!format!("{local:?}").contains(secret_path));
+
+        fixture.finish().await
+    }
+
+    #[tokio::test]
     async fn stop_node_is_typed_unsupported_without_process_ownership() -> Result<()> {
         let fixture = Fixture::new("stop-node", 8).await?;
         let error = request(
@@ -1546,11 +2100,20 @@ mod tests {
         let commands = NodeCommandBus::spawn(Arc::new(EchoHandler), events.clone(), 8);
         let server = LocalServer::bind(endpoint.clone(), EndpointRole::Node).await?;
         let (shutdown_tx, mut stop_rx) = watch::channel(false);
+        let file_owner = FileOwnerService::new(
+            &directory,
+            fuckipv6_common::domain::NodeId::from_public_key(b"owned-file-owner"),
+            state.clone(),
+        )?;
         let service = tokio::spawn(serve_owned_node(
             server,
             commands,
             state,
             events,
+            OwnedNodeServices {
+                file_owner,
+                registry: MultiNetworkRegistry::new(),
+            },
             Arc::new(AtomicBool::new(true)),
             shutdown_tx.clone(),
         ));

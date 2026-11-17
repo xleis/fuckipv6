@@ -122,33 +122,7 @@ impl LinuxTun {
         })?;
 
         // 用 ip tuntap 命令创建设备（这样会有 IPv6/IPv4 支持）
-        let create_output = tokio::process::Command::new("ip")
-            .args(["tuntap", "add", "mode", "tun", "name", name])
-            .output()
-            .await;
-
-        let create_output = match create_output {
-            Ok(output) => output,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Err(anyhow::Error::new(NetworkSetupError::new(
-                    NetworkSetupStage::ToolUnavailable,
-                    "ip command not found",
-                )));
-            }
-            Err(e) => {
-                return Err(anyhow::Error::new(NetworkSetupError::new(
-                    NetworkSetupStage::TunCreate,
-                    format!("execute ip tuntap add: {e}"),
-                )));
-            }
-        };
-
-        if !create_output.status.success() {
-            let stderr = String::from_utf8_lossy(&create_output.stderr);
-            tracing::error!("创建 TUN 网卡失败: {}", stderr);
-            return Err(anyhow::Error::new(classify_create_error(&stderr, name)));
-        }
-        tracing::debug!("已通过 ip tuntap 成功创建 TUN 虚拟设备");
+        create_tun_link(name).await?;
 
         let ips = virtual_ips.clone();
         let setup_result = async {
@@ -521,6 +495,78 @@ fn classify_create_error(stderr: &str, name: &str) -> NetworkSetupError {
     }
 }
 
+fn existing_tun_conflict(stderr: &str) -> bool {
+    let stderr = stderr.to_ascii_lowercase();
+    stderr.contains("file exists") || stderr.contains("device or resource busy")
+}
+
+async fn create_tun_link(name: &str) -> Result<()> {
+    let output = run_tuntap_add(name).await?;
+    if output.status.success() {
+        tracing::debug!("已通过 ip tuntap 成功创建 TUN 虚拟设备");
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !existing_tun_conflict(&stderr) {
+        tracing::error!("创建 TUN 网卡失败: {}", stderr);
+        return Err(anyhow::Error::new(classify_create_error(&stderr, name)));
+    }
+
+    // `ip tuntap add` creates a persistent link. A SIGKILL can therefore leave
+    // the link, addresses and routes behind after the owning descriptors close.
+    // Probe exclusive access before deleting it: an actively owned TUN is busy
+    // and must remain fail-closed, while an orphaned TUN can be safely replaced.
+    match open_tun_device(name).await {
+        Ok(probe) => {
+            drop(probe);
+            tracing::warn!(tun = %name, "检测到崩溃残留的 TUN 网卡，正在安全接管并重建");
+        }
+        Err(error) => {
+            tracing::error!(tun = %name, %error, "既有 TUN 网卡仍被占用，拒绝接管");
+            return Err(anyhow::Error::new(classify_create_error(&stderr, name)));
+        }
+    }
+
+    delete_link(name).await?;
+    let retry = run_tuntap_add(name).await?;
+    if retry.status.success() {
+        tracing::info!(tun = %name, "已替换崩溃残留的 TUN 网卡");
+        return Ok(());
+    }
+
+    let retry_stderr = String::from_utf8_lossy(&retry.stderr);
+    tracing::error!("重建 TUN 网卡失败: {}", retry_stderr);
+    Err(anyhow::Error::new(classify_create_error(
+        &retry_stderr,
+        name,
+    )))
+}
+
+async fn run_tuntap_add(name: &str) -> Result<std::process::Output> {
+    let mut command = tokio::process::Command::new("ip");
+    command.args(["tuntap", "add", "mode", "tun", "name", name]);
+    match run_command_async_bounded(command, TUN_COMMAND_TIMEOUT).await {
+        Ok(output) => Ok(output),
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            Err(anyhow::Error::new(NetworkSetupError::new(
+                NetworkSetupStage::ToolUnavailable,
+                "ip command not found",
+            )))
+        }
+        Err(error) => Err(error).map_err(|error| {
+            anyhow::Error::new(NetworkSetupError::new(
+                NetworkSetupStage::TunCreate,
+                format!("execute ip tuntap add: {error}"),
+            ))
+        }),
+    }
+}
+
 async fn configure_link(name: &str, mtu: u16) -> Result<()> {
     let mtu_output = tokio::process::Command::new("ip")
         .args(["link", "set", name, "mtu", &mtu.to_string()])
@@ -853,6 +899,17 @@ mod tests {
         let error = classify_create_error("ioctl(TUNSETIFF): File exists", "fuckipv6");
         assert_eq!(error.stage(), NetworkSetupStage::TunCreate);
         assert!(error.to_string().contains("File exists"));
+    }
+
+    #[test]
+    fn existing_tun_conflict_matches_create_errors() {
+        assert!(existing_tun_conflict("ioctl(TUNSETIFF): File exists"));
+        assert!(existing_tun_conflict(
+            "ioctl(TUNSETIFF): Device or resource busy"
+        ));
+        assert!(!existing_tun_conflict(
+            "RTNETLINK answers: Operation not permitted"
+        ));
     }
 
     #[test]

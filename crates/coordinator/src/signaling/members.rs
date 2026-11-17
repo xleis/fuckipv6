@@ -54,6 +54,8 @@ pub(crate) async fn build_member_directory(
         can_manage_members: viewer_role != MembershipRole::Member,
         exit_selection_policy: record.exit_selection_policy.clone(),
         exit_selection_policy_revision: record.policy_revision,
+        network_revision: record.revision,
+        capability_declarations: record.capability_declarations.clone(),
         members: project_members(
             &record,
             actor,
@@ -653,6 +655,11 @@ mod tests {
 
         assert_eq!(directory.viewer_role, MembershipRole::Owner);
         assert!(directory.can_manage_members);
+        assert_eq!(directory.network_revision, record.revision);
+        assert_eq!(
+            directory.capability_declarations,
+            record.capability_declarations
+        );
         let removed = directory
             .members
             .iter()

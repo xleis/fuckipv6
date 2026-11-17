@@ -76,6 +76,7 @@ pub struct ProjectedNodeSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration: Option<NodeConfigurationSnapshot>,
     #[serde(default)]
+    #[schemars(transform = |schema: &mut schemars::Schema| { schema.remove("default"); })]
     pub exit_node_capabilities: ExitNodeCapabilities,
     #[serde(default)]
     pub local_exit: LocalExitCapabilitySnapshot,
@@ -1537,6 +1538,7 @@ mod tests {
             configuration: NodeConfigurationSnapshot::default(),
             exit_node_capabilities: ExitNodeCapabilities::default(),
             local_exit: Default::default(),
+            file_capability: Default::default(),
             capabilities: NodeCapabilityRegistrySnapshot::default(),
             permissions: NodePermissionSnapshot::default(),
             access_control: NodeAccessControlSnapshot {
@@ -2084,6 +2086,8 @@ mod tests {
             can_manage_members: false,
             exit_selection_policy: Default::default(),
             exit_selection_policy_revision: 0,
+            network_revision: 1,
+            capability_declarations: Vec::new(),
             members: vec![
                 directory_member("member-a", "hidden-member-a", "hidden-fingerprint-a"),
                 directory_member("member-b", "hidden-member-b", "hidden-fingerprint-b"),

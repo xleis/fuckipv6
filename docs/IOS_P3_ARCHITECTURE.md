@@ -88,11 +88,16 @@ App: VPNController.connect()
 
 **发送路径的平台差异（实测）**：Rust 数据面按批发送——一次设备读取的多个包一起 seal 后交给传输层。
 `crates/client/src/p2p/udp_batch.rs` 的 Linux 分支用 `sendmmsg` 一次发一批；非 Linux 分支
-（macOS 与 iOS 都走这里）只发第一个数据报并返回 `Ok(1)`，于是
+（macOS 与 iOS 都走这里）在 P3.4 之前只发第一个数据报并返回 `Ok(1)`，于是
 `send_batch_to_or_fallback_in_place`（`crates/client/src/p2p/connection.rs:2170`）把同批其余数据报
-按设计转成 sealed relay 回退。正确性不受影响：密文是同一份、链路加密不降级、数据全部到达；
-但直连 P2P 只承载每批的第一个包，批量吞吐实际由中继承担。要提升直连吞吐需要在 Darwin 上补一个
-按序循环的 `send_batch` 实现，属性能优化，P3 未改动（实测数据见 `docs/IOS_P3_TEST_REPORT.md` §5.4）。
+按设计转成 sealed relay 回退：正确性不受影响，但直连 P2P 只承载每批的第一个包，手机侧批量吞吐
+实际由中继承担（P3.3 实测 6.3 Mbit/s、每轮 221 个包回退）。
+
+P3.4 已把非 Linux 分支改成逐包 `send_to` 的有序循环，边界/密文/成功前缀契约与 Linux 完全一致，
+每 16 个已发包 `yield_now()` 一次避免独占 executor；`send_syscalls()` 按平台返回真实系统调用数
+（Linux 1、其他平台 N），`udp_batch_stats` 因此仍然如实反映内核合并情况。实测收益：同一台真机、
+同参数（256×1200 B、16 包/批）从 6.3 Mbit/s（每轮 221 包回退）提升到 38.9 Mbit/s 且回退为 0，
+见 `docs/IOS_P3_TEST_REPORT.md` §5.4。
 
 **结束顺序**：`stop()` 先把 `running` 置 false 并推进 generation，等在途发送计数归零，
 再等 node→host 线程退出，返回“是否排空”。只有返回 true 才允许释放 endpoint；
@@ -188,5 +193,5 @@ iOS 侧只实现 P2 定义的平台接口，不改动 `crates/client`：
 - 网络切换只做 TUN 侧重建，不主动触发 Mesh 重选（交给 Rust 的路径变更逻辑）。
 - 数据面成员资格由协调端的 network record（`members`）决定：不在其中的节点能注册、拿到虚拟 IP，
   但会 `peers=0` 且拿不到 relay 端点。iOS 侧没有提交通行名单的入口，开发联调时由协调端配置决定。
-- 极端注入速率（200 µs 间隔、512 × 1200 B 连发）下节点控制请求会等待超时，未定位；
-  正常速率（≥1 ms 间隔）无此现象。
+- 极端注入速率下的控制面超时已在 P3.4 修复：入站回写从「事件循环里等设备队列容量」改成「有界队列（128）+ 专用写任务」，队列满即丢包并计 `tun_write_error`，控制请求不再被数据面饿死（`docs/DATAPLANE_PERFORMANCE_TODO.md` 的「P1b 收口」）。
+- 手机入站吞吐仍有上限：单轮超过约 512 × 1200 B、或高带宽连发时丢包 5–60%，而 P2P 侧 `errors` 为 0、无 relay 回退，瓶颈在「系统给隧道的入站队列 + Swift pump 逐包跨 FFI 交给 `PacketFlow`」；待做的方向是一次 FFI 取多包与批量 `writePackets`（同一文档的「新发现：手机入站吞吐上限」）。

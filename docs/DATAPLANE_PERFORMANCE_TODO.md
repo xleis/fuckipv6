@@ -383,7 +383,7 @@ cargo test -p fuckipv6-client p2p::inbound_queue::tests --lib --no-default-featu
 ### PERF-4 TUN/UDP syscall 批处理
 
 - [ ] Linux TUN 路径实现 batch read/write（优先 multi-buffer 或等价接口），非 Linux 保留逐包 fallback。当前只完成 readiness-edge drain，未实现多包 syscall。
-- [x] UDP 使用 Linux `recvmmsg`/`sendmmsg`，默认 batch 32、上限 128、非 Linux 逐包 fallback；生产 UDP receiver 与同 peer sender 已接线。
+- [x] UDP 使用 Linux `recvmmsg`/`sendmmsg`，默认 batch 32、上限 128、非 Linux 按序循环 `send_to`（P1a，2026-11-17，见下方「P1a 收口」）；生产 UDP receiver 与同 peer sender 已接线。
 - [x] 批量发送在 syscall 前完成整个 prefix 的 seal，保持每 peer nonce 顺序；短写只把未发送 suffix 交 fallback，不重新 seal。对应测试为 `short_sendmmsg_falls_back_only_unsent_suffix_without_resealing`。
 - [x] 用内建 counter 与外部 `strace -c` 证明成功包/批和真实 syscall 数，归档 1420B/1372B-payload 与 64B 两组。
 
@@ -578,6 +578,29 @@ strace 的手工调用数高于内建“成功 batch syscall”数，因为 `asy
 - UDP GSO/GRO 和 TUN offload 尚未实现；buffer pool 只覆盖 UDP receive。
 - 尚缺真实 `P2pEngine` + 密码认证组合压力测试、正式多 run/perf 归因，以及与最终独立提交绑定的前后对比。
 
+## P1a 收口：Apple 平台批量发送按序逐包（2026-11-17）
+
+**问题**：`crates/client/src/p2p/udp_batch.rs` 的 `#[cfg(not(target_os = "linux"))] send_batch` 只对第一个数据报调用 `send_to` 并返回 `Ok(1)`。批量路径把整批密文写成 sealed 前缀交给它，于是同批其余包在 `crates/client/src/p2p/connection.rs:2170-2185` 被记为 `sendmmsg accepted only 1 of N datagrams` 的 `SealedForFallback`，逐包改走 QUIC relay 回退（`cli/commands.rs` 的 `send_fallback`，并计 `p2p_send_errors`）。正确性不受影响，但 macOS/iOS 上「批量直连」实际只承载每批首包，吞吐由中继承担。
+
+**修复**：非 Linux 分支改为按序循环 `send_to`，语义与 `sendmmsg` 对齐。
+
+- 首个数据报失败才返回 `Err`；中途失败保留成功前缀（返回已发送数），未发送后缀仍由调用方交 fallback，不重新 seal。
+- `ErrorKind::Interrupted` 重试同一个包；每 `SEND_YIELD_INTERVAL = 16` 个已发包 `tokio::task::yield_now()`，避免长批独占执行器。
+- 新增 `send_syscalls(datagrams)`（Linux 返回 `usize::from(datagrams > 0)`，其他平台返回 `datagrams`）与 `record_send_result(&UdpBatchStats, datagrams)`；`UdpBatchStats::record_send_calls(syscalls, datagrams)` 如实记录真实 syscall 数与 datagrams，`record_send(n)` 变成 `record_send_calls(1, n)` 的快捷方式。
+
+**测试**：`p2p::udp_batch` 新增 5 例并改造既有断言，共 9 passed。
+
+- `send_batch_delivers_every_datagram_in_order`：1/8/16/32/128 包的顺序与边界、内容逐字节校验。
+- `send_batch_delivers_ipv6_datagrams_without_merging_them`：`[::1]` 上 8 × 64 B 不被合并。
+- `send_batch_keeps_a_successful_prefix_when_a_later_datagram_fails`：`[64B, 70000B(EMSGSIZE), 64B]` 返回 `Ok(1)`。
+- `send_batch_surfaces_the_error_when_the_first_datagram_fails`：首包失败必须透出错误、不能吞成 `Ok(0)`。
+- `send_syscalls_track_kernel_coalescing`：Linux 1 / 其他 N，且 `record_send_result` 记账正确。
+- `short_sendmmsg_falls_back_only_unsent_suffix_without_resealing` 与 `assert_production_udp_batch` 的 syscall 期望改为按平台取值（Linux 1 / 其他 2 与 8），`udp_batch_*_use_one_send_syscall` 改名为 `*_share_one_batch`。
+
+**真机结果**（iPhone 16 Pro Max ↔ Mac 第二节点，256 × 1200 B、16 包/批、1 ms 间隔，往返 payload 口径）：P3.3 为 6.35 / 5.72 / 6.01 / 7.18 Mbit/s（mean 6.32）且每轮 221–223 包回退；P3.4 为 33.27 / 39.33 / 44.11 Mbit/s（mean 38.90）、回退 0 次，约 6×。同机 1 包/批对照仍为 4.3–4.4 Mbit/s，说明差距来自批量直连而不是链路变快。
+
+**提交**：`8e6eda9 perf(p2p): send Darwin UDP batches datagram by datagram`。
+
 ## P1b 收口：入站回写主机移出事件循环（2026-11-17）
 
 **问题**：`RuntimeTunIo` 把从数据面退回主机的每个包直接交给事件循环，事件循环对每条入站包 `await` 设备写入（`write_payloads_to_tun` → `tun.write_batch(...)`）。当宿主机取包速度低于到达速度时，设备出队队列（默认 capacity 64）塞满，事件循环就停在等待队列容量的 `await` 上，`control_rx`（`RuntimeCommand`）与 TUN 读取同时得不到轮询机会，表现为 `等待运行时响应超时（1 秒）` 并持续刷 `刷新本机 Exit 客户端计数失败`；iPhone 侧每包一次 FFI receive，出队偏慢，因此最容易触发。
@@ -600,6 +623,22 @@ strace 的手工调用数高于内建“成功 batch syscall”数，因为 `asy
 | 200 µs / 1024 | 980.7 ms | 0.4 ms | 0 | 1024 |
 
 修复前 A 侧（发送侧）控制面始终 ≤5 ms，只有接收侧被数据面按住；修复后两侧 p50 均 <1 ms、p90 ≤0.7 ms、max ≤1.5 ms，`等待运行时响应超时` 告警从「每秒一条持续数分钟」降为 0 条，stop 耗时 0.7 ms / 0.4 ms。新增单测 `cli::commands::tests::kernel_write_queue_drops_the_surplus_instead_of_blocking` 固定「队列满即丢包、不阻塞」的语义，`packet_io_external_uses_real_runtime_reader_and_write_paths_without_tun` 覆盖 writer 任务关闭。
+
+## 新发现：手机入站吞吐上限（2026-11-17，未修）
+
+P1a/P1b 真机复测中暴露的下一个瓶颈，与上面两项无因果关系。
+
+| 注入形状（1200 B/包，batch 16、1 ms） | 到达 | 吞吐 | P2P errors |
+| --- | --- | --- | --- |
+| 256 × 3 轮 | 256/256 | 33.3–44.1 Mbit/s | +0 |
+| 512 单轮 | 512/512 | 39.1–44.5 Mbit/s | +0 |
+| 1024 单轮 | 720–760/1024 | — | +161…193 |
+| 2048 单轮 | 450–482/2048 | — | 同量级 |
+| 4000 × 3 连发 | 450/4000 | — | +431/475/695 |
+
+- 512 包 × 10 轮连发时在「满发 40 Mbit/s」与「丢 5–60%」之间交替；降速到 16 包/批 4 ms 或 8 包/批 1 ms 仍有 5–25% 丢包。
+- 最干净的证据是 512 包 × 10 轮：这些轮次 P2P `errors` 增量为 0、没有回退，却仍有 5–60% 丢包，说明丢在手机入站路径（系统给隧道的入站队列 + Swift pump 每包一次 `receive`/`writePackets`）。1024 及以上的单轮丢包更重，且同时出现 `errors` 增量，两种损耗叠加，暂不能区分比例。
+- 后续方向：跨 FFI 批量取出（一次 `fv6_receive` 返回多包）与 pump 侧批量 `writePackets`，并把入站丢弃计入可观测统计，便于区分「系统队列满」与「Rust 侧丢弃」。需要先加计数再动手，否则改完无法证明有效。
 
 ## 本轮验证记录
 

@@ -4247,6 +4247,13 @@ W16-01 仍缺成员/策略页面切片，保持 `[ ]`。
 上传、下载、暂停/恢复/取消与 SAF 仍属 W16，本客户端不提供写入动作。新增 `FileBrowseTest` 5 项，Android 单测共 71 项通过。
 W16-01 仍未挂载设置页与成员/策略切片，保持 `[ ]`。
 
+**补充（2026-11-21，File 传输客户端）**：新增 `bridge/FileTransfer`：上传按固定长度流式发送到
+`POST /api/v1/file/uploads`（查询仅含 `peer`/`network_id`/`share_id`/`path`/`chunk_size` 且全部编码），下载先
+`POST /api/v1/file/downloads` 取短期 token（路径只在 JSON body），再由 `GET /api/v1/file/downloads/{token}` 取流；
+暂停/恢复使用类型化路径并拒绝未知动作，传输列表解析方向/状态/进度/块数与稳定错误码。`201` 只表示“已开始”，
+从不表示完成。新增 `FileTransferTest` 6 项，Android 单测共 77 项通过。SAF 文件选择器、真机传输与 VpnService 仍未实现，
+W16-01 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

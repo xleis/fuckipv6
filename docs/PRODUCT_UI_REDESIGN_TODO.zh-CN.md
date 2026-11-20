@@ -4655,6 +4655,21 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 
 ### W18-02 Rust 质量门禁 `[ ]`
 
+**补充（2026-11-21，本地 release-gate linux 实跑）**：以 `python3 scripts/release-gate.py run --platform linux --toolchain stable --allow-dirty --benchmark none` 在本机跑完整 Linux 门禁，结果 `failed`，逐项归因：
+
+| 检查 | 结果 | 归因 |
+|---|---|---|
+| `test` | passed | `cargo test --workspace --all-features` 由门禁自身确认 |
+| `release-build` | passed | `cargo build --release --workspace --all-features` |
+| `lifecycle-cleanup*`（含 route/dns/tun/exit-rules） | passed | Linux 生命周期清理专项 |
+| `cross-check-x86_64-pc-windows-gnu` | passed | Windows 交叉检查 |
+| `cross-check-x86_64-unknown-linux-musl` | failed → **已修** | 两处 `file_share` 竞态测试直调 `libc::renameat2`（gnu 专有符号）；改为 `rename_exchange`（gnu 用 libc、musl 用 `SYS_renameat2` 系统调用）后，`cargo check --workspace --all-targets --all-features --target x86_64-unknown-linux-musl` 通过 |
+| `format` / `clippy` | failed | 并发会话未提交的 `crates/client/src/gpui/view.rs`、`view_model.rs` 改动（格式漂移与 `needless_borrows_for_generic_args`），不属于本轮改动，未代改 |
+| `stable-source` | failed | 门禁运行期间 HEAD 被并发提交推进，属预期 |
+| `clean-worktree` | skipped | 用了 `--allow-dirty` |
+
+结论：门禁仍不能判绿，但阻塞项已收敛到"他人未提交的 gpui 改动"和"运行期间提交漂移"；musl 交叉编译是真实缺陷，本轮已修复并取证。
+
 **补充（2026-11-21，Linux 工作区测试门禁）**：`cargo test --workspace --all-features` 此前在本机 Linux 上为红，两类原因已修：
 
 1. `crates/client/src/embedded/tests.rs` 的 13 项端到端测试在 Linux 上必然失败——`prepare_client_runtime_ext` 按设计拒绝 Linux 上的

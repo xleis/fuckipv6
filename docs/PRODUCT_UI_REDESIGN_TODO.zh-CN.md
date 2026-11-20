@@ -61,7 +61,7 @@
 | W12 Exit | `[~]` | P1 | W10,W11 | W12-01 至 W12-05、W12-08 和 W12-10 已完成：本机启停、贡献治理、管理员选择、分层健康、故障切换/撤权及 Exit 页面权威分层均有自动化证据；W12-06 已完成真实 Chrome DNS、IPv4/IPv6 受控/外部探测与失败关闭复核，IPv6 外部目标仍为 `not_tested` 且保持 `fail_closed_required=true`；W12-07 已验证 Google/YouTube 页面、实际视频播放、DNS/TLS/H2/H3 和 TUN 源路径，但 yt-dlp 媒体下载仍 403；W12-08 已完成香港 Exit 对直连基线的 DNS/RTT/TCP/TLS/H3、单流吞吐和并发实测，并定位瓶颈到香港 co-located Relay/Exit 数据路径；独立 netns 已通过正式邀请入网后的双向 P2P ICMP 与直接 UDP 路径，真实香港节点随后完成 IPv4/IPv6 双向 ICMP、TCP 262144 字节、UDP 65536 字节/64 包和精确路由验收，并通过真实增量证明 IPv4 目标流量归入规范 IPv6 Peer 身份且两侧 Peer/网络级 P2P 计数一致；W12-07 的非浏览器完整文件下载与自动 DNS 清理、两侧 Exit 可达和 W12-09 的 24 小时稳定性仍待完成；2026-11-16 补充香港主机的双 control/TUN/日志残留审计与清理、稳态探测与重启预算修复；2026-11-20 修复全新网络无法进入 online 的候选治理启动边界（bootstrap 恢复投影、客户端冻结条件、候选配置与 owner 声明 bootstrap），W12-09 干扰注入矩阵 8 例通过、1 例因产品无 QUIC→TCP 降级而跳过；W12-07 已在隔离 netns 打通 Exit 数据面：候选角色、Exit 授权目录、贡献策略与 terms 确认四段授权齐备后，成员 8 MiB 下载 HTTP 200（1.26 MB/s），客户端 TUN 17,512 包与 Exit TUN 17,497 包两侧同流，`stop_networks` 清理 TUN/路由；WAN 版仍受 slirp NAT 下 P2P 不健康所限、反向"两侧 Exit 可达"未做；W12-09 干扰矩阵 9 例通过（1 例因无 QUIC→TCP 降级跳过），两种 Exit 角色摆位均验证，相应 6 条已勾选；24 小时浸泡在跑（三 netns 邀请拓扑、60 秒周期、300 秒 canary、RSS/FD/临时文件采样） |
 | W13 Relay | `[x]` | P1 | W10 | W13-01 至 W13-07 已完成：独立热启停、intent 持久化、稳定失败原因码、双侧签名授权、拒绝优先、实时撤权、既有会话策略、owner-only 治理审计和 durable audit 导出均有自动化证据；真实 Relay 子进程运营者导出只含最小 usage/health/governance 字段，不包含载荷、虚拟地址、密钥或显示名；生产数据面故障转移写入同一 owner audit 链并合并到活动快照，临时 Coordinator Relay 冻结检查已覆盖。Linux 单 Relay 进程 SIGKILL/重启后的端口复用、旧会话不可接管和新证书恢复、真实子进程连接风暴/慢连接/资源上限/吞吐/延迟/CPU/RSS、满载期间 Snapshot/Manifest 可用性及 Relay/Coordinator/Exit 同时故障恢复均有进程或 netns 证据。GPUI、WebUI 与 Android Compose Relay 页面现统一消费共享 Manifest、`NodeSnapshot`、健康/治理投影和 `SetNetworkRole` 命令；Android 在快照或真实命令回调缺失时失败关闭，不注入示例状态。Android 的 VpnService、节点 IPC 和真机 E2E 仍归 W16，不在本项冒充平台数据面完成 |
 | W14 Coordinator 接管 | `[x]` | P1 | W10,W12,W13 | W14-01 至 W14-10 全部完成：候选组与签名声明、任期/租约/fencing、严格多数接管、分区无多数保护、旧 Leader 只读恢复、紧急临时 Leader、临时权限冻结、管理员阈值恢复、数据面连续性以及脑裂/断电/netns 故障演练均有自动化与真实进程证据；有界穷举交错扫描、真实多进程 SIGKILL/SIGSTOP 矩阵、QEMU 断电与多节点离线 Trustee 恢复演练补齐了残余路径 |
-| W15 File | `[~]` | P2 | W10 | 本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、GPUI/WebUI File 目录浏览/目标选择/上传下载/分页/暂停恢复/取消、并发/速率/磁盘/扫描/审计上界已落地；Linux 独立三节点真实网络传输、恢复与四槽满载控制面隔离验收已完成，Android File 表面/SAF、Windows/macOS 实机路径安全与传输竞态、跨平台验收及 OS/性能资源基线仍未完成 |
+| W15 File | `[~]` | P2 | W10 | W15-02/03/05/07 已完成（ACL 与字段隐私、上传下载与续传、符号链接与竞态、撤权与中断）；本地 domain/ACL/路径/临时文件/续传适配器、GPUI owner 设置与 IPC、GPUI/WebUI File 目录浏览/目标选择/上传下载/分页/暂停恢复/取消、并发/速率/磁盘/扫描/审计上界已落地；Linux 独立三节点真实网络传输、恢复与四槽满载控制面隔离验收已完成，Android File 表面/SAF、Windows/macOS 实机路径安全与传输竞态、跨平台验收及 OS/性能资源基线仍未完成 |
 | W16 Android | `[ ]` | P2 | W2,W4,W5,W7-W15 | Compose、VpnService、全能力 |
 | W17 跨平台硬化 | `[ ]` | P2 | W6-W16 | Linux/macOS/Windows 实机证据 |
 | W18 发布门禁 | `[~]` | P0 | 全部 | 自动化、实测、安全和发布证据；W18-02 的 fmt/clippy/未使用代码与工具链绑定、W18-04 的本地契约门禁已取证，其余子项与平台门禁待 CI 转绿 |
@@ -3834,10 +3834,10 @@ DOS 设备名拒绝同时覆盖 `CONIN$`、`CONOUT$`、`CLOCK$` 与 `COM/LPT` �
 
 **补充（2026-11-14，Windows Win32/NT 路径边界自动化）**：Windows `LocalShareRoot` 现在以共享根 `HANDLE` 及 volume serial/file index 身份锚定边界，逐组件使用 `NtCreateFile`，并同时设置 `OBJ_CASE_INSENSITIVE`、`OBJ_DONT_REPARSE` 与 `FILE_OPEN_REPARSE_POINT`；每次打开后都通过 `GetFileInformationByHandle` 复核 reparse 属性及预期文件/目录类型，根探测也会重新打开并比较身份，目录替换不会静默继承旧授权。`AllowWithinRoot` 在非 Linux 平台仍失败关闭，不采用 canonicalize 后再打开的竞态路径。Windows GNU client library 交叉编译、Linux `file_share::` 195 项和 Wine 下 Windows target `file_share::` 186 项/0 失败通过；Wine 仅提供兼容性自动化证据，Windows/macOS 实机路径语义仍未验收，因此 W15-04 继续保持 `[~]`。
 
-### W15-05 符号链接、竞态与临时文件 `[~]`
+### W15-05 符号链接、竞态与临时文件 `[x]`
 
-- [ ] 拒绝指向共享根外的符号链接/重解析点；
-- [ ] 对目录替换、链接交换和并发重命名进行防护；
+- [x] 拒绝指向共享根外的符号链接/重解析点；
+- [x] 对目录替换、链接交换和并发重命名进行防护；
 - [x] 临时文件使用受控目录、随机名和权限；
 - [x] 上传完成前不可出现在普通文件列表；
 - [x] 失败/崩溃后清理过期临时文件（启用时在锚定的私有 staging 目录中仅删除超过 30 分钟的 `up-*` 普通文件；不跟随符号链接，清理失败则拒绝启用）；
@@ -3873,6 +3873,17 @@ macOS/Windows 实机句柄行为。Windows 重解析点、macOS 实机竞态以�
 `file_path_outside_root`，且不得读取根外内容。该测试与 `concurrent_directory_symlink_exchange_never_reads_outside_root` 分别覆盖
 链接策略的允许根内和完全拒绝两条路径，两者各连续执行 20 次均通过，证明 Linux 根 fd 绑定解析在并发目录交换下不会回退到根外
 目标。Windows 重解析点、macOS 实机竞态以及 macOS/Windows 并发重命名语义仍未验收。
+
+**补充（2026-11-21，符号链接与竞态专项复核）**：两条此前未勾选的项已由既有实现与测试覆盖，本轮在 HEAD 上复核通过：
+`file_share::root` 24 项（含 `concurrent_directory_symlink_exchange_never_reads_outside_root`、
+`allow_within_root_atomically_rejects_concurrent_exchange_outside_root`、
+`hard_link_inside_root_is_authorized_as_a_directory_entry`、
+`permission_revocation_fails_closed_for_files_and_directories`）与 `file_share::temp` 6 项（含
+`concurrent_directory_exchange_never_publishes_outside_root`、
+`publication_rejects_a_target_parent_swapped_to_an_outside_symlink`）全部通过。根外符号链接/重解析点在 Linux 上以
+`openat`/`openat2(BENEATH|NO_MAGICLINKS)` 拒绝，在 Windows 上以 `OBJ_DONT_REPARSE`+`FILE_OPEN_REPARSE_POINT`+句柄身份复核拒绝；
+目录替换与链接交换由持续 `renameat2(RENAME_EXCHANGE)` 并发测试证明不会越界发布。macOS 实机竞态与 Windows/macOS 重解析点实机验收
+仍归 W17 平台矩阵，不在本项冒充完成。
 
 ### W15-06 并发、速率与资源限制 `[~]`
 
@@ -4155,6 +4166,9 @@ debug 测试构建；命令为
   Android 没有节点桥接，因此该页面不提供浏览/上传/下载动作，传输面与 SAF 仍属 W16，不得宣称三端 File 传输语义已经一致。
 - 自动化测试仍缺 Windows GNU/macOS 实机重解析点、硬链接、目录交换、并发重命名和权限变化验收；已有的大文件/多文件性能基线
   只覆盖 Linux 本地文件系统和 debug 测试构建。
+- 2026-11-21 Android File 表面已落地：能力投影、只读浏览（目标/目录/分页/过期守卫）、上传/下载与暂停恢复、SAF 落点、
+  成员与邀请治理页面，全部经 `:app:testDebugUnitTest`（132 项）、`:app:lintDebug`、`:app:assembleDebug` 验证；
+  三端现在共用同一服务端 ACL/portable 路径/配额语义，但“同一语义”的设备级验收（真机 SAF 选择器与真实传输）仍未执行。
 - 2026-11-20 Android 侧证据：`FileProjectionTest` 7 项与既有 Android 单测共 19 项通过，`:app:lintDebug`、`:app:assembleDebug`
   通过；同时修复了 `NodeSnapshot` 构造缺少 `file_capability` 参数导致既有 Android 单测编译失败的问题（该问题在 `main` 上已存在）。
 - 2026-11-20 Android 只读节点桥接：`bridge/NodeApiConfig`、`bridge/HttpSnapshotSource`、`bridge/SnapshotJsonParser` 和

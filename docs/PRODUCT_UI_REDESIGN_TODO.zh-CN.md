@@ -4268,6 +4268,11 @@ W16-01 保持 `[ ]`。
 generation 守卫丢弃过期目录响应，避免切目录后迟到的分页覆盖当前页面；失败复用既有 `file.page.error.*` 文案。新增
 `FileWorkspaceStateTest` 6 项，Android 单测共 87 项通过。挂载到导航仍需与并发外壳改动合并，W16-01 保持 `[ ]`。
 
+**补充（2026-11-21，File 浏览控制器）**：`FileBrowseClient` 实现 `BrowseSource`，新增 `ui/FileBrowseController`：请求在 IO 线程执行、
+捕获发起时的 generation 并丢弃过期响应；`open` 先本地校验 portable path（不合法不发请求），`up`/`loadMore` 分别走父目录与
+不透明 cursor 追加；失败统一映射既有 `file.page.error.*` 且保留已加载条目。新增 `FileBrowseControllerTest` 5 项，Android 单测共
+92 项通过。UI 挂载仍等待外壳改动合并，W16-01 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

@@ -127,15 +127,20 @@ object FileBrowseUrls {
  * Android app has a transfer surface. Every failure is a value the UI renders;
  * nothing is retried silently and no listing is invented.
  */
+interface BrowseSource {
+    fun targets(): BrowseResult<List<FileTarget>>
+    fun directory(request: BrowseRequest): BrowseResult<DirectoryPage>
+}
+
 class FileBrowseClient(
     private val config: NodeApiConfig,
     private val timeoutMillis: Int = 6_000,
-) {
-    fun targets(): BrowseResult<List<FileTarget>> = request(FileBrowseUrls.targets(config)) { body ->
+) : BrowseSource {
+    override fun targets(): BrowseResult<List<FileTarget>> = request(FileBrowseUrls.targets(config)) { body ->
         BrowseResult.Ok(FileBrowseJson.parseTargets(body))
     }
 
-    fun directory(request: BrowseRequest): BrowseResult<DirectoryPage> =
+    override fun directory(request: BrowseRequest): BrowseResult<DirectoryPage> =
         request(FileBrowseUrls.directory(config, request)) { body ->
             BrowseResult.Ok(FileBrowseJson.parseDirectory(body))
         }

@@ -10329,14 +10329,21 @@ td,
   border-color: var(--border) !important;
 }
 
-section,
-article,
-.page-heading,
+/* Only real cards get the paper fill; page-level containers stay on the
+   page ground so both surfaces share one uninterrupted background. */
+.surface-card,
+.network-card,
 .panel,
-.card,
-[data-ui-region="content"] > * {
+.page-heading {
   background-color: var(--panel-solid);
   border: 0 !important;
+}
+
+section,
+article,
+[data-ui-region="content"],
+.page-content {
+  background-color: transparent !important;
 }
 
 .workspace {
@@ -10698,4 +10705,242 @@ article,
   .file-transfer-meta {
     grid-template-columns: 1fr;
   }
+}
+
+/* ── Hard flat pass ──────────────────────────────────────────────────────
+   No gradients anywhere, no blur, no shadows, no radii, no component
+   outlines. Depth is expressed only by the paper fill and single hairlines
+   on structural edges. */
+*:not(svg):not(svg *) {
+  background-image: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+.dialog,
+.action-workspace,
+.network-actions-menu,
+.page-command-menu,
+.dropdown-menu,
+.topology-options-panel,
+.topology-legend-grid,
+.topology-detail-drawer,
+.popover,
+.menu-panel,
+[role="dialog"],
+[role="menu"] {
+  background: var(--panel-solid) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+
+input,
+select,
+textarea,
+.toolbar-button,
+.icon-button,
+.primary-button,
+.secondary-button,
+.danger-button,
+button {
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+input,
+select,
+textarea {
+  background: var(--input-bg) !important;
+  border: 0 !important;
+  color: var(--text);
+}
+
+button {
+  background: var(--panel-solid);
+  border: 0;
+  color: var(--text);
+}
+
+button:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.primary-button {
+  background: var(--text) !important;
+  color: var(--bg) !important;
+}
+
+.primary-button:hover:not(:disabled) {
+  background: var(--text-secondary) !important;
+}
+
+.badge,
+.status-badge,
+.sync-badge,
+.topology-network-chips button,
+.page-tab {
+  border-radius: 0 !important;
+  border: 0 !important;
+  background: var(--surface);
+  color: var(--text-secondary);
+}
+
+.page-tab[aria-selected="true"] {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+table {
+  border-collapse: collapse;
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+/* The canvas is the page, not a second surface: one paper tone, one hairline. */
+.topology-stage {
+  background: var(--bg) !important;
+  border: 0 !important;
+}
+
+.topology-stage .topology-canvas {
+  background: var(--bg) !important;
+}
+
+/* Empty topology keeps the canvas as the workspace centre. */
+.topology-stage-empty {
+  display: grid;
+  place-items: center;
+  height: clamp(380px, calc(100vh - 410px), 880px);
+  min-height: 380px;
+}
+
+.topology-empty-card {
+  display: grid;
+  gap: 4px;
+  padding: 14px 18px;
+  background: var(--panel-solid);
+  text-align: left;
+}
+
+.topology-empty-title {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.topology-empty-detail {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+/* Paper iconography: thin ink strokes, no filled blocks. */
+.primary-nav:not(.drawer) .brand-mark {
+  width: 40px;
+  height: 40px;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.primary-nav:not(.drawer) .brand-mark svg {
+  width: 23px;
+  height: 23px;
+  color: var(--text);
+  stroke-width: 1.5;
+}
+
+.primary-nav:not(.drawer) .module-button {
+  color: var(--text-muted);
+}
+
+.primary-nav:not(.drawer) .module-button > svg {
+  stroke-width: 1.5;
+  opacity: 0.9;
+}
+
+.primary-nav:not(.drawer) .module-button:hover {
+  color: var(--text-secondary);
+}
+
+.primary-nav:not(.drawer) .module-button.selected {
+  background: transparent !important;
+  color: var(--text);
+}
+
+.primary-nav:not(.drawer) .module-button.selected:before {
+  background: var(--text) !important;
+}
+
+.global-bar .icon-button svg,
+.global-bar .toolbar-button svg,
+.global-bar .primary-icon-button svg {
+  color: var(--text-secondary);
+  stroke-width: 1.5;
+}
+
+.card-heading > svg,
+.topology-insight-heading > svg {
+  color: var(--text-faint);
+  stroke-width: 1.4;
+}
+
+/* Status is carried by a small dot and muted ink, never by a filled block. */
+.status-pill,
+.status-pill.neutral,
+.status-pill.good,
+.status-pill.warn,
+.status-pill.bad,
+.capability-dot {
+  background: transparent !important;
+}
+
+.status-pill {
+  padding-left: 0;
+  padding-right: 0;
+  color: var(--text-muted) !important;
+}
+
+.status-pill::before {
+  background: var(--text-faint);
+}
+
+.status-pill.good::before {
+  background: var(--success);
+}
+
+.status-pill.warn::before {
+  background: var(--warning);
+}
+
+.status-pill.bad::before {
+  background: var(--danger);
+}
+
+/* Softer icon ink across the chrome. */
+.primary-nav:not(.drawer) .brand-mark svg {
+  color: var(--text-secondary);
+  stroke-width: 1.4;
+}
+
+.primary-nav:not(.drawer) .module-button {
+  color: var(--text-faint);
+}
+
+.primary-nav:not(.drawer) .module-button.selected {
+  color: var(--text);
+}
+
+.global-bar .icon-button svg,
+.global-bar .toolbar-button svg,
+.global-bar .primary-icon-button svg {
+  color: var(--text-muted);
 }

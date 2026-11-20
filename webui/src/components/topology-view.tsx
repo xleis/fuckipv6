@@ -1511,7 +1511,7 @@ const TopologyNodeGlyph = memo(function TopologyNodeGlyph({
   const shared = node.networks.length > 1;
   const rawName = node.display_name?.trim() || node.node_id;
   const displayName =
-    rawName.length > 19 ? `${rawName.slice(0, 18)}…` : rawName;
+    rawName.length > 12 ? `${rawName.slice(0, 11)}…` : rawName;
   const roleText = nodeRoleText(locale, node, undefined);
   const metaText = `${roleText} · ${healthLabel(locale, node.health)}`;
   const dragRef = useRef<{
@@ -1718,7 +1718,7 @@ const TopologyNodeGlyph = memo(function TopologyNodeGlyph({
         y="-32"
         width="164"
         height="64"
-        rx="13"
+        rx="0"
         className="topology-node-card"
         stroke={networkColor}
       />
@@ -2551,6 +2551,8 @@ export function TopologyView({
   }
 
   if (!presentation.canRender || !sourceTopology) {
+    // Not renderable yet: keep the workspace shape (canvas included) and state
+    // the condition, instead of collapsing to a bare notice bar.
     return (
       <div
         className="topology-state-shell"
@@ -2560,16 +2562,50 @@ export function TopologyView({
           presentation={presentation}
           locale={locale}
         />
+        <div className="topology-stage topology-stage-empty">
+          <div className="topology-floating-toolbar" aria-hidden="true">
+            <span className="topology-zoom-status">100%</span>
+          </div>
+          <div className="topology-empty-card">
+            <span className="topology-empty-title">
+              {label(locale, "topology.list.self")}
+            </span>
+            <span className="topology-empty-detail">
+              {label(locale, topologyConditionCopy(presentation.kind).titleKey)}
+            </span>
+          </div>
+          <div className="topology-canvas-footer">
+            <div className="topology-legend" aria-hidden="true" />
+          </div>
+        </div>
       </div>
     );
   }
   if (sourceTopology.boundaries.length === 0) {
+    // Nothing to draw yet, but the workspace keeps its canvas: the empty card
+    // states the condition and never pretends to be a node or a link.
     return (
       <div className="topology-state-shell" data-topology-state="empty">
         <TopologyPresentationNotices
           presentation={topologyPresentation(sourceTopology)}
           locale={locale}
         />
+        <div className="topology-stage topology-stage-empty">
+          <div className="topology-floating-toolbar" aria-hidden="true">
+            <span className="topology-zoom-status">100%</span>
+          </div>
+          <div className="topology-empty-card">
+            <span className="topology-empty-title">
+              {label(locale, "topology.list.self")}
+            </span>
+            <span className="topology-empty-detail">
+              {label(locale, "topology.state.empty.title")}
+            </span>
+          </div>
+          <div className="topology-canvas-footer">
+            <div className="topology-legend" aria-hidden="true" />
+          </div>
+        </div>
       </div>
     );
   }

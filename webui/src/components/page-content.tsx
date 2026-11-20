@@ -858,10 +858,21 @@ function recentOverviewActivity(
     }));
 }
 
-function abbreviatedNodeId(nodeId: string): string {
-  const characters = Array.from(nodeId);
-  if (characters.length <= 20) return nodeId;
-  return `${characters.slice(0, 12).join("")}…${characters.slice(-6).join("")}`;
+/** Internal command identifiers never reach the screen: the user sees the
+ *  action name, not `node_command:start_node`. */
+/** Server detail strings sometimes embed the raw command id; drop it so the
+ *  row reads as an outcome, not as a wire identifier. */
+function sanitizeActivityDetail(detail: string): string {
+  return detail
+    .replace(/\s*·?\s*node_command:[a-z0-9_]+/g, "")
+    .replace(/node_command:[a-z0-9_]+\s*·?\s*/g, "")
+    .trim();
+}
+
+function activityCommandLabel(locale: Locale, command: string): string {
+  const key = `action.${command.replace(/^node_command:/, "").replace(/_/g, ".")}`;
+  const text = label(locale, key);
+  return text === key ? "" : text;
 }
 
 function Overview({
@@ -884,7 +895,6 @@ function Overview({
   const nodeName =
     snapshot.identity?.display_name?.trim() ||
     label(locale, "overview.node_name_fallback");
-  const nodeId = snapshot.identity?.node_id?.trim();
   const shortcut = (actionId: string) => {
     onNavigate("networks");
     onRequestAction(actionId);
@@ -905,15 +915,6 @@ function Overview({
         <div className="hero-status-copy">
           <span>{label(locale, "common.primary_status")}</span>
           <h2>{nodeName}</h2>
-          {nodeId ? (
-            <div
-              className="hero-node-identity"
-              aria-label={`${label(locale, "overview.node_id")}: ${nodeId}`}
-            >
-              <span>{label(locale, "overview.node_id")}</span>
-              <code title={nodeId}>{abbreviatedNodeId(nodeId)}</code>
-            </div>
-          ) : null}
           <p>
             <strong>{status.label}</strong> · {status.detail}
           </p>
@@ -1032,23 +1033,22 @@ function Overview({
           <span className={`status-pill ${traffic.tone}`}>{traffic.label}</span>
           <code>{traffic.detail}</code>
         </div>
-        <div className="traffic-session-meta">
-          <span>
-            {label(locale, "traffic.session.reason")}
-            <code>
-              {trafficSession?.reason_code ??
-                label(locale, "traffic.session.no_reason")}
-            </code>
-          </span>
-          <span>
-            {label(locale, "traffic.session.failure")}
-            <code>
-              {trafficSession?.failure
-                ? trafficFailureLabel(locale, trafficSession.failure)
-                : label(locale, "common.none")}
-            </code>
-          </span>
-        </div>
+        {trafficSession?.reason_code || trafficSession?.failure ? (
+          <div className="traffic-session-meta">
+            {trafficSession?.reason_code ? (
+              <span>
+                {label(locale, "traffic.session.reason")}
+                <code>{trafficSession.reason_code}</code>
+              </span>
+            ) : null}
+            {trafficSession?.failure ? (
+              <span>
+                {label(locale, "traffic.session.failure")}
+                <code>{trafficFailureLabel(locale, trafficSession.failure)}</code>
+              </span>
+            ) : null}
+          </div>
+        ) : null}
         {trafficValidation ? (
           <>
             <h4>{label(locale, "traffic.session.validation.title")}</h4>
@@ -1143,13 +1143,13 @@ function Overview({
                 <CircleDot size={14} />
                 <span>
                   <strong>{entry.title}</strong>
-                  <small>{entry.detail}</small>
-                  <code className="activity-audit-id">
-                    {tr(locale, "overview.activity.audit_id", {
-                      audit: entry.auditId,
-                    })}
-                  </code>
-                  {entry.command ? <code>{entry.command}</code> : null}
+                  <small>{sanitizeActivityDetail(entry.detail)}</small>
+                  {entry.command &&
+                  activityCommandLabel(locale, entry.command) ? (
+                    <small className="activity-command">
+                      {activityCommandLabel(locale, entry.command)}
+                    </small>
+                  ) : null}
                 </span>
               </div>
             ))}

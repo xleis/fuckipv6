@@ -826,7 +826,7 @@ export function validateSnapshot(snapshot: unknown): NodeSnapshot {
       fail(`network traffic invalid: ${network.name}`);
   }
   if (value.network_profiles !== undefined) {
-    for (const profile of value.network_profiles) {
+    for (const profile of value.network_profiles ?? []) {
       if (!record(profile)) fail("network profile snapshot invalid");
       stringValue(profile.name, "network profile snapshot name invalid", true);
       stringValue(
@@ -897,7 +897,7 @@ export function validateSnapshot(snapshot: unknown): NodeSnapshot {
     arrayValue(peer.endpoints, `peer endpoints invalid: ${peer.peer_id}`);
     if (!record(peer.traffic)) fail(`peer traffic invalid: ${peer.peer_id}`);
   }
-  for (const entry of value.logs) {
+  for (const entry of value.logs ?? []) {
     if (!record(entry)) fail("log entry invalid");
     stringValue(entry.message, "log message invalid");
     stringValue(entry.target, "log target invalid");

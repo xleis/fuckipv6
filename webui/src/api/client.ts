@@ -173,10 +173,32 @@ export async function loadManifest(): Promise<NodeUiManifest> {
   return validateManifestResponse(payload);
 }
 
+
+/** The node omits empty optional collections; fill them once so every
+ *  consumer can iterate without null checks. */
+function normalizeSnapshot(snapshot: NodeSnapshot): NodeSnapshot {
+  return {
+    ...snapshot,
+    networks: snapshot.networks ?? [],
+    peers: snapshot.peers ?? [],
+    logs: snapshot.logs ?? [],
+    embedded_services: snapshot.embedded_services ?? [],
+    memberships: snapshot.memberships ?? [],
+    network_profiles: snapshot.network_profiles ?? [],
+    exit_selections: snapshot.exit_selections ?? [],
+    routing_summaries: snapshot.routing_summaries ?? [],
+    interfaces: snapshot.interfaces ?? [],
+    interface_problems: snapshot.interface_problems ?? [],
+    recent_activity: snapshot.recent_activity ?? [],
+  };
+}
+
 function loadSnapshotInline(): Promise<NodeSnapshot> {
   return apiRequest<NodeApiSnapshotResponse>(
     `/api/v1/snapshot?schema_version=${NODE_CONTRACT_SCHEMA_VERSION}`,
-  ).then(validateSnapshotResponse);
+  )
+    .then(validateSnapshotResponse)
+    .then(normalizeSnapshot);
 }
 
 type PendingSnapshotRequest = {
@@ -190,11 +212,6 @@ let snapshotWorkerRequestSequence = 0;
 let lastWorkerSnapshot: NodeSnapshot | null = null;
 let lastWorkerSnapshotToken = 0;
 const pendingSnapshotRequests = new Map<number, PendingSnapshotRequest>();
-
-function rejectPendingSnapshotRequests(error: unknown): void {
-  for (const pending of pendingSnapshotRequests.values()) pending.reject(error);
-  pendingSnapshotRequests.clear();
-}
 
 function getSnapshotWorker(): Worker | null {
   if (snapshotWorker) return snapshotWorker;
@@ -269,6 +286,7 @@ function loadSnapshotInWorker(previous?: NodeSnapshot): Promise<NodeSnapshot> {
       }
       next = applySnapshotPatch(previous, result.patch);
     }
+    next = normalizeSnapshot(next);
     lastWorkerSnapshot = next;
     lastWorkerSnapshotToken = result.token;
     return next;

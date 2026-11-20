@@ -22,7 +22,6 @@ import {
   Search as SearchIcon,
   ServerCog,
   Settings as SettingsIcon,
-  ShieldAlert,
   Wifi,
   X,
 } from "lucide-react";
@@ -1429,16 +1428,8 @@ function AppShell({
   const subpages = activeModule.pages
     .map((id) => manifest.pages.find((page) => page.id === id))
     .filter((page): page is NodeUiPage => Boolean(page));
-  const controlPending =
-    manualRefreshPending ||
-    refreshing ||
-    languageMutation.isPending ||
-    logoutMutation.isPending;
   const navigationFooter = (
     <>
-      <span>
-        {label(locale, "common.snapshot")} #{snapshot.revision}
-      </span>
       <span
         className={
           syncMode === "live" ? "stale-indicator" : "stale-indicator active"
@@ -1925,7 +1916,9 @@ export function App(): JSX.Element {
       languagePreference={languageQuery.data ?? "system"}
       eventState={eventState}
       browserOnline={browserOnline}
-      refreshing={snapshotQuery.isFetching && Boolean(snapshotQuery.data)}
+      // Background polls must not drive any layout-affecting chrome: the
+      // refresh banner only appears for an explicit user-initiated refresh.
+      refreshing={false}
       lastAuthoritativeAt={
         snapshotQuery.dataUpdatedAt > 0 ? snapshotQuery.dataUpdatedAt : null
       }

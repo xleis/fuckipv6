@@ -638,14 +638,62 @@ export function TopologyPage({
   }
 
   if (!topology) {
+    // No topology data yet: the workspace keeps its shape so the canvas stays
+    // the visual centre, but nothing pretends to be a node or a link.
     return (
-      <TopologyView
-        topology={null}
-        locale={locale}
-        presentationSignals={presentationSignals}
-        filters={filters}
-        onFiltersChange={setFilters}
-      />
+      <div className="topology-page">
+        <section
+          className="topology-state-band"
+          aria-label={label(locale, "topology.hero.status")}
+        >
+          <div className="topology-state-primary">
+            <span className="topology-state-copy">
+              <strong>{label(locale, "topology.state.empty.title")}</strong>
+              <span>{label(locale, "topology.empty.no_networks")}</span>
+            </span>
+          </div>
+        </section>
+        <div className="topology-stage topology-stage-empty">
+          <div className="topology-floating-toolbar" aria-hidden="true">
+            <span className="topology-zoom-status">100%</span>
+          </div>
+          <div className="topology-empty-card">
+            <span className="topology-empty-title">
+              {label(locale, "topology.list.self")}
+            </span>
+            <span className="topology-empty-detail">
+              {label(locale, "topology.state.empty.title")}
+            </span>
+          </div>
+          <div className="topology-canvas-footer">
+            <div className="topology-legend" aria-hidden="true" />
+          </div>
+        </div>
+        <div className="topology-insights">
+          <section className="topology-insight-card">
+            <div className="topology-insight-heading">
+              <div>
+                <h2>{label(locale, "topology.path.title")}</h2>
+                <span>{label(locale, "topology.path.auto")}</span>
+              </div>
+            </div>
+            <p className="topology-insight-empty">
+              {label(locale, "topology.path.empty")}
+            </p>
+          </section>
+          <section className="topology-insight-card">
+            <div className="topology-insight-heading">
+              <div>
+                <h2>{label(locale, "topology.events.title")}</h2>
+                <span>{label(locale, "topology.events.window")}</span>
+              </div>
+            </div>
+            <p className="topology-insight-empty">
+              {label(locale, "topology.events.empty")}
+            </p>
+          </section>
+        </div>
+      </div>
     );
   }
 

@@ -386,7 +386,7 @@ async function main() {
     ]);
     assert.deepEqual(primaryNavigation.flatMap((module) => module.pageIds), [
       "overview", "peers", "node_runtime", "routing", "identity", "networks",
-      "topology", "exit_node", "relay", "traffic", "logs", "settings",
+      "topology", "exit_node", "relay", "traffic", "activity", "logs", "files", "settings",
     ]);
 
     assert.match(reactActionPanel, /@radix-ui\/react-dialog/);

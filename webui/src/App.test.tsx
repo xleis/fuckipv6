@@ -1647,7 +1647,9 @@ describe("React WebUI shell", () => {
       expect(loadSnapshot).toHaveBeenCalledTimes(2);
       expect(loadManifest).toHaveBeenCalledTimes(2);
     });
-    expect(await screen.findByText("command-77")).toBeInTheDocument();
+    expect(
+      await screen.findByText("translated:action.command-77"),
+    ).toBeInTheDocument();
 
     act(() =>
       reconnectSocket.emit(
@@ -2773,7 +2775,7 @@ describe("React WebUI shell", () => {
     expect(rows[0]).toHaveTextContent("command-6");
     expect(rows[4]).toHaveTextContent("command-2");
     expect(rows[0]).toHaveAttribute("data-audit-id", "audit-6");
-    expect(rows[0]).toHaveTextContent("translated:overview.activity.audit_id");
+    expect(rows[0]).toHaveTextContent("translated:overview.activity.detail");
     expect(activity).not.toHaveTextContent("raw-summary");
     expect(activity).not.toHaveTextContent("secret-");
   });

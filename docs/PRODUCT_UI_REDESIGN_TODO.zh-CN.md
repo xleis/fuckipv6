@@ -4254,6 +4254,12 @@ W16-01 仍未挂载设置页与成员/策略切片，保持 `[ ]`。
 从不表示完成。新增 `FileTransferTest` 6 项，Android 单测共 77 项通过。SAF 文件选择器、真机传输与 VpnService 仍未实现，
 W16-01 保持 `[ ]`。
 
+**补充（2026-11-21，成员目录切片）**：新增 `bridge/MemberSurface`：`list_network_members` 命令编码与 `network_members`
+结果解析（节点身份、可选显示名、角色、连接状态、生命周期状态、revision、access epoch、当前视角可执行动作、加入时间）。
+空成员列表视为合法空名单；缺少 `network_id` 或 `members` 类型错误返回 `null`，页面继续显示“未观察”而不是渲染假名单。
+未知角色/状态原样保留供上层按稳定键降级。新增 `MemberSurfaceTest` 4 项，Android 单测共 81 项通过。成员页 UI 与
+生命周期命令（`change_member_lifecycle` 等）仍待接线，W16-01 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

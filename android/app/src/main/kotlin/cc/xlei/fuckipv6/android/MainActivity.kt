@@ -43,6 +43,7 @@ import cc.xlei.fuckipv6.android.bridge.JoinReviewRequest
 import cc.xlei.fuckipv6.android.bridge.MemberLifecycleRequest
 import cc.xlei.fuckipv6.android.bridge.MemberLifecycleSurface
 import cc.xlei.fuckipv6.android.bridge.MemberSurface
+import cc.xlei.fuckipv6.android.bridge.NetworkLabel
 import cc.xlei.fuckipv6.android.bridge.MemberView
 import cc.xlei.fuckipv6.android.bridge.DirectoryEntry
 import cc.xlei.fuckipv6.android.bridge.FileTransferClient
@@ -59,6 +60,7 @@ import cc.xlei.fuckipv6.android.ui.FileBrowseController
 import cc.xlei.fuckipv6.android.ui.InvitationListContent
 import cc.xlei.fuckipv6.android.ui.JoinRequestListContent
 import cc.xlei.fuckipv6.android.ui.MemberListContent
+import cc.xlei.fuckipv6.android.ui.NetworkSelection
 import cc.xlei.fuckipv6.android.ui.FileTransferController
 import cc.xlei.fuckipv6.android.ui.FileTransferNaming
 import cc.xlei.fuckipv6.android.ui.RelayPageData
@@ -98,6 +100,7 @@ class MainActivity : ComponentActivity() {
     private val invitations = MutableStateFlow<List<InvitationView>?>(null)
     private val issuedInvitationCode = MutableStateFlow<String?>(null)
     private var memberNetworkId: String? = null
+    private val selectedNetwork = MutableStateFlow<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -217,7 +220,14 @@ class MainActivity : ComponentActivity() {
         bridgeScope.launch {
             node?.state()?.collect { state ->
                 val ready = state as? BridgeState.Ready ?: return@collect
-                val networkName = ready.relay?.networkName
+                // Every surface reads the selected network, not whichever the
+                // snapshot happened to list first.
+                val chosen = NetworkSelection.resolve(ready.networks, selectedNetwork.value)
+                    ?: return@collect
+                if (selectedNetwork.value != chosen.networkName) {
+                    selectedNetwork.value = chosen.networkName
+                }
+                val networkName = chosen.networkName
                 if (networkName != null) {
                     val networkId = ready.networks
                         .firstOrNull { it.networkName == networkName }
@@ -302,8 +312,14 @@ class MainActivity : ComponentActivity() {
             }
             val files = ready?.data
             val filesFailureKey = (bridgeState as? BridgeState.Failed)?.failure?.uiStateKey
-            val relay = ready?.relay?.let(::relayPageData)
-            val coordinator = ready?.coordinator?.let(CoordinatorPageData::fromBridge)
+            val availableNetworks: List<NetworkLabel> = ready?.networks.orEmpty()
+            val selectedNetworkName = selectedNetwork.collectAsState().value
+            val relay = ready?.relay
+                ?.takeIf { it.networkName == selectedNetworkName }
+                ?.let(::relayPageData)
+            val coordinator = ready?.coordinator
+                ?.takeIf { it.networkName == selectedNetworkName }
+                ?.let(CoordinatorPageData::fromBridge)
             val admin = adminPage.collectAsState().value
             val membersState = members.collectAsState().value
             val joinRequestsState = joinRequests.collectAsState().value
@@ -317,6 +333,9 @@ class MainActivity : ComponentActivity() {
                             relay = relay,
                             coordinator = coordinator,
                             adminRecovery = admin,
+                            availableNetworks = availableNetworks,
+                            selectedNetworkName = selectedNetworkName,
+                            onSelectNetwork = { name -> selectedNetwork.value = name },
                             members = membersState,
                             onRefreshMembers = { memberNetworkId?.let(::refreshMembers) },
                             onMemberLifecycleAction = ::changeMemberLifecycle,

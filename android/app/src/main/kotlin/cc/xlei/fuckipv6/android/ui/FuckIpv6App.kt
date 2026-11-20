@@ -62,6 +62,9 @@ fun FuckIpv6App(
     fileBrowse: FileWorkspaceState? = null,
     fileBrowseActions: FileBrowseActions? = null,
     transfers: FileTransferState? = null,
+    availableNetworks: List<cc.xlei.fuckipv6.android.bridge.NetworkLabel> = emptyList(),
+    selectedNetworkName: String? = null,
+    onSelectNetwork: ((String) -> Unit)? = null,
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
@@ -164,6 +167,9 @@ fun FuckIpv6App(
                 fileBrowse = fileBrowse,
                 fileBrowseActions = fileBrowseActions,
                 transfers = transfers,
+                availableNetworks = availableNetworks,
+                selectedNetworkName = selectedNetworkName,
+                onSelectNetwork = onSelectNetwork,
                 members = members,
                 onRefreshMembers = onRefreshMembers,
                 onMemberLifecycleAction = onMemberLifecycleAction,
@@ -219,6 +225,9 @@ fun PageContent(
     fileBrowse: FileWorkspaceState? = null,
     fileBrowseActions: FileBrowseActions? = null,
     transfers: FileTransferState? = null,
+    availableNetworks: List<cc.xlei.fuckipv6.android.bridge.NetworkLabel> = emptyList(),
+    selectedNetworkName: String? = null,
+    onSelectNetwork: ((String) -> Unit)? = null,
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
@@ -241,6 +250,15 @@ fun PageContent(
             text = contracts.i18n.translate(locale, "page.$pageId"),
             style = MaterialTheme.typography.headlineSmall,
         )
+        if (onSelectNetwork != null) {
+            NetworkSelector(
+                contracts = contracts,
+                locale = locale,
+                available = availableNetworks,
+                selectedName = selectedNetworkName,
+                onSelect = onSelectNetwork,
+            )
+        }
         when {
             pageId == "node_runtime" && (adminRecovery != null || coordinator != null) ->
                 Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {

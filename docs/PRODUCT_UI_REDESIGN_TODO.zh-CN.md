@@ -4357,6 +4357,11 @@ Android 单测共 125 项通过。加入申请审批（`review_join_request`）�
 只显示一次（节点不再提供），置空后才允许再次创建，不写日志或本地缓存。`MainActivity` 网络切换时读列表、创建/撤销后重读。
 新增 `InvitationSurfaceTest` 4 项与 5 组中英键，Android 单测共 132 项通过。VpnService 与真机验收仍未完成，W16-02 保持 `[ ]`。
 
+**补充（2026-11-21，网络选择器）**：节点可同时服务多个网络，此前各页面隐式使用快照里的第一个网络。新增
+`ui/NetworkSelection`/`NetworkSelector`，`MainActivity` 维护选中网络，Relay/Coordinator/管理员恢复/成员/邀请/加入申请全部按选中
+网络解析；选中项从快照消失时回退首条而不是显示已删除网络的数据；仅在多网络时渲染选择器。新增 `NetworkSelectionTest` 3 项，
+Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 > 当前进展（2026-11-21）：新增隧道骨架。`service/TunnelState` 定义封闭状态机（`Stopped/Preparing/Running/Stopping/Failed`）

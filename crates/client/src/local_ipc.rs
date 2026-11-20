@@ -1890,6 +1890,18 @@ mod tests {
             eprintln!("跳过真实第二 UID 测试：当前系统不允许非特权用户命名空间");
             return Ok(());
         }
+        // Some distributions ship unprivileged `unshare` but no working
+        // setuid/capability UID mapping helper. That is an environment gap, not
+        // a product failure: the test must skip rather than turn a missing
+        // newuidmap into a red workspace gate.
+        if stderr.contains("newuidmap")
+            || stderr.contains("newgidmap")
+            || stderr.contains("Could not set caps")
+            || stderr.contains("write setgroups")
+        {
+            eprintln!("跳过真实第二 UID 测试：系统缺少可用的 UID 映射助手 (newuidmap/newgidmap)");
+            return Ok(());
+        }
         bail!(
             "真实第二 UID 测试失败（status={}）\nstdout:\n{}\nstderr:\n{}",
             output.status,

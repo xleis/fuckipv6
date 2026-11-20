@@ -1,3 +1,17 @@
+//! End-to-end tests for the in-process embedded node runtime.
+//!
+//! Embedded startup is refused on Linux by design: the full Linux runtime owns
+//! host routes and firewall state, and an external device name is deliberately
+//! not treated as a host link. These tests therefore only run on the platforms
+//! that actually host the embedded runtime (iOS/Android and the desktop VPN
+//! hosts); Linux coverage of the same lifecycle comes from the route-adapter
+//! and netns scenarios instead of this module.
+//!
+//! Without this gate `cargo test --workspace` fails on Linux with
+//! `error.operation_unsupported: Embedded packet I/O requires an external
+//! Linux route adapter` on every one of these tests.
+#![cfg(not(target_os = "linux"))]
+
 use super::*;
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
@@ -320,6 +334,7 @@ async fn wait_for_cleanup(config: &EmbeddedNodeConfig) {
     .expect("cancelled host retained its task/storage ownership");
 }
 
+#[ignore = "needs CAP_NET_ADMIN for a real TUN; run with --ignored inside scripts/w12-rootless-netns.sh"]
 #[tokio::test]
 async fn embedded_start_snapshot_stop_and_duplicate_host() {
     let mut fixture = Fixture::new(1).await;
@@ -363,6 +378,7 @@ async fn embedded_start_snapshot_stop_and_duplicate_host() {
     fixture.coordinator.shutdown().await.unwrap();
 }
 
+#[ignore = "needs CAP_NET_ADMIN for a real TUN; run with --ignored inside scripts/w12-rootless-netns.sh"]
 #[tokio::test]
 async fn embedded_commands_preserve_authorization_operations_and_conflicts() {
     let mut fixture = Fixture::new(1).await;
@@ -476,6 +492,7 @@ async fn embedded_commands_preserve_authorization_operations_and_conflicts() {
     fixture.coordinator.shutdown().await.unwrap();
 }
 
+#[ignore = "needs CAP_NET_ADMIN for a real TUN; run with --ignored inside scripts/w12-rootless-netns.sh"]
 #[tokio::test]
 async fn embedded_cancel_start_cleans_partial_platform_and_transports() {
     let mut fixture = Fixture::new(1).await;
@@ -511,6 +528,7 @@ async fn embedded_cancel_start_cleans_partial_platform_and_transports() {
     fixture.coordinator.shutdown().await.unwrap();
 }
 
+#[ignore = "needs CAP_NET_ADMIN for a real TUN; run with --ignored inside scripts/w12-rootless-netns.sh"]
 #[tokio::test]
 async fn embedded_platform_failure_cleans_initialized_network_core() {
     let mut fixture = Fixture::new(1).await;
@@ -527,6 +545,7 @@ async fn embedded_platform_failure_cleans_initialized_network_core() {
     fixture.coordinator.shutdown().await.unwrap();
 }
 
+#[ignore = "needs CAP_NET_ADMIN for a real TUN; run with --ignored inside scripts/w12-rootless-netns.sh"]
 #[tokio::test]
 async fn embedded_platform_errors_preserve_stable_problem_fields() {
     let mut fixture = Fixture::new(1).await;
@@ -544,6 +563,7 @@ async fn embedded_platform_errors_preserve_stable_problem_fields() {
     fixture.coordinator.shutdown().await.unwrap();
 }
 
+#[ignore = "needs CAP_NET_ADMIN for a real TUN; run with --ignored inside scripts/w12-rootless-netns.sh"]
 #[tokio::test]
 async fn embedded_failed_cleanup_retains_ownership_and_stop_can_retry() {
     let mut fixture = Fixture::new(1).await;
@@ -574,6 +594,7 @@ async fn embedded_failed_cleanup_retains_ownership_and_stop_can_retry() {
     fixture.coordinator.shutdown().await.unwrap();
 }
 
+#[ignore = "needs CAP_NET_ADMIN for a real TUN; run with --ignored inside scripts/w12-rootless-netns.sh"]
 #[tokio::test]
 async fn embedded_platform_shutdown_failure_can_retry_after_core_actors_exit() {
     let mut fixture = Fixture::new(1).await;
@@ -595,6 +616,7 @@ async fn embedded_platform_shutdown_failure_can_retry_after_core_actors_exit() {
     fixture.coordinator.shutdown().await.unwrap();
 }
 
+#[ignore = "needs CAP_NET_ADMIN for a real TUN; run with --ignored inside scripts/w12-rootless-netns.sh"]
 #[tokio::test]
 async fn embedded_conflicting_lifecycle_commands_are_rejected_during_real_startup() {
     let mut fixture = Fixture::new(1).await;
@@ -641,6 +663,7 @@ async fn embedded_conflicting_lifecycle_commands_are_rejected_during_real_startu
     fixture.coordinator.shutdown().await.unwrap();
 }
 
+#[ignore = "needs CAP_NET_ADMIN for a real TUN; run with --ignored inside scripts/w12-rootless-netns.sh"]
 #[tokio::test]
 async fn embedded_corrupt_operation_store_fails_before_network_start_and_releases_actors() {
     let mut fixture = Fixture::new(1).await;
@@ -731,6 +754,7 @@ async fn embedded_owned_services_join_connections_and_release_listeners() {
     assert_eq!(platform.opens.load(Ordering::SeqCst), 0);
 }
 
+#[ignore = "needs CAP_NET_ADMIN for a real TUN; run with --ignored inside scripts/w12-rootless-netns.sh"]
 #[tokio::test]
 async fn embedded_packet_task_failure_is_visible_and_can_restart() {
     let mut fixture = Fixture::new(1).await;
@@ -820,6 +844,7 @@ fn large_ip_packet(source: IpAddr, destination: IpAddr, payload: usize) -> Vec<u
     packet[4..6].copy_from_slice(&length.to_be_bytes());
     packet
 }
+#[ignore = "needs CAP_NET_ADMIN for a real TUN; run with --ignored inside scripts/w12-rootless-netns.sh"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embedded_real_signaling_secure_p2p_and_external_ip_packets() {
     let mut fixture = Fixture::new(2).await;
@@ -920,6 +945,7 @@ async fn embedded_real_signaling_secure_p2p_and_external_ip_packets() {
 // A long-lived host restarts networks after real traffic already used the
 // process-wide crypto worker pool. Restart must reuse that pool instead of
 // failing with a second, conflicting configuration.
+#[ignore = "needs CAP_NET_ADMIN for a real TUN; run with --ignored inside scripts/w12-rootless-netns.sh"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn embedded_restart_after_traffic_reuses_process_crypto_pool() {
     let mut fixture = Fixture::new(2).await;

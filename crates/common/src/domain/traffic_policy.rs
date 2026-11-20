@@ -1359,6 +1359,10 @@ mod tests {
         fn domain_normalization_is_case_insensitive_and_idempotent(
             label in "[a-z][a-z0-9-]{0,20}[a-z0-9]",
         ) {
+            // A label that happens to start with the ACE prefix but is not valid
+            // punycode (`xn--0`) is rejected by IDNA on purpose; this property is
+            // about case folding and idempotence, not about ACE validation.
+            prop_assume!(!label.starts_with("xn--"));
             let lower = format!("{label}.Example.");
             let upper = format!("{}.EXAMPLE.", label.to_ascii_uppercase());
             let normalized = DomainName::parse(lower).unwrap();

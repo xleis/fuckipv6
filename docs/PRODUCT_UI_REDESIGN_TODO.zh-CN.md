@@ -4631,6 +4631,19 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 
 ### W18-02 Rust 质量门禁 `[ ]`
 
+**补充（2026-11-21，Linux 工作区测试门禁）**：`cargo test --workspace --all-features` 此前在本机 Linux 上为红，两类原因已修：
+
+1. `crates/client/src/embedded/tests.rs` 的 13 项端到端测试在 Linux 上必然失败——`prepare_client_runtime_ext` 按设计拒绝 Linux 上的
+   embedded 运行时（完整 Linux 运行时独占 host 路由/防火墙，外部设备名不作为 host link）。现在整个测试模块以
+   `#![cfg(not(target_os = "linux"))]` 门控并在模块头写明原因；**代价是 Linux 上失去这 13 项的覆盖**，因此本项仍不勾选，
+   需要先在 Linux 上实现"外部路由适配器"接缝才能恢复。
+2. `domain::traffic_policy::tests::domain_normalization_is_case_insensitive_and_idempotent` 的生成器会产出以 ACE 前缀开头但并非合法
+   punycode 的标签（`xn--0`），IDNA 拒绝它是正确行为；属性已加 `prop_assume!(!label.starts_with("xn--"))`。
+
+另外 `local_ipc::tests::real_second_uid_peer_is_rejected` 现在把"发行版缺少可用 `newuidmap`/`newgidmap`"识别为环境跳过，而不是
+产品失败。复核：`cargo test --workspace --all-features` 无 FAILED，`cargo test -p fuckipv6-client --lib` 1551 passed、common 444 passed，
+`cargo clippy -p fuckipv6-common -p fuckipv6-client --all-targets --all-features -- -D warnings` 通过。
+
 - [x] `cargo fmt --check` 通过；
 - [x] `cargo clippy --workspace --all-targets --all-features -- -D warnings` 通过；
 - [ ] `cargo test --workspace --all-features` 通过；

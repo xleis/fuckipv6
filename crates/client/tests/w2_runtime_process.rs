@@ -110,8 +110,12 @@ fn read_pid(path: &Path) -> Result<u32> {
         .with_context(|| format!("进程锁 {} 不含有效 PID", path.display()))
 }
 
+// The workspace test run drives these launchers alongside ~1,500 other tests, so
+// every readiness poll needs a budget that survives a saturated four-core runner
+// instead of assuming a quiet host. Each loop returns as soon as the condition
+// holds, so the longer ceiling costs nothing when the machine is idle.
 async fn wait_until_ready(endpoint: &LocalEndpoint) -> Result<()> {
-    for _ in 0..150 {
+    for _ in 0..600 {
         let request = local_ipc::request(
             endpoint,
             local_ipc::IpcRole::Cli,
@@ -147,7 +151,7 @@ async fn wait_for_terminal_operation(
 }
 
 async fn wait_for_exit(child: &mut ProcessGuard) -> Result<std::process::ExitStatus> {
-    for _ in 0..150 {
+    for _ in 0..600 {
         if let Some(status) = child.try_wait()? {
             return Ok(status);
         }
@@ -249,7 +253,7 @@ fn process_alive(pid: u32) -> bool {
 }
 
 async fn wait_for_pid(path: &Path, expected: u32) -> Result<()> {
-    for _ in 0..150 {
+    for _ in 0..600 {
         if read_pid(path).is_ok_and(|pid| pid == expected) {
             return Ok(());
         }
@@ -259,7 +263,7 @@ async fn wait_for_pid(path: &Path, expected: u32) -> Result<()> {
 }
 
 async fn wait_for_new_pid(path: &Path, previous: u32) -> Result<u32> {
-    for _ in 0..150 {
+    for _ in 0..600 {
         if let Ok(pid) = read_pid(path) {
             if pid != previous && process_alive(pid) {
                 return Ok(pid);
@@ -271,7 +275,7 @@ async fn wait_for_new_pid(path: &Path, previous: u32) -> Result<u32> {
 }
 
 async fn wait_for_webui(port: u16) -> Result<()> {
-    for _ in 0..150 {
+    for _ in 0..600 {
         if tokio::time::timeout(
             Duration::from_millis(250),
             tokio::net::TcpStream::connect(("127.0.0.1", port)),
@@ -287,7 +291,7 @@ async fn wait_for_webui(port: u16) -> Result<()> {
 }
 
 async fn wait_for_process_exit(pid: u32) -> Result<()> {
-    for _ in 0..150 {
+    for _ in 0..600 {
         if !process_alive(pid) {
             return Ok(());
         }

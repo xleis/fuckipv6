@@ -368,6 +368,58 @@ bootstrap_coordinator_governance() {
     info "bootstrap governance: candidate revision 1 and owner declaration published"
 }
 
+# The Exit Node authorises a member's readiness probe only when its own local
+# access policy carries an Exit contribution clause. A network created with
+# `exit_contribution = not_required` leaves that clause absent, and the probe is
+# rejected with `exit.contribution.policy_unavailable`.
+apply_exit_contribution_policy() {
+    local socket_path=$1 owner_node=$2
+    local view revision local_revision now_ms expires_ms candidate command
+    ipc_command "$socket_path" '{"command":"get_policy"}' >"$WORK/policy-before.json" \
+        || fail "get_policy failed on the Exit Node"
+    revision=$(jq -r '.data.revision // 0' "$WORK/policy-before.json")
+    local_revision=$(jq -r '.data.snapshot.local_policy.revision // 0' "$WORK/policy-before.json")
+    local_revision=$((local_revision + 1))
+    now_ms=$(date +%s%3N)
+    expires_ms=$((now_ms + 604800000))
+    candidate=$(jq -cn --arg owner "$owner_node" --argjson now "$now_ms" --argjson exp "$expires_ms" \
+        --argjson rev "$local_revision" \
+        '{local_policy:{node_id:$owner,revision:$rev,issued_at_unix_ms:$now,expires_at_unix_ms:$exp,
+           network_scope:{kind:"all"},contribution_vetoes:[],exit_contribution:{},relay_limits:{},rules:[]},
+          network_acls:[]}')
+    command=$(jq -cn --argjson cand "$candidate" --argjson rev "$revision" \
+        '{command:"apply_policy",payload:{expected_revision:$rev,candidate:$cand,network_ids:[],
+           includes_local_policy:true,confirm_privilege_expansion:true}}')
+    ipc_command "$socket_path" "$command" >"$WORK/policy-apply.json" 2>"$WORK/policy-apply.err" \
+        || { cat "$WORK/policy-apply.err" "$WORK/policy-apply.json" >&2 || true; fail "applying the Exit contribution policy failed"; }
+    jq -e '.data.revision >= 1' "$WORK/policy-apply.json" >/dev/null \
+        || fail "the Exit contribution policy did not apply"
+    info "Exit contribution policy applied at revision $(jq -r '.data.revision' "$WORK/policy-apply.json")"
+}
+
+# A profile update reissues membership terms. Until the member acknowledges the
+# new terms hash, the Exit contribution gate reports
+# `exit.contribution.policy_confirmation_required` and the data path stays shut.
+acknowledge_membership_terms() {
+    local socket_path=$1 label=$2 snapshot=$3
+    local terms_hash now_ms command
+    snapshot_to "$socket_path" "$snapshot" || fail "snapshot failed on $label"
+    if ! jq -e --arg n "$NETWORK" '[.data.memberships[]? | select(.network_name==$n) | select(.policy_confirmation_required==true)] | length >= 1' \
+        "$snapshot" >/dev/null; then
+        return 0
+    fi
+    terms_hash=$(jq -r --arg n "$NETWORK" '[.data.memberships[]? | select(.network_name==$n)][0].current_terms_hash' "$snapshot")
+    [ -n "$terms_hash" ] && [ "$terms_hash" != null ] || fail "$label reported a pending policy without a terms hash"
+    now_ms=$(date +%s%3N)
+    command=$(jq -cn --arg id "$(jq -r --arg n "$NETWORK" '[.data.memberships[]? | select(.network_name==$n)][0].network_id' "$snapshot")" \
+        --arg hash "$terms_hash" --argjson now "$now_ms" \
+        '{command:"acknowledge_membership_policy",payload:{network_id:$id,expected_terms_hash:$hash,
+           acknowledged_at_unix_ms:$now,exit_contribution_acknowledged:true}}')
+    ipc_command "$socket_path" "$command" >"$WORK/ack-$label.json" 2>"$WORK/ack-$label.err" \
+        || { cat "$WORK/ack-$label.err" "$WORK/ack-$label.json" >&2 || true; fail "$label could not acknowledge the updated policy terms"; }
+    info "$label acknowledged the updated policy terms"
+}
+
 main() {
     [ "$(id -u)" -eq 0 ] || fail "root is required for network namespaces and TUN devices"
     require_tools
@@ -742,16 +794,31 @@ SH
     ipc_command "$HOST_SOCK" "$role_command" >"$WORK/exit-role.json" || fail "authorising the Exit Node role failed"
 
     info "publishing the administrator Exit authorization directory"
+    apply_exit_contribution_policy "$HOST_SOCK" "$HOST_NODE_ID"
+
     profile_revision=$(jq -r '.revision' "$NETWORK_JSON")
     update_command=$(jq -cn --arg n "$NETWORK" --argjson rev "$profile_revision" \
         --argjson up "$(jq -c '{purpose,icon,language,region,tags,capability_declarations,visibility,join_mode,
-            exit_contribution,exit_contribution_scope,exit_contribution_mode,
+            exit_contribution:"not_required",exit_contribution_scope:"not_applicable",
+            exit_contribution_mode:"autonomous",
             exit_selection_policy:{mode:{mode:"fixed",exit:.owner},default_exit:.owner,
               available_exits:[.owner],denied_exits:[],groups:[],members:[],
               session_transition:"fail_closed"}}' "$NETWORK_JSON")" \
         '{command:"update_network_profile",payload:{network_name:$n,expected_revision:$rev,update:$up}}')
     ipc_command "$HOST_SOCK" "$update_command" >"$WORK/exit-directory.json" || fail "the Exit authorization directory update failed"
     jq -e '.status == "network_profile_updated"' "$WORK/exit-directory.json" >/dev/null || fail "the Exit directory update did not apply"
+
+    info "acknowledging the reissued policy terms on every member"
+    for ((i = 0; i < 30; i++)); do
+        acknowledge_membership_terms "$HOST_SOCK" host "$WORK/host-terms.json"
+        acknowledge_membership_terms "$NODE1_SOCK" node1 "$WORK/node1-terms.json"
+        acknowledge_membership_terms "$NODE2_SOCK" node2 "$WORK/node2-terms.json"
+        if ! jq -e --arg n "$NETWORK" '[.data.memberships[]? | select(.network_name==$n) | select(.policy_confirmation_required==true)] | length >= 1' \
+            "$WORK/host-terms.json" >/dev/null; then
+            break
+        fi
+        sleep 1
+    done
 
     info "waiting for the member to see the authorised Exit"
     exit_selectable=0
@@ -784,6 +851,20 @@ SH
     [ "$routed" = 1 ] || { jq -c '.data.routing_summaries' "$WORK/node1-routed.json" >&2 || true; fail "the member never projected an Exit routing decision"; }
     jq -c '.data.routing_summaries[]?' "$WORK/node1-routed.json" >"$WORK/routing-summary.json"
 
+    info "waiting for the Exit session to reach the protected state"
+    protected=0
+    for ((i = 0; i < 120; i++)); do
+        snapshot_to "$NODE1_SOCK" "$WORK/node1-protected.json" || true
+        if jq -e '.data.traffic_session.state == "protected"' "$WORK/node1-protected.json" >/dev/null 2>&1; then
+            protected=1
+            break
+        fi
+        sleep 1
+    done
+    [ "$protected" = 1 ] || { jq -c '.data.traffic_session' "$WORK/node1-protected.json" >&2 || true; fail "the Exit session never reached the protected state"; }
+    jq -c '.data.traffic_session' "$WORK/node1-protected.json" >"$WORK/traffic-session.json"
+    info "traffic session: $(cat "$WORK/traffic-session.json")"
+
     info "capturing both sides of the tunnel during the download"
     ip netns exec "$NS1" timeout 240 tcpdump -ni "$TUN1" -nn -c 20000 'tcp' >"$WORK/client-tun.txt" 2>"$WORK/client-tun.err" &
     CLIENT_CAP=$!
@@ -792,11 +873,21 @@ SH
     ip netns exec "$NSH" timeout 240 tcpdump -ni "$TUNH" -nn -c 20000 'tcp' >"$WORK/exit-tun.txt" 2>"$WORK/exit-tun.err" &
     EXIT_CAP=$!
 
+    ip netns exec "$NS1" cat /etc/resolv.conf >"$WORK/member-resolv-after.txt" 2>&1 || true
+    ip netns exec "$NS1" ip -br addr show lo >"$WORK/member-lo.txt" 2>&1 || true
+    ip netns exec "$NS1" getent hosts speed.cloudflare.com >"$WORK/member-dns-check.txt" 2>&1 || true
+    info "member resolver: $(tr '\n' ' ' <"$WORK/member-resolv-after.txt")"
+    info "member lo: $(cat "$WORK/member-lo.txt")"
+    info "member DNS check: $(tr '\n' ' ' <"$WORK/member-dns-check.txt")"
+
     info "downloading $DOWNLOAD_BYTES bytes through the Exit with curl"
-    ip netns exec "$NS1" curl -sS --max-time 240 -o "$WORK/download.bin" \
+    # The validated Exit path covers IPv4 only; IPv6 is intentionally failed
+    # closed, so pin the client to IPv4 instead of racing a reachable-family
+    # fallback.
+    ip netns exec "$NS1" curl -4 -sS --max-time 240 -o "$WORK/download.bin" \
         -w '{"http_code":%{http_code},"size_download":%{size_download},"speed":%{speed_download}}\n' \
-        "https://speed.cloudflare.com/__down?bytes=$DOWNLOAD_BYTES" >"$WORK/download.json" \
-        || fail "the non-browser download through the Exit failed"
+        "https://speed.cloudflare.com/__down?bytes=$DOWNLOAD_BYTES" >"$WORK/download.json" 2>"$WORK/download.err" \
+        || { cat "$WORK/download.err" >&2 || true; fail "the non-browser download through the Exit failed"; }
     jq -e '.http_code == 200 and .size_download > 0' "$WORK/download.json" >/dev/null || fail "the download did not complete"
     sha256sum "$WORK/download.bin" >"$WORK/download.sha256"
     got=$(stat -c %s "$WORK/download.bin")

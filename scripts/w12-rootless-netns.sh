@@ -33,6 +33,11 @@ exec unshare -Urm --propagation private bash -c '
     mkdir -p /run/netns /run/user /etc/netns /tmp/.X11-unix
     printf "nameserver 10.0.2.3\noptions edns0\n" >/run/w12-resolv.conf
     mount --bind /run/w12-resolv.conf /etc/resolv.conf
+    # The Exit DNS guard rewrites resolv.conf and, when it uses the resolved
+    # backend, nsswitch.conf. Give it owned copies so the namespace does not need
+    # write access to the host /etc.
+    cp /etc/nsswitch.conf /run/w12-nsswitch.conf
+    mount --bind /run/w12-nsswitch.conf /etc/nsswitch.conf
     mount -t tmpfs tmpfs /var/run/netns
     mount -t tmpfs tmpfs /etc/netns
     # Never signal by uid inside a user namespace: parent-uid 1000 processes map

@@ -31,6 +31,15 @@ allow = [
     "Unlicense",
     "WTFPL",
     "Zlib",
+    # File-scoped weak copyleft. Used by the cbindgen build helper, the
+    # webauthn crypto glue, and the dwrote/option-ext font and path helpers in
+    # the GPUI stack; none of them are modified or redistributed as source.
+    "MPL-2.0",
+    # Zero-clause BSD, used by doctest-file through the iOS bridge harness.
+    "0BSD",
+    # Community Data License Agreement, used for the bundled root certificate
+    # data in webpki-roots.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 

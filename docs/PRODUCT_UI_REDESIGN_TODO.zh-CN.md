@@ -4839,9 +4839,9 @@ workspace 与 fuzz 两个目标都输出 `advisories ok, bans ok, licenses ok, s
 
 ### W18-08 生命周期与故障恢复门禁 `[ ]`
 
-- [ ] 关 UI 不断网；
-- [ ] control 崩溃 node 继续；
-- [ ] stop node 不断 control/WebUI；
+- [x] 关 UI 不断网；
+- [x] control 崩溃 node 继续；
+- [x] stop node 不断 control/WebUI；
 - [ ] 系统重启按配置恢复；
 - [ ] TUN/路由/DNS/进程残留自动清理；
 - [ ] 所有失败有硬超时和自动恢复；
@@ -4849,6 +4849,21 @@ workspace 与 fuzz 两个目标都输出 `advisories ok, bans ok, licenses ok, s
 - [ ] 完成全套故障注入证据。
 
 **验收**：历史“每次测试断网且需手工 kill”的问题有自动化复现与通过证据。
+
+**证据（2026-11-21，commit `a2dd447` 工作区）**：前三条直接引用 W2 已完成项已有的自动化证据，不再重复造轮：
+
+- **关 UI 不断网**：W2-03 的 `closing_headless_webui_does_not_stop_the_node` 覆盖 headless WebUI
+  关闭后节点继续运行；
+- **control 崩溃 node 继续**：W2-05 的 `new_headless_ui_restarts_crashed_control_and_adopts_live_node`
+  覆盖控制进程崩溃后新实例接管存活节点；
+- **stop node 不断 control/WebUI**：W2-04 的「stop node 保留 control/WebUI」子项与逐项清理报告，
+  只在清理完全干净时返回成功。
+
+后五条保持未勾，缺口是具体的：第 4 条依赖 W2-08 的系统服务管理器（macOS/Windows 实机未验证、
+Android 前台服务未实现）；第 5 条的 TUN 残留问题仍有 2026-11-16 记录的「进程全部退出后 TUN 仍在、
+需手工 `ip link del`」未用当前构建复跑定性；第 6 条的硬超时分散在 W11-07/W12-05，但
+「所有失败」这个全称还没有一份汇总证据；第 7 条与第 5 条同源。第 8 条需要把 W12 干扰矩阵、W14
+脑裂/断电矩阵、W2 生命周期用例合并成一份清单，目前散落在三个工作包里。
 
 ### W18-09 平台发布门禁 `[ ]`
 

@@ -15,7 +15,6 @@
   const confirmButton = $("confirm-recovery");
   const statusBox = $("status");
   const pageTitle = $("page-title");
-  const footer = $("bootstrap-footer");
   const languageSelect = $("language-preference");
 
   let currentRecoveryCode = "";
@@ -114,12 +113,6 @@
     const title = t(titleKey);
     document.title = `fuckipv6 · ${title}`;
     pageTitle.textContent = title;
-    footer.textContent = tr(
-      publicClaim
-        ? "owner_auth.bootstrap.footer_public"
-        : "owner_auth.bootstrap.footer_local",
-      { origin: origin || window.origin },
-    );
   }
 
   function applyLanguage() {

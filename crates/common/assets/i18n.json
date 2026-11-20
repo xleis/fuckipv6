@@ -3360,7 +3360,13 @@
       "join.section.title": "加入申请",
       "join.section.detail": "只有节点返回的待审批申请；理由与备注属于私有字段，不会在此显示。",
       "join.action.request_information": "补充信息",
-      "join.error.unobserved": "尚未从节点读取加入申请。"
+      "join.error.unobserved": "尚未从节点读取加入申请。",
+      "invitation.section.title": "邀请",
+      "invitation.section.detail": "列出节点返回的邀请状态。邀请码只在创建后的这一次显示，之后不可再读取。",
+      "invitation.action.create": "创建邀请",
+      "invitation.action.revoke": "撤销",
+      "invitation.code.title": "新邀请码（仅显示一次）",
+      "invitation.error.unobserved": "尚未读取邀请列表。"
     },
     "en": {
       "nav.overview": "Overview",
@@ -6720,7 +6726,13 @@
       "join.section.title": "Join requests",
       "join.section.detail": "Only pending applications the node returned. Reasons and notes stay private and are not rendered.",
       "join.action.request_information": "Request information",
-      "join.error.unobserved": "Join requests have not been read from the node yet."
+      "join.error.unobserved": "Join requests have not been read from the node yet.",
+      "invitation.section.title": "Invitations",
+      "invitation.section.detail": "Invitation states as the node reports them. The code is shown only once, right after creation.",
+      "invitation.action.create": "Create invitation",
+      "invitation.action.revoke": "Revoke",
+      "invitation.code.title": "New invitation code (shown once)",
+      "invitation.error.unobserved": "The invitation list has not been read yet."
     }
   }
 }

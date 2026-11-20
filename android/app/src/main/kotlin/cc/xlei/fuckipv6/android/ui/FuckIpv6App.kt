@@ -67,6 +67,10 @@ fun FuckIpv6App(
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
     joinRequests: List<cc.xlei.fuckipv6.android.bridge.JoinRequestView>? = null,
     onJoinReview: ((String, cc.xlei.fuckipv6.android.bridge.JoinRequestView) -> Unit)? = null,
+    invitations: List<cc.xlei.fuckipv6.android.bridge.InvitationView>? = null,
+    issuedInvitationCode: String? = null,
+    onCreateInvitation: (() -> Unit)? = null,
+    onRevokeInvitation: ((cc.xlei.fuckipv6.android.bridge.InvitationView) -> Unit)? = null,
 ) {
     val systemLocale = LocalLocale.current.platformLocale
     val initialModule = contracts.navigation.modules.first()
@@ -165,6 +169,10 @@ fun FuckIpv6App(
                 onMemberLifecycleAction = onMemberLifecycleAction,
                 joinRequests = joinRequests,
                 onJoinReview = onJoinReview,
+                invitations = invitations,
+                issuedInvitationCode = issuedInvitationCode,
+                onCreateInvitation = onCreateInvitation,
+                onRevokeInvitation = onRevokeInvitation,
             )
         }
     }
@@ -216,6 +224,10 @@ fun PageContent(
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
     joinRequests: List<cc.xlei.fuckipv6.android.bridge.JoinRequestView>? = null,
     onJoinReview: ((String, cc.xlei.fuckipv6.android.bridge.JoinRequestView) -> Unit)? = null,
+    invitations: List<cc.xlei.fuckipv6.android.bridge.InvitationView>? = null,
+    issuedInvitationCode: String? = null,
+    onCreateInvitation: (() -> Unit)? = null,
+    onRevokeInvitation: ((cc.xlei.fuckipv6.android.bridge.InvitationView) -> Unit)? = null,
 ) {
     Column(
         modifier = modifier
@@ -259,6 +271,14 @@ fun PageContent(
                             locale = locale,
                             requests = joinRequests,
                             onReview = onJoinReview,
+                        )
+                        InvitationListContent(
+                            contracts = contracts,
+                            locale = locale,
+                            invitations = invitations,
+                            issuedCode = issuedInvitationCode,
+                            onCreate = onCreateInvitation,
+                            onRevoke = onRevokeInvitation,
                         )
                     }
                 }

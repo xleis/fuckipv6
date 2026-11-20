@@ -4338,6 +4338,11 @@ Android 单测共 125 项通过。加入申请审批（`review_join_request`）�
 确认对话，确认后带展示过的 revision 提交，成功只重读申请与成员目录。`MainActivity` 切换网络时读取申请。新增
 `JoinRequestSurfaceTest` 3 项与 4 组中英键，Android 单测共 128 项通过。VpnService 与真机验收仍未完成，W16-02 保持 `[ ]`。
 
+**补充（2026-11-21，邀请管理）**：新增 `bridge/InvitationSurface` 与 `ui/InvitationListContent`：创建/列表/撤销编码与解析；角色、
+次数、有效期按域边界本地校验（60 秒–30 天、次数>0、封闭角色集），越界不发请求；撤销需确认并带 `revision`；新建后的邀请码
+只显示一次（节点不再提供），置空后才允许再次创建，不写日志或本地缓存。`MainActivity` 网络切换时读列表、创建/撤销后重读。
+新增 `InvitationSurfaceTest` 4 项与 5 组中英键，Android 单测共 132 项通过。VpnService 与真机验收仍未完成，W16-02 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

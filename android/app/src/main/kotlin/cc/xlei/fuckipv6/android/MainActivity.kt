@@ -34,6 +34,9 @@ import cc.xlei.fuckipv6.android.bridge.NodeCommandBridge
 import cc.xlei.fuckipv6.android.bridge.NodeCommandClient
 import cc.xlei.fuckipv6.android.bridge.FileBrowseClient
 import cc.xlei.fuckipv6.android.bridge.MemberDirectoryView
+import cc.xlei.fuckipv6.android.bridge.CreateInvitationRequest
+import cc.xlei.fuckipv6.android.bridge.InvitationSurface
+import cc.xlei.fuckipv6.android.bridge.InvitationView
 import cc.xlei.fuckipv6.android.bridge.JoinRequestSurface
 import cc.xlei.fuckipv6.android.bridge.JoinRequestView
 import cc.xlei.fuckipv6.android.bridge.JoinReviewRequest
@@ -53,6 +56,7 @@ import cc.xlei.fuckipv6.android.ui.CoordinatorPageData
 import cc.xlei.fuckipv6.android.ui.DownloadSaver
 import cc.xlei.fuckipv6.android.ui.FileBrowseActions
 import cc.xlei.fuckipv6.android.ui.FileBrowseController
+import cc.xlei.fuckipv6.android.ui.InvitationListContent
 import cc.xlei.fuckipv6.android.ui.JoinRequestListContent
 import cc.xlei.fuckipv6.android.ui.MemberListContent
 import cc.xlei.fuckipv6.android.ui.FileTransferController
@@ -91,6 +95,8 @@ class MainActivity : ComponentActivity() {
     private var memberBridge: NodeCommandBridge? = null
     private val members = MutableStateFlow<MemberDirectoryView?>(null)
     private val joinRequests = MutableStateFlow<List<JoinRequestView>?>(null)
+    private val invitations = MutableStateFlow<List<InvitationView>?>(null)
+    private val issuedInvitationCode = MutableStateFlow<String?>(null)
     private var memberNetworkId: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -147,6 +153,14 @@ class MainActivity : ComponentActivity() {
                                 memberNetworkId?.let(::refreshJoinRequests)
                                 memberNetworkId?.let(::refreshMembers)
                             }
+                            "invitations" ->
+                                invitations.value = InvitationSurface.parseList(outcome.data)
+                            "invitation_created" -> {
+                                issuedInvitationCode.value =
+                                    InvitationSurface.parseIssued(outcome.data)?.code
+                                memberNetworkId?.let(::refreshInvitations)
+                            }
+                            "invitation_revoked" -> memberNetworkId?.let(::refreshInvitations)
                         }
                     }
                 }
@@ -255,6 +269,7 @@ class MainActivity : ComponentActivity() {
                         memberNetworkId = networkId
                         refreshMembers(networkId)
                         refreshJoinRequests(networkId)
+                        refreshInvitations(networkId)
                     }
                 }
             }
@@ -292,6 +307,8 @@ class MainActivity : ComponentActivity() {
             val admin = adminPage.collectAsState().value
             val membersState = members.collectAsState().value
             val joinRequestsState = joinRequests.collectAsState().value
+            val invitationsState = invitations.collectAsState().value
+            val issuedCodeState = issuedInvitationCode.collectAsState().value
             FuckIpv6Theme {
                 contracts.fold(
                     onSuccess = {
@@ -305,6 +322,10 @@ class MainActivity : ComponentActivity() {
                             onMemberLifecycleAction = ::changeMemberLifecycle,
                             joinRequests = joinRequestsState,
                             onJoinReview = ::reviewJoinRequest,
+                            invitations = invitationsState,
+                            issuedInvitationCode = issuedCodeState,
+                            onCreateInvitation = ::createInvitation,
+                            onRevokeInvitation = ::revokeInvitation,
                             files = files,
                             filesFailureKey = filesFailureKey,
                         )
@@ -457,6 +478,47 @@ class MainActivity : ComponentActivity() {
         )
         // Keep the compiler honest about the unused config in this path.
         check(config.isValid)
+    }
+
+    private fun refreshInvitations(networkId: String) {
+        val bridge = memberBridge ?: return
+        val command = InvitationSurface.listCommand(networkId) ?: return
+        val body = CommandJson.envelope(
+            command = command,
+            requestId = nextRequestId(),
+            idempotencyKey = "invitation-list-$networkId-${UUID.randomUUID()}",
+        )
+        bridge.submit(bridgeScope, body)
+    }
+
+    /** Creates one invitation with the default member/1-use/24h profile. */
+    private fun createInvitation() {
+        val bridge = memberBridge ?: return
+        val networkId = memberNetworkId ?: return
+        val command = InvitationSurface.createCommand(
+            CreateInvitationRequest(networkId = networkId),
+        ) ?: return
+        issuedInvitationCode.value = null
+        val body = CommandJson.envelope(
+            command = command,
+            requestId = nextRequestId(),
+            idempotencyKey = "invitation-create-$networkId-${UUID.randomUUID()}",
+        )
+        bridge.submit(bridgeScope, body)
+    }
+
+    private fun revokeInvitation(invitation: InvitationView) {
+        val bridge = memberBridge ?: return
+        val networkId = memberNetworkId ?: return
+        val revision = invitation.revision ?: return
+        val command = InvitationSurface.revokeCommand(networkId, invitation.invitationId, revision)
+            ?: return
+        val body = CommandJson.envelope(
+            command = command,
+            requestId = nextRequestId(),
+            idempotencyKey = "invitation-revoke-${invitation.invitationId}-${UUID.randomUUID()}",
+        )
+        bridge.submit(bridgeScope, body)
     }
 
     private fun refreshJoinRequests(networkId: String) {

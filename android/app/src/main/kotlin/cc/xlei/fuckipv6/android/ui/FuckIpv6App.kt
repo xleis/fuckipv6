@@ -74,6 +74,7 @@ fun FuckIpv6App(
     routing: List<cc.xlei.fuckipv6.android.bridge.RoutingSummaryView>? = null,
     localExit: cc.xlei.fuckipv6.android.bridge.LocalExitView? = null,
     exitSelections: List<cc.xlei.fuckipv6.android.bridge.ExitSelectionView>? = null,
+    topology: cc.xlei.fuckipv6.android.bridge.TopologyView? = null,
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
@@ -189,6 +190,7 @@ fun FuckIpv6App(
                 routing = routing,
                 localExit = localExit,
                 exitSelections = exitSelections,
+                topology = topology,
                 members = members,
                 onRefreshMembers = onRefreshMembers,
                 onMemberLifecycleAction = onMemberLifecycleAction,
@@ -257,6 +259,7 @@ fun PageContent(
     routing: List<cc.xlei.fuckipv6.android.bridge.RoutingSummaryView>? = null,
     localExit: cc.xlei.fuckipv6.android.bridge.LocalExitView? = null,
     exitSelections: List<cc.xlei.fuckipv6.android.bridge.ExitSelectionView>? = null,
+    topology: cc.xlei.fuckipv6.android.bridge.TopologyView? = null,
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
@@ -366,6 +369,8 @@ fun PageContent(
                     locale = locale,
                     contracts = contracts,
                 )
+            pageId == "topology" && topology != null ->
+                TopologyContent(contracts = contracts, locale = locale, topology = topology)
             pageId == "exit_node" && (localExit != null || exitSelections != null) ->
                 ExitContent(
                     contracts = contracts,

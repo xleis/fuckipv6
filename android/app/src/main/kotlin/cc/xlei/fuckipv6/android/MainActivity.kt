@@ -50,6 +50,7 @@ import cc.xlei.fuckipv6.android.bridge.LogsSurface
 import cc.xlei.fuckipv6.android.bridge.NetworksSurface
 import cc.xlei.fuckipv6.android.bridge.ExitSurface
 import cc.xlei.fuckipv6.android.bridge.RoutingSurface
+import cc.xlei.fuckipv6.android.bridge.TopologySurface
 import cc.xlei.fuckipv6.android.bridge.PeersSurface
 import cc.xlei.fuckipv6.android.bridge.TrafficSurface
 import cc.xlei.fuckipv6.android.bridge.MemberView
@@ -355,6 +356,7 @@ class MainActivity : ComponentActivity() {
                             routing = ready?.peers?.let(RoutingSurface::parse),
                             localExit = ready?.peers?.let(ExitSurface::parseLocalExit),
                             exitSelections = ready?.peers?.let(ExitSurface::parseSelections),
+                            topology = ready?.peers?.let(TopologySurface::parse),
                             availableNetworks = availableNetworks,
                             selectedNetworkName = selectedNetworkName,
                             onSelectNetwork = { name -> selectedNetwork.value = name },

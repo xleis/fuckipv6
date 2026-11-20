@@ -4058,4 +4058,45 @@ mod tests {
             );
         }
     }
+
+    /// Every key the manifest hands to a renderer must exist in both locales.
+    /// WebUI and GPUI translate verbatim, so a missing key shows the raw
+    /// identifier in the product UI.
+    #[test]
+    fn every_manifest_string_key_resolves_in_both_locales() {
+        use fuckipv6_common::i18n::{has_key, Locale};
+
+        fn assert_key(key: &str, origin: &str) {
+            for locale in [Locale::ZhCn, Locale::En] {
+                assert!(
+                    has_key(locale, key),
+                    "{key} ({origin}) is missing from {locale:?}"
+                );
+            }
+        }
+
+        let manifest = node_ui_manifest();
+        for page in &manifest.pages {
+            assert_key(&page.title_key, "page title");
+            assert_key(&page.nav_label_key, "page nav label");
+            assert_key(&format!("page.{}", page.id), "page id label");
+            for action in &page.actions {
+                assert_key(&action.label_key, "action label");
+                assert_key(&action.group_label_key, "action group label");
+                for field in &action.fields {
+                    assert_key(&field.label_key, "field label");
+                }
+                if let Some(confirmation) = &action.confirmation {
+                    assert_key(&confirmation.title_key, "confirmation title");
+                    assert_key(&confirmation.consequence_key, "confirmation consequence");
+                }
+            }
+        }
+        for reason in &manifest.action_block_reasons {
+            assert_key(reason.message_key(), "action block reason");
+        }
+        for group in &manifest.action_groups {
+            assert_key(group.label_key(), "action group");
+        }
+    }
 }

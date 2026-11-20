@@ -4235,6 +4235,12 @@ W16-01 仍缺提交/撤销/执行与成员、策略等页面切片，保持 `[ ]
 5 秒定时轮询保留为兜底：事件只缩短等待，不替代权威读取。新增 `EventFrameParserTest` 5 项，Android 单测共 62 项通过。
 W16-01 仍缺成员/策略页面切片，保持 `[ ]`。
 
+**补充（2026-11-20，节点连接设置页）**：新增 `ui/SettingsProjection` 与 `ui/SettingsPage`：节点地址按 bridge 同一规则校验
+（空值等于“未配置”，不会生成客户端；缺 scheme、错误 scheme、含空格均报 `settings.node_api.invalid_url`），令牌以密码态
+输入且仅存本机偏好，保存前必须通过校验；共享 i18n 增加 8 组 `settings.node_api.*` 中英文键并保持 zh/en 对齐。新增
+`SettingsProjectionTest` 4 项，Android 单测共 66 项通过，`:app:lintDebug`、`:app:assembleDebug` 通过。该页面的导航挂载需要与
+并发进行中的外壳改动合并，本次未改动 `FuckIpv6App`，因此 W16-01 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

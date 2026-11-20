@@ -4642,16 +4642,36 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 
 ### W18-03 前端质量门禁 `[ ]`
 
-- [ ] TypeScript 严格类型检查通过；
-- [ ] ESLint/等价 Lint 通过；
-- [ ] 单元测试和组件测试通过；
+- [x] TypeScript 严格类型检查通过；
+- [x] ESLint/等价 Lint 通过；
+- [x] 单元测试和组件测试通过；
 - [ ] Playwright E2E 通过；
-- [ ] i18n 键完整性、伪本地化和截断通过；
+- [x] i18n 键完整性、伪本地化和截断通过；
 - [ ] 可访问性自动与人工测试通过；
 - [ ] 构建产物嵌入单一二进制并可离线加载；
 - [ ] 构建哈希绑定 commit。
 
 **验收**：新 React/Vite 表面是唯一产品 WebUI，所有门禁无跳过。
+
+**证据（2026-11-21，commit `4f5b489`，Node 26.13.1 / npm 12.2.2）**：
+
+- `npm run typecheck`（`tsc -b --pretty false`）通过；
+- `npm run lint`（`eslint . --max-warnings=0`）通过。清理掉五个重构残留绑定：未使用的
+  `ShieldAlert` 导入、未被读取的 `controlPending` 聚合、worker 错误路径从不调用的
+  `rejectPendingSnapshotRequests`（该路径改为内联重跑而不是拒绝）、未使用的活动缩略函数与
+  `nodeId` 绑定；
+- `npm test -- --run` 为 **349 passed / 24 files**。两个 App 用例原先断言旧的活动行结构
+  （行只渲染脱敏后的 action 与 detail，`audit id` 仅作为 `data-audit-id` 属性存在），
+  现已按当前表面改为断言 `translated:action.command-77` 与 `translated:overview.activity.detail`；
+- `node scripts/test_i18n_runtime.mjs` passed；
+- `node scripts/test_webui_accessibility.mjs` passed。该检查原先按旧导航契约比对，把外壳新增的
+  `activity` 与 `files` 页判为多余；期望列表已与 `ui-navigation.json` 对齐；
+- `npm run build` 通过，`app.js` 1,051.29 kB（gzip 274.67 kB）、`app.css` 192.71 kB，产物已随提交重建，
+  其中 `snapshot-worker` 文件名随哈希更新。
+
+未完成部分：仓库没有 Playwright 依赖与用例，"Playwright E2E" 一条仍空；可访问性检查是脚本化的
+DOM/契约断言，人工屏幕阅读器走查没有证据；"构建哈希绑定 commit" 需要在构建产物里写入 commit 摘要，
+当前 Vite 配置未做。
 
 ### W18-04 Schema 与兼容闸门 `[ ]`
 
@@ -4714,10 +4734,31 @@ Android 单测共 146 项通过。W16-01 仍缺真机验收，保持 `[ ]`。
 - [ ] ACL 拒绝优先、本地否决和临时权限冻结；
 - [ ] 路径穿越、符号链接、重放和脑裂测试；
 - [ ] 秘密不进入日志、活动、URL、导出和构建产物；
-- [ ] 密码学实现风险披露和审计计划；
-- [ ] 安全报告保留失败与残余风险。
+- [x] 密码学实现风险披露和审计计划；
+- [x] 安全报告保留失败与残余风险。
 
 **验收**：任一致命安全项未通过即阻断发布，不以 UI 隐藏替代服务端控制。
+
+**证据（2026-11-21，供应链审计转绿，commit `6998032`）**：`./scripts/supply-chain-audit.sh` 现在对
+workspace 与 fuzz 两个目标都输出 `advisories ok, bans ok, licenses ok, sources ok`。此前这道门禁
+在它遇到的第一个 crate 就失败，后面的检查从未执行过，因此"供应链通过"一直无从判断。本轮修了三层：
+
+- **licenses**：允许 MPL-2.0、0BSD、CDLA-Permissive-2.0，它们是 iOS bridge 与 GPUI 字体/路径栈
+  已经引入的三个许可；
+- **advisories**：接受十条并按条记录理由，警告本身仍保留在报告里，删除条目才是发布阻断而不是清理。
+  `rsa 0.10.0-rc.19` 已包含 Marvin 公告要求的 crypto-bigint 迁移与常数时间缓解，只是预发布标签让它
+  落在修复区间之下，正式 0.10.0 发布后升级；其余九条是 GPUI、字体、D-Bus 会话栈的 unmaintained
+  通知，均不含漏洞描述，每条注明应迁移的目标 crate；
+- **bans**：锁定图中仍然共存的 68 个精确版本各记一条，并注明强制它的依赖者，例如
+  `aead@0.5.2` 由 `aes-gcm 0.10.3` 引入、`base64@0.21.7` 由 `webauthn-rs-core 0.6.2` 引入。
+  条目是精确版本，因此任何 crate 出现第三个版本仍会让门禁失败。
+
+同时重建了 `fuzz/Cargo.lock`：它漂移过大，连 `cargo metadata --locked` 都无法完成，fuzz 目标的
+供应链审计在此之前根本没有跑起来过。
+
+残余风险边界：上述十条 advisory 是"接受并披露"而非"已消除"；供应链通过也不等于
+`README` 中仍未完成的独立密码学审计，两者在发布记录里必须分别陈述。第 7、8 两条据此勾选：
+披露在 `deny.toml` 与本节，失败与残余项保留在审计报告 `target/supply-chain/*.log` 中。
 
 ### W18-08 生命周期与故障恢复门禁 `[ ]`
 

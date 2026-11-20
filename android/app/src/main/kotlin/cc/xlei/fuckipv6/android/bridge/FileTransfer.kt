@@ -166,11 +166,27 @@ object FileTransferUrls {
  * string. Every branch returns a value and nothing is retried silently: an
  * "accepted" transfer is reported as started, never as completed.
  */
+interface TransferSource {
+    fun startUpload(
+        request: TransferRequest,
+        source: () -> InputStream,
+        contentLength: Long,
+    ): TransferOutcome<StartedTransfer>
+
+    fun startDownload(request: TransferRequest): TransferOutcome<PendingDownload>
+
+    fun listTransfers(): TransferOutcome<List<TransferStatus>>
+
+    fun pause(transferId: String, operationId: String): TransferOutcome<String>
+
+    fun resume(transferId: String, operationId: String): TransferOutcome<String>
+}
+
 class FileTransferClient(
     private val config: NodeApiConfig,
     private val timeoutMillis: Int = 30_000,
-) {
-    fun startUpload(
+) : TransferSource {
+    override fun startUpload(
         request: TransferRequest,
         source: () -> InputStream,
         contentLength: Long,
@@ -187,7 +203,7 @@ class FileTransferClient(
         )
     }
 
-    fun startDownload(request: TransferRequest): TransferOutcome<PendingDownload> =
+    override fun startDownload(request: TransferRequest): TransferOutcome<PendingDownload> =
         exchange(
             url = FileTransferUrls.downloads(config),
             method = "POST",
@@ -200,7 +216,7 @@ class FileTransferClient(
             expected = HttpURLConnection.HTTP_CREATED,
         )
 
-    fun listTransfers(): TransferOutcome<List<TransferStatus>> =
+    override fun listTransfers(): TransferOutcome<List<TransferStatus>> =
         exchange(
             url = FileTransferUrls.transfers(config),
             method = "GET",
@@ -211,10 +227,10 @@ class FileTransferClient(
             expected = HttpURLConnection.HTTP_OK,
         )
 
-    fun pause(transferId: String, operationId: String): TransferOutcome<String> =
+    override fun pause(transferId: String, operationId: String): TransferOutcome<String> =
         control(transferId, operationId, "pause")
 
-    fun resume(transferId: String, operationId: String): TransferOutcome<String> =
+    override fun resume(transferId: String, operationId: String): TransferOutcome<String> =
         control(transferId, operationId, "resume")
 
     private fun control(transferId: String, operationId: String, action: String): TransferOutcome<String> =

@@ -4273,6 +4273,11 @@ generation 守卫丢弃过期目录响应，避免切目录后迟到的分页覆
 不透明 cursor 追加；失败统一映射既有 `file.page.error.*` 且保留已加载条目。新增 `FileBrowseControllerTest` 5 项，Android 单测共
 92 项通过。UI 挂载仍等待外壳改动合并，W16-01 保持 `[ ]`。
 
+**补充（2026-11-21，File 传输控制器）**：`FileTransferClient` 实现 `TransferSource`，新增 `ui/FileTransferController`：上传/下载/
+暂停/恢复均在 IO 线程执行并立刻刷新节点传输列表，`busy` 只在请求期间为真；上传负长度直接拒绝且不发请求，下载只记录
+短期 token、不宣称已保存字节，暂停/恢复使用节点报告的真实 `transfer_id`/`operation_id`；失败复用既有 `file.page.error.*`
+文案并保留列表。新增 `FileTransferControllerTest` 5 项，Android 单测共 97 项通过。SAF 保存与 UI 挂载仍待完成，W16-01 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

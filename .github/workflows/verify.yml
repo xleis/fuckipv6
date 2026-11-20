@@ -400,6 +400,11 @@ jobs:
             ~/.gradle/wrapper
           key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
 
+      - name: Check Android i18n literals
+        run: |
+          python3 -m unittest scripts/test_check_android_i18n.py -v
+          python3 scripts/check-android-i18n.py
+
       - name: Unit tests, lint and debug build
         working-directory: android
         run: >-

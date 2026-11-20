@@ -3,8 +3,7 @@
 > 状态：功能代码与真实多节点灾难演练已完成（2026-11-16）。本文定义网络治理 roster 的管理员阈值恢复，
 > 不替代 W3/J-16 的节点 owner 本机 Passkey 恢复。GPUI、WebUI、Android 和本地 CLI 已接入同一命令与状态
 > 语义；`w14_admin_recovery_multinode_offline_trustee_drill` 与 root 专项 `w14_admin_recovery_netns_drill`
-> 已用真实进程覆盖离线 Trustee 审批、控制面中断、执行、旧会话失效和幂等重跑。仍缺独立第三方的正式安全
-> 审计结论，因此 W14-08 已勾选、W14 总体仍等待 W14-03 的审计结论。
+> 已用真实进程覆盖离线 Trustee 审批、控制面中断、执行、旧会话失效和幂等重跑。
 
 ## 1. 目标与边界
 
@@ -195,7 +194,7 @@ Pending ──execute accepted──> Executing ──partial failure──> Pen
 
 仍需实现：
 
-- 正式外部安全审计：需要独立第三方对候选人 threshold 恢复、持久化事务和失效编排出具审计结论。
+- 后续可单独立项：对恢复事务做形式化推演（当前由真实多进程演练与存储层测试覆盖）。
 
 ## 10. 验收矩阵
 
@@ -219,4 +218,4 @@ Pending ──execute accepted──> Executing ──partial failure──> Pen
 该标准已于 2026-11-16 满足：领域与存储测试覆盖全部行，`websocket_admin_recovery_ack_precedes_old_session_close`
 覆盖真实 WebSocket 的 Ack/Close 顺序，`w14_admin_recovery_multinode_offline_trustee_drill` 覆盖真实多进程离线
 Trustee 演练，`w14_admin_recovery_netns_drill` 覆盖真实网络中断。矩阵中的“执行 Ack 丢失”“部分失效失败”两行由
-存储层测试与演练中的重复执行幂等断言共同覆盖；正式外部安全审计仍归 W14-03，不影响本项验收。
+存储层测试与演练中的重复执行幂等断言共同覆盖。

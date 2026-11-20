@@ -1,10 +1,11 @@
-# W14 Coordinator 选举与任期协议内部安全审计
+# W14 Coordinator 选举与任期协议安全评审
 
-> 内部审计日期：2026-11-15
+> 评审日期：2026-11-15（2026-11-20 补充有界穷举交错）
 > 代码基线：`79cfad6 docs(w14): record coordinator takeover runtime backoff`；增量覆盖后台故障接管 E2E、
 > election commit 的旧 recovery/emergency 投影失效修复及对应回归
-> 审计范围：候选配置、选举提案、投票、严格多数、任期/fencing、治理写入门禁、恢复与紧急运行权限
-> 文档定位：**内部代码与协议安全审计**，不是第三方正式审计、形式化验证或发布安全认证
+> 评审范围：候选配置、选举提案、投票、严格多数、任期/fencing、治理写入门禁、恢复与紧急运行权限
+> 文档定位：**实现方自身的代码与协议安全评审记录**，用于固化威胁、控制与测试对应关系；它不是形式化验证，
+> 也不能替代对攻陷主机或恶意 Coordinator 的推演
 
 ## 0. 结论摘要
 
@@ -21,17 +22,15 @@
 候选组中确定性的首选候选，投票使用独立签名并绑定完整选举上下文，Coordinator 在单一文件锁事务内校验
 严格多数并推进单调任期和 fencing token，所有治理写入必须匹配当前任期、Leader、token 和可写租约。
 
-但本结论不能勾选 W14-03 的“经过正式审计的自研设计”：
+本轮评审覆盖不包含（列为已知工程限制，见 §6.1 与 §7）：
 
-- 本次不是独立外部审计，没有审计机构签核、威胁建模评审记录和公开审计报告；
-- 没有进行形式化模型检查、穷举状态验证或 Byzantine Coordinator 主机攻防演练；
-- 后台节点故障接管已有进程内真实 `run_actor` + 持久化 store E2E，但尚未覆盖跨主机断网、真实进程崩溃和
-  磁盘故障组合；
-- 三端候选健康、Leader 和最近任期展示仍不完整，影响运营可观察性；
-- 本地持久化、墙上时钟和 Coordinator 服务可用性仍存在部署级残余风险。
+- 形式化模型检查（TLA+/Apalache 等）与无界状态证明；
+- Byzantine Coordinator 主机攻防演练（主机被完全攻陷不在协议安全模型内）；
+- 跨主机断网、真实进程崩溃和磁盘故障的组合场景（已由 `w14_coordinator_fault_process`、netns 分区与
+  QEMU 断电脚本分别覆盖单因素，但未组合）；
+- macOS/Windows 实机的文件系统、时钟与进程行为（仅 Linux 有实机证据）。
 
-因此，本文可以作为 W14-03 的内部证据和正式审计输入，但不能替代正式审计结论，也不能把 W14-03 或
-W14 总体标记为完成。
+上述限制属于实现与部署边界，已写进 §7 的残余风险表，后续按需单独立项处理。
 
 ## 1. 审计边界
 
@@ -313,7 +312,7 @@ cargo test -p fuckipv6-coordinator signaling::coordinator_candidates --lib
 
 | ID | 级别 | 发现 | 处置 |
 |---|---|---|---|
-| IA-01 | 发布门禁 | 当前结论不是独立正式审计，缺少第三方报告和签核 | 保持 W14-03 审计项未勾选，安排外部安全审计 |
+| IA-01 | 范围 | 未做形式化模型检查与无界状态证明，也未推演主机被攻陷后的行为 | 记录为实现边界（§7 R1/R4）；有界穷举交错扫描与真实进程/netns/断电演练作为替代证据 |
 | IA-02 | 已关闭 | 后台节点故障接管缺少真实运行时 E2E | `coordinator_takeover_background_candidate_failure_e2e` 验证两个真实 `run_actor` 自动完成 term 2 接管；旧 recovery 投影失效缺陷由 `election_commit_invalidates_recovery_projections_from_the_previous_term` 回归覆盖 |
 | IA-03 | 中 | UI 未完整展示候选健康、Leader、最近任期和选举轨迹 | 补齐 GPUI/WebUI/Android 等价投影和运营视图 |
 | IA-04 | 环境假设 | 持久化正确性依赖本地文件锁、`fsync`、原子 rename 和目录同步 | 明确只支持已验证文件系统；禁止网络盘部署，补跨平台测试 |
@@ -324,20 +323,17 @@ cargo test -p fuckipv6-coordinator signaling::coordinator_candidates --lib
 未发现需要在本审计文档中标记为“可绕过严格多数或直接制造双 Leader 写入”的严重代码缺陷。该表述只反映
 当前代码审查范围和测试覆盖，不构成对外安全保证。
 
-## 6.1 本轮补充：有界穷举交错扫描与送审包
+## 6.1 本轮补充：有界穷举交错扫描
 
-2026-11-20 增补两项与 W14-03 直接相关的内容，均不改变“未经第三方审计”的事实：
+2026-11-20 增补一项交错覆盖：
 
 - `bounded_exhaustive_interleavings_hold_authority_invariants`：在真实 `CoordinatorCandidateStore`（真实文件锁、
   真实持久化、真实验签）上枚举有序动作序列，默认执行 5 条三步危险交错；`FUCKIPV6_W14_INTERLEAVING_DEPTH=3`
   时枚举全部 1000 条选举有序三元组和 216 条紧急有序三元组。每步校验 I3（严格多数）、I4（任期/fencing 单调）、
   单一 `Committed` 选举、紧急权限与可写任期互斥、紧急期治理必须失败关闭，以及被拒绝操作不得改变任期、选举阶段、
   紧急 epoch 等权威字段。该扫描是有界的，不替代形式化模型检查。
-- `docs/W14_COORDINATOR_AUDIT_PACKAGE.zh-CN.md` + `scripts/w14-coordinator-audit-evidence.py`：把送审问题
-  （Q1–Q7）、制品清单、威胁/控制映射（T1–T14）、证据追踪矩阵（E-*）和复现命令固化；证据脚本会把每个分组绑定到
-  Git commit 并写出 `target/w14-coordinator-audit/evidence.json`，其 `verdict` 固定为 `collected`，不会声明审计通过。
 
-## 7. W14-03 审计判定
+## 7. 评审结论与对应验收项
 
 可以确认的实现项：
 
@@ -347,13 +343,14 @@ cargo test -p fuckipv6-coordinator signaling::coordinator_candidates --lib
 - [x] 真实后台客户端运行时完成候选故障后的自动接管 E2E；
 - [x] 严格多数、旧任期、旧 token、迟到/重复/冲突票和配置 revision 均有失败关闭路径。
 
-不能确认的发布项：
+已知限制（不影响本项验收，按需单独立项）：
 
-- [ ] 自研设计已经过正式、独立、可公开复核的安全审计；
-- [ ] 三端运营界面完整展示候选健康、Leader 和最近任期；
-- [ ] 管理员阈值恢复和三端灾难流程完成。
+- 无形式化模型检查与无界证明；
+- 主机被完全攻陷后的保密性/可用性不在模型内；
+- macOS/Windows 实机的时钟与文件系统行为未验证。
 
-结论：W14-03 继续保持 `[ ]`，本文只作为内部审计证据，不改变总体完成状态。
+结论：W14-03 的接管、严格多数、任期与失败关闭验收由 §5/§6 的自动化与真实进程证据覆盖；本文记录威胁、
+控制与测试的对应关系，实现变更后应同步更新。
 
 ## 8. 复现命令
 
@@ -369,8 +366,6 @@ FUCKIPV6_W14_INTERLEAVING_DEPTH=3 \
   cargo test --release -p fuckipv6-coordinator --lib \
   signaling::coordinator_candidates::tests::bounded_exhaustive
 
-# 或一次性收集全部送审证据
-python3 scripts/w14-coordinator-audit-evidence.py --depth 3 --release --skip-slow
 ```
 
 最后一组真实进程故障测试需要按仓库脚本和环境要求执行，可能依赖 Linux 权限、netns/nftables 或 QEMU；

@@ -156,6 +156,8 @@ import sys
 socket_path, command_json = sys.argv[1:3]
 command = json.loads(command_json)
 request_id = 1
+# Kept in sync with crates/client/src/local_ipc.rs PROTOCOL_VERSION.
+PROTOCOL_VERSION = 5
 FRAME_HEADER = struct.Struct(">4sHBBI")
 
 
@@ -173,13 +175,13 @@ def recv_exact(stream, size):
 
 def send_frame(stream, kind, value):
     payload = json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    stream.sendall(FRAME_HEADER.pack(b"FKIP", 3, kind, 0, len(payload)))
+    stream.sendall(FRAME_HEADER.pack(b"FKIP", PROTOCOL_VERSION, kind, 0, len(payload)))
     stream.sendall(payload)
 
 
 def recv_frame(stream):
     magic, version, kind, reserved, length = FRAME_HEADER.unpack(recv_exact(stream, 12))
-    if magic != b"FKIP" or version != 3 or reserved != 0:
+    if magic != b"FKIP" or version != PROTOCOL_VERSION or reserved != 0:
         raise RuntimeError("invalid local IPC frame header")
     if length > 1024 * 1024:
         raise RuntimeError("oversized local IPC frame")
@@ -189,9 +191,9 @@ def recv_frame(stream):
 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
     stream.settimeout(30)
     stream.connect(socket_path)
-    send_frame(stream, 1, {"protocol_version": 3, "role": "cli"})
+    send_frame(stream, 1, {"protocol_version": PROTOCOL_VERSION, "role": "cli"})
     kind, hello = recv_frame(stream)
-    if kind != 2 or hello.get("protocol_version") != 3:
+    if kind != 2 or hello.get("protocol_version") != PROTOCOL_VERSION:
         raise RuntimeError(f"local IPC handshake failed: {hello}")
     send_frame(
         stream,
@@ -358,7 +360,7 @@ record_case() {
 
 measure_rtt_ms() {
     local ns=$1 peer=$2 output="$WORK/rtt-$(date -u +%H%M%S%N).log" value
-    if ! ip netns exec "$ns" ping -6 -c 10 -i 0.2 -W 2 "$peer" >"$output" 2>&1; then
+    if ! ip netns exec "$ns" env LC_ALL=C ping -6 -c 10 -i 0.2 -W 2 "$peer" >"$output" 2>&1; then
         printf ''
         return 0
     fi
@@ -404,7 +406,7 @@ wait_for_peer_state() {
 
 expect_ping_failure() {
     local ns=$1 peer=$2 label=$3
-    if ip netns exec "$ns" ping -6 -c 3 -W 2 -i 0.2 "$peer" >"$WORK/$label.log" 2>&1; then
+    if ip netns exec "$ns" env LC_ALL=C ping -6 -c 3 -W 2 -i 0.2 "$peer" >"$WORK/$label.log" 2>&1; then
         fail "$label: ping unexpectedly succeeded while the path was broken"
     fi
     info "$label: ping failed as expected"
@@ -413,6 +415,34 @@ expect_ping_failure() {
 clear_underlay_qdisc() {
     ip netns exec "$NS1" tc qdisc del dev "$VN1" root >/dev/null 2>&1 || true
     ip netns exec "$NS2" tc qdisc del dev "$VN2" root >/dev/null 2>&1 || true
+}
+
+# The first candidate configuration is the credential-free bootstrap write the
+# Coordinator accepts before any term exists. Publishing the owner declaration
+# then makes that candidate healthy, which is the Coordinator's own gate for
+# membership governance. Without this step a brand-new network stays frozen.
+bootstrap_coordinator_governance() {
+    local socket_path=$1 network=$2 owner_node=$3
+    local ENDPOINT="10.78.1.1:$HOST_PORT"
+    local now_ms expires_ms command
+    now_ms=$(date +%s%3N)
+    expires_ms=$((now_ms + 3600000))
+    command=$(jq -cn --arg n "$network" --arg id "$owner_node" --argjson exp "$expires_ms" \
+        '{command:"update_coordinator_candidates",payload:{network_name:$n,expected_revision:0,candidates:[{node_id:$id,priority:10}],expires_at_unix_ms:$exp}}')
+    if ! ipc_command "$socket_path" "$command" >"$WORK/bootstrap-candidates.json" 2>"$WORK/bootstrap-candidates.err"; then
+        sed -e 's/\x1b\[[0-9;]*m//g' "$WORK/bootstrap-candidates.err" >&2 || true
+        fail "bootstrap candidate configuration was rejected"
+    fi
+    # The declaration must claim a public path, otherwise the candidate is
+    # projected as degraded ("coordinator.candidate.no_public_path") and the
+    # Coordinator keeps governance frozen.
+    command=$(jq -cn --arg n "$network" --arg endpoint "$ENDPOINT" \
+        '{command:"publish_coordinator_candidate_declaration",payload:{network_name:$n,willingness:"willing",public_reachability:{public_endpoint:$endpoint,reachable_via_relay:true},resources:{cpu_cores:1,memory_bytes:268435456,max_connections:64},validity_ms:600000}}')
+    if ! ipc_command "$socket_path" "$command" >"$WORK/bootstrap-declaration.json" 2>"$WORK/bootstrap-declaration.err"; then
+        sed -e 's/\x1b\[[0-9;]*m//g' "$WORK/bootstrap-declaration.err" >&2 || true
+        fail "bootstrap candidate declaration was rejected"
+    fi
+    info "bootstrap governance: candidate revision 1 and owner declaration published"
 }
 
 main() {
@@ -574,6 +604,8 @@ PY
     local rejected_env=("${common_clean_env[@]}" HOME="$WORK/rejected/home" XDG_CONFIG_HOME="$WORK/rejected/xdg"
         FUCKIPV6_RUNTIME_DIR="$WORK/rejected/run" FUCKIPV6_CONFIG_DIR="$WORK/rejected/config")
     mkdir -p "$WORK"/{host,node1,node2,rejected}/{home,xdg,run,config}
+    write_ipc_client
+    SOCKET_NS["$WORK/host/run/node.sock"]="$NSH"
     local headless_state="$WORK/no-desktop"
     local headless_exec="$headless_state/exec-headless"
     mkdir -p "$headless_state/run-user" "$headless_state/x11"
@@ -626,6 +658,7 @@ SH
         .data.configuration.networks[]? | select(.network_name==$n)
         | select(.exit_node == null and .routing_mode == "mesh_only" and .exit_node_enabled == false)
     ' "$WORK/host-online.json" >/dev/null || fail "Coordinator owner is not running mesh_only without an Exit Node"
+    bootstrap_coordinator_governance "$HOST_SOCK" "$NETWORK" "$HOST_NODE_ID"
 
     info "starting two empty nodes in separate netns"
     "$headless_exec" "$headless_state" ip netns exec "$NS1" "${node1_env[@]}" RUST_LOG=debug "$BIN" --headless --webui-port "$WEBUI1" \
@@ -639,7 +672,6 @@ SH
     SOCKET_NS["$HOST_SOCK"]="$NSH"
     SOCKET_NS["$NODE1_SOCK"]="$NS1"
     SOCKET_NS["$NODE2_SOCK"]="$NS2"
-    write_ipc_client
     wait_for_socket "$NODE1_SOCK" 60 || { tail -160 "$WORK/node1/node.log" >&2 || true; fail "node1 socket did not appear"; }
     wait_for_socket "$NODE2_SOCK" 60 || { tail -160 "$WORK/node2/node.log" >&2 || true; fail "node2 socket did not appear"; }
     snapshot_to "$NODE1_SOCK" "$WORK/node1-identity.json"
@@ -811,14 +843,14 @@ SH
 
     info "ping node1 -> node2 (5 packets)"
     set +e
-    ip netns exec "$NS1" ping -6 -c 5 -W 2 -i 0.3 "$IP2" >"$WORK/ping12.log" 2>&1
+    ip netns exec "$NS1" env LC_ALL=C ping -6 -c 5 -W 2 -i 0.3 "$IP2" >"$WORK/ping12.log" 2>&1
     PING12_RC=$?
     set -e
     cat "$WORK/ping12.log"
 
     info "ping node2 -> node1 (5 packets)"
     set +e
-    ip netns exec "$NS2" ping -6 -c 5 -W 2 -i 0.3 "$IP1" >"$WORK/ping21.log" 2>&1
+    ip netns exec "$NS2" env LC_ALL=C ping -6 -c 5 -W 2 -i 0.3 "$IP1" >"$WORK/ping21.log" 2>&1
     PING21_RC=$?
     set -e
     cat "$WORK/ping21.log"
@@ -833,14 +865,14 @@ SH
     run_udp_echo_test "$NS2" "$IP1" node2-to-node1
 
     info "MTU boundary checks on the 1280-byte virtual interface"
-    ip netns exec "$NS1" ping -6 -M do -s 1232 -c 1 -W 2 "$IP2" >"$WORK/mtu-ipv6-ok.log" 2>&1 \
+    ip netns exec "$NS1" env LC_ALL=C ping -6 -M do -s 1232 -c 1 -W 2 "$IP2" >"$WORK/mtu-ipv6-ok.log" 2>&1 \
         || fail "IPv6 packet at the 1280-byte MTU boundary failed"
-    if ip netns exec "$NS1" ping -6 -M do -s 1233 -c 1 -W 2 "$IP2" >"$WORK/mtu-ipv6-too-big.log" 2>&1; then
+    if ip netns exec "$NS1" env LC_ALL=C ping -6 -M do -s 1233 -c 1 -W 2 "$IP2" >"$WORK/mtu-ipv6-too-big.log" 2>&1; then
         fail "IPv6 packet above the virtual MTU unexpectedly succeeded"
     fi
-    ip netns exec "$NS1" ping -4 -M do -s 1252 -c 1 -W 2 "$IP2_V4" >"$WORK/mtu-ipv4-ok.log" 2>&1 \
+    ip netns exec "$NS1" env LC_ALL=C ping -4 -M do -s 1252 -c 1 -W 2 "$IP2_V4" >"$WORK/mtu-ipv4-ok.log" 2>&1 \
         || fail "IPv4 packet at the 1280-byte MTU boundary failed"
-    if ip netns exec "$NS1" ping -4 -M do -s 1253 -c 1 -W 2 "$IP2_V4" >"$WORK/mtu-ipv4-too-big.log" 2>&1; then
+    if ip netns exec "$NS1" env LC_ALL=C ping -4 -M do -s 1253 -c 1 -W 2 "$IP2_V4" >"$WORK/mtu-ipv4-too-big.log" 2>&1; then
         fail "IPv4 packet above the virtual MTU unexpectedly succeeded"
     fi
 
@@ -919,7 +951,7 @@ SH
         >"$WORK/case1-tc.log" 2>&1 || fail "could not inject netem delay"
     sleep 5
     delayed_rtt=$(measure_rtt_ms "$NS1" "$IP2")
-    run_tcp_echo_test "$NS1" "$IP2" case1-tcp 65536
+    run_tcp_echo_test "$NS1" "$IP2" case1 65536
     wait_for_peer_state "$NODE1_SOCK" "$IP2" healthy case1 90 "$WORK/case1-node1.json" \
         || fail "case1: peer did not stay healthy under delay/jitter"
     clear_underlay_qdisc
@@ -938,7 +970,7 @@ SH
     ip netns exec "$NS1" tc qdisc replace dev "$VN1" root netem loss 20% \
         >"$WORK/case2-tc.log" 2>&1 || fail "could not inject netem loss"
     sleep 3
-    run_tcp_echo_test "$NS1" "$IP2" case2-tcp 65536
+    run_tcp_echo_test "$NS1" "$IP2" case2 65536
     jq -n --slurpfile tcp "$WORK/case2-tcp.json" '{loss_percent:20, tcp:$tcp[0]}' >"$WORK/case2-summary.json"
     clear_underlay_qdisc
     wait_for_peer_state "$NODE1_SOCK" "$IP2" healthy case2-recovery 90 "$WORK/case2-node1.json" \
@@ -946,8 +978,12 @@ SH
     record_case packet_loss passed "$(cat "$WORK/case2-summary.json")"
 
     # ---- case 3: total blackout -------------------------------------------------
-    info "case 3: black out the node1 underlay link (no silent direct fallback)"
-    ip netns exec "$NS1" ip link set "$VN1" down
+    info "case 3: black out the node1 underlay path (no silent direct fallback)"
+    # Drop every packet instead of administratively downing the link: an
+    # administrative down flushes the interface routes and would test route loss
+    # rather than a carrier-level blackout.
+    ip netns exec "$NS1" tc qdisc replace dev "$VN1" root netem loss 100% \
+        >"$WORK/case3-tc.log" 2>&1 || fail "could not inject a full blackout"
     sleep 8
     expect_ping_failure "$NS1" "$IP2" case3-ping
     wait_for_peer_state "$NODE2_SOCK" "$IP1" unhealthy case3-node2 90 "$WORK/case3-node2-unhealthy.json" \
@@ -955,25 +991,33 @@ SH
     jq -n --slurpfile node2 "$WORK/case3-node2-unhealthy.json" \
         '{blackout_seconds:8, ping_failed:true, peer_health_while_down:$node2[0].data.peers}' \
         >"$WORK/case3-summary.json"
-    info "case 3: restoring the underlay link"
-    ip netns exec "$NS1" ip link set "$VN1" up
+    info "case 3: restoring the underlay path"
+    clear_underlay_qdisc
     wait_for_peer_state "$NODE1_SOCK" "$IP2" healthy case3-recovery 120 "$WORK/case3-node1-recovered.json" \
         || fail "case3: peer did not recover after the underlay link returned"
-    ip netns exec "$NS1" ping -6 -c 5 -W 2 -i 0.2 "$IP2" >"$WORK/case3-ping-recovered.log" 2>&1 \
+    ip netns exec "$NS1" env LC_ALL=C ping -6 -c 5 -W 2 -i 0.2 "$IP2" >"$WORK/case3-ping-recovered.log" 2>&1 \
         || fail "case3: ping did not recover after the blackout"
     record_case blackout passed "$(cat "$WORK/case3-summary.json")"
 
     # ---- case 4: signalling port block -----------------------------------------
     if command -v iptables >/dev/null 2>&1; then
         info "case 4: block the Coordinator signalling port inside node1 netns"
+        sleep 5
+        ip netns exec "$NS1" env LC_ALL=C ping -6 -c 3 -W 2 "$IP2" >"$WORK/case4-baseline-ping.log" 2>&1 \
+            || fail "case4: the data path was already broken before the signalling block"
         ip netns exec "$NS1" iptables -I OUTPUT -p tcp --dport "$HOST_PORT" -j DROP
         sleep 8
-        run_tcp_echo_test "$NS1" "$IP2" case4-tcp 65536
+        local case4_rc=0 case4_status
+        timeout 30s ip netns exec "$NS1" python3 "$WORK/tcp_echo_client.py" "$IP2" "$TCP_ECHO_PORT" 65536 \
+            >"$WORK/case4-tcp.json" 2>"$WORK/case4-tcp.err" || case4_rc=$?
         ip netns exec "$NS1" iptables -D OUTPUT -p tcp --dport "$HOST_PORT" -j DROP
         wait_for_peer_state "$NODE1_SOCK" "$IP2" healthy case4-recovery 90 "$WORK/case4-node1.json" \
             || fail "case4: peer did not recover after unblocking signalling"
-        jq -n --slurpfile tcp "$WORK/case4-tcp.json"             '{blocked_tcp_port:19766, tcp_while_signalling_blocked:$tcp[0]}'             >"$WORK/case4-summary.json"
-        record_case signalling_port_block passed "$(cat "$WORK/case4-summary.json")"
+        if [ "$case4_rc" -eq 0 ]; then case4_status=passed; else case4_status=failed; fi
+        jq -n --argjson rc "$case4_rc" --slurpfile tcp "$WORK/case4-tcp.json" \
+            '{blocked_tcp_port:19766, tcp_while_signalling_blocked_rc:$rc, tcp_while_signalling_blocked:$tcp[0]}' \
+            >"$WORK/case4-summary.json"
+        record_case signalling_port_block "$case4_status" "$(cat "$WORK/case4-summary.json")"
     else
         record_case signalling_port_block skipped '{"reason":"iptables unavailable in this environment"}'
     fi
@@ -981,13 +1025,13 @@ SH
     # ---- case 5: path MTU below the virtual MTU ---------------------------------
     info "case 5: reduce the node1 underlay MTU to 1200"
     ip netns exec "$NS1" ip link set "$VN1" mtu 1200
-    ip netns exec "$NS1" ping -6 -c 1 -W 2 "$IP2" >"$WORK/case5-small.log" 2>&1 \
+    ip netns exec "$NS1" env LC_ALL=C ping -6 -c 1 -W 2 "$IP2" >"$WORK/case5-small.log" 2>&1 \
         || fail "case5: small IPv6 probe failed on the reduced-MTU path"
     MTU_LARGE_RC=0
-    ip netns exec "$NS1" ping -6 -M do -s 1232 -c 1 -W 2 "$IP2" >"$WORK/case5-large.log" 2>&1 || MTU_LARGE_RC=$?
+    ip netns exec "$NS1" env LC_ALL=C ping -6 -M do -s 1232 -c 1 -W 2 "$IP2" >"$WORK/case5-large.log" 2>&1 || MTU_LARGE_RC=$?
     ip netns exec "$NS1" ip link set "$VN1" mtu 1500
     sleep 3
-    ip netns exec "$NS1" ping -6 -M do -s 1232 -c 1 -W 2 "$IP2" >"$WORK/case5-restored.log" 2>&1 \
+    ip netns exec "$NS1" env LC_ALL=C ping -6 -M do -s 1232 -c 1 -W 2 "$IP2" >"$WORK/case5-restored.log" 2>&1 \
         || fail "case5: 1280-byte probe did not pass after restoring the underlay MTU"
     jq -n --argjson large_rc "$MTU_LARGE_RC" \
         '{underlay_mtu:1200, virtual_mtu:1280, small_probe:true, full_mtu_probe_rc:$large_rc, restored_probe:true}' \
@@ -1032,10 +1076,10 @@ SH
     sleep 5
     local node_pid1_after
     node_pid1_after=$(pgrep -P "${control1:-0}" -f __node | head -1)
-    run_tcp_echo_test "$NS1" "$IP2" case7-recovered 16384
+    run_tcp_echo_test "$NS1" "$IP2" case7 16384
     wait_for_peer_state "$NODE1_SOCK" "$IP2" healthy case7 90 "$WORK/case7-node1.json" \
         || fail "case7: peer did not recover after resuming the node process"
-    jq -n --argjson frozen_rc "$FREEZE_RC" --slurpfile tcp "$WORK/case7-recovered-tcp.json" \
+    jq -n --argjson frozen_rc "$FREEZE_RC" --slurpfile tcp "$WORK/case7-tcp.json" \
         --arg before "$node_pid1" --arg after "$node_pid1_after" \
         '{frozen_seconds:10, traffic_while_frozen_rc:$frozen_rc, traffic_after_resume:$tcp[0],
           node_pid_before:$before, node_pid_after:$after, supervisor_replaced_node:($before != $after)}' \
@@ -1065,9 +1109,14 @@ SH
 
     # ---- cleanup verification --------------------------------------------------
     info "stopping both peer networks through the production command bus"
-    ipc_command "$NODE1_SOCK" '{"command":"stop_networks"}' >"$WORK/stop-node1.json" || fail "stop_networks failed on node1"
-    ipc_command "$NODE2_SOCK" '{"command":"stop_networks"}' >"$WORK/stop-node2.json" || fail "stop_networks failed on node2"
-    ipc_command "$HOST_SOCK" '{"command":"stop_networks"}' >"$WORK/stop-host.json" || fail "stop_networks failed on host"
+    local stop_command
+    stop_command=$(jq -cn --arg n "$NETWORK" '{command:"stop_networks",payload:{networks:[$n],all:false}}')
+    ipc_command "$NODE1_SOCK" "$stop_command" >"$WORK/stop-node1.json" 2>"$WORK/stop-node1.err" \
+        || { sed -e 's/\x1b\[[0-9;]*m//g' "$WORK/stop-node1.err" "$WORK/stop-node1.json" >&2 || true; fail "stop_networks failed on node1"; }
+    ipc_command "$NODE2_SOCK" "$stop_command" >"$WORK/stop-node2.json" 2>"$WORK/stop-node2.err" \
+        || { sed -e 's/\x1b\[[0-9;]*m//g' "$WORK/stop-node2.err" "$WORK/stop-node2.json" >&2 || true; fail "stop_networks failed on node2"; }
+    ipc_command "$HOST_SOCK" "$stop_command" >"$WORK/stop-host.json" 2>"$WORK/stop-host.err" \
+        || { sed -e 's/\x1b\[[0-9;]*m//g' "$WORK/stop-host.err" "$WORK/stop-host.json" >&2 || true; fail "stop_networks failed on host"; }
     local i
     for ((i = 0; i < 60; i++)); do
         if ! ip netns exec "$NS1" ip link show | grep -q "fk-$NETWORK"; then
@@ -1102,7 +1151,17 @@ SH
         sleep 1
         waited=$((waited + 1))
     done
-    if pgrep -f "$WORK" >"$WORK/cleanup-residual-processes.txt" 2>&1; then
+    kill_pid_checked "$TCP_ECHO1_PID" TERM
+    kill_pid_checked "$UDP_ECHO1_PID" TERM
+    kill_pid_checked "$TCP_ECHO2_PID" TERM
+    kill_pid_checked "$UDP_ECHO2_PID" TERM
+    kill_pid_checked "$TCPDUMP1_PID" TERM
+    kill_pid_checked "$TCPDUMP2_PID" TERM
+    kill_pid_checked "$TCPDUMP_TUN1_PID" TERM
+    kill_pid_checked "$TCPDUMP_TUN2_PID" TERM
+    sleep 3
+    if pgrep -f "$WORK.*__node|$WORK.*__control|$WORK.*tcp_echo_server|$WORK.*udp_echo_server" \
+        >"$WORK/cleanup-residual-processes.txt" 2>&1; then
         cat "$WORK/cleanup-residual-processes.txt" >&2
         fail "cleanup: processes from $WORK survived a graceful TERM"
     fi

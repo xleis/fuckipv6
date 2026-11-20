@@ -198,6 +198,12 @@ impl NodeCommandContext {
     /// layer's emergency governance gate. A missing candidate projection stays
     /// unobserved; an observed non-writable or active-emergency network freezes
     /// governance writes for that network only.
+    ///
+    /// A network that has not installed an authoritative term yet is not frozen:
+    /// there is no established authority to protect, and its creator still has
+    /// to admit the first members. Candidate health remains the Coordinator's own
+    /// admission gate, and term-bound writes stay rejected there, so this does
+    /// not widen authority.
     pub(crate) fn with_governance_snapshot(mut self, snapshot: &NodeSnapshot) -> Self {
         self.governance_frozen_networks =
             snapshot
@@ -207,7 +213,8 @@ impl NodeCommandContext {
                 .filter(|status| {
                     status.emergency_leader.as_ref().is_some_and(|leader| {
                         leader.state == CoordinatorEmergencyLeaderState::Active
-                    }) || !status.control_plane.governance_writable
+                    }) || (!status.control_plane.governance_writable
+                        && status.latest_term.is_some())
                 })
                 .map(|status| status.network_id.clone())
                 .collect();

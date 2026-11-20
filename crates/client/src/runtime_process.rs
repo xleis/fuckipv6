@@ -654,6 +654,7 @@ impl NodeRestartBudget {
         self.failures.clear();
     }
 
+    #[cfg(test)]
     fn recorded(&self) -> usize {
         self.failures.len()
     }

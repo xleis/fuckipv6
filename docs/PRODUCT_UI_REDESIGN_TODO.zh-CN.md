@@ -4229,6 +4229,12 @@ W16-01 仍缺提交/撤销/执行与成员、策略等页面切片，保持 `[ ]
 `:app:lintDebug`、`:app:assembleDebug` 通过。该验证在与并发 UI 改动隔离的 HEAD worktree 中执行。W16-01 仍缺成员/策略
 页面切片与 VpnService，保持 `[ ]`。
 
+**补充（2026-11-20，事件流刷新）**：新增 `bridge/EventStream`/`bridge/NodeEventStream` 解析 `GET /api/v1/events` 的 SSE
+`data:` 帧（`snapshot`/`event`/`resync_required`），忽略注释与 `id:`/`event:`/`retry:` 字段；`snapshot` 帧可直接应用
+（帧内是快照对象，解析时包一层信封），`event`/`resync_required` 只触发一次权威拉取，未知类型忽略。事件流断开后重连，
+5 秒定时轮询保留为兜底：事件只缩短等待，不替代权威读取。新增 `EventFrameParserTest` 5 项，Android 单测共 62 项通过。
+W16-01 仍缺成员/策略页面切片，保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

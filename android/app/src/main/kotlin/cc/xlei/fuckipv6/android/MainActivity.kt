@@ -24,12 +24,15 @@ import cc.xlei.fuckipv6.android.bridge.RecoveryStatusView
 import cc.xlei.fuckipv6.android.bridge.HttpSnapshotSource
 import cc.xlei.fuckipv6.android.bridge.NodeApiConfig
 import cc.xlei.fuckipv6.android.bridge.NodeBridge
+import cc.xlei.fuckipv6.android.bridge.LiveAction
 import cc.xlei.fuckipv6.android.bridge.NodeCommandBridge
 import cc.xlei.fuckipv6.android.bridge.NodeCommandClient
+import cc.xlei.fuckipv6.android.bridge.NodeEventStream
 import cc.xlei.fuckipv6.android.bridge.RelaySurface
 import cc.xlei.fuckipv6.android.ui.AdminRecoveryPageData
 import cc.xlei.fuckipv6.android.ui.CoordinatorPageData
 import cc.xlei.fuckipv6.android.ui.RelayPageData
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import cc.xlei.fuckipv6.android.contract.SharedContractLoader
 import cc.xlei.fuckipv6.android.ui.ContractFailureScreen
@@ -45,6 +48,7 @@ class MainActivity : ComponentActivity() {
     private val requestSequence = AtomicLong(System.currentTimeMillis())
     private val recoveries = MutableStateFlow<List<RecoveryStatusView>>(emptyList())
     private val adminPage = MutableStateFlow<AdminRecoveryPageData?>(null)
+    private var eventJob: Job? = null
     private var refreshNetwork: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -85,6 +89,33 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        // Events only shorten the wait: every frame still triggers one
+        // authoritative snapshot pull, and the timed poll stays as fallback.
+        if (node != null && apiConfig != null) {
+            val stream = NodeEventStream(apiConfig)
+            eventJob = bridgeScope.launch {
+                var pending = false
+                while (true) {
+                    val failure = stream.read { frame ->
+                        when (frame.action()) {
+                            is LiveAction.ApplySnapshot -> if (!pending) {
+                                pending = true
+                                node.pollOnce()
+                                pending = false
+                            }
+                            LiveAction.RefreshSnapshot, LiveAction.Resync -> if (!pending) {
+                                pending = true
+                                node.pollOnce()
+                                pending = false
+                            }
+                            LiveAction.Ignore -> Unit
+                        }
+                    }
+                    if (failure == null) break
+                    delay(5_000)
+                }
+            }
+        }
         bridgeScope.launch {
             node?.state()?.collect { state ->
                 val ready = state as? BridgeState.Ready ?: return@collect
@@ -229,6 +260,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         pollJob?.cancel()
+        eventJob?.cancel()
         bridgeScope.cancel()
         bridge = null
         super.onDestroy()

@@ -4278,6 +4278,11 @@ generation 守卫丢弃过期目录响应，避免切目录后迟到的分页覆
 短期 token、不宣称已保存字节，暂停/恢复使用节点报告的真实 `transfer_id`/`operation_id`；失败复用既有 `file.page.error.*`
 文案并保留列表。新增 `FileTransferControllerTest` 5 项，Android 单测共 97 项通过。SAF 保存与 UI 挂载仍待完成，W16-01 保持 `[ ]`。
 
+**补充（2026-11-21，下载落盘管线）**：新增 `bridge/DownloadFetcher`（以 token 流式取流，预检与逐块双重字节上限，
+`Content-Length` 与实际不一致判畸形）与 `ui/DownloadSaver`：落点由调用方实现的 `DownloadSink`（SAF 文档/缓存文件）决定，
+只有“流完整 + close 成功”才报告 `Saved`；传输失败、超限、close/open 失败一律 `discard`，绝不出现“已保存字节”。
+新增 `DownloadSaverTest` 5 项，Android 单测共 102 项通过。SAF 选择器实现、上传源选择与 UI 挂载仍待完成，W16-01 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

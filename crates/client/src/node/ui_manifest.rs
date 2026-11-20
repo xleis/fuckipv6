@@ -4003,4 +4003,59 @@ mod tests {
             );
         }
     }
+
+    /// The shared navigation contract and the node manifest must describe the
+    /// same pages: GPUI/WebUI read one, Android reads the other, and a page that
+    /// exists in only one of them is unreachable on that surface.
+    #[test]
+    fn manifest_pages_match_the_shared_navigation_contract() {
+        let navigation: serde_json::Value =
+            serde_json::from_str(include_str!("../../../common/assets/ui-navigation.json"))
+                .expect("navigation contract must be valid JSON");
+        let mut navigation_pages = std::collections::BTreeSet::new();
+        for module in navigation["modules"].as_array().expect("modules array") {
+            for page in module["page_ids"].as_array().expect("page_ids array") {
+                navigation_pages.insert(page.as_str().expect("page id").to_owned());
+            }
+        }
+
+        let manifest = node_ui_manifest();
+        let manifest_pages: std::collections::BTreeSet<String> =
+            manifest.pages.iter().map(|page| page.id.clone()).collect();
+
+        assert!(
+            manifest_pages.len() >= 14,
+            "manifest lost pages: {}",
+            manifest_pages.len()
+        );
+        let only_in_manifest: Vec<_> = manifest_pages
+            .difference(&navigation_pages)
+            .cloned()
+            .collect();
+        let only_in_navigation: Vec<_> = navigation_pages
+            .difference(&manifest_pages)
+            .cloned()
+            .collect();
+        assert!(
+            only_in_manifest.is_empty() && only_in_navigation.is_empty(),
+            "navigation and manifest page sets differ: manifest-only={only_in_manifest:?}, \
+             navigation-only={only_in_navigation:?}"
+        );
+
+        // Every page keeps its own title key, and the manifest page id must be the
+        // one the navigation contract reaches through a module tab.
+        for page in &manifest.pages {
+            assert_eq!(
+                page.title_key,
+                format!("page.{}", page.id),
+                "page {} must use its own title key",
+                page.id
+            );
+            assert!(
+                navigation_pages.contains(&page.id),
+                "page {} is not reachable from the navigation contract",
+                page.id
+            );
+        }
+    }
 }

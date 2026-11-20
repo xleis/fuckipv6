@@ -62,6 +62,8 @@ fun FuckIpv6App(
     fileBrowse: FileWorkspaceState? = null,
     fileBrowseActions: FileBrowseActions? = null,
     transfers: FileTransferState? = null,
+    members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
+    onRefreshMembers: (() -> Unit)? = null,
 ) {
     val systemLocale = LocalLocale.current.platformLocale
     val initialModule = contracts.navigation.modules.first()
@@ -155,6 +157,8 @@ fun FuckIpv6App(
                 fileBrowse = fileBrowse,
                 fileBrowseActions = fileBrowseActions,
                 transfers = transfers,
+                members = members,
+                onRefreshMembers = onRefreshMembers,
             )
         }
     }
@@ -201,6 +205,8 @@ fun PageContent(
     fileBrowse: FileWorkspaceState? = null,
     fileBrowseActions: FileBrowseActions? = null,
     transfers: FileTransferState? = null,
+    members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
+    onRefreshMembers: (() -> Unit)? = null,
 ) {
     Column(
         modifier = modifier
@@ -229,6 +235,14 @@ fun PageContent(
                             contracts = contracts,
                             locale = locale,
                             data = it,
+                        )
+                    }
+                    if (onRefreshMembers != null) {
+                        MemberListContent(
+                            contracts = contracts,
+                            locale = locale,
+                            directory = members,
+                            onRefresh = onRefreshMembers,
                         )
                     }
                 }

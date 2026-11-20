@@ -33,6 +33,8 @@ import cc.xlei.fuckipv6.android.bridge.LiveAction
 import cc.xlei.fuckipv6.android.bridge.NodeCommandBridge
 import cc.xlei.fuckipv6.android.bridge.NodeCommandClient
 import cc.xlei.fuckipv6.android.bridge.FileBrowseClient
+import cc.xlei.fuckipv6.android.bridge.MemberDirectoryView
+import cc.xlei.fuckipv6.android.bridge.MemberSurface
 import cc.xlei.fuckipv6.android.bridge.DirectoryEntry
 import cc.xlei.fuckipv6.android.bridge.FileTransferClient
 import cc.xlei.fuckipv6.android.bridge.HttpDownloadFetcher
@@ -45,6 +47,7 @@ import cc.xlei.fuckipv6.android.ui.CoordinatorPageData
 import cc.xlei.fuckipv6.android.ui.DownloadSaver
 import cc.xlei.fuckipv6.android.ui.FileBrowseActions
 import cc.xlei.fuckipv6.android.ui.FileBrowseController
+import cc.xlei.fuckipv6.android.ui.MemberListContent
 import cc.xlei.fuckipv6.android.ui.FileTransferController
 import cc.xlei.fuckipv6.android.ui.FileTransferNaming
 import cc.xlei.fuckipv6.android.ui.RelayPageData
@@ -78,6 +81,9 @@ class MainActivity : ComponentActivity() {
     private var downloadSaver: DownloadSaver? = null
     private var apiConfig: NodeApiConfig? = null
     private var pendingDownloadName: String? = null
+    private var memberBridge: NodeCommandBridge? = null
+    private val members = MutableStateFlow<MemberDirectoryView?>(null)
+    private var memberNetworkId: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -112,6 +118,20 @@ class MainActivity : ComponentActivity() {
                 bridgeScope,
             ).also { controller -> controller.refresh() }
         }
+        memberBridge = apiConfig
+            ?.takeIf { it.isValid }
+            ?.let { NodeCommandBridge(NodeCommandClient(it)) }
+            ?.also { bridge ->
+                bridgeScope.launch {
+                    bridge.lastOutcome().collect { outcome ->
+                        if (outcome is CommandOutcome.Succeeded &&
+                            outcome.outcomeStatus == "network_members"
+                        ) {
+                            members.value = MemberSurface.parseDirectory(outcome.data)
+                        }
+                    }
+                }
+            }
         recoveryBridge = apiConfig
             ?.takeIf { it.isValid }
             ?.let { NodeCommandBridge(NodeCommandClient(it)) }
@@ -212,6 +232,10 @@ class MainActivity : ComponentActivity() {
                         refreshNetwork = networkName
                         refreshRecoveries(networkName)
                     }
+                    if (networkId != null && networkId != memberNetworkId) {
+                        memberNetworkId = networkId
+                        refreshMembers(networkId)
+                    }
                 }
             }
         }
@@ -246,6 +270,7 @@ class MainActivity : ComponentActivity() {
             val relay = ready?.relay?.let(::relayPageData)
             val coordinator = ready?.coordinator?.let(CoordinatorPageData::fromBridge)
             val admin = adminPage.collectAsState().value
+            val membersState = members.collectAsState().value
             FuckIpv6Theme {
                 contracts.fold(
                     onSuccess = {
@@ -254,6 +279,7 @@ class MainActivity : ComponentActivity() {
                             relay = relay,
                             coordinator = coordinator,
                             adminRecovery = admin,
+                            members = membersState,
                             files = files,
                             filesFailureKey = filesFailureKey,
                         )
@@ -406,6 +432,17 @@ class MainActivity : ComponentActivity() {
         )
         // Keep the compiler honest about the unused config in this path.
         check(config.isValid)
+    }
+
+    /** Reads the member roster through its own command bridge. */
+    private fun refreshMembers(networkId: String) {
+        val bridge = memberBridge ?: return
+        val body = CommandJson.envelope(
+            command = MemberSurface.listCommand(networkId),
+            requestId = nextRequestId(),
+            idempotencyKey = "member-list-$networkId-${UUID.randomUUID()}",
+        )
+        bridge.submit(bridgeScope, body)
     }
 
     private fun nextRequestId(): Long {

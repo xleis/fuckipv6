@@ -3351,7 +3351,12 @@
       "settings.node_api.token_hint": "节点未启用认证时留空；令牌只保存在本机偏好中。",
       "settings.node_api.save": "保存并连接",
       "settings.node_api.clear": "清除连接",
-      "settings.node_api.invalid_url": "地址无效：需以 http:// 或 https:// 开头并包含主机名。"
+      "settings.node_api.invalid_url": "地址无效：需以 http:// 或 https:// 开头并包含主机名。",
+      "member.section.title": "成员",
+      "member.section.detail": "只显示节点返回的成员目录：身份、角色、连接状态与可执行动作。",
+      "member.row.lifecycle": "生命周期",
+      "member.row.actions": "可执行动作",
+      "member.error.unobserved": "尚未从节点读取成员目录。"
     },
     "en": {
       "nav.overview": "Overview",
@@ -6702,7 +6707,12 @@
       "settings.node_api.token_hint": "Leave empty when the node has no bearer token; the token stays in local preferences only.",
       "settings.node_api.save": "Save and connect",
       "settings.node_api.clear": "Clear connection",
-      "settings.node_api.invalid_url": "Invalid address: it must start with http:// or https:// and include a host."
+      "settings.node_api.invalid_url": "Invalid address: it must start with http:// or https:// and include a host.",
+      "member.section.title": "Members",
+      "member.section.detail": "Only the roster the node returned: identity, role, connection state and available actions.",
+      "member.row.lifecycle": "Lifecycle",
+      "member.row.actions": "Available actions",
+      "member.error.unobserved": "The member directory has not been read from the node yet."
     }
   }
 }

@@ -4323,6 +4323,11 @@ DOS 设备名；provider 不报大小或名字时不提交）后流式上传；�
 `DownloadSaver` + `SafDownloadSink`（失败删除）。新增 `FileTransferNamingTest` 2 项，Android 单测共 121 项通过。
 真机选择器交互与 VpnService 仍待验收，W16-01/W16-02 保持 `[ ]`。
 
+**补充（2026-11-21，成员目录页面）**：`node_runtime` 页新增成员区（`ui/MemberListContent`），只渲染节点返回的身份、显示名、
+角色、连接状态、生命周期与可执行动作数；未读取时显示 `member.error.unobserved`，空名单显示 `common.no_data`。
+`MainActivity` 用独立命令桥按网络 id 读取 `list_network_members`，网络切换自动重读并支持手动刷新。共享 i18n 新增 5 组中英键。
+Android 单测 121 项通过。生命周期写命令（改角色/移除成员）与 VpnService 仍未接线，W16-01/W16-02 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

@@ -957,6 +957,66 @@ impl CoordinatorCandidateStore {
         let network = read_network_record(&self.network_record_path, &network_id)?;
         let audit_sequence_before = network_audit_sequence(&file, &network_id);
 
+        // A network whose authority has not been installed yet has nothing to
+        // validate against. Rejecting recovery here would leave every freshly
+        // created network permanently offline because the election handoff that
+        // installs the first term is a later step. Report a fail-closed
+        // projection instead: governance stays read-only, while health checks
+        // and the existing data plane keep working. This mirrors the documented
+        // recovery contract and never grants write authority.
+        if file
+            .networks
+            .get(&network_id)
+            .and_then(|stored| stored.latest_term.as_ref())
+            .is_none()
+        {
+            report.validate_definition()?;
+            if !network.members.contains(actor) {
+                bail!("coordinator_candidate.error.permission_denied");
+            }
+            let recovery = CoordinatorRecoveryStatus {
+                network_id: network_id.clone(),
+                stage: CoordinatorRecoveryStage::ReadOnly,
+                role: CoordinatorRecoveryRole::Member,
+                governance_writable: false,
+                health_checks_allowed: true,
+                data_plane_allowed: true,
+                authoritative_term: 0,
+                authoritative_fencing_token: fuckipv6_common::domain::FencingToken(0),
+                authoritative_leader: network.owner.clone(),
+                authoritative_candidate_config_revision: 0,
+                authoritative_audit_sequence: audit_sequence_before,
+                reason_code: "coordinator.recovery.bootstrap_pending".into(),
+            };
+            append_audit(
+                &mut file.audit_log,
+                actor,
+                &network.network_id,
+                "coordinator.recovery.bootstrap_pending",
+                format!("network/{}/recovery/{actor}", network.network_id),
+                AuditOutcome::Succeeded,
+                now_unix_ms,
+                "network has no authoritative term yet; recovery stays read-only and the data plane is allowed",
+                recovery_audit_details(
+                    actor,
+                    &report,
+                    Some(CoordinatorRecoveryStage::ReadOnly),
+                    None,
+                ),
+            )?;
+            // Recovery records are validated against an authoritative term on
+            // load, so a bootstrap projection is deliberately not persisted. The
+            // caller's cursor therefore stays at zero until a term exists, which
+            // replays the whole bounded journal afterwards.
+            let status = status_from_file(&network, file.networks.get(&network_id), now_unix_ms)?;
+            self.persist(&file)?;
+            return Ok(CoordinatorRecoveryResponse {
+                status,
+                recovery,
+                audit_entries: Vec::new(),
+            });
+        }
+
         let current = (|| -> Result<(CoordinatorTerm, CoordinatorCandidateConfig)> {
             report.validate_definition()?;
             if !network.members.contains(actor) {
@@ -2593,7 +2653,8 @@ mod tests {
     use super::*;
     use fuckipv6_common::domain::{
         CapabilityKind, CoordinatorAuthority, CoordinatorCandidate, CoordinatorCandidateResources,
-        CoordinatorCandidateWillingness, CoordinatorControlPlaneState, CoordinatorPhase,
+        CoordinatorCandidateWillingness, CoordinatorControlPlaneState,
+        CoordinatorEmergencyLeaderState, CoordinatorLeaseState, CoordinatorPhase,
         CoordinatorPublicReachability, ExitContributionMode, ExitContributionObligation,
         ExitContributionScope, ExitSelectionPolicy, FencingToken, NetworkCreateProfile,
         NetworkJoinMode, NetworkVisibility, PublicKey, COORDINATOR_CLOCK_SKEW_LIMIT_MS,
@@ -2618,7 +2679,11 @@ mod tests {
 
     impl Fixture {
         fn new(label: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!(
+            Self::new_in(&std::env::temp_dir(), label)
+        }
+
+        fn new_in(base: &std::path::Path, label: &str) -> Self {
+            let dir = base.join(format!(
                 "fuckipv6-coordinator-candidates-{}-{label}",
                 std::process::id()
             ));
@@ -6037,5 +6102,715 @@ mod tests {
                 && entry.outcome == AuditOutcome::Denied
                 && entry.details.get("error") == Some(&error)
         }));
+    }
+
+    #[test]
+    fn fresh_network_recovery_stays_read_only_and_allows_the_data_plane() {
+        let fixture = Fixture::new("fresh-recovery");
+        let store = fixture.store();
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+
+        let response = store
+            .recover(
+                &candidate_one_id,
+                CoordinatorRecoveryReport {
+                    network_id: fixture.network.network_id.clone(),
+                    observed_term: None,
+                    observed_fencing_token: None,
+                    observed_leader: None,
+                    observed_candidate_config_revision: None,
+                    observed_audit_sequence: 0,
+                },
+                NOW,
+            )
+            .expect("a network without an installed term must still answer recovery");
+
+        assert_eq!(response.recovery.stage, CoordinatorRecoveryStage::ReadOnly);
+        assert_eq!(
+            response.recovery.reason_code,
+            "coordinator.recovery.bootstrap_pending"
+        );
+        assert!(!response.recovery.governance_writable);
+        assert!(response.recovery.health_checks_allowed);
+        assert!(response.recovery.data_plane_allowed);
+        assert_eq!(response.status.latest_term, None);
+        assert_eq!(response.status.config, None);
+        assert!(response.status.control_plane.governance_writable.eq(&false));
+
+        let audit = store.audit_entries().unwrap();
+        assert!(audit.iter().any(|entry| {
+            entry.action == "coordinator.recovery.bootstrap_pending"
+                && entry.outcome == AuditOutcome::Succeeded
+        }));
+    }
+
+    #[test]
+    fn fresh_network_recovery_still_rejects_non_members() {
+        let fixture = Fixture::new("fresh-recovery-outsider");
+        let store = fixture.store();
+        let outsider = Identity::generate().unwrap();
+        let outsider_id = NodeId::from_public_key(&outsider.public_key());
+
+        let error = store
+            .recover(
+                &outsider_id,
+                CoordinatorRecoveryReport {
+                    network_id: fixture.network.network_id.clone(),
+                    observed_term: None,
+                    observed_fencing_token: None,
+                    observed_leader: None,
+                    observed_candidate_config_revision: None,
+                    observed_audit_sequence: 0,
+                },
+                NOW,
+            )
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "coordinator_candidate.error.permission_denied");
+    }
+
+    /// Fingerprint of everything that carries durable authority. Rejected
+    /// operations may append audit entries but must never change any of these.
+    #[derive(Debug, PartialEq, Eq)]
+    struct AuthorityFingerprint {
+        term: Option<(u64, NodeId, u64)>,
+        term_expires_at_unix_ms: Option<u64>,
+        election: Option<(String, CoordinatorElectionStage, usize)>,
+        emergency: Option<(NodeId, u64, CoordinatorEmergencyLeaderState)>,
+    }
+
+    fn authority_fingerprint(status: &CoordinatorCandidateStatus) -> AuthorityFingerprint {
+        AuthorityFingerprint {
+            term: status
+                .latest_term
+                .as_ref()
+                .map(|term| (term.term, term.leader.clone(), term.fencing_token.0)),
+            term_expires_at_unix_ms: status
+                .latest_term
+                .as_ref()
+                .map(|term| term.expires_at_unix_ms),
+            election: status.latest_election.as_ref().map(|election| {
+                (
+                    election.proposal.proposal_id.as_str().to_string(),
+                    election.stage,
+                    election.votes.len(),
+                )
+            }),
+            emergency: status
+                .emergency_leader
+                .as_ref()
+                .map(|lease| (lease.leader.clone(), lease.emergency_epoch, lease.state)),
+        }
+    }
+
+    /// Every observation must satisfy the protocol invariants an independent
+    /// auditor would look for: strict-majority authority, monotonic
+    /// term/fencing progression, a single committed election, and no writable
+    /// term that coexists with an emergency runtime authority.
+    fn assert_authority_invariants(
+        label: &str,
+        status: &CoordinatorCandidateStatus,
+        previous_term: &mut Option<(u64, u64)>,
+        now_unix_ms: u64,
+    ) {
+        if let Some(term) = &status.latest_term {
+            let voters = term
+                .majority_proof
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                voters.len(),
+                term.majority_proof.len(),
+                "{label}: majority proof must name distinct voters"
+            );
+            assert!(
+                voters.len() * 2 > term.candidate_group.len(),
+                "{label}: installed term {} has no strict majority ({}/{})",
+                term.term,
+                voters.len(),
+                term.candidate_group.len()
+            );
+            for voter in &term.majority_proof {
+                assert!(
+                    term.candidate_group.contains(voter),
+                    "{label}: majority voter outside the candidate group"
+                );
+            }
+            if let Some((term_number, fencing_token)) = *previous_term {
+                assert!(
+                    term.term >= term_number,
+                    "{label}: term rolled back from {term_number} to {}",
+                    term.term
+                );
+                if term.term == term_number {
+                    assert!(
+                        term.fencing_token.0 >= fencing_token,
+                        "{label}: fencing token rolled back inside term {term_number}"
+                    );
+                } else {
+                    assert!(
+                        term.fencing_token.0 > fencing_token,
+                        "{label}: fencing token did not advance with term {} -> {}",
+                        term_number,
+                        term.term
+                    );
+                }
+            }
+            *previous_term = Some((term.term, term.fencing_token.0));
+        }
+
+        if let Some(election) = &status.latest_election {
+            if election.stage == CoordinatorElectionStage::Committed {
+                let voters = election
+                    .votes
+                    .iter()
+                    .map(|vote| &vote.voter)
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert!(
+                    voters.len() * 2 > election.proposal.candidate_group.len(),
+                    "{label}: committed election without a strict majority"
+                );
+            }
+        }
+
+        if let Some(lease) = &status.emergency_leader {
+            if lease.state == CoordinatorEmergencyLeaderState::Active {
+                if let Some(term) = &status.latest_term {
+                    let writable = matches!(
+                        term.lease_status_at(now_unix_ms).state,
+                        CoordinatorLeaseState::Active | CoordinatorLeaseState::RenewalDue
+                    );
+                    assert!(
+                        !writable,
+                        "{label}: emergency authority coexists with a writable term"
+                    );
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum InterleavingAction {
+        ProposeTermOneByOne,
+        ProposeTermOneByTwo,
+        VoteOneForTermOne,
+        VoteTwoForTermOne,
+        TimeoutTermOneProposal,
+        InstallTermOneWithoutMajority,
+        InstallTermOne,
+        InstallSuccessorTermTwo,
+        RenewTermOneLease,
+        GovernanceWriteUnderTermOne,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum EmergencyAction {
+        IssueEmergencyLeader,
+        GovernanceWriteUnderEmergency,
+        InstallTermOne,
+        InstallSuccessorTermTwo,
+        RenewTermOneLease,
+        UpdateCandidateConfigWhileEmergency,
+    }
+
+    /// One durable store per scenario, wiped between sequences: interleavings
+    /// must not inherit state from the previous sequence, but recreating the
+    /// network record and identities for every one of hundreds of sequences
+    /// would dominate the sweep.
+    fn reset_candidate_store(fixture: &Fixture) -> CoordinatorCandidateStore {
+        let path = fixture.dir.join("coordinator_candidates.json");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(fixture.dir.join(".profile.lock"));
+        let _ = std::fs::remove_file(fixture.dir.join(".candidate.lock"));
+        let _ = std::fs::remove_file(fixture.dir.join(".governance.lock"));
+        fixture.store()
+    }
+
+    /// Depth of the exhaustive interleaving sweep.
+    ///
+    /// `0` (the default) runs only the smoke hazards, because every store
+    /// operation re-verifies Ed25519 signatures and an unoptimised build makes
+    /// a full sweep too slow for the default test run. `2` covers every
+    /// ordered pair of protocol actions and `3` every ordered triple; the
+    /// audit evidence harness runs `3` in a release build, which is where the
+    /// full sweep belongs.
+    fn interleaving_depth() -> usize {
+        std::env::var("FUCKIPV6_W14_INTERLEAVING_DEPTH")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0)
+            .clamp(0, 3)
+    }
+
+    fn enumerate_sequences(alphabet_len: usize, depth: usize) -> Vec<Vec<usize>> {
+        let mut sequences = vec![Vec::new()];
+        for _ in 0..depth {
+            let mut next = Vec::with_capacity(sequences.len() * alphabet_len);
+            for sequence in &sequences {
+                for action in 0..alphabet_len {
+                    let mut extended = sequence.clone();
+                    extended.push(action);
+                    next.push(extended);
+                }
+            }
+            sequences = next;
+        }
+        sequences
+    }
+
+    /// The sweep only asserts protocol invariants, not durable-write behaviour,
+    /// so it prefers a memory-backed directory: every store write fsyncs and a
+    /// disk-backed temporary directory would dominate the runtime.
+    fn sweep_base_dir() -> std::path::PathBuf {
+        if let Some(override_dir) = std::env::var_os("FUCKIPV6_W14_SWEEP_BASE") {
+            return std::path::PathBuf::from(override_dir);
+        }
+        let shared_memory = std::path::PathBuf::from("/dev/shm");
+        if shared_memory.is_dir()
+            && std::fs::write(shared_memory.join(".fuckipv6-w14-probe"), b"ok").is_ok()
+        {
+            let _ = std::fs::remove_file(shared_memory.join(".fuckipv6-w14-probe"));
+            return shared_memory;
+        }
+        std::env::temp_dir()
+    }
+
+    #[test]
+    fn bounded_exhaustive_interleavings_hold_authority_invariants() {
+        let depth = interleaving_depth();
+        let base = sweep_base_dir();
+        if std::env::var_os("FUCKIPV6_W14_SWEEP_TRACE").is_some() {
+            eprintln!("w14 sweep base={} depth={depth}", base.display());
+        }
+        let election_fixture = Fixture::new_in(&base, "interleaving-election-sweep");
+        for (index, sequence) in enumerate_sequences(InterleavingAction::ALPHABET.len(), depth)
+            .into_iter()
+            .enumerate()
+            .filter(|_| depth > 0)
+        {
+            let actions = sequence
+                .iter()
+                .map(|slot| InterleavingAction::from_index(*slot))
+                .collect::<Vec<_>>();
+            run_election_interleaving(&election_fixture, &actions, index);
+        }
+
+        let emergency_fixture = Fixture::new_in(&base, "interleaving-emergency-sweep");
+        for (index, sequence) in enumerate_sequences(EmergencyAction::ALPHABET.len(), depth)
+            .into_iter()
+            .enumerate()
+            .filter(|_| depth > 0)
+        {
+            let actions = sequence
+                .iter()
+                .map(|slot| EmergencyAction::from_index(*slot))
+                .collect::<Vec<_>>();
+            run_emergency_interleaving(&emergency_fixture, &actions, index);
+        }
+
+        // Cross-operation hazards that need three steps to appear. These run at
+        // every depth so a reduced sweep never loses them.
+        let election_hazards: [[InterleavingAction; 3]; 8] = [
+            [
+                InterleavingAction::ProposeTermOneByOne,
+                InterleavingAction::VoteOneForTermOne,
+                InterleavingAction::InstallTermOne,
+            ],
+            [
+                InterleavingAction::ProposeTermOneByOne,
+                InterleavingAction::TimeoutTermOneProposal,
+                InterleavingAction::InstallTermOne,
+            ],
+            [
+                InterleavingAction::ProposeTermOneByOne,
+                InterleavingAction::VoteOneForTermOne,
+                InterleavingAction::VoteTwoForTermOne,
+            ],
+            [
+                InterleavingAction::InstallTermOne,
+                InterleavingAction::RenewTermOneLease,
+                InterleavingAction::InstallSuccessorTermTwo,
+            ],
+            [
+                InterleavingAction::InstallTermOne,
+                InterleavingAction::InstallSuccessorTermTwo,
+                InterleavingAction::RenewTermOneLease,
+            ],
+            [
+                InterleavingAction::InstallTermOne,
+                InterleavingAction::GovernanceWriteUnderTermOne,
+                InterleavingAction::InstallSuccessorTermTwo,
+            ],
+            [
+                InterleavingAction::InstallTermOneWithoutMajority,
+                InterleavingAction::InstallTermOne,
+                InterleavingAction::GovernanceWriteUnderTermOne,
+            ],
+            [
+                InterleavingAction::TimeoutTermOneProposal,
+                InterleavingAction::VoteTwoForTermOne,
+                InterleavingAction::InstallTermOne,
+            ],
+        ];
+        let election_hazard_limit = if depth == 0 {
+            3
+        } else {
+            election_hazards.len()
+        };
+        for (index, sequence) in election_hazards
+            .iter()
+            .take(election_hazard_limit)
+            .enumerate()
+        {
+            run_election_interleaving(&election_fixture, sequence.as_slice(), 10_000 + index);
+        }
+
+        let emergency_hazards: [[EmergencyAction; 3]; 6] = [
+            [
+                EmergencyAction::IssueEmergencyLeader,
+                EmergencyAction::GovernanceWriteUnderEmergency,
+                EmergencyAction::InstallTermOne,
+            ],
+            [
+                EmergencyAction::IssueEmergencyLeader,
+                EmergencyAction::UpdateCandidateConfigWhileEmergency,
+                EmergencyAction::InstallTermOne,
+            ],
+            [
+                EmergencyAction::IssueEmergencyLeader,
+                EmergencyAction::InstallTermOne,
+                EmergencyAction::GovernanceWriteUnderEmergency,
+            ],
+            [
+                EmergencyAction::IssueEmergencyLeader,
+                EmergencyAction::RenewTermOneLease,
+                EmergencyAction::InstallSuccessorTermTwo,
+            ],
+            [
+                EmergencyAction::InstallTermOne,
+                EmergencyAction::IssueEmergencyLeader,
+                EmergencyAction::GovernanceWriteUnderEmergency,
+            ],
+            [
+                EmergencyAction::IssueEmergencyLeader,
+                EmergencyAction::InstallSuccessorTermTwo,
+                EmergencyAction::GovernanceWriteUnderEmergency,
+            ],
+        ];
+        let emergency_hazard_limit = if depth == 0 {
+            2
+        } else {
+            emergency_hazards.len()
+        };
+        for (index, sequence) in emergency_hazards
+            .iter()
+            .take(emergency_hazard_limit)
+            .enumerate()
+        {
+            run_emergency_interleaving(&emergency_fixture, sequence.as_slice(), 10_000 + index);
+        }
+
+        // The sweep may live on a small memory-backed filesystem; do not leave
+        // scenario directories behind.
+        let _ = std::fs::remove_dir_all(&election_fixture.dir);
+        let _ = std::fs::remove_dir_all(&emergency_fixture.dir);
+    }
+
+    impl InterleavingAction {
+        const ALPHABET: [InterleavingAction; 10] = [
+            InterleavingAction::ProposeTermOneByOne,
+            InterleavingAction::ProposeTermOneByTwo,
+            InterleavingAction::VoteOneForTermOne,
+            InterleavingAction::VoteTwoForTermOne,
+            InterleavingAction::TimeoutTermOneProposal,
+            InterleavingAction::InstallTermOneWithoutMajority,
+            InterleavingAction::InstallTermOne,
+            InterleavingAction::InstallSuccessorTermTwo,
+            InterleavingAction::RenewTermOneLease,
+            InterleavingAction::GovernanceWriteUnderTermOne,
+        ];
+
+        fn from_index(index: usize) -> Self {
+            Self::ALPHABET[index % Self::ALPHABET.len()]
+        }
+    }
+
+    impl EmergencyAction {
+        const ALPHABET: [EmergencyAction; 6] = [
+            EmergencyAction::IssueEmergencyLeader,
+            EmergencyAction::GovernanceWriteUnderEmergency,
+            EmergencyAction::InstallTermOne,
+            EmergencyAction::InstallSuccessorTermTwo,
+            EmergencyAction::RenewTermOneLease,
+            EmergencyAction::UpdateCandidateConfigWhileEmergency,
+        ];
+
+        fn from_index(index: usize) -> Self {
+            Self::ALPHABET[index % Self::ALPHABET.len()]
+        }
+    }
+
+    fn run_election_interleaving(fixture: &Fixture, sequence: &[InterleavingAction], index: usize) {
+        let label = format!("interleaving-election-{index}");
+        let trace = std::env::var_os("FUCKIPV6_W14_SWEEP_TRACE").is_some();
+        let started = std::time::Instant::now();
+        let store = reset_candidate_store(fixture);
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_two_id = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        let group = vec![candidate_one_id.clone(), candidate_two_id.clone()];
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+        for candidate in [&fixture.candidate_one, &fixture.candidate_two] {
+            store
+                .publish_declaration(
+                    &NodeId::from_public_key(&candidate.public_key()),
+                    fixture.declaration(candidate, 1),
+                    NOW,
+                )
+                .unwrap();
+        }
+
+        let term_one = fixture.term_with_revision_and_group(
+            1,
+            1,
+            &fixture.candidate_one,
+            1,
+            group.clone(),
+            &[&fixture.candidate_one, &fixture.candidate_two],
+            NOW + 1,
+            NOW + 30_000,
+        );
+        let term_one_without_majority = fixture.term_with_revision_and_group(
+            1,
+            1,
+            &fixture.candidate_one,
+            1,
+            group.clone(),
+            &[&fixture.candidate_one],
+            NOW + 1,
+            NOW + 30_000,
+        );
+        let term_two = fixture.term_with_revision_and_group(
+            2,
+            2,
+            &fixture.candidate_two,
+            1,
+            group.clone(),
+            &[&fixture.candidate_one, &fixture.candidate_two],
+            NOW + 2,
+            NOW + 60_000,
+        );
+        let proposal = fixture.election_proposal(1, &fixture.candidate_one, NOW + 30_000);
+        let proposal_id = proposal.proposal_id.clone();
+        let credential = fixture.credential(&term_one);
+
+        let mut previous_term = None;
+        let mut step = 0u64;
+        let mut before = authority_fingerprint(
+            &store
+                .status(&owner_id, &fixture.network.network_id, NOW + 1)
+                .unwrap(),
+        );
+        for action in sequence {
+            let now = NOW + step + 1;
+            step += 1;
+            let outcome = match action {
+                InterleavingAction::ProposeTermOneByOne => store
+                    .propose_election(&candidate_one_id, proposal.clone(), now)
+                    .map(|_| ()),
+                InterleavingAction::ProposeTermOneByTwo => store
+                    .propose_election(
+                        &candidate_two_id,
+                        fixture.election_proposal(1, &fixture.candidate_two, NOW + 30_000),
+                        now,
+                    )
+                    .map(|_| ()),
+                InterleavingAction::VoteOneForTermOne => store
+                    .record_election_vote(
+                        &candidate_one_id,
+                        &proposal_id,
+                        fixture.election_vote(
+                            1,
+                            &fixture.candidate_one,
+                            &fixture.candidate_one,
+                            NOW + 30_000,
+                        ),
+                        now,
+                    )
+                    .map(|_| ()),
+                InterleavingAction::VoteTwoForTermOne => store
+                    .record_election_vote(
+                        &candidate_two_id,
+                        &proposal_id,
+                        fixture.election_vote(
+                            1,
+                            &fixture.candidate_one,
+                            &fixture.candidate_two,
+                            NOW + 30_000,
+                        ),
+                        now,
+                    )
+                    .map(|_| ()),
+                InterleavingAction::TimeoutTermOneProposal => store
+                    .timeout_election(
+                        &candidate_one_id,
+                        &fixture.network.network_id,
+                        &proposal_id,
+                        NOW + 31_000,
+                    )
+                    .map(|_| ()),
+                InterleavingAction::InstallTermOneWithoutMajority => store
+                    .install_term(&candidate_one_id, term_one_without_majority.clone(), now)
+                    .map(|_| ()),
+                InterleavingAction::InstallTermOne => store
+                    .install_term(&candidate_one_id, term_one.clone(), now)
+                    .map(|_| ()),
+                InterleavingAction::InstallSuccessorTermTwo => store
+                    .install_term(&candidate_two_id, term_two.clone(), now)
+                    .map(|_| ()),
+                InterleavingAction::RenewTermOneLease => store
+                    .renew_term_lease(&candidate_one_id, &credential, NOW + 60_000, now)
+                    .map(|_| ()),
+                InterleavingAction::GovernanceWriteUnderTermOne => store
+                    .authorize_governance_write(
+                        &candidate_one_id,
+                        &credential,
+                        CoordinatorWriteKind::Membership,
+                        now,
+                    )
+                    .map(|_| ()),
+            };
+
+            let inspected_now = match action {
+                InterleavingAction::TimeoutTermOneProposal => NOW + 31_000,
+                _ => now,
+            };
+            let status = store
+                .status(&owner_id, &fixture.network.network_id, inspected_now)
+                .unwrap();
+            let after = authority_fingerprint(&status);
+            if outcome.is_err() {
+                assert_eq!(
+                    before, after,
+                    "{label}: rejected {action:?} changed durable authority: {outcome:?}"
+                );
+            }
+            assert_authority_invariants(&label, &status, &mut previous_term, inspected_now);
+            before = after;
+        }
+        if trace {
+            eprintln!(
+                "w14 election {index} steps={} elapsed_ms={}",
+                sequence.len(),
+                started.elapsed().as_millis()
+            );
+        }
+    }
+
+    fn run_emergency_interleaving(fixture: &Fixture, sequence: &[EmergencyAction], index: usize) {
+        let label = format!("interleaving-emergency-{index}");
+        let store = reset_candidate_store(fixture);
+        let owner_id = NodeId::from_public_key(&fixture.owner.public_key());
+        let ordinary_id = NodeId::from_public_key(&fixture.ordinary.public_key());
+        let candidate_one_id = NodeId::from_public_key(&fixture.candidate_one.public_key());
+        let candidate_two_id = NodeId::from_public_key(&fixture.candidate_two.public_key());
+        let group = vec![candidate_one_id.clone(), candidate_two_id.clone()];
+        store
+            .update_config(&owner_id, 0, fixture.config_two(1), NOW)
+            .unwrap();
+
+        let term_one = fixture.term_with_revision_and_group(
+            1,
+            1,
+            &fixture.candidate_one,
+            1,
+            group.clone(),
+            &[&fixture.candidate_one, &fixture.candidate_two],
+            NOW + 1,
+            NOW + 30_000,
+        );
+        let term_two = fixture.term_with_revision_and_group(
+            2,
+            2,
+            &fixture.candidate_two,
+            1,
+            group.clone(),
+            &[&fixture.candidate_one, &fixture.candidate_two],
+            NOW + 2,
+            NOW + 60_000,
+        );
+        let credential = fixture.credential(&term_one);
+        let online_members = vec![owner_id.clone(), ordinary_id];
+
+        let mut previous_term = None;
+        let mut step = 0u64;
+        let mut before = authority_fingerprint(
+            &store
+                .status(&owner_id, &fixture.network.network_id, NOW + 1)
+                .unwrap(),
+        );
+        for action in sequence {
+            let now = NOW + step + 1;
+            step += 1;
+            let outcome = match action {
+                EmergencyAction::IssueEmergencyLeader => store
+                    .issue_emergency_leader(
+                        &owner_id,
+                        &fixture.network.network_id,
+                        &online_members,
+                        now,
+                    )
+                    .map(|_| ()),
+                EmergencyAction::GovernanceWriteUnderEmergency => store
+                    .authorize_governance_write(
+                        &candidate_one_id,
+                        &credential,
+                        CoordinatorWriteKind::Membership,
+                        now,
+                    )
+                    .map(|_| ()),
+                EmergencyAction::InstallTermOne => store
+                    .install_term(&candidate_one_id, term_one.clone(), now)
+                    .map(|_| ()),
+                EmergencyAction::InstallSuccessorTermTwo => store
+                    .install_term(&candidate_two_id, term_two.clone(), now)
+                    .map(|_| ()),
+                EmergencyAction::RenewTermOneLease => store
+                    .renew_term_lease(&candidate_one_id, &credential, NOW + 60_000, now)
+                    .map(|_| ()),
+                EmergencyAction::UpdateCandidateConfigWhileEmergency => store
+                    .update_config(&owner_id, 1, fixture.config_two(2), now)
+                    .map(|_| ()),
+            };
+
+            let status = store
+                .status(&owner_id, &fixture.network.network_id, now)
+                .unwrap();
+            let after = authority_fingerprint(&status);
+            if outcome.is_err() {
+                assert_eq!(
+                    before, after,
+                    "{label}: rejected {action:?} changed durable authority: {outcome:?}"
+                );
+            }
+            before = after;
+            // Emergency authority must never enable a governance write, and it
+            // must never survive a successor term install.
+            if status
+                .emergency_leader
+                .as_ref()
+                .is_some_and(|lease| lease.state == CoordinatorEmergencyLeaderState::Active)
+            {
+                assert!(
+                    store
+                        .ensure_governance_allowed(&fixture.network.network_id, now)
+                        .is_err(),
+                    "{label}: governance stayed open under an active emergency lease"
+                );
+            }
+            assert_authority_invariants(&label, &status, &mut previous_term, now);
+        }
     }
 }

@@ -324,6 +324,19 @@ cargo test -p fuckipv6-coordinator signaling::coordinator_candidates --lib
 未发现需要在本审计文档中标记为“可绕过严格多数或直接制造双 Leader 写入”的严重代码缺陷。该表述只反映
 当前代码审查范围和测试覆盖，不构成对外安全保证。
 
+## 6.1 本轮补充：有界穷举交错扫描与送审包
+
+2026-11-20 增补两项与 W14-03 直接相关的内容，均不改变“未经第三方审计”的事实：
+
+- `bounded_exhaustive_interleavings_hold_authority_invariants`：在真实 `CoordinatorCandidateStore`（真实文件锁、
+  真实持久化、真实验签）上枚举有序动作序列，默认执行 5 条三步危险交错；`FUCKIPV6_W14_INTERLEAVING_DEPTH=3`
+  时枚举全部 1000 条选举有序三元组和 216 条紧急有序三元组。每步校验 I3（严格多数）、I4（任期/fencing 单调）、
+  单一 `Committed` 选举、紧急权限与可写任期互斥、紧急期治理必须失败关闭，以及被拒绝操作不得改变任期、选举阶段、
+  紧急 epoch 等权威字段。该扫描是有界的，不替代形式化模型检查。
+- `docs/W14_COORDINATOR_AUDIT_PACKAGE.zh-CN.md` + `scripts/w14-coordinator-audit-evidence.py`：把送审问题
+  （Q1–Q7）、制品清单、威胁/控制映射（T1–T14）、证据追踪矩阵（E-*）和复现命令固化；证据脚本会把每个分组绑定到
+  Git commit 并写出 `target/w14-coordinator-audit/evidence.json`，其 `verdict` 固定为 `collected`，不会声明审计通过。
+
 ## 7. W14-03 审计判定
 
 可以确认的实现项：
@@ -350,6 +363,14 @@ cargo test -p fuckipv6-coordinator signaling::coordinator_candidates --lib
 cargo test -p fuckipv6-client node::coordinator_takeover --lib
 cargo test -p fuckipv6-client node::runtime_control::tests::coordinator_takeover --lib
 cargo test -p fuckipv6-coordinator --test w14_coordinator_fault_process
+
+# 有界穷举交错（深度 3 为全三元组，release 构建下为分钟级）
+FUCKIPV6_W14_INTERLEAVING_DEPTH=3 \
+  cargo test --release -p fuckipv6-coordinator --lib \
+  signaling::coordinator_candidates::tests::bounded_exhaustive
+
+# 或一次性收集全部送审证据
+python3 scripts/w14-coordinator-audit-evidence.py --depth 3 --release --skip-slow
 ```
 
 最后一组真实进程故障测试需要按仓库脚本和环境要求执行，可能依赖 Linux 权限、netns/nftables 或 QEMU；

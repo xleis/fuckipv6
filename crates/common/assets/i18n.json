@@ -3356,7 +3356,11 @@
       "member.section.detail": "只显示节点返回的成员目录：身份、角色、连接状态与可执行动作。",
       "member.row.lifecycle": "生命周期",
       "member.row.actions": "可执行动作",
-      "member.error.unobserved": "尚未从节点读取成员目录。"
+      "member.error.unobserved": "尚未从节点读取成员目录。",
+      "join.section.title": "加入申请",
+      "join.section.detail": "只有节点返回的待审批申请；理由与备注属于私有字段，不会在此显示。",
+      "join.action.request_information": "补充信息",
+      "join.error.unobserved": "尚未从节点读取加入申请。"
     },
     "en": {
       "nav.overview": "Overview",
@@ -6712,7 +6716,11 @@
       "member.section.detail": "Only the roster the node returned: identity, role, connection state and available actions.",
       "member.row.lifecycle": "Lifecycle",
       "member.row.actions": "Available actions",
-      "member.error.unobserved": "The member directory has not been read from the node yet."
+      "member.error.unobserved": "The member directory has not been read from the node yet.",
+      "join.section.title": "Join requests",
+      "join.section.detail": "Only pending applications the node returned. Reasons and notes stay private and are not rendered.",
+      "join.action.request_information": "Request information",
+      "join.error.unobserved": "Join requests have not been read from the node yet."
     }
   }
 }

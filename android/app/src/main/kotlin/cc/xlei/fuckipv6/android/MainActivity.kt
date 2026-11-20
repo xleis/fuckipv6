@@ -34,6 +34,9 @@ import cc.xlei.fuckipv6.android.bridge.NodeCommandBridge
 import cc.xlei.fuckipv6.android.bridge.NodeCommandClient
 import cc.xlei.fuckipv6.android.bridge.FileBrowseClient
 import cc.xlei.fuckipv6.android.bridge.MemberDirectoryView
+import cc.xlei.fuckipv6.android.bridge.JoinRequestSurface
+import cc.xlei.fuckipv6.android.bridge.JoinRequestView
+import cc.xlei.fuckipv6.android.bridge.JoinReviewRequest
 import cc.xlei.fuckipv6.android.bridge.MemberLifecycleRequest
 import cc.xlei.fuckipv6.android.bridge.MemberLifecycleSurface
 import cc.xlei.fuckipv6.android.bridge.MemberSurface
@@ -50,6 +53,7 @@ import cc.xlei.fuckipv6.android.ui.CoordinatorPageData
 import cc.xlei.fuckipv6.android.ui.DownloadSaver
 import cc.xlei.fuckipv6.android.ui.FileBrowseActions
 import cc.xlei.fuckipv6.android.ui.FileBrowseController
+import cc.xlei.fuckipv6.android.ui.JoinRequestListContent
 import cc.xlei.fuckipv6.android.ui.MemberListContent
 import cc.xlei.fuckipv6.android.ui.FileTransferController
 import cc.xlei.fuckipv6.android.ui.FileTransferNaming
@@ -86,6 +90,7 @@ class MainActivity : ComponentActivity() {
     private var pendingDownloadName: String? = null
     private var memberBridge: NodeCommandBridge? = null
     private val members = MutableStateFlow<MemberDirectoryView?>(null)
+    private val joinRequests = MutableStateFlow<List<JoinRequestView>?>(null)
     private var memberNetworkId: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -134,6 +139,12 @@ class MainActivity : ComponentActivity() {
                             "member_lifecycle_changed" -> {
                                 // The change is authoritative; re-read the roster
                                 // instead of patching it locally.
+                                memberNetworkId?.let(::refreshMembers)
+                            }
+                            "join_requests" ->
+                                joinRequests.value = JoinRequestSurface.parseList(outcome.data)
+                            "join_requests_reviewed" -> {
+                                memberNetworkId?.let(::refreshJoinRequests)
                                 memberNetworkId?.let(::refreshMembers)
                             }
                         }
@@ -243,6 +254,7 @@ class MainActivity : ComponentActivity() {
                     if (networkId != null && networkId != memberNetworkId) {
                         memberNetworkId = networkId
                         refreshMembers(networkId)
+                        refreshJoinRequests(networkId)
                     }
                 }
             }
@@ -279,6 +291,7 @@ class MainActivity : ComponentActivity() {
             val coordinator = ready?.coordinator?.let(CoordinatorPageData::fromBridge)
             val admin = adminPage.collectAsState().value
             val membersState = members.collectAsState().value
+            val joinRequestsState = joinRequests.collectAsState().value
             FuckIpv6Theme {
                 contracts.fold(
                     onSuccess = {
@@ -290,6 +303,8 @@ class MainActivity : ComponentActivity() {
                             members = membersState,
                             onRefreshMembers = { memberNetworkId?.let(::refreshMembers) },
                             onMemberLifecycleAction = ::changeMemberLifecycle,
+                            joinRequests = joinRequestsState,
+                            onJoinReview = ::reviewJoinRequest,
                             files = files,
                             filesFailureKey = filesFailureKey,
                         )
@@ -442,6 +457,41 @@ class MainActivity : ComponentActivity() {
         )
         // Keep the compiler honest about the unused config in this path.
         check(config.isValid)
+    }
+
+    private fun refreshJoinRequests(networkId: String) {
+        val bridge = memberBridge ?: return
+        val body = CommandJson.envelope(
+            command = JoinRequestSurface.listCommand(networkId),
+            requestId = nextRequestId(),
+            idempotencyKey = "join-list-$networkId-${UUID.randomUUID()}",
+        )
+        bridge.submit(bridgeScope, body)
+    }
+
+    /**
+     * Reviews one application with the revision the reviewer was shown. A stale
+     * revision is refused by the Coordinator; the UI never re-sends with a
+     * guessed value.
+     */
+    private fun reviewJoinRequest(action: String, request: JoinRequestView) {
+        val bridge = memberBridge ?: return
+        val networkId = memberNetworkId ?: return
+        val revision = request.revision ?: return
+        val command = JoinRequestSurface.reviewCommand(
+            JoinReviewRequest(
+                networkId = networkId,
+                requestId = request.requestId,
+                action = action,
+                expectedRevision = revision,
+            ),
+        ) ?: return
+        val body = CommandJson.envelope(
+            command = command,
+            requestId = nextRequestId(),
+            idempotencyKey = "join-$action-${request.requestId}-${UUID.randomUUID()}",
+        )
+        bridge.submit(bridgeScope, body)
     }
 
     /**

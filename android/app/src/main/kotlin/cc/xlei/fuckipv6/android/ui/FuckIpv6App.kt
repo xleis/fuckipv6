@@ -65,6 +65,8 @@ fun FuckIpv6App(
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
+    joinRequests: List<cc.xlei.fuckipv6.android.bridge.JoinRequestView>? = null,
+    onJoinReview: ((String, cc.xlei.fuckipv6.android.bridge.JoinRequestView) -> Unit)? = null,
 ) {
     val systemLocale = LocalLocale.current.platformLocale
     val initialModule = contracts.navigation.modules.first()
@@ -161,6 +163,8 @@ fun FuckIpv6App(
                 members = members,
                 onRefreshMembers = onRefreshMembers,
                 onMemberLifecycleAction = onMemberLifecycleAction,
+                joinRequests = joinRequests,
+                onJoinReview = onJoinReview,
             )
         }
     }
@@ -210,6 +214,8 @@ fun PageContent(
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
+    joinRequests: List<cc.xlei.fuckipv6.android.bridge.JoinRequestView>? = null,
+    onJoinReview: ((String, cc.xlei.fuckipv6.android.bridge.JoinRequestView) -> Unit)? = null,
 ) {
     Column(
         modifier = modifier
@@ -247,6 +253,12 @@ fun PageContent(
                             directory = members,
                             onRefresh = onRefreshMembers,
                             onLifecycleAction = onMemberLifecycleAction,
+                        )
+                        JoinRequestListContent(
+                            contracts = contracts,
+                            locale = locale,
+                            requests = joinRequests,
+                            onReview = onJoinReview,
                         )
                     }
                 }

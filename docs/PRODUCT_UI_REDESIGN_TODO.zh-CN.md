@@ -4333,6 +4333,11 @@ Android 单测 121 项通过。生命周期写命令（改角色/移除成员）
 （含后果说明），确认后以 `member.revision` 作 CAS 提交，成功只刷新目录、不在本地改状态。新增 `MemberLifecycleTest` 4 项，
 Android 单测共 125 项通过。加入申请审批（`review_join_request`）与 VpnService 仍未接线，W16-01/W16-02 保持 `[ ]`。
 
+**补充（2026-11-21，加入申请审批）**：新增 `bridge/JoinRequestSurface` 与 `ui/JoinRequestListContent`：只渲染申请人公开资料、
+状态与 revision，理由/备注等私有字段不进 UI（测试断言私有文本不出现）；审批按钮仅 `pending` 且回调可用时启用，点击走既有
+确认对话，确认后带展示过的 revision 提交，成功只重读申请与成员目录。`MainActivity` 切换网络时读取申请。新增
+`JoinRequestSurfaceTest` 3 项与 4 组中英键，Android 单测共 128 项通过。VpnService 与真机验收仍未完成，W16-02 保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

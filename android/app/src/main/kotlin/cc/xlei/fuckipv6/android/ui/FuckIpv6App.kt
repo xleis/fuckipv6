@@ -68,6 +68,8 @@ fun FuckIpv6App(
     peers: cc.xlei.fuckipv6.android.bridge.PeersSnapshot? = null,
     activity: cc.xlei.fuckipv6.android.bridge.ActivityFeed? = null,
     traffic: cc.xlei.fuckipv6.android.bridge.TrafficView? = null,
+    logs: cc.xlei.fuckipv6.android.bridge.LogsFeed? = null,
+    identity: cc.xlei.fuckipv6.android.bridge.IdentityView? = null,
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
@@ -177,6 +179,8 @@ fun FuckIpv6App(
                 peers = peers,
                 activity = activity,
                 traffic = traffic,
+                logs = logs,
+                identity = identity,
                 members = members,
                 onRefreshMembers = onRefreshMembers,
                 onMemberLifecycleAction = onMemberLifecycleAction,
@@ -239,6 +243,8 @@ fun PageContent(
     peers: cc.xlei.fuckipv6.android.bridge.PeersSnapshot? = null,
     activity: cc.xlei.fuckipv6.android.bridge.ActivityFeed? = null,
     traffic: cc.xlei.fuckipv6.android.bridge.TrafficView? = null,
+    logs: cc.xlei.fuckipv6.android.bridge.LogsFeed? = null,
+    identity: cc.xlei.fuckipv6.android.bridge.IdentityView? = null,
     members: cc.xlei.fuckipv6.android.bridge.MemberDirectoryView? = null,
     onRefreshMembers: (() -> Unit)? = null,
     onMemberLifecycleAction: ((String, cc.xlei.fuckipv6.android.bridge.MemberView) -> Unit)? = null,
@@ -348,6 +354,10 @@ fun PageContent(
                     locale = locale,
                     contracts = contracts,
                 )
+            pageId == "logs" && logs != null ->
+                LogsContent(contracts = contracts, locale = locale, feed = logs)
+            pageId == "identity" && identity != null ->
+                IdentityContent(contracts = contracts, locale = locale, identity = identity)
             pageId == "activity" && activity != null ->
                 ActivityContent(contracts = contracts, locale = locale, feed = activity)
             pageId == "traffic" && traffic != null ->

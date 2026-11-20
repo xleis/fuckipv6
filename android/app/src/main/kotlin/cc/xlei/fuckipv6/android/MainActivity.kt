@@ -45,6 +45,8 @@ import cc.xlei.fuckipv6.android.bridge.MemberLifecycleSurface
 import cc.xlei.fuckipv6.android.bridge.MemberSurface
 import cc.xlei.fuckipv6.android.bridge.NetworkLabel
 import cc.xlei.fuckipv6.android.bridge.ActivitySurface
+import cc.xlei.fuckipv6.android.bridge.IdentitySurface
+import cc.xlei.fuckipv6.android.bridge.LogsSurface
 import cc.xlei.fuckipv6.android.bridge.PeersSurface
 import cc.xlei.fuckipv6.android.bridge.TrafficSurface
 import cc.xlei.fuckipv6.android.bridge.MemberView
@@ -344,6 +346,8 @@ class MainActivity : ComponentActivity() {
                             traffic = ready?.peers?.let { snapshot ->
                                 TrafficSurface.parse(snapshot, selectedNetworkName.orEmpty())
                             },
+                            logs = ready?.peers?.let(LogsSurface::parse),
+                            identity = ready?.peers?.let(IdentitySurface::parse),
                             availableNetworks = availableNetworks,
                             selectedNetworkName = selectedNetworkName,
                             onSelectNetwork = { name -> selectedNetwork.value = name },

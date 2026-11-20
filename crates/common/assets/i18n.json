@@ -3370,7 +3370,9 @@
       "invitation.action.revoke": "撤销",
       "invitation.code.title": "新邀请码（仅显示一次）",
       "invitation.error.unobserved": "尚未读取邀请列表。",
-      "peers.unobserved.detail": "尚未从节点快照读取到该网络的节点列表。"
+      "peers.unobserved.detail": "尚未从节点快照读取到该网络的节点列表。",
+      "identity.hidden": "已按隐私策略隐藏",
+      "logs.unavailable.detail": "本快照没有携带日志行；日志只对节点所有者可见，也可能只是尚未产生。"
     },
     "en": {
       "nav.overview": "Overview",
@@ -6740,7 +6742,9 @@
       "invitation.action.revoke": "Revoke",
       "invitation.code.title": "New invitation code (shown once)",
       "invitation.error.unobserved": "The invitation list has not been read yet.",
-      "peers.unobserved.detail": "The node snapshot has not reported peers for this network yet."
+      "peers.unobserved.detail": "The node snapshot has not reported peers for this network yet.",
+      "identity.hidden": "Hidden by the privacy policy",
+      "logs.unavailable.detail": "This snapshot carried no log lines: logs are visible to the node owner only, and none may exist yet."
     }
   }
 }

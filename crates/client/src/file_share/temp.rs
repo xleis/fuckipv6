@@ -153,6 +153,38 @@ mod tests {
         std::os::windows::fs::symlink_dir(target, link).expect("directory symlink");
     }
 
+    /// `renameat2` is a linux-gnu libc symbol; musl exposes it only as a syscall.
+    /// Keeping both paths lets the race tests run on every Linux target instead of
+    /// being disabled on musl.
+    #[cfg(all(target_os = "linux", target_env = "musl"))]
+    unsafe fn rename_exchange(
+        from: *const libc::c_char,
+        to: *const libc::c_char,
+    ) -> std::ffi::c_int {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            from,
+            libc::AT_FDCWD,
+            to,
+            libc::RENAME_EXCHANGE,
+        ) as std::ffi::c_int
+    }
+
+    #[cfg(all(target_os = "linux", not(target_env = "musl")))]
+    unsafe fn rename_exchange(
+        from: *const libc::c_char,
+        to: *const libc::c_char,
+    ) -> std::ffi::c_int {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from,
+            libc::AT_FDCWD,
+            to,
+            libc::RENAME_EXCHANGE,
+        )
+    }
+
     #[test]
     fn temporary_upload_is_published_only_after_completion() {
         let (temporary, share) = root();
@@ -259,15 +291,7 @@ mod tests {
             thread::spawn(move || {
                 barrier.wait();
                 while !stop.load(Ordering::Relaxed) {
-                    let result = unsafe {
-                        libc::renameat2(
-                            libc::AT_FDCWD,
-                            pivot_c.as_ptr(),
-                            libc::AT_FDCWD,
-                            alternate_c.as_ptr(),
-                            libc::RENAME_EXCHANGE,
-                        )
-                    };
+                    let result = unsafe { rename_exchange(pivot_c.as_ptr(), alternate_c.as_ptr()) };
                     if result != 0 {
                         rename_error.store(
                             std::io::Error::last_os_error().raw_os_error().unwrap_or(-1),

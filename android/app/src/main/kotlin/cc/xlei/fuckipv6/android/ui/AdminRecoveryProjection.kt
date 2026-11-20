@@ -1,5 +1,8 @@
 package cc.xlei.fuckipv6.android.ui
 
+import cc.xlei.fuckipv6.android.bridge.RecoveryImpactView
+import cc.xlei.fuckipv6.android.bridge.RecoveryRevocationView
+import cc.xlei.fuckipv6.android.bridge.RecoveryStatusView
 import cc.xlei.fuckipv6.contract.NodeContractV1.AdminRecoveryApproval
 import cc.xlei.fuckipv6.contract.NodeContractV1.AdminRecoveryImpact
 import cc.xlei.fuckipv6.contract.NodeContractV1.AdminRecoveryProposal
@@ -56,6 +59,11 @@ data class AdminRecoveryRevocationPlanProjection(
     }
 }
 
+/** Safe enum lookup: the generated `fromWireName` throws on unknown values. */
+internal fun adminRecoveryState(value: String?): AdminRecoveryState? = value?.let {
+    runCatching { AdminRecoveryState.fromWireName(it) }.getOrNull()
+}
+
 data class AdminRecoveryStatusProjection(
     val canExecute: Boolean?,
     val denialKey: String?,
@@ -89,6 +97,39 @@ data class AdminRecoveryStatusProjection(
                 ),
                 signatureCount = status.signature_count,
                 state = status.state,
+            )
+
+        /** Bridge entry point: same projection from the JSON read model. */
+        fun from(view: RecoveryStatusView): AdminRecoveryStatusProjection =
+            AdminRecoveryStatusProjection(
+                canExecute = view.canExecute,
+                denialKey = view.denialKey,
+                expiresAtUnixMs = view.expiresAtUnixMs,
+                impact = view.impact?.let { impact: RecoveryImpactView ->
+                    AdminRecoveryImpactProjection(
+                        administratorsAdded = impact.administratorsAdded,
+                        administratorsRemoved = impact.administratorsRemoved,
+                        membersAdded = impact.membersAdded,
+                        membersRemoved = impact.membersRemoved,
+                        ownerAfter = impact.ownerAfter,
+                        ownerBefore = impact.ownerBefore,
+                    )
+                },
+                initiator = view.initiator,
+                issuedAtUnixMs = view.issuedAtUnixMs,
+                networkId = view.networkId,
+                participants = view.participants,
+                requestId = view.requestId,
+                requiredSignatures = view.requiredSignatures,
+                revocation = view.revocation?.let { revocation: RecoveryRevocationView ->
+                    AdminRecoveryRevocationPlanProjection(
+                        oldSessions = revocation.oldSessions,
+                        pendingInvitations = revocation.pendingInvitations,
+                        unconfirmedWrites = revocation.unconfirmedWrites,
+                    )
+                },
+                signatureCount = view.signatureCount,
+                state = adminRecoveryState(view.state),
             )
     }
 }
@@ -170,6 +211,28 @@ data class AdminRecoveryPageData(
                 onExecute = onExecute,
             )
         }
+
+        /**
+         * Bridge entry point: builds the page from the JSON read model. Only the
+         * refresh action is wired, because submitting, revoking and executing
+         * need the full signed request bundle that the desktop surfaces own.
+         * Unwired actions stay disabled rather than pretending success.
+         */
+        fun fromBridge(
+            networkName: String,
+            networkId: String?,
+            recoveries: List<RecoveryStatusView>,
+            loadedAtUnixMs: Long? = null,
+            onList: ((NodeAdminRecoveryListCommand) -> Unit)? = null,
+        ): AdminRecoveryPageData = AdminRecoveryPageData(
+            networkName = networkName,
+            networkId = networkId,
+            backendAvailable = onList != null,
+            latestStatus = recoveries.firstOrNull()?.let(AdminRecoveryStatusProjection::from),
+            recoveries = recoveries.map(AdminRecoveryStatusProjection::from),
+            loadedAtUnixMs = loadedAtUnixMs,
+            onList = onList,
+        )
     }
 }
 

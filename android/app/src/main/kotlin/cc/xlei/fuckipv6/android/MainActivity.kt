@@ -16,16 +16,21 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
+import cc.xlei.fuckipv6.android.bridge.AdminRecoverySurface
 import cc.xlei.fuckipv6.android.bridge.BridgeState
 import cc.xlei.fuckipv6.android.bridge.CommandJson
+import cc.xlei.fuckipv6.android.bridge.CommandOutcome
+import cc.xlei.fuckipv6.android.bridge.RecoveryStatusView
 import cc.xlei.fuckipv6.android.bridge.HttpSnapshotSource
 import cc.xlei.fuckipv6.android.bridge.NodeApiConfig
 import cc.xlei.fuckipv6.android.bridge.NodeBridge
 import cc.xlei.fuckipv6.android.bridge.NodeCommandBridge
 import cc.xlei.fuckipv6.android.bridge.NodeCommandClient
 import cc.xlei.fuckipv6.android.bridge.RelaySurface
+import cc.xlei.fuckipv6.android.ui.AdminRecoveryPageData
 import cc.xlei.fuckipv6.android.ui.CoordinatorPageData
 import cc.xlei.fuckipv6.android.ui.RelayPageData
+import kotlinx.coroutines.launch
 import cc.xlei.fuckipv6.android.contract.SharedContractLoader
 import cc.xlei.fuckipv6.android.ui.ContractFailureScreen
 import cc.xlei.fuckipv6.android.ui.FuckIpv6App
@@ -36,7 +41,11 @@ class MainActivity : ComponentActivity() {
     private var pollJob: Job? = null
     private var bridge: NodeBridge? = null
     private var commandBridge: NodeCommandBridge? = null
+    private var recoveryBridge: NodeCommandBridge? = null
     private val requestSequence = AtomicLong(System.currentTimeMillis())
+    private val recoveries = MutableStateFlow<List<RecoveryStatusView>>(emptyList())
+    private val adminPage = MutableStateFlow<AdminRecoveryPageData?>(null)
+    private var refreshNetwork: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,6 +63,41 @@ class MainActivity : ComponentActivity() {
         commandBridge = apiConfig
             ?.takeIf { it.isValid }
             ?.let { NodeCommandBridge(NodeCommandClient(it)) }
+        recoveryBridge = apiConfig
+            ?.takeIf { it.isValid }
+            ?.let { NodeCommandBridge(NodeCommandClient(it)) }
+            ?.also { adminBridge ->
+                bridgeScope.launch {
+                    adminBridge.lastOutcome().collect { outcome ->
+                        if (outcome is CommandOutcome.Succeeded &&
+                            outcome.outcomeStatus == "admin_recoveries"
+                        ) {
+                            recoveries.value = AdminRecoverySurface.parseList(outcome.data)
+                        }
+                    }
+                }
+            }
+        bridgeScope.launch {
+            node?.state()?.collect { state ->
+                val ready = state as? BridgeState.Ready ?: return@collect
+                val networkName = ready.relay?.networkName
+                if (networkName != null) {
+                    val networkId = ready.networks
+                        .firstOrNull { it.networkName == networkName }
+                        ?.networkId
+                    adminPage.value = AdminRecoveryPageData.fromBridge(
+                        networkName = networkName,
+                        networkId = networkId,
+                        recoveries = recoveries.value,
+                        onList = { refreshRecoveries(networkName) },
+                    )
+                    if (refreshNetwork != networkName) {
+                        refreshNetwork = networkName
+                        refreshRecoveries(networkName)
+                    }
+                }
+            }
+        }
 
         setContent {
             val bridgeState by remember(node) {
@@ -64,6 +108,7 @@ class MainActivity : ComponentActivity() {
             val filesFailureKey = (bridgeState as? BridgeState.Failed)?.failure?.uiStateKey
             val relay = ready?.relay?.let(::relayPageData)
             val coordinator = ready?.coordinator?.let(CoordinatorPageData::fromBridge)
+            val admin = adminPage.collectAsState().value
             FuckIpv6Theme {
                 contracts.fold(
                     onSuccess = {
@@ -71,6 +116,7 @@ class MainActivity : ComponentActivity() {
                             contracts = it,
                             relay = relay,
                             coordinator = coordinator,
+                            adminRecovery = admin,
                             files = files,
                             filesFailureKey = filesFailureKey,
                         )
@@ -113,6 +159,18 @@ class MainActivity : ComponentActivity() {
             }
         },
     )
+
+    /** Refresh the recovery list through the read-only command channel. */
+    private fun refreshRecoveries(networkName: String) {
+        val bridge = recoveryBridge ?: return
+        val command = AdminRecoverySurface.listCommand(networkName)
+        val body = CommandJson.envelope(
+            command = command,
+            requestId = nextRequestId(),
+            idempotencyKey = "recovery-list-${networkName}-${UUID.randomUUID()}",
+        )
+        bridge.submit(bridgeScope, body)
+    }
 
     private fun nextRequestId(): Long {
         val candidate = requestSequence.incrementAndGet()

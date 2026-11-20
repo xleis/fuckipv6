@@ -35,6 +35,7 @@ data class FilePageData(
     val showsTransferActions: Boolean
         get() = false
 
+
     companion object {
         const val TRANSFER_SURFACE_KEY = "file.page.local_state.note"
 

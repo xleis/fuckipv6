@@ -16,7 +16,12 @@ import org.json.JSONObject
  * inventing one.
  */
 sealed interface CommandOutcome {
-    data class Succeeded(val operationId: String?, val stage: String) : CommandOutcome
+    data class Succeeded(
+        val operationId: String?,
+        val stage: String,
+        val outcomeStatus: String? = null,
+        val data: JSONObject? = null,
+    ) : CommandOutcome
     data class InProgress(val operationId: String?, val state: String, val stage: String) : CommandOutcome
     data class Rejected(
         val problemCode: String,
@@ -35,9 +40,18 @@ object CommandResponseParser {
         val envelope = JSONObject(body)
         envelope.optJSONObject("operation")?.let { return@runCatching fromOperation(it) }
         envelope.optJSONObject("result")?.let { result ->
+            val outcome = result.optJSONObject("outcome")
             return@runCatching CommandOutcome.Succeeded(
                 operationId = null,
-                stage = result.optStringOrNull("stage") ?: "result",
+                stage = outcome?.optStringOrNull("status") ?: result.optStringOrNull("stage") ?: "result",
+                outcomeStatus = outcome?.optStringOrNull("status"),
+                data = outcome?.opt("data")?.let { value ->
+                    when (value) {
+                        is JSONObject -> value
+                        is org.json.JSONArray -> JSONObject().put("items", value)
+                        else -> null
+                    }
+                },
             )
         }
         // A 200 without an operation or result is not a success claim.
@@ -75,7 +89,23 @@ object CommandResponseParser {
         val stage = operation.optStringOrNull("stage") ?: "unknown"
         val state = operation.optStringOrNull("state") ?: "unknown"
         return when (state) {
-            "succeeded" -> CommandOutcome.Succeeded(id, stage)
+            "succeeded" -> CommandOutcome.Succeeded(
+                operationId = id,
+                stage = stage,
+                outcomeStatus = operation.optJSONObject("result")
+                    ?.optJSONObject("outcome")
+                    ?.optStringOrNull("status"),
+                data = operation.optJSONObject("result")
+                    ?.optJSONObject("outcome")
+                    ?.opt("data")
+                    ?.let { value ->
+                        when (value) {
+                            is JSONObject -> value
+                            is org.json.JSONArray -> JSONObject().put("items", value)
+                            else -> null
+                        }
+                    },
+            )
             "failed", "cancelled", "timed_out" -> {
                 val error = operation.optJSONObject("error")
                 CommandOutcome.Rejected(

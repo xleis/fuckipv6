@@ -4200,6 +4200,14 @@ Leader、最近任期与候选健康；缺失控制面保持 `null` 并由页面
 Android 单测共 50 项通过，`:app:lintDebug`、`:app:assembleDebug` 通过。AdminRecovery 页仍需 `admin_recovery_list`
 命令结果解析，W16-01 保持 `[ ]`。
 
+**补充（2026-11-20，AdminRecovery 页读取真实列表）**：新增 `bridge/AdminRecoverySurface`：`list_admin_recoveries` 命令编码与
+`admin_recoveries` 结果解析（同时接受裸数组与 `items` 包裹），并把结果投影成既有 `AdminRecoveryStatusProjection`；未知 `state`
+线上值经 `runCatching` 收敛为 `null`，缺失字段保持缺失。`AdminRecoveryPageData.fromBridge(...)` 只接线“刷新”，
+提交/撤销/执行需要完整签名 bundle（桌面侧持有），因此这些动作在 Android 上保持禁用而不是伪造成功。
+`NodeCommandBridge.lastOutcome()` 暴露命令返回数据，`BridgeState.Ready` 携带 `networks` 以解析网络名→id；
+`MainActivity` 用独立命令桥按网络名刷新列表。新增 `AdminRecoverySurfaceTest` 5 项，Android 单测共 55 项通过。
+W16-01 仍缺提交/撤销/执行与成员、策略等页面切片，保持 `[ ]`。
+
 ### W16-02 前台 VpnService 生命周期 `[ ]`
 
 - [ ] 使用前台服务承载 VpnService 和数据面；

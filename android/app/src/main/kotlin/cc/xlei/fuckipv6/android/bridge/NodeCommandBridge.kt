@@ -40,8 +40,16 @@ class NodeCommandBridge(
     private val maxPolls: Int = 60,
 ) {
     private val state = MutableStateFlow<CommandState>(CommandState.Idle)
+    private val lastOutcome = MutableStateFlow<CommandOutcome?>(null)
 
     fun state(): StateFlow<CommandState> = state.asStateFlow()
+
+    /**
+     * Last raw outcome, including the payload the node returned. Read-only
+     * consumers (for example the recovery list) need the data, not just the
+     * stage; nobody may treat a non-terminal outcome as a result.
+     */
+    fun lastOutcome(): StateFlow<CommandOutcome?> = lastOutcome.asStateFlow()
 
     /** Submits [body] and follows the resulting operation. Returns the poll job. */
     fun submit(scope: CoroutineScope, body: String): Job = scope.launch {
@@ -49,6 +57,7 @@ class NodeCommandBridge(
         var polls = 0
         while (true) {
             state.value = toState(outcome)
+            lastOutcome.value = outcome
             val inFlight = outcome as? CommandOutcome.InProgress ?: return@launch
             val operationId = inFlight.operationId ?: return@launch
             if (polls >= maxPolls) {

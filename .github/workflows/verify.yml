@@ -48,6 +48,11 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install native build dependencies
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install -y libfontconfig1-dev libfreetype-dev pkg-config
+
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
@@ -89,6 +94,11 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: Install native build dependencies
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install -y libfontconfig1-dev libfreetype-dev pkg-config
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -166,6 +176,11 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install native build dependencies
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install -y libfontconfig1-dev libfreetype-dev pkg-config
+
       - name: Test public API attack surface
         run: ./scripts/test-public-api-attack-surface.sh
 
@@ -197,6 +212,7 @@ jobs:
           sudo apt-get install -y
           xvfb libvulkan1 mesa-vulkan-drivers
           libxcb1 libxcb-xkb1 libxkbcommon0 libxkbcommon-x11-0
+          libfontconfig1-dev libfreetype-dev pkg-config
 
       - name: Build native node binary
         run: cargo build -p fuckipv6-client
@@ -234,7 +250,7 @@ jobs:
           sudo apt-get install -y
           xvfb libvulkan1 mesa-vulkan-drivers
           libxcb1 libxcb-xkb1 libxkbcommon0 libxkbcommon-x11-0
-          fonts-inter
+          fonts-inter libfontconfig1-dev libfreetype-dev pkg-config
 
       - name: Install WebUI dependencies
         run: npm ci --prefix webui
@@ -264,7 +280,9 @@ jobs:
           targets: x86_64-unknown-linux-musl,x86_64-pc-windows-gnu
 
       - name: Install MinGW
-        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+        run: >-
+          sudo apt-get update &&
+          sudo apt-get install -y mingw-w64 libfontconfig1-dev libfreetype-dev pkg-config
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -289,7 +307,7 @@ jobs:
   windows:
     name: Windows gate
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -320,7 +338,7 @@ jobs:
   macos:
     name: macOS gate
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - name: Checkout
         uses: actions/checkout@v4

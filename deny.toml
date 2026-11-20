@@ -12,7 +12,27 @@ targets = [
 all-features = true
 
 [advisories]
-ignore = []
+# Accepted, documented residual risks. The security report keeps the warning
+# visible: the way out is removing the crate from the graph, not deleting the
+# entry.
+ignore = [
+    # rsa 0.10.0-rc.19 already carries the crypto-bigint migration and the
+    # constant-time mitigations the advisory asks for; only the prerelease tag
+    # keeps it below the fixed range. It reaches us through webauthn attestation
+    # verification on the owner's own machine. Upgrade once 0.10.0 ships.
+    "RUSTSEC-2023-0071",
+    # Unmaintained notices from the GPUI, webauthn and desktop session stacks.
+    # None of these describe a vulnerability; each names the crate to move to.
+    "RUSTSEC-2026-0543", # chrono, pinned by the desktop session and audit code
+    "RUSTSEC-2024-0384", # instant, wasm shim under the GPUI stack
+    "RUSTSEC-2024-0436", # paste, proc-macro dependency of the rendering stack
+    "RUSTSEC-2025-0134", # rustls-pemfile, thin wrapper over rustls-pki-types
+    "RUSTSEC-2026-0206", # rustybuzz, text shaping inside GPUI
+    "RUSTSEC-2026-0192", # ttf-parser, font parsing inside GPUI
+    "RUSTSEC-2026-0371", # zbus_names, D-Bus names in the Linux session stack
+    "RUSTSEC-2026-0370", # zvariant, D-Bus wire types in the same stack
+    "RUSTSEC-2026-0372", # zvariant_derive, derive crate for zvariant
+]
 
 [licenses]
 # Explicitly allow only permissive licenses used by the locked dependency graph.
@@ -87,6 +107,78 @@ skip = [
     { crate = "windows-targets@0.48.5", reason = "windows-sys 0.52 compatibility" },
     { crate = "windows_x86_64_gnu@0.48.5", reason = "windows-targets 0.48 compatibility" },
     { crate = "wintun@0.3.2", reason = "tun 0.6 Windows backend" },
+
+    # 2026-11-21 dependency-tree snapshot: each pair below still selects two
+    # majors because the dependent lines have not unified yet. Entries are exact
+    # versions, so a future third version still fails the gate.
+    { crate = "aead@0.5.2", reason = "required by aes-gcm 0.10.3" },
+    { crate = "aes@0.8.4", reason = "required by aes-gcm 0.10.3" },
+    { crate = "aes-gcm@0.10.3", reason = "required by fuckipv6-secure-session 0.3.0" },
+    { crate = "asn1-rs@0.6.2", reason = "required by der-parser 9.0.0" },
+    { crate = "asn1-rs-derive@0.5.1", reason = "required by asn1-rs 0.6.2" },
+    { crate = "base64@0.21.7", reason = "required by webauthn-rs-core 0.6.2" },
+    { crate = "base64@0.22.1", reason = "required by axum 0.8.9" },
+    { crate = "bit-set@0.9.1", reason = "required by naga 29.0.4" },
+    { crate = "bit-vec@0.9.1", reason = "required by bit-set 0.9.1" },
+    { crate = "bitflags@1.3.2", reason = "required by fluent-uri 0.1.4" },
+    { crate = "block-buffer@0.10.4", reason = "required by digest 0.10.7" },
+    { crate = "block-padding@0.3.3", reason = "required by inout 0.1.4" },
+    { crate = "cbc@0.1.2", reason = "required by oo7 0.6.0" },
+    { crate = "cipher@0.4.4", reason = "required by aes 0.8.4" },
+    { crate = "convert_case@0.10.0", reason = "required by derive_more-impl 2.1.1" },
+    { crate = "ctr@0.9.2", reason = "required by aes-gcm 0.10.3" },
+    { crate = "der-parser@9.0.0", reason = "required by x509-parser 0.16.0" },
+    { crate = "foldhash@0.1.5", reason = "required by hashbrown 0.15.5" },
+    { crate = "font-types@0.11.3", reason = "required by read-fonts 0.37.0" },
+    { crate = "ghash@0.5.1", reason = "required by aes-gcm 0.10.3" },
+    { crate = "hashbrown@0.14.5", reason = "required by zed-xim 0.4.0-zed" },
+    { crate = "hashbrown@0.15.5", reason = "required by gpu-descriptor 0.3.2" },
+    { crate = "hashbrown@0.16.1", reason = "required by accesskit_consumer 0.38.0" },
+    { crate = "heck@0.4.1", reason = "required by cbindgen 0.28.0" },
+    { crate = "hkdf@0.12.4", reason = "required by fuckipv6-secure-session 0.3.0" },
+    { crate = "hmac@0.12.1", reason = "required by fuckipv6-client 0.3.0" },
+    { crate = "inout@0.1.4", reason = "required by cipher 0.4.4" },
+    { crate = "itertools@0.13.0", reason = "required by gpui-base 0.8.0" },
+    { crate = "keccak@0.1.6", reason = "required by sha3 0.10.9" },
+    { crate = "miniz_oxide@0.8.9", reason = "required by exr 1.74.2" },
+    { crate = "objc2@0.5.3", reason = "required by accesskit_macos 0.26.3" },
+    { crate = "objc2-app-kit@0.2.2", reason = "required by accesskit_macos 0.26.3" },
+    { crate = "objc2-foundation@0.2.2", reason = "required by accesskit_macos 0.26.3" },
+    { crate = "oid-registry@0.7.1", reason = "required by x509-parser 0.16.0" },
+    { crate = "pbkdf2@0.12.2", reason = "required by oo7 0.6.0" },
+    { crate = "phf@0.11.3", reason = "required by markup5ever 0.12.1" },
+    { crate = "phf_generator@0.11.3", reason = "required by phf_codegen 0.11.3" },
+    { crate = "phf_shared@0.11.3", reason = "required by phf 0.11.3" },
+    { crate = "png@0.17.16", reason = "required by tiny-skia 0.11.4" },
+    { crate = "pollster@0.2.5", reason = "required by postage 0.5.0" },
+    { crate = "polyval@0.6.2", reason = "required by ghash 0.5.1" },
+    { crate = "quick-error@1.2.3", reason = "required by rusty-fork 0.3.1" },
+    { crate = "rand@0.8.8", reason = "required by phf_generator 0.11.3" },
+    { crate = "rand_chacha@0.9.0", reason = "required by rand 0.9.5" },
+    { crate = "read-fonts@0.37.0", reason = "required by harfrust 0.5.2" },
+    { crate = "roxmltree@0.20.0", reason = "required by fontconfig-parser 0.5.8" },
+    { crate = "rustc-hash@1.1.0", reason = "required by naga 29.0.4" },
+    { crate = "serde_spanned@0.6.9", reason = "required by toml 0.8.23" },
+    { crate = "sha1@0.10.7", reason = "required by axum 0.8.9" },
+    { crate = "sha2@0.10.9", reason = "required by ed25519-dalek 2.2.0" },
+    { crate = "sha3@0.10.9", reason = "required by fuckipv6-secure-session 0.3.0" },
+    { crate = "skrifa@0.40.0", reason = "required by cosmic-text 0.19.0" },
+    { crate = "spin@0.9.9", reason = "required by flume 0.12.0" },
+    { crate = "synstructure@0.13.2", reason = "required by asn1-rs-derive 0.5.1" },
+    { crate = "toml@0.8.23", reason = "required by cbindgen 0.28.0" },
+    { crate = "toml_datetime@0.6.11", reason = "required by toml 0.8.23" },
+    { crate = "toml_edit@0.22.27", reason = "required by toml 0.8.23" },
+    { crate = "universal-hash@0.5.1", reason = "required by poly1305 0.8.0" },
+    { crate = "windows@0.51.1", reason = "required by wintun 0.3.2" },
+    { crate = "windows@0.58.0", reason = "required by gpui-base 0.8.0" },
+    { crate = "windows-core@0.58.0", reason = "required by windows 0.58.0" },
+    { crate = "windows-implement@0.58.0", reason = "required by windows-core 0.58.0" },
+    { crate = "windows-interface@0.58.0", reason = "required by windows-core 0.58.0" },
+    { crate = "windows-result@0.2.0", reason = "required by windows-core 0.58.0" },
+    { crate = "windows-strings@0.1.0", reason = "required by windows-core 0.58.0" },
+    { crate = "windows-sys@0.48.0", reason = "required by dirs-sys 0.4.1" },
+    { crate = "winnow@0.7.15", reason = "required by toml_edit 0.22.27" },
+    { crate = "x509-parser@0.16.0", reason = "required by fuckipv6-client 0.3.0" },
 ]
 
 [sources]

@@ -402,6 +402,11 @@ jobs:
             ~/.gradle/wrapper
           key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
 
+      - name: Check surface state parity
+        run: |
+          python3 -m unittest scripts/test_check_surface_state_parity.py -v
+          python3 scripts/check-surface-state-parity.py
+
       - name: Check Android i18n literals
         run: |
           python3 -m unittest scripts/test_check_android_i18n.py -v
